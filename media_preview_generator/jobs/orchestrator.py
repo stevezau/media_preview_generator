@@ -494,14 +494,14 @@ def _enumerate_plex_full_scan_items(
     library_ids = list(getattr(config, "plex_library_ids", None) or []) or None
     # Mirror the Emby/Jellyfin multi-server enumerator's "Querying…"
     # banner (see ``_enumerate_items_for_servers``). A full Plex library
-    # enumeration on a large TV library can take 30–120s before the
+    # enumeration on a large TV library can take a while before the
     # first item is yielded via ``list_canonical_paths``; without this
     # the progress bar sits at "0/0" with no message and the job looks
     # frozen — live user report on job 90301a18. Log at INFO so it
     # lands in the per-job log file too (the UI's Job Detail tab reads
     # from that file, not the progress_callback stream).
     _label = plex_cfg.name or plex_cfg.id or plex_cfg.type.value
-    logger.info("Querying {} library… (can take 30–120s for large libraries)", _label)
+    logger.info("Querying {} library… (can take a while for large libraries)", _label)
     if progress_callback is not None:
         try:
             progress_callback(0, 0, f"Querying {_label} library…")

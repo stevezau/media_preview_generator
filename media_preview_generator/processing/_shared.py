@@ -114,7 +114,7 @@ class _MediaServerProcessor:
                 return
             # Announce the per-library query at INFO so both the app
             # log and the per-job log panel show user-meaningful
-            # progress. Large TV libraries (10k+ items) take 30-120s
+            # progress. Large TV libraries (10k+ items) can take a while
             # to enumerate; without this the UI appears frozen.
             logger.info(
                 "Querying library {}/{}: {!r} (this can take a while for large libraries)",

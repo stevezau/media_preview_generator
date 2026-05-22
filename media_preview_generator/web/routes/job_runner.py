@@ -701,7 +701,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     _slot_held = True
                     # Flip to RUNNING the moment the slot is acquired —
                     # library enumeration / webhook resolution IS
-                    # active work (often 30-120s of real API calls) and
+                    # active work (real API calls that can take a while) and
                     # the user should see that reflected in the status.
                     # PENDING is now reserved for jobs truly idle
                     # (queued at the gate, waiting retry backoff, or
