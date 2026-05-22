@@ -203,7 +203,7 @@
                         </label>
                         <input type="number" class="form-control has-stepper" id="scanWorkers"
                                min="0" max="256" value="0" placeholder="Auto">
-                        <div class="form-text">How many files to check for an existing preview in parallel. <strong>0 = Auto</strong> (recommended). Does not change how many previews generate at once.</div>
+                        <div class="form-text">How many files to check for an existing preview in parallel. <strong>0 = Auto</strong> (recommended). Does not change how many previews generate at once.<span id="scanWorkersAutoHint" class="text-info"></span></div>
                     </div>
                 </div>
 
@@ -686,12 +686,50 @@ document.addEventListener('DOMContentLoaded', function() {
     // the GPU status fetch in parallel but render after both resolve.
     const gpuPromise = fetchGpuStatus();
     Promise.all([
-        loadSettings().then(() => renderGpuFromFetch(gpuPromise)),
+        loadSettings().then(() => renderGpuFromFetch(gpuPromise)).then(updateScanWorkersAutoHint),
         loadVersionInfo(),
     ]).finally(() => {
         // Refresh scrollspy after dynamic content changes page height
         bootstrap.ScrollSpy.getInstance(document.body)?.refresh();
     });
+
+    // Keep the "Auto resolves to N" hint live as the inputs that feed the
+    // formula change. GPU worker edits happen inside #gpuConfigList (rendered
+    // by gpu_config_panel.js), so delegate from the container.
+    ['scanWorkers', 'cpuThreads'].forEach((id) => {
+        document.getElementById(id)?.addEventListener('input', updateScanWorkersAutoHint);
+    });
+    const gpuList = document.getElementById('gpuConfigList');
+    gpuList?.addEventListener('input', updateScanWorkersAutoHint);
+    gpuList?.addEventListener('change', updateScanWorkersAutoHint);
+
+    // Mirrors JobDispatcher._resolve_scan_workers: Auto (0) → max(32,
+    // processing workers), where processing workers = enabled GPU workers +
+    // CPU threads. Shows what Auto lands on right now; clears when an explicit
+    // value is set.
+    function updateScanWorkersAutoHint() {
+        const hintEl = document.getElementById('scanWorkersAutoHint');
+        if (!hintEl) return;
+        const raw = parseInt(document.getElementById('scanWorkers').value, 10);
+        if (raw && raw > 0) {
+            hintEl.textContent = '';
+            return;
+        }
+        let gpuWorkers = 0;
+        try {
+            (collectGpuConfig() || []).forEach((g) => {
+                if (g && g.enabled) gpuWorkers += parseInt(g.workers, 10) || 0;
+            });
+        } catch (e) {
+            /* GPU panel not rendered yet — fall back to CPU only */
+        }
+        const cpu = parseInt(document.getElementById('cpuThreads').value, 10) || 0;
+        const generators = Math.max(1, gpuWorkers + cpu);
+        const resolved = Math.max(32, generators);
+        hintEl.textContent =
+            ` Auto right now: ${resolved} (the larger of 32 and your ${generators} preview ` +
+            `worker${generators === 1 ? '' : 's'}).`;
+    }
 
     // Auto-save: all stateful inputs/selects inside .settings-content
     // kick the shared debounced save helper.
