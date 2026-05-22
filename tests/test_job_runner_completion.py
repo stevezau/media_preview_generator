@@ -160,14 +160,13 @@ class TestClassifyJobCompletion:
         )
         assert result == "error"
 
-    def test_retry_job_with_leftover_paths_is_hard_failure(self):
-        """A retry job that exits with unresolved retry paths (and didn't
-        spawn another retry) is a terminal failure — the user's webhook
-        never got served.
+    def test_retry_exhausted_with_no_successes_is_hard_failure(self):
+        """A retry chain that exhausts AND served nothing (no previews made)
+        is a terminal failure — the user's webhook never got served.
         """
         result = _classify_job_completion(
             failures=[],
-            outcome={"generated": 1},
+            outcome={"generated": 0, "skipped_file_not_found": 1},
             is_retry=True,
             retry_paths=["/still-missing.mkv"],
             spawned_retry_id=None,
@@ -175,6 +174,25 @@ class TestClassifyJobCompletion:
             resolved_count=1,
         )
         assert result == "error"
+
+    def test_retry_exhausted_with_successes_is_warning_not_failure(self):
+        """A retry chain that exhausted but still GENERATED previews is a
+        partial failure (amber), not a total failure (red). Regression: job
+        67f7bf2a generated 11 previews with 0 hard failures but showed red
+        "Failed" purely because the chain couldn't register a few genuinely-
+        missing files. retry_exhausted must respect success_total like every
+        other gate.
+        """
+        result = _classify_job_completion(
+            failures=[],
+            outcome={"generated": 11, "skipped_file_not_found": 4},
+            is_retry=True,
+            retry_paths=["/still-missing-1.mkv", "/still-missing-2.mkv"],
+            spawned_retry_id=None,
+            total_paths=15,
+            resolved_count=15,
+        )
+        assert result == "warning"
 
     def test_all_not_found_without_spawn_is_hard_failure(self):
         """Every file Plex resolved was missing on disk AND no retry was

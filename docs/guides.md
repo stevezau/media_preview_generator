@@ -127,6 +127,25 @@ content that never decodes on the GPU, set **CPU Workers > 0** so that
 content routes directly to dedicated CPU workers from the main queue
 instead of blocking a GPU worker each time.
 
+#### Speeding up full-library scans on big libraries
+
+A full scan first sweeps every file to check whether a fresh preview
+already exists, then only generates the missing ones. Those two jobs have
+independent concurrency:
+
+- **GPU Workers / CPU Workers** cap how many previews *generate* at once
+  (heavy FFmpeg/GPU work) — keep these matched to your hardware.
+- **Library Scanning → Files checked at once** (`scan_workers`) caps how
+  many files the *existence check* sweeps in parallel. This is light disk
+  I/O and adds no FFmpeg/GPU load.
+
+On a large, mostly-complete library the sweep can dominate. Leave
+**Files checked at once** on **Auto** for most setups; raise it if the
+"checking" phase feels slow on fast storage, or lower it if a single
+spinning HDD thrashes under many parallel stats. Raising it never spawns
+more simultaneous FFmpeg processes — that's still governed by your worker
+counts.
+
 Settings are saved to `/config/settings.json` and persist across restarts.
 
 ### Automation Page

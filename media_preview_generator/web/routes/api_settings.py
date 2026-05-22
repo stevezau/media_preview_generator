@@ -304,6 +304,10 @@ def get_settings():
             "gpu_config": settings.gpu_config,
             "gpu_threads": settings.gpu_threads,
             "cpu_threads": settings.cpu_threads,
+            # Library-scanning concurrency for full scans. 0 = Auto. Clamped
+            # to [0, 256] so a manually-edited settings.json can't surface an
+            # absurd value in the UI. See issue #243.
+            "scan_workers": max(0, min(256, int(settings.get("scan_workers", 0) or 0))),
             "ffmpeg_threads": settings.get("ffmpeg_threads", 2),
             "thumbnail_interval": settings.thumbnail_interval,
             "thumbnail_quality": settings.thumbnail_quality,
@@ -354,6 +358,7 @@ _SAVE_SETTINGS_ALLOWED_FIELDS = (
     "gpu_config",
     "gpu_threads",
     "cpu_threads",
+    "scan_workers",
     "ffmpeg_threads",
     "thumbnail_interval",
     "thumbnail_quality",
@@ -377,6 +382,7 @@ _SAVE_SETTINGS_ALLOWED_FIELDS = (
 
 _SAVE_SETTINGS_INT_FIELDS = (
     "cpu_threads",
+    "scan_workers",
     "gpu_threads",
     "ffmpeg_threads",
     "thumbnail_interval",
@@ -445,6 +451,17 @@ def _validate_and_coerce_settings_updates(data: dict) -> tuple[dict | None, tupl
         if value < 1 or value > 10:
             return None, (
                 jsonify({"error": "max_concurrent_jobs must be between 1 and 10"}),
+                400,
+            )
+
+    # Library-scanning concurrency. 0 = Auto; an explicit value is bounded
+    # to [1, 256]. Reject out-of-range rather than silently clamping (same
+    # contract as max_concurrent_jobs) so Save shows the user what they get.
+    if "scan_workers" in updates:
+        value = updates["scan_workers"]
+        if value < 0 or value > 256:
+            return None, (
+                jsonify({"error": "scan_workers must be between 0 (Auto) and 256"}),
                 400,
             )
 
