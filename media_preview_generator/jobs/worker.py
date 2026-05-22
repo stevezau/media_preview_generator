@@ -422,24 +422,12 @@ class Worker:
                 # Single-writer (worker thread) → no lock needed.
                 self.current_phase = text or ""
 
-            # Pin precedence — matches ``_dispatch_processable_items`` so the
-            # worker dispatch path and the multi-server scan path agree on
-            # who publishes:
-            #   1. Caller-supplied ``config.server_id_filter`` always wins
-            #      — that's the explicit "publish to this server only" pin
-            #      from the job config (set by job_runner when the job's
-            #      config carries ``server_id``). Pinned vendor webhooks
-            #      depend on this. Without it the worker fans out to every
-            #      owning server, which on Steve's setup means a
-            #      Plex-pinned webhook silently writes Emby BIFs +
-            #      Jellyfin trickplay too (audit P1 / D34-shape regression).
-            #   2. No caller pin + non-Plex originator → scope to that
-            #      originator's id. The item's ``server_id`` carries the
-            #      vendor that fired the webhook; falling out to "fan out
-            #      to all" leaks publishes to other vendors.
-            #   3. No caller pin + Plex originator → fan out (the
-            #      cross-vendor publish path Plex+Emby+Jellyfin installs
-            #      depend on).
+            # Pin precedence (config pin wins → non-Plex originator scopes to
+            # itself → Plex originator fans out) lives in resolve_per_item_pin,
+            # the single source both this generation path and the dispatcher's
+            # checking stage share so they agree on who publishes. A Plex-pinned
+            # webhook fanning out would silently write Emby/Jellyfin previews too
+            # (audit P1 / D34-shape regression) — see resolve_per_item_pin.
             per_item_pin: str | None = resolve_per_item_pin(config, item, registry)
 
             # ``webhook_source`` lives on Config when this dispatch came

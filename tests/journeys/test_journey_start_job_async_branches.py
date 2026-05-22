@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -300,16 +301,16 @@ class TestStartJobAsyncHappyPath:
         )
 
         def fake_process(canonical_path, config, registry, **kwargs):
-            from media_preview_generator.processing.multi_server import (
-                DispatchResult,
-                PublisherStatus,
-            )
+            # Terminal SKIPPED so the checking stage records it inline and the
+            # dispatch completes (the hook we assert on fires at dispatch start
+            # regardless; the run must return for the assertion to be reached).
+            from media_preview_generator.processing.multi_server import MultiServerStatus
 
-            return DispatchResult(
+            return SimpleNamespace(
                 canonical_path=canonical_path,
-                status=PublisherStatus.PUBLISHED,
-                publisher_results=[],
-                frame_count=1,
+                status=MultiServerStatus.SKIPPED,
+                publishers=[],
+                message="",
             )
 
         hook_calls: list[None] = []
@@ -317,9 +318,17 @@ class TestStartJobAsyncHappyPath:
         def hook():
             hook_calls.append(None)
 
-        fake_config = MagicMock()
-        fake_config.cpu_threads = 0
-        fake_config.working_tmp_folder = str(tmp_path)
+        # A realistic config (not a bare MagicMock): the unified dispatcher
+        # reads gpu_threads/cpu_threads/scan_workers/regenerate_thumbnails and
+        # a MagicMock's auto-attributes break int()/branching.
+        fake_config = SimpleNamespace(
+            gpu_threads=0,
+            cpu_threads=1,
+            scan_workers=0,
+            regenerate_thumbnails=False,
+            server_id_filter=None,
+            working_tmp_folder=str(tmp_path),
+        )
 
         with (
             app.app_context(),

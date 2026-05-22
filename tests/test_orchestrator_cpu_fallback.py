@@ -38,15 +38,23 @@ from media_preview_generator.servers.base import ServerConfig, ServerType
 MODULE = "media_preview_generator.jobs.orchestrator"
 
 
-def _config(cpu_threads: int = 1):
+def _config(cpu_threads: int = 1, gpu_threads: int = 1):
+    # gpu_threads defaults to 1 because these tests pass a GPU in
+    # selected_gpus and exercise the GPU→CPU fallback. The unified dispatcher
+    # sizes GPU workers from config.gpu_threads (like the existing
+    # _create_worker_pool), so the count must match the GPU passed — in
+    # production config.gpu_threads and selected_gpus derive from the same
+    # gpu_config, so they're always consistent.
     return SimpleNamespace(
-        gpu_threads=0,
+        gpu_threads=gpu_threads,
         cpu_threads=cpu_threads,
+        scan_workers=0,
         working_tmp_folder="/tmp/work",
         plex_url="",
         plex_token="",
         webhook_paths=None,
         server_id_filter=None,
+        regenerate_thumbnails=False,
     )
 
 
@@ -217,8 +225,8 @@ class TestOrchestratorCpuFallback:
         assert counts.get(ProcessingResult.FAILED.value, 0) == 0, (
             f"successful CPU fallback must NOT be counted as failed; counts={counts}"
         )
-        assert counts.get("published", 0) == 1, (
-            f"successful CPU fallback must surface as a published item; counts={counts}"
+        assert counts.get("generated", 0) == 1, (
+            f"successful CPU fallback must surface as a generated item; counts={counts}"
         )
 
     def test_cpu_fallback_failure_is_marked_failed_and_does_not_propagate(self, tmp_path):

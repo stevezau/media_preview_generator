@@ -101,6 +101,11 @@ def _drive_dispatcher(
 
     registry_mock = MagicMock()
     registry_mock.configs.return_value = [cfg]
+    # resolve_per_item_pin reads the originator's type via
+    # registry.get_config(item.server_id) to decide Plex-fans-out (None) vs
+    # non-Plex-scopes-to-self. Model it so the matrix exercises the real
+    # branch instead of a bare MagicMock (whose .type is never ServerType.PLEX).
+    registry_mock.get_config.return_value = cfg
 
     item = ProcessableItem(
         canonical_path="/data/movies/x.mkv",
@@ -113,6 +118,13 @@ def _drive_dispatcher(
 
     settings_entry = {"id": server_id, "type": server_type.value, "enabled": True}
     expected_config = _config(**(cfg_kwargs or {}))
+    # Production derives the scan's sid_filter FROM config.server_id_filter
+    # (run_processing: ``sid_filter = getattr(config, "server_id_filter")``),
+    # so the caller pin always lives on config — which is exactly what
+    # resolve_per_item_pin reads. Model that here; otherwise the pin reaches
+    # enumeration (the arg) but not the per-item resolver, and a Plex
+    # originator wrongly fans out instead of honouring the pin.
+    expected_config.server_id_filter = caller_pin
 
     with (
         patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,

@@ -20,10 +20,22 @@ import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from media_preview_generator.jobs.dispatcher import reset_dispatcher
 from media_preview_generator.jobs.orchestrator import _run_full_scan_multi_server
 from media_preview_generator.processing.multi_server import MultiServerStatus
 from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.servers.base import ServerConfig, ServerType
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_dispatcher():
+    # The scan path now feeds the singleton JobDispatcher; reset it around
+    # each test so trackers/workers from one test can't leak into the next.
+    reset_dispatcher()
+    yield
+    reset_dispatcher()
 
 
 def _config(cpu_threads: int = 1, scan_workers: int = 0):
@@ -104,7 +116,9 @@ class TestScanPhaseSkip:
 
         gen_calls = [c for c in mock_pcp.call_args_list if not c.kwargs.get("check_only")]
         assert gen_calls == [], "fresh item must not trigger any generation (no permit/slot)"
-        assert counts.get("skipped_output_exists", 0) == 1
+        # Unified path counts per-file (ProcessingResult), so a scan-decided
+        # skip lands under skipped_bif_exists, not the per-publisher key.
+        assert counts.get("skipped_bif_exists", 0) == 1
 
     def test_needs_generation_item_takes_one_generation_call(self):
         items = [ProcessableItem(canonical_path="/data/new.mkv", server_id="srv-a")]
@@ -119,7 +133,7 @@ class TestScanPhaseSkip:
 
         gen_calls = [c for c in mock_pcp.call_args_list if not c.kwargs.get("check_only")]
         assert len(gen_calls) == 1
-        assert counts.get("published", 0) == 1
+        assert counts.get("generated", 0) == 1
 
     def test_skipped_item_attributed_to_library_scan_worker(self):
         """Files-panel attribution: a scan-decided skip is labelled 'Library scan'."""
@@ -152,9 +166,9 @@ class TestScanPhaseAccountingParity:
         mock_pcp = MagicMock(side_effect=pcp)
         counts = _run(_config(cpu_threads=2), mock_pcp, items)
 
-        # 3 skipped + 2 published, every item accounted for.
-        assert counts.get("skipped_output_exists", 0) == 3
-        assert counts.get("published", 0) == 2
+        # 3 skipped + 2 generated, every item accounted for (per-file counts).
+        assert counts.get("skipped_bif_exists", 0) == 3
+        assert counts.get("generated", 0) == 2
 
 
 class TestGenerationCapHoldsUnderHighScanConcurrency:
@@ -195,4 +209,4 @@ class TestGenerationCapHoldsUnderHighScanConcurrency:
             f"generation concurrency exceeded the cap: max_active={max_active} > cap={cap}. "
             "The scan phase must not let more than `generators` FFmpeg calls run at once."
         )
-        assert counts.get("published", 0) == n_items
+        assert counts.get("generated", 0) == n_items

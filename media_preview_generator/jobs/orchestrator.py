@@ -8,7 +8,6 @@ by the web layer (job_runner.py).
 import os
 import random
 import shutil
-import time
 
 from loguru import logger
 
@@ -16,15 +15,9 @@ from ..processing.generator import ProcessingResult, clear_failures, log_failure
 from ..servers.ownership import apply_path_mappings, apply_webhook_prefixes, find_owning_servers
 from .worker import WorkerPool
 
+
 # Max cadence for worker-snapshot SocketIO emits during a multi-server
 # dispatch. See the long comment in ``_dispatch_processable_items`` —
-# 1 Hz matches the legacy ``WorkerPool`` (``worker.py:1245``). Exposed
-# as a module-level constant so tests that observe transient
-# "processing" snapshots can ``monkeypatch.setattr`` it down to a few
-# milliseconds without exercising the production cadence.
-_WORKER_EMIT_THROTTLE_S = 1.0
-
-
 def _resolve_webhook_path_to_canonical(
     path: str, server_configs: list, *, log_resolution: bool = True
 ) -> tuple[str, list]:
@@ -536,966 +529,113 @@ def _dispatch_processable_items(
     server_id_filter: str | None = None,
     worker_callback=None,
     on_dispatch_start=None,
+    worker_pool_callback=None,
 ) -> dict:
-    """Run a list of ``(server_config, ProcessableItem)`` pairs in parallel.
+    """Submit ``(server_config, ProcessableItem)`` pairs to the shared dispatcher.
 
-    Shared dispatch loop used by :func:`_run_full_scan_multi_server` and
-    :func:`_run_recently_added_multi_server`. Pulled out so adding new
-    enumeration sources doesn't mean copying ~80 lines of GPU rotation +
-    progress-callback + per-publisher aggregation.
+    This used to be a second, parallel execution engine (its own
+    ThreadPoolExecutor + slot pool + hot-reload poller). It now feeds the one
+    shared :class:`JobDispatcher` — the same engine webhooks and single-Plex
+    scans use — so there is a SINGLE worker model with the checking/processing
+    split for every trigger and every vendor, and a scan + an incoming webhook
+    share one capped pool instead of oversubscribing two.
 
-    Args:
-        items: Pre-collected list of ``(server_config, ProcessableItem)``.
-        config: Job-wide :class:`Config` used by FFmpeg + frame extraction.
-        registry: Live :class:`ServerRegistry` (publishers fan out via this).
-        selected_gpus: ``[(gpu_type, gpu_device, gpu_info), ...]`` from the
-            UI's GPU selection. Workers use this round-robin.
-        progress_callback: Optional ``(processed, total, msg)`` callback
-            forwarded to the UI's progress widget.
-        cancel_check: Optional callable returning True when the caller wants
-            the dispatch to stop.
-        job_id: Optional job identifier; per-publisher rows get appended to
-            this job for the dashboard's per-server status view.
-        label: Free-text identifier used in info logs ("full scan",
-            "recently-added scan", etc.) so log lines stay grep-friendly.
+    ``items`` is ``[(server_config, ProcessableItem), ...]``; only the
+    ProcessableItem is forwarded — the per-item publish pin is resolved from
+    ``config.server_id_filter`` + ``item.server_id`` inside the worker /
+    checking stage (:func:`jobs.worker.resolve_per_item_pin`), equivalent to
+    the old per-tuple ``server_cfg.type`` logic since ``item.server_id ==
+    server_cfg.id`` for enumerated items. ``server_id_filter`` is accepted for
+    signature compatibility and is already carried on ``config``.
 
-    Returns:
-        Aggregated PublisherStatus counts keyed by enum value
-        (``published``/``failed``/``skipped_*``) — same shape every
-        existing caller already depends on.
+    Returns the tracker's per-file ProcessingResult outcome counts
+    (``generated`` / ``skipped_bif_exists`` / …) — the same per-item scheme the
+    webhook + single-Plex path already produces and every consumer already
+    reads.
     """
-    import threading
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import uuid
 
-    from ..processing.generator import (
-        CancellationError,
-        CodecNotSupportedError,
-        _notify_file_result,
-        failure_scope,
-    )
-    from ..processing.multi_server import MultiServerStatus, process_canonical_path
-    from ..servers.base import ServerType
+    from ..web.jobs import PRIORITY_NORMAL
+    from .dispatcher import get_dispatcher
+    from .worker import WorkerPool
 
-    counts = {r.value: 0 for r in ProcessingResult}
-    total = len(items)
-    if total == 0:
-        return counts
+    empty = {r.value: 0 for r in ProcessingResult}
+    plain_items = [item for (_server_cfg, item) in items]
+    total = len(plain_items)
+    if not plain_items:
+        return empty
 
-    gpu_devices = list(selected_gpus or [])
-    cpu_workers = max(0, int(getattr(config, "cpu_threads", 1) or 0))
+    # Reuse the shared dispatcher's pool when one already exists (e.g. a
+    # concurrent webhook created it); otherwise build one sized from the
+    # user's GPU/CPU worker config + selected GPUs (mirrors the legacy
+    # ``_create_worker_pool`` in run_processing).
+    existing = get_dispatcher()
+    if existing is not None:
+        worker_pool = existing.worker_pool
+        logger.info(
+            "Multi-server {}: reusing shared worker pool ({} worker(s))",
+            label,
+            len(worker_pool._snapshot_workers()),
+        )
+    else:
+        sel = list(selected_gpus or [])
+        # ``config.gpu_threads`` can be > 0 while no GPU is actually
+        # selected/detected (a configured GPU that's currently absent), and
+        # WorkerPool raises if asked for GPU workers with no devices. Clamp to
+        # 0 → CPU-only, never crash the whole dispatch. With GPUs present this
+        # is a no-op (in production gpu_threads and selected_gpus both derive
+        # from gpu_config, so they agree).
+        worker_pool = WorkerPool(
+            gpu_workers=int(getattr(config, "gpu_threads", 0) or 0) if sel else 0,
+            cpu_workers=int(getattr(config, "cpu_threads", 0) or 0),
+            selected_gpus=sel,
+        )
+    dispatcher = get_dispatcher(worker_pool)
 
-    def _read_workers_count(gpu_info) -> int:
-        # Previously ``getattr(g[2], "workers", 1)`` — but ``g[2]`` is the
-        # dict that ``_build_selected_gpus`` constructs with
-        # ``info["workers"] = workers``. ``getattr`` on a dict returns
-        # the default unless the dict also has an attribute by that
-        # name (it doesn't), so a user with two GPUs each configured for
-        # 2 workers got parallelism=2 instead of 4. Use the right
-        # accessor + clamp to ≥1 so a workers=0 typo can't silently
-        # hide a device.
-        if isinstance(gpu_info, dict):
-            try:
-                return max(1, int(gpu_info.get("workers", 1) or 1))
-            except (TypeError, ValueError):
-                return 1
+    # Reconcile the (possibly reused/stale) pool to the current GPU config —
+    # the same hook the webhook/single-Plex path uses so worker counts track
+    # settings. Replaces Engine B's bespoke 1.5s poller.
+    if worker_pool_callback:
         try:
-            return max(1, int(getattr(gpu_info, "workers", 1) or 1))
-        except (TypeError, ValueError):
-            return 1
+            worker_pool_callback(worker_pool)
+        except Exception as exc:
+            logger.debug("worker_pool_callback raised during {} dispatch: {}", label, exc)
 
-    from .worker_naming import (
-        cpu_worker_label as _cpu_worker_label,
-    )
-    from .worker_naming import (
-        friendly_device_label as _device_label,
-    )
-    from .worker_naming import (
-        gpu_worker_label as _gpu_worker_label,
-    )
-
-    # Pre-allocate one stable slot per concurrent worker. The slot is
-    # alive for the entire dispatch; only ``status`` and ``current_title``
-    # mutate as items pass through. Two payoffs:
-    #   1. The Workers panel shows N persistent rows (matches the legacy
-    #      WorkerPool model). No more rows flashing on/off as items
-    #      complete and the next thread picks up a microsecond later.
-    #   2. Each ThreadPool thread persistently binds to ONE slot, which
-    #      means its GPU assignment is also stable — no per-item
-    #      round-robin churn.
-    # Per-type counter so labels match the legacy WorkerPool format
-    # ("GPU Worker 1 (NVIDIA TITAN RTX)") that users already recognise
-    # — avoids two different label conventions side-by-side when a job
-    # mixes the legacy and multi-server paths.
-    # Slot identity is decoupled from thread identity so the settings
-    # poller (further down) can add/remove rows mid-job without
-    # disturbing in-flight work — the dispatcher used to bake the slot
-    # count at job start, so a user bumping NVIDIA workers 2→3 saw no
-    # change until the next job. With the decoupling: a thread acquires
-    # the semaphore, claims any free slot at runtime, releases it on
-    # finish. New slots become claimable the moment the poller appends
-    # them.
-    gpu_slots: list[dict] = []
-    _seq_state = {"slot": 0, "gpu": 0, "cpu": 0}
-
-    # The dashboard renderer (``app.js:2393-2438``) gates the
-    # progress bar / speed / ETA rendering on ``ffmpeg_started``:
-    # when ``False`` it hides those elements and shows a "Working…"
-    # placeholder (or the ``current_phase`` text when present).
-    # Without these fields on the multi-server slot dict,
-    # ``WorkerStatus`` falls back to ``False`` / ``""`` and the panel
-    # renders "Working…" for the entire run even when speed/ETA are
-    # flowing through the API — the symptom job 2395774d reproduced
-    # live.
-    #
-    # ``ffmpeg_started`` mirrors the legacy ``WorkerPool`` field
-    # (``worker.py:128`` / flipped in ``worker.py:1624``) and is
-    # flipped True by ``_slot_progress_callback`` below on the first
-    # progress tick, reset False in ``_release_slot``.
-    #
-    # ``current_phase`` is a forward-compat placeholder — no callsite
-    # writes it yet. The legacy worker populates it from log-line
-    # parsing (``worker.py:397``) for nicer pre-FFmpeg labels like
-    # "Resolving item id on EmbyTest…" / "Reusing cached frames";
-    # threading those through ``process_canonical_path`` is a separate
-    # piece of work. Empty string degrades gracefully to "Working…".
-    def _build_gpu_slot(gpu_type: str, gpu_device: str | None, gpu_info: dict | object) -> dict:
-        _seq_state["slot"] += 1
-        _seq_state["gpu"] += 1
-        return {
-            "worker_id": _seq_state["slot"],
-            "worker_type": "GPU",
-            "worker_name": _gpu_worker_label(_seq_state["gpu"], _device_label(gpu_info, gpu_device, gpu_type)),
-            "gpu_type": gpu_type,
-            "gpu_device": gpu_device,
-            "_gpu_info": gpu_info,  # kept so the poller can build matching new slots
-            "status": "idle",
-            "current_title": "",
-            "library_name": "",
-            "progress_percent": 0,
-            "speed": "0.0x",
-            "remaining_time": 0,
-            "ffmpeg_started": False,
-            "current_phase": "",
-            "_claimed_by": None,
-            "_pending_removal": False,
-        }
-
-    def _build_cpu_slot() -> dict:
-        _seq_state["slot"] += 1
-        _seq_state["cpu"] += 1
-        return {
-            "worker_id": _seq_state["slot"],
-            "worker_type": "CPU",
-            "worker_name": _cpu_worker_label(_seq_state["cpu"]),
-            "gpu_type": None,
-            "gpu_device": None,
-            "_gpu_info": None,
-            "status": "idle",
-            "current_title": "",
-            "library_name": "",
-            "progress_percent": 0,
-            "speed": "0.0x",
-            "remaining_time": 0,
-            "ffmpeg_started": False,
-            "current_phase": "",
-            "_claimed_by": None,
-            "_pending_removal": False,
-        }
-
-    for gpu_type, gpu_device, gpu_info in gpu_devices:
-        for _ in range(_read_workers_count(gpu_info)):
-            gpu_slots.append(_build_gpu_slot(gpu_type, gpu_device, gpu_info))
-    for _ in range(cpu_workers):
-        gpu_slots.append(_build_cpu_slot())
-
-    initial_concurrency = max(1, len(gpu_slots))
-    # Scan-phase concurrency (#243). ``scan_workers`` is how many items the
-    # cheap "does a fresh preview already exist?" check sweeps in parallel,
-    # decoupled from the FFmpeg-generation cap (``initial_concurrency`` — the
-    # GPU+CPU worker count). The pre-permit check in ``_process_one`` runs on
-    # these threads WITHOUT holding a generation permit, so raising this
-    # speeds the library sweep without spawning more FFmpegs.
-    #
-    # 0 = Auto → max(32, generators): exactly today's pool size, so the
-    # threads that previously sat idle-blocked on the semaphore now actually
-    # do the checking — the benefit lands at the default with no regression.
-    # An explicit value still floors at ``initial_concurrency`` so every
-    # generator can run.
-    _scan_workers_cfg = max(0, int(getattr(config, "scan_workers", 0) or 0))
-    scan_workers = _scan_workers_cfg if _scan_workers_cfg > 0 else max(32, initial_concurrency)
-    pool_max_workers = max(scan_workers, initial_concurrency)
-
-    job_manager = None
-    if job_id:
-        try:
-            from ..web.jobs import get_job_manager
-
-            job_manager = get_job_manager()
-        except Exception:
-            job_manager = None
-
-    logger.info(
-        "Multi-server {}: dispatching {} item(s) with parallelism={} (max pool={})",
-        label,
-        total,
-        initial_concurrency,
-        pool_max_workers,
-    )
-    # Fire the "dispatch has really started" hook so the job flips from
-    # PENDING to RUNNING. job_runner's _on_dispatch_start calls
-    # job_manager.start_job(); without this the multi-server full-scan
-    # path leaves the job stuck in PENDING even as items complete.
-    # Matches the equivalent call in ``_dispatch_items`` used by the
-    # webhook / legacy-plex-phase code paths.
     if on_dispatch_start:
         try:
             on_dispatch_start()
         except Exception as exc:
             logger.debug("on_dispatch_start raised: {}", exc)
-    # Surface "Dispatching N items…" up-front so the progress widget gets
-    # a real total + denominator the moment enumeration finishes — without
-    # this the bar sits at 0/0 with the stale "Querying…" label until the
-    # first item completes (can be 30s+ on the first FFmpeg pass).
+
     if progress_callback:
         try:
-            progress_callback(0, total, f"Dispatching {total} item(s) across {initial_concurrency} worker(s)…")
+            progress_callback(0, total, f"Dispatching {total} item(s)…")
         except Exception as exc:
             logger.debug("progress_callback raised on dispatch banner: {}", exc)
 
-    # Concurrency gate. Decoupled from ThreadPoolExecutor's max_workers
-    # so the hot-reload poller below can grow/shrink concurrency by
-    # adjusting the permit count alone.
-    _slots_lock = threading.Lock()
-    _concurrency_cond = threading.Condition(_slots_lock)
-    _concurrency_state = {"target": initial_concurrency, "active": 0}
+    # A real job always carries a job_id; enumeration helpers occasionally
+    # call with None (no Job row). Use a unique synthetic key so two such runs
+    # can't collide on the singleton dispatcher's tracker map.
+    effective_job_id = job_id or f"{label.replace(' ', '-')}-{uuid.uuid4().hex[:8]}"
 
-    # Flips True the first time any item claims a generation slot (i.e. the
-    # scan turned up real work). Used only to switch the job's progress label
-    # from "Checking existing previews…" to "Processed…". A plain bool write
-    # from the worker threads + a read from the single as_completed consumer;
-    # a benign stale read just shows the old label for one more tick.
-    _phase_state = {"generation_started": False}
-
-    def _acquire_concurrency() -> None:
-        # Block until the active count is below the dynamic target.
-        # If the user shrinks workers mid-job, queued threads back up
-        # here until enough active ones finish; if they grow workers
-        # the poller's notify_all wakes a queued thread immediately.
-        with _concurrency_cond:
-            while _concurrency_state["active"] >= _concurrency_state["target"]:
-                _concurrency_cond.wait()
-            _concurrency_state["active"] += 1
-
-    def _release_concurrency() -> None:
-        with _concurrency_cond:
-            _concurrency_state["active"] -= 1
-            _concurrency_cond.notify_all()
-
-    def _claim_idle_slot(thread_name: str) -> dict | None:
-        # Slots are claimed at task start (after concurrency gate),
-        # released at task end. A thread is NOT pinned to a slot —
-        # different items the same thread processes can land on
-        # different slots (whichever is free). That's necessary for
-        # hot-reload: when the user adds a new GPU slot, any waiting
-        # thread can pick it up immediately rather than only the
-        # thread that was bound to that slot at job start.
-        with _slots_lock:
-            for s in gpu_slots:
-                if s["_claimed_by"] is None and not s["_pending_removal"] and s["status"] == "idle":
-                    s["_claimed_by"] = thread_name
-                    return s
-            return None
-
-    def _release_slot(slot: dict) -> None:
-        with _slots_lock:
-            slot["status"] = "idle"
-            slot["current_title"] = ""
-            slot["_claimed_by"] = None
-            slot["progress_percent"] = 0
-            # Reset the FFmpeg-phase flags so the NEXT item this slot
-            # picks up starts in the pre-FFmpeg "Working…" state until
-            # its own progress callback flips them back. Without this
-            # reset, a slot that just finished a real FFmpeg pass keeps
-            # ``ffmpeg_started=True`` and the UI shows the previous
-            # item's stale speed/ETA on the new (pre-FFmpeg) item.
-            slot["ffmpeg_started"] = False
-            slot["current_phase"] = ""
-            # If the poller marked this slot for removal while it was
-            # busy, drop it now that it's free — the panel sees one
-            # fewer row on the next snapshot.
-            if slot["_pending_removal"]:
-                try:
-                    gpu_slots.remove(slot)
-                except ValueError:
-                    pass
-
-    def _snapshot_slots() -> list[dict]:
-        # Strip internal bookkeeping ("_claimed_by", "_pending_removal",
-        # "_gpu_info") before exposing rows to the worker_callback.
-        with _slots_lock:
-            return [{k: v for k, v in s.items() if not k.startswith("_")} for s in gpu_slots]
-
-    # ── Worker-snapshot emit throttle ─────────────────────────────────
-    # Cap snapshot emits at ~1 Hz. Pre-fix every slot claim + release
-    # called ``_emit_worker_snapshot`` immediately, so a full-library
-    # scan whose first phase is mostly "already fresh — skip FFmpeg"
-    # no-op items (each completing in ~50 ms with 4 workers → ~80 items/sec
-    # → ~160 transitions/sec) flooded the SocketIO connection. Each
-    # emit also spawned a fresh thread in ``JobManager._emit_event``,
-    # so the dashboard's browser-side event loop couldn't keep up and
-    # the Workers panel never settled long enough to render — job
-    # 8cd02fa6 reproducer.
-    #
-    # Same pattern the legacy ``WorkerPool`` already uses at
-    # ``worker.py:1245`` — "skip if <1 s since the last emit." The
-    # poller heartbeat fires every 1.5 s (> throttle) so the panel
-    # never stalls for longer than the heartbeat window even on a
-    # sustained flood. ``force=True`` bypasses the throttle for the
-    # three events the user must see immediately:
-    #   * initial dispatch banner — show the configured slots as idle
-    #   * final dispatch end — capture the all-idle terminal state
-    #   * poller-driven slot-count changes — rows added/removed
-    # Forced emits do NOT consume the throttle budget so a genuine
-    # transition immediately afterwards still produces its own emit,
-    # and the panel shows the very first claim even on sub-second
-    # dispatches.
-    throttle_s = _WORKER_EMIT_THROTTLE_S
-    _emit_state: dict = {"last_non_force_monotonic": 0.0}
-    _emit_state_lock = threading.Lock()
-
-    def _emit_worker_snapshot(force: bool = False) -> None:
-        if not worker_callback:
-            return
-        with _emit_state_lock:
-            if not force:
-                now = time.monotonic()
-                if now - _emit_state["last_non_force_monotonic"] < throttle_s:
-                    return
-                _emit_state["last_non_force_monotonic"] = now
-        try:
-            worker_callback(_snapshot_slots())
-        except Exception as exc:
-            logger.debug("worker_callback raised: {}", exc)
-
-    # ── Hot-reload settings poller ───────────────────────────────────
-    # Reads gpu_config + cpu_threads every ~1.5s and reconciles
-    # gpu_slots + concurrency target with the live setting. The user
-    # can bump NVIDIA workers from 2→3 in Settings while the job is
-    # running and see the third row appear within ~1.5s — without
-    # this the slot count was baked at job start.
-    _poller_stop = threading.Event()
-    _poller_thread: threading.Thread | None = None
-
-    def _reconcile_with_settings() -> None:
-        try:
-            from ..web.settings_manager import get_settings_manager
-
-            sm = get_settings_manager()
-            new_gpu_config = sm.gpu_config or []
-            new_cpu = max(0, int(getattr(sm, "cpu_threads", 0) or 0))
-        except Exception as exc:
-            logger.debug("hot-reload poller: settings read failed ({}); skipping tick", exc)
-            return
-
-        # Build a target {device: desired_count} map for GPUs that were
-        # in scope at job start. Devices added/removed entirely
-        # mid-job are out of scope (next job picks them up).
-        gpu_info_by_device: dict[str, tuple[str, object]] = {}
-        for gpu_type, gpu_device, gpu_info in gpu_devices:
-            if gpu_device:
-                gpu_info_by_device[gpu_device] = (gpu_type, gpu_info)
-
-        desired_gpu_per_device: dict[str, int] = {}
-        for entry in new_gpu_config:
-            if not isinstance(entry, dict):
-                continue
-            device = entry.get("device")
-            if device not in gpu_info_by_device:
-                continue
-            if not entry.get("enabled", True):
-                desired_gpu_per_device[device] = 0
-                continue
-            try:
-                desired_gpu_per_device[device] = max(0, int(entry.get("workers", 1) or 0))
-            except (TypeError, ValueError):
-                desired_gpu_per_device[device] = 1
-
-        added = 0
-        removed = 0
-        with _slots_lock:
-            # GPU diff per device
-            for device, desired in desired_gpu_per_device.items():
-                live = [
-                    s
-                    for s in gpu_slots
-                    if s["worker_type"] == "GPU" and s["gpu_device"] == device and not s["_pending_removal"]
-                ]
-                delta = desired - len(live)
-                if delta > 0:
-                    gpu_type, gpu_info = gpu_info_by_device[device]
-                    for _ in range(delta):
-                        gpu_slots.append(_build_gpu_slot(gpu_type, device, gpu_info))
-                        added += 1
-                elif delta < 0:
-                    # Prefer to retire idle slots first (immediate),
-                    # mark busy ones as pending so they retire when
-                    # they finish their current item.
-                    surplus = -delta
-                    idle_first = sorted(live, key=lambda s: 0 if s["_claimed_by"] is None else 1)
-                    for s in idle_first[:surplus]:
-                        if s["_claimed_by"] is None:
-                            try:
-                                gpu_slots.remove(s)
-                                removed += 1
-                            except ValueError:
-                                pass
-                        else:
-                            s["_pending_removal"] = True
-                            removed += 1
-            # CPU diff
-            live_cpu = [s for s in gpu_slots if s["worker_type"] == "CPU" and not s["_pending_removal"]]
-            delta = new_cpu - len(live_cpu)
-            if delta > 0:
-                for _ in range(delta):
-                    gpu_slots.append(_build_cpu_slot())
-                    added += 1
-            elif delta < 0:
-                surplus = -delta
-                idle_first = sorted(live_cpu, key=lambda s: 0 if s["_claimed_by"] is None else 1)
-                for s in idle_first[:surplus]:
-                    if s["_claimed_by"] is None:
-                        try:
-                            gpu_slots.remove(s)
-                            removed += 1
-                        except ValueError:
-                            pass
-                    else:
-                        s["_pending_removal"] = True
-                        removed += 1
-
-            new_target = sum(1 for s in gpu_slots if not s["_pending_removal"])
-            if new_target != _concurrency_state["target"]:
-                _concurrency_state["target"] = max(1, new_target)
-                _concurrency_cond.notify_all()
-
-        if added or removed:
-            logger.info(
-                "Hot-reload: gpu_config changed mid-{} — added {} slot(s), removed {} slot(s); concurrency target now {}",
-                label,
-                added,
-                removed,
-                _concurrency_state["target"],
-            )
-            # Slot-count changed — bypass the 1 Hz throttle so the
-            # panel reflects the new row count immediately.
-            _emit_worker_snapshot(force=True)
-
-    def _poller_loop() -> None:
-        while not _poller_stop.wait(1.5):
-            _reconcile_with_settings()
-            # Periodic snapshot tick so the Workers panel reflects
-            # in-flight FFmpeg progress (progress_percent / speed) within
-            # ~1.5s. Without this, the snapshot only fires at task
-            # start / end and during settings reconciliation, leaving
-            # the panel frozen at "0% @ 0.0x" through 30s+ FFmpeg
-            # passes for multi-server full scans. Throttled at 1 Hz —
-            # 1.5 s ≥ throttle so the heartbeat always passes through.
-            _emit_worker_snapshot()
-
-    def _process_one(index_and_item):
-        # D27 — register the executor's worker thread under this job's
-        # id so the per-job log handler captures every per-file
-        # Dispatch / Owners-resolved / FFmpeg / Publisher line that
-        # process_canonical_path emits. Without this, the Emby/Jellyfin
-        # full-scan path (which uses ThreadPoolExecutor directly,
-        # bypassing JobDispatcher → Worker.assign_task → register_job_thread)
-        # leaves its threads anonymous and the per-job log shows only
-        # the lifecycle markers — users see "dispatching 5000 items"
-        # then nothing for hours despite continuous activity in app.log.
-        # Idempotent re-register per call: the executor pool reuses
-        # threads across items, but every call sets the same job_id so
-        # there's no churn in _job_thread_to_job_id.
-        if job_id:
-            from .worker import register_job_thread
-
-            register_job_thread(job_id)
-
-        index, (server_cfg, item) = index_and_item
-        thread_name = threading.current_thread().name
-
-        if cancel_check and cancel_check():
-            return ("Worker", None)
-
-        # Pause gate — block (don't bail) while the queue is paused so
-        # NEW FFmpegs don't spawn after the user clicks Pause All. The
-        # dispatcher path (job_runner → JobDispatcher) already honours
-        # pause via tracker.is_paused() in _get_next_item, but the
-        # multi-server full-scan / webhook ThreadPoolExecutor path used
-        # to ignore it — pausing only halted in-flight FFmpegs (via
-        # SIGSTOP from commit 6d812ad) while the executor kept pulling
-        # the next item and launching fresh subprocesses for ~6 minutes
-        # until the queue drained. Cancel takes precedence over pause
-        # so a user who pauses then cancels isn't stuck waiting.
-        while pause_check and pause_check():
-            if cancel_check and cancel_check():
-                return ("Worker", None)
-            time.sleep(0.25)
-
-        # Pin precedence — computed up-front so the scan-phase check below
-        # and the generation call further down agree on who publishes:
-        #   1. Caller-supplied ``server_id_filter`` always wins — the user's
-        #      explicit "scan Movies on plex-default" pin from the job config.
-        #   2. No caller pin + non-Plex originator → scope to that originator.
-        #   3. No caller pin + Plex originator → fan out to every owner.
-        if server_id_filter:
-            per_item_pin = server_id_filter
-        elif server_cfg.type is not ServerType.PLEX:
-            per_item_pin = server_cfg.id
-        else:
-            per_item_pin = None
-
-        # Scan phase (#243): run the cheap pre-FFmpeg check WITHOUT holding a
-        # generation permit or a Workers-panel slot. Up to ``pool_max_workers``
-        # threads do this in parallel, so the "does a fresh preview already
-        # exist?" sweep is no longer throttled to the FFmpeg cap. Only items
-        # that genuinely need frame extraction fall through to claim a (capped)
-        # permit + slot below. ``check_only=True`` is contractually guaranteed
-        # not to run FFmpeg, so generation can NEVER happen without a permit.
-        scan_result = None
-        with failure_scope(job_id):
-            try:
-                scan_result = process_canonical_path(
-                    canonical_path=item.canonical_path,
-                    registry=registry,
-                    config=config,
-                    item_id_by_server=item.item_id_by_server or None,
-                    bundle_metadata_by_server=item.bundle_metadata_by_server or None,
-                    gpu=None,
-                    gpu_device_path=None,
-                    progress_callback=None,
-                    cancel_check=cancel_check,
-                    server_id_filter=per_item_pin,
-                    regenerate=bool(getattr(config, "regenerate_thumbnails", False)),
-                    check_only=True,
-                )
-            except CancellationError:
-                return ("Library scan", None)
-            except Exception as scan_exc:
-                # The cheap check raised unexpectedly (e.g. a transient server
-                # error mid item-id resolution). Don't decide the item here —
-                # fall through to the full generation path, which carries the
-                # complete error handling, CPU fallback, and Files-panel
-                # attribution. Worst case it spends a permit to reach the same
-                # failure, which is exactly the pre-#243 behaviour.
-                logger.debug(
-                    "Multi-server {}: scan-phase check raised for {!r} ({}: {}); routing to the full generation path.",
-                    label,
-                    item.canonical_path,
-                    type(scan_exc).__name__,
-                    scan_exc,
-                )
-                scan_result = None
-
-        if scan_result is not None and scan_result.status is not MultiServerStatus.NEEDS_GENERATION:
-            # Terminal outcome decided during the cheap scan: already-fresh
-            # skip, no-owners, source-missing, or pending-registration. None
-            # of these need FFmpeg, so record the result through the SAME
-            # folding path the generation branch uses (the return value flows
-            # into the as_completed loop) — no permit, no slot, and it never
-            # shows as a Workers-panel row. The Files-panel Worker column reads
-            # "Library scan" because that's what actually processed it.
-            return ("Library scan", scan_result)
-
-        # Item needs generation (or the check raised) — acquire a capped
-        # generation permit and a Workers-panel slot, then run the full
-        # pipeline below.
-        # Two-step acquisition: concurrency permit (gates how many
-        # threads run real work simultaneously) and slot claim (which
-        # row in the Workers panel represents this thread). The poller
-        # adjusts both atomically.
-        _acquire_concurrency()
-        slot = _claim_idle_slot(thread_name)
-        # Edge case: poller marked all live slots for removal between
-        # the acquire and the claim. Release the permit so others can
-        # proceed and bail this item.
-        if slot is None:
-            _release_concurrency()
-            return ("Worker", None)
-        # First real work found — flip the job's progress label away from
-        # "Checking existing previews…". Benign race (see _phase_state).
-        _phase_state["generation_started"] = True
-
-        # GPU assignment is *per slot*, not per item — the slot's
-        # gpu_type/gpu_device were set at slot creation so concurrency
-        # is correctly distributed across physical devices even after
-        # hot-reload reshuffles slots.
-        gpu_type = slot["gpu_type"]
-        gpu_device = slot["gpu_device"]
-        worker_label = slot["worker_name"]
-
-        # Flip the slot to "processing X" in place — never pop it.
-        # Rows persist for the whole dispatch (legacy WorkerPool
-        # model) so the Workers panel doesn't flash entries on/off.
-        with _slots_lock:
-            slot["status"] = "processing"
-            slot["current_title"] = item.title or os.path.basename(item.canonical_path)
-        # Push the snapshot the moment the thread picks up the item so
-        # the Workers panel shows activity within ~1 frame of dispatch
-        # (otherwise the panel would only update on completion — for
-        # FFmpeg passes that take 30s+ that's a very long blank stare).
-        _emit_worker_snapshot()
-
-        # ``per_item_pin`` was computed up-front (before the scan-phase
-        # check) so the check and this generation call agree on who
-        # publishes — see the pin-precedence comment above.
-
-        # Slot progress callback — updates the slot's progress_percent /
-        # speed / remaining_time fields in place during FFmpeg so the
-        # Workers panel rows show live "<progress>% @ <speed>" instead
-        # of a frozen 0.0x. Mirrors what worker._update_worker_progress
-        # does for the JobDispatcher path; without this the multi-server
-        # full-scan path (which uses ThreadPoolExecutor + the slot dict
-        # rather than the dispatcher's WorkerPool) emitted only the
-        # title, status changes, and 0% / 0.0x defaults.
-        def _slot_progress_callback(
-            progress_percent,
-            current_duration,
-            total_duration,
-            speed=None,
-            remaining_time=None,
-            frame=0,
-            fps=0,
-            q=0,
-            size=0,
-            time_str="00:00:00.00",
-            bitrate=0,
-            media_file=None,
-        ):
-            with _slots_lock:
-                slot["progress_percent"] = progress_percent
-                if speed:
-                    slot["speed"] = speed
-                if remaining_time is not None:
-                    slot["remaining_time"] = remaining_time
-                # First progress tick means FFmpeg is actually running
-                # and producing measurable output — flip the UI out of
-                # its pre-FFmpeg "Working…" branch so the user sees the
-                # real progress bar + speed + ETA. Mirrors the legacy
-                # ``WorkerPool._update_worker_progress`` (``worker.py:1624``).
-                # Reset on slot release (see ``_release_slot``) so a
-                # cache-hit / skipped-FFmpeg item that follows starts
-                # back in the "Working…" branch instead of inheriting
-                # the previous item's progress.
-                slot["ffmpeg_started"] = True
-            # Don't emit a snapshot per progress tick — that'd drown
-            # the SocketIO emit queue at 5+ updates/sec/worker. Slot
-            # state is mutated in place; the panel picks up the
-            # latest speed/remaining_time on the next snapshot. All
-            # ``_emit_worker_snapshot`` calls (claim, release, poller
-            # heartbeat) share the 1 Hz throttle defined inside this
-            # function — see the long comment near ``_emit_worker_snapshot``.
-
-        # Bind the worker thread's failure-tracking scope to this
-        # job so any FFmpeg failure inside ``process_canonical_path``
-        # → ``generate_images`` → ``record_failure`` is attributed
-        # to the right job's run summary. Without this scope every
-        # FFmpeg failure on the multi-server full-scan path was
-        # logged as "Internal bookkeeping bug: failure ... reported
-        # outside an active job" — the codebase's self-flagged
-        # diagnostic. The Worker dispatch path (worker.py:_process_item)
-        # has the equivalent ``with failure_scope(self.current_job_id)``;
-        # this scan path was missing it.
-        with failure_scope(job_id):
-            try:
-                result = process_canonical_path(
-                    canonical_path=item.canonical_path,
-                    registry=registry,
-                    config=config,
-                    item_id_by_server=item.item_id_by_server or None,
-                    bundle_metadata_by_server=item.bundle_metadata_by_server or None,
-                    gpu=gpu_type,
-                    gpu_device_path=gpu_device,
-                    progress_callback=_slot_progress_callback,
-                    cancel_check=cancel_check,
-                    server_id_filter=per_item_pin,
-                    regenerate=bool(getattr(config, "regenerate_thumbnails", False)),
-                )
-                return (worker_label, result)
-            except CodecNotSupportedError as exc:
-                # In-place GPU→CPU fallback. Pre-fix the bare except below
-                # swallowed CodecNotSupportedError, so the user-visible
-                # "retrying on CPU automatically" log line from
-                # generator.py / multi_server.py was a lie on full-scan
-                # jobs — no CPU retry ever ran. Worker-pool path has the
-                # equivalent fallback at jobs/worker.py:557-613; this
-                # mirrors it for the orchestrator's executor path.
-                # Live regression: 4 Re:ZERO episodes in job a90c9b87
-                # (TV Shows full scan, 2026-05-14) hit this and were
-                # marked failed despite the announced fallback.
-                if cancel_check and cancel_check():
-                    logger.info(
-                        "Multi-server {}: cancelled before CPU fallback for {!r}",
-                        label,
-                        item.canonical_path,
-                    )
-                    return (worker_label, None)
-                logger.warning(
-                    "Multi-server {}: GPU couldn't process {!r} ({}); retrying on CPU. "
-                    "If this happens for many files, your GPU may not support the codec.",
-                    label,
-                    item.canonical_path,
-                    exc,
-                )
-                try:
-                    result = process_canonical_path(
-                        canonical_path=item.canonical_path,
-                        registry=registry,
-                        config=config,
-                        item_id_by_server=item.item_id_by_server or None,
-                        bundle_metadata_by_server=item.bundle_metadata_by_server or None,
-                        gpu=None,
-                        gpu_device_path=None,
-                        progress_callback=_slot_progress_callback,
-                        cancel_check=cancel_check,
-                        server_id_filter=per_item_pin,
-                        regenerate=bool(getattr(config, "regenerate_thumbnails", False)),
-                    )
-                    logger.info(
-                        "Multi-server {}: completed CPU fallback for {!r}",
-                        label,
-                        item.canonical_path,
-                    )
-                    return (worker_label, result)
-                except CancellationError:
-                    # Distinct branch (mirrors jobs/worker.py:598-602) so the
-                    # user-visible log shows "cancelled during fallback" rather
-                    # than getting collapsed into the generic "CPU fallback also
-                    # failed (CancellationError: …)" message.
-                    logger.info(
-                        "Multi-server {}: cancelled during CPU fallback for {!r}",
-                        label,
-                        item.canonical_path,
-                    )
-                    return (worker_label, None)
-                except Exception as fallback_exc:
-                    logger.warning(
-                        "Multi-server {}: CPU fallback also failed for {!r} ({}: {}). "
-                        "Marking this file as failed; other items keep processing.",
-                        label,
-                        item.canonical_path,
-                        type(fallback_exc).__name__,
-                        fallback_exc,
-                    )
-                    return (worker_label, None)
-            except Exception as exc:
-                logger.warning(
-                    "Multi-server {}: per-item processing failed for {!r} ({}: {}). "
-                    "Other items in this run will still be processed.",
-                    label,
-                    item.canonical_path,
-                    type(exc).__name__,
-                    exc,
-                )
-                return (worker_label, None)
-            finally:
-                # Release the slot (auto-removes if poller flagged it)
-                # and the concurrency permit. Order matters: free the
-                # slot first so the snapshot reflects "idle" before
-                # another thread grabs it.
-                _release_slot(slot)
-                _emit_worker_snapshot()
-                _release_concurrency()
-
-    completed = 0
-    # Per-server publisher tally for this dispatch. Folded after every
-    # completed item and mirrored onto the Job via the fixed-size
-    # ``set_publishers`` call (one entry per server). Safe to mutate
-    # without a lock because ``as_completed`` yields finished futures
-    # back to **a single consumer thread** (the for-loop below) — the
-    # workers themselves never touch this dict. If this loop ever
-    # multiplexes consumption across threads, wrap the fold +
-    # set_publishers call in a ``threading.Lock``.
-    # Replaces the original
-    # per-item ``append_publishers`` (one row per file × server) which
-    # made publishers_json grow O(items × servers) — a 117k-item full
-    # library scan re-encoded and SQLite-UPSERTed an 11.8 MB blob after
-    # every item, throttling sustained throughput to <10 items/sec on a
-    # workload that's almost entirely "all fresh" stat() checks. The
-    # legacy dispatcher path was already moved to this shape in commit
-    # 1ecf099; this catches the full-scan path up.
-    publishers_aggregate: dict[str, dict] = {}
-    # Index inputs alongside their outcomes so the per-item record can
-    # surface the canonical path even when ``result is None`` (the
-    # exception-swallowed branch). Without this the Files panel showed
-    # only the surviving rows; the failures were just a number on the
-    # summary chip with no per-file attribution.
-    indexed_items = list(enumerate(items))
-    # Force the initial worker snapshot so the dashboard's Workers
-    # panel shows the configured slots as "idle" the moment the
-    # dispatch starts, instead of staying blank until the first
-    # item-claim transition (which the 1 Hz throttle can defer for
-    # up to a second after the panel first asks). Bypasses the
-    # throttle because there's nothing to coalesce yet.
-    _emit_worker_snapshot(force=True)
-    _poller_thread = threading.Thread(
-        target=_poller_loop,
-        name=f"multi-server-poller-{label}",
-        daemon=True,
+    tracker = dispatcher.submit_items(
+        job_id=effective_job_id,
+        items=plain_items,
+        config=config,
+        registry=registry,
+        title_max_width=200,
+        library_name="",
+        callbacks={
+            "progress_callback": progress_callback,
+            "worker_callback": worker_callback,
+            "cancel_check": cancel_check,
+            "pause_check": pause_check,
+        },
+        priority=PRIORITY_NORMAL,
     )
-    _poller_thread.start()
-    try:
-        pool_ctx = ThreadPoolExecutor(max_workers=pool_max_workers)
-    except Exception:
-        _poller_stop.set()
-        raise
-    # Why submit() + as_completed() instead of ``pool.map``:
-    # ``ThreadPoolExecutor.map`` returns results in **submission order**,
-    # so a slow item near the front of the queue stalls progress for
-    # every faster item behind it — workers are completing in parallel
-    # but the consumer is blocked at the head, so the
-    # ``progress_callback`` (and its SocketIO emit) never fires until
-    # the slow item completes. Job 9eb79d9c surfaced this on a Jellyfin
-    # full-library scan: numerator stuck at ~5/5000 for minutes, then
-    # jumped to ~700/5000 the instant the user cancelled. The
-    # ``as_completed`` iterator yields each future the moment its
-    # worker is done, so progress reflects real completion order.
-    with pool_ctx as pool:
-        future_to_input: dict = {
-            pool.submit(_process_one, indexed_item): indexed_item for indexed_item in indexed_items
-        }
-        for future in as_completed(future_to_input):
-            idx, (_server_cfg, item) = future_to_input[future]
-            try:
-                worker_label, result = future.result()
-            except Exception as exc:
-                # ``_process_one`` already wraps its own work in try/except
-                # and returns ``(worker_label, None)`` on failure, so
-                # this branch is only reached if _process_one itself
-                # raised before its try-block (or the pool surfaced an
-                # InterruptedError). Treat it the same as the
-                # exception-swallowed path: log, count as failure, no
-                # per-file row (canonical_path is still known).
-                logger.warning(
-                    "Multi-server {}: future.result() raised for {!r} ({}: {}). Treating as a failed item.",
-                    label,
-                    item.canonical_path,
-                    type(exc).__name__,
-                    exc,
-                )
-                worker_label, result = "Worker", None
-            completed += 1
-            if progress_callback:
-                try:
-                    # Until the scan turns up the first item that needs FFmpeg,
-                    # the job is sweeping the library for existing previews —
-                    # surface that rather than "Processed", which reads as
-                    # generation. Flips to "Processed" the moment any item
-                    # claims a generation slot (#243).
-                    phase_msg = (
-                        f"Checking existing previews… {completed}/{total}"
-                        if not _phase_state["generation_started"]
-                        else f"Processed {completed}/{total}"
-                    )
-                    progress_callback(completed, total, phase_msg)
-                except Exception:
-                    pass
-            # ``worker_label`` already came back from _process_one as the
-            # actual stable slot name (e.g. "NVIDIA TITAN RTX #1") that
-            # processed this item — so the Files panel's Worker column
-            # shows the same identity as the Workers panel's row.
-            if result is None:
-                # _process_one swallowed an exception (FFmpeg crash, codec
-                # not supported, etc.). Count it as a failed item so the
-                # outcome counter — and the Job UI badge — surface it
-                # instead of silently reporting "Completed".
-                counts["failed"] = counts.get("failed", 0) + 1
-                # Persist a Files-panel row so the user can see *which*
-                # file failed without grepping the log. Without this, a
-                # batch with 50 failures showed "0 file(s)" in the panel
-                # and the failures only existed as a counter on the chip.
-                try:
-                    _notify_file_result(
-                        item.canonical_path,
-                        ProcessingResult.FAILED,
-                        "process_canonical_path raised — see app log for traceback",
-                        worker_label,
-                        servers=[],
-                    )
-                except Exception as exc:
-                    logger.debug("Could not notify failed file result for {}: {}", item.canonical_path, exc)
-                continue
-            for pub in result.publishers or []:
-                key = (pub.status.value if hasattr(pub.status, "value") else str(pub.status)).lower()
-                counts[key] = counts.get(key, 0) + 1
-            # Empty-publisher aggregate statuses (SKIPPED_FILE_NOT_FOUND,
-            # NO_OWNERS, NO_FRAMES, MultiServerStatus.FAILED when frame
-            # generation raised before any publisher ran) still represent
-            # a processed item. Without this fold, the item is counted in
-            # ``completed`` but disappears from the outcome totals — which
-            # is how the deea99db job reported "128007 processed" but
-            # only "128002 in outcome". Mirrors _outcome_for_multi_server_status
-            # so the counter key and the Files-panel outcome string agree.
-            if not (result.publishers or []):
-                aggregate_status = getattr(result, "status", None)
-                if aggregate_status is MultiServerStatus.SKIPPED_FILE_NOT_FOUND:
-                    counts["skipped_file_not_found"] = counts.get("skipped_file_not_found", 0) + 1
-                elif aggregate_status is MultiServerStatus.NO_OWNERS:
-                    counts["no_owners"] = counts.get("no_owners", 0) + 1
-                elif aggregate_status is MultiServerStatus.NO_FRAMES:
-                    # NO_FRAMES already invoked ``record_failure`` inside
-                    # ``generate_images`` — rolling it into ``failed`` here
-                    # keeps the end-of-run "X failed file(s)" list and the
-                    # "N of T item(s) failed" summary aligned. Without this
-                    # they diverge (deea99db: 1-in-list vs 2-in-summary).
-                    counts["failed"] = counts.get("failed", 0) + 1
-                elif aggregate_status is MultiServerStatus.FAILED:
-                    counts["failed"] = counts.get("failed", 0) + 1
-            rows = _publisher_rows_from_result(result, result.canonical_path)
-            if job_manager is not None:
-                # Fold this item's per-server outcomes into the running
-                # aggregate, then mirror the bounded summary onto the
-                # Job. Per-file × per-server detail still lands in the
-                # Files-panel JSONL via ``_notify_file_result`` below —
-                # that's the right home for it (append-only, capped
-                # caller-side; see web/jobs.record_file_result).
-                fold_publisher_rows_into_aggregate(publishers_aggregate, rows)
-                try:
-                    job_manager.set_publishers(job_id, list(publishers_aggregate.values()))
-                except Exception as exc:
-                    logger.debug("Could not set publisher aggregate for job {}: {}", job_id, exc)
-            # Live Files-panel row. The multi-server dispatch path
-            # bypasses Worker → _persist (it calls process_canonical_path
-            # directly via the ThreadPoolExecutor), so without this hook
-            # the JSONL file stays empty for the entire run and users
-            # see "0 file(s)" mid-job despite continuous activity.
-            try:
-                outcome = _outcome_for_multi_server_status(result.status)
-                _notify_file_result(
-                    result.canonical_path,
-                    outcome,
-                    (result.message or "").strip(),
-                    worker_label,
-                    servers=rows,
-                )
-            except Exception as exc:
-                logger.debug("Could not notify file result for {}: {}", result.canonical_path, exc)
-
-    # Stop the hot-reload poller and clear any persistent slot rows
-    # from the panel snapshot. Daemon thread, but explicit shutdown
-    # avoids a 1.5s tail of poller activity after the dispatch
-    # returns.
-    _poller_stop.set()
-    try:
-        _poller_thread.join(timeout=2.0)
-    except Exception:
-        pass
-    # Force one final emit so the panel sees the terminal all-idle
-    # state. Without it, a last-item-release transition within the
-    # throttle window leaves the panel showing a stale "processing"
-    # row until the next job clears it.
-    _emit_worker_snapshot(force=True)
-    logger.info("Multi-server {} complete: {} item(s) processed.", label, completed)
-    return counts
+    tracker.wait()
+    logger.info("Multi-server {} complete: {} item(s) processed.", label, tracker.completed)
+    return tracker.get_result()["outcome"]
 
 
 def _enumerate_items_for_servers(
@@ -1663,6 +803,7 @@ def _run_full_scan_multi_server(
     job_id: str | None = None,
     worker_callback=None,
     on_dispatch_start=None,
+    worker_pool_callback=None,
     warnings_out: list[str] | None = None,
 ) -> dict:
     """Multi-server full-library scan via the per-vendor :class:`VendorProcessor`.
@@ -1780,6 +921,7 @@ def _run_full_scan_multi_server(
         server_id_filter=server_id_filter,
         worker_callback=worker_callback,
         on_dispatch_start=on_dispatch_start,
+        worker_pool_callback=worker_pool_callback,
     )
 
 
@@ -1796,6 +938,7 @@ def _run_recently_added_multi_server(
     job_id: str | None = None,
     worker_callback=None,
     on_dispatch_start=None,
+    worker_pool_callback=None,
     warnings_out: list[str] | None = None,
 ) -> dict:
     """Recently-added scan for any vendor via :class:`VendorProcessor`.
@@ -1880,6 +1023,7 @@ def _run_recently_added_multi_server(
         server_id_filter=server_id_filter,
         worker_callback=worker_callback,
         on_dispatch_start=on_dispatch_start,
+        worker_pool_callback=worker_pool_callback,
     )
 
 
@@ -2512,6 +1656,7 @@ def run_processing(
                 job_id=job_id,
                 worker_callback=worker_callback,
                 on_dispatch_start=on_dispatch_start,
+                worker_pool_callback=worker_pool_callback,
                 warnings_out=scan_warnings,
             )
             result: dict = {"outcome": outcome_counts}

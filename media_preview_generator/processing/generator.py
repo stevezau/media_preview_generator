@@ -198,8 +198,8 @@ def clear_failures() -> None:
 # Dispatch reads the active ``job_id`` from ``_failure_job_id_var`` — the
 # same ContextVar ``failure_scope`` uses. Every call site of
 # ``_notify_file_result`` already runs inside ``failure_scope(job_id)``
-# (worker.py:_process_item and orchestrator.py:_process_one), so no
-# caller changes were needed.
+# (worker.py:_process_item for generation and dispatcher.py:_run_check for
+# the checking stage), so no caller changes were needed.
 #
 # The ``""`` bucket keeps the old scope-less API working for unit tests
 # that exercise ``_notify_file_result`` directly without wrapping in a
