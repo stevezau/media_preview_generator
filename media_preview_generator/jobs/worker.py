@@ -68,6 +68,32 @@ def is_job_thread_for(thread_id: int, job_id: str) -> bool:
         return _job_thread_to_job_id.get(thread_id) == job_id
 
 
+def resolve_per_item_pin(config, item, registry) -> str | None:
+    """Decide which single server (if any) a dispatch should publish to.
+
+    Shared by the processing path (:meth:`Worker._process_item`) and the
+    dispatcher's checking stage so both agree on who publishes — a divergence
+    would let the cheap check skip an item whose pinned server is actually
+    stale. Precedence:
+
+    1. Caller-supplied ``config.server_id_filter`` always wins (explicit
+       "publish to this server only" pin from the job config).
+    2. No caller pin + non-Plex originator → scope to that originator's id
+       (``item.server_id`` carries the vendor that fired the webhook).
+    3. No caller pin + Plex originator → fan out (return None).
+    """
+    from ..servers.base import ServerType as _ST
+
+    _config_pin = getattr(config, "server_id_filter", None) or None
+    if _config_pin:
+        return _config_pin
+    if getattr(item, "server_id", None):
+        origin_cfg = registry.get_config(item.server_id) if registry else None
+        origin_is_plex = bool(origin_cfg and origin_cfg.type is _ST.PLEX)
+        return item.server_id if not origin_is_plex else None
+    return None
+
+
 class Worker:
     """Represents a worker thread for processing media items."""
 
@@ -414,17 +440,7 @@ class Worker:
             #   3. No caller pin + Plex originator → fan out (the
             #      cross-vendor publish path Plex+Emby+Jellyfin installs
             #      depend on).
-            from ..servers.base import ServerType as _ST
-
-            _config_pin = getattr(config, "server_id_filter", None) or None
-            if _config_pin:
-                per_item_pin: str | None = _config_pin
-            elif item.server_id:
-                origin_cfg = registry.get_config(item.server_id) if registry else None
-                origin_is_plex = bool(origin_cfg and origin_cfg.type is _ST.PLEX)
-                per_item_pin = item.server_id if not origin_is_plex else None
-            else:
-                per_item_pin = None
+            per_item_pin: str | None = resolve_per_item_pin(config, item, registry)
 
             # ``webhook_source`` lives on Config when this dispatch came
             # from a webhook (Sonarr/Radarr/Plex/…). Use it as the gate
