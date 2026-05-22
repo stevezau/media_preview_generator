@@ -290,3 +290,36 @@ class TestPhaseLabelByMode:
             )
         assert "Preparing to generate…" in phases
         assert "Checking existing previews…" not in phases
+
+
+class TestCancellationDuringGeneration:
+    """A cancelled FFmpeg run (job cancelled / container restart mid-extract)
+    raises CancellationError. It must propagate as cancellation — NOT be
+    swallowed into a FAILED result with a misleading "corrupt video file"
+    traceback (the worker's CancellationError handler records it cleanly).
+    Regression: a cancelled scan logged a scary diagnostic traceback +
+    "Common causes: corrupt video file…" advice.
+    """
+
+    def test_cancellation_reraises_not_swallowed_as_failed(self, mock_config_for_processing, tmp_path):
+        from media_preview_generator.processing.generator import CancellationError
+
+        registry = _emby_registry(tmp_path)
+        media_file = _seed_media(tmp_path)
+        with (
+            patch(
+                "media_preview_generator.processing.multi_server.outputs_fresh_for_source",
+                return_value=False,
+            ),
+            patch(
+                "media_preview_generator.processing.multi_server.generate_images",
+                side_effect=CancellationError("cancelled"),
+            ),
+            pytest.raises(CancellationError),
+        ):
+            process_canonical_path(
+                canonical_path=str(media_file),
+                registry=registry,
+                config=mock_config_for_processing,
+                check_only=False,
+            )

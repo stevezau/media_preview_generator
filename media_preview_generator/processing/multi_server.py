@@ -46,6 +46,7 @@ from ..output.journal import clear_meta, outputs_fresh_for_source, write_meta
 from ..servers.base import LibraryNotYetIndexedError, MediaServer, ServerConfig, ServerType
 from .frame_cache import get_frame_cache
 from .generator import (
+    CancellationError,
     CodecNotSupportedError,
     _cleanup_temp_directory,
     generate_images,
@@ -1718,6 +1719,13 @@ def process_canonical_path(
                     "No action needed; this is a normal fallback for codecs your GPU doesn't support.",
                     canonical_path,
                 )
+                raise
+            except CancellationError:
+                # Cancellation (job cancelled / container restart mid-FFmpeg) is
+                # NOT a frame-extraction failure — don't log the scary "corrupt
+                # video file" traceback or mark it FAILED here. Re-raise so the
+                # worker's CancellationError handler records it cleanly.
+                logger.info("Frame extraction cancelled for {} — stopping this file.", canonical_path)
                 raise
             except Exception as exc:
                 logger.exception(
