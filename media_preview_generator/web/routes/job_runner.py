@@ -62,7 +62,14 @@ def _classify_job_completion(
     nothing_resolved = total_paths > 0 and resolved_count == 0 and not spawned_retry_id
     retry_exhausted = is_retry and bool(retry_paths) and not spawned_retry_id
 
-    if all_items_failed or all_not_found or nothing_resolved or retry_exhausted:
+    # A retry chain that exhausted is only a *total* failure (red) when nothing
+    # succeeded. If it still produced previews (success_total > 0), it's a
+    # partial failure (amber) — the same rule every other gate already follows
+    # (all_items_failed requires success_total == 0). Without the guard, a retry
+    # job that generated N previews but couldn't register a few genuinely-
+    # missing files showed red "Failed" (job 67f7bf2a: generated 11, 0 hard
+    # failures, 26 unregistered missing files → was red, should be amber).
+    if all_items_failed or all_not_found or nothing_resolved or (retry_exhausted and success_total == 0):
         return "error"
     return "warning"
 
