@@ -13,7 +13,7 @@ import time
 from loguru import logger
 
 from ..processing.generator import ProcessingResult, clear_failures, log_failure_summary
-from ..servers.ownership import apply_webhook_prefixes, find_owning_servers
+from ..servers.ownership import apply_path_mappings, apply_webhook_prefixes, find_owning_servers
 from .worker import WorkerPool
 
 # Max cadence for worker-snapshot SocketIO emits during a multi-server
@@ -73,10 +73,23 @@ def _resolve_webhook_path_to_canonical(
     candidate_paths: list[str] = [path]
     seen_candidates: set[str] = {path}
     for cfg in server_configs:
-        for translated in apply_webhook_prefixes(path, cfg.path_mappings or []):
-            if translated not in seen_candidates:
-                seen_candidates.add(translated)
-                candidate_paths.append(translated)
+        # Two namespaces can arrive here, and each needs its own translator:
+        #   * Sonarr/Radarr/Tdarr send their own view (``/data/...``) →
+        #     apply_webhook_prefixes maps the configured webhook_prefixes to
+        #     local.
+        #   * A Plex/Emby/Jellyfin ``library.new`` webhook resolves the file
+        #     via the server's API, so the path arrives in the MEDIA-SERVER's
+        #     own view (``/mnt/Media/...``) → apply_path_mappings does the
+        #     same remote→local translation we already apply to a library's
+        #     remote_paths. Without this, an install with a path mapping
+        #     never matched its own server's webhooks (issue #254): the
+        #     ownership check translated the library prefix to ``/media`` but
+        #     compared it against the untranslated ``/mnt/Media`` path.
+        for translator in (apply_webhook_prefixes, apply_path_mappings):
+            for translated in translator(path, cfg.path_mappings or []):
+                if translated not in seen_candidates:
+                    seen_candidates.add(translated)
+                    candidate_paths.append(translated)
 
     # Aggregate owners across ALL candidates that match. Track which
     # candidate each owner came from so we can pick a canonical path
