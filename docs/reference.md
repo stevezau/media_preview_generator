@@ -115,6 +115,7 @@ GPU settings are configured per-GPU in **Settings** → **Processing Options**. 
 | Setting | Web UI | Default | Description |
 |---------|--------|---------|-------------|
 | `cpu_threads` | Yes | `1` | Number of CPU worker threads (0–32) |
+| `scan_workers` | Yes | `0` (Auto) | Full-scan only: how many files are checked **in parallel** for an existing preview, independent of the FFmpeg-generation cap (GPU + CPU workers). Checking is light disk I/O and does NOT add FFmpeg/GPU load. `0` = Auto (`max(32, generators)`); an explicit value is bounded to 1–256. Raise it to speed the "skip already-done files" sweep on large libraries; lower it on a single spinning HDD. |
 | `thumbnail_quality` | Yes | `4` | Preview quality 1-10 (2=highest) |
 | `thumbnail_interval` | Yes | `10` | Interval between preview images (1–60 s). Matches Plex/BIF community convention (see sidecar `-{width}-10.bif` files). |
 | `selected_libraries` | Yes | All | Library IDs to process |
@@ -205,7 +206,7 @@ These env vars are deprecated and silently ignored at startup with a warning log
 On first run, these env vars are migrated into settings.json. After that, settings.json is the source of truth:
 
 - `PLEX_URL`, `PLEX_TOKEN`, `PLEX_CONFIG_FOLDER`, `PLEX_VERIFY_SSL`, `PLEX_TIMEOUT`
-- `PLEX_BIF_FRAME_INTERVAL` / `THUMBNAIL_INTERVAL` (alias), `THUMBNAIL_QUALITY`, `TONEMAP_ALGORITHM`, `CPU_THREADS`
+- `PLEX_BIF_FRAME_INTERVAL` / `THUMBNAIL_INTERVAL` (alias), `THUMBNAIL_QUALITY`, `TONEMAP_ALGORITHM`, `CPU_THREADS`, `SCAN_WORKERS`
 - `MEDIA_PATH`, `TMP_FOLDER`, `LOG_LEVEL`
 
 ---

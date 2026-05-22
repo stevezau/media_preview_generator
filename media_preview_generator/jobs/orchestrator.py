@@ -709,11 +709,21 @@ def _dispatch_processable_items(
         gpu_slots.append(_build_cpu_slot())
 
     initial_concurrency = max(1, len(gpu_slots))
-    # Generous ThreadPool ceiling so the hot-reload poller can grow the
-    # active worker count without bumping into max_workers. Tasks waiting
-    # on the concurrency semaphore are cheap (one idle thread each) so
-    # 32 is fine; users wanting more can restart.
-    pool_max_workers = max(initial_concurrency, 32)
+    # Scan-phase concurrency (#243). ``scan_workers`` is how many items the
+    # cheap "does a fresh preview already exist?" check sweeps in parallel,
+    # decoupled from the FFmpeg-generation cap (``initial_concurrency`` — the
+    # GPU+CPU worker count). The pre-permit check in ``_process_one`` runs on
+    # these threads WITHOUT holding a generation permit, so raising this
+    # speeds the library sweep without spawning more FFmpegs.
+    #
+    # 0 = Auto → max(32, generators): exactly today's pool size, so the
+    # threads that previously sat idle-blocked on the semaphore now actually
+    # do the checking — the benefit lands at the default with no regression.
+    # An explicit value still floors at ``initial_concurrency`` so every
+    # generator can run.
+    _scan_workers_cfg = max(0, int(getattr(config, "scan_workers", 0) or 0))
+    scan_workers = _scan_workers_cfg if _scan_workers_cfg > 0 else max(32, initial_concurrency)
+    pool_max_workers = max(scan_workers, initial_concurrency)
 
     job_manager = None
     if job_id:
@@ -758,6 +768,13 @@ def _dispatch_processable_items(
     _slots_lock = threading.Lock()
     _concurrency_cond = threading.Condition(_slots_lock)
     _concurrency_state = {"target": initial_concurrency, "active": 0}
+
+    # Flips True the first time any item claims a generation slot (i.e. the
+    # scan turned up real work). Used only to switch the job's progress label
+    # from "Checking existing previews…" to "Processed…". A plain bool write
+    # from the worker threads + a read from the single as_completed consumer;
+    # a benign stale read just shows the old label for one more tick.
+    _phase_state = {"generation_started": False}
 
     def _acquire_concurrency() -> None:
         # Block until the active count is below the dynamic target.
@@ -1024,6 +1041,74 @@ def _dispatch_processable_items(
                 return ("Worker", None)
             time.sleep(0.25)
 
+        # Pin precedence — computed up-front so the scan-phase check below
+        # and the generation call further down agree on who publishes:
+        #   1. Caller-supplied ``server_id_filter`` always wins — the user's
+        #      explicit "scan Movies on plex-default" pin from the job config.
+        #   2. No caller pin + non-Plex originator → scope to that originator.
+        #   3. No caller pin + Plex originator → fan out to every owner.
+        if server_id_filter:
+            per_item_pin = server_id_filter
+        elif server_cfg.type is not ServerType.PLEX:
+            per_item_pin = server_cfg.id
+        else:
+            per_item_pin = None
+
+        # Scan phase (#243): run the cheap pre-FFmpeg check WITHOUT holding a
+        # generation permit or a Workers-panel slot. Up to ``pool_max_workers``
+        # threads do this in parallel, so the "does a fresh preview already
+        # exist?" sweep is no longer throttled to the FFmpeg cap. Only items
+        # that genuinely need frame extraction fall through to claim a (capped)
+        # permit + slot below. ``check_only=True`` is contractually guaranteed
+        # not to run FFmpeg, so generation can NEVER happen without a permit.
+        scan_result = None
+        with failure_scope(job_id):
+            try:
+                scan_result = process_canonical_path(
+                    canonical_path=item.canonical_path,
+                    registry=registry,
+                    config=config,
+                    item_id_by_server=item.item_id_by_server or None,
+                    bundle_metadata_by_server=item.bundle_metadata_by_server or None,
+                    gpu=None,
+                    gpu_device_path=None,
+                    progress_callback=None,
+                    cancel_check=cancel_check,
+                    server_id_filter=per_item_pin,
+                    regenerate=bool(getattr(config, "regenerate_thumbnails", False)),
+                    check_only=True,
+                )
+            except CancellationError:
+                return ("Library scan", None)
+            except Exception as scan_exc:
+                # The cheap check raised unexpectedly (e.g. a transient server
+                # error mid item-id resolution). Don't decide the item here —
+                # fall through to the full generation path, which carries the
+                # complete error handling, CPU fallback, and Files-panel
+                # attribution. Worst case it spends a permit to reach the same
+                # failure, which is exactly the pre-#243 behaviour.
+                logger.debug(
+                    "Multi-server {}: scan-phase check raised for {!r} ({}: {}); routing to the full generation path.",
+                    label,
+                    item.canonical_path,
+                    type(scan_exc).__name__,
+                    scan_exc,
+                )
+                scan_result = None
+
+        if scan_result is not None and scan_result.status is not MultiServerStatus.NEEDS_GENERATION:
+            # Terminal outcome decided during the cheap scan: already-fresh
+            # skip, no-owners, source-missing, or pending-registration. None
+            # of these need FFmpeg, so record the result through the SAME
+            # folding path the generation branch uses (the return value flows
+            # into the as_completed loop) — no permit, no slot, and it never
+            # shows as a Workers-panel row. The Files-panel Worker column reads
+            # "Library scan" because that's what actually processed it.
+            return ("Library scan", scan_result)
+
+        # Item needs generation (or the check raised) — acquire a capped
+        # generation permit and a Workers-panel slot, then run the full
+        # pipeline below.
         # Two-step acquisition: concurrency permit (gates how many
         # threads run real work simultaneously) and slot claim (which
         # row in the Workers panel represents this thread). The poller
@@ -1036,6 +1121,9 @@ def _dispatch_processable_items(
         if slot is None:
             _release_concurrency()
             return ("Worker", None)
+        # First real work found — flip the job's progress label away from
+        # "Checking existing previews…". Benign race (see _phase_state).
+        _phase_state["generation_started"] = True
 
         # GPU assignment is *per slot*, not per item — the slot's
         # gpu_type/gpu_device were set at slot creation so concurrency
@@ -1057,24 +1145,9 @@ def _dispatch_processable_items(
         # FFmpeg passes that take 30s+ that's a very long blank stare).
         _emit_worker_snapshot()
 
-        # Pin precedence:
-        #   1. Caller-supplied ``server_id_filter`` always wins — that's
-        #      the user's explicit "scan Movies on plex-default" pin from
-        #      the job config. Without this we'd fan out to Jellyfin/Emby
-        #      on a Plex-pinned job (job d9918149 reproducer: every Plex
-        #      file got a JellyTest publisher attempt that failed because
-        #      no Jellyfin item_id existed).
-        #   2. No caller pin + non-Plex originator → scope to that
-        #      originator. Plex isn't reachable on this install.
-        #   3. No caller pin + Plex originator → fan out to every
-        #      owning server (the original cross-vendor publish path
-        #      that benefits multi-vendor installs).
-        if server_id_filter:
-            per_item_pin = server_id_filter
-        elif server_cfg.type is not ServerType.PLEX:
-            per_item_pin = server_cfg.id
-        else:
-            per_item_pin = None
+        # ``per_item_pin`` was computed up-front (before the scan-phase
+        # check) so the check and this generation call agree on who
+        # publishes — see the pin-precedence comment above.
 
         # Slot progress callback — updates the slot's progress_percent /
         # speed / remaining_time fields in place during FFmpeg so the
@@ -1313,7 +1386,17 @@ def _dispatch_processable_items(
             completed += 1
             if progress_callback:
                 try:
-                    progress_callback(completed, total, f"Processed {completed}/{total}")
+                    # Until the scan turns up the first item that needs FFmpeg,
+                    # the job is sweeping the library for existing previews —
+                    # surface that rather than "Processed", which reads as
+                    # generation. Flips to "Processed" the moment any item
+                    # claims a generation slot (#243).
+                    phase_msg = (
+                        f"Checking existing previews… {completed}/{total}"
+                        if not _phase_state["generation_started"]
+                        else f"Processed {completed}/{total}"
+                    )
+                    progress_callback(completed, total, phase_msg)
                 except Exception:
                     pass
             # ``worker_label`` already came back from _process_one as the

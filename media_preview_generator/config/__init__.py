@@ -147,6 +147,14 @@ class Config:
     # device, name, type, enabled, workers, ffmpeg_threads
     gpu_config: list[dict[str, Any]] = field(default_factory=list)
 
+    # Library-scanning concurrency for full scans: how many items the
+    # high-throughput "does a fresh preview already exist?" sweep checks in
+    # parallel, independent of the FFmpeg-generation cap (gpu_config workers +
+    # cpu_threads). 0 = Auto (the orchestrator resolves it to max(32,
+    # generators)). Checking is light disk I/O; raising it does NOT increase
+    # FFmpeg load. See issue #243.
+    scan_workers: int = 0
+
     # Runtime state (set after construction)
     working_tmp_folder: str = ""
 
@@ -575,6 +583,15 @@ def load_config(*, log_validation_errors: bool = True) -> Config:
 
     cpu_threads = get_value("cpu_threads", "CPU_THREADS", 1, int)
 
+    # Library-scanning concurrency. 0 = Auto (resolved by the orchestrator).
+    # A positive value is clamped to [1, 256] so a typo can't spawn an absurd
+    # thread pool; a negative/garbage value falls back to Auto.
+    scan_workers = get_value("scan_workers", "SCAN_WORKERS", 0, int)
+    if scan_workers < 0:
+        scan_workers = 0
+    elif scan_workers > 256:
+        scan_workers = 256
+
     tmp_folder = get_value("tmp_folder", "TMP_FOLDER", tempfile.gettempdir(), str)
 
     log_level = get_value("log_level", "LOG_LEVEL", "INFO", str).upper()
@@ -732,6 +749,7 @@ def load_config(*, log_validation_errors: bool = True) -> Config:
         cpu_threads=cpu_threads,
         ffmpeg_threads=ffmpeg_threads,
         gpu_config=gpu_config,
+        scan_workers=scan_workers,
         tmp_folder=tmp_folder,
         tmp_folder_created_by_us=tmp_folder_created_by_us,
         ffmpeg_path=ffmpeg_path,

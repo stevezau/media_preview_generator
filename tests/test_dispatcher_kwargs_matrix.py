@@ -42,6 +42,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from media_preview_generator.jobs.orchestrator import _run_full_scan_multi_server
+from media_preview_generator.processing.multi_server import MultiServerStatus
 from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.servers.base import ServerConfig, ServerType
 
@@ -121,7 +122,19 @@ def _drive_dispatcher(
     ):
         mock_sm.return_value.get.return_value = [settings_entry]
         mock_registry.from_settings.return_value = registry_mock
-        mock_process.return_value = MagicMock(publishers=[])
+
+        # Post-#243 the dispatcher runs a cheap ``check_only`` scan pass on
+        # every item before it spends a generation permit. Return
+        # NEEDS_GENERATION there so the item flows on to a real generation
+        # call — that's the call this matrix pins the full kwarg shape of
+        # (it carries gpu/gpu_device_path/progress_callback). The scan-phase
+        # check_only call deliberately passes gpu=None/progress_callback=None.
+        def _pcp(**kwargs):
+            if kwargs.get("check_only"):
+                return MagicMock(status=MultiServerStatus.NEEDS_GENERATION, publishers=[])
+            return MagicMock(publishers=[])
+
+        mock_process.side_effect = _pcp
 
         _run_full_scan_multi_server(
             expected_config,
@@ -129,8 +142,9 @@ def _drive_dispatcher(
             server_id_filter=caller_pin,
         )
 
-    mock_process.assert_called_once()
-    return mock_process.call_args.kwargs, cfg, registry_mock, expected_config
+    gen_calls = [c for c in mock_process.call_args_list if not c.kwargs.get("check_only")]
+    assert len(gen_calls) == 1, f"expected exactly one generation call, got {len(gen_calls)}"
+    return gen_calls[0].kwargs, cfg, registry_mock, expected_config
 
 
 # ---------------------------------------------------------------------------

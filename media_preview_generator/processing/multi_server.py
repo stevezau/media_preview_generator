@@ -77,6 +77,12 @@ class MultiServerStatus(str, Enum):
     NO_OWNERS = "no_owners"  # no enabled library covers the path
     FAILED = "failed"  # generation or every publisher failed
     NO_FRAMES = "no_frames"  # FFmpeg produced 0 frames (unrecoverable)
+    # Returned ONLY by check_only=True calls: every pre-FFmpeg step ran and
+    # the item genuinely needs frame extraction. Lets the orchestrator's
+    # high-concurrency scan phase decide whether to spend a generation permit
+    # without ever crossing the FFmpeg boundary itself. A real (check_only=
+    # False) call never returns this — it would just generate.
+    NEEDS_GENERATION = "needs_generation"
 
 
 @dataclass
@@ -1199,6 +1205,7 @@ def process_canonical_path(
     display_name: str | None = None,
     source: str | None = None,
     originating_job_id: str | None = None,
+    check_only: bool = False,
 ) -> MultiServerResult:
     """Process ``canonical_path`` and publish to every owning server.
 
@@ -1216,6 +1223,20 @@ def process_canonical_path(
             knows the id (typical for Plex / Emby / Jellyfin webhooks).
         regenerate: When True, publish even if all output paths already
             exist on disk.
+        check_only: When True, run every pre-FFmpeg step (publisher
+            resolution, source-missing / sibling-mount-rebind probe, the
+            all-fresh short-circuit and its ``trigger_refresh`` +
+            ``cleanup_orphaned_outputs`` side effects, the regenerate
+            meta-clear) exactly as a normal call, then return
+            :attr:`MultiServerStatus.NEEDS_GENERATION` at the FFmpeg
+            boundary instead of extracting frames. Terminal outcomes
+            (``SKIPPED``, ``PUBLISHED`` pending-registration, ``NO_OWNERS``,
+            ``SKIPPED_FILE_NOT_FOUND``) return exactly as they do without
+            this flag — they never reach the FFmpeg boundary. The full-scan
+            orchestrator uses this so its high-concurrency scan phase can
+            decide whether to spend a (capped) generation permit before any
+            FFmpeg can run. Default callers leave this False and never
+            observe ``NEEDS_GENERATION``.
 
     Returns:
         :class:`MultiServerResult` aggregating per-publisher outcomes.
@@ -1546,6 +1567,22 @@ def process_canonical_path(
                 clear_meta(adapter.compute_output_paths(_probe_bundle(server.id), server, item_id))
             except Exception:
                 continue
+
+    # check_only boundary: everything above here is the cheap pre-FFmpeg
+    # work (resolution, source-missing/sibling-rebind probe, all-fresh
+    # short-circuit + its cleanup/refresh side effects, regenerate
+    # meta-clear). All terminal outcomes (SKIPPED, PUBLISHED pending,
+    # NO_OWNERS, SKIPPED_FILE_NOT_FOUND) have already returned. Reaching
+    # here means the item genuinely needs frame extraction — so a
+    # check_only caller stops now and reports NEEDS_GENERATION rather than
+    # crossing into the heavy FFmpeg path below. This is the ONLY place
+    # NEEDS_GENERATION is produced.
+    if check_only:
+        return MultiServerResult(
+            canonical_path=canonical_path,
+            status=MultiServerStatus.NEEDS_GENERATION,
+            message="Outputs missing or stale; FFmpeg required",
+        )
 
     # Frame cache: when enabled, the second+ webhook for the same file
     # within the cache TTL skips FFmpeg entirely. Disabled callers

@@ -47,6 +47,26 @@ def _server_config(server_id, server_type=ServerType.JELLYFIN):
     )
 
 
+def _scan_then(result):
+    """``process_canonical_path`` side_effect for the post-#243 two-phase flow.
+
+    The full-scan dispatcher now runs a cheap ``check_only=True`` pass on each
+    item before it claims a generation slot. Tests that exercise the
+    generation path (slot claim, worker snapshots, FFmpeg-started flag) must
+    return ``NEEDS_GENERATION`` on that scan pass so the item proceeds to a
+    real generation call, which then returns ``result`` (or ``result(**kwargs)``
+    when a callable is supplied).
+    """
+    from media_preview_generator.processing.multi_server import MultiServerStatus
+
+    def _side_effect(*args, **kwargs):
+        if kwargs.get("check_only"):
+            return MagicMock(status=MultiServerStatus.NEEDS_GENERATION, publishers=[])
+        return result(*args, **kwargs) if callable(result) else result
+
+    return _side_effect
+
+
 class TestMultiServerFullScan:
     def test_no_servers_configured_returns_zero_counts(self, tmp_path):
         """No servers → zero counts AND no dispatch attempts.
@@ -998,11 +1018,13 @@ class TestWorkerCallbackEmissionFromMultiServerDispatch:
 
         with patch(
             "media_preview_generator.processing.multi_server.process_canonical_path",
-            return_value=SimpleNamespace(
-                publishers=[],
-                canonical_path="/data/m.mkv",
-                status=MultiServerStatus.PUBLISHED,
-                message="",
+            side_effect=_scan_then(
+                SimpleNamespace(
+                    publishers=[],
+                    canonical_path="/data/m.mkv",
+                    status=MultiServerStatus.PUBLISHED,
+                    message="",
+                )
             ),
         ):
             _dispatch_processable_items(
@@ -1058,11 +1080,13 @@ class TestWorkerCallbackEmissionFromMultiServerDispatch:
 
         with patch(
             "media_preview_generator.processing.multi_server.process_canonical_path",
-            return_value=SimpleNamespace(
-                publishers=[],
-                canonical_path="/data/named.mkv",
-                status=MultiServerStatus.PUBLISHED,
-                message="",
+            side_effect=_scan_then(
+                SimpleNamespace(
+                    publishers=[],
+                    canonical_path="/data/named.mkv",
+                    status=MultiServerStatus.PUBLISHED,
+                    message="",
+                )
             ),
         ):
             _dispatch_processable_items(
@@ -1218,6 +1242,11 @@ class TestParallelismRespectsPerDeviceWorkerCount:
         import time as _time
 
         def _slow(canonical_path, **kwargs):
+            # Scan pass returns instantly so every item proceeds to a
+            # (capped) generation call — that's where the concurrency this
+            # test measures actually happens.
+            if kwargs.get("check_only"):
+                return MagicMock(status=MultiServerStatus.NEEDS_GENERATION, publishers=[])
             _time.sleep(0.05)
             return SimpleNamespace(
                 publishers=[],
@@ -1454,6 +1483,10 @@ class TestHotReloadWorkerCount:
         gpus = [self._make_gpu("cuda:0", workers=2, name="NVIDIA TITAN RTX")]
 
         def _slow(canonical_path, **kwargs):
+            # Scan pass returns instantly; only generation calls hold a slot
+            # long enough for the poller to observe a grown worker count.
+            if kwargs.get("check_only"):
+                return MagicMock(status=MultiServerStatus.NEEDS_GENERATION, publishers=[])
             _time.sleep(0.2)
             return SimpleNamespace(
                 publishers=[],
@@ -1937,11 +1970,13 @@ class TestRealEndToEndMultiServerFullScan:
 
         # The real pipeline ran end-to-end and recorded one publish.
         assert counts.get("published", 0) == 1, counts
-        # compute_output_paths is called twice in the real flow: once by
-        # the pre-FFmpeg "are outputs fresh?" probe, once inside
-        # _publish_one for the publish path. Both must see the same
+        # compute_output_paths is called three times in the real post-#243
+        # flow: once by the cheap ``check_only`` scan pass's freshness probe
+        # (decoupled from the generation permit), then — on the generation
+        # call — once more by that call's own freshness probe and once inside
+        # _publish_one for the publish path. All three must see the same
         # canonical path and the same bare item id — that's the D31 contract.
-        assert len(captured_compute_calls) == 2
+        assert len(captured_compute_calls) == 3
         assert len(captured_publish_calls) == 1
 
         for call in captured_compute_calls:
@@ -2752,6 +2787,10 @@ class TestWorkerFFmpegStartedFlag:
             snapshots.append(list(workers_list))
 
         def _pcp_two_phase(*, canonical_path, progress_callback=None, **kwargs):
+            # Scan pass returns instantly so the item claims a generation slot
+            # below (where the ffmpeg_started flag transitions are exercised).
+            if kwargs.get("check_only"):
+                return MagicMock(status=MultiServerStatus.NEEDS_GENERATION, publishers=[])
             # Phase 1 — pre-FFmpeg setup (no progress yet). The poller
             # heartbeat fires every 1.5 s, so 1.7 s here guarantees at
             # least one snapshot lands with ffmpeg_started=False.
@@ -2839,6 +2878,10 @@ class TestWorkerFFmpegStartedFlag:
         call_count = {"n": 0}
 
         def _pcp(*, canonical_path, progress_callback=None, **kwargs):
+            # Scan pass returns instantly and does NOT advance call_count, so
+            # call_count tracks generation calls only (item 1 then item 2).
+            if kwargs.get("check_only"):
+                return MagicMock(status=MultiServerStatus.NEEDS_GENERATION, publishers=[])
             call_count["n"] += 1
             if call_count["n"] == 1:
                 # Item 1 — real FFmpeg pass; flips the flag True.
