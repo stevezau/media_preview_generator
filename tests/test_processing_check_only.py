@@ -230,3 +230,63 @@ class TestCheckOnlyDoesNotChangeNormalPath:
             )
         mock_gen.assert_called()
         assert result.status is not MultiServerStatus.NEEDS_GENERATION
+
+
+class TestPhaseLabelByMode:
+    """The pre-FFmpeg freshness probe is shared by the checking stage and the
+    generation worker, but its phase label must differ. "Checking existing
+    previews…" is the checking stage's identity (check_only=True, own threads);
+    a generation worker running the same probe must read as preparing to
+    generate, not "checking" — otherwise the worker card shows the old
+    "GPU worker stuck checking" symptom (regression: webhook job 68a110ee).
+    """
+
+    def test_check_only_pass_is_labelled_checking(self, mock_config_for_processing, tmp_path):
+        registry = _emby_registry(tmp_path)
+        media_file = _seed_media(tmp_path)
+        phases: list[str] = []
+        with patch(
+            "media_preview_generator.processing.multi_server.outputs_fresh_for_source",
+            return_value=False,
+        ):
+            process_canonical_path(
+                canonical_path=str(media_file),
+                registry=registry,
+                config=mock_config_for_processing,
+                check_only=True,
+                phase_callback=phases.append,
+            )
+        assert "Checking existing previews…" in phases
+        assert "Preparing to generate…" not in phases
+
+    def test_generation_pass_is_not_labelled_checking(self, mock_config_for_processing, tmp_path):
+        registry = _emby_registry(tmp_path)
+        media_file = _seed_media(tmp_path)
+        phases: list[str] = []
+
+        def fake_generate_images(video_file, output_folder, *args, **kwargs):
+            from pathlib import Path as _P
+
+            _P(output_folder).mkdir(parents=True, exist_ok=True)
+            (_P(output_folder) / "00000.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 64)
+            return (True, 1, "h264", 1.0, 30.0, None)
+
+        with (
+            patch(
+                "media_preview_generator.processing.multi_server.outputs_fresh_for_source",
+                return_value=False,
+            ),
+            patch(
+                "media_preview_generator.processing.multi_server.generate_images",
+                side_effect=fake_generate_images,
+            ),
+        ):
+            process_canonical_path(
+                canonical_path=str(media_file),
+                registry=registry,
+                config=mock_config_for_processing,
+                check_only=False,
+                phase_callback=phases.append,
+            )
+        assert "Preparing to generate…" in phases
+        assert "Checking existing previews…" not in phases

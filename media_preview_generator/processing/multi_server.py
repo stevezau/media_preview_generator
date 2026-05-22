@@ -1432,7 +1432,13 @@ def process_canonical_path(
             pass
 
     if not regenerate:
-        _phase("Checking existing previews…")
+        # "Checking existing previews…" belongs to the decoupled checking
+        # stage (check_only=True, run on its own threads). When a generation
+        # worker runs this same freshness probe before FFmpeg (check_only=
+        # False), surfacing "Checking…" on the worker card reads as the old
+        # "GPU worker stuck checking" bug — the worker is preparing to
+        # generate, not sweeping the library. Label it accordingly.
+        _phase("Checking existing previews…" if check_only else "Preparing to generate…")
         all_fresh = True
         for server, adapter, item_id_hint in publishers:
             try:
