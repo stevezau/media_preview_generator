@@ -1044,3 +1044,27 @@ class TestRetryLibraryNameComputation:
             self._derive("Retry: Chelsea vs Nottingham Forest", ["/data/sports/CvN.mkv"])
             == "Retry: Chelsea vs Nottingham Forest"
         ), "Stacked retry must strip the existing 'Retry: ' prefix before re-prepending"
+
+
+class TestSetJobOutcomeReusedOutputs:
+    """set_job_outcome carries the optional reused_outputs count (cross-server
+    reuse savings) onto progress, and a later outcome-only update doesn't clobber it."""
+
+    def test_reused_outputs_set_and_preserved(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test")
+
+        jm.set_job_outcome(job.id, {"generated": 5}, reused_outputs=12)
+        assert job.progress.outcome == {"generated": 5}
+        assert job.progress.reused_outputs == 12
+
+        # A later outcome-only update (reused_outputs=None) must NOT reset the
+        # reuse count pushed live during the run.
+        jm.set_job_outcome(job.id, {"generated": 7})
+        assert job.progress.outcome == {"generated": 7}
+        assert job.progress.reused_outputs == 12
+
+    def test_reused_outputs_defaults_to_zero(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test")
+        assert job.progress.reused_outputs == 0

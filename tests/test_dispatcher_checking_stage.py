@@ -260,3 +260,51 @@ def test_cancel_during_checking_completes_cleanly():
         f"over-counted on cancel: {tracker.successful}+{tracker.failed} > {tracker.total_items}"
     )
     dispatcher.shutdown()
+
+
+def test_reused_outputs_counts_cache_hit_publishers():
+    """Cross-server reuse: publisher rows whose frames came from cache
+    (frame_source == "cache_hit", i.e. reused instead of re-running FFmpeg)
+    increment tracker.reused_outputs — the source of the "Reused across N
+    outputs" stat. extracted publishers don't count."""
+    from media_preview_generator.processing.multi_server import (
+        MultiServerResult,
+        MultiServerStatus,
+        PublisherResult,
+        PublisherStatus,
+    )
+
+    pool = WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[])
+    dispatcher = JobDispatcher(pool)
+
+    def _pub(sid, frame_source):
+        return PublisherResult(
+            server_id=sid,
+            server_name=sid.upper(),
+            adapter_name="a",
+            status=PublisherStatus.PUBLISHED,
+            frame_source=frame_source,
+        )
+
+    def pcp(**kwargs):
+        if kwargs.get("check_only"):
+            return MultiServerResult(canonical_path=kwargs["canonical_path"], status=MultiServerStatus.NEEDS_GENERATION)
+        # Generation fanned out to 3 servers: one freshly extracted, two reused.
+        return MultiServerResult(
+            canonical_path=kwargs["canonical_path"],
+            status=MultiServerStatus.PUBLISHED,
+            publishers=[_pub("s1", "extracted"), _pub("s2", "cache_hit"), _pub("s3", "cache_hit")],
+        )
+
+    with patch(PCP, side_effect=pcp):
+        tracker = dispatcher.submit_items(
+            job_id="j-reuse",
+            items=_pi_list_or_passthrough([("k1", "Movie", "movie")]),
+            config=_make_config(),
+            registry=MagicMock(),
+        )
+        assert tracker.wait(timeout=10)
+
+    assert tracker.reused_outputs == 2, "two cache_hit publishers should count as 2 reused outputs"
+    assert tracker.outcome_counts.get("generated", 0) == 1, "the file itself is one generated item"
+    dispatcher.shutdown()

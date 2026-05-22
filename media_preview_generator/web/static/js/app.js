@@ -1550,6 +1550,37 @@ const _FRAME_SOURCE_BADGES = {
     extracted:      null, // no badge for "extracted" — it's the boring default
 };
 
+// Compact job-level outcome summary, rendered LIVE during a run (it rides
+// the job_progress event via progress.outcome + progress.reused_outputs, which
+// the dispatcher now pushes on the progress cadence). Per-file counts
+// (Generated / Already had / Failed) plus, for multi-server jobs, the
+// cross-server reuse savings ("Reused across N server outputs"). Empty string
+// when there's nothing to show yet.
+function _renderOutcomeSummary(outcome, reusedOutputs) {
+    const parts = [];
+    if (outcome && typeof outcome === 'object') {
+        // ProcessingResult (per-file) keys only — these sum to the file count.
+        const keys = ['generated', 'skipped_bif_exists', 'skipped_file_not_found',
+                      'skipped_not_indexed', 'skipped_excluded', 'skipped_invalid_hash',
+                      'no_media_parts', 'failed'];
+        keys.forEach(function (k) {
+            const n = outcome[k];
+            if (n && n > 0) {
+                parts.push(`${escapeHtmlText(_statusMeta(k).label)}: ${n.toLocaleString()}`);
+            }
+        });
+    }
+    let html = parts.join(' · ');
+    const reused = parseInt(reusedOutputs, 10) || 0;
+    if (reused > 0) {
+        // Only meaningful (and shown) for multi-server jobs.
+        html += (html ? ' · ' : '') +
+            `<span class="text-info" title="Previews reused across servers instead of re-running FFmpeg">` +
+            `Reused across ${reused.toLocaleString()} server output${reused === 1 ? '' : 's'}</span>`;
+    }
+    return html;
+}
+
 function _renderPublishersBlock(job) {
     // D12 — per-server aggregate (one row per registered server with
     // status counts), NOT per-file. Per-file × per-server attribution
@@ -2144,7 +2175,8 @@ function updateActiveJobs(runningJobs) {
             <div class="d-flex justify-content-between mt-1 small text-muted">
                 <span id="activeJobItem-${jid}">${escapeHtml(job.progress.current_item) || 'Starting...'}</span>
                 <span id="activeJobItems-${jid}">Items: ${job.progress.processed_items || 0} / ${job.progress.total_items || '?'}</span>
-            </div>`;
+            </div>
+            <div class="small text-muted mt-1" id="activeJobOutcome-${jid}">${_renderOutcomeSummary(job.progress.outcome, job.progress.reused_outputs)}</div>`;
         }
 
         html += `
@@ -2226,6 +2258,14 @@ function updateJobProgress(jobId, progress) {
     const itemsEl = document.getElementById('activeJobItems-' + jobId);
     if (itemsEl) {
         itemsEl.textContent = `Items: ${progress.processed_items || 0} / ${progress.total_items || '?'}`;
+    }
+
+    // Live outcome breakdown — re-render from the (now live) progress.outcome
+    // + reused_outputs so it tracks the counter instead of only refreshing on
+    // the infrequent job_updated/loadJobs cycle.
+    const outcomeEl = document.getElementById('activeJobOutcome-' + jobId);
+    if (outcomeEl) {
+        outcomeEl.innerHTML = _renderOutcomeSummary(progress.outcome, progress.reused_outputs);
     }
 
     const row = document.getElementById(`job-row-${jobId}`);
