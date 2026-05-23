@@ -1046,25 +1046,22 @@ class TestRetryLibraryNameComputation:
         ), "Stacked retry must strip the existing 'Retry: ' prefix before re-prepending"
 
 
-class TestSetJobOutcomeReusedOutputs:
-    """set_job_outcome carries the optional reused_outputs count (cross-server
-    reuse savings) onto progress, and a later outcome-only update doesn't clobber it."""
+class TestSetJobOutcome:
+    """set_job_outcome mirrors the live per-file outcome breakdown onto progress,
+    and a later update replaces it (the dispatcher pushes the full snapshot each
+    progress tick)."""
 
-    def test_reused_outputs_set_and_preserved(self, config_dir):
+    def test_outcome_set_and_updated(self, config_dir):
         jm = JobManager(config_dir=config_dir)
         job = jm.create_job(library_name="Test")
 
-        jm.set_job_outcome(job.id, {"generated": 5}, reused_outputs=12)
+        jm.set_job_outcome(job.id, {"generated": 5})
         assert job.progress.outcome == {"generated": 5}
-        assert job.progress.reused_outputs == 12
 
-        # A later outcome-only update (reused_outputs=None) must NOT reset the
-        # reuse count pushed live during the run.
-        jm.set_job_outcome(job.id, {"generated": 7})
-        assert job.progress.outcome == {"generated": 7}
-        assert job.progress.reused_outputs == 12
+        jm.set_job_outcome(job.id, {"generated": 7, "skipped_file_not_found": 1})
+        assert job.progress.outcome == {"generated": 7, "skipped_file_not_found": 1}
 
-    def test_reused_outputs_defaults_to_zero(self, config_dir):
+    def test_outcome_defaults_to_none(self, config_dir):
         jm = JobManager(config_dir=config_dir)
         job = jm.create_job(library_name="Test")
-        assert job.progress.reused_outputs == 0
+        assert job.progress.outcome is None

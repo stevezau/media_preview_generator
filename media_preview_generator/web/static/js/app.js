@@ -290,7 +290,7 @@ function connectSocket() {
     });
 
     socket.on('job_progress', function(data) {
-        updateJobProgress(data.job_id, data.progress);
+        updateJobProgress(data.job_id, data.progress, data.publishers);
     });
 
     socket.on('worker_update', function(data) {
@@ -1550,35 +1550,29 @@ const _FRAME_SOURCE_BADGES = {
     extracted:      null, // no badge for "extracted" — it's the boring default
 };
 
-// Compact job-level outcome summary, rendered LIVE during a run (it rides
-// the job_progress event via progress.outcome + progress.reused_outputs, which
-// the dispatcher now pushes on the progress cadence). Per-file counts
-// (Generated / Already had / Failed) plus, for multi-server jobs, the
-// cross-server reuse savings ("Reused across N server outputs"). Empty string
-// when there's nothing to show yet.
-function _renderOutcomeSummary(outcome, reusedOutputs) {
+// File-level issue footnote, rendered LIVE during a run (it rides the
+// job_progress event via progress.outcome, which the dispatcher pushes on the
+// progress cadence). Shows only outcomes that aren't attributable to a single
+// server — file missing on disk, no media parts, etc. The Generated / Reused /
+// Already-Existed breakdown lives per-server in _renderPublishersBlock. Empty
+// string when there's nothing to show yet.
+function _renderJobFileIssues(outcome) {
+    // File-level issues that aren't attributable to a single server — they
+    // happen *before* per-server publishing (file missing on disk, no media
+    // parts, excluded, etc.). Rendered as a small footnote under the
+    // per-server breakdown. Generated / Reused / Already-Existed are
+    // intentionally excluded here: they're shown per-server now.
+    if (!outcome || typeof outcome !== 'object') return '';
+    const keys = ['skipped_file_not_found', 'no_media_parts', 'skipped_excluded',
+                  'skipped_invalid_hash', 'skipped_not_indexed', 'failed'];
     const parts = [];
-    if (outcome && typeof outcome === 'object') {
-        // ProcessingResult (per-file) keys only — these sum to the file count.
-        const keys = ['generated', 'skipped_bif_exists', 'skipped_file_not_found',
-                      'skipped_not_indexed', 'skipped_excluded', 'skipped_invalid_hash',
-                      'no_media_parts', 'failed'];
-        keys.forEach(function (k) {
-            const n = outcome[k];
-            if (n && n > 0) {
-                parts.push(`${escapeHtmlText(_statusMeta(k).label)}: ${n.toLocaleString()}`);
-            }
-        });
-    }
-    let html = parts.join(' · ');
-    const reused = parseInt(reusedOutputs, 10) || 0;
-    if (reused > 0) {
-        // Only meaningful (and shown) for multi-server jobs.
-        html += (html ? ' · ' : '') +
-            `<span class="text-info" title="Previews reused across servers instead of re-running FFmpeg">` +
-            `Reused across ${reused.toLocaleString()} server output${reused === 1 ? '' : 's'}</span>`;
-    }
-    return html;
+    keys.forEach(function (k) {
+        const n = outcome[k];
+        if (n && n > 0) {
+            parts.push(`${escapeHtmlText(_statusMeta(k).label)}: ${n.toLocaleString()}`);
+        }
+    });
+    return parts.join(' · ');
 }
 
 function _renderPublishersBlock(job) {
@@ -1595,15 +1589,33 @@ function _renderPublishersBlock(job) {
         const logo = _vendorLogo(stype, 12) || '';
         const sname = entry.server_name || stype.toUpperCase() || 'Server';
         const counts = (entry && typeof entry.counts === 'object' && entry.counts) ? entry.counts : {};
-        const statusOrder = ['published', 'published_pending_registration', 'skipped_output_exists', 'skipped_not_indexed', 'not_indexed', 'skipped_not_in_library', 'skipped', 'no_owners', 'no_frames', 'failed'];
-        const seen = new Set();
-        const ordered = statusOrder.filter(function (k) { seen.add(k); return counts[k] > 0; })
-            .concat(Object.keys(counts).filter(function (k) { return !seen.has(k) && counts[k] > 0; }));
-        if (!ordered.length) return '';
-        const badges = ordered.map(function (status) {
-            const meta = _statusMeta(status);
-            const tip = meta.tip ? ` title="${escapeHtmlAttr(meta.tip)}"` : '';
-            return `<span class="badge ${meta.cls}"${tip}>${escapeHtmlText(meta.label)} × ${counts[status]}</span>`;
+        const fs = (entry && typeof entry.frame_sources === 'object' && entry.frame_sources) ? entry.frame_sources : null;
+        const badgeSpecs = [];
+        if (fs) {
+            // Per-server breakdown by frame provenance: each server shows what
+            // it actually did — freshly Generated (extracted), Reused (frames
+            // cached from a sibling server, no second FFmpeg), or Already
+            // Existed (output already on disk).
+            [['extracted', 'Generated', 'bg-success', 'FFmpeg ran fresh for this server'],
+             ['cache_hit', 'Reused', 'bg-info text-dark', 'Frames reused from another server — no second FFmpeg'],
+             ['output_existed', 'Already Existed', 'bg-secondary', 'Output was already on disk and unchanged']]
+                .forEach(function (s) { if (fs[s[0]] > 0) badgeSpecs.push({label: s[1], cls: s[2], count: fs[s[0]], tip: s[3]}); });
+            // Plus attention-worthy statuses NOT captured by frame provenance
+            // (failures, pending registration, index issues).
+            ['failed', 'published_pending_registration', 'skipped_not_indexed', 'not_indexed', 'skipped_not_in_library', 'no_owners', 'no_frames']
+                .forEach(function (k) { if (counts[k] > 0) { const m = _statusMeta(k); badgeSpecs.push({label: m.label, cls: m.cls, count: counts[k], tip: m.tip}); } });
+        } else {
+            // Fallback for jobs recorded before per-server frame_sources existed.
+            const statusOrder = ['published', 'published_pending_registration', 'skipped_output_exists', 'skipped_not_indexed', 'not_indexed', 'skipped_not_in_library', 'skipped', 'no_owners', 'no_frames', 'failed'];
+            const seen = new Set();
+            statusOrder.filter(function (k) { seen.add(k); return counts[k] > 0; })
+                .concat(Object.keys(counts).filter(function (k) { return !seen.has(k) && counts[k] > 0; }))
+                .forEach(function (status) { const m = _statusMeta(status); badgeSpecs.push({label: m.label, cls: m.cls, count: counts[status], tip: m.tip}); });
+        }
+        if (!badgeSpecs.length) return '';
+        const badges = badgeSpecs.map(function (b) {
+            const tip = b.tip ? ` title="${escapeHtmlAttr(b.tip)}"` : '';
+            return `<span class="badge ${b.cls}"${tip}>${escapeHtmlText(b.label)} × ${b.count}</span>`;
         }).join(' ');
         // Stack server-name pill, an arrow separator, and the per-status
         // badges with explicit gap-2 spacing so the visual hierarchy is
@@ -2176,7 +2188,7 @@ function updateActiveJobs(runningJobs) {
                 <span id="activeJobItem-${jid}">${escapeHtml(job.progress.current_item) || 'Starting...'}</span>
                 <span id="activeJobItems-${jid}">Items: ${job.progress.processed_items || 0} / ${job.progress.total_items || '?'}</span>
             </div>
-            <div class="small text-muted mt-1" id="activeJobOutcome-${jid}">${_renderOutcomeSummary(job.progress.outcome, job.progress.reused_outputs)}</div>`;
+            <div class="small text-muted mt-1" id="activeJobOutcome-${jid}">${_renderJobFileIssues(job.progress.outcome)}</div>`;
         }
 
         html += `
@@ -2198,7 +2210,7 @@ function updateActiveJobs(runningJobs) {
             <div class="mb-2 small">
                 <strong>Library:</strong> ${libraryDisplay}${_serverBadge(job)}${webhookFilesHtml}
             </div>
-            ${_renderPublishersBlock(job)}
+            <div id="activeJobPublishers-${jid}">${_renderPublishersBlock(job)}</div>
             ${startedLine ? `<div class="mb-2">${startedLine}</div>` : ''}
             ${progressBlock}
         </div>`;
@@ -2223,7 +2235,7 @@ function removeActiveJob(jobId) {
 // DOM card is created can be replayed once loadJobs() renders it.
 const _pendingProgress = {};
 
-function updateJobProgress(jobId, progress) {
+function updateJobProgress(jobId, progress, publishers) {
     const progressBar = document.getElementById('activeJobProgress-' + jobId);
     if (!progressBar) {
         // DOM not ready yet — cache for replay after next loadJobs().
@@ -2260,12 +2272,21 @@ function updateJobProgress(jobId, progress) {
         itemsEl.textContent = `Items: ${progress.processed_items || 0} / ${progress.total_items || '?'}`;
     }
 
-    // Live outcome breakdown — re-render from the (now live) progress.outcome
-    // + reused_outputs so it tracks the counter instead of only refreshing on
-    // the infrequent job_updated/loadJobs cycle.
+    // Live per-server breakdown — re-render the Generated/Reused/Already-Existed
+    // badges from the publisher aggregate carried on this event so they track
+    // the counter instead of only refreshing on the slower job_updated cycle.
+    if (publishers !== undefined) {
+        const pubEl = document.getElementById('activeJobPublishers-' + jobId);
+        if (pubEl) {
+            pubEl.innerHTML = _renderPublishersBlock({ publishers: publishers });
+        }
+    }
+
+    // File-level issue footnote (not found on disk, no media parts, …) — these
+    // aren't attributable to a server, so they live below the per-server block.
     const outcomeEl = document.getElementById('activeJobOutcome-' + jobId);
     if (outcomeEl) {
-        outcomeEl.innerHTML = _renderOutcomeSummary(progress.outcome, progress.reused_outputs);
+        outcomeEl.innerHTML = _renderJobFileIssues(progress.outcome);
     }
 
     const row = document.getElementById(`job-row-${jobId}`);

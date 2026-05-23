@@ -255,10 +255,6 @@ class JobProgress:
     current_file: str = ""
     workers: list[WorkerStatus] = field(default_factory=list)
     outcome: dict[str, int] | None = None
-    # Count of per-server outputs that reused already-extracted frames
-    # (cache_hit) instead of re-running FFmpeg — i.e. the cross-server reuse
-    # savings. 0 / not-multi-server jobs simply don't surface it in the UI.
-    reused_outputs: int = 0
     # ISO end-time + duration of an in-progress retry-backoff wait.
     # Lets the UI render a smooth client-side countdown + a bar that
     # fills as the wait elapses, instead of a stuck-looking 0% bar.
@@ -1666,33 +1662,32 @@ class JobManager:
                 if retry_wait_total is not _UNSET:
                     job.progress.retry_wait_total = retry_wait_total
 
-                # Emit progress event (don't save to disk on every update)
+                # Emit progress event (don't save to disk on every update).
+                # Include the per-server publisher aggregate so the Job UI's
+                # per-server breakdown refreshes live on every progress tick
+                # instead of only on the slower job_updated/full-reload cycle.
                 self._emit_event(
                     "job_progress",
-                    {"job_id": job_id, "progress": job.progress.to_dict()},
+                    {
+                        "job_id": job_id,
+                        "progress": job.progress.to_dict(),
+                        "publishers": list(job.publishers or []),
+                    },
                 )
             return job
 
-    def set_job_outcome(
-        self, job_id: str, outcome: dict[str, int], reused_outputs: int | None = None
-    ) -> Optional["Job"]:
-        """Store the processing outcome breakdown on a job.
+    def set_job_outcome(self, job_id: str, outcome: dict[str, int]) -> Optional["Job"]:
+        """Store the per-file processing outcome breakdown on a job.
 
         Args:
             job_id: Job identifier.
             outcome: Dict mapping ProcessingResult values to counts.
-            reused_outputs: Optional count of per-server outputs that reused
-                cached frames (cross-server reuse). When None, the existing
-                value is left unchanged — so a later outcome-only update can't
-                clobber a reuse count pushed live during the run.
 
         """
         with self._lock:
             job = self._jobs.get(job_id)
             if job:
                 job.progress.outcome = outcome
-                if reused_outputs is not None:
-                    job.progress.reused_outputs = reused_outputs
             return job
 
     def complete_job(

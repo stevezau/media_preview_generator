@@ -262,11 +262,12 @@ def test_cancel_during_checking_completes_cleanly():
     dispatcher.shutdown()
 
 
-def test_reused_outputs_counts_cache_hit_publishers():
-    """Cross-server reuse: publisher rows whose frames came from cache
-    (frame_source == "cache_hit", i.e. reused instead of re-running FFmpeg)
-    increment tracker.reused_outputs — the source of the "Reused across N
-    outputs" stat. extracted publishers don't count."""
+def test_frame_sources_aggregated_per_server():
+    """Cross-server reuse is surfaced per-server: each publisher row's
+    frame_source folds into that server's frame_sources tally in the
+    publishers aggregate — the source of the per-server "Generated / Reused /
+    Already Existed" badges. A freshly extracted publish counts as the server's
+    "extracted"; a cache_hit (frames reused, no second FFmpeg) as "cache_hit"."""
     from media_preview_generator.processing.multi_server import (
         MultiServerResult,
         MultiServerStatus,
@@ -305,6 +306,9 @@ def test_reused_outputs_counts_cache_hit_publishers():
         )
         assert tracker.wait(timeout=10)
 
-    assert tracker.reused_outputs == 2, "two cache_hit publishers should count as 2 reused outputs"
+    by_server = {e["server_id"]: e.get("frame_sources", {}) for e in tracker.publishers_aggregate.values()}
+    assert by_server["s1"] == {"extracted": 1}, "s1 ran FFmpeg fresh"
+    assert by_server["s2"] == {"cache_hit": 1}, "s2 reused s1's frames"
+    assert by_server["s3"] == {"cache_hit": 1}, "s3 reused s1's frames"
     assert tracker.outcome_counts.get("generated", 0) == 1, "the file itself is one generated item"
     dispatcher.shutdown()

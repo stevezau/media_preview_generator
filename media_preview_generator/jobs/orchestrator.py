@@ -281,6 +281,17 @@ _PUBLISHER_STATUS_PRECEDENCE: dict[str, int] = {
     "failed": 5,
 }
 
+# Publisher statuses whose frame_source actually describes a frame outcome
+# (Generated=extracted / Reused=cache_hit / Already-Existed=output_existed).
+# Every PublisherResult carries a default ``frame_source="extracted"`` even for
+# not-indexed / no-owners / no-frames skips, so the per-server frame_sources
+# tally MUST gate on status — otherwise a not-indexed skip is mislabeled as
+# "Generated". Both the live fold (fold_publisher_rows_into_aggregate) and the
+# completed-chain merge gate on this set so the two views stay in lock-step.
+_FRAME_PROVENANCE_STATUSES: frozenset[str] = frozenset(
+    {"published", "published_pending_registration", "skipped_output_exists"}
+)
+
 
 def _best_publisher_status(statuses: list[str]) -> str:
     """Return the most informative status from a list of attempts.
@@ -300,14 +311,14 @@ def merge_chain_publishers_best_per_path(file_results: list[dict]) -> list[dict]
     ``JobManager.get_file_results(chain_head_id, dedup_by_path=False)``.
 
     Returns the publisher rows in the same shape as
-    ``fold_publisher_rows_into_aggregate`` produces (id/name/type/counts),
-    but with one row per (server, path) folded using the
-    ``_PUBLISHER_STATUS_PRECEDENCE`` "best wins" rule rather than the
-    original "latest dedup wins". See the module-level constant docstring
-    for the bug this fixes.
+    ``fold_publisher_rows_into_aggregate`` produces (id/name/type/counts plus
+    a per-server ``frame_sources`` tally), but with one row per (server, path)
+    folded using the ``_PUBLISHER_STATUS_PRECEDENCE`` "best wins" rule rather
+    than the original "latest dedup wins". See the module-level constant
+    docstring for the bug this fixes.
     """
-    # (server_id, path) → list of statuses, in observation order
-    per_server_path: dict[tuple[str, str], list[str]] = {}
+    # (server_id, path) → list of (status, frame_source) in observation order
+    per_server_path: dict[tuple[str, str], list[tuple[str, str]]] = {}
     # server_id → metadata for the result rows (name / type)
     server_meta: dict[str, dict] = {}
 
@@ -324,7 +335,7 @@ def merge_chain_publishers_best_per_path(file_results: list[dict]) -> list[dict]
             status = s.get("status") or ""
             if not status:
                 continue
-            per_server_path.setdefault((sid, path), []).append(status)
+            per_server_path.setdefault((sid, path), []).append((status, s.get("frame_source") or ""))
             # Late-arriving name/type wins over an empty one (matches
             # fold_publisher_rows_into_aggregate's protection against
             # the first row carrying only an id).
@@ -335,7 +346,8 @@ def merge_chain_publishers_best_per_path(file_results: list[dict]) -> list[dict]
                 meta["server_type"] = (s.get("type") or s.get("server_type") or "").lower()
 
     aggregate: dict[str, dict] = {}
-    for (sid, _path), statuses in per_server_path.items():
+    for (sid, _path), observations in per_server_path.items():
+        statuses = [st for st, _ in observations]
         best = _best_publisher_status(statuses)
         entry = aggregate.setdefault(
             sid,
@@ -347,6 +359,20 @@ def merge_chain_publishers_best_per_path(file_results: list[dict]) -> list[dict]
             },
         )
         entry["counts"][best] = entry["counts"].get(best, 0) + 1
+        # Frame provenance for the winning outcome, mirroring
+        # fold_publisher_rows_into_aggregate (same _FRAME_PROVENANCE_STATUSES
+        # gate) so the per-server Generated/Reused/Already-Existed breakdown
+        # survives a *completed* retry chain identically to the live run. Slim
+        # file_result rows omit frame_source when it's the "extracted" default
+        # (jobs.py:2242), so a published row with no recorded source is treated
+        # as extracted.
+        if best in _FRAME_PROVENANCE_STATUSES:
+            best_fs = next((fs for st, fs in observations if st == best and fs), "")
+            if not best_fs and best in ("published", "published_pending_registration"):
+                best_fs = "extracted"
+            if best_fs:
+                frame_sources = entry.setdefault("frame_sources", {})
+                frame_sources[best_fs] = frame_sources.get(best_fs, 0) + 1
 
     return list(aggregate.values())
 
@@ -393,6 +419,16 @@ def fold_publisher_rows_into_aggregate(aggregate: dict[str, dict], rows: list[di
                 entry["server_type"] = row["server_type"].lower()
         status = row.get("status") or "unknown"
         entry["counts"][status] = entry["counts"].get(status, 0) + 1
+        # Per-server frame provenance, additive alongside the status counts so
+        # existing consumers of ``counts`` are untouched. Lets the Job UI show
+        # each server's "Generated (extracted) / Reused (cache_hit) / Already
+        # existed (output_existed)" split. Gated on _FRAME_PROVENANCE_STATUSES:
+        # a not-indexed / no-owners skip carries a default "extracted" stamp
+        # that does NOT mean frames were produced, so it must not be tallied.
+        fs = row.get("frame_source")
+        if fs and status in _FRAME_PROVENANCE_STATUSES:
+            frame_sources = entry.setdefault("frame_sources", {})
+            frame_sources[fs] = frame_sources.get(fs, 0) + 1
 
 
 def _log_webhook_owning_servers(config, paths: list[str]) -> None:

@@ -86,10 +86,6 @@ class JobTracker:
         self.failed = 0
         self.cancelled = False
         self.outcome_counts: dict[str, int] = {r.value: 0 for r in ProcessingResult}
-        # Count of per-server outputs that reused already-extracted frames
-        # (publisher frame_source == "cache_hit") instead of re-running FFmpeg.
-        # Surfaces the cross-server reuse savings; guarded by _counts_lock.
-        self.reused_outputs: int = 0
         # D12 — per-server aggregate (one entry per server_id) so the Job
         # views render a fixed-size summary regardless of file count.
         # Per-file × per-server detail lives in the Files-panel JSONL via
@@ -172,7 +168,6 @@ class JobTracker:
                 self.failed += 1
             is_done = (self.successful + self.failed) >= self.total_items
             outcome_snapshot = dict(self.outcome_counts)
-            reused_snapshot = self.reused_outputs
 
         # A raising callback must never prevent done_event.set() below — that
         # would strand the job (hang). It also runs in the shared dispatch loop
@@ -205,11 +200,11 @@ class JobTracker:
                         msg = f"{self.library_prefix}{self.completed}/{self.total_items} completed"
                     else:
                         msg = f"{self.library_prefix}Checking existing previews… {self.completed}/{self.total_items}"
-                    # Push the live outcome breakdown + reuse savings BEFORE the
-                    # progress callback fires, so it rides the same throttled
-                    # job_progress emit (progress.outcome used to be set only at
-                    # completion, leaving the breakdown frozen during a run).
-                    self._push_outcome_snapshot(outcome_snapshot, reused_snapshot)
+                    # Push the live per-file outcome BEFORE the progress callback
+                    # fires, so the file-level footnote (not found, no media
+                    # parts, …) rides the same throttled job_progress emit
+                    # (progress.outcome used to be set only at completion).
+                    self._push_outcome_snapshot(outcome_snapshot)
                     self.progress_callback(
                         self.completed,
                         self.total_items,
@@ -223,17 +218,17 @@ class JobTracker:
         if is_done:
             self.done_event.set()
 
-    def _push_outcome_snapshot(self, outcome: dict[str, int], reused_outputs: int) -> None:
-        """Mirror the live outcome breakdown + reuse savings onto the Job.
+    def _push_outcome_snapshot(self, outcome: dict[str, int]) -> None:
+        """Mirror the live per-file outcome breakdown onto the Job.
 
-        Best-effort and called on the progress cadence so the job summary
-        updates during the run, not only at completion. A job_manager hiccup
-        must never break progress/completion, so it's fully guarded.
+        Best-effort and called on the progress cadence so the file-level
+        footnote updates during the run, not only at completion. A job_manager
+        hiccup must never break progress/completion, so it's fully guarded.
         """
         try:
             from ..web.jobs import get_job_manager
 
-            get_job_manager().set_job_outcome(self.job_id, outcome, reused_outputs=reused_outputs)
+            get_job_manager().set_job_outcome(self.job_id, outcome)
         except Exception as exc:
             logger.debug("Could not push live outcome for job {}: {}", self.job_id, exc)
 
@@ -302,7 +297,6 @@ class JobTracker:
                 self.outcome_counts[outcome.value] += 1
             publishers_snapshot = None
             if rows:
-                self.reused_outputs += sum(1 for r in rows if (r.get("frame_source") or "") == "cache_hit")
                 try:
                     fold_publisher_rows_into_aggregate(self.publishers_aggregate, rows)
                     publishers_snapshot = list(self.publishers_aggregate.values())
@@ -667,11 +661,6 @@ class JobDispatcher:
             with tracker._counts_lock:
                 fold_publisher_rows_into_aggregate(tracker.publishers_aggregate, worker.last_publishers)
                 publishers_snapshot = list(tracker.publishers_aggregate.values())
-                # Cross-server reuse: outputs that reused already-extracted
-                # frames rather than re-running FFmpeg.
-                tracker.reused_outputs += sum(
-                    1 for r in worker.last_publishers if (r.get("frame_source") or "") == "cache_hit"
-                )
             try:
                 from ..web.jobs import get_job_manager
 
@@ -960,8 +949,7 @@ class JobDispatcher:
                 percent = (effective / tracker.total_items * 100) if tracker.total_items > 0 else 0
                 with tracker._counts_lock:
                     outcome_snapshot = dict(tracker.outcome_counts)
-                    reused_snapshot = tracker.reused_outputs
-                tracker._push_outcome_snapshot(outcome_snapshot, reused_snapshot)
+                tracker._push_outcome_snapshot(outcome_snapshot)
                 tracker.progress_callback(
                     tracker.completed,
                     tracker.total_items,

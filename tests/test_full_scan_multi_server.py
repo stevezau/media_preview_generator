@@ -1549,6 +1549,79 @@ class TestFoldPublisherRowsIntoAggregate:
         )
         assert agg["p1"]["counts"] == {"unknown": 1}
 
+    def test_frame_source_tallied_per_server(self):
+        """frame_source folds into a per-server ``frame_sources`` tally — the
+        backing data for the per-server Generated/Reused/Already-Existed badges."""
+        from media_preview_generator.jobs.orchestrator import fold_publisher_rows_into_aggregate
+
+        agg: dict[str, dict] = {}
+        rows = [
+            {"server_id": "p1", "server_type": "plex", "status": "published", "frame_source": "extracted"},
+            {"server_id": "p1", "server_type": "plex", "status": "published", "frame_source": "cache_hit"},
+            {
+                "server_id": "p1",
+                "server_type": "plex",
+                "status": "skipped_output_exists",
+                "frame_source": "output_existed",
+            },
+        ]
+        for row in rows:
+            fold_publisher_rows_into_aggregate(agg, [row])
+        assert agg["p1"]["frame_sources"] == {"extracted": 1, "cache_hit": 1, "output_existed": 1}
+        # counts axis is untouched — existing consumers still read it.
+        assert agg["p1"]["counts"] == {"published": 2, "skipped_output_exists": 1}
+
+    def test_failed_row_excluded_from_frame_sources(self):
+        """A failed publish has no meaningful frame_source — it must not inflate
+        the 'Generated' (extracted) bucket."""
+        from media_preview_generator.jobs.orchestrator import fold_publisher_rows_into_aggregate
+
+        agg: dict[str, dict] = {}
+        fold_publisher_rows_into_aggregate(
+            agg,
+            [{"server_id": "p1", "server_type": "plex", "status": "failed", "frame_source": "extracted"}],
+        )
+        assert agg["p1"]["counts"] == {"failed": 1}
+        assert "frame_sources" not in agg["p1"], "failed rows contribute no frame provenance"
+
+    def test_row_without_frame_source_adds_no_frame_sources_key(self):
+        """Provenance is only tallied when explicitly known — a row lacking
+        frame_source leaves the entry's frame_sources absent (back-compat with
+        older publisher rows / non-multi-server paths)."""
+        from media_preview_generator.jobs.orchestrator import fold_publisher_rows_into_aggregate
+
+        agg: dict[str, dict] = {}
+        fold_publisher_rows_into_aggregate(
+            agg,
+            [{"server_id": "p1", "server_type": "plex", "status": "published"}],
+        )
+        assert "frame_sources" not in agg["p1"]
+
+    def test_non_frame_statuses_excluded_even_with_extracted_stamp(self):
+        """PublisherResults carry a default frame_source='extracted' even for
+        not-indexed / no-owners skips (worker.py). Those statuses are NOT real
+        frame outcomes, so they must not be tallied as 'Generated' — only
+        published / pending / skipped_output_exists feed frame_sources."""
+        from media_preview_generator.jobs.orchestrator import fold_publisher_rows_into_aggregate
+
+        agg: dict[str, dict] = {}
+        rows = [
+            {"server_id": "p1", "server_type": "plex", "status": "skipped_not_indexed", "frame_source": "extracted"},
+            {"server_id": "p1", "server_type": "plex", "status": "skipped_not_in_library", "frame_source": "extracted"},
+            {"server_id": "p1", "server_type": "plex", "status": "no_owners", "frame_source": "extracted"},
+            {"server_id": "p1", "server_type": "plex", "status": "published", "frame_source": "extracted"},
+        ]
+        for row in rows:
+            fold_publisher_rows_into_aggregate(agg, [row])
+        # Only the genuine publish contributes a frame source.
+        assert agg["p1"]["frame_sources"] == {"extracted": 1}
+        assert agg["p1"]["counts"] == {
+            "skipped_not_indexed": 1,
+            "skipped_not_in_library": 1,
+            "no_owners": 1,
+            "published": 1,
+        }
+
 
 class TestMergeChainPublishersBestPerPath:
     """Per-(server, path) "best status wins" aggregation that backs the
@@ -1663,6 +1736,49 @@ class TestMergeChainPublishersBestPerPath:
             ]
         )
         assert rows[0]["counts"] == {"published": 1}
+
+    def test_frame_sources_survive_chain_completion(self):
+        """A completed retry chain must keep the per-server Generated/Reused/
+        Already-Existed breakdown alive — same as the live run. Slim rows omit
+        frame_source when it's the 'extracted' default, so a published row with
+        no recorded source counts as Generated (extracted); cache_hit counts as
+        Reused; output_existed as Already-Existed; failures contribute none."""
+        from media_preview_generator.jobs.orchestrator import merge_chain_publishers_best_per_path
+
+        rows = merge_chain_publishers_best_per_path(
+            [
+                {
+                    "file": "/a.mkv",
+                    "servers": [{"id": "p", "type": "plex", "status": "published"}],  # extracted (omitted)
+                },
+                {
+                    "file": "/b.mkv",
+                    "servers": [{"id": "p", "type": "plex", "status": "published", "frame_source": "cache_hit"}],
+                },
+                {
+                    "file": "/c.mkv",
+                    "servers": [
+                        {"id": "p", "type": "plex", "status": "skipped_output_exists", "frame_source": "output_existed"}
+                    ],
+                },
+                {
+                    "file": "/d.mkv",
+                    "servers": [{"id": "p", "type": "plex", "status": "failed", "frame_source": "extracted"}],
+                },
+                {
+                    # not-indexed skip carries the default 'extracted' stamp but
+                    # is NOT a frame outcome — must match the live fold and be
+                    # excluded, or the breakdown would differ on completion.
+                    "file": "/e.mkv",
+                    "servers": [
+                        {"id": "p", "type": "plex", "status": "skipped_not_indexed", "frame_source": "extracted"}
+                    ],
+                },
+            ]
+        )
+        assert rows[0]["frame_sources"] == {"extracted": 1, "cache_hit": 1, "output_existed": 1}, (
+            "failed + not-indexed rows must not add to extracted; published-without-source defaults to extracted"
+        )
 
     def test_published_then_failed_keeps_published_documents_assumption(self):
         """Pins the precedence's intentional asymmetry: ``published → failed``
