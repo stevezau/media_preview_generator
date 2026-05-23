@@ -38,15 +38,23 @@ from media_preview_generator.servers.base import ServerConfig, ServerType
 MODULE = "media_preview_generator.jobs.orchestrator"
 
 
-def _config(cpu_threads: int = 1):
+def _config(cpu_threads: int = 1, gpu_threads: int = 1):
+    # gpu_threads defaults to 1 because these tests pass a GPU in
+    # selected_gpus and exercise the GPU→CPU fallback. The unified dispatcher
+    # sizes GPU workers from config.gpu_threads (like the existing
+    # _create_worker_pool), so the count must match the GPU passed — in
+    # production config.gpu_threads and selected_gpus derive from the same
+    # gpu_config, so they're always consistent.
     return SimpleNamespace(
-        gpu_threads=0,
+        gpu_threads=gpu_threads,
         cpu_threads=cpu_threads,
+        scan_workers=0,
         working_tmp_folder="/tmp/work",
         plex_url="",
         plex_token="",
         webhook_paths=None,
         server_id_filter=None,
+        regenerate_thumbnails=False,
     )
 
 
@@ -107,24 +115,39 @@ class TestOrchestratorCpuFallback:
 
         Without this row, a refactor that always re-runs on CPU would
         silently double the workload on healthy items.
+
+        Post-#243 the full-scan path runs a ``check_only`` scan pass first;
+        an item that needs work reports NEEDS_GENERATION and then takes
+        exactly one generation call (the GPU attempt). No CPU fallback.
         """
         cfg, registry_mock, proc = self._setup_one_item_dispatch()
+
+        def pcp(**kwargs):
+            if kwargs.get("check_only"):
+                return MagicMock(status=MultiServerStatus.NEEDS_GENERATION, publishers=[])
+            return _success_result()
+
+        mock_pcp = MagicMock(side_effect=pcp)
 
         with (
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
             patch("media_preview_generator.servers.ServerRegistry") as mock_registry,
             patch("media_preview_generator.processing.get_processor_for", return_value=proc),
-            patch("media_preview_generator.processing.multi_server.process_canonical_path") as mock_pcp,
+            patch("media_preview_generator.processing.multi_server.process_canonical_path", mock_pcp),
         ):
             mock_sm.return_value.get.return_value = [{"id": "srv-a", "type": "jellyfin", "enabled": True}]
             mock_registry.from_settings.return_value = registry_mock
-            mock_pcp.return_value = _success_result()
 
             _run_full_scan_multi_server(_config(), selected_gpus=[("NVIDIA", "/dev/nvidia0", {})])
 
-        assert mock_pcp.call_count == 1, (
-            f"GPU success path must call process_canonical_path exactly once, got {mock_pcp.call_count}"
+        # Exactly one GENERATION call (the GPU attempt). The scan-phase
+        # check_only call(s) don't count as work and must not trigger a
+        # CPU fallback.
+        gen_calls = [c for c in mock_pcp.call_args_list if not c.kwargs.get("check_only")]
+        assert len(gen_calls) == 1, (
+            f"GPU success must produce exactly one generation call (no CPU re-run), got {len(gen_calls)}"
         )
+        assert gen_calls[0].kwargs["gpu"] == "NVIDIA"
 
     def test_gpu_codec_error_falls_back_to_cpu_with_gpu_none(self, tmp_path):
         """GPU raises CodecNotSupportedError → second call must run with gpu=None.
@@ -135,16 +158,21 @@ class TestOrchestratorCpuFallback:
         """
         cfg, registry_mock, proc = self._setup_one_item_dispatch()
 
-        # Fail on first call (GPU), succeed on second (CPU fallback).
-        # Asserting the kwargs of BOTH calls ensures the fix forwards
-        # the right gpu= value — per .claude/rules/testing.md the test
-        # must lock in the contract the SUT controls (gpu=None on retry),
-        # not just that fallback was attempted.
-        outcomes = [
-            CodecNotSupportedError("GPU processing failed (hardware accelerator runtime error) for /data/anime.mkv"),
-            _success_result(),
-        ]
-        mock_pcp = MagicMock(side_effect=outcomes)
+        # Scan pass reports NEEDS_GENERATION; then GPU attempt fails and the
+        # CPU fallback succeeds. Asserting the kwargs of BOTH generation
+        # calls ensures the fix forwards the right gpu= value — per
+        # .claude/rules/testing.md the test must lock in the contract the SUT
+        # controls (gpu=None on retry), not just that fallback was attempted.
+        def pcp(**kwargs):
+            if kwargs.get("check_only"):
+                return MagicMock(status=MultiServerStatus.NEEDS_GENERATION, publishers=[])
+            if kwargs["gpu"] is not None:
+                raise CodecNotSupportedError(
+                    "GPU processing failed (hardware accelerator runtime error) for /data/anime.mkv"
+                )
+            return _success_result()
+
+        mock_pcp = MagicMock(side_effect=pcp)
 
         with (
             patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
@@ -157,20 +185,26 @@ class TestOrchestratorCpuFallback:
 
             counts = _run_full_scan_multi_server(_config(), selected_gpus=[("NVIDIA", "/dev/nvidia0", {})])
 
-        assert mock_pcp.call_count == 2, (
-            f"GPU CodecNotSupportedError must trigger one CPU retry (2 total calls), "
-            f"got {mock_pcp.call_count}. Pre-fix this was 1 — the fallback never ran."
+        # Two GENERATION calls: GPU attempt (raises) + CPU fallback. The
+        # check_only scan pass is separate and must not be counted as a
+        # generation attempt.
+        gen_calls = [c for c in mock_pcp.call_args_list if not c.kwargs.get("check_only")]
+        assert len(gen_calls) == 2, (
+            f"GPU CodecNotSupportedError must trigger one CPU retry (2 generation calls), "
+            f"got {len(gen_calls)}. Pre-fix this was 1 — the fallback never ran."
         )
 
-        # First call: GPU attempt — must include the GPU type/device the orchestrator was given.
-        first_kwargs = mock_pcp.call_args_list[0].kwargs
-        assert first_kwargs["gpu"] == "NVIDIA", f"first call gpu kwarg should be 'NVIDIA', got {first_kwargs['gpu']!r}"
+        # First generation call: GPU attempt — must include the GPU type/device.
+        first_kwargs = gen_calls[0].kwargs
+        assert first_kwargs["gpu"] == "NVIDIA", (
+            f"first gen call gpu kwarg should be 'NVIDIA', got {first_kwargs['gpu']!r}"
+        )
         assert first_kwargs["gpu_device_path"] == "/dev/nvidia0"
 
-        # Second call: CPU fallback — must explicitly pass gpu=None / gpu_device_path=None.
-        # If the fix forwards the original gpu= here by mistake, FFmpeg would
-        # re-attempt on the same GPU and fail with the same error.
-        second_kwargs = mock_pcp.call_args_list[1].kwargs
+        # Second generation call: CPU fallback — must explicitly pass
+        # gpu=None / gpu_device_path=None. If the fix forwards the original
+        # gpu= here by mistake, FFmpeg would re-attempt on the same GPU.
+        second_kwargs = gen_calls[1].kwargs
         assert second_kwargs["gpu"] is None, (
             f"CPU fallback call must pass gpu=None to disable hardware acceleration; got {second_kwargs['gpu']!r}"
         )
@@ -178,9 +212,8 @@ class TestOrchestratorCpuFallback:
             f"CPU fallback call must pass gpu_device_path=None; got {second_kwargs['gpu_device_path']!r}"
         )
 
-        # Other kwargs should be preserved across the retry — same canonical_path,
-        # same server_id_filter, same regenerate flag. A fix that fat-fingered
-        # one of these would silently change behaviour on the retry.
+        # Other kwargs preserved across the retry — same canonical_path,
+        # same server_id_filter, same regenerate flag.
         assert second_kwargs["canonical_path"] == first_kwargs["canonical_path"]
         assert second_kwargs["server_id_filter"] == first_kwargs["server_id_filter"]
         assert second_kwargs["regenerate"] == first_kwargs["regenerate"]
@@ -192,8 +225,8 @@ class TestOrchestratorCpuFallback:
         assert counts.get(ProcessingResult.FAILED.value, 0) == 0, (
             f"successful CPU fallback must NOT be counted as failed; counts={counts}"
         )
-        assert counts.get("published", 0) == 1, (
-            f"successful CPU fallback must surface as a published item; counts={counts}"
+        assert counts.get("generated", 0) == 1, (
+            f"successful CPU fallback must surface as a generated item; counts={counts}"
         )
 
     def test_cpu_fallback_failure_is_marked_failed_and_does_not_propagate(self, tmp_path):
@@ -216,6 +249,11 @@ class TestOrchestratorCpuFallback:
         cpu_failure = RuntimeError("CPU also failed: out of memory")
 
         def pcp_side_effect(**kwargs):
+            # Scan pass: every item needs work. Returning NEEDS_GENERATION
+            # routes it to the generation calls below (where the codec error
+            # / CPU fallback live).
+            if kwargs.get("check_only"):
+                return MagicMock(status=MultiServerStatus.NEEDS_GENERATION, publishers=[])
             if kwargs["canonical_path"] == "/data/a.mkv":
                 if kwargs["gpu"] is not None:
                     raise CodecNotSupportedError("GPU processing failed for /data/a.mkv")
@@ -239,13 +277,17 @@ class TestOrchestratorCpuFallback:
             # catch the secondary failure and the dispatch should complete.
             _run_full_scan_multi_server(_config(), selected_gpus=[("NVIDIA", "/dev/nvidia0", {})])
 
-        # 3 calls total: a.mkv GPU (raises CodecError), a.mkv CPU (raises RuntimeError), b.mkv GPU (succeeds).
-        assert mock_pcp.call_count == 3, (
-            f"expected GPU-attempt + CPU-fallback for a.mkv plus GPU for b.mkv (3 calls), got {mock_pcp.call_count}"
+        # Generation calls only (ignore the check_only scan pass):
+        #   a.mkv GPU (raises CodecError) + a.mkv CPU (raises RuntimeError)
+        #   + b.mkv GPU (succeeds) = 3 generation calls.
+        gen_calls = [c for c in mock_pcp.call_args_list if not c.kwargs.get("check_only")]
+        assert len(gen_calls) == 3, (
+            f"expected GPU-attempt + CPU-fallback for a.mkv plus GPU for b.mkv (3 generation calls), "
+            f"got {len(gen_calls)}"
         )
 
         # b.mkv must have been processed despite a.mkv failing on both attempts.
-        b_calls = [c for c in mock_pcp.call_args_list if c.kwargs.get("canonical_path") == "/data/b.mkv"]
-        assert len(b_calls) == 1, (
+        b_gen_calls = [c for c in gen_calls if c.kwargs.get("canonical_path") == "/data/b.mkv"]
+        assert len(b_gen_calls) == 1, (
             "/data/b.mkv must still get its turn even when /data/a.mkv exhausted both GPU and CPU attempts"
         )

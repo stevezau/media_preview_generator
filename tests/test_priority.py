@@ -204,84 +204,64 @@ class TestDispatcherPriority:
         dispatcher._ensure_dispatch_running = lambda: None
         return dispatcher
 
+    def _add_tracker(self, dispatcher, job_id, items, priority):
+        """Register a tracker directly (no submit_items → no background
+        checking threads), so the priority picker can be exercised
+        synchronously and deterministically.
+        """
+        tracker = JobTracker(
+            job_id=job_id,
+            items=items,
+            config=_make_config(),
+            registry=MagicMock(),
+            priority=priority,
+        )
+        with dispatcher._trackers_lock:
+            dispatcher._trackers[job_id] = tracker
+        return tracker
+
     def test_high_priority_dispatched_first(self):
-        """Items from a high-priority job should be returned before normal."""
+        """Items from a high-priority job should be checked before normal.
+
+        The priority-aware entry picker is ``_get_next_check_item`` now
+        (items enter the checking queue first); it shares the same
+        (priority, submission_order) sort the processing picker uses.
+        """
         dispatcher = self._make_dispatcher()
-        config = _make_config()
+        self._add_tracker(dispatcher, "low-job", [("k1", "Low Item", "movie")], PRIORITY_LOW)
+        self._add_tracker(dispatcher, "high-job", [("k2", "High Item", "movie")], PRIORITY_HIGH)
 
-        dispatcher.submit_items(
-            job_id="low-job",
-            items=[("k1", "Low Item", "movie")],
-            config=config,
-            registry=MagicMock(),
-            priority=PRIORITY_LOW,
-        )
-        dispatcher.submit_items(
-            job_id="high-job",
-            items=[("k2", "High Item", "movie")],
-            config=config,
-            registry=MagicMock(),
-            priority=PRIORITY_HIGH,
-        )
+        picked = dispatcher._get_next_check_item()
+        assert picked is not None
+        assert picked[0].job_id == "high-job"
 
-        item = dispatcher._get_next_item()
-        assert item is not None
-        assert item[0] == "high-job"
-
-        item2 = dispatcher._get_next_item()
-        assert item2 is not None
-        assert item2[0] == "low-job"
+        picked2 = dispatcher._get_next_check_item()
+        assert picked2 is not None
+        assert picked2[0].job_id == "low-job"
 
     def test_same_priority_fifo(self):
         """Within the same priority, earlier submissions should come first."""
         dispatcher = self._make_dispatcher()
-        config = _make_config()
+        self._add_tracker(dispatcher, "first", [("k1", "First", "movie")], PRIORITY_NORMAL)
+        self._add_tracker(dispatcher, "second", [("k2", "Second", "movie")], PRIORITY_NORMAL)
 
-        dispatcher.submit_items(
-            job_id="first",
-            items=[("k1", "First", "movie")],
-            config=config,
-            registry=MagicMock(),
-            priority=PRIORITY_NORMAL,
-        )
-        dispatcher.submit_items(
-            job_id="second",
-            items=[("k2", "Second", "movie")],
-            config=config,
-            registry=MagicMock(),
-            priority=PRIORITY_NORMAL,
-        )
-
-        item = dispatcher._get_next_item()
-        assert item is not None
-        assert item[0] == "first"
+        picked = dispatcher._get_next_check_item()
+        assert picked is not None
+        assert picked[0].job_id == "first"
 
     def test_update_job_priority_reorders(self):
         """Changing a job's priority should affect subsequent dispatch order."""
         dispatcher = self._make_dispatcher()
-        config = _make_config()
-
-        dispatcher.submit_items(
-            job_id="job-a",
-            items=[("k1", "A1", "movie"), ("k2", "A2", "movie")],
-            config=config,
-            registry=MagicMock(),
-            priority=PRIORITY_NORMAL,
-        )
-        dispatcher.submit_items(
-            job_id="job-b",
-            items=[("k3", "B1", "movie")],
-            config=config,
-            registry=MagicMock(),
-            priority=PRIORITY_NORMAL,
-        )
+        self._add_tracker(dispatcher, "job-a", [("k1", "A1", "movie"), ("k2", "A2", "movie")], PRIORITY_NORMAL)
+        self._add_tracker(dispatcher, "job-b", [("k3", "B1", "movie")], PRIORITY_NORMAL)
 
         dispatcher.update_job_priority("job-b", PRIORITY_HIGH)
 
-        item = dispatcher._get_next_item()
-        assert item is not None
-        assert item[0] == "job-b"
+        picked = dispatcher._get_next_check_item()
+        assert picked is not None
+        assert picked[0].job_id == "job-b"
 
     def test_empty_queue_returns_none(self):
         dispatcher = self._make_dispatcher()
+        assert dispatcher._get_next_check_item() is None
         assert dispatcher._get_next_item() is None

@@ -1113,6 +1113,78 @@ class TestLoadConfig:
     @patch("subprocess.run")
     @patch("os.path.exists")
     @patch("os.path.isdir")
+    @patch("os.listdir")
+    @patch("os.access")
+    @patch("os.statvfs", create=True)
+    @patch("media_preview_generator.logging_config.setup_logging")
+    def test_load_config_scan_workers_default_auto_and_clamp(
+        self,
+        mock_logging,
+        mock_statvfs,
+        mock_access,
+        mock_listdir,
+        mock_isdir,
+        mock_exists,
+        mock_run,
+        mock_which,
+    ):
+        """scan_workers: missing→0 (Auto), explicit kept, out-of-range clamped."""
+        from media_preview_generator.config import clear_config_cache
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        mock_which.return_value = "/usr/bin/ffmpeg"
+        mock_run.return_value = MagicMock(returncode=0, stdout="ffmpeg version 7.0.0")
+
+        def mock_listdir_fn(path):
+            if "tmp" in path or path.startswith("/tmp"):
+                return []
+            if path.endswith("/localhost") or ("/localhost" in path and not path.endswith("Media")):
+                return list("0123456789abcdef")
+            if path.endswith("/Media"):
+                return ["localhost"]
+            return ["Cache", "Media", "Metadata", "Plug-ins", "Logs"]
+
+        mock_exists.side_effect = lambda path: True
+        mock_isdir.return_value = True
+        mock_listdir.side_effect = mock_listdir_fn
+        mock_access.return_value = True
+        statvfs_result = MagicMock()
+        statvfs_result.f_frsize = 4096
+        statvfs_result.f_bavail = 1024 * 1024 * 250
+        mock_statvfs.return_value = statvfs_result
+
+        base = {
+            "plex_url": "http://localhost:32400",
+            "plex_token": "test_token",
+            "plex_config_folder": "/config/plex/Library/Application Support/Plex Media Server",
+            "cpu_threads": 1,
+        }
+        sm = get_settings_manager()
+
+        # Missing key → Auto sentinel 0 (orchestrator resolves it).
+        sm.apply_changes(dict(base))
+        clear_config_cache()
+        assert load_config().scan_workers == 0
+
+        # Explicit value preserved.
+        sm.apply_changes({**base, "scan_workers": 64})
+        clear_config_cache()
+        assert load_config().scan_workers == 64
+
+        # Above the ceiling clamps to 256.
+        sm.apply_changes({**base, "scan_workers": 9999})
+        clear_config_cache()
+        assert load_config().scan_workers == 256
+
+        # Negative garbage falls back to Auto.
+        sm.apply_changes({**base, "scan_workers": -5})
+        clear_config_cache()
+        assert load_config().scan_workers == 0
+
+    @patch("shutil.which")
+    @patch("subprocess.run")
+    @patch("os.path.exists")
+    @patch("os.path.isdir")
     @patch("os.access")
     @patch("os.statvfs", create=True)
     @patch("media_preview_generator.logging_config.setup_logging")

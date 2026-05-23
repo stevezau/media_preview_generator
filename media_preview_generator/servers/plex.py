@@ -1504,11 +1504,11 @@ class PlexServer(MediaServer):
             # call. Bracket it with two INFO lines so the per-job log
             # has something between the existing "Querying library …"
             # banner and the first item dispatch, instead of a silent
-            # 30-120s gap on a large library.
+            # gap on a large library.
             if target.METADATA_TYPE == "episode":
                 logger.info(
                     "Plex library {!r}: requesting full episode list from server "
-                    "(plexapi paginates internally; this can take 30-120s for large libraries)…",
+                    "(plexapi paginates internally; this can take a while for large libraries)…",
                     target.title,
                 )
                 results = retry_plex_call(target.search, libtype="episode")
@@ -1531,7 +1531,7 @@ class PlexServer(MediaServer):
             elif target.METADATA_TYPE == "movie":
                 logger.info(
                     "Plex library {!r}: requesting full movie list from server "
-                    "(plexapi paginates internally; this can take 30-120s for large libraries)…",
+                    "(plexapi paginates internally; this can take a while for large libraries)…",
                     target.title,
                 )
                 results = retry_plex_call(target.search)

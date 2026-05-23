@@ -430,6 +430,30 @@ def _neutralize_setup_logging(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_shared_dispatcher():
+    """Tear down the singleton JobDispatcher around every test.
+
+    Webhooks, single-Plex scans AND (since #243) multi-vendor scans all feed
+    one shared ``JobDispatcher`` singleton with a long-lived background loop
+    thread and a tracker map. A test that submits to it and doesn't reset
+    leaves that loop running inside the xdist worker — its trackers, threads
+    and registered callbacks then bleed into unrelated tests on the same
+    worker (observed: ``test_processing_multi_server`` flaking only under the
+    full parallel run, green in isolation). Resetting before and after each
+    test keeps the singleton from crossing test boundaries. No-op when no
+    dispatcher was created.
+    """
+    try:
+        from media_preview_generator.jobs.dispatcher import reset_dispatcher
+    except ImportError:
+        yield
+        return
+    reset_dispatcher()
+    yield
+    reset_dispatcher()
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_real_world_calls(request, monkeypatch):
     """Stub out the network / hardware calls that ``run_job`` would
     otherwise make on a developer's laptop or on an unsandboxed CI runner.

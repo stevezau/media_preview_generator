@@ -290,7 +290,7 @@ function connectSocket() {
     });
 
     socket.on('job_progress', function(data) {
-        updateJobProgress(data.job_id, data.progress);
+        updateJobProgress(data.job_id, data.progress, data.publishers);
     });
 
     socket.on('worker_update', function(data) {
@@ -1550,6 +1550,30 @@ const _FRAME_SOURCE_BADGES = {
     extracted:      null, // no badge for "extracted" — it's the boring default
 };
 
+// File-level issue footnote, rendered LIVE during a run (it rides the
+// job_progress event via progress.outcome, which the dispatcher pushes on the
+// progress cadence). Shows only outcomes that aren't attributable to a single
+// server — file missing on disk, no media parts, etc. The Generated / Reused /
+// Already-Existed breakdown lives per-server in _renderPublishersBlock. Empty
+// string when there's nothing to show yet.
+function _renderJobFileIssues(outcome) {
+    // File-level issues that aren't attributable to a single server — they
+    // happen *before* per-server publishing (file missing on disk, no media
+    // parts, excluded, etc.). Rendered as a small footnote under the
+    // per-server breakdown. Generated / Reused / Already-Existed are
+    // intentionally excluded here: they're shown per-server now.
+    if (!outcome || typeof outcome !== 'object') return '';
+    const keys = ['skipped_file_not_found', 'no_media_parts', 'skipped_excluded',
+                  'skipped_invalid_hash', 'skipped_not_indexed', 'failed'];
+    return keys.map(function (k) {
+        const n = outcome[k];
+        if (!n || n <= 0) return '';
+        const meta = _statusMeta(k);
+        const tip = meta.tip ? ` title="${escapeHtmlAttr(meta.tip)}"` : '';
+        return `<span class="badge ${meta.cls}"${tip}>${escapeHtmlText(meta.label)} × ${n.toLocaleString()}</span>`;
+    }).filter(Boolean).join(' ');
+}
+
 function _renderPublishersBlock(job) {
     // D12 — per-server aggregate (one row per registered server with
     // status counts), NOT per-file. Per-file × per-server attribution
@@ -1558,21 +1582,45 @@ function _renderPublishersBlock(job) {
     // History sections. Each entry: {server_id, server_name, server_type,
     // counts: {published: N, failed: M, ...}}.
     const rows = (job && Array.isArray(job.publishers)) ? job.publishers : [];
-    if (!rows.length) return '';
+    // File-level issues (not found on disk, no media parts, …) aren't
+    // attributable to a single server, but they belong WITH the per-server
+    // breakdown — rendered as a note inside this same block, directly under
+    // the server rows, rather than dangling at the bottom of the card.
+    const outcome = (job && job.progress && job.progress.outcome) || (job && job.outcome) || null;
+    const fileIssues = _renderJobFileIssues(outcome);
+    if (!rows.length && !fileIssues) return '';
     const lines = rows.map(function (entry) {
         const stype = (entry.server_type || '').toLowerCase();
         const logo = _vendorLogo(stype, 12) || '';
         const sname = entry.server_name || stype.toUpperCase() || 'Server';
         const counts = (entry && typeof entry.counts === 'object' && entry.counts) ? entry.counts : {};
-        const statusOrder = ['published', 'published_pending_registration', 'skipped_output_exists', 'skipped_not_indexed', 'not_indexed', 'skipped_not_in_library', 'skipped', 'no_owners', 'no_frames', 'failed'];
-        const seen = new Set();
-        const ordered = statusOrder.filter(function (k) { seen.add(k); return counts[k] > 0; })
-            .concat(Object.keys(counts).filter(function (k) { return !seen.has(k) && counts[k] > 0; }));
-        if (!ordered.length) return '';
-        const badges = ordered.map(function (status) {
-            const meta = _statusMeta(status);
-            const tip = meta.tip ? ` title="${escapeHtmlAttr(meta.tip)}"` : '';
-            return `<span class="badge ${meta.cls}"${tip}>${escapeHtmlText(meta.label)} × ${counts[status]}</span>`;
+        const fs = (entry && typeof entry.frame_sources === 'object' && entry.frame_sources) ? entry.frame_sources : null;
+        const badgeSpecs = [];
+        if (fs) {
+            // Per-server breakdown by frame provenance: each server shows what
+            // it actually did — freshly Generated (extracted), Reused (frames
+            // cached from a sibling server, no second FFmpeg), or Already
+            // Existed (output already on disk).
+            [['extracted', 'Generated', 'bg-success', 'FFmpeg ran fresh for this server'],
+             ['cache_hit', 'Reused', 'bg-info text-dark', 'Frames reused from another server — no second FFmpeg'],
+             ['output_existed', 'Already Existed', 'bg-secondary', 'Output was already on disk and unchanged']]
+                .forEach(function (s) { if (fs[s[0]] > 0) badgeSpecs.push({label: s[1], cls: s[2], count: fs[s[0]], tip: s[3]}); });
+            // Plus attention-worthy statuses NOT captured by frame provenance
+            // (failures, pending registration, index issues).
+            ['failed', 'published_pending_registration', 'skipped_not_indexed', 'not_indexed', 'skipped_not_in_library', 'no_owners', 'no_frames']
+                .forEach(function (k) { if (counts[k] > 0) { const m = _statusMeta(k); badgeSpecs.push({label: m.label, cls: m.cls, count: counts[k], tip: m.tip}); } });
+        } else {
+            // Fallback for jobs recorded before per-server frame_sources existed.
+            const statusOrder = ['published', 'published_pending_registration', 'skipped_output_exists', 'skipped_not_indexed', 'not_indexed', 'skipped_not_in_library', 'skipped', 'no_owners', 'no_frames', 'failed'];
+            const seen = new Set();
+            statusOrder.filter(function (k) { seen.add(k); return counts[k] > 0; })
+                .concat(Object.keys(counts).filter(function (k) { return !seen.has(k) && counts[k] > 0; }))
+                .forEach(function (status) { const m = _statusMeta(status); badgeSpecs.push({label: m.label, cls: m.cls, count: counts[status], tip: m.tip}); });
+        }
+        if (!badgeSpecs.length) return '';
+        const badges = badgeSpecs.map(function (b) {
+            const tip = b.tip ? ` title="${escapeHtmlAttr(b.tip)}"` : '';
+            return `<span class="badge ${b.cls}"${tip}>${escapeHtmlText(b.label)} × ${b.count}</span>`;
         }).join(' ');
         // Stack server-name pill, an arrow separator, and the per-status
         // badges with explicit gap-2 spacing so the visual hierarchy is
@@ -1612,7 +1660,15 @@ function _renderPublishersBlock(job) {
         tipAttr = ' title="Aggregated across all ' + totalRuns + ' run'
             + (totalRuns === 1 ? '' : 's') + ' of this chain"';
     }
-    return `<div class="mt-3 pt-2 border-top"><strong class="me-2"${tipAttr}>Servers</strong>${lines}</div>`;
+    const header = rows.length ? `<strong class="me-2"${tipAttr}>Servers</strong>${lines}` : '';
+    // File-level issues laid out like a server row — a "Files" pill, arrow,
+    // then the same badge chips — so they read as part of the breakdown.
+    const noteLine = fileIssues
+        ? `<div class="mt-1 d-flex flex-wrap align-items-center gap-2">` +
+          `<span class="badge bg-light text-dark border"><i class="bi bi-exclamation-triangle me-1"></i>Files</span>` +
+          `<span class="text-muted small" aria-hidden="true">→</span>${fileIssues}</div>`
+        : '';
+    return `<div class="mt-3 pt-2 border-top">${header}${noteLine}</div>`;
 }
 
 // Pick the retry-chain info-modal template matching the Job's server
@@ -2166,7 +2222,7 @@ function updateActiveJobs(runningJobs) {
             <div class="mb-2 small">
                 <strong>Library:</strong> ${libraryDisplay}${_serverBadge(job)}${webhookFilesHtml}
             </div>
-            ${_renderPublishersBlock(job)}
+            <div id="activeJobPublishers-${jid}">${_renderPublishersBlock(job)}</div>
             ${startedLine ? `<div class="mb-2">${startedLine}</div>` : ''}
             ${progressBlock}
         </div>`;
@@ -2191,7 +2247,7 @@ function removeActiveJob(jobId) {
 // DOM card is created can be replayed once loadJobs() renders it.
 const _pendingProgress = {};
 
-function updateJobProgress(jobId, progress) {
+function updateJobProgress(jobId, progress, publishers) {
     const progressBar = document.getElementById('activeJobProgress-' + jobId);
     if (!progressBar) {
         // DOM not ready yet — cache for replay after next loadJobs().
@@ -2226,6 +2282,18 @@ function updateJobProgress(jobId, progress) {
     const itemsEl = document.getElementById('activeJobItems-' + jobId);
     if (itemsEl) {
         itemsEl.textContent = `Items: ${progress.processed_items || 0} / ${progress.total_items || '?'}`;
+    }
+
+    // Live per-server breakdown — re-render the Generated/Reused/Already-Existed
+    // badges plus the file-level note (not found on disk, …) from the publisher
+    // aggregate + outcome carried on this event, so the whole block tracks the
+    // counter instead of only refreshing on the slower job_updated cycle. The
+    // note renders inside the block (under the server rows), not at card bottom.
+    if (publishers !== undefined) {
+        const pubEl = document.getElementById('activeJobPublishers-' + jobId);
+        if (pubEl) {
+            pubEl.innerHTML = _renderPublishersBlock({ publishers: publishers, outcome: progress.outcome });
+        }
     }
 
     const row = document.getElementById(`job-row-${jobId}`);
@@ -2613,10 +2681,14 @@ function showNewJobModal() {
     if (sortByEl) sortByEl.value = '';
 
     // Always show all libraries grouped by server. The per-server scope
-    // is inferred from the tick selection at submit time (api_jobs.py's
-    // _infer_server_from_library_ids), so a separate "Media Server"
-    // picker would be redundant — one click instead of two for the
-    // common case of "tick a few libraries on one server."
+    // is sent explicitly via the data-server-id attribute the renderer
+    // stamps on each library checkbox (see startNewJob's collapsing of
+    // ``selectedServerIds`` into a single ``server_id`` field). A
+    // separate "Media Server" picker would be redundant — one click
+    // instead of two for the common case of "tick a few libraries on
+    // one server." Issue #244: the backend used to infer the server
+    // from library_ids alone, which silently mis-routed on multi-Plex
+    // because Plex assigns library ids per-server starting at "1".
     _renderJobLibraryList(libraries);
     _updateJobScopeBadge();
 
@@ -2697,9 +2769,11 @@ function _renderJobLibraryList(libs) {
 }
 
 // Compute the computed-scope preview (one server vs. fan-out) from the
-// current tick state. Must match the server-side inference in
-// api_jobs.py::_infer_server_from_library_ids — if one diverges from the
-// other, users will see a badge that doesn't match actual behaviour.
+// current tick state — same per-checkbox data-server-id values that
+// startNewJob collapses into the request's ``server_id`` field. This is
+// the authoritative scope computation; the backend's
+// ``_infer_server_from_library_ids`` is a refusing fallback for clients
+// that don't send server_id (see issue #244).
 function _updateJobScopeBadge() {
     const badge = document.getElementById('jobScopeBadge');
     if (!badge) return;
@@ -2772,6 +2846,12 @@ async function startNewJob() {
 
     let selectedLibraryIds = [];
     let libraryName = 'All Libraries';
+    // Collect the ticked checkboxes' ``data-server-id`` so we can send
+    // ``server_id`` explicitly when every tick belongs to one server.
+    // Issue #244: relying on the backend's library-id-based inference
+    // mis-routes when two Plex servers share a library id (Plex assigns
+    // ids per-server starting at "1", so collisions are normal).
+    let selectedServerIds = new Set();
 
     if (!allLibrariesCheckbox.checked) {
         // Get selected library checkboxes
@@ -2784,6 +2864,10 @@ async function startNewJob() {
         }
 
         selectedLibraryIds = selectedIdsLocal;
+        for (const cb of selectedCheckboxes) {
+            const sid = (cb.getAttribute('data-server-id') || '').trim();
+            if (sid) selectedServerIds.add(sid);
+        }
         // Build a display name from the looked-up library names so the
         // Jobs page shows which libraries were picked, not just a count.
         // Previously multi-library selections collapsed to "3 Libraries"
@@ -2819,16 +2903,20 @@ async function startNewJob() {
         jobConfig.sort_by = sortBy;
     }
 
-    // No explicit server_id on the wire — api_jobs.create_job runs
-    // _infer_server_from_library_ids(selected_library_ids) and pins
-    // automatically when every tick resolves to one server. Mixed
-    // selection intentionally stays unpinned for cross-server fan-out.
+    // Explicit ``server_id`` when every ticked library belongs to one
+    // server — the UI already knows this from the rendered library
+    // groups (data-server-id attribute) and shouldn't make the backend
+    // re-derive it from library_ids alone. Multi-server selections
+    // stay unpinned so the cross-server fan-out path still works.
     const jobPayload = {
         library_ids: selectedLibraryIds,
         library_name: libraryName,
         priority: priority,
         config: jobConfig,
     };
+    if (selectedServerIds.size === 1) {
+        jobPayload.server_id = Array.from(selectedServerIds)[0];
+    }
 
     // Retry once on transient network errors ("Failed to fetch" from
     // server congestion).

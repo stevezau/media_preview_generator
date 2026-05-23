@@ -189,6 +189,13 @@ def _quiet_hours_recompute_and_apply() -> None:
         if target:
             logger.info("Quiet hours: processing paused (queue will fill until resume time)")
         else:
+            # Start the PENDING backlog the same way the manual/auto resume
+            # paths do — otherwise jobs revived PENDING-while-paused at boot
+            # (pause now survives restarts) sit forever when a quiet window
+            # ends, since flipping the flag alone dispatches nothing.
+            from .routes.job_runner import resume_running_and_drain_pending
+
+            resume_running_and_drain_pending()
             logger.info("Quiet hours: processing resumed (queue draining)")
     except Exception:
         logger.exception("Quiet-hours recompute hit an unexpected error")

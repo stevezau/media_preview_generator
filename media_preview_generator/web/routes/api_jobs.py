@@ -91,10 +91,21 @@ def _infer_server_from_library_id(library_id: str) -> tuple[str | None, str | No
     """Find the configured media server that owns ``library_id``.
 
     Returns (server_id, server_name, server_type) or (None, None, None)
-    when the id matches no configured library. Used by the manual job
-    creation path to attribute single-library jobs to their server even
-    when the caller didn't pass server_id (D2 — older /Start New Job
-    submissions and any external API caller that sends only library_ids).
+    when the id matches no configured library OR when two or more
+    enabled servers share the same library id (Plex assigns library
+    ids sequentially per-server starting at "1", so multi-Plex installs
+    almost always have id collisions — silently picking the first
+    match was the cause of issue #244's wrong-server scans).
+
+    Used by the manual job creation path to attribute single-library
+    jobs to their server even when the caller didn't pass server_id
+    (D2 — older /Start New Job submissions and any external API caller
+    that sends only library_ids). Modern UI sends ``server_id``
+    explicitly; the inference is a fallback for un-updated clients and
+    must refuse rather than guess when it can't disambiguate.
+
+    Disabled servers don't compete for the id — they're off-air and
+    can't satisfy a job either way.
     """
     if not library_id:
         return None, None, None
@@ -107,17 +118,25 @@ def _infer_server_from_library_id(library_id: str) -> tuple[str | None, str | No
         return None, None, None
     if not isinstance(raw, list):
         return None, None, None
+    matches: list[dict] = []
     for entry in raw:
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or not entry.get("enabled", True):
             continue
         for lib in entry.get("libraries") or []:
             if isinstance(lib, dict) and str(lib.get("id") or "") == needle:
-                return (
-                    entry.get("id"),
-                    entry.get("name") or entry.get("id"),
-                    (entry.get("type") or "").lower() or None,
-                )
-    return None, None, None
+                matches.append(entry)
+                break  # one library match per server is enough
+    if len(matches) != 1:
+        # Zero matches → unknown id. Multiple → ambiguous (multi-Plex
+        # id collision); refuse to guess so the caller / UI is forced
+        # to pass server_id explicitly.
+        return None, None, None
+    entry = matches[0]
+    return (
+        entry.get("id"),
+        entry.get("name") or entry.get("id"),
+        (entry.get("type") or "").lower() or None,
+    )
 
 
 def _infer_server_from_library_ids(
@@ -947,20 +966,14 @@ def pause_processing():
 def resume_processing():
     """Clear global processing pause and resume all running jobs."""
     from ..settings_manager import get_settings_manager
+    from .job_runner import resume_running_and_drain_pending
 
     sm = get_settings_manager()
     job_manager = get_job_manager()
     sm.processing_paused = False
-    for running in job_manager.get_running_jobs():
-        job_manager.request_resume(running.id)
     job_manager.emit_processing_paused_changed(False)
     logger.info("Global processing resumed")
-    pending = sorted(
-        job_manager.get_pending_jobs(),
-        key=lambda j: (j.priority, j.created_at or ""),
-    )
-    for pj in pending:
-        _start_job_async(pj.id, pj.config or {})
+    resume_running_and_drain_pending()
     return jsonify({"paused": False})
 
 
@@ -1498,11 +1511,20 @@ def reprocess_job(job_id):
 
     sm = get_settings_manager()
     if sm.processing_paused:
+        # Reprocess clears the global pause (the user's explicit intent to run).
+        # Clearing it must fully resume the queue — draining every PENDING job,
+        # not just the new one — or jobs revived PENDING-while-paused at boot
+        # (pause now survives restarts) would strand. resume_running_and_drain_
+        # pending starts the new job too (it's PENDING; _start_job_async is
+        # idempotent), so no double-start.
+        from .job_runner import resume_running_and_drain_pending
+
         sm.processing_paused = False
         job_manager.emit_processing_paused_changed(False)
         logger.info("Processing auto-resumed — user requested reprocess")
-
-    _start_job_async(new_job.id, new_job.config)
+        resume_running_and_drain_pending()
+    else:
+        _start_job_async(new_job.id, new_job.config)
     return jsonify(new_job.to_dict()), 201
 
 

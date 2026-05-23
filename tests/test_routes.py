@@ -159,6 +159,36 @@ class TestPageRoutes:
         assert b'id="settings-sidebar"' in body, "settings page must include the sidebar nav"
         assert b'id="section-processing"' in body, "settings page must include the Processing section"
 
+    def test_webhook_activity_requires_auth(self, client):
+        resp = client.get("/webhook-activity", follow_redirects=False)
+        assert resp.status_code == 302
+        assert "/login" in resp.headers.get("Location", "")
+
+    def test_webhook_activity_page_renders(self, authed_client):
+        """The relocated Tools page must carry the history table + pagination
+        markup the JS binds to; a 200 with the wrong template would strand
+        loadHistory() against missing elements."""
+        resp = authed_client.get("/webhook-activity")
+        assert resp.status_code == 200
+        body = resp.data
+        assert b'id="section-webhooks-activity"' in body, "page missing the activity card"
+        assert b'id="historyTable"' in body, "page missing the history table the JS renders into"
+        assert b'id="historyPaginationControls"' in body, "page missing pagination controls"
+        # The markup is inert without the moved JS — assert the load-bearing
+        # functions shipped too, so a truncated script copy can't pass green.
+        assert b"function loadHistory" in body, "page missing loadHistory() — table would never populate"
+        assert b"function clearHistory" in body, "page missing clearHistory() — Clear button would throw"
+
+    def test_automation_links_out_to_webhook_activity_not_inline_table(self, authed_client):
+        """After the move, the Automation page must NOT embed the history
+        table (that lives under Tools now) but MUST link to it — otherwise
+        the configure→verify path is broken."""
+        resp = authed_client.get("/automation")
+        assert resp.status_code == 200
+        body = resp.data
+        assert b'id="historyTable"' not in body, "history table must no longer be inline on Automation"
+        assert b"/webhook-activity" in body, "Automation must link to the Webhook Activity page"
+
     def test_servers_page_accepts_add_query_param(self, authed_client):
         """Setup wizard step 1's vendor picker redirects to
         /servers?add=<vendor> when the user picks Emby/Jellyfin. The page
@@ -3286,6 +3316,31 @@ class TestReprocessJob:
         # And the non-retry config (webhook_paths) is preserved.
         assert new_job.config.get("webhook_paths") == ["/data/movie.mkv"]
 
+    def test_reprocess_while_paused_resumes_and_drains_pending(self, client):
+        """Reprocess clears the global pause (user's intent to run). Since pause
+        now survives restarts, clearing it must drain the whole PENDING backlog
+        (boot-revived jobs), not only the reprocessed one — so reprocess routes
+        through the shared resume helper, not a bare single-job start."""
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        with patch("media_preview_generator.web.routes.api_jobs._start_job_async"):
+            create_resp = client.post("/api/jobs", headers=_api_headers(), json={"library_name": "Movies"})
+        job_id = create_resp.get_json()["id"]
+        jm = get_job_manager()
+        jm.complete_job(job_id)
+
+        sm = get_settings_manager()
+        sm.processing_paused = True
+        try:
+            with patch("media_preview_generator.web.routes.job_runner.resume_running_and_drain_pending") as mock_drain:
+                resp = client.post(f"/api/jobs/{job_id}/reprocess", headers=_api_headers())
+            assert resp.status_code == 201
+            assert sm.processing_paused is False, "reprocess clears the global pause"
+            mock_drain.assert_called_once_with()
+        finally:
+            sm.processing_paused = False
+
     def test_reprocess_of_chain_head_completes_normally(self, client):
         """Regression for issue #242: reprocess of a chain head must not hang.
 
@@ -4060,6 +4115,64 @@ class TestLibrariesAPI:
         )
         token_seen = any(kwargs.get("headers", {}).get("X-Plex-Token") == "test-token" for _, kwargs in captured)
         assert token_seen, f"_fetch_libraries_via_http didn't pass X-Plex-Token; calls: {captured!r}"
+
+    def test_get_libraries_filters_out_disabled_libraries(self, client):
+        """/api/libraries must hide libraries the user has disabled in
+        Settings → Servers → Edit. Pre-fix the endpoint returned every
+        library the live Plex API surfaced, so disabled ones showed up
+        as tickable rows in the Start New Job picker. Ticking one then
+        running the job silently produced "No libraries to scan"
+        because the downstream enumerator (_shared.py:94) filters on
+        ``lib.enabled``. The user expected disabled = hidden everywhere.
+        """
+        from media_preview_generator.servers.base import Library
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        sm = get_settings_manager()
+        sm.set(
+            "media_servers",
+            [
+                {
+                    "id": "plex-test",
+                    "type": "plex",
+                    "name": "Test Plex",
+                    "enabled": True,
+                    "url": "http://plex:32400",
+                    "auth": {"token": "tok"},
+                    "libraries": [
+                        {"id": "1", "name": "Movies", "enabled": True, "kind": "movie"},
+                        {"id": "2", "name": "TV", "enabled": False, "kind": "episode"},
+                        {"id": "3", "name": "Audiobooks", "enabled": False, "kind": "track"},
+                    ],
+                }
+            ],
+        )
+
+        fake_server = MagicMock()
+        fake_server.list_libraries.return_value = [
+            Library(id="1", name="Movies", enabled=True, kind="movie", remote_paths=()),
+            Library(id="2", name="TV", enabled=False, kind="episode", remote_paths=()),
+            Library(id="3", name="Audiobooks", enabled=False, kind="track", remote_paths=()),
+        ]
+        fake_registry = MagicMock()
+        fake_registry.get.return_value = fake_server
+
+        with patch(
+            "media_preview_generator.servers.ServerRegistry.from_settings",
+            return_value=fake_registry,
+        ):
+            resp = client.get("/api/libraries", headers=_api_headers())
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        ids = [lib["id"] for lib in data["libraries"]]
+        # Bug-blind guard: assert the disabled libraries are absent by id,
+        # not just check the count — a future regression that swaps order
+        # or renames libraries silently would pass a length check but
+        # land disabled rows in the picker.
+        assert "1" in ids, f"enabled library 'Movies' (id=1) must be in response; got {ids!r}"
+        assert "2" not in ids, f"disabled library 'TV' (id=2) must be filtered; got {ids!r}"
+        assert "3" not in ids, f"disabled library 'Audiobooks' (id=3) must be filtered; got {ids!r}"
 
     def test_get_libraries_no_config(self, client):
         """Libraries endpoint with no Plex AND no other media servers returns

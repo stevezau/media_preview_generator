@@ -1,13 +1,12 @@
 """Shared worker-row labelling so every code path agrees on the same shape.
 
-Three independent code paths build the rows the dashboard's Workers panel
+Two independent code paths build the rows the dashboard's Workers panel
 renders:
 
-1. :func:`media_preview_generator.jobs.orchestrator._dispatch_processable_items` —
-   the multi-server dispatch loop (Plex full scan, Emby/Jellyfin scans).
-2. :class:`media_preview_generator.jobs.worker.WorkerPool` — the legacy Plex
-   single-server path (only fires on a pure-Plex install today).
-3. :func:`media_preview_generator.web.routes.api_jobs._build_idle_workers_from_config`
+1. :class:`media_preview_generator.jobs.worker.WorkerPool` — the live worker
+   snapshots for every active job (webhooks, single-Plex scans, and the
+   multi-server scans that now feed the shared :class:`~media_preview_generator.jobs.dispatcher.JobDispatcher`).
+2. :func:`media_preview_generator.web.routes.api_jobs._build_idle_workers_from_config`
    — synthesised idle entries returned by ``GET /api/jobs/workers`` when no
    job is currently active.
 

@@ -70,7 +70,17 @@ class JobTracker:
         self.library_name = library_name
         self.library_prefix = f"[{library_name}] " if library_name else ""
 
-        self.item_queue: deque = deque(items)
+        # Two-stage queues (issue #243 unification). Every submitted item
+        # first lands in ``check_queue``, where the dispatcher's checking
+        # workers run the cheap ``process_canonical_path(check_only=True)``
+        # pass. Items already fresh (or otherwise terminal) are recorded
+        # straight away via ``record_check_result`` and never touch a
+        # GPU/CPU processing worker. Items that genuinely need FFmpeg are
+        # appended to ``item_queue``, which the processing workers drain
+        # exactly as before. ``total_items`` counts every submitted item;
+        # each one is recorded exactly once (check-skip OR processing).
+        self.check_queue: deque = deque(items)
+        self.item_queue: deque = deque()
         self.total_items = len(items)
         self.successful = 0
         self.failed = 0
@@ -83,6 +93,19 @@ class JobTracker:
         # Active Jobs and History sections to grow unbounded on big runs.
         self.publishers_aggregate: dict[str, dict] = {}
         self.done_event = threading.Event()
+        # Flips True the first time one of this job's items is assigned to a
+        # generation worker (set in JobDispatcher._assign_tasks). Drives the
+        # "Checking existing previews…" → "completed" progress label so a
+        # scan that's still sweeping doesn't read as if it's generating.
+        self.generation_started = False
+        # Guards every mutation of successful / failed / outcome_counts /
+        # publishers_aggregate. Pre-#243 these were only ever touched by the
+        # single dispatch-loop thread; the checking stage now folds outcomes
+        # from up to ``scan_workers`` concurrent daemon check threads AND the
+        # dispatch loop concurrently folds finished FFmpeg items — non-atomic
+        # ``+=`` would lose increments, so ``completed`` could never reach
+        # ``total_items`` and ``done_event`` would never fire (hung job).
+        self._counts_lock = threading.Lock()
 
         cbs = callbacks or {}
         self.progress_callback: Callable | None = cbs.get("progress_callback")
@@ -136,45 +159,170 @@ class JobTracker:
             title: Media title for logging.
 
         """
-        if success:
-            self.successful += 1
-        else:
-            self.failed += 1
+        # Increment under the lock and capture the post-increment completion
+        # state atomically (the checking stage calls this from many threads).
+        with self._counts_lock:
+            if success:
+                self.successful += 1
+            else:
+                self.failed += 1
+            is_done = (self.successful + self.failed) >= self.total_items
+            outcome_snapshot = dict(self.outcome_counts)
 
-        if self.on_item_complete:
-            self.on_item_complete(worker_display_name, title, success)
+        # A raising callback must never prevent done_event.set() below — that
+        # would strand the job (hang). It also runs in the shared dispatch loop
+        # thread (via _check_completions), so an unguarded raise there kills
+        # the loop for every job. Swallow + log; completion always proceeds.
+        try:
+            if self.on_item_complete:
+                self.on_item_complete(worker_display_name, title, success)
 
-        if self.progress_callback:
-            now = time.time()
-            is_final = self.completed >= self.total_items
-            if is_final or now - self._last_progress_update >= 0.5:
-                fraction = 0.0
-                if self.in_progress_fraction_getter is not None:
-                    try:
-                        fraction = self.in_progress_fraction_getter()
-                    except Exception:
-                        fraction = 0.0
-                effective = self.completed + fraction
-                percent = (effective / self.total_items * 100) if self.total_items > 0 else 0
-                self.progress_callback(
-                    self.completed,
-                    self.total_items,
-                    f"{self.library_prefix}{self.completed}/{self.total_items} completed",
-                    percent_override=percent,
-                )
-                self._last_progress_update = now
+            if self.progress_callback:
+                now = time.time()
+                is_final = is_done
+                if is_final or now - self._last_progress_update >= 0.5:
+                    fraction = 0.0
+                    if self.in_progress_fraction_getter is not None:
+                        try:
+                            fraction = self.in_progress_fraction_getter()
+                        except Exception:
+                            fraction = 0.0
+                    effective = self.completed + fraction
+                    percent = (effective / self.total_items * 100) if self.total_items > 0 else 0
+                    # Until the first item claims a generation worker, the job
+                    # is still sweeping the library for existing previews —
+                    # surface that rather than "completed", which reads as
+                    # generation. Flips to the normal label the moment
+                    # generation begins (set in JobDispatcher._assign_tasks).
+                    # Mirrors the label the multi-server scan path showed
+                    # before the engines merged.
+                    if self.generation_started:
+                        msg = f"{self.library_prefix}{self.completed}/{self.total_items} completed"
+                    else:
+                        msg = f"{self.library_prefix}Checking existing previews… {self.completed}/{self.total_items}"
+                    # Push the live per-file outcome BEFORE the progress callback
+                    # fires, so the file-level footnote (not found, no media
+                    # parts, …) rides the same throttled job_progress emit
+                    # (progress.outcome used to be set only at completion).
+                    self._push_outcome_snapshot(outcome_snapshot)
+                    self.progress_callback(
+                        self.completed,
+                        self.total_items,
+                        msg,
+                        percent_override=percent,
+                    )
+                    self._last_progress_update = now
+        except Exception as exc:
+            logger.debug("Job {} completion callback raised (ignored): {}", self.job_id, exc)
 
-        if self.completed >= self.total_items:
+        if is_done:
             self.done_event.set()
 
+    def _push_outcome_snapshot(self, outcome: dict[str, int]) -> None:
+        """Mirror the live per-file outcome breakdown onto the Job.
+
+        Best-effort and called on the progress cadence so the file-level
+        footnote updates during the run, not only at completion. A job_manager
+        hiccup must never break progress/completion, so it's fully guarded.
+        """
+        try:
+            from ..web.jobs import get_job_manager
+
+            get_job_manager().set_job_outcome(self.job_id, outcome)
+        except Exception as exc:
+            logger.debug("Could not push live outcome for job {}: {}", self.job_id, exc)
+
     def cancel(self) -> None:
-        """Mark this job cancelled and drain remaining items."""
+        """Mark this job cancelled and drain remaining items.
+
+        Drains BOTH the not-yet-checked queue and the checked-but-not-yet-
+        generated queue so the failed tally covers every still-pending item.
+        """
         self.cancelled = True
-        remaining = len(self.item_queue)
-        self.item_queue.clear()
-        if remaining:
-            self.failed += remaining
+        with self._counts_lock:
+            remaining = len(self.check_queue) + len(self.item_queue)
+            self.check_queue.clear()
+            self.item_queue.clear()
+            if remaining:
+                self.failed += remaining
         self.done_event.set()
+
+    def record_check_result(self, item, result) -> None:
+        """Record an item decided by the checking stage (no processing worker).
+
+        ``result`` is the :class:`MultiServerResult` from a
+        ``check_only=True`` call whose status is terminal (SKIPPED,
+        PUBLISHED pending-registration, NO_OWNERS, SKIPPED_FILE_NOT_FOUND) —
+        i.e. it did NOT need FFmpeg. Folds the same outcome counts +
+        per-server publisher rows + Files-panel row + completion that
+        ``_merge_worker_outcome`` + ``record_completion`` produce for the
+        processing path (it does NOT call them — it writes the equivalent
+        data inline), so accounting is identical regardless of which stage
+        finished the item. Must run inside ``failure_scope(job_id)`` (the
+        caller, ``_run_check``, provides it) so the Files-panel row routes to
+        this job. No-op if the job is already done (e.g. cancelled mid-check).
+        """
+        if self.done_event.is_set():
+            return
+
+        # Lazy imports avoid a circular import at module load
+        # (orchestrator imports the dispatcher singleton lazily too).
+        from ..processing.generator import _notify_file_result
+        from .orchestrator import (
+            _outcome_for_multi_server_status,
+            _publisher_rows_from_result,
+            fold_publisher_rows_into_aggregate,
+        )
+
+        outcome = _outcome_for_multi_server_status(result.status)
+        # Same coarse success rule the processing path uses
+        # (Worker._process_item): only FAILED counts as a failure; SKIPPED /
+        # NO_MEDIA_PARTS / SKIPPED_FILE_NOT_FOUND / pending all count as done.
+        success = outcome is not ProcessingResult.FAILED
+
+        # Publisher rows are best-effort UI attribution — never let a malformed
+        # result block the count/completion below.
+        try:
+            rows = _publisher_rows_from_result(result, getattr(result, "canonical_path", "") or item.canonical_path)
+        except Exception as exc:
+            logger.debug("Could not build publisher rows for {}: {}", item.canonical_path, exc)
+            rows = []
+        # Counter + aggregate mutations under the lock (concurrent check threads).
+        # The aggregate fold is guarded *inside* the lock so a raise there can't
+        # propagate to _run_check's router AFTER the outcome counter has already
+        # been bumped — that double-counts the item (re-queue → worker counts it
+        # again), the exact "X processed / Y in outcome" divergence shape.
+        with self._counts_lock:
+            if outcome.value in self.outcome_counts:
+                self.outcome_counts[outcome.value] += 1
+            publishers_snapshot = None
+            if rows:
+                try:
+                    fold_publisher_rows_into_aggregate(self.publishers_aggregate, rows)
+                    publishers_snapshot = list(self.publishers_aggregate.values())
+                except Exception as exc:
+                    logger.debug("Could not fold publisher rows for {}: {}", item.canonical_path, exc)
+        if publishers_snapshot is not None:
+            try:
+                from ..web.jobs import get_job_manager
+
+                get_job_manager().set_publishers(self.job_id, publishers_snapshot)
+            except Exception as exc:
+                logger.debug("Could not set publisher aggregate for job {}: {}", self.job_id, exc)
+
+        try:
+            _notify_file_result(
+                getattr(result, "canonical_path", "") or item.canonical_path,
+                outcome,
+                (getattr(result, "message", "") or "").strip(),
+                "Library scan",
+                servers=rows,
+            )
+        except Exception as exc:
+            logger.debug("Could not notify checked file result for {}: {}", item.canonical_path, exc)
+
+        title = getattr(item, "title", "") or item.canonical_path
+        self.record_completion(success, "Library scan", title)
 
     def wait(self, timeout: float | None = None) -> bool:
         """Block until all items are processed.
@@ -229,6 +377,29 @@ class JobDispatcher:
         # don't flicker invisibly).
         self._last_worker_busy_snapshot: dict[int, bool] = {}
 
+        # Checking stage (issue #243): a bounded pool of lightweight
+        # "checking workers" that run process_canonical_path(check_only=True)
+        # on submitted items BEFORE they can claim a (capped) GPU/CPU
+        # processing worker. Decouples the fast "does a fresh preview exist?"
+        # sweep from the heavy FFmpeg cap. Items already fresh are recorded
+        # straight away; only items needing FFmpeg reach the processing pool.
+        #
+        # Driven by the dispatch loop (single priority-aware picker) which
+        # spawns one short-lived **daemon** thread per check, capped at
+        # ``_max_checks`` in flight. Daemon matters: a check that blocks on a
+        # hung mount inside process_canonical_path (the same os.path.isfile
+        # the processing worker hits) must NOT keep the process alive — the
+        # legacy worker threads were daemon for exactly this reason. A
+        # non-daemon pool (e.g. ThreadPoolExecutor) would leave a stuck check
+        # blocking interpreter/xdist-worker shutdown ("not properly
+        # terminated"). On-demand spawn means a 1-item webhook uses 1 thread,
+        # not ``_max_checks``; threads exit when their check returns, so
+        # nothing accumulates.
+        self._max_checks = 0
+        self._checks_in_flight = 0
+        self._checks_in_flight_lock = threading.Lock()
+        self._check_pool_started = False
+
     def submit_items(
         self,
         job_id: str,
@@ -276,9 +447,33 @@ class JobDispatcher:
         logger.info(
             "Dispatcher: submitted {} items for job {} ({})", len(items), job_id[:8], library_name or "no library"
         )
+        self._ensure_check_pool_running(config)
         self._has_work.set()
         self._ensure_dispatch_running()
         return tracker
+
+    def _resolve_scan_workers(self, config: Config) -> int:
+        """Resolve the checking-pool size from config.
+
+        ``scan_workers`` 0 = Auto → ``max(32, processing workers)``, mirroring
+        the orchestrator's resolution so the default lands at the same value
+        regardless of which path created the dispatcher. An explicit value is
+        floored at 1.
+        """
+        try:
+            cfg = max(0, int(getattr(config, "scan_workers", 0) or 0))
+        except (TypeError, ValueError):
+            cfg = 0
+        generators = max(1, len(self.worker_pool._snapshot_workers()))
+        return cfg if cfg > 0 else max(32, generators)
+
+    def _ensure_check_pool_running(self, config: Config) -> None:
+        """Set the checking in-flight cap once, sized from ``scan_workers``."""
+        if self._check_pool_started:
+            return
+        self._max_checks = self._resolve_scan_workers(config)
+        self._check_pool_started = True
+        logger.info("Dispatcher: checking enabled ({} max in-flight)", self._max_checks)
 
     def cancel_job(self, job_id: str) -> None:
         """Cancel a job's remaining items in the dispatch queue."""
@@ -289,11 +484,12 @@ class JobDispatcher:
             logger.info("Dispatcher: cancelled job {}", job_id[:8])
 
     def shutdown(self) -> None:
-        """Stop the dispatch loop and shut down the worker pool."""
+        """Stop the dispatch loop + checking executor and shut down the pool."""
         self._shutdown = True
-        self._has_work.set()  # Wake the loop so it can exit
+        self._has_work.set()  # Wake the dispatch loop so it can exit
         if self._dispatch_thread and self._dispatch_thread.is_alive():
             self._dispatch_thread.join(timeout=30)
+        # Checking threads are daemon + short-lived — no executor to drain.
         self.worker_pool.shutdown()
 
     # ------------------------------------------------------------------
@@ -325,33 +521,49 @@ class JobDispatcher:
             if self._shutdown:
                 break
 
-            # 1. Handle cancelled jobs
-            self._handle_cancellations()
+            # The whole iteration is guarded: this is the SHARED loop for every
+            # job, so an unhandled exception in any step (a raising callback,
+            # malformed worker state, a transient error) must not kill it —
+            # that would hang every active and future job. Log and continue;
+            # the next tick retries. Per-item failures are already isolated in
+            # the worker/check threads, so this only catches engine-level slips.
+            try:
+                # 1. Handle cancelled jobs
+                self._handle_cancellations()
 
-            # 2. Check worker completions and route to trackers
-            self._check_completions()
+                # 2. Check worker completions and route to trackers
+                self._check_completions()
 
-            # 3. Assign items to available workers BEFORE emitting
-            #    updates so the first status emission reflects the newly
-            #    busy worker instead of stale "idle" data.
-            self._assign_tasks()
+                # 2b. Feed the checking stage: sweep unchecked items (bounded,
+                #     priority-aware). Already-fresh items are recorded here and
+                #     never reach a processing worker; items needing FFmpeg land
+                #     in the per-job item_queue that step 3 drains.
+                self._submit_checks()
 
-            # 4. Emit periodic worker status updates for all active jobs
-            self._emit_worker_updates()
+                # 3. Assign items to available workers BEFORE emitting
+                #    updates so the first status emission reflects the newly
+                #    busy worker instead of stale "idle" data.
+                self._assign_tasks()
 
-            # 5. Emit periodic progress updates for active jobs
-            self._emit_progress_updates()
+                # 4. Emit periodic worker status updates for all active jobs
+                self._emit_worker_updates()
 
-            # 6. Periodic progress logging
-            now = time.time()
-            if now - last_progress_log >= 5.0:
-                self._log_progress()
-                last_progress_log = now
+                # 5. Emit periodic progress updates for active jobs
+                self._emit_progress_updates()
 
-            # 7. Clean up completed trackers and check if loop can idle
-            self._cleanup_done_trackers()
-            if self._all_idle():
-                self._has_work.clear()
+                # 6. Periodic progress logging
+                now = time.time()
+                if now - last_progress_log >= 5.0:
+                    self._log_progress()
+                    last_progress_log = now
+
+                # 7. Clean up completed trackers and check if loop can idle
+                self._cleanup_done_trackers()
+                if self._all_idle():
+                    self._has_work.clear()
+            except Exception:
+                logger.exception("Dispatcher: dispatch loop iteration failed; continuing")
+                time.sleep(0.05)
 
             # Event-based sleep: wake immediately when any worker
             # completes instead of burning a fixed 5 ms.  Falls back
@@ -424,9 +636,13 @@ class JobDispatcher:
         outcome counters changed during the most recent task.
         """
         delta = worker.last_task_outcome_delta()
-        for key, count in delta.items():
-            if count > 0 and key in tracker.outcome_counts:
-                tracker.outcome_counts[key] += count
+        # Under the tracker lock: the checking stage now folds outcome_counts
+        # from concurrent check threads, so this dispatch-loop fold must not
+        # race them (non-atomic ``+=`` would lose increments → hung job).
+        with tracker._counts_lock:
+            for key, count in delta.items():
+                if count > 0 and key in tracker.outcome_counts:
+                    tracker.outcome_counts[key] += count
         # D12 — fold this task's per-server publisher rows into the
         # tracker's per-server aggregate (server_id → status counts) and
         # mirror that fixed-size summary onto the Job. The earlier D7
@@ -442,13 +658,15 @@ class JobDispatcher:
         if worker.last_publishers:
             from .orchestrator import fold_publisher_rows_into_aggregate
 
-            fold_publisher_rows_into_aggregate(tracker.publishers_aggregate, worker.last_publishers)
+            with tracker._counts_lock:
+                fold_publisher_rows_into_aggregate(tracker.publishers_aggregate, worker.last_publishers)
+                publishers_snapshot = list(tracker.publishers_aggregate.values())
             try:
                 from ..web.jobs import get_job_manager
 
                 get_job_manager().set_publishers(
                     tracker.job_id,
-                    list(tracker.publishers_aggregate.values()),
+                    publishers_snapshot,
                 )
             except Exception as exc:
                 logger.debug(
@@ -485,6 +703,10 @@ class JobDispatcher:
                 worker.is_busy = False
                 continue
 
+            # First item of this job to reach a generation worker — flip the
+            # progress label off "Checking existing previews…".
+            tracker.generation_started = True
+
             progress_callback = partial(self.worker_pool._update_worker_progress, worker)
             worker.assign_task(
                 item,
@@ -503,6 +725,146 @@ class JobDispatcher:
                 job_id[:8],
                 worker.display_name,
             )
+
+    def _get_next_check_item(self):
+        """Pick the next item to CHECK, priority-aware, skipping paused jobs.
+
+        Mirrors :meth:`_get_next_item` but drains ``check_queue`` (the
+        pre-FFmpeg checking stage) instead of ``item_queue`` (processing).
+
+        Returns ``(tracker, item)`` or ``None``.
+        """
+        with self._trackers_lock:
+            eligible = [
+                t
+                for t in self._trackers.values()
+                if not t.done_event.is_set() and not t.is_paused() and not t.is_cancelled() and t.check_queue
+            ]
+            eligible.sort(key=lambda t: (t.priority, t.submission_order))
+            for tracker in eligible:
+                item = tracker.check_queue.popleft()
+                return (tracker, item)
+        return None
+
+    def _submit_checks(self) -> None:
+        """Spawn checking tasks as bounded, short-lived daemon threads.
+
+        Called from the dispatch loop. Picks the highest-priority unchecked
+        item and runs it on a fresh daemon thread, up to ``_max_checks`` in
+        flight. Priority-aware (single picker), bounded (in-flight cap),
+        on-demand (one thread per concurrent check; none persist). Daemon so a
+        check stuck on a hung mount can never block process shutdown.
+        """
+        if not self._check_pool_started:
+            return
+        while True:
+            with self._checks_in_flight_lock:
+                if self._checks_in_flight >= self._max_checks:
+                    return
+            picked = self._get_next_check_item()
+            if picked is None:
+                return
+            tracker, item = picked
+            with self._checks_in_flight_lock:
+                self._checks_in_flight += 1
+            threading.Thread(
+                target=self._run_check_and_release,
+                args=(tracker, item),
+                name="job-checker",
+                daemon=True,
+            ).start()
+
+    def _run_check_and_release(self, tracker: JobTracker, item) -> None:
+        """Run one check then release its in-flight slot + wake the loop."""
+        from .worker import unregister_job_thread
+
+        try:
+            self._run_check(tracker, item)
+        finally:
+            # Mirror the processing worker's per-thread cleanup so this
+            # short-lived check thread's ident doesn't linger in the per-job
+            # log-routing map after it exits.
+            unregister_job_thread()
+            self._on_check_done()
+
+    def _on_check_done(self) -> None:
+        with self._checks_in_flight_lock:
+            self._checks_in_flight -= 1
+        # Wake the dispatch loop so it can submit more checks, assign any
+        # newly-queued processing items, and refresh progress/idle state.
+        self._has_work.set()
+        self._worker_done.set()
+
+    def _run_check(self, tracker: JobTracker, item) -> None:
+        """Run one ``check_only`` pass and route the outcome.
+
+        Terminal results (already fresh, no-owners, source-missing,
+        pending-registration) are recorded straight onto the tracker — no
+        GPU/CPU processing worker is claimed. Items needing FFmpeg are
+        appended to the tracker's processing queue. ``check_only=True`` is
+        contractually guaranteed never to run FFmpeg, so generation only
+        happens later under the capped processing workers.
+        """
+        # Re-check cancel/done right before any work so a job cancelled
+        # between pick and run does no I/O.
+        if tracker.is_cancelled() or tracker.done_event.is_set():
+            return
+
+        from ..processing.generator import failure_scope
+        from ..processing.multi_server import MultiServerStatus, process_canonical_path
+        from .worker import register_job_thread, resolve_per_item_pin
+
+        # Register under the job so the per-job log captures the check's
+        # Dispatch / Owners-resolved lines (mirrors the processing worker).
+        register_job_thread(tracker.job_id)
+        per_item_pin = resolve_per_item_pin(tracker.config, item, tracker.registry)
+        # ``failure_scope`` (NOT register_job_thread) is what routes
+        # ``_notify_file_result`` rows + ``record_failure`` to this job — the
+        # processing worker wraps process_canonical_path the same way
+        # (worker.py). Without it, a checked item's Files-panel row + any
+        # failure land in the anonymous "" bucket and are dropped.
+        with failure_scope(tracker.job_id):
+            try:
+                result = process_canonical_path(
+                    canonical_path=item.canonical_path,
+                    registry=tracker.registry,
+                    config=tracker.config,
+                    item_id_by_server=getattr(item, "item_id_by_server", None) or None,
+                    bundle_metadata_by_server=getattr(item, "bundle_metadata_by_server", None) or None,
+                    gpu=None,
+                    gpu_device_path=None,
+                    progress_callback=None,
+                    cancel_check=tracker.cancel_check,
+                    server_id_filter=per_item_pin,
+                    regenerate=bool(getattr(tracker.config, "regenerate_thumbnails", False)),
+                    check_only=True,
+                )
+
+                if result.status is MultiServerStatus.NEEDS_GENERATION:
+                    # Guard: never re-queue into a job cancel() already drained.
+                    if not tracker.is_cancelled() and not tracker.done_event.is_set():
+                        tracker.item_queue.append(item)
+                elif not tracker.done_event.is_set():
+                    tracker.record_check_result(item, result)
+            except Exception as exc:
+                # ANYTHING the check stage raises — the cheap probe itself, an
+                # unexpected/malformed result (e.g. no .status), or recording —
+                # routes the item to a processing worker so the full path's
+                # error handling / CPU fallback / retries apply (the same
+                # conservative fallthrough the orchestrator uses). Crucially
+                # this also means the item always *completes*: stranding it
+                # here (the routing used to sit outside this guard) left
+                # tracker.wait() blocking forever. Guarded so a job cancelled
+                # mid-check doesn't re-populate a queue cancel() already drained.
+                logger.debug(
+                    "Dispatcher: check raised for {!r} ({}: {}); routing to a processing worker.",
+                    item.canonical_path,
+                    type(exc).__name__,
+                    exc,
+                )
+                if not tracker.is_cancelled() and not tracker.done_event.is_set():
+                    tracker.item_queue.append(item)
+                return
 
     def update_job_priority(self, job_id: str, priority: int) -> None:
         """Update the dispatch priority of a running job's tracker.
@@ -585,6 +947,9 @@ class JobDispatcher:
                 in_progress_fraction = self._get_in_progress_fraction(tracker.job_id)
                 effective = tracker.completed + in_progress_fraction
                 percent = (effective / tracker.total_items * 100) if tracker.total_items > 0 else 0
+                with tracker._counts_lock:
+                    outcome_snapshot = dict(tracker.outcome_counts)
+                tracker._push_outcome_snapshot(outcome_snapshot)
                 tracker.progress_callback(
                     tracker.completed,
                     tracker.total_items,
@@ -696,6 +1061,9 @@ class JobDispatcher:
         """Check if there is no work left (no items, no busy workers)."""
         if self.worker_pool.has_busy_workers():
             return False
+        with self._checks_in_flight_lock:
+            if self._checks_in_flight > 0:
+                return False
         with self._trackers_lock:
             for tracker in self._trackers.values():
                 if not tracker.done_event.is_set():

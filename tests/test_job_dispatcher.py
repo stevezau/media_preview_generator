@@ -40,6 +40,20 @@ def _make_gpu_list(n=1):
 
 
 def _fake_process_item(*args, **kwargs):
+    # Post-#243 the dispatcher runs a check_only scan pass first. Report
+    # NEEDS_GENERATION there so the item flows on to a processing worker
+    # (where these tests assert worker/dispatch behaviour); the processing
+    # call then returns a normal generated result.
+    if kwargs.get("check_only"):
+        from media_preview_generator.processing.multi_server import (
+            MultiServerResult,
+            MultiServerStatus,
+        )
+
+        return MultiServerResult(
+            canonical_path=kwargs.get("canonical_path", "") or "",
+            status=MultiServerStatus.NEEDS_GENERATION,
+        )
     time.sleep(0.02)
     return _ms("generated")
 
@@ -88,8 +102,12 @@ class TestJobTracker:
             config=_make_config(),
             registry=MagicMock(),
         )
-        assert len(tracker.item_queue) == 3
+        # Items now enter the checking queue first (item_queue receives only
+        # items the check stage flags as needing FFmpeg).
+        assert len(tracker.check_queue) == 3
+        assert len(tracker.item_queue) == 0
         tracker.cancel()
+        assert len(tracker.check_queue) == 0
         assert len(tracker.item_queue) == 0
         assert tracker.cancelled
         assert tracker.done_event.is_set()

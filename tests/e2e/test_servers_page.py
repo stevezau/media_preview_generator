@@ -99,6 +99,16 @@ class TestAddServerModal:
         expect(servers_page.locator("#step-connect")).to_be_visible(timeout=2000)
         # Emby supports password + api_key auth, so the picker is shown.
         expect(servers_page.locator("#auth-method-section")).to_be_visible(timeout=1000)
+        # Issue #247 regression: configureAuthForType used to call
+        # ``$('#auth-quick').parentElement.classList.toggle('d-none', …)``
+        # which targeted the ENTIRE .btn-group containing all three
+        # auth-method radios. On Emby it hid the whole picker so the
+        # user was stuck on Password with no way to reach API Key.
+        # Pin that the API Key label is reachable for Emby.
+        expect(servers_page.locator('label[for="auth-key"]')).to_be_visible(timeout=1000)
+        expect(servers_page.locator('label[for="auth-pw"]')).to_be_visible(timeout=1000)
+        # And Quick Connect is hidden for Emby (Jellyfin-only feature).
+        expect(servers_page.locator('label[for="auth-quick"]')).to_be_hidden()
 
     def test_picking_jellyfin_shows_auth_method_picker(self, servers_page: Page):
         _force_open_wizard(servers_page)
@@ -116,6 +126,99 @@ class TestAddServerModal:
         expect(servers_page.locator("#auth-fields-token-plex")).to_be_visible(timeout=1000)
         # And the manual-token input is in the DOM.
         expect(servers_page.locator("#plexToken")).to_be_attached()
+
+    def test_plex_discovery_uses_radio_not_checkbox(self, servers_page: Page):
+        """After Plex OAuth, the discovered-servers list must render as
+        radio buttons (single pick), not checkboxes. Pre-fix users could
+        tick multiple, the second tick silently cleared the URL field,
+        and the batch-add path bypassed per-server config-folder setup.
+        The new flow: pick one → URL/name auto-fill → Test connection."""
+        _force_open_wizard(servers_page)
+        servers_page.locator('.server-type-btn[data-type="plex"]').click()
+        expect(servers_page.locator("#step-connect")).to_be_visible(timeout=2000)
+
+        # Inject a mock pair of discovered servers via the existing
+        # renderPlexDiscovered hook; the OAuth round-trip itself is
+        # covered by test_oauth_routes.py.
+        servers_page.evaluate(
+            """() => {
+                // The function is IIFE-private; reach in via the same
+                // event the OAuth success path uses.
+                const list = document.getElementById('plexDiscoveredServers');
+                list.innerHTML = `
+                    <label class="list-group-item">
+                      <input type="radio" name="plexDiscoveredPick" class="plex-server-pick"
+                             data-idx="0" data-uri="http://kraken:32400" data-name="Kraken">
+                      <span>Kraken</span>
+                    </label>
+                    <label class="list-group-item">
+                      <input type="radio" name="plexDiscoveredPick" class="plex-server-pick"
+                             data-idx="1" data-uri="http://calypso:32400" data-name="Calypso 4k">
+                      <span>Calypso 4k</span>
+                    </label>`;
+                document.getElementById('plexDiscoveredList').classList.remove('d-none');
+                // Rewire the change listeners the same way servers.js does.
+                document.querySelectorAll('.plex-server-pick').forEach(el => {
+                    el.addEventListener('change', () => {
+                        if (!el.checked) return;
+                        document.getElementById('serverUrl').value = el.dataset.uri;
+                        if (!document.getElementById('serverName').value)
+                            document.getElementById('serverName').value = el.dataset.name;
+                    });
+                });
+            }"""
+        )
+
+        picks = servers_page.locator(".plex-server-pick")
+        expect(picks).to_have_count(2)
+        # Pin the input type: radio, not checkbox.
+        first_type = picks.nth(0).evaluate("el => el.type")
+        assert first_type == "radio", f"expected radio, got {first_type!r}"
+        # Pin the radio-group semantic: same `name` so the browser
+        # enforces single-selection (the user's "I can check both"
+        # bug is exactly the absence of this attribute).
+        first_name = picks.nth(0).evaluate("el => el.name")
+        assert first_name == "plexDiscoveredPick"
+
+        # Pick Calypso. URL must auto-fill to its URI.
+        picks.nth(1).check()
+        expect(servers_page.locator("#serverUrl")).to_have_value("http://calypso:32400")
+        # Now pick Kraken — single-selection: Calypso deselects, URL
+        # updates. The pre-fix checkbox behaviour would keep both
+        # ticked and CLEAR the URL field. Pinning the new contract.
+        picks.nth(0).check()
+        expect(servers_page.locator("#serverUrl")).to_have_value("http://kraken:32400")
+        assert picks.nth(1).evaluate("el => el.checked") is False, "picking another radio must deselect the prior one"
+
+    def test_add_plex_modal_does_not_have_batch_add_button(self, servers_page: Page):
+        """The old #plexAddSelected button + #plexSelectedCount badge
+        were removed when discovery switched to single-pick radios.
+        Pin that they're gone so a future copy-paste doesn't re-add
+        the confusing multi-select path."""
+        _force_open_wizard(servers_page)
+        servers_page.locator('.server-type-btn[data-type="plex"]').click()
+        expect(servers_page.locator("#step-connect")).to_be_visible(timeout=2000)
+        expect(servers_page.locator("#plexAddSelected")).to_have_count(0)
+        expect(servers_page.locator("#plexSelectedCount")).to_have_count(0)
+
+    def test_add_plex_modal_has_browse_button_next_to_config_folder(self, servers_page: Page):
+        """The Plex config folder field in the Add Server modal must
+        have a Browse button — matching the same field on the Edit
+        modal (#editPlexConfigBrowseBtn) and the setup wizard
+        (#wizardPlexConfigFolderBrowseBtn). Pre-fix the partial
+        ``_server_connection_form.html`` only had the input; users had
+        to type the path blind."""
+        _force_open_wizard(servers_page)
+        servers_page.locator('.server-type-btn[data-type="plex"]').click()
+        expect(servers_page.locator("#step-connect")).to_be_visible(timeout=2000)
+        expect(servers_page.locator("#auth-fields-token-plex")).to_be_visible(timeout=1000)
+        # The browse button must exist in the DOM alongside the input.
+        expect(servers_page.locator("#plexConfigFolder")).to_be_visible()
+        expect(servers_page.locator("#plexConfigFolderBrowseBtn")).to_be_visible()
+        # Clicking it must open the folder picker modal (the same
+        # #folderPickerModal that the Edit / wizard browse buttons use).
+        servers_page.locator("#plexConfigFolderBrowseBtn").click()
+        expect(servers_page.locator("#folderPickerModal")).to_be_visible(timeout=2000)
 
 
 @pytest.mark.e2e

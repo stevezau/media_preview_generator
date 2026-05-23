@@ -15,7 +15,9 @@ import pytest
 
 from media_preview_generator.web.jobs import (
     LOG_RETENTION_CLEARED_MESSAGE,
+    Job,
     JobManager,
+    JobProgress,
     JobStatus,
 )
 
@@ -36,6 +38,24 @@ def _reset_job_manager():
 def config_dir(tmp_path):
     """Temporary config directory for job logs."""
     return str(tmp_path / "config")
+
+
+class TestJobProgressSchemaTolerance:
+    """A job persisted under a different progress schema must still load.
+    Regression: removing the ``reused_outputs`` field crash-looped app boot
+    because rows written by the prior image carried it and ``JobProgress(**data)``
+    raised TypeError on the stale kwarg — taking down the whole JobManager."""
+
+    def test_unknown_progress_keys_are_dropped_not_raised(self):
+        job = Job(
+            id="j1",
+            library_name="X",
+            progress={"percent": 50.0, "reused_outputs": 9, "eta": "legacy"},
+        )
+        assert isinstance(job.progress, JobProgress)
+        assert job.progress.percent == 50.0
+        assert not hasattr(job.progress, "reused_outputs")
+        assert not hasattr(job.progress, "eta")
 
 
 class TestJobLogPersistence:
@@ -1044,3 +1064,24 @@ class TestRetryLibraryNameComputation:
             self._derive("Retry: Chelsea vs Nottingham Forest", ["/data/sports/CvN.mkv"])
             == "Retry: Chelsea vs Nottingham Forest"
         ), "Stacked retry must strip the existing 'Retry: ' prefix before re-prepending"
+
+
+class TestSetJobOutcome:
+    """set_job_outcome mirrors the live per-file outcome breakdown onto progress,
+    and a later update replaces it (the dispatcher pushes the full snapshot each
+    progress tick)."""
+
+    def test_outcome_set_and_updated(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test")
+
+        jm.set_job_outcome(job.id, {"generated": 5})
+        assert job.progress.outcome == {"generated": 5}
+
+        jm.set_job_outcome(job.id, {"generated": 7, "skipped_file_not_found": 1})
+        assert job.progress.outcome == {"generated": 7, "skipped_file_not_found": 1}
+
+    def test_outcome_defaults_to_none(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test")
+        assert job.progress.outcome is None

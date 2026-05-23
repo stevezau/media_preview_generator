@@ -158,6 +158,34 @@ class TestJellyfinDeletedPaths:
         assert req.call_count == 2  # B was attempted despite A's failure
 
 
+class TestDeletedPathNotificationDedup:
+    """Regression: a webhook batch forwards ONE job-wide deletedFiles[] list to
+    EVERY imported item, so the same deleted path used to be re-announced once
+    per file — an O(files × deletions) POST storm (observed live: 987 deletions
+    × 988 files → 350k+ POSTs). The adapter is rebuilt per job-run, so each path
+    must be announced at most once across all of a job's items."""
+
+    def test_same_paths_announced_once_across_repeated_calls(self):
+        jelly = _jelly()
+        with patch.object(JellyfinServer, "_request", return_value=_ok()) as req:
+            # Simulate 3 imported items each forwarding the same job-wide list.
+            for _ in range(3):
+                jelly.trigger_refresh(item_id=None, remote_path=None, deleted_paths=["/x/A.mkv", "/x/B.mkv"])
+        # 2 unique paths → 2 POSTs total, NOT 6.
+        assert req.call_count == 2
+        posted = sorted(c.kwargs["json_body"]["Updates"][0]["Path"] for c in req.call_args_list)
+        assert posted == ["/x/A.mkv", "/x/B.mkv"]
+
+    def test_dedup_is_per_adapter_instance_not_global(self):
+        """The guard must be job-scoped, not a global suppression that would
+        stop a *later* job from re-announcing the same path. Two fresh adapters
+        (two job-runs) each announce once → 2 total, not 1."""
+        with patch.object(EmbyServer, "_request", return_value=_ok()) as req:
+            _emby().trigger_refresh(item_id=None, remote_path=None, deleted_paths=["/x/A.mkv"])
+            _emby().trigger_refresh(item_id=None, remote_path=None, deleted_paths=["/x/A.mkv"])
+        assert req.call_count == 2
+
+
 # ---------------------------------------------------------------------------
 # Emby
 # ---------------------------------------------------------------------------

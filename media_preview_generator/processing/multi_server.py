@@ -46,6 +46,7 @@ from ..output.journal import clear_meta, outputs_fresh_for_source, write_meta
 from ..servers.base import LibraryNotYetIndexedError, MediaServer, ServerConfig, ServerType
 from .frame_cache import get_frame_cache
 from .generator import (
+    CancellationError,
     CodecNotSupportedError,
     _cleanup_temp_directory,
     generate_images,
@@ -77,6 +78,12 @@ class MultiServerStatus(str, Enum):
     NO_OWNERS = "no_owners"  # no enabled library covers the path
     FAILED = "failed"  # generation or every publisher failed
     NO_FRAMES = "no_frames"  # FFmpeg produced 0 frames (unrecoverable)
+    # Returned ONLY by check_only=True calls: every pre-FFmpeg step ran and
+    # the item genuinely needs frame extraction. Lets the orchestrator's
+    # high-concurrency scan phase decide whether to spend a generation permit
+    # without ever crossing the FFmpeg boundary itself. A real (check_only=
+    # False) call never returns this — it would just generate.
+    NEEDS_GENERATION = "needs_generation"
 
 
 @dataclass
@@ -778,7 +785,37 @@ def _try_reuse_existing_bif(
     return 0
 
 
-def _probe_sibling_mounts(canonical_path: str, registry) -> str | None:
+def _missing_on_disk_message(canonical_path: str, sibling_candidates: list[str]) -> str:
+    """Build the operator-facing "missing on disk" warning.
+
+    Pure string builder so the wording — including the list of sibling
+    mounts actually probed and the mount-problem hint — is unit-testable
+    without the full ``process_canonical_path`` harness. When sibling
+    mounts were probed and none held the file, that's the signal the
+    media volume may not be mounted in this container rather than a path
+    typo (see project_stale_bindmount_missing_on_disk).
+    """
+    base = (
+        f"Source video file is missing on disk: {canonical_path}. "
+        "This often happens when a webhook fires before the file finishes copying, or "
+        "when the file was moved/deleted between scan and dispatch."
+    )
+    if sibling_candidates:
+        base += (
+            f" Also checked {len(sibling_candidates)} sibling mount(s) — none held the file: "
+            f"{', '.join(sibling_candidates)}. If the file is clearly present on the host, the "
+            "media volume may not be mounted inside this container (stale bind-mount / unmounted NFS)."
+        )
+    else:
+        base += (
+            " If the file is supposed to be there, check that the media volume is mounted inside "
+            "this container and the path mapping under Settings → Media Servers."
+        )
+    base += " The rest of the queue is unaffected."
+    return base
+
+
+def _probe_sibling_mounts(canonical_path: str, registry) -> tuple[str | None, list[str]]:
     """Find an existing copy of ``canonical_path`` on a SIBLING local mount.
 
     Plex's indexed path can drift from disk reality when a post-import
@@ -792,13 +829,17 @@ def _probe_sibling_mounts(canonical_path: str, registry) -> str | None:
     trailing path under each sibling. Return the first one whose file
     actually exists on disk, or ``None`` if no sibling holds it.
 
-    Returns ``None`` for the single-mount case (no siblings to probe)
-    or when the canonical_path doesn't sit under any known prefix.
+    Returns ``(rebound_path, tried)`` where ``rebound_path`` is the live
+    sibling location (or ``None``) and ``tried`` is the ordered list of
+    sibling paths actually stat'd — the caller folds that into the
+    "missing on disk" warning so the operator can see every disk was
+    probed (the stale-bind-mount signature). Both are empty/``None`` for
+    the single-mount case or when the path sits under no known prefix.
     """
     try:
         configs = list(registry.configs())
     except Exception:
-        return None
+        return None, []
 
     # Collect every distinct local_prefix across all enabled servers
     # that has a non-empty value. Sort longest-first so a match against
@@ -815,7 +856,7 @@ def _probe_sibling_mounts(canonical_path: str, registry) -> str | None:
             if local:
                 prefixes.add(local)
     if len(prefixes) < 2:
-        return None  # No siblings to probe.
+        return None, []  # No siblings to probe.
 
     sorted_prefixes = sorted(prefixes, key=len, reverse=True)
     matched_prefix: str | None = None
@@ -826,18 +867,27 @@ def _probe_sibling_mounts(canonical_path: str, registry) -> str | None:
             suffix = canonical_path[len(p) :]
             break
     if matched_prefix is None or suffix is None:
-        return None
+        return None, []
 
+    tried: list[str] = []
     for sibling in sorted_prefixes:
         if sibling == matched_prefix:
             continue
         candidate = sibling + suffix
+        tried.append(candidate)
         try:
             if os.path.isfile(candidate):
-                return candidate
+                logger.debug("Sibling-mount probe: {} found at sibling mount {}", canonical_path, candidate)
+                return candidate, tried
         except OSError:
             continue
-    return None
+    logger.debug(
+        "Sibling-mount probe for {}: none of the {} sibling mount(s) held the file ({})",
+        canonical_path,
+        len(tried),
+        ", ".join(tried),
+    )
+    return None, tried
 
 
 def _summarise_results(results: list[PublisherResult], status: MultiServerStatus) -> str:
@@ -1156,6 +1206,7 @@ def process_canonical_path(
     display_name: str | None = None,
     source: str | None = None,
     originating_job_id: str | None = None,
+    check_only: bool = False,
 ) -> MultiServerResult:
     """Process ``canonical_path`` and publish to every owning server.
 
@@ -1173,6 +1224,20 @@ def process_canonical_path(
             knows the id (typical for Plex / Emby / Jellyfin webhooks).
         regenerate: When True, publish even if all output paths already
             exist on disk.
+        check_only: When True, run every pre-FFmpeg step (publisher
+            resolution, source-missing / sibling-mount-rebind probe, the
+            all-fresh short-circuit and its ``trigger_refresh`` +
+            ``cleanup_orphaned_outputs`` side effects, the regenerate
+            meta-clear) exactly as a normal call, then return
+            :attr:`MultiServerStatus.NEEDS_GENERATION` at the FFmpeg
+            boundary instead of extracting frames. Terminal outcomes
+            (``SKIPPED``, ``PUBLISHED`` pending-registration, ``NO_OWNERS``,
+            ``SKIPPED_FILE_NOT_FOUND``) return exactly as they do without
+            this flag — they never reach the FFmpeg boundary. The full-scan
+            orchestrator uses this so its high-concurrency scan phase can
+            decide whether to spend a (capped) generation permit before any
+            FFmpeg can run. Default callers leave this False and never
+            observe ``NEEDS_GENERATION``.
 
     Returns:
         :class:`MultiServerResult` aggregating per-publisher outcomes.
@@ -1244,7 +1309,7 @@ def process_canonical_path(
         # then try the same trailing path under each SIBLING local_prefix.
         # First match wins. If none match, fall through to the original
         # SKIPPED_FILE_NOT_FOUND path (still retryable).
-        rebound_path = _probe_sibling_mounts(canonical_path, registry)
+        rebound_path, sibling_candidates = _probe_sibling_mounts(canonical_path, registry)
         if rebound_path:
             logger.info(
                 "Source missing at canonical path {} — found at sibling mount {}. "
@@ -1305,14 +1370,7 @@ def process_canonical_path(
                 ", ".join(f"{srv.name}/{adp.name}" for srv, adp, _ in publishers),
             )
         else:
-            logger.warning(
-                "Source video file is missing on disk: {}. "
-                "This often happens when a webhook fires before the file finishes copying, or "
-                "when the file was moved/deleted between scan and dispatch. "
-                "If the file is supposed to be there, check your media mount and the path mapping "
-                "under Settings → Media Servers. The rest of the queue is unaffected.",
-                canonical_path,
-            )
+            logger.warning(_missing_on_disk_message(canonical_path, sibling_candidates))
             # SKIPPED_FILE_NOT_FOUND (not FAILED) so the webhook-retry path
             # in job_runner picks it up and reschedules — webhooks fire at
             # download-START in many *arrs, so a "file missing" right now
@@ -1375,7 +1433,13 @@ def process_canonical_path(
             pass
 
     if not regenerate:
-        _phase("Checking existing previews…")
+        # "Checking existing previews…" belongs to the decoupled checking
+        # stage (check_only=True, run on its own threads). When a generation
+        # worker runs this same freshness probe before FFmpeg (check_only=
+        # False), surfacing "Checking…" on the worker card reads as the old
+        # "GPU worker stuck checking" bug — the worker is preparing to
+        # generate, not sweeping the library. Label it accordingly.
+        _phase("Checking existing previews…" if check_only else "Preparing to generate…")
         all_fresh = True
         for server, adapter, item_id_hint in publishers:
             try:
@@ -1511,6 +1575,22 @@ def process_canonical_path(
             except Exception:
                 continue
 
+    # check_only boundary: everything above here is the cheap pre-FFmpeg
+    # work (resolution, source-missing/sibling-rebind probe, all-fresh
+    # short-circuit + its cleanup/refresh side effects, regenerate
+    # meta-clear). All terminal outcomes (SKIPPED, PUBLISHED pending,
+    # NO_OWNERS, SKIPPED_FILE_NOT_FOUND) have already returned. Reaching
+    # here means the item genuinely needs frame extraction — so a
+    # check_only caller stops now and reports NEEDS_GENERATION rather than
+    # crossing into the heavy FFmpeg path below. This is the ONLY place
+    # NEEDS_GENERATION is produced.
+    if check_only:
+        return MultiServerResult(
+            canonical_path=canonical_path,
+            status=MultiServerStatus.NEEDS_GENERATION,
+            message="Outputs missing or stale; FFmpeg required",
+        )
+
     # Frame cache: when enabled, the second+ webhook for the same file
     # within the cache TTL skips FFmpeg entirely. Disabled callers
     # (regenerate=True, or callers that explicitly opt out) write into
@@ -1639,6 +1719,13 @@ def process_canonical_path(
                     "No action needed; this is a normal fallback for codecs your GPU doesn't support.",
                     canonical_path,
                 )
+                raise
+            except CancellationError:
+                # Cancellation (job cancelled / container restart mid-FFmpeg) is
+                # NOT a frame-extraction failure — don't log the scary "corrupt
+                # video file" traceback or mark it FAILED here. Re-raise so the
+                # worker's CancellationError handler records it cleanly.
+                logger.info("Frame extraction cancelled for {} — stopping this file.", canonical_path)
                 raise
             except Exception as exc:
                 logger.exception(

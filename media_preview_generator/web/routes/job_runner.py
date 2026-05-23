@@ -62,7 +62,14 @@ def _classify_job_completion(
     nothing_resolved = total_paths > 0 and resolved_count == 0 and not spawned_retry_id
     retry_exhausted = is_retry and bool(retry_paths) and not spawned_retry_id
 
-    if all_items_failed or all_not_found or nothing_resolved or retry_exhausted:
+    # A retry chain that exhausted is only a *total* failure (red) when nothing
+    # succeeded. If it still produced previews (success_total > 0), it's a
+    # partial failure (amber) — the same rule every other gate already follows
+    # (all_items_failed requires success_total == 0). Without the guard, a retry
+    # job that generated N previews but couldn't register a few genuinely-
+    # missing files showed red "Failed" (job 67f7bf2a: generated 11, 0 hard
+    # failures, 26 unregistered missing files → was red, should be amber).
+    if all_items_failed or all_not_found or nothing_resolved or (retry_exhausted and success_total == 0):
         return "error"
     return "warning"
 
@@ -168,6 +175,20 @@ def _format_eta(seconds: float) -> str:
         return f"{int(seconds // 3600)}h {int((seconds % 3600) // 60)}m"
 
 
+def _join_error_clauses(parts: list[str]) -> str:
+    """Join independent failure clauses into one readable summary.
+
+    Each part may be a short clause (``"3 path(s) sent for retry"``) or a
+    full multi-sentence message (``"... no previews were generated. Check the
+    per-item logs above."``). A fixed ``", "`` join collided with parts that
+    already ended in ``.``, producing ``"...logs above., Could not find ..."``.
+    We strip any trailing sentence punctuation from each part and separate
+    them with ``". "`` so the result reads as clean sentences.
+    """
+    cleaned = [p.strip().rstrip(".!?").strip() for p in parts if p and p.strip()]
+    return ". ".join(c for c in cleaned if c)
+
+
 def _build_selected_gpus(settings) -> list:
     """Build the selected_gpus list from gpu_config and GPU cache.
 
@@ -239,6 +260,31 @@ def _is_force_fire_now_set(job_manager, job_id: str) -> bool:
     if job is None:
         return False
     return bool((job.config or {}).get("force_fire_now"))
+
+
+def resume_running_and_drain_pending() -> None:
+    """Resume paused running jobs and start every PENDING job, in priority order.
+
+    The shared body for ALL resume paths — manual resume
+    (``api_jobs.resume_processing``), worker-availability auto-resume
+    (``api_settings._auto_resume_if_needed``) and quiet-hours window end
+    (``scheduler._quiet_hours_recompute_and_apply``). Factored into one place
+    because a path that flips ``processing_paused`` False but forgets to start
+    the PENDING jobs strands them forever — exactly what happened to jobs
+    revived PENDING-while-paused at boot once pause began surviving restarts.
+
+    Callers own the ``processing_paused`` flag flip + the
+    ``processing_paused_changed`` emit (their logging/semantics differ); this
+    only performs the running-resume + pending-start fan-out.
+    """
+    from ..jobs import get_job_manager
+
+    jm = get_job_manager()
+    for running in jm.get_running_jobs():
+        jm.request_resume(running.id)
+    pending = sorted(jm.get_pending_jobs(), key=lambda j: (j.priority, j.created_at or ""))
+    for pj in pending:
+        _start_job_async(pj.id, pj.config or {})
 
 
 def _start_job_async(job_id: str, config_overrides: dict | None = None):
@@ -687,7 +733,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     _slot_held = True
                     # Flip to RUNNING the moment the slot is acquired —
                     # library enumeration / webhook resolution IS
-                    # active work (often 30-120s of real API calls) and
+                    # active work (real API calls that can take a while) and
                     # the user should see that reflected in the status.
                     # PENDING is now reserved for jobs truly idle
                     # (queued at the gate, waiting retry backoff, or
@@ -1503,9 +1549,11 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
 
                         if error_parts:
                             if total_paths > 0 and resolved_count < total_paths:
-                                error_msg = f"{resolved_count}/{total_paths} processed; " + ", ".join(error_parts)
+                                error_msg = f"{resolved_count}/{total_paths} processed; " + _join_error_clauses(
+                                    error_parts
+                                )
                             else:
-                                error_msg = "; ".join(error_parts)
+                                error_msg = _join_error_clauses(error_parts)
                             job_manager.add_log(job_id, f"WARNING - {error_msg}")
                             classification = _classify_job_completion(
                                 failures=failures,

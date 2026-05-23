@@ -314,9 +314,15 @@ class Job:
         if not self.created_at:
             self.created_at = datetime.now(timezone.utc).isoformat()
         if isinstance(self.progress, dict):
-            # Strip legacy 'eta' so persisted jobs.json loads without error
-            data = dict(self.progress)
-            data.pop("eta", None)
+            # Filter to JobProgress's current fields so a job persisted under a
+            # different schema still loads instead of raising TypeError on an
+            # unexpected kwarg. This covers both the legacy 'eta' and any field
+            # since removed (e.g. 'reused_outputs', dropped when the per-server
+            # frame breakdown replaced the job-level reuse total) — without this,
+            # a single stale row crashes JobManager init and the whole app fails
+            # to boot.
+            valid = {f.name for f in fields(JobProgress)}
+            data = {k: v for k, v in self.progress.items() if k in valid}
             self.progress = JobProgress(**data)
         if isinstance(self.status, str):
             self.status = JobStatus(self.status)
@@ -1662,15 +1668,22 @@ class JobManager:
                 if retry_wait_total is not _UNSET:
                     job.progress.retry_wait_total = retry_wait_total
 
-                # Emit progress event (don't save to disk on every update)
+                # Emit progress event (don't save to disk on every update).
+                # Include the per-server publisher aggregate so the Job UI's
+                # per-server breakdown refreshes live on every progress tick
+                # instead of only on the slower job_updated/full-reload cycle.
                 self._emit_event(
                     "job_progress",
-                    {"job_id": job_id, "progress": job.progress.to_dict()},
+                    {
+                        "job_id": job_id,
+                        "progress": job.progress.to_dict(),
+                        "publishers": list(job.publishers or []),
+                    },
                 )
             return job
 
     def set_job_outcome(self, job_id: str, outcome: dict[str, int]) -> Optional["Job"]:
-        """Store the processing outcome breakdown on a job.
+        """Store the per-file processing outcome breakdown on a job.
 
         Args:
             job_id: Job identifier.
