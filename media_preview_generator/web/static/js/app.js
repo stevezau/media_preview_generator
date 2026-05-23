@@ -1583,7 +1583,13 @@ function _renderPublishersBlock(job) {
     // History sections. Each entry: {server_id, server_name, server_type,
     // counts: {published: N, failed: M, ...}}.
     const rows = (job && Array.isArray(job.publishers)) ? job.publishers : [];
-    if (!rows.length) return '';
+    // File-level issues (not found on disk, no media parts, …) aren't
+    // attributable to a single server, but they belong WITH the per-server
+    // breakdown — rendered as a note inside this same block, directly under
+    // the server rows, rather than dangling at the bottom of the card.
+    const outcome = (job && job.progress && job.progress.outcome) || (job && job.outcome) || null;
+    const fileIssues = _renderJobFileIssues(outcome);
+    if (!rows.length && !fileIssues) return '';
     const lines = rows.map(function (entry) {
         const stype = (entry.server_type || '').toLowerCase();
         const logo = _vendorLogo(stype, 12) || '';
@@ -1655,7 +1661,11 @@ function _renderPublishersBlock(job) {
         tipAttr = ' title="Aggregated across all ' + totalRuns + ' run'
             + (totalRuns === 1 ? '' : 's') + ' of this chain"';
     }
-    return `<div class="mt-3 pt-2 border-top"><strong class="me-2"${tipAttr}>Servers</strong>${lines}</div>`;
+    const header = rows.length ? `<strong class="me-2"${tipAttr}>Servers</strong>${lines}` : '';
+    const noteLine = fileIssues
+        ? `<div class="small text-muted mt-1"><i class="bi bi-exclamation-triangle me-1"></i>${fileIssues}</div>`
+        : '';
+    return `<div class="mt-3 pt-2 border-top">${header}${noteLine}</div>`;
 }
 
 // Pick the retry-chain info-modal template matching the Job's server
@@ -2187,8 +2197,7 @@ function updateActiveJobs(runningJobs) {
             <div class="d-flex justify-content-between mt-1 small text-muted">
                 <span id="activeJobItem-${jid}">${escapeHtml(job.progress.current_item) || 'Starting...'}</span>
                 <span id="activeJobItems-${jid}">Items: ${job.progress.processed_items || 0} / ${job.progress.total_items || '?'}</span>
-            </div>
-            <div class="small text-muted mt-1" id="activeJobOutcome-${jid}">${_renderJobFileIssues(job.progress.outcome)}</div>`;
+            </div>`;
         }
 
         html += `
@@ -2273,20 +2282,15 @@ function updateJobProgress(jobId, progress, publishers) {
     }
 
     // Live per-server breakdown — re-render the Generated/Reused/Already-Existed
-    // badges from the publisher aggregate carried on this event so they track
-    // the counter instead of only refreshing on the slower job_updated cycle.
+    // badges plus the file-level note (not found on disk, …) from the publisher
+    // aggregate + outcome carried on this event, so the whole block tracks the
+    // counter instead of only refreshing on the slower job_updated cycle. The
+    // note renders inside the block (under the server rows), not at card bottom.
     if (publishers !== undefined) {
         const pubEl = document.getElementById('activeJobPublishers-' + jobId);
         if (pubEl) {
-            pubEl.innerHTML = _renderPublishersBlock({ publishers: publishers });
+            pubEl.innerHTML = _renderPublishersBlock({ publishers: publishers, outcome: progress.outcome });
         }
-    }
-
-    // File-level issue footnote (not found on disk, no media parts, …) — these
-    // aren't attributable to a server, so they live below the per-server block.
-    const outcomeEl = document.getElementById('activeJobOutcome-' + jobId);
-    if (outcomeEl) {
-        outcomeEl.innerHTML = _renderJobFileIssues(progress.outcome);
     }
 
     const row = document.getElementById(`job-row-${jobId}`);
