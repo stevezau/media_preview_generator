@@ -1565,14 +1565,13 @@ function _renderJobFileIssues(outcome) {
     if (!outcome || typeof outcome !== 'object') return '';
     const keys = ['skipped_file_not_found', 'no_media_parts', 'skipped_excluded',
                   'skipped_invalid_hash', 'skipped_not_indexed', 'failed'];
-    const parts = [];
-    keys.forEach(function (k) {
+    return keys.map(function (k) {
         const n = outcome[k];
-        if (n && n > 0) {
-            parts.push(`${escapeHtmlText(_statusMeta(k).label)}: ${n.toLocaleString()}`);
-        }
-    });
-    return parts.join(' · ');
+        if (!n || n <= 0) return '';
+        const meta = _statusMeta(k);
+        const tip = meta.tip ? ` title="${escapeHtmlAttr(meta.tip)}"` : '';
+        return `<span class="badge ${meta.cls}"${tip}>${escapeHtmlText(meta.label)} × ${n.toLocaleString()}</span>`;
+    }).filter(Boolean).join(' ');
 }
 
 function _renderPublishersBlock(job) {
@@ -1662,8 +1661,12 @@ function _renderPublishersBlock(job) {
             + (totalRuns === 1 ? '' : 's') + ' of this chain"';
     }
     const header = rows.length ? `<strong class="me-2"${tipAttr}>Servers</strong>${lines}` : '';
+    // File-level issues laid out like a server row — a "Files" pill, arrow,
+    // then the same badge chips — so they read as part of the breakdown.
     const noteLine = fileIssues
-        ? `<div class="small text-muted mt-1"><i class="bi bi-exclamation-triangle me-1"></i>${fileIssues}</div>`
+        ? `<div class="mt-1 d-flex flex-wrap align-items-center gap-2">` +
+          `<span class="badge bg-light text-dark border"><i class="bi bi-exclamation-triangle me-1"></i>Files</span>` +
+          `<span class="text-muted small" aria-hidden="true">→</span>${fileIssues}</div>`
         : '';
     return `<div class="mt-3 pt-2 border-top">${header}${noteLine}</div>`;
 }
