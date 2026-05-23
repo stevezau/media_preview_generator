@@ -6,6 +6,7 @@ pipeline interacts with servers exclusively through this interface; vendor
 specifics live in concrete subclasses under this package.
 """
 
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -204,6 +205,30 @@ class MediaServer(ABC):
     def __init__(self, server_id: str, name: str) -> None:
         self.id = server_id
         self.name = name
+        # At-most-once-per-job guard for deleted-path notifications. A webhook
+        # batch (Sonarr/Radarr) carries one job-wide deletedFiles[] list that is
+        # forwarded to *every* imported item, so without this each deleted path
+        # would be re-announced to the server once per file — an O(files ×
+        # deletions) HTTP storm (observed: 987 deletions × 988 files → 350k+
+        # POSTs on a single job). The registry/adapters are rebuilt per job-run,
+        # so this set is naturally job-scoped and GC'd with the job.
+        self._notified_deleted_paths: set[str] = set()
+        self._notified_deleted_lock = threading.Lock()
+
+    def _claim_deleted_notification(self, server_view_path: str) -> bool:
+        """Claim a deleted-path notification for this job-run.
+
+        Returns True if this is the first claim (caller should notify the
+        server), False if the path was already announced this run (skip the
+        redundant POST). Claim-before-fire: a later duplicate is suppressed even
+        if the first POST is still in flight or failed — the storm is the bug,
+        and the server's own filesystem scan is the fallback for a missed nudge.
+        """
+        with self._notified_deleted_lock:
+            if server_view_path in self._notified_deleted_paths:
+                return False
+            self._notified_deleted_paths.add(server_view_path)
+            return True
 
     @property
     @abstractmethod
@@ -400,6 +425,12 @@ class MediaServer(ABC):
                             )
                             continue
                     except OSError:
+                        continue
+                    # Skip if this exact path was already announced this job-run
+                    # — the job-wide deletedFiles[] list is forwarded to every
+                    # imported item, so without this each deletion fires once
+                    # per file (the O(files × deletions) notify storm).
+                    if not self._claim_deleted_notification(candidate):
                         continue
                     try:
                         self._trigger_path_deleted(candidate)
