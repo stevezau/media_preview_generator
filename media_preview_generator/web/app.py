@@ -450,11 +450,13 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
             logger.info("Auto-requeue on restart is disabled")
             return
 
-        # A pause from the previous session should not block requeued
-        # jobs — the restart itself signals intent to resume work.
-        if settings.processing_paused:
-            settings.processing_paused = False
-            logger.info("Cleared processing_paused on startup — pausing does not survive restarts")
+        # A pause from the previous session is honored across the restart —
+        # an explicit pause is intent that outlives a container bounce (the
+        # operator may have paused to stop GPU load, then restarted for an
+        # unrelated reason). Interrupted jobs are still revived, but the start
+        # path leaves them PENDING while paused (job_runner.py); resuming
+        # processing starts every pending job (api_jobs.resume_processing).
+        paused = settings.processing_paused
 
         max_age = int(settings.get("requeue_max_age_minutes", 720))
         job_manager = get_job_manager()
@@ -468,7 +470,13 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
         for job in revived:
             _start_job_async(job.id, job.config)
 
-        logger.info("Revived {} interrupted job(s) on startup", len(revived))
+        if paused:
+            logger.info(
+                "Revived {} interrupted job(s) on startup — held PENDING (processing is paused)",
+                len(revived),
+            )
+        else:
+            logger.info("Revived {} interrupted job(s) on startup", len(revived))
     except Exception as e:
         logger.warning(
             "Could not resume jobs that were running when the app last shut down ({}: {}). "

@@ -441,10 +441,10 @@ class TestRequeueInterruptedOnStartup:
     @patch("media_preview_generator.web.routes._start_job_async")
     @patch("media_preview_generator.web.app.get_job_manager")
     @patch("media_preview_generator.web.settings_manager.get_settings_manager")
-    def test_processing_paused_cleared_on_startup(
-        self, mock_get_settings_manager, mock_get_job_manager, mock_start_job
-    ):
-        """processing_paused is cleared on restart so requeued jobs can start."""
+    def test_processing_paused_survives_startup(self, mock_get_settings_manager, mock_get_job_manager, mock_start_job):
+        """An explicit pause outlives a restart: the flag is left set and the
+        revived job is still routed through the start path (which holds it
+        PENDING while paused — see job_runner), not cleared on boot."""
         sm = mock_get_settings_manager.return_value
         sm.get.side_effect = lambda key, default=None: {
             "auto_requeue_on_restart": True,
@@ -457,7 +457,7 @@ class TestRequeueInterruptedOnStartup:
 
         _requeue_interrupted_on_startup("/tmp/config")
 
-        assert sm.processing_paused is False
+        assert sm.processing_paused is True, "an explicit pause must survive the restart"
         mock_start_job.assert_called_once_with("job-456", {})
 
 

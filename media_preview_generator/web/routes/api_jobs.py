@@ -966,20 +966,14 @@ def pause_processing():
 def resume_processing():
     """Clear global processing pause and resume all running jobs."""
     from ..settings_manager import get_settings_manager
+    from .job_runner import resume_running_and_drain_pending
 
     sm = get_settings_manager()
     job_manager = get_job_manager()
     sm.processing_paused = False
-    for running in job_manager.get_running_jobs():
-        job_manager.request_resume(running.id)
     job_manager.emit_processing_paused_changed(False)
     logger.info("Global processing resumed")
-    pending = sorted(
-        job_manager.get_pending_jobs(),
-        key=lambda j: (j.priority, j.created_at or ""),
-    )
-    for pj in pending:
-        _start_job_async(pj.id, pj.config or {})
+    resume_running_and_drain_pending()
     return jsonify({"paused": False})
 
 
@@ -1517,11 +1511,20 @@ def reprocess_job(job_id):
 
     sm = get_settings_manager()
     if sm.processing_paused:
+        # Reprocess clears the global pause (the user's explicit intent to run).
+        # Clearing it must fully resume the queue — draining every PENDING job,
+        # not just the new one — or jobs revived PENDING-while-paused at boot
+        # (pause now survives restarts) would strand. resume_running_and_drain_
+        # pending starts the new job too (it's PENDING; _start_job_async is
+        # idempotent), so no double-start.
+        from .job_runner import resume_running_and_drain_pending
+
         sm.processing_paused = False
         job_manager.emit_processing_paused_changed(False)
         logger.info("Processing auto-resumed — user requested reprocess")
-
-    _start_job_async(new_job.id, new_job.config)
+        resume_running_and_drain_pending()
+    else:
+        _start_job_async(new_job.id, new_job.config)
     return jsonify(new_job.to_dict()), 201
 
 

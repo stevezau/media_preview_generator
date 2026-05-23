@@ -3316,6 +3316,31 @@ class TestReprocessJob:
         # And the non-retry config (webhook_paths) is preserved.
         assert new_job.config.get("webhook_paths") == ["/data/movie.mkv"]
 
+    def test_reprocess_while_paused_resumes_and_drains_pending(self, client):
+        """Reprocess clears the global pause (user's intent to run). Since pause
+        now survives restarts, clearing it must drain the whole PENDING backlog
+        (boot-revived jobs), not only the reprocessed one — so reprocess routes
+        through the shared resume helper, not a bare single-job start."""
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        with patch("media_preview_generator.web.routes.api_jobs._start_job_async"):
+            create_resp = client.post("/api/jobs", headers=_api_headers(), json={"library_name": "Movies"})
+        job_id = create_resp.get_json()["id"]
+        jm = get_job_manager()
+        jm.complete_job(job_id)
+
+        sm = get_settings_manager()
+        sm.processing_paused = True
+        try:
+            with patch("media_preview_generator.web.routes.job_runner.resume_running_and_drain_pending") as mock_drain:
+                resp = client.post(f"/api/jobs/{job_id}/reprocess", headers=_api_headers())
+            assert resp.status_code == 201
+            assert sm.processing_paused is False, "reprocess clears the global pause"
+            mock_drain.assert_called_once_with()
+        finally:
+            sm.processing_paused = False
+
     def test_reprocess_of_chain_head_completes_normally(self, client):
         """Regression for issue #242: reprocess of a chain head must not hang.
 

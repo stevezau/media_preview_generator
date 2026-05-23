@@ -262,6 +262,31 @@ def _is_force_fire_now_set(job_manager, job_id: str) -> bool:
     return bool((job.config or {}).get("force_fire_now"))
 
 
+def resume_running_and_drain_pending() -> None:
+    """Resume paused running jobs and start every PENDING job, in priority order.
+
+    The shared body for ALL resume paths — manual resume
+    (``api_jobs.resume_processing``), worker-availability auto-resume
+    (``api_settings._auto_resume_if_needed``) and quiet-hours window end
+    (``scheduler._quiet_hours_recompute_and_apply``). Factored into one place
+    because a path that flips ``processing_paused`` False but forgets to start
+    the PENDING jobs strands them forever — exactly what happened to jobs
+    revived PENDING-while-paused at boot once pause began surviving restarts.
+
+    Callers own the ``processing_paused`` flag flip + the
+    ``processing_paused_changed`` emit (their logging/semantics differ); this
+    only performs the running-resume + pending-start fan-out.
+    """
+    from ..jobs import get_job_manager
+
+    jm = get_job_manager()
+    for running in jm.get_running_jobs():
+        jm.request_resume(running.id)
+    pending = sorted(jm.get_pending_jobs(), key=lambda j: (j.priority, j.created_at or ""))
+    for pj in pending:
+        _start_job_async(pj.id, pj.config or {})
+
+
 def _start_job_async(job_id: str, config_overrides: dict | None = None):
     """Start job execution in a background thread.
 

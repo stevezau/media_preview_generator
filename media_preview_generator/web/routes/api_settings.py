@@ -247,18 +247,10 @@ def _auto_resume_if_needed(settings) -> None:
     logger.info("Processing auto-resumed — workers available")
     try:
         from ..jobs import get_job_manager
-        from .api_jobs import _start_job_async
+        from .job_runner import resume_running_and_drain_pending
 
-        jm = get_job_manager()
-        jm.emit_processing_paused_changed(False)
-        for running in jm.get_running_jobs():
-            jm.request_resume(running.id)
-        pending = sorted(
-            jm.get_pending_jobs(),
-            key=lambda j: (j.priority, j.created_at or ""),
-        )
-        for pj in pending:
-            _start_job_async(pj.id, pj.config or {})
+        get_job_manager().emit_processing_paused_changed(False)
+        resume_running_and_drain_pending()
     except Exception:
         logger.debug("Could not emit resume event", exc_info=True)
 

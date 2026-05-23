@@ -1,7 +1,7 @@
 """Tests for media_preview_generator.web.scheduler."""
 
 import os
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -1182,3 +1182,34 @@ class TestMultiLibrarySchedules:
         )
         assert updated["library_ids"] == ["1", "2", "3"]
         assert updated["library_id"] is None  # cleared when multi
+
+
+class TestQuietHoursRecomputeDrainsPending:
+    """A quiet-hours window ending must START the pending backlog, not just
+    flip the flag — otherwise jobs revived PENDING-while-paused at boot (pause
+    survives restarts now) sit forever when the window closes."""
+
+    def _run(self, in_window: bool, currently_paused: bool):
+        from media_preview_generator.web import scheduler as sched
+
+        sm = MagicMock()
+        sm.processing_paused = currently_paused
+        sm.get.return_value = {"enabled": True, "windows": []}
+        with (
+            patch.object(sched, "is_now_in_any_quiet_window", return_value=in_window),
+            patch("media_preview_generator.web.settings_manager.get_settings_manager", return_value=sm),
+            patch("media_preview_generator.web.jobs.get_job_manager", return_value=MagicMock()),
+            patch("media_preview_generator.web.routes.job_runner.resume_running_and_drain_pending") as mock_drain,
+        ):
+            sched._quiet_hours_recompute_and_apply()
+        return sm, mock_drain
+
+    def test_window_end_resumes_and_drains_pending(self):
+        sm, mock_drain = self._run(in_window=False, currently_paused=True)
+        assert sm.processing_paused is False, "window end clears the pause"
+        mock_drain.assert_called_once_with()
+
+    def test_window_start_pauses_without_draining(self):
+        sm, mock_drain = self._run(in_window=True, currently_paused=False)
+        assert sm.processing_paused is True, "window start sets the pause"
+        mock_drain.assert_not_called()
