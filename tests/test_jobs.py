@@ -15,7 +15,9 @@ import pytest
 
 from media_preview_generator.web.jobs import (
     LOG_RETENTION_CLEARED_MESSAGE,
+    Job,
     JobManager,
+    JobProgress,
     JobStatus,
 )
 
@@ -36,6 +38,24 @@ def _reset_job_manager():
 def config_dir(tmp_path):
     """Temporary config directory for job logs."""
     return str(tmp_path / "config")
+
+
+class TestJobProgressSchemaTolerance:
+    """A job persisted under a different progress schema must still load.
+    Regression: removing the ``reused_outputs`` field crash-looped app boot
+    because rows written by the prior image carried it and ``JobProgress(**data)``
+    raised TypeError on the stale kwarg — taking down the whole JobManager."""
+
+    def test_unknown_progress_keys_are_dropped_not_raised(self):
+        job = Job(
+            id="j1",
+            library_name="X",
+            progress={"percent": 50.0, "reused_outputs": 9, "eta": "legacy"},
+        )
+        assert isinstance(job.progress, JobProgress)
+        assert job.progress.percent == 50.0
+        assert not hasattr(job.progress, "reused_outputs")
+        assert not hasattr(job.progress, "eta")
 
 
 class TestJobLogPersistence:
