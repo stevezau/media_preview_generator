@@ -1195,7 +1195,7 @@ def _build_path_mapping_mismatch_hints(unresolved_paths: list[str], server_confi
     message. When no library location is a substring of the path at all
     (the sender's mount root differs entirely — issue #254), the path
     still gets a generic fallback hint naming the received root and the
-    "Path the webhook sends" field, so every unresolved path is keyed in
+    "Path on Apps (Sonarr, Radarr, Webhooks)" field, so every unresolved path is keyed in
     the returned dict (none are left for the caller to handle generically).
     The only way a path is absent is if there are no configured library
     locations at all, in which case the function returns ``{}`` early.
@@ -1306,7 +1306,7 @@ def _build_path_mapping_mismatch_hints(unresolved_paths: list[str], server_confi
                 f"If this came from Sonarr/Radarr/Tdarr, they see your media at a different path "
                 f"than {owner_name} reports (e.g. '{example_loc}'). Add the webhook's path root "
                 f"(e.g. '{webhook_root}') under Settings → {owner_name} → Path mappings → "
-                "'Path the webhook sends'."
+                "'Path on Apps (Sonarr, Radarr, Webhooks)'."
             )
 
     return hints

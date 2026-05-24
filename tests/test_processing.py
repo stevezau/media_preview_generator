@@ -554,7 +554,7 @@ class TestMultiServerGuards:
         Sonarr sends ``/tv/...`` while Plex reports ``/mnt/Media/TV``), the
         substring-pivot finds nothing, so the builder must still emit an
         actionable fallback that names the received root and points at the
-        'Path the webhook sends' field — not a bare "Not found".
+        'Path on Apps' field — not a bare "Not found".
         """
         config = _make_config(tmp_path, webhook_paths=["/tv/Show/S01E01.mkv"])
 
@@ -583,7 +583,7 @@ class TestMultiServerGuards:
         # Names the received root so the user knows exactly what to enter.
         assert "/tv" in joined, f"hint missing received root '/tv'; got {hints!r}"
         # Points at the specific field that fixes it, by server name.
-        assert "Path the webhook sends" in joined, f"hint missing field name; got {hints!r}"
+        assert "Path on Apps" in joined, f"hint missing field name; got {hints!r}"
         assert "Plex" in joined, f"hint should name the owning server; got {hints!r}"
         # Single-server matrix cell: with one configured server the named
         # owner is unambiguous. Which server is named when several own
