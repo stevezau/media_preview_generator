@@ -55,6 +55,17 @@ from .retry_cascade import (
     classify_dv_safe_retry_reason,
 )
 
+# Issue #238 / #256 — how many byte-identical thumbnails we tolerate before
+# the keyframe-only fast path is considered unsafe. Keyframe spacing is rarely
+# an exact multiple of the thumbnail interval, so a file whose keyframes sit a
+# hair beyond the interval (e.g. 10.4s keyframes at a 10s interval) produces a
+# small fraction of repeated frames. The duplicate fraction is ~(1 - interval
+# / gap), so tolerating 6% lets the fast path absorb gaps up to interval / 0.94
+# (~6.4% over) instead of slow-decoding the whole file over a rounding error.
+# The same value drives the post-extract duplicate check so the up-front probe
+# and the safety net agree on what "too many duplicates" means.
+KEYFRAME_DUPLICATE_TOLERANCE = 0.06
+
 
 class ProcessingResult(Enum):
     """Outcome of processing a single media item.
@@ -801,7 +812,7 @@ def _probe_max_keyframe_gap(video_file: str) -> float | None:
     return max(b - a for a, b in zip(kf_times, kf_times[1:], strict=False))
 
 
-def _has_duplicate_thumbnails(output_folder: str, threshold: float = 0.05) -> bool:
+def _has_duplicate_thumbnails(output_folder: str, threshold: float = KEYFRAME_DUPLICATE_TOLERANCE) -> bool:
     """Return ``True`` when more than ``threshold`` fraction of the
     ``img-*.jpg`` files in ``output_folder`` are byte-identical to the
     immediately preceding image in lexicographic (== timestamp) order.
@@ -812,7 +823,9 @@ def _has_duplicate_thumbnails(output_folder: str, threshold: float = 0.05) -> bo
     couldn't see — the resulting frame-pack contains runs of identical
     JPEGs.  A high adjacent-duplicate ratio is the unambiguous signature
     of that bug (legitimate consecutive-identical frames from fade-outs
-    or solid colour cuts stay well under 5%).
+    or solid colour cuts stay well under the tolerance).  ``threshold``
+    defaults to :data:`KEYFRAME_DUPLICATE_TOLERANCE` so this safety net and
+    the up-front keyframe probe agree on what counts as "too many".
 
     Hashing ~7000 JPGs of a 4-hour movie takes ~150 ms on warm cache,
     so this runs unconditionally on every successful fast-path output.
@@ -1089,9 +1102,17 @@ def generate_images(
     #
     # The probe scans the whole file in packet-only mode (~1–5 s typical,
     # no decode work) so we never miss mid-file GOP variations.  When the
-    # max gap exceeds the interval we disable the fast path up front, and
-    # log a user-friendly WARN line explaining what happened in plain
-    # language (no jargon, no FFmpeg flags).
+    # max gap exceeds the interval (plus a small tolerance, see below) we
+    # disable the fast path up front, and log a user-friendly WARN line
+    # explaining what happened in plain language (no jargon, no FFmpeg flags).
+    #
+    # Issue #256 — the comparison is not a strict ``> interval``. Keyframe
+    # spacing is rarely an exact multiple of the interval, so a file with
+    # 10.4 s keyframes at a 10 s interval would otherwise slow-decode in full
+    # to avoid ~4% duplicate frames. We allow the gap to run up to
+    # ``interval / (1 - KEYFRAME_DUPLICATE_TOLERANCE)`` — the point at which
+    # the duplicate fraction ``(1 - interval / gap)`` reaches the tolerance —
+    # matching the post-extract duplicate check's threshold.
     if use_skip_initial:
         # No upfront cancel-check before the probe: ffprobe has its own
         # 120-second timeout and the existing cancel-checks inside the
@@ -1100,6 +1121,7 @@ def generate_images(
         # path that callers (and tests) rely on.
         max_gap = _probe_max_keyframe_gap(video_file)
         interval = config.plex_bif_frame_interval
+        gap_limit = interval / (1 - KEYFRAME_DUPLICATE_TOLERANCE)
         if max_gap is None:
             logger.warning(
                 "Slow path for '{}': we couldn't read this file's snapshot frame layout. "
@@ -1108,7 +1130,7 @@ def generate_images(
                 os.path.basename(video_file),
             )
             use_skip_initial = False
-        elif max_gap > interval:
+        elif max_gap > gap_limit:
             logger.warning(
                 "Slow path for '{}': this video stores a fresh snapshot frame every ~{:.1f}s, "
                 "while you've asked for thumbnails every {}s. We'll fully decode the video to "
@@ -1120,10 +1142,11 @@ def generate_images(
             use_skip_initial = False
         else:
             logger.debug(
-                "keyframe-probe: file='{}' max_gap={:.2f}s interval={}s → keep -skip_frame nokey",
+                "keyframe-probe: file='{}' max_gap={:.2f}s interval={}s gap_limit={:.2f}s → keep -skip_frame nokey",
                 video_file,
                 max_gap,
                 interval,
+                gap_limit,
             )
 
     # Ensure output folder exists

@@ -6,13 +6,16 @@ thumbnail interval).
 The unit tests cover the helpers in isolation (ffprobe-parser + adjacent-
 hash counter).  A separate integration block at the bottom exercises the
 wiring inside ``generate_images`` itself, asserting that the right
-retry-cascade tier fires for each of the three new branches:
+retry-cascade tier fires for each probe/validator branch:
 
 1. probe inconclusive → first FFmpeg call uses ``use_skip=False``,
 2. probe says unsafe → first FFmpeg call uses ``use_skip=False`` + WARN,
 3. probe clears + post-extract validator detects duplicates → first
    FFmpeg call uses ``use_skip=True``, then a second call fires with
    ``use_skip=False`` (the validator-driven retry).
+4. gap within the #256 tolerance (interval × 1.064) → keeps ``use_skip=True``,
+   no slow-path WARN.
+5. gap just beyond the tolerance → ``use_skip=False`` + WARN.
 
 The integration tests deliberately do NOT use the autouse fixture from
 ``test_media_processing.py`` (different module, different scope), so the
@@ -212,7 +215,7 @@ def _write_jpgs(folder: Path, payloads: list[bytes]) -> None:
 
 
 def test_no_duplicates_returns_false(tmp_path):
-    """Every JPG distinct — well below the 5% threshold."""
+    """Every JPG distinct — well below the default tolerance."""
     _write_jpgs(tmp_path, [f"unique-{i}".encode() for i in range(100)])
     assert _has_duplicate_thumbnails(str(tmp_path)) is False
 
@@ -228,7 +231,7 @@ def test_heavy_run_length_duplicates_returns_true(tmp_path):
 
 
 def test_below_threshold_returns_false(tmp_path):
-    """4% adjacent dupes — under the 5% default threshold."""
+    """3% adjacent dupes — under the 6% default threshold."""
     payloads = [f"frame-{i}".encode() for i in range(100)]
     payloads[10] = payloads[9]
     payloads[30] = payloads[29]
@@ -239,7 +242,7 @@ def test_below_threshold_returns_false(tmp_path):
 
 
 def test_above_threshold_returns_true(tmp_path):
-    """7% adjacent dupes — over threshold."""
+    """7% adjacent dupes — over the 6% default threshold."""
     payloads = [f"frame-{i}".encode() for i in range(100)]
     for idx in range(1, 15, 2):
         payloads[idx] = payloads[idx - 1]
@@ -558,3 +561,124 @@ def test_integration_validator_retry_fires_when_fast_path_duplicates(
     warns = [r for r in loguru_caplog.records if r.levelname == "WARNING" and "Re-running" in r.message]
     assert len(warns) == 1
     assert "unusual snapshot spacing" in warns[0].message
+
+
+@patch("media_preview_generator.processing.generator.MediaInfo")
+@patch("subprocess.Popen")
+@patch("media_preview_generator.processing.generator.subprocess.run")
+@patch("media_preview_generator.processing.generator.os.rename")
+@patch("media_preview_generator.processing.generator.os.remove")
+@patch("os.path.exists")
+@patch("builtins.open", new_callable=mock_open)
+@patch("time.sleep")
+@patch("media_preview_generator.processing.generator.glob.glob")
+@patch("media_preview_generator.processing.generator._detect_codec_error")
+@patch("media_preview_generator.processing.generator._has_duplicate_thumbnails")
+def test_integration_gap_just_within_tolerance_keeps_skip_frame(
+    mock_has_dupes,
+    mock_detect,
+    mock_glob,
+    mock_sleep,
+    mock_file,
+    mock_exists,
+    mock_remove,
+    mock_rename,
+    mock_run,
+    mock_popen,
+    mock_mediainfo,
+    tmp_path,
+    loguru_caplog,
+):
+    """Issue #256 — a keyframe gap a hair beyond the interval but inside the
+    6% tolerance keeps the fast path instead of slow-decoding the whole file.
+
+    interval=10s, keyframes at 0 and 10.4s → gap 10.4s.  gap_limit is
+    ``10 / 0.94 ≈ 10.64s``, so 10.4 < 10.64 → fast path retained.  This is the
+    rounding-error case that previously tripped the strict ``> interval`` check.
+    """
+    mock_has_dupes.return_value = False  # output is clean, no validator retry
+    cfg = _make_integration_config(tmp_path)
+    cfg.plex_bif_frame_interval = 10
+    _wire_integration_mocks(
+        mock_run=mock_run,
+        mock_popen=mock_popen,
+        mock_mediainfo=mock_mediainfo,
+        mock_exists=mock_exists,
+        mock_file=mock_file,
+        mock_detect=mock_detect,
+        mock_glob=mock_glob,
+        probe_stdout="0.000000,K_\n10.400000,K_\n",  # 10.4s gap, within tolerance of 10s
+        temp_dir=str(tmp_path),
+    )
+
+    with loguru_caplog.at_level("WARNING"):
+        generate_images("/test/borderline.mkv", str(tmp_path), None, None, cfg)
+
+    # Single fast-path FFmpeg call, WITH -skip_frame, no slow-path warning.
+    assert mock_popen.call_count == 1, "Within-tolerance file must not slow-decode"
+    args = mock_popen.call_args_list[0][0][0]
+    assert "-skip_frame:v" in args, "10.4s gap is within the 6% tolerance of a 10s interval — keep the fast path"
+    assert args[args.index("-skip_frame:v") + 1] == "nokey"
+    warns = [r for r in loguru_caplog.records if r.levelname == "WARNING" and "Slow path" in r.message]
+    assert warns == [], "No slow-path WARN should fire for a within-tolerance gap"
+    # The post-extract validator still runs as the safety net.
+    mock_has_dupes.assert_called_once()
+
+
+@patch("media_preview_generator.processing.generator.MediaInfo")
+@patch("subprocess.Popen")
+@patch("media_preview_generator.processing.generator.subprocess.run")
+@patch("media_preview_generator.processing.generator.os.rename")
+@patch("media_preview_generator.processing.generator.os.remove")
+@patch("os.path.exists")
+@patch("builtins.open", new_callable=mock_open)
+@patch("time.sleep")
+@patch("media_preview_generator.processing.generator.glob.glob")
+@patch("media_preview_generator.processing.generator._detect_codec_error")
+@patch("media_preview_generator.processing.generator._has_duplicate_thumbnails")
+def test_integration_gap_just_beyond_tolerance_disables_skip_frame(
+    mock_has_dupes,
+    mock_detect,
+    mock_glob,
+    mock_sleep,
+    mock_file,
+    mock_exists,
+    mock_remove,
+    mock_rename,
+    mock_run,
+    mock_popen,
+    mock_mediainfo,
+    tmp_path,
+    loguru_caplog,
+):
+    """Issue #256 — a keyframe gap past the 6% tolerance still slow-decodes.
+
+    interval=10s, keyframes at 0 and 10.9s → gap 10.9s > gap_limit ≈ 10.64s,
+    so the fast path is disabled (≈8% duplicates would otherwise ship).  This
+    is the boundary partner to the within-tolerance test above.
+    """
+    mock_has_dupes.return_value = False
+    cfg = _make_integration_config(tmp_path)
+    cfg.plex_bif_frame_interval = 10
+    _wire_integration_mocks(
+        mock_run=mock_run,
+        mock_popen=mock_popen,
+        mock_mediainfo=mock_mediainfo,
+        mock_exists=mock_exists,
+        mock_file=mock_file,
+        mock_detect=mock_detect,
+        mock_glob=mock_glob,
+        probe_stdout="0.000000,K_\n10.900000,K_\n",  # 10.9s gap, beyond tolerance of 10s
+        temp_dir=str(tmp_path),
+    )
+
+    with loguru_caplog.at_level("WARNING"):
+        generate_images("/test/sparse.mkv", str(tmp_path), None, None, cfg)
+
+    assert mock_popen.call_count == 1, "Probe-driven slow path must not retry FFmpeg"
+    args = mock_popen.call_args_list[0][0][0]
+    assert "-skip_frame:v" not in args, "10.9s gap exceeds the 6% tolerance — must slow-decode"
+    warns = [r for r in loguru_caplog.records if r.levelname == "WARNING" and "Slow path" in r.message]
+    assert len(warns) == 1
+    assert "~10.9s" in warns[0].message
+    mock_has_dupes.assert_not_called()
