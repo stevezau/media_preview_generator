@@ -548,6 +548,48 @@ class TestMultiServerGuards:
         assert "/mnt" in joined, f"hint missing webhook prefix '/mnt'; got {hints!r}"
         assert "/data" in joined, f"hint missing server prefix '/data'; got {hints!r}"
 
+    def test_unmatched_webhook_root_hint_points_at_webhook_field(self, tmp_path):
+        """When the webhook path shares NO substring with any library
+        location (Sonarr/Radarr on a wholly different mount — issue #254:
+        Sonarr sends ``/tv/...`` while Plex reports ``/mnt/Media/TV``), the
+        substring-pivot finds nothing, so the builder must still emit an
+        actionable fallback that names the received root and points at the
+        'Path the webhook sends' field — not a bare "Not found".
+        """
+        config = _make_config(tmp_path, webhook_paths=["/tv/Show/S01E01.mkv"])
+
+        with (
+            patch(f"{MODULE}.WorkerPool") as MockPool,
+            patch("media_preview_generator.web.settings_manager.get_settings_manager") as mock_sm,
+        ):
+            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=0)
+            mock_sm.return_value.get.return_value = [
+                {
+                    "id": "plex-a",
+                    "type": "plex",
+                    "name": "Plex",
+                    "enabled": True,
+                    "libraries": [{"id": "2", "name": "TV", "remote_paths": ["/mnt/Media/TV"], "enabled": True}],
+                    "path_mappings": [{"plex_prefix": "/mnt/Media", "local_prefix": "/media", "webhook_prefixes": []}],
+                },
+            ]
+            result = run_processing(config, selected_gpus=[])
+
+        resolution = result.get("webhook_resolution") or {}
+        assert "/tv/Show/S01E01.mkv" in (resolution.get("unresolved_paths") or [])
+        hints = resolution.get("path_hints") or []
+        assert hints, "expected a fallback hint for the unmatched webhook root, got none"
+        joined = " ".join(hints)
+        # Names the received root so the user knows exactly what to enter.
+        assert "/tv" in joined, f"hint missing received root '/tv'; got {hints!r}"
+        # Points at the specific field that fixes it, by server name.
+        assert "Path the webhook sends" in joined, f"hint missing field name; got {hints!r}"
+        assert "Plex" in joined, f"hint should name the owning server; got {hints!r}"
+        # Single-server matrix cell: with one configured server the named
+        # owner is unambiguous. Which server is named when several own
+        # distinct locations (example_loc = shortest, longest-first sort)
+        # is a separate cell not exercised here.
+
     def test_webhook_pinned_to_plex_does_not_fan_out(self, tmp_path):
         """Audit M4 — a Plex-pinned webhook publishes to Plex only.
         Pinning means "publish to this server only", and the dispatcher

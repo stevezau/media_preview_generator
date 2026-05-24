@@ -1192,8 +1192,13 @@ def _build_path_mapping_mismatch_hints(unresolved_paths: list[str], server_confi
     "Sonarr/Radarr is reporting one prefix but the server stores
     another." When found, the dict entry contains a hint string the
     file_result row can show in place of the generic "Not found"
-    message. Paths with no detectable mismatch are simply absent from
-    the dict (the caller should fall back to a generic message).
+    message. When no library location is a substring of the path at all
+    (the sender's mount root differs entirely — issue #254), the path
+    still gets a generic fallback hint naming the received root and the
+    "Path the webhook sends" field, so every unresolved path is keyed in
+    the returned dict (none are left for the caller to handle generically).
+    The only way a path is absent is if there are no configured library
+    locations at all, in which case the function returns ``{}`` early.
     """
     if not unresolved_paths or not server_configs:
         return {}
@@ -1280,6 +1285,29 @@ def _build_path_mapping_mismatch_hints(unresolved_paths: list[str], server_confi
                     f"{server_pfx}, webhook path = {webhook_pfx}"
                 )
             break
+
+        if upath not in hints:
+            # No configured library location appears anywhere in this webhook
+            # path, so the substring-pivot above found nothing — the sender's
+            # mount root differs entirely from every server's view (the classic
+            # Sonarr/Radarr-on-a-different-mount case, issue #254, where neither
+            # the media-server's remote prefix nor this app's local prefix is a
+            # prefix of the incoming path). We can't derive the exact split, but
+            # we CAN name the root the webhook arrived with and point the
+            # operator straight at the field that fixes it — far more useful
+            # than a bare "Not found".
+            upath_norm = upath.replace("\\", "/")
+            segments = [s for s in upath_norm.split("/") if s]
+            webhook_root = "/" + segments[0] if segments else upath_norm
+            example_loc = norm_locations[-1]
+            owner_name = location_owners.get(example_loc, [("your server", [])])[0][0]
+            hints[upath] = (
+                f"Webhook sent '{upath_norm}' but no configured library matches it. "
+                f"If this came from Sonarr/Radarr/Tdarr, they see your media at a different path "
+                f"than {owner_name} reports (e.g. '{example_loc}'). Add the webhook's path root "
+                f"(e.g. '{webhook_root}') under Settings → {owner_name} → Path mappings → "
+                "'Path the webhook sends'."
+            )
 
     return hints
 

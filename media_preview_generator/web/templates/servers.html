@@ -438,7 +438,7 @@
                                     <li><strong>Local path on this app:</strong> <code>/mnt/plex/movies</code></li>
                                 </ul>
                                 <p class="mb-1">
-                                    <strong>Path the webhook sends</strong> (third column) is for the rare case where Sonarr / Radarr / Plex Direct sends yet a third path because the media is behind a union mount (MergerFS or similar). Leave blank if your webhooks already send the same paths the server uses.
+                                    <strong>Path the webhook sends</strong> (third column) is for when you trigger generation from <strong>Sonarr / Radarr / Tdarr</strong> webhooks and those apps see your media at a <em>different</em> path than your media server reports — e.g. Sonarr sends <code>/tv/Show/S01E01.mkv</code> but Plex reports <code>/mnt/Media/TV/Show/S01E01.mkv</code>. Enter that app's path root here so we can map it to your local mount. Leave blank if your webhooks already send the same paths the server uses (e.g. Plex/Emby/Jellyfin <code>library.new</code> webhooks, which resolve the path through the server).
                                 </p>
                             </div>
                         </details>
@@ -453,7 +453,7 @@
                                 <th>Path the webhook sends
                                     <button type="button" class="info-icon info-icon-more ms-1" tabindex="0"
                                             data-bs-toggle="tooltip" data-bs-placement="top"
-                                            title="Only for union mounts / multi-source webhooks — click for details"
+                                            title="For Sonarr/Radarr/Tdarr webhooks that send a different path than your server reports — click for details"
                                             data-explain-title="Webhook path mapping"
                                             data-explain-template="infoWebhookPathTpl"
                                             aria-label="Explain webhook path mapping">
