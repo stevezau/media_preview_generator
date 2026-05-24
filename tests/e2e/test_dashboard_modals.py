@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from playwright.sync_api import Page, Route, expect
 
@@ -384,3 +386,86 @@ class TestServerDropdownVendorBadges:
         option_texts = authed_page.locator("#manualServerScope option").all_text_contents()
         joined = " | ".join(option_texts)
         assert "(PLEX)" in joined and "(JELLYFIN)" in joined, option_texts
+
+
+@pytest.mark.e2e
+class TestJobModalFilesTabStickiness:
+    """Regression: the Job Details modal's Files tab is sticky across opens
+    (Bootstrap keeps the last-active tab in the hidden modal's DOM). If a job
+    was closed while on the Files tab, the NEXT job opens on Files too — but
+    ``onFilesTabActivated`` only fires on a real tab *click*, not on an
+    already-active tab, so the per-file results never load and the
+    "Click to load file results" placeholder sits there forever.
+
+    User report: "close the job while on the files view, open another job —
+    it says 'Click to load file results' but it should just load the files."
+    """
+
+    _PLACEHOLDER = "Click to load file results"
+
+    def _stub_modal_endpoints(self, page: Page) -> None:
+        page.route(
+            "**/api/jobs/*/logs**",
+            lambda r: _fulfill_json(r, {"logs": [], "total_lines": 0}),
+        )
+
+        def _files_handler(route: Route) -> None:
+            # Distinct filename per job so step 3 proves the reopen loaded
+            # *job-B's* results, not stale job-A data left in the DOM.
+            name = "B.mkv" if "job-B" in route.request.url else "A.mkv"
+            _fulfill_json(
+                route,
+                {
+                    "files": [{"file": f"/data/Movies/{name}", "outcome": "generated", "servers": []}],
+                    "page": 1,
+                    "total_pages": 1,
+                    "filtered_count": 1,
+                    "total": 1,
+                    "processed_total": 1,
+                    "list_truncated": False,
+                },
+            )
+
+        page.route("**/api/jobs/*/files**", _files_handler)
+
+    def _seed_two_jobs(self, page: Page) -> None:
+        page.evaluate(
+            """() => {
+                window.jobs = [
+                    {id: 'job-A', library_name: 'Movies A', status: 'completed', config: {}, publishers: []},
+                    {id: 'job-B', library_name: 'Movies B', status: 'completed', config: {}, publishers: []},
+                ];
+            }"""
+        )
+
+    def _open_modal(self, page: Page, job_id: str) -> None:
+        # Re-seed window.jobs immediately before opening so the dashboard's
+        # background jobs poll (which the default mock returns empty) can't
+        # have wiped them out between steps.
+        self._seed_two_jobs(page)
+        page.evaluate(f"() => showLogsModal('{job_id}')")
+        expect(page.locator("#logsModal")).to_be_visible(timeout=2000)
+
+    def _close_modal(self, page: Page) -> None:
+        page.evaluate("() => bootstrap.Modal.getInstance(document.getElementById('logsModal')).hide()")
+        expect(page.locator("#logsModal")).to_be_hidden(timeout=2000)
+
+    def test_reopening_on_files_tab_auto_loads_results(self, dashboard_page: Page) -> None:
+        page = dashboard_page
+        self._stub_modal_endpoints(page)
+
+        # 1. Open job A, switch to the Files tab — results load on click.
+        self._open_modal(page, "job-A")
+        page.locator("#filesTab").click()
+        expect(page.locator("#fileResultsBody")).to_contain_text("A.mkv", timeout=2000)
+
+        # 2. Close while the Files tab is still the active tab.
+        self._close_modal(page)
+        expect(page.locator("#filesTab")).to_have_class(re.compile(r"\bactive\b"))
+
+        # 3. Open job B — it lands on the sticky Files tab. The placeholder
+        #    must NOT remain; job B's own file results must auto-load.
+        self._open_modal(page, "job-B")
+        expect(page.locator("#filesTabPane")).to_have_class(re.compile(r"\bactive\b"))
+        expect(page.locator("#fileResultsBody")).not_to_contain_text(self._PLACEHOLDER, timeout=2000)
+        expect(page.locator("#fileResultsBody")).to_contain_text("B.mkv", timeout=2000)
