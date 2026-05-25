@@ -1851,7 +1851,13 @@ def plex_webhook():
     job_kwargs: dict = {}
     if resolved_server_id:
         job_kwargs["server_id"] = resolved_server_id
-    queued_any = any(_schedule_webhook_job("plex", display_title, path, **job_kwargs) for path in paths)
+    # Schedule EVERY resolved path. A list comprehension (not a generator)
+    # is load-bearing here: ``any(generator)`` short-circuits on the first
+    # truthy result, so when one library.new resolves to multiple episode
+    # paths (a show/season add — see _walk_to_leaf_items) only the first
+    # episode would ever get queued. Regression #257: the reporter's batch
+    # showed only S01E01 of each multi-episode show.
+    queued_any = any([_schedule_webhook_job("plex", display_title, path, **job_kwargs) for path in paths])
 
     if not queued_any:
         _add_history_entry("plex", "library.new", display_title, "ignored_no_path")
