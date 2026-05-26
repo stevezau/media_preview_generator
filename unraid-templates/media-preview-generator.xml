@@ -11,7 +11,9 @@
     <Support>https://github.com/stevezau/media_preview_generator/issues</Support>
     <Project>https://github.com/stevezau/media_preview_generator</Project>
     <Overview>
-Generate video preview thumbnails (BIF files) for Plex Media Server with GPU acceleration support.
+Generate video preview thumbnails for Plex, Emby and Jellyfin with GPU acceleration support. One FFmpeg pass writes the right format for each server (Plex BIF bundle, Emby sidecar BIF, Jellyfin trickplay tiles).
+
+This template seeds a Plex connection below; add Emby/Jellyfin servers (any mix) from the web UI after first start.
 
 Features:
 - Web UI with setup wizard for easy configuration

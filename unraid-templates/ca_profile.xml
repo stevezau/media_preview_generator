@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Maintainer>
+    <Icon>https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/icon.png</Icon>
+    <Profile>
+Maintainer of Media Preview Generator — GPU-accelerated video preview thumbnail generation for Plex, Emby and Jellyfin. One FFmpeg pass with hardware decoding (CUDA, VAAPI, QSV, VideoToolbox) writes the right format for every server (Plex BIF bundle, Emby sidecar BIF, Jellyfin trickplay tiles), with a web UI, scheduled jobs and Sonarr/Radarr webhook support.
+    </Profile>
+    <WebPage>https://github.com/stevezau</WebPage>
+</Maintainer>
