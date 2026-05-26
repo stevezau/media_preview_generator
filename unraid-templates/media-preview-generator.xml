@@ -1,15 +1,15 @@
 <?xml version="1.0"?>
 <Container version="2">
-    <Name>plex-previews</Name>
-    <Repository>stevezzau/plex_generate_vid_previews:latest</Repository>
-    <Registry>https://hub.docker.com/r/stevezzau/plex_generate_vid_previews</Registry>
+    <Name>media-preview-generator</Name>
+    <Repository>stevezzau/media_preview_generator:latest</Repository>
+    <Registry>https://hub.docker.com/r/stevezzau/media_preview_generator</Registry>
     <Network>bridge</Network>
     <MyIP/>
     <Shell>bash</Shell>
     <Privileged>false</Privileged>
     <PrivilegedReq>false</PrivilegedReq>
-    <Support>https://github.com/stevezau/plex_generate_vid_previews/issues</Support>
-    <Project>https://github.com/stevezau/plex_generate_vid_previews</Project>
+    <Support>https://github.com/stevezau/media_preview_generator/issues</Support>
+    <Project>https://github.com/stevezau/media_preview_generator</Project>
     <Overview>
 Generate video preview thumbnails (BIF files) for Plex Media Server with GPU acceleration support.
 
@@ -40,14 +40,15 @@ For NVIDIA GPU support, you must:
     </Overview>
     <Category>MediaApp:Video MediaServer:Video</Category>
     <WebUI>http://[IP]:[PORT:8080]/</WebUI>
-    <TemplateURL>https://raw.githubusercontent.com/stevezau/plex_generate_vid_previews/main/unraid-templates/plex-generate-previews.xml</TemplateURL>
-    <Icon>https://raw.githubusercontent.com/stevezau/plex_generate_vid_previews/main/docs/images/icon.png</Icon>
+    <TemplateURL>https://raw.githubusercontent.com/stevezau/media_preview_generator/main/unraid-templates/media-preview-generator.xml</TemplateURL>
+    <Icon>https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/icon.png</Icon>
     <ExtraParams>--restart=unless-stopped</ExtraParams>
     <PostArgs/>
     <CPUset/>
     <DateInstalled/>
     <Date>2025-01-01</Date>
     <Changes>
+[2026-05-27] Renamed to media-preview-generator; image moved to stevezzau/media_preview_generator (old plex_generate_vid_previews image is deprecated)
 [2025-01-01] Initial release with web UI and OAuth support
     </Changes>
     <DonateText/>
@@ -64,7 +65,7 @@ For NVIDIA GPU support, you must:
     <!-- Path Mappings -->
     <Config Name="Media Path" Target="/media" Default="/mnt/user/media" Mode="ro" Description="Path to your media files on Unraid (read-only)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/media</Config>
     <Config Name="Plex Data Path" Target="/plex" Default="/mnt/user/appdata/plex/Library/Application Support/Plex Media Server" Mode="rw" Description="Path to Plex application data where previews will be stored" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/plex/Library/Application Support/Plex Media Server</Config>
-    <Config Name="Config Path" Target="/config" Default="/mnt/user/appdata/plex-previews" Mode="rw" Description="Path to store configuration, schedules, and job history" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/plex-previews</Config>
+    <Config Name="Config Path" Target="/config" Default="/mnt/user/appdata/media-preview-generator" Mode="rw" Description="Path to store configuration, schedules, and job history" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/media-preview-generator</Config>
 
     <!-- Path Translation (for Docker-to-Host path mapping) -->
     <Config Name="Local Videos Path" Target="PLEX_LOCAL_VIDEOS_PATH_MAPPING" Default="/media" Mode="" Description="How this container sees media (usually /media)" Type="Variable" Display="advanced" Required="false" Mask="false">/media</Config>
