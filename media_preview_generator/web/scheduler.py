@@ -413,6 +413,7 @@ def execute_scheduled_job(
                 library_ids=library_ids or None,
                 lookback_hours=lookback,
                 library_name=f"Recently added: {display_label}",
+                priority=priority,
             )
             manager._update_last_run(schedule_id)
         except Exception:

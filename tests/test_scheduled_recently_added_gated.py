@@ -175,6 +175,124 @@ class TestStartRecentlyAddedJobAsync:
             f"gate.release MUST happen after the scan returns — got {call_log!r}"
         )
 
+    @pytest.mark.parametrize(
+        "passed_priority,expected",
+        [
+            (1, 1),  # High pin must reach the Job (issue #259)
+            (3, 3),  # Low pin must reach the Job
+            (None, 2),  # unset -> PRIORITY_NORMAL (parse_priority default)
+        ],
+    )
+    def test_priority_forwarded_to_created_job(self, tmp_path, passed_priority, expected):
+        """The schedule's priority must reach the spawned Job (issue #259).
+
+        Pre-fix the recently-added branch dropped ``priority`` entirely:
+        the helper had no parameter for it and ``create_job`` fell back to
+        PRIORITY_NORMAL, so a High/Low schedule always ran at Normal. The
+        gate admits at ``job.priority``, so this also governs queue order.
+        """
+        import media_preview_generator.web.jobs as jobs_mod
+        from media_preview_generator.web.jobs import JobManager
+        from media_preview_generator.web.routes.job_runner import (
+            _start_recently_added_job_async,
+        )
+
+        with jobs_mod._job_lock:
+            jobs_mod._job_manager = JobManager(config_dir=str(tmp_path / "config"))
+        jm = jobs_mod._job_manager
+
+        scan_called = threading.Event()
+
+        with (
+            patch(
+                "media_preview_generator.jobs.orchestrator._run_recently_added_multi_server",
+                side_effect=lambda *a, **k: scan_called.set() or {},
+            ),
+            patch("media_preview_generator.config.load_config", return_value=MagicMock()),
+            patch(
+                "media_preview_generator.web.routes.job_runner._build_selected_gpus",
+                return_value=[],
+            ),
+        ):
+            job_id = _start_recently_added_job_async(
+                schedule_id="sched-1",
+                server_id=None,
+                library_ids=None,
+                lookback_hours=1.0,
+                library_name="Recently added: all libraries",
+                priority=passed_priority,
+            )
+            assert scan_called.wait(timeout=3.0)
+
+        job = jm.get_job(job_id)
+        assert job is not None
+        assert job.priority == expected, (
+            f"schedule priority {passed_priority!r} must reach the Job as {expected}; got {job.priority}"
+        )
+
+    @pytest.mark.parametrize(
+        "server_id,expected_filter",
+        [
+            ("plex-1", "plex-1"),  # pinned -> publish only to that server (issue #259)
+            (None, None),  # unpinned -> leave fan-out behaviour untouched
+        ],
+    )
+    def test_pinned_server_sets_config_server_id_filter(self, tmp_path, server_id, expected_filter):
+        """A pinned recently-added scan must set ``config.server_id_filter``.
+
+        Enumeration is already filtered by the explicit ``server_id_filter``
+        kwarg, but the per-item PUBLISH target is resolved from
+        ``config.server_id_filter`` (``resolve_per_item_pin``). With two Plex
+        servers owning the same files, a Plex-pinned scan that left this
+        unset fanned out and published to both (issue #259 comment). When
+        unpinned we must NOT set it, so unpinned scans keep fanning out.
+        """
+        from types import SimpleNamespace
+
+        import media_preview_generator.web.jobs as jobs_mod
+        from media_preview_generator.web.jobs import JobManager
+        from media_preview_generator.web.routes.job_runner import (
+            _start_recently_added_job_async,
+        )
+
+        with jobs_mod._job_lock:
+            jobs_mod._job_manager = JobManager(config_dir=str(tmp_path / "config"))
+
+        scan_called = threading.Event()
+        captured: dict = {}
+
+        def fake_scan(config, *args, **kwargs):
+            captured["config"] = config
+            scan_called.set()
+            return {}
+
+        fake_config = SimpleNamespace(server_id_filter=None)
+
+        with (
+            patch(
+                "media_preview_generator.jobs.orchestrator._run_recently_added_multi_server",
+                side_effect=fake_scan,
+            ),
+            patch("media_preview_generator.config.load_config", return_value=fake_config),
+            patch(
+                "media_preview_generator.web.routes.job_runner._build_selected_gpus",
+                return_value=[],
+            ),
+        ):
+            _start_recently_added_job_async(
+                schedule_id="sched-1",
+                server_id=server_id,
+                library_ids=None,
+                lookback_hours=1.0,
+                library_name="Recently added: all libraries",
+            )
+            assert scan_called.wait(timeout=3.0)
+
+        assert captured["config"].server_id_filter == expected_filter, (
+            f"server_id={server_id!r} must yield config.server_id_filter={expected_filter!r}; "
+            f"got {captured['config'].server_id_filter!r}"
+        )
+
     def test_cancel_during_gate_wait_skips_scan_and_does_not_release(self, tmp_path):
         """If the user cancels the Job while it's waiting for a gate
         slot, ``acquire`` returns False and the scan must NOT run. The
