@@ -32,13 +32,23 @@ If your Plex container uses a custom network (like br1 or macvlan), this contain
 must use the SAME network to communicate with Plex. Change the Network Type setting
 to match your Plex container's network.
 
-For Intel QuickSync, /dev/dri is passed through automatically (see GPU Device below).
+GPU SETUP — pick ONE path:
 
-For NVIDIA GPU support, you must:
-1. Install NVIDIA driver and nvidia-container-toolkit on Unraid
-2. Add --runtime=nvidia to Extra Parameters
-3. Or use the Nvidia-Driver and nvidia-container-toolkit plugins from Community Applications
-4. Add NVIDIA_DRIVER_CAPABILITIES=all to the environment variables below (the 'graphics' capability is required for Dolby Vision Profile 5 thumbnails; 'compute,video,utility' alone only covers NVDEC and nvidia-smi).
+[Intel / AMD]
+  Pass /dev/dri through (already configured below — no further action needed).
+
+[NVIDIA] — REQUIRED STEPS, in this order:
+  1. Install the Nvidia-Driver plugin from Community Applications (bundles the NVIDIA driver and nvidia-container-toolkit needed for --runtime=nvidia).
+  2. Add  --runtime=nvidia  to "Extra Parameters" on this template (NOT --gpus all).
+  3. Set the NVIDIA_VISIBLE_DEVICES and NVIDIA_DRIVER_CAPABILITIES variables below.
+  4. Optional: if your host has no Intel iGPU and the container fails with a /dev/dri error, remove the Intel GPU Device field.
+
+  Common error: "docker: Error response from daemon: AMD CDI spec not found"
+    -> You're using --gpus all on Unraid. Replace it with --runtime=nvidia.
+
+  Why NVIDIA_DRIVER_CAPABILITIES=all? The 'graphics' capability is required for
+  Dolby Vision Profile 5 thumbnails (libplacebo Vulkan tone-mapping).
+  'compute,video,utility' alone covers only CUDA/NVDEC and nvidia-smi.
     </Overview>
     <Category>MediaApp:Video MediaServer:Video</Category>
     <WebUI>http://[IP]:[PORT:8080]/</WebUI>
@@ -50,6 +60,7 @@ For NVIDIA GPU support, you must:
     <DateInstalled/>
     <Date>2025-01-01</Date>
     <Changes>
+[2026-06-01] Surfaced the NVIDIA --runtime=nvidia requirement in field labels and the Overview to prevent "AMD CDI spec not found" errors when users set NVIDIA env vars without adding the runtime flag to Extra Parameters (issue #260)
 [2026-05-27] Renamed to media-preview-generator; image moved to stevezzau/media_preview_generator (old plex_generate_vid_previews image is deprecated)
 [2025-01-01] Initial release with web UI and OAuth support
     </Changes>
@@ -91,8 +102,8 @@ For NVIDIA GPU support, you must:
     <Config Name="Intel GPU Device" Target="/dev/dri" Default="/dev/dri" Mode="" Description="Pass through Intel GPU for QuickSync acceleration" Type="Device" Display="advanced" Required="false" Mask="false">/dev/dri</Config>
 
     <!-- GPU Support (NVIDIA) -->
-    <Config Name="NVIDIA Driver Capabilities" Target="NVIDIA_DRIVER_CAPABILITIES" Default="all" Mode="" Description="NVIDIA driver capabilities to inject into the container. Use 'all' (recommended) so the 'graphics' capability is included — this is required for Dolby Vision Profile 5 thumbnails (libplacebo Vulkan tone-mapping). 'compute,video,utility' alone only covers CUDA/NVDEC and will NOT give you DV5 support. Only applied if you also set --runtime=nvidia in Extra Parameters." Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
-    <Config Name="NVIDIA Visible Devices" Target="NVIDIA_VISIBLE_DEVICES" Default="" Mode="" Description="Which NVIDIA GPUs to expose (e.g. 'all', or a specific UUID). Only applied if you also set --runtime=nvidia in Extra Parameters." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+    <Config Name="NVIDIA Driver Capabilities (requires --runtime=nvidia in Extra Parameters)" Target="NVIDIA_DRIVER_CAPABILITIES" Default="all" Mode="" Description="REQUIRES --runtime=nvidia in Extra Parameters — without it, this variable is ignored and the container will either fail to start (e.g. 'AMD CDI spec not found') or fall back to CPU. Recommended value: 'all' (includes the 'graphics' capability needed for Dolby Vision Profile 5 thumbnails via libplacebo Vulkan tone-mapping). 'compute,video,utility' alone covers only CUDA/NVDEC and will NOT give you DV5 support." Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
+    <Config Name="NVIDIA Visible Devices (requires --runtime=nvidia in Extra Parameters)" Target="NVIDIA_VISIBLE_DEVICES" Default="" Mode="" Description="REQUIRES --runtime=nvidia in Extra Parameters — without it, this variable is ignored. Which NVIDIA GPUs to expose to the container, e.g. 'all' or a specific GPU UUID. Do NOT use --gpus all on Unraid; that triggers CDI resolution and fails with 'AMD CDI spec not found'." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 
     <!-- Advanced -->
     <Config Name="Log Level" Target="LOG_LEVEL" Default="INFO" Mode="" Description="Logging level: DEBUG, INFO, WARNING, ERROR" Type="Variable" Display="advanced" Required="false" Mask="false">INFO</Config>
