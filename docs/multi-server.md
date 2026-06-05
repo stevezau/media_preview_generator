@@ -7,7 +7,13 @@ from a single instance. A new file is processed exactly once (one FFmpeg pass
 on the GPU) and the resulting frames are published to **every** configured
 server that owns it, in the format that server expects.
 
-![Servers page showing one card per Plex / Jellyfin / Emby server, each with connection status and library count, plus the universal webhook URL at the bottom](images/servers.png)
+![Servers page showing one card per Plex / Jellyfin / Emby server, each with connection status and library count](images/servers.png)
+
+> [!NOTE]
+> The universal webhook URL is configured on the **Automation** page
+> (top nav, between Servers and Settings) under **Webhooks** — not on the
+> Servers page. The per-server Plex Direct webhook lives under
+> **Servers → edit your Plex server → Webhook & Scanner**.
 
 This page covers:
 
@@ -236,7 +242,7 @@ that library cleanly with no retry storm.
 
 Two layers prevent the same file being processed twice:
 
-1. **Short-term frame cache** — when a second webhook arrives for the same file shortly after the first (e.g. Sonarr and Plex both notify within minutes), the second one reuses the already-extracted JPGs instead of running FFmpeg again. The cache holds the most recent files for a configurable window (default 10 minutes). Concurrent webhooks for the same file (a "webhook storm") collapse into a single FFmpeg pass.
+1. **Short-term frame cache** — when a second webhook arrives for the same file shortly after the first (e.g. Sonarr and Plex both notify within minutes), the second one reuses the already-extracted JPGs instead of running FFmpeg again. The cache holds the most recent files for a configurable window (default 1 hour). Concurrent webhooks for the same file (a "webhook storm") collapse into a single FFmpeg pass.
 
 2. **Long-term sidecar tracking** — every published output gets a small companion file (`<file>.bif.meta`) that records the source file's last-modified time and size. On any later webhook, the app checks this companion file first — if every output already exists and the source hasn't changed, the whole pipeline is skipped. This handles "Sonarr fires immediately, then Plex's own webhook fires 30 minutes later for the same file."
 
