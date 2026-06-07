@@ -90,7 +90,7 @@ GPU SETUP — pick ONE path:
     <Config Name="CPU Threads" Target="CPU_THREADS" Default="1" Mode="" Description="Number of parallel CPU workers for fallback (default: 1). Migrated to settings.json on first start. GPU config (enable/disable, workers per GPU) is in Web UI Settings." Type="Variable" Display="advanced" Required="false" Mask="false">1</Config>
 
     <!-- Web Authentication -->
-    <Config Name="Auth Token Override" Target="WEB_AUTH_TOKEN" Default="" Mode="" Description="Optional: Override the authentication token. If empty, use the token set during the setup wizard (or auto-generated if skipped)" Type="Variable" Display="advanced" Required="false" Mask="true"/>
+    <Config Name="Auth Token Override" Target="WEB_AUTH_TOKEN" Default="" Mode="" Description="Optional: Override the authentication token. If empty, use the token set during the setup wizard (or auto-generated if skipped). Left unmasked because Unraid's masked password fields can silently fail to save the value (issue #263)." Type="Variable" Display="advanced" Required="false" Mask="false"/>
     <Config Name="Web Port" Target="WEB_PORT" Default="8080" Mode="" Description="Internal port for web server (usually matches Web UI Port)" Type="Variable" Display="advanced" Required="false" Mask="false">8080</Config>
 
     <!-- User/Group -->
