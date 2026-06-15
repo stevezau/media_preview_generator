@@ -1296,6 +1296,26 @@ def process_canonical_path(
     )
 
     if not os.path.isfile(canonical_path):
+        # Issue #266 — a folder (TV series root, season dir) reached the
+        # worker. Manual/webhook folder paths are normally expanded into
+        # their video files upstream in _run_webhook_paths_phase; the only
+        # folder that survives that is one with no recognised video files.
+        # Say so plainly instead of the misleading "missing on disk /
+        # wrong path mappings" message — the path is fine, it's just not a
+        # video file, and no retry will turn a folder into one.
+        if os.path.isdir(canonical_path):
+            logger.warning(
+                "Path is a folder, not a video file: {}. It contains no recognised video files "
+                "(.mkv/.mp4/.avi/.m4v/.ts/.wmv/.mov/.flv/.webm). Point manual generation at a "
+                "video file, or at a folder that actually holds episodes/movies.",
+                canonical_path,
+            )
+            return MultiServerResult(
+                canonical_path=canonical_path,
+                status=MultiServerStatus.NO_FRAMES,
+                message=f"Path is a folder with no video files: {canonical_path}",
+            )
+
         # D35 — Sibling-disk probe before declaring the source missing.
         # When the user runs multiple data disks under one logical view
         # (mergerfs, etc.), Plex's indexed path can go stale: file was at
