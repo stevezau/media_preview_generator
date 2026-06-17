@@ -87,8 +87,16 @@ class TestNewJobModal:
 class TestManualTriggerModal:
     def test_manual_trigger_modal_opens(self, dashboard_page: Page) -> None:
         dashboard_page.locator('button:has-text("Manual Trigger")').click()
-        expect(dashboard_page.locator("#manualFilePaths")).to_be_visible(timeout=2000)
+        # The primary controls are now the media-search box + browse button;
+        # the server-scope picker is still present.
+        expect(dashboard_page.locator("#manualSearchInput")).to_be_visible(timeout=2000)
+        expect(dashboard_page.locator("#manualBrowseBtn")).to_be_visible()
         expect(dashboard_page.locator("#manualServerScope")).to_be_visible()
+        # The free-text paste-paths box is now an escape hatch inside a
+        # collapsed <details> — hidden until expanded, then revealed.
+        expect(dashboard_page.locator("#manualFilePaths")).to_be_hidden()
+        dashboard_page.locator("#manualAdvanced summary").click()
+        expect(dashboard_page.locator("#manualFilePaths")).to_be_visible()
 
 
 @pytest.fixture
