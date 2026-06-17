@@ -5,6 +5,9 @@
 //
 // Usage:
 //   openFolderPicker('/data', (pickedPath) => { input.value = pickedPath; });
+//   // Allow picking an individual video file too (Manual Generation):
+//   openFolderPicker('/data', (path, meta) => { ... meta.isDir ... },
+//                    { includeFiles: true });
 
 (function () {
     'use strict';
@@ -13,6 +16,11 @@
     let _onPickCallback = null;
     let _currentPath = '/';
     let _showHidden = false;
+    // When true, the browse API also returns video files, and clicking a file
+    // selects it as the pick target (instead of navigating). _selectedFile holds
+    // that file path; null means "the current folder is the selection".
+    let _includeFiles = false;
+    let _selectedFile = null;
 
     function _ensureModalMarkup() {
         if (document.getElementById(MODAL_ID)) return;
@@ -66,8 +74,9 @@
             _loadPath(_currentPath);
         });
         document.getElementById('folderPickerConfirmBtn').addEventListener('click', () => {
+            const picked = _selectedFile || _currentPath;
             if (_onPickCallback) {
-                try { _onPickCallback(_currentPath); } catch (e) { console.error(e); }
+                try { _onPickCallback(picked, { isDir: !_selectedFile }); } catch (e) { console.error(e); }
             }
             const modal = bootstrap.Modal.getInstance(document.getElementById(MODAL_ID));
             if (modal) modal.hide();
@@ -125,17 +134,34 @@
     function _renderEntries(entries) {
         const list = document.getElementById('folderPickerList');
         if (!entries.length) {
-            list.innerHTML = '<div class="list-group-item text-muted">No subfolders.</div>';
+            list.innerHTML = `<div class="list-group-item text-muted">No ${_includeFiles ? 'subfolders or videos' : 'subfolders'}.</div>`;
             return;
         }
-        list.innerHTML = entries.map((e) =>
-            `<button type="button" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center" data-fp-path="${escapeHtmlAttr(e.path)}">
-                <span><i class="bi bi-folder2 me-2"></i>${escapeHtmlText(e.name)}</span>
-                <i class="bi bi-chevron-right text-muted"></i>
-            </button>`
-        ).join('');
-        list.querySelectorAll('button[data-fp-path]').forEach((btn) => {
-            btn.addEventListener('click', () => _loadPath(btn.dataset.fpPath));
+        // ``is_dir`` is absent on responses from before files were supported;
+        // treat a missing flag as a directory so legacy callers keep working.
+        list.innerHTML = entries.map((e) => {
+            const isDir = e.is_dir !== false;
+            if (isDir) {
+                return `<button type="button" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center" data-fp-dir="${escapeHtmlAttr(e.path)}">
+                    <span><i class="bi bi-folder2 me-2"></i>${escapeHtmlText(e.name)}</span>
+                    <i class="bi bi-chevron-right text-muted"></i>
+                </button>`;
+            }
+            const active = e.path === _selectedFile ? ' active' : '';
+            return `<button type="button" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center${active}" data-fp-file="${escapeHtmlAttr(e.path)}">
+                <span><i class="bi bi-film me-2"></i>${escapeHtmlText(e.name)}</span>
+                <i class="bi bi-check2 text-success${active ? '' : ' invisible'}"></i>
+            </button>`;
+        }).join('');
+        list.querySelectorAll('button[data-fp-dir]').forEach((btn) => {
+            btn.addEventListener('click', () => _loadPath(btn.dataset.fpDir));
+        });
+        list.querySelectorAll('button[data-fp-file]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                _selectedFile = _selectedFile === btn.dataset.fpFile ? null : btn.dataset.fpFile;
+                _renderEntries(entries);
+                _syncChrome();
+            });
         });
     }
 
@@ -145,7 +171,13 @@
         const upBtn = document.getElementById('folderPickerUpBtn');
         if (upBtn) upBtn.disabled = _currentPath === '/' || !_currentPath;
         const sel = document.getElementById('folderPickerSelectedPath');
-        if (sel) sel.textContent = _currentPath;
+        if (sel) sel.textContent = _selectedFile || _currentPath;
+        const confirmBtn = document.getElementById('folderPickerConfirmBtn');
+        if (confirmBtn) {
+            confirmBtn.innerHTML = _selectedFile
+                ? '<i class="bi bi-check2 me-1"></i>Pick this file'
+                : '<i class="bi bi-check2 me-1"></i>Pick this folder';
+        }
     }
 
     async function _loadPath(path) {
@@ -154,9 +186,13 @@
         errEl.classList.add('d-none');
         errEl.textContent = '';
         list.innerHTML = '<div class="list-group-item text-muted"><span class="spinner-border spinner-border-sm me-1"></span>Loading…</div>';
+        // Navigating to a new folder drops any previously selected file — the
+        // selection always belongs to the folder currently in view.
+        _selectedFile = null;
         try {
             const qs = new URLSearchParams({ path });
             if (_showHidden) qs.set('show_hidden', '1');
+            if (_includeFiles) qs.set('include_files', '1');
             const data = await apiGet('/api/system/browse?' + qs.toString());
             _currentPath = data.path || path || '/';
             _renderBreadcrumb(_currentPath);
@@ -178,12 +214,20 @@
         }
     }
 
-    window.openFolderPicker = function (initialPath, onPick) {
+    window.openFolderPicker = function (initialPath, onPick, options) {
         _ensureModalMarkup();
         _onPickCallback = typeof onPick === 'function' ? onPick : null;
         _currentPath = initialPath || '/';
         _showHidden = false;
+        _includeFiles = !!(options && options.includeFiles);
+        _selectedFile = null;
         document.getElementById('folderPickerShowHidden').checked = false;
+        const title = document.querySelector(`#${MODAL_ID} .modal-title`);
+        if (title) {
+            title.innerHTML = _includeFiles
+                ? '<i class="bi bi-folder2-open me-2"></i>Pick a folder or video file'
+                : '<i class="bi bi-folder2-open me-2"></i>Pick a folder';
+        }
         _loadPath(_currentPath);
         const modal = new bootstrap.Modal(document.getElementById(MODAL_ID));
         modal.show();

@@ -27,6 +27,7 @@ from .base import (
     Library,
     MediaItem,
     MediaServer,
+    MediaSuggestion,
     ServerConfig,
     ServerType,
     WebhookEvent,
@@ -1721,6 +1722,115 @@ class PlexServer(MediaServer):
                 sq.episode,
             )
         return items
+
+    def search_suggestions(self, query: str, limit: int = 20) -> list[MediaSuggestion]:
+        """Container-level hits for the Manual Generation picker.
+
+        Reuses the same ``/hubs/search`` + rank path as :meth:`search_items`,
+        but keeps shows whole: a show hit becomes one suggestion carrying its
+        folder ``locations`` (Plex spreads a show across multiple disks, so
+        every location is kept) instead of being expanded into episodes. Movies
+        and standalone episode hits become leaf suggestions. When the query
+        carries ``S##E##`` a show is drilled straight to that one episode.
+        """
+        from ..plex_client import _build_episode_title, _extract_item_locations, retry_plex_call
+        from ..search import SearchQuery
+        from ..search.rank import filter_and_rank
+
+        sq = SearchQuery.parse(query)
+        if sq.is_empty:
+            return []
+
+        plex = self._connect()
+        try:
+            hubs = retry_plex_call(plex.search, query=sq.title, limit=limit)
+        except Exception as exc:
+            logger.warning(
+                "Plex suggestion search for {!r} failed ({}: {}). Returning no results so the "
+                "Manual Generation picker renders an empty list rather than spinning.",
+                sq.raw,
+                type(exc).__name__,
+                exc,
+            )
+            return []
+
+        candidates: list[tuple[str, str, object]] = []
+        for m in hubs or []:
+            try:
+                obj_type = str(getattr(m, "type", "") or getattr(m, "METADATA_TYPE", "")).lower()
+                title = _build_episode_title(m) if obj_type == "episode" else (getattr(m, "title", "") or "")
+                candidates.append((title, obj_type, m))
+            except Exception as exc:
+                logger.debug("Skipping Plex suggestion hit due to projection error: {}", exc)
+                continue
+
+        ranked = filter_and_rank(sq, candidates, limit=limit * 2)
+
+        suggestions: list[MediaSuggestion] = []
+        seen: set[tuple[str, tuple[str, ...]]] = set()
+
+        def _emit(suggestion: MediaSuggestion) -> None:
+            key = (suggestion.kind, suggestion.remote_paths)
+            if not suggestion.remote_paths or key in seen:
+                return
+            seen.add(key)
+            suggestions.append(suggestion)
+
+        for m in ranked:
+            if len(suggestions) >= limit:
+                break
+            obj_type = str(getattr(m, "type", "") or getattr(m, "METADATA_TYPE", "")).lower()
+            library_id = str(getattr(m, "librarySectionID", "") or "")
+            year = getattr(m, "year", None)
+
+            if obj_type == "show":
+                if sq.has_episode:
+                    try:
+                        ep = retry_plex_call(m.episode, season=sq.season, episode=sq.episode)
+                    except Exception as exc:
+                        logger.debug("Plex episode drill S{}E{} failed: {}", sq.season, sq.episode, exc)
+                        continue
+                    ep_locations = _extract_item_locations(ep)
+                    _emit(
+                        MediaSuggestion(
+                            kind="episode",
+                            title=_build_episode_title(ep),
+                            year=getattr(ep, "year", None),
+                            remote_paths=tuple(ep_locations),
+                            library_id=library_id,
+                        )
+                    )
+                    continue
+                # Plain show query — keep the show whole; the dispatcher expands
+                # its folder(s) into episodes. leafCount is the episode count and
+                # rides along on the hub result, so it's free display metadata.
+                show_locations = _extract_item_locations(m)
+                leaf = getattr(m, "leafCount", None)
+                _emit(
+                    MediaSuggestion(
+                        kind="show",
+                        title=getattr(m, "title", "") or "",
+                        year=year,
+                        remote_paths=tuple(show_locations),
+                        library_id=library_id,
+                        child_count=int(leaf) if isinstance(leaf, int) else None,
+                    )
+                )
+                continue
+
+            kind = "episode" if obj_type == "episode" else "movie"
+            title = _build_episode_title(m) if kind == "episode" else (getattr(m, "title", "") or "")
+            _emit(
+                MediaSuggestion(
+                    kind=kind,
+                    title=title,
+                    year=year,
+                    remote_paths=tuple(_extract_item_locations(m)),
+                    library_id=library_id,
+                )
+            )
+
+        return suggestions
 
     def resolve_item_to_remote_path(self, item_id: str) -> str | None:
         """Return ``item.media[0].parts[0].file`` for ``item_id``, else ``None``.

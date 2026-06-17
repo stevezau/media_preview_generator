@@ -2943,6 +2943,18 @@ async function startNewJob() {
     showToast('Error', 'Failed to start job: ' + lastError.message, 'danger');
 }
 
+// ---------------------------------------------------------------------------
+// Manual Generation: server-search typeahead + folder/file picker + chip list.
+// A "selection" is a media pick whose ``paths`` feed /api/jobs/manual. A show
+// carries its folder(s) (the dispatcher expands them into episodes); a movie/
+// episode/file carries its file; a browsed folder carries that folder.
+// ---------------------------------------------------------------------------
+let _manualSelections = [];
+let _manualWired = false;
+let _manualLastBrowseRoot = '/';
+let _manualSearchTimer = null;
+let _manualSearchSeq = 0;
+
 async function _populateManualServerScopePicker() {
     const sel = document.getElementById('manualServerScope');
     if (!sel) return;
@@ -2961,26 +2973,221 @@ async function _populateManualServerScopePicker() {
     }
 }
 
+function _manualKindIcon(kind) {
+    if (kind === 'show') return 'bi-tv';
+    if (kind === 'movie') return 'bi-film';
+    if (kind === 'episode') return 'bi-collection-play';
+    if (kind === 'file') return 'bi-film';
+    return 'bi-folder2';
+}
+
+// Server-source pills shown on each search result so the user can see which
+// server(s) a hit came from. A merged row (same item on several servers) shows
+// one pill per server. Colour-coded by vendor for at-a-glance scanning.
+function _manualServerBadges(servers) {
+    const cls = { plex: 'text-warning border-warning', emby: 'text-success border-success', jellyfin: 'text-info border-info' };
+    return (servers || []).map(s =>
+        `<span class="badge bg-transparent border ${cls[s.type] || 'text-secondary border-secondary'} ms-1" style="font-weight:500;" title="${escapeHtmlAttr((s.type || '').toUpperCase())}">${escapeHtmlText(s.name)}</span>`
+    ).join('');
+}
+
+function _manualSelectionKey(paths) {
+    return (paths || []).slice().sort().join('|');
+}
+
+function manualAddSelection(sel) {
+    const key = _manualSelectionKey(sel.paths);
+    if (!key) return;
+    if (_manualSelections.some(s => s.key === key)) {
+        showToast('Already added', `${sel.label} is already selected`, 'info');
+        return;
+    }
+    _manualSelections.push({ ...sel, key });
+    manualRenderChips();
+}
+
+function manualRemoveSelection(key) {
+    _manualSelections = _manualSelections.filter(s => s.key !== key);
+    manualRenderChips();
+}
+
+function manualRenderChips() {
+    const wrap = document.getElementById('manualChips');
+    const empty = document.getElementById('manualChipsEmpty');
+    const clearAll = document.getElementById('manualClearAll');
+    if (!wrap) return;
+    if (!_manualSelections.length) {
+        wrap.innerHTML = '';
+        if (empty) empty.classList.remove('d-none');
+        if (clearAll) clearAll.classList.add('d-none');
+        return;
+    }
+    if (empty) empty.classList.add('d-none');
+    if (clearAll) clearAll.classList.remove('d-none');
+    wrap.innerHTML = _manualSelections.map(s => {
+        const tip = (s.sublabel ? s.sublabel + '\n' : '') + s.paths.join('\n');
+        return `<span class="badge bg-secondary-subtle text-body border d-inline-flex align-items-center gap-1 py-2 px-2"
+                      title="${escapeHtmlAttr(tip)}">
+            <i class="bi ${_manualKindIcon(s.kind)}"></i>
+            <span>${escapeHtmlText(s.label)}</span>
+            <a href="#" class="text-reset ms-1 manual-chip-rm" data-key="${escapeHtmlAttr(s.key)}" aria-label="Remove"><i class="bi bi-x-lg"></i></a>
+        </span>`;
+    }).join('');
+    wrap.querySelectorAll('.manual-chip-rm').forEach(a => {
+        a.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            manualRemoveSelection(a.dataset.key);
+        });
+    });
+}
+
+function _manualHideSearch() {
+    const box = document.getElementById('manualSearchResults');
+    if (box) { box.classList.add('d-none'); box.innerHTML = ''; }
+}
+
+function manualRenderSearchResults(results) {
+    const box = document.getElementById('manualSearchResults');
+    if (!box) return;
+    if (!results || !results.length) {
+        box.innerHTML = '<div class="list-group-item text-muted small">No matches.</div>';
+        box.classList.remove('d-none');
+        return;
+    }
+    const kindLabel = { show: 'Shows', movie: 'Movies', episode: 'Episodes' };
+    let lastKind = null;
+    const rows = [];
+    results.forEach((r, idx) => {
+        if (r.kind !== lastKind) {
+            lastKind = r.kind;
+            rows.push(`<div class="list-group-item bg-body-tertiary py-1 small fw-semibold text-muted">${kindLabel[r.kind] || 'Results'}</div>`);
+        }
+        const year = r.year ? ` <span class="text-muted">(${r.year})</span>` : '';
+        const bits = [];
+        if (r.kind === 'show') {
+            if (r.child_count) bits.push(`${r.child_count} eps`);
+            if ((r.paths || []).length > 1) bits.push(`${r.paths.length} folders`);
+        }
+        const meta = bits.length ? `<span class="small text-muted me-2">${escapeHtmlText(bits.join(' · '))}</span>` : '';
+        rows.push(`<button type="button" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center" data-idx="${idx}">
+            <span class="text-truncate"><i class="bi ${_manualKindIcon(r.kind)} me-2"></i>${escapeHtmlText(r.title)}${year}</span>
+            <span class="ms-2 flex-shrink-0 d-flex align-items-center">${meta}${_manualServerBadges(r.servers)}</span>
+        </button>`);
+    });
+    box.innerHTML = rows.join('');
+    box.classList.remove('d-none');
+    box.querySelectorAll('button[data-idx]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const r = results[parseInt(btn.dataset.idx, 10)];
+            const labelYear = r.year ? ` (${r.year})` : '';
+            const sub = r.kind === 'show'
+                ? [r.child_count ? `${r.child_count} eps` : '', `${r.paths.length} folder(s)`].filter(Boolean).join(' · ')
+                : '';
+            manualAddSelection({ kind: r.kind, label: `${r.title}${labelYear}`, sublabel: sub, paths: r.paths });
+            const input = document.getElementById('manualSearchInput');
+            if (input) { input.value = ''; input.focus(); }
+            _manualHideSearch();
+        });
+    });
+}
+
+async function manualRunSearch() {
+    const input = document.getElementById('manualSearchInput');
+    if (!input) return;
+    const q = input.value.trim();
+    if (q.length < 2) { _manualHideSearch(); return; }
+    const scope = (document.getElementById('manualServerScope') || {}).value || '';
+    const box = document.getElementById('manualSearchResults');
+    if (box) {
+        box.innerHTML = '<div class="list-group-item text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Searching…</div>';
+        box.classList.remove('d-none');
+    }
+    const seq = ++_manualSearchSeq;
+    try {
+        const qs = new URLSearchParams({ q });
+        if (scope) qs.set('server_id', scope);
+        const data = await apiGet('/api/media/search?' + qs.toString());
+        if (seq !== _manualSearchSeq) return;  // a newer keystroke superseded this
+        manualRenderSearchResults(data.results || []);
+    } catch (e) {
+        if (seq !== _manualSearchSeq) return;
+        if (box) box.innerHTML = `<div class="list-group-item text-danger small">${escapeHtmlText((e && e.message) || 'Search failed')}</div>`;
+    }
+}
+
+function manualOpenBrowse() {
+    openFolderPicker(_manualLastBrowseRoot, (path, meta) => {
+        if (!path) return;
+        _manualLastBrowseRoot = (meta && meta.isDir) ? path : path.replace(/\/+[^/]+\/?$/, '') || '/';
+        const base = path.replace(/\/+$/, '').split('/').pop() || path;
+        manualAddSelection({
+            kind: (meta && meta.isDir) ? 'folder' : 'file',
+            label: base,
+            sublabel: path,
+            paths: [path],
+        });
+    }, { includeFiles: true });
+}
+
+function _wireManualModal() {
+    if (_manualWired) return;
+    _manualWired = true;
+    const input = document.getElementById('manualSearchInput');
+    if (input) {
+        input.addEventListener('input', () => {
+            clearTimeout(_manualSearchTimer);
+            _manualSearchTimer = setTimeout(manualRunSearch, 250);
+        });
+        input.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Escape') _manualHideSearch();
+        });
+    }
+    const browseBtn = document.getElementById('manualBrowseBtn');
+    if (browseBtn) browseBtn.addEventListener('click', manualOpenBrowse);
+    const clearAll = document.getElementById('manualClearAll');
+    if (clearAll) clearAll.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        _manualSelections = [];
+        manualRenderChips();
+    });
+    const scope = document.getElementById('manualServerScope');
+    if (scope) scope.addEventListener('change', () => {
+        if ((input.value || '').trim().length >= 2) manualRunSearch();
+    });
+    // Clicking outside the results dropdown dismisses it.
+    document.addEventListener('click', (ev) => {
+        if (!ev.target.closest('#manualSearchResults') && ev.target !== input && !ev.target.closest('#manualSearchInput')) {
+            _manualHideSearch();
+        }
+    });
+}
+
 function showManualTriggerModal() {
+    _manualSelections = [];
+    _manualSearchSeq++;
     document.getElementById('manualFilePaths').value = '';
     document.getElementById('manualForceRegenerate').checked = false;
     document.getElementById('manualPriority').value = '2';
+    const searchInput = document.getElementById('manualSearchInput');
+    if (searchInput) searchInput.value = '';
+    _manualHideSearch();
     const sel = document.getElementById('manualServerScope');
     if (sel) sel.value = '';
     _populateManualServerScopePicker();
+    manualRenderChips();
+    _wireManualModal();
     new bootstrap.Modal(document.getElementById('manualTriggerModal')).show();
 }
 
 async function startManualJob() {
-    const raw = document.getElementById('manualFilePaths').value.trim();
-    if (!raw) {
-        showToast('Error', 'Please enter at least one file path', 'warning');
-        return;
-    }
+    // Selections come from chips (search/browse) plus any manually pasted lines.
+    const chipPaths = _manualSelections.flatMap(s => s.paths);
+    const typed = (document.getElementById('manualFilePaths').value || '')
+        .split('\n').map(p => p.trim()).filter(p => p.length > 0);
+    const paths = [...new Set([...chipPaths, ...typed])];
 
-    const paths = raw.split('\n').map(p => p.trim()).filter(p => p.length > 0);
     if (paths.length === 0) {
-        showToast('Error', 'Please enter at least one file path', 'warning');
+        showToast('Error', 'Pick at least one show, movie, file or folder', 'warning');
         return;
     }
 
@@ -3000,7 +3207,12 @@ async function startManualJob() {
         bootstrap.Modal.getInstance(document.getElementById('manualTriggerModal')).hide();
         loadJobs();
         loadJobStats();
-        const label = paths.length === 1 ? paths[0].split('/').pop() : `${paths.length} files`;
+        let label;
+        if (_manualSelections.length === 1 && !typed.length) {
+            label = _manualSelections[0].label;
+        } else {
+            label = `${paths.length} path(s)`;
+        }
         showToast('Job Started', `Processing ${label}`, 'success');
     } catch (error) {
         showToast('Error', 'Failed to start manual job: ' + error.message, 'danger');

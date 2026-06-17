@@ -31,6 +31,7 @@ from .base import (
     Library,
     MediaItem,
     MediaServer,
+    MediaSuggestion,
     ServerConfig,
 )
 
@@ -913,6 +914,125 @@ class EmbyApiClient(MediaServer):
                 sq.episode,
             )
         return results
+
+    def search_suggestions(self, query: str, limit: int = 20) -> list[MediaSuggestion]:
+        """Container-level hits for the Manual Generation picker.
+
+        Mirrors :meth:`search_items` but keeps Series whole: a Series row
+        becomes one ``show`` suggestion carrying its folder ``Path`` (the
+        dispatcher expands it into episodes), rather than being drilled into
+        ``/Shows/{id}/Episodes``. Movies and episodes become leaf suggestions.
+        Two passes — Series-first via ``NameStartsWith``, then a ``searchTerm``
+        fallback covering movies, episodes and ``The``-prefixed shows.
+        """
+        from ..search import SearchQuery
+        from ..search.rank import filter_and_rank
+
+        sq = SearchQuery.parse(query)
+        if sq.is_empty:
+            return []
+
+        suggestions: list[MediaSuggestion] = []
+        seen_ids: set[str] = set()
+        user_id = self._user_id()
+
+        def _maybe_add_user_id(params: dict[str, Any]) -> dict[str, Any]:
+            return {**params, "UserId": user_id} if user_id else params
+
+        def _emit_series(raw: dict[str, Any]) -> None:
+            path = str(raw.get("Path") or "")
+            rid = str(raw.get("Id") or "")
+            if not path or rid in seen_ids:
+                return
+            seen_ids.add(rid)
+            count = raw.get("RecursiveItemCount")
+            if not isinstance(count, int):
+                count = raw.get("ChildCount") if isinstance(raw.get("ChildCount"), int) else None
+            suggestions.append(
+                MediaSuggestion(
+                    kind="show",
+                    title=str(raw.get("Name") or ""),
+                    year=raw.get("ProductionYear") if isinstance(raw.get("ProductionYear"), int) else None,
+                    remote_paths=(path,),
+                    library_id=str(raw.get("ParentId") or ""),
+                    child_count=count,
+                )
+            )
+
+        def _emit_leaf(raw: dict[str, Any], kind: str) -> None:
+            path = str(raw.get("Path") or "")
+            rid = str(raw.get("Id") or "")
+            if not path or rid in seen_ids:
+                return
+            seen_ids.add(rid)
+            suggestions.append(
+                MediaSuggestion(
+                    kind=kind,
+                    title=_format_emby_title(raw),
+                    year=raw.get("ProductionYear") if isinstance(raw.get("ProductionYear"), int) else None,
+                    remote_paths=(path,),
+                    library_id=str(raw.get("ParentId") or ""),
+                )
+            )
+
+        # Pass 1: Series-first via NameStartsWith (skipped when the user typed
+        # S##E## — they want a specific episode, not the whole show).
+        if not sq.has_episode:
+            series_params = _maybe_add_user_id(
+                {
+                    "NameStartsWith": sq.title,
+                    "IncludeItemTypes": "Series",
+                    "Recursive": "true",
+                    "Fields": "Path,ProductionYear,RecursiveItemCount",
+                    "Limit": "10",
+                }
+            )
+            try:
+                for series in self.query_items(series_params) or []:
+                    if isinstance(series, dict) and str(series.get("Type") or "") == "Series":
+                        _emit_series(series)
+                        if len(suggestions) >= limit:
+                            return suggestions
+            except Exception as exc:
+                logger.debug("[{}] Series-first suggestion pass failed for {!r}: {}", self.name, sq.raw, exc)
+
+        # Pass 2: searchTerm fallback — movies, episodes, and shows missed above.
+        fallback_params = _maybe_add_user_id(
+            {
+                "searchTerm": sq.title,
+                "IncludeItemTypes": "Series,Movie,Episode",
+                "Recursive": "true",
+                "Fields": "Path,ProductionYear,RecursiveItemCount,IndexNumber,ParentIndexNumber",
+                "Limit": str(min(int(limit) * 4, 200)),
+            }
+        )
+        try:
+            raw_items = self.query_items(fallback_params)
+        except Exception as exc:
+            logger.info("[{}] searchTerm suggestion fallback failed for {!r}: {}", self.name, sq.raw, exc)
+            raw_items = []
+
+        candidates: list[tuple[str, str, dict]] = []
+        for raw in raw_items or []:
+            if isinstance(raw, dict):
+                candidates.append((_format_emby_title(raw), str(raw.get("Type") or "").lower(), raw))
+
+        for raw in filter_and_rank(sq, candidates, limit=limit * 2):
+            if len(suggestions) >= limit:
+                break
+            raw_type = str(raw.get("Type") or "")
+            if raw_type == "Series":
+                if not sq.has_episode:
+                    _emit_series(raw)
+                continue
+            if sq.has_episode:
+                if raw_type != "Episode":
+                    continue
+                if raw.get("ParentIndexNumber") != sq.season or raw.get("IndexNumber") != sq.episode:
+                    continue
+            _emit_leaf(raw, "episode" if raw_type == "Episode" else "movie")
+
+        return suggestions
 
     def resolve_item_to_remote_path(self, item_id: str) -> str | None:
         """Return ``MediaSources[0].Path`` (or top-level ``Path``) for ``item_id``.
