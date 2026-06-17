@@ -98,6 +98,47 @@ class TestManualTriggerModal:
         dashboard_page.locator("#manualAdvanced summary").click()
         expect(dashboard_page.locator("#manualFilePaths")).to_be_visible()
 
+    def test_search_results_multiselect_adds_multiple_chips(self, dashboard_page: Page) -> None:
+        """Tick several search results, then 'Add selected' adds them all as
+        chips in one go (widowshyper's #266 request)."""
+        results = {
+            "query": "ben",
+            "error": None,
+            "results": [
+                {
+                    "kind": "show",
+                    "title": "Ben 10: Ultimate Alien",
+                    "year": 2010,
+                    "paths": ["/data/TV/Ben 10 UA"],
+                    "child_count": 52,
+                    "servers": [{"id": "plex-1", "name": "Plex", "type": "plex"}],
+                },
+                {
+                    "kind": "show",
+                    "title": "Ben 10: Alien Force",
+                    "year": 2008,
+                    "paths": ["/data/TV/Ben 10 AF"],
+                    "child_count": 46,
+                    "servers": [{"id": "plex-1", "name": "Plex", "type": "plex"}],
+                },
+            ],
+        }
+        dashboard_page.route("**/api/media/search**", lambda route: _fulfill_json(route, results))
+
+        dashboard_page.locator('button:has-text("Manual Trigger")').click()
+        dashboard_page.locator("#manualSearchInput").fill("ben")
+        # Debounced search renders one checkbox per result.
+        checks = dashboard_page.locator("#manualSearchResults .manual-row-check")
+        expect(checks).to_have_count(2, timeout=3000)
+
+        checks.nth(0).check()
+        checks.nth(1).check()
+        expect(dashboard_page.locator("#manualSelectCount")).to_have_text("2")
+
+        dashboard_page.locator("#manualAddSelectedBtn").click()
+        # Both picks land as chips.
+        expect(dashboard_page.locator("#manualChips .badge")).to_have_count(2)
+
 
 @pytest.fixture
 def jellyfin_dashboard_page(authed_page: Page, app_url: str) -> Page:

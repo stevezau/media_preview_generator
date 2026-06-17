@@ -2954,6 +2954,9 @@ let _manualWired = false;
 let _manualLastBrowseRoot = '/';
 let _manualSearchTimer = null;
 let _manualSearchSeq = 0;
+// Current search result set + the indices ticked for batch-add.
+let _manualSearchResults = [];
+let _manualChecked = new Set();
 
 async function _populateManualServerScopePicker() {
     const sel = document.getElementById('manualServerScope');
@@ -3044,6 +3047,7 @@ function manualRenderChips() {
 function _manualHideSearch() {
     const box = document.getElementById('manualSearchResults');
     if (box) { box.classList.add('d-none'); box.innerHTML = ''; }
+    _manualChecked = new Set();
 }
 
 function manualRenderSearchResults(results) {
@@ -3054,6 +3058,8 @@ function manualRenderSearchResults(results) {
         box.classList.remove('d-none');
         return;
     }
+    _manualSearchResults = results;
+    _manualChecked = new Set();
     const kindLabel = { show: 'Shows', movie: 'Movies', episode: 'Episodes' };
     let lastKind = null;
     const rows = [];
@@ -3069,26 +3075,63 @@ function manualRenderSearchResults(results) {
             if ((r.paths || []).length > 1) bits.push(`${r.paths.length} folders`);
         }
         const meta = bits.length ? `<span class="small text-muted me-2">${escapeHtmlText(bits.join(' · '))}</span>` : '';
-        rows.push(`<button type="button" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center" data-idx="${idx}">
-            <span class="text-truncate"><i class="bi ${_manualKindIcon(r.kind)} me-2"></i>${escapeHtmlText(r.title)}${year}</span>
-            <span class="ms-2 flex-shrink-0 d-flex align-items-center">${meta}${_manualServerBadges(r.servers)}</span>
-        </button>`);
+        // A row is a checkbox (batch-pick) + a clickable title (add-one-now) +
+        // metadata/badges. The checkbox toggles selection without closing the
+        // dropdown; clicking the title adds just that item immediately.
+        rows.push(`<div class="list-group-item d-flex align-items-center gap-2" data-idx="${idx}">
+            <input type="checkbox" class="form-check-input mt-0 flex-shrink-0 manual-row-check" data-idx="${idx}" aria-label="Select ${escapeHtmlAttr(r.title)}">
+            <span class="flex-grow-1 text-truncate manual-row-add" role="button" style="cursor: pointer;" data-idx="${idx}"><i class="bi ${_manualKindIcon(r.kind)} me-2"></i>${escapeHtmlText(r.title)}${year}</span>
+            <span class="ms-1 flex-shrink-0 d-flex align-items-center">${meta}${_manualServerBadges(r.servers)}</span>
+        </div>`);
     });
+    // Sticky batch-add bar — only shown once something is ticked.
+    rows.push(`<div class="list-group-item d-flex justify-content-between align-items-center position-sticky bottom-0 bg-body border-top" id="manualSelectBar" style="display: none;">
+        <span class="small text-muted"><span id="manualSelectCount">0</span> selected</span>
+        <button type="button" class="btn btn-sm btn-primary" id="manualAddSelectedBtn"><i class="bi bi-plus-lg me-1"></i>Add selected</button>
+    </div>`);
     box.innerHTML = rows.join('');
     box.classList.remove('d-none');
-    box.querySelectorAll('button[data-idx]').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const r = results[parseInt(btn.dataset.idx, 10)];
-            const labelYear = r.year ? ` (${r.year})` : '';
-            const sub = r.kind === 'show'
-                ? [r.child_count ? `${r.child_count} eps` : '', `${r.paths.length} folder(s)`].filter(Boolean).join(' · ')
-                : '';
-            manualAddSelection({ kind: r.kind, label: `${r.title}${labelYear}`, sublabel: sub, paths: r.paths });
+    box.querySelectorAll('.manual-row-add').forEach(el => {
+        el.addEventListener('click', () => {
+            _manualAddResult(_manualSearchResults[parseInt(el.dataset.idx, 10)]);
             const input = document.getElementById('manualSearchInput');
             if (input) { input.value = ''; input.focus(); }
             _manualHideSearch();
         });
     });
+    box.querySelectorAll('.manual-row-check').forEach(cb => {
+        cb.addEventListener('change', () => {
+            const idx = parseInt(cb.dataset.idx, 10);
+            if (cb.checked) _manualChecked.add(idx); else _manualChecked.delete(idx);
+            _manualUpdateSelectBar();
+        });
+    });
+    const addBtn = document.getElementById('manualAddSelectedBtn');
+    if (addBtn) addBtn.addEventListener('click', () => {
+        [..._manualChecked].sort((a, b) => a - b).forEach(i => _manualAddResult(_manualSearchResults[i]));
+        const input = document.getElementById('manualSearchInput');
+        if (input) { input.value = ''; input.focus(); }
+        _manualHideSearch();
+    });
+}
+
+// Turn one search result into a chip selection (shared by single-click add
+// and the batch "Add selected" button).
+function _manualAddResult(r) {
+    if (!r) return;
+    const labelYear = r.year ? ` (${r.year})` : '';
+    const sub = r.kind === 'show'
+        ? [r.child_count ? `${r.child_count} eps` : '', `${r.paths.length} folder(s)`].filter(Boolean).join(' · ')
+        : '';
+    manualAddSelection({ kind: r.kind, label: `${r.title}${labelYear}`, sublabel: sub, paths: r.paths });
+}
+
+function _manualUpdateSelectBar() {
+    const bar = document.getElementById('manualSelectBar');
+    const cnt = document.getElementById('manualSelectCount');
+    if (!bar || !cnt) return;
+    cnt.textContent = _manualChecked.size;
+    bar.style.display = _manualChecked.size ? '' : 'none';
 }
 
 async function manualRunSearch() {

@@ -19,8 +19,14 @@
     // When true, the browse API also returns video files, and clicking a file
     // selects it as the pick target (instead of navigating). _selectedFile holds
     // that file path; null means "the current folder is the selection".
+    // In includeFiles mode the picker is multi-select: _selected maps each
+    // ticked path -> isDir and persists as the user navigates between folders,
+    // so they can gather files/folders from several places before confirming.
+    // Legacy (folder-only) mode leaves _selected empty and confirms the
+    // currently-open folder.
     let _includeFiles = false;
-    let _selectedFile = null;
+    let _selected = new Map();
+    let _entries = [];
 
     function _ensureModalMarkup() {
         if (document.getElementById(MODAL_ID)) return;
@@ -74,9 +80,14 @@
             _loadPath(_currentPath);
         });
         document.getElementById('folderPickerConfirmBtn').addEventListener('click', () => {
-            const picked = _selectedFile || _currentPath;
+            // Ticked items win; with nothing ticked, fall back to the current
+            // folder (legacy single-folder behaviour). The callback runs once
+            // per pick so multi-select adds several chips in one go.
+            const picks = _selected.size
+                ? [..._selected.entries()].map(([path, isDir]) => ({ path, isDir }))
+                : [{ path: _currentPath, isDir: true }];
             if (_onPickCallback) {
-                try { _onPickCallback(picked, { isDir: !_selectedFile }); } catch (e) { console.error(e); }
+                try { picks.forEach((p) => _onPickCallback(p.path, { isDir: p.isDir })); } catch (e) { console.error(e); }
             }
             const modal = bootstrap.Modal.getInstance(document.getElementById(MODAL_ID));
             if (modal) modal.hide();
@@ -131,7 +142,15 @@
         });
     }
 
+    function _toggleSelect(path, isDir) {
+        if (_selected.has(path)) _selected.delete(path);
+        else _selected.set(path, isDir);
+        _renderEntries(_entries);
+        _syncChrome();
+    }
+
     function _renderEntries(entries) {
+        _entries = entries;
         const list = document.getElementById('folderPickerList');
         if (!entries.length) {
             list.innerHTML = `<div class="list-group-item text-muted">No ${_includeFiles ? 'subfolders or videos' : 'subfolders'}.</div>`;
@@ -141,25 +160,35 @@
         // treat a missing flag as a directory so legacy callers keep working.
         list.innerHTML = entries.map((e) => {
             const isDir = e.is_dir !== false;
-            if (isDir) {
+            // Legacy folder-only mode: dirs are plain navigable rows.
+            if (!_includeFiles) {
                 return `<button type="button" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center" data-fp-dir="${escapeHtmlAttr(e.path)}">
                     <span><i class="bi bi-folder2 me-2"></i>${escapeHtmlText(e.name)}</span>
                     <i class="bi bi-chevron-right text-muted"></i>
                 </button>`;
             }
-            const active = e.path === _selectedFile ? ' active' : '';
-            return `<button type="button" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center${active}" data-fp-file="${escapeHtmlAttr(e.path)}">
-                <span><i class="bi bi-film me-2"></i>${escapeHtmlText(e.name)}</span>
-                <i class="bi bi-check2 text-success${active ? '' : ' invisible'}"></i>
-            </button>`;
+            // Multi-select mode: checkbox to tick + a name that navigates
+            // (folders) or toggles its own checkbox (files).
+            const checked = _selected.has(e.path) ? ' checked' : '';
+            const icon = isDir ? 'bi-folder2' : 'bi-film';
+            const navAttr = isDir ? `data-fp-dir="${escapeHtmlAttr(e.path)}"` : `data-fp-file="${escapeHtmlAttr(e.path)}"`;
+            const chevron = isDir ? '<i class="bi bi-chevron-right text-muted flex-shrink-0"></i>' : '';
+            return `<div class="list-group-item d-flex align-items-center gap-2">
+                <input type="checkbox" class="form-check-input mt-0 flex-shrink-0 fp-check" data-fp-path="${escapeHtmlAttr(e.path)}" data-fp-isdir="${isDir ? '1' : '0'}"${checked} aria-label="Select ${escapeHtmlAttr(e.name)}">
+                <span class="flex-grow-1 text-truncate fp-nav" role="button" style="cursor: pointer;" ${navAttr}><i class="bi ${icon} me-2"></i>${escapeHtmlText(e.name)}</span>
+                ${chevron}
+            </div>`;
         }).join('');
-        list.querySelectorAll('button[data-fp-dir]').forEach((btn) => {
-            btn.addEventListener('click', () => _loadPath(btn.dataset.fpDir));
+        list.querySelectorAll('button[data-fp-dir], .fp-nav[data-fp-dir]').forEach((el) => {
+            el.addEventListener('click', () => _loadPath(el.dataset.fpDir));
         });
-        list.querySelectorAll('button[data-fp-file]').forEach((btn) => {
-            btn.addEventListener('click', () => {
-                _selectedFile = _selectedFile === btn.dataset.fpFile ? null : btn.dataset.fpFile;
-                _renderEntries(entries);
+        list.querySelectorAll('.fp-nav[data-fp-file]').forEach((el) => {
+            el.addEventListener('click', () => _toggleSelect(el.dataset.fpFile, false));
+        });
+        list.querySelectorAll('.fp-check').forEach((cb) => {
+            cb.addEventListener('change', () => {
+                if (cb.checked) _selected.set(cb.dataset.fpPath, cb.dataset.fpIsdir === '1');
+                else _selected.delete(cb.dataset.fpPath);
                 _syncChrome();
             });
         });
@@ -170,12 +199,13 @@
         if (pathInput) pathInput.value = _currentPath;
         const upBtn = document.getElementById('folderPickerUpBtn');
         if (upBtn) upBtn.disabled = _currentPath === '/' || !_currentPath;
+        const n = _selected.size;
         const sel = document.getElementById('folderPickerSelectedPath');
-        if (sel) sel.textContent = _selectedFile || _currentPath;
+        if (sel) sel.textContent = n ? `${n} item${n === 1 ? '' : 's'} selected` : _currentPath;
         const confirmBtn = document.getElementById('folderPickerConfirmBtn');
         if (confirmBtn) {
-            confirmBtn.innerHTML = _selectedFile
-                ? '<i class="bi bi-check2 me-1"></i>Pick this file'
+            confirmBtn.innerHTML = n
+                ? `<i class="bi bi-check2 me-1"></i>Add ${n} selected`
                 : '<i class="bi bi-check2 me-1"></i>Pick this folder';
         }
     }
@@ -186,9 +216,8 @@
         errEl.classList.add('d-none');
         errEl.textContent = '';
         list.innerHTML = '<div class="list-group-item text-muted"><span class="spinner-border spinner-border-sm me-1"></span>Loading…</div>';
-        // Navigating to a new folder drops any previously selected file — the
-        // selection always belongs to the folder currently in view.
-        _selectedFile = null;
+        // Selections persist across navigation in multi-select mode, so we do
+        // NOT clear them here — the user can gather picks from several folders.
         try {
             const qs = new URLSearchParams({ path });
             if (_showHidden) qs.set('show_hidden', '1');
@@ -220,12 +249,12 @@
         _currentPath = initialPath || '/';
         _showHidden = false;
         _includeFiles = !!(options && options.includeFiles);
-        _selectedFile = null;
+        _selected = new Map();
         document.getElementById('folderPickerShowHidden').checked = false;
         const title = document.querySelector(`#${MODAL_ID} .modal-title`);
         if (title) {
             title.innerHTML = _includeFiles
-                ? '<i class="bi bi-folder2-open me-2"></i>Pick a folder or video file'
+                ? '<i class="bi bi-folder2-open me-2"></i>Pick folders or video files'
                 : '<i class="bi bi-folder2-open me-2"></i>Pick a folder';
         }
         _loadPath(_currentPath);
