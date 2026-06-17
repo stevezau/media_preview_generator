@@ -3084,6 +3084,14 @@ function manualRenderSearchResults(results) {
             <span class="ms-1 flex-shrink-0 d-flex align-items-center">${meta}${_manualServerBadges(r.servers)}</span>
         </div>`);
     });
+    // Discoverability: when a show is in the results and the user hasn't typed
+    // a season/episode yet, hint that they can append one to target a single
+    // episode (the search box accepts "Show S01E01" or "Show 1x01").
+    const q = (document.getElementById('manualSearchInput') || {}).value || '';
+    const typedEpisode = /\bS\d{1,2}E\d{1,3}\b|\b\d{1,2}x\d{1,3}\b/i.test(q);
+    if (results.some(r => r.kind === 'show') && !typedEpisode) {
+        rows.unshift('<div class="list-group-item small text-body-secondary bg-body-tertiary py-1 border-bottom"><i class="bi bi-lightbulb me-1 text-warning"></i>Tip: add an episode like <code>S01E01</code> to pick just one episode.</div>');
+    }
     // Sticky batch-add bar — only shown once something is ticked.
     rows.push(`<div class="list-group-item d-flex justify-content-between align-items-center position-sticky bottom-0 bg-body border-top" id="manualSelectBar" style="display: none;">
         <span class="small text-muted"><span id="manualSelectCount">0</span> selected</span>
