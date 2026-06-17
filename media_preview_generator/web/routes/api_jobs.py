@@ -3,6 +3,7 @@
 import math
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from flask import jsonify, request, session
@@ -840,9 +841,15 @@ def media_search():
                     locals_.append(local)
         return locals_
 
-    for cfg, server in targets:
+    # Fan the per-server searches out concurrently — each vendor's search API
+    # is a 2-3s network round-trip, so a sequential loop made a 3-server
+    # typeahead feel sluggish (~8s). ThreadPoolExecutor.map preserves input
+    # order, so the merge below stays deterministic regardless of which server
+    # responds first; a server that errors yields ``None`` and is skipped.
+    def _fetch(target: tuple) -> tuple:
+        cfg, server = target
         try:
-            suggestions = server.search_suggestions(query, limit=_MEDIA_SEARCH_LIMIT)
+            return cfg, server.search_suggestions(query, limit=_MEDIA_SEARCH_LIMIT)
         except Exception as exc:
             logger.warning(
                 "Media search on server {!r} failed ({}: {}). Other servers still return results; "
@@ -851,6 +858,16 @@ def media_search():
                 type(exc).__name__,
                 exc,
             )
+            return cfg, None
+
+    if targets:
+        with ThreadPoolExecutor(max_workers=min(len(targets), 8)) as pool:
+            fetched = list(pool.map(_fetch, targets))
+    else:
+        fetched = []
+
+    for cfg, suggestions in fetched:
+        if suggestions is None:
             continue
         mappings = list(cfg.path_mappings or [])
         server_tag = {"id": cfg.id, "name": cfg.name, "type": cfg.type.value}
