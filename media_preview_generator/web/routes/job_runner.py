@@ -1842,7 +1842,7 @@ def _start_recently_added_job_async(
                 )
 
             def worker_callback(workers_list):
-                from ...jobs import WorkerStatus
+                from ..jobs import WorkerStatus
 
                 active_keys = set()
                 for worker_data in workers_list:

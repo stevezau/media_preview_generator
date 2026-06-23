@@ -351,3 +351,51 @@ class TestStartRecentlyAddedJobAsync:
         )
         # Job should land in CANCELLED, not COMPLETED.
         assert jm.get_job(job_id).status.value == "cancelled"
+
+
+class TestWorkerCallbackImportsResolve:
+    """Regression for #267: both ``worker_callback`` closures in
+    ``job_runner.py`` import ``WorkerStatus``. ``_start_recently_added_job_async``'s
+    copy used ``from ...jobs import WorkerStatus`` (one dot too many) which
+    resolves to the top-level ``jobs`` *package* — where ``WorkerStatus`` is
+    NOT defined — instead of ``..jobs`` -> ``web.jobs``. At runtime the
+    dispatcher swallowed the ImportError as "dispatch loop iteration failed;
+    continuing", so worker-status UI updates silently vanished for scheduled
+    recently-added scans while preview generation still completed.
+
+    The mocked scan in the other tests never fires the real callback, so a
+    static resolution check is what actually guards the import depth.
+    """
+
+    def test_every_workerstatus_import_resolves(self):
+        import ast
+        import importlib
+        from pathlib import Path
+
+        import media_preview_generator.web.routes.job_runner as jr_mod
+
+        source = Path(jr_mod.__file__).read_text()
+        tree = ast.parse(source)
+
+        # job_runner lives in media_preview_generator.web.routes, so a
+        # relative ImportFrom with level N resolves against that package.
+        base_pkg = "media_preview_generator.web.routes"
+
+        found = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if not any(alias.name == "WorkerStatus" for alias in node.names):
+                continue
+            found += 1
+            # Resolve the relative module the same way Python would.
+            parent = base_pkg.rsplit(".", node.level - 1)[0] if node.level > 1 else base_pkg
+            target = f"{parent}.{node.module}" if node.module else parent
+            mod = importlib.import_module(target)
+            assert hasattr(mod, "WorkerStatus"), (
+                f"`from {'.' * node.level}{node.module or ''} import WorkerStatus` at "
+                f"job_runner.py:{node.lineno} resolves to {target!r}, which has no "
+                f"WorkerStatus (issue #267 — wrong relative-import depth)"
+            )
+
+        assert found >= 2, f"expected both worker_callback WorkerStatus imports, found {found}"
