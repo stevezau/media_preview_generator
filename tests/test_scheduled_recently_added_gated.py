@@ -354,40 +354,46 @@ class TestStartRecentlyAddedJobAsync:
 
 
 class TestWorkerCallbackImportsResolve:
-    """Regression for #267: both ``worker_callback`` closures in
-    ``job_runner.py`` import ``WorkerStatus``. ``_start_recently_added_job_async``'s
-    copy used ``from ...jobs import WorkerStatus`` (one dot too many) which
-    resolves to the top-level ``jobs`` *package* — where ``WorkerStatus`` is
-    NOT defined — instead of ``..jobs`` -> ``web.jobs``. At runtime the
-    dispatcher swallowed the ImportError as "dispatch loop iteration failed;
-    continuing", so worker-status UI updates silently vanished for scheduled
-    recently-added scans while preview generation still completed.
+    """Regression for #267. The ``worker_callback`` closure in
+    ``_start_recently_added_job_async`` did ``from ...jobs import WorkerStatus``
+    (one dot too many), resolving to the top-level ``jobs`` *package* — where
+    ``WorkerStatus`` is NOT defined — instead of ``..jobs`` -> ``web.jobs``. At
+    runtime the dispatcher swallowed the ImportError as "dispatch loop iteration
+    failed; continuing", so worker-status UI updates silently vanished for
+    scheduled recently-added scans while preview generation still completed.
 
-    The mocked scan in the other tests never fires the real callback, so a
-    static resolution check is what actually guards the import depth.
+    The fix hoists ``WorkerStatus`` to the module-level ``from ..jobs import``,
+    so any wrong target now fails at module import time (which this test
+    forces) rather than being deferred into a closure the mocked scans never
+    fire. The two checks below pin (a) the symbol is the real class from
+    ``web.jobs`` and (b) no stray function-local import re-introduces the
+    wrong-depth footgun.
     """
 
-    def test_every_workerstatus_import_resolves(self):
+    def test_workerstatus_is_live_at_module_level(self):
+        import media_preview_generator.web.routes.job_runner as jr_mod
+        from media_preview_generator.web.jobs import WorkerStatus
+
+        assert jr_mod.WorkerStatus is WorkerStatus, (
+            "job_runner.WorkerStatus must be the class from web.jobs — a wrong "
+            "relative-import depth would either shadow it or fail import (issue #267)"
+        )
+
+    def test_no_workerstatus_import_resolves_wrong(self):
         import ast
         import importlib
         from pathlib import Path
 
         import media_preview_generator.web.routes.job_runner as jr_mod
 
-        source = Path(jr_mod.__file__).read_text()
-        tree = ast.parse(source)
-
-        # job_runner lives in media_preview_generator.web.routes, so a
-        # relative ImportFrom with level N resolves against that package.
+        tree = ast.parse(Path(jr_mod.__file__).read_text())
         base_pkg = "media_preview_generator.web.routes"
 
-        found = 0
         for node in ast.walk(tree):
             if not isinstance(node, ast.ImportFrom):
                 continue
             if not any(alias.name == "WorkerStatus" for alias in node.names):
                 continue
-            found += 1
             # Resolve the relative module the same way Python would.
             parent = base_pkg.rsplit(".", node.level - 1)[0] if node.level > 1 else base_pkg
             target = f"{parent}.{node.module}" if node.module else parent
@@ -397,5 +403,3 @@ class TestWorkerCallbackImportsResolve:
                 f"job_runner.py:{node.lineno} resolves to {target!r}, which has no "
                 f"WorkerStatus (issue #267 — wrong relative-import depth)"
             )
-
-        assert found >= 2, f"expected both worker_callback WorkerStatus imports, found {found}"
