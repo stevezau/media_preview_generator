@@ -32,6 +32,7 @@ from loguru import logger
 from ..config import resolve_frame_interval
 from ._embyish import EmbyApiClient, is_video_library_folder
 from .base import FlagTarget, HealthCheckIssue, ServerType, WebhookEvent
+from .ownership import apply_inverse_path_mappings
 
 # Floor on how often a single Jellyfin server may receive a full
 # /Library/Refresh nudge. Without it, a webhook burst (e.g. Sonarr
@@ -296,9 +297,31 @@ class JellyfinServer(EmbyApiClient):
         path on the base class when the plugin isn't installed (404)
         or any other transport error. Caller-side cache wraps both
         paths so repeat queries within the TTL are free.
+
+        The dispatcher passes the LOCAL canonical path; both the plugin's
+        ``FindByPath`` and the base class's library scoping key on the path as
+        *Jellyfin* sees it, so we translate local → server-side via the inverse
+        of ``path_mappings`` first. This is what makes off-media trickplay (which
+        REQUIRES the item id) work on path-mapped setups; it's a no-op when the
+        app and Jellyfin share the same media paths.
         """
         if not remote_path:
             return None
+        # Translate the local canonical path into Jellyfin's path space and try
+        # EVERY candidate the path_mappings produce — overlapping mounts can yield
+        # more than one, and we mustn't silently drop a valid resolution. No-op
+        # (single passthrough candidate) for local==remote setups.
+        mappings = (self._config.path_mappings or []) if getattr(self, "_config", None) else []
+        for server_path in apply_inverse_path_mappings(remote_path, mappings):
+            result = self._resolve_server_path_to_item_id(server_path)
+            if result:
+                return result
+        return None
+
+    def _resolve_server_path_to_item_id(self, remote_path: str) -> str | None:
+        """Resolve ONE server-side path to an item id via the plugin's FindByPath,
+        falling back to the base library-scoped resolver. ``remote_path`` is in
+        Jellyfin's own path space (already translated by the caller)."""
         try:
             response = self._request(
                 "GET",

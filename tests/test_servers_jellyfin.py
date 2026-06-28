@@ -2423,3 +2423,89 @@ class TestOffMediaReadiness:
         assert check["ok"] is False
         assert check["severity"] == "critical"
         assert check["meta"]["plugin_required"] is True
+
+
+class TestPathMappedItemResolution:
+    """Off-media trickplay REQUIRES the item id; on path-mapped Jellyfin the
+    dispatcher passes the LOCAL canonical path, so the resolver must translate
+    it to Jellyfin's own path space before the plugin's FindByPath."""
+
+    def test_resolver_translates_local_path_to_remote_for_plugin(self):
+        cfg = _jelly_config()
+        cfg.path_mappings = [{"remote_prefix": "/jf-media", "local_prefix": "/mnt/media"}]
+        jelly = JellyfinServer(cfg)
+
+        seen = {}
+
+        def fake_request(method, path, **kwargs):
+            seen["path_param"] = (kwargs.get("params") or {}).get("path")
+            return MagicMock(status_code=200, json=MagicMock(return_value={"itemId": "abc123"}))
+
+        with patch.object(JellyfinServer, "_request", side_effect=fake_request):
+            item_id = jelly._uncached_resolve_remote_path_to_item_id("/mnt/media/Movies/Foo/Foo.mkv")
+
+        assert item_id == "abc123"
+        # The plugin must be queried with the path JELLYFIN indexed, not the local mount.
+        assert seen["path_param"] == "/jf-media/Movies/Foo/Foo.mkv"
+
+    def test_resolver_unchanged_when_local_equals_remote(self):
+        # No path_mappings (the common single-host case) → path passed through verbatim.
+        jelly = JellyfinServer(_jelly_config())
+        seen = {}
+
+        def fake_request(method, path, **kwargs):
+            seen["path_param"] = (kwargs.get("params") or {}).get("path")
+            return MagicMock(status_code=200, json=MagicMock(return_value={"itemId": "xyz"}))
+
+        with patch.object(JellyfinServer, "_request", side_effect=fake_request):
+            jelly._uncached_resolve_remote_path_to_item_id("/data/Movies/Foo/Foo.mkv")
+        assert seen["path_param"] == "/data/Movies/Foo/Foo.mkv"
+
+    def test_resolver_passes_through_when_mappings_present_but_none_match(self):
+        # Mappings configured but the path is under none of them → verbatim.
+        cfg = _jelly_config()
+        cfg.path_mappings = [{"remote_prefix": "/jf-media", "local_prefix": "/mnt/media"}]
+        jelly = JellyfinServer(cfg)
+        seen = {}
+
+        def fake_request(method, path, **kwargs):
+            seen["path_param"] = (kwargs.get("params") or {}).get("path")
+            return MagicMock(status_code=200, json=MagicMock(return_value={"itemId": "q"}))
+
+        with patch.object(JellyfinServer, "_request", side_effect=fake_request):
+            jelly._uncached_resolve_remote_path_to_item_id("/other/place/Foo.mkv")
+        assert seen["path_param"] == "/other/place/Foo.mkv"
+
+    def test_resolver_tries_every_candidate_not_just_first(self):
+        """Overlapping mounts yield multiple server-side candidates; the resolver
+        must try each (a regression of taking only [0] would miss the indexed one)."""
+        cfg = _jelly_config()
+        # Both local_prefixes match /mnt/X → two candidates: /jf-a/... then /jf-b/...
+        cfg.path_mappings = [
+            {"remote_prefix": "/jf-a", "local_prefix": "/mnt"},
+            {"remote_prefix": "/jf-b", "local_prefix": "/mnt"},
+        ]
+        jelly = JellyfinServer(cfg)
+        queried = []
+
+        def fake_request(method, path, **kwargs):
+            p = (kwargs.get("params") or {}).get("path")
+            queried.append(p)
+            # First candidate isn't indexed (404); second resolves.
+            if p == "/jf-b/Movies/Foo.mkv":
+                return MagicMock(status_code=200, json=MagicMock(return_value={"itemId": "found"}))
+            return MagicMock(status_code=404, json=MagicMock(return_value={}))
+
+        # The 404 candidate falls through to the base resolver; stub it to None
+        # so the loop cleanly advances to the next candidate.
+        with (
+            patch.object(JellyfinServer, "_request", side_effect=fake_request),
+            patch(
+                "media_preview_generator.servers._embyish.EmbyApiClient._uncached_resolve_remote_path_to_item_id",
+                return_value=None,
+            ),
+        ):
+            item_id = jelly._uncached_resolve_remote_path_to_item_id("/mnt/Movies/Foo.mkv")
+
+        assert item_id == "found"
+        assert queried == ["/jf-a/Movies/Foo.mkv", "/jf-b/Movies/Foo.mkv"]

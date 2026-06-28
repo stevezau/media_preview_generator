@@ -304,6 +304,11 @@ jobs:
           # need a claimed Plex skip cleanly via the auto-skip in conftest.
           PLEX_CLAIM: ${{ secrets.PLEX_CLAIM_TOKEN }}
         run: |
+          # PUID/PGID = the runner user so Jellyfin's bind-mounted config
+          # (./jellyfin-config) is writable: setup_servers.py injects the API
+          # key + installs the plugin, and the off-media test writes trickplay
+          # into Jellyfin's data folder.
+          export PUID="$(id -u)" PGID="$(id -g)"
           docker compose -f docker-compose.test.yml up -d
           # Wait for healthchecks (compose has them on each service).
           for i in {1..60}; do

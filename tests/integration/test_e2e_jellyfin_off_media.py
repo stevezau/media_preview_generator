@@ -1,41 +1,26 @@
 """Live e2e test for OFF-MEDIA Jellyfin trickplay (#264).
 
-The full user-visible loop against a real Jellyfin **10.11+** with the
-Media Preview Bridge plugin installed and its config dir mounted
-read-write into the test runner:
+The full user-visible loop against the real Jellyfin 10.11 container brought up
+by docker-compose.test.yml, with the Media Preview Bridge plugin installed by
+setup_servers.py and the config dir bind-mounted read-write:
 
-1. ``process_canonical_path`` (the real dispatcher) runs FFmpeg once and
-   the JellyfinTrickplayAdapter publishes tile sheets into the Jellyfin
-   **data folder** (``<config>/data/trickplay/<id[:2]>/<id>/<W> - 10x10/``),
+1. ``process_canonical_path`` (the real dispatcher) runs FFmpeg once and the
+   JellyfinTrickplayAdapter publishes tile sheets into the Jellyfin **data
+   folder** (``<programdata>/data/trickplay/<id[:2]>/<id>/<W> - 10x10/``),
    NOT next to the media.
-2. The dispatcher's ``trigger_refresh`` calls the plugin's
-   ``saveWithMedia=false`` endpoint, which registers the tiles with the
-   correct ``ThumbnailCount``.
-3. With the library option ``SaveTrickplayWithMedia=false``, Jellyfin
-   **serves** the tile sheet from the data folder over HTTP — the byte
-   stream the web client fetches when scrubbing.
+2. The dispatcher's ``trigger_refresh`` calls the plugin's ``saveWithMedia=false``
+   endpoint, which registers the tiles with the correct ``ThumbnailCount``.
+3. With the library option ``SaveTrickplayWithMedia=false``, Jellyfin **serves**
+   the tile sheet from the data folder over HTTP — byte-identical to what we
+   wrote.
 
-This is distinct from the on-media chain (test_e2e_jellyfin_trickplay_fix.py)
-and is the only test that exercises the off-media GUID layout end-to-end.
-
-Gated on a dedicated env set (the standard integration Jellyfin is 10.9.11
-without the plugin, so it can't run this). Provide, e.g. against the
-``mpg_test`` canary rig::
-
-    MPG_OFFMEDIA_JELLYFIN_URL=http://localhost:8197 \
-    MPG_OFFMEDIA_JELLYFIN_TOKEN=<admin token> \
-    MPG_OFFMEDIA_JELLYFIN_CONFIG_DIR=<this runner's RW mount of JF /config> \
-    MPG_OFFMEDIA_MEDIA_FILE=<abs path to a media file indexed in JF & readable here> \
-    pytest -m integration --no-cov tests/integration/test_e2e_jellyfin_off_media.py
-
-The config dir MUST be writable by this process (the real deployment
-mounts it RW with a matching PUID); the test skips with a clear message
-if it isn't, rather than failing spuriously.
+Distinct from the on-media chain (test_e2e_jellyfin_trickplay_fix.py); the only
+test exercising the off-media GUID layout end-to-end. Skips cleanly when the
+10.11 + plugin + bind-mount harness isn't up (see the jellyfin_config_dir fixture).
 """
 
 from __future__ import annotations
 
-import os
 import shutil
 import time
 import uuid
@@ -48,28 +33,8 @@ import requests
 from media_preview_generator.processing.multi_server import process_canonical_path
 from media_preview_generator.servers import ServerRegistry
 
-_ENV = (
-    "MPG_OFFMEDIA_JELLYFIN_URL",
-    "MPG_OFFMEDIA_JELLYFIN_TOKEN",
-    "MPG_OFFMEDIA_JELLYFIN_CONFIG_DIR",
-    "MPG_OFFMEDIA_MEDIA_FILE",
-)
-
-
-@pytest.fixture(scope="session")
-def offmedia_env() -> dict[str, str]:
-    missing = [k for k in _ENV if not os.environ.get(k)]
-    if missing:
-        pytest.skip(f"off-media Jellyfin env not set: {missing} (needs JF 10.11 + plugin + RW config mount)")
-    env = {k: os.environ[k] for k in _ENV}
-    if not Path(env["MPG_OFFMEDIA_MEDIA_FILE"]).is_file():
-        pytest.skip(f"media file not readable here: {env['MPG_OFFMEDIA_MEDIA_FILE']}")
-    # The publisher must be able to write into the config dir (real deploys
-    # mount it RW with a matching PUID). Skip clearly rather than fail.
-    cfg = env["MPG_OFFMEDIA_JELLYFIN_CONFIG_DIR"]
-    if not (os.path.isdir(cfg) and os.access(cfg, os.W_OK)):
-        pytest.skip(f"Jellyfin config dir not writable by this process: {cfg}")
-    return env
+_JF_REMOTE_PREFIX = "/jf-media"
+_MEDIA_REL = ("Movies", "Test Movie H264 (2024)", "Test Movie H264 (2024).mkv")
 
 
 @pytest.fixture
@@ -102,28 +67,28 @@ def _jf_headers(token: str) -> dict[str, str]:
     return {"X-Emby-Token": token}
 
 
-def _resolve_item(jf_url: str, token: str, media_path: str) -> tuple[str, str]:
-    """Return (item_id, library_id) for the media file, via the plugin ResolvePath."""
-    r = requests.get(
-        f"{jf_url}/MediaPreviewBridge/ResolvePath",
-        headers=_jf_headers(token),
-        params={"path": media_path},
-        timeout=15,
-    )
-    assert r.status_code == 200, f"plugin ResolvePath failed ({r.status_code}); is the plugin installed? {r.text[:200]}"
-    item_id = r.json()["itemId"]
-    # Find which library owns it (for the registry + the SaveTrickplayWithMedia flip).
+def _resolve_item(jf_url: str, token: str, remote_path: str) -> str:
+    """Resolve the media file to its Jellyfin item id via the plugin (with retry
+    for the post-library-create scan to finish indexing)."""
+    for _ in range(30):
+        r = requests.get(
+            f"{jf_url}/MediaPreviewBridge/ResolvePath",
+            headers=_jf_headers(token),
+            params={"path": remote_path},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            return r.json()["itemId"]
+        time.sleep(2)
+    raise AssertionError(f"Jellyfin never indexed {remote_path} (plugin ResolvePath kept 404ing)")
+
+
+def _movies_library_id(jf_url: str, token: str) -> str:
     folders = requests.get(f"{jf_url}/Library/VirtualFolders", headers=_jf_headers(token), timeout=15).json()
-    lib_id = ""
-    best = 0
     for f in folders:
-        for loc in f.get("Locations") or []:
-            # Prefer the longest matching location prefix (the folder that
-            # actually owns the item when virtual folders share a prefix).
-            if media_path.startswith(loc) and len(loc) > best:
-                best = len(loc)
-                lib_id = f.get("ItemId") or f.get("Id") or ""
-    return item_id, lib_id
+        if any(loc.startswith(_JF_REMOTE_PREFIX) for loc in (f.get("Locations") or [])):
+            return f.get("ItemId") or f.get("Id") or ""
+    raise AssertionError("no Movies library found on the test Jellyfin")
 
 
 def _offmedia_sheet_dir(config_dir: str, item_id: str, width: int = 320) -> Path:
@@ -134,17 +99,20 @@ def _offmedia_sheet_dir(config_dir: str, item_id: str, width: int = 320) -> Path
 @pytest.mark.integration
 @pytest.mark.slow
 class TestJellyfinOffMediaEndToEnd:
-    def test_off_media_publish_register_and_serve(self, offmedia_env, offmedia_config):
-        jf_url = offmedia_env["MPG_OFFMEDIA_JELLYFIN_URL"].rstrip("/")
-        token = offmedia_env["MPG_OFFMEDIA_JELLYFIN_TOKEN"]
-        config_dir = offmedia_env["MPG_OFFMEDIA_JELLYFIN_CONFIG_DIR"]
-        media = offmedia_env["MPG_OFFMEDIA_MEDIA_FILE"]
+    def test_off_media_publish_register_and_serve(
+        self, jellyfin_credentials, jellyfin_config_dir, media_root, offmedia_config
+    ):
+        jf_url = jellyfin_credentials["JELLYFIN_URL"].rstrip("/")
+        token = jellyfin_credentials["JELLYFIN_ACCESS_TOKEN"]
+        config_dir = jellyfin_config_dir
 
-        item_id, lib_id = _resolve_item(jf_url, token, media)
-        assert item_id, "could not resolve the media file to a Jellyfin item id"
-        assert lib_id, "could not find the owning Jellyfin library"
+        local_media = str(media_root.joinpath(*_MEDIA_REL))
+        remote_media = f"{_JF_REMOTE_PREFIX}/" + "/".join(_MEDIA_REL)
+        assert Path(local_media).is_file(), f"synthetic media missing: {local_media}"
 
-        media_dir = str(Path(media).parent)
+        item_id = _resolve_item(jf_url, token, remote_media)
+        lib_id = _movies_library_id(jf_url, token)
+
         registry = ServerRegistry.from_settings(
             [
                 {
@@ -154,8 +122,16 @@ class TestJellyfinOffMediaEndToEnd:
                     "enabled": True,
                     "url": jf_url,
                     "auth": {"method": "api_key", "api_key": token},
-                    "libraries": [{"id": lib_id, "name": "lib", "remote_paths": [media_dir], "enabled": True}],
-                    "path_mappings": [],
+                    "server_identity": jellyfin_credentials["JELLYFIN_SERVER_ID"],
+                    "libraries": [
+                        {
+                            "id": lib_id,
+                            "name": "Movies",
+                            "remote_paths": [remote_media.rsplit("/", 2)[0]],
+                            "enabled": True,
+                        }
+                    ],
+                    "path_mappings": [{"remote_prefix": _JF_REMOTE_PREFIX, "local_prefix": str(media_root)}],
                     "output": {
                         "adapter": "jellyfin_trickplay",
                         "width": 320,
@@ -169,7 +145,6 @@ class TestJellyfinOffMediaEndToEnd:
         )
 
         sheet_dir = _offmedia_sheet_dir(config_dir, item_id)
-        # Snapshot the library option so we can restore it.
         folders = requests.get(f"{jf_url}/Library/VirtualFolders", headers=_jf_headers(token), timeout=15).json()
         original_opts = next(
             (f.get("LibraryOptions") or {} for f in folders if (f.get("ItemId") or f.get("Id")) == lib_id), {}
@@ -192,31 +167,26 @@ class TestJellyfinOffMediaEndToEnd:
 
             # 2. Run the REAL dispatcher: FFmpeg once -> off-media publish -> plugin register.
             result = process_canonical_path(
-                canonical_path=media,
+                canonical_path=local_media,
                 registry=registry,
                 config=offmedia_config,
                 gpu=None,
                 gpu_device_path=None,
             )
-            # Assert the publish SUCCEEDED for our off-media server (publishers
-            # is non-empty even on failure — published_count counts real writes).
+            # Assert the publish SUCCEEDED for our off-media server (publishers is
+            # non-empty even on failure — published_count counts real writes).
             assert result.published_count == 1, (
                 f"expected 1 published, got {[(p.server_id, p.status) for p in result.publishers]}"
             )
             assert result.publishers[0].server_id == "jf-offmedia"
 
-            # 3. Tiles landed in the Jellyfin data folder. (We don't assert the
-            #    media-adjacent dir is absent: on a shared rig it may pre-exist
-            #    from earlier media-adjacent runs. The adapter unit tests prove
-            #    off-media writes ONLY to the config dir; here we prove the data
-            #    folder got the tiles and Jellyfin serves them from there.)
-            # sheet_dir is, by construction, <config_dir>/data/trickplay/<id>/...
-            # so tiles existing there proves the publish targeted the config dir.
+            # 3. Tiles landed in the data folder (sheet_dir is, by construction,
+            #    <config_dir>/data/trickplay/<id>/... so this proves the target).
             tiles = sorted(sheet_dir.glob("*.jpg")) if sheet_dir.is_dir() else []
             assert tiles, f"no off-media tiles written under {sheet_dir}"
             assert tiles[0].name == "0.jpg"
 
-            # 4. Jellyfin registered the trickplay (correct geometry).
+            # 4. Jellyfin registered the trickplay with the correct geometry.
             seen = None
             for _ in range(20):
                 body = requests.get(
@@ -237,8 +207,7 @@ class TestJellyfinOffMediaEndToEnd:
             assert seen["TileWidth"] == 10 and seen["TileHeight"] == 10
             assert seen["ThumbnailCount"] > 1, "ThumbnailCount looks like a sheet count (the #12887 bug)"
 
-            # 5. The decisive proof: Jellyfin SERVES the off-media tile, and it's
-            #    byte-identical to what we wrote into the data folder.
+            # 5. Decisive proof: Jellyfin serves the off-media tile, byte-identical.
             served = None
             for _ in range(15):
                 served = requests.get(
@@ -255,7 +224,6 @@ class TestJellyfinOffMediaEndToEnd:
             )
         finally:
             shutil.rmtree(sheet_dir.parent, ignore_errors=True)
-            # Restore the original library options.
             requests.post(
                 f"{jf_url}/Library/VirtualFolders/LibraryOptions",
                 headers={**_jf_headers(token), "Content-Type": "application/json"},

@@ -143,6 +143,38 @@ def apply_path_mappings(remote_path: str, mappings: list[dict[str, Any]]) -> lis
     return candidates
 
 
+def apply_inverse_path_mappings(local_path: str, mappings: list[dict[str, Any]]) -> list[str]:
+    """Translate a local (canonical) path to candidate server-side paths.
+
+    The inverse of :func:`apply_path_mappings`: matches ``local_path`` against
+    each mapping's ``local_prefix`` and substitutes the ``remote_prefix``. Used
+    by the Jellyfin reverse-lookup so a path-mapped server resolves the item id
+    in its OWN path space — the plugin's ``FindByPath`` and the library scoping
+    both key on the path as Jellyfin sees it, not the app's local mount.
+
+    Returns ``[local_path]`` unchanged when no mapping matches (so local==remote
+    setups are untouched).
+    """
+    if not mappings:
+        return [local_path]
+
+    local_fwd = (local_path or "").replace("\\", "/")
+    norm = _normalize(local_fwd)
+    candidates: list[str] = []
+    for entry in mappings:
+        remote = entry.get("remote_prefix") or entry.get("plex_prefix") or ""
+        local = entry.get("local_prefix") or ""
+        if not remote or not local:
+            continue
+        local_prefix_fwd = local.replace("\\", "/")
+        if norm.startswith(_normalize(local_prefix_fwd)):
+            tail = local_fwd[len(local_prefix_fwd.rstrip("/")) :]
+            candidates.append(remote.rstrip("/") + tail)
+    if not candidates:
+        candidates.append(local_path)
+    return candidates
+
+
 def server_owns_path(
     canonical_path: str,
     server: ServerConfig,

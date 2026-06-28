@@ -11,13 +11,14 @@ Two server types are fully automated:
   admin "MyEmbyUser" with no password. We authenticate as that user,
   capture the ``AccessToken`` and ``ServerId``, then create a movies
   library pointing at ``/em-media``.
-* **Jellyfin** is *not* automated here — its first-run ``/Startup/User``
-  endpoint is broken on a fresh install across 10.9 / 10.10 / 10.11
-  (``Sequence contains no elements`` because the user table is empty).
-  Run the Jellyfin wizard once manually via the web UI on
-  ``http://127.0.0.1:8097``, then re-run this script with
-  ``--jellyfin-token=<token>`` to capture credentials. Or skip Jellyfin
-  with ``--server emby``.
+* **Jellyfin** (``lscr.io/linuxserver/jellyfin:10.11``) — the first-run
+  ``/Startup/User`` wizard is broken on a fresh install across 10.9-10.11
+  (``Sequence contains no elements``), so we inject an admin API key straight
+  into the ``ApiKeys`` table (verified to satisfy the plugin's
+  ``RequiresElevation`` endpoints with no completed wizard), install the Media
+  Preview Bridge plugin into the bind-mounted config, and create a Movies
+  library at ``/jf-media``. ``--jellyfin-token``/``--jellyfin-user-id`` still
+  accept a manually-captured token to skip the injection.
 
 Plex needs a one-time ``PLEX_CLAIM`` token from <https://plex.tv/claim>;
 its setup is not currently automated by this script.
@@ -62,6 +63,10 @@ class ServerCredentials:
     user_id: str
     base_url: str
     library_remote_path: str
+    # Host path of the server's program-data root (where the app would mount
+    # the config dir for off-media trickplay). Empty for vendors that don't
+    # need it. For Jellyfin (linuxserver image) this is <bind>/data.
+    config_dir: str = ""
 
 
 def _wait_for_http(url: str, *, timeout: int = 120) -> None:
@@ -197,94 +202,171 @@ def setup_plex(*, base_url: str = PLEX_URL) -> ServerCredentials:
     )
 
 
+# Jellyfin (linuxserver image) bind-mount layout, all relative to HERE:
+#   <bind>/                       = /config
+#   <bind>/data/                  = ProgramDataPath (/config/data) → off-media jellyfin_config_folder
+#   <bind>/data/data/jellyfin.db  = the SQLite DB (the ApiKeys table lives here)
+#   <bind>/data/plugins/          = plugin install dir
+_JF_BIND = HERE / "jellyfin-config"
+_JF_PROGRAMDATA = _JF_BIND / "data"
+_JF_DB = _JF_PROGRAMDATA / "data" / "jellyfin.db"
+_JF_PLUGINS = _JF_PROGRAMDATA / "plugins"
+
+_PLUGIN_DIR = HERE.parent.parent / "jellyfin-plugin"
+_PLUGIN_DLL = _PLUGIN_DIR / "bin" / "Release" / "net9.0" / "Jellyfin.Plugin.MediaPreviewBridge.dll"
+_PLUGIN_GUID = "c2cb9bf9-7c5d-4f1a-9a07-2d6f5e5b0001"
+
+_COMPOSE = ["docker", "compose", "-f", str(HERE / "docker-compose.test.yml")]
+
+
+def _plugin_version() -> str:
+    import re
+
+    text = (_PLUGIN_DIR / "Jellyfin.Plugin.MediaPreviewBridge.csproj").read_text(encoding="utf-8")
+    m = re.search(r"<Version>([^<]+)</Version>", text)
+    return m.group(1) if m else "10.11.0.0"
+
+
+def _ensure_plugin_dll() -> Path:
+    """Build the Media Preview Bridge plugin DLL via the dotnet SDK image if absent.
+
+    A fresh CI checkout has no ``bin/`` so this builds from the committed plugin
+    source (~20s). Locally it reuses an existing build for fast iteration.
+    """
+    import subprocess
+
+    if _PLUGIN_DLL.exists():
+        return _PLUGIN_DLL
+    print("[setup] building Media Preview Bridge plugin (dotnet sdk:9.0)…", flush=True)
+    subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{_PLUGIN_DIR}:/src",
+            "-w",
+            "/src",
+            "mcr.microsoft.com/dotnet/sdk:9.0",
+            "dotnet",
+            "build",
+            "-c",
+            "Release",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    if not _PLUGIN_DLL.exists():
+        raise RuntimeError(f"plugin build did not produce {_PLUGIN_DLL}")
+    return _PLUGIN_DLL
+
+
+def _install_plugin() -> None:
+    """Install the built DLL + meta.json into Jellyfin's plugins dir (idempotent)."""
+    import json
+    import shutil
+
+    dll = _ensure_plugin_dll()
+    ver = _plugin_version()
+    # Remove any older install so exactly one version loads.
+    if _JF_PLUGINS.exists():
+        for old in _JF_PLUGINS.glob("Media Preview Bridge_*"):
+            shutil.rmtree(old, ignore_errors=True)
+    dest = _JF_PLUGINS / f"Media Preview Bridge_{ver}"
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(dll, dest / dll.name)
+    (dest / "meta.json").write_text(
+        json.dumps(
+            {
+                "category": "Media Tools",
+                "guid": _PLUGIN_GUID,
+                "name": "Media Preview Bridge",
+                "owner": "stevezau",
+                "targetAbi": "10.11.0.0",
+                "version": ver,
+                "status": "Active",
+                "autoUpdate": False,
+                "assemblies": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _jf_existing_token() -> str:
+    """Read the integration-test API key from the bind-mounted DB (read-only)."""
+    import sqlite3
+
+    if not _JF_DB.exists():
+        return ""
+    try:
+        # mode=ro (not immutable): Jellyfin may hold the DB open + WAL-writing;
+        # immutable=1 would skip the -wal sidecar and risk a stale read.
+        con = sqlite3.connect(f"file:{_JF_DB}?mode=ro", uri=True)
+        row = con.execute(
+            "SELECT AccessToken FROM ApiKeys WHERE Name='integration-test' ORDER BY DateLastActivity DESC LIMIT 1"
+        ).fetchone()
+        con.close()
+        return str(row[0]) if row else ""
+    except sqlite3.Error:
+        return ""
+
+
+def _jf_plugin_loaded(base_url: str) -> bool:
+    try:
+        r = requests.get(f"{base_url}/MediaPreviewBridge/Ping", timeout=5)
+        return r.status_code == 200 and bool(r.json().get("ok"))
+    except Exception:
+        return False
+
+
 def setup_jellyfin_via_api_key_injection(*, base_url: str = JELLYFIN_URL) -> ServerCredentials:
-    """Bootstrap Jellyfin by injecting an API key directly into the SQLite DB.
+    """Bootstrap a real Jellyfin 10.11 for the integration suite.
 
-    Jellyfin's first-run wizard (``POST /Startup/User``) is broken
-    across 10.9 / 10.10 / 10.11 — the controller calls Users.First()
-    against an empty user table. As of this writing, no public
-    workaround exists short of clicking through the web UI.
+    Jellyfin's first-run wizard (``POST /Startup/User``) is broken across
+    10.9-10.11 (Users.First() on an empty user table), so we inject an admin
+    API key straight into the ``ApiKeys`` table — verified to satisfy the
+    plugin's ``RequiresElevation`` endpoints without a completed wizard.
 
-    Workaround: stop the container, ``INSERT INTO ApiKeys`` with a
-    known token, restart. The injected token authenticates against
-    every admin endpoint without going through user auth at all.
+    The config dir is bind-mounted (``<here>/jellyfin-config``) so we can also
+    drop the Media Preview Bridge plugin into ``<config>/data/plugins`` and so
+    the off-media test can write trickplay into Jellyfin's data folder. On the
+    linuxserver image ProgramDataPath is ``/config/data`` and the DB lives at
+    ``<config>/data/data/jellyfin.db``.
 
-    Requires: docker access (the container's volume is read via
-    ``docker run alpine``). Returns the captured credentials so the
-    integration suite can address Jellyfin like any other configured
-    server.
+    Idempotent: reuses an existing key, only stops/starts Jellyfin when it must
+    inject a key or load a freshly-installed plugin.
     """
     import secrets
     import subprocess
     from datetime import datetime, timezone
 
-    # Idempotency: check if an ``integration-test`` API key already
-    # exists in the volume. Re-running ``up.sh`` shouldn't accumulate
-    # rows in ``ApiKeys`` (every fresh INSERT leaves a stale token
-    # active forever — ``DateLastActivity`` decides nothing about
-    # validity, just sorts the admin UI). Architecture-review #46
-    # MED finding: the previous flow stopped Jellyfin, INSERTed a
-    # new token, restarted, and rewrote ``servers.env`` on every
-    # ``up.sh`` invocation — destructive when the user just wanted to
-    # verify the stack was healthy.
-    select_cmd = [
-        "docker",
-        "run",
-        "--rm",
-        "-v",
-        "plex-previews-test_jellyfin_config:/c",
-        "alpine",
-        "sh",
-        "-c",
-        (
-            "apk add --quiet sqlite && "
-            "sqlite3 /c/data/data/jellyfin.db "
-            "\"SELECT AccessToken FROM ApiKeys WHERE Name='integration-test' "
-            'ORDER BY DateLastActivity DESC LIMIT 1;"'
-        ),
-    ]
-    existing = subprocess.run(select_cmd, capture_output=True, text=True, check=False)
-    existing_token = existing.stdout.strip() if existing.returncode == 0 else ""
+    _install_plugin()  # drop the DLL in before deciding whether a restart is needed
 
-    if existing_token:
-        # Token already exists; reuse it without stopping the container
-        # (server is already running with this key registered).
-        token = existing_token
-        _wait_for_http(f"{base_url}/System/Info/Public")
-    else:
-        # First-time setup: stop, INSERT, restart.
-        subprocess.run(
-            ["docker", "compose", "-f", str(HERE / "docker-compose.test.yml"), "stop", "jellyfin"],
-            check=True,
-            capture_output=True,
-        )
-        token = f"integration-{secrets.token_hex(16)}"
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
-        inject_cmd = [
-            "docker",
-            "run",
-            "--rm",
-            "-v",
-            "plex-previews-test_jellyfin_config:/c",
-            "alpine",
-            "sh",
-            "-c",
-            (
-                "apk add --quiet sqlite && "
-                f'sqlite3 /c/data/data/jellyfin.db "INSERT INTO ApiKeys '
-                f"(DateCreated, DateLastActivity, Name, AccessToken) VALUES "
-                f"('{now}', '{now}', 'integration-test', '{token}');\""
-            ),
-        ]
-        inject_result = subprocess.run(inject_cmd, capture_output=True, text=True, check=False)
-        if inject_result.returncode != 0:
-            raise RuntimeError(f"Failed to inject Jellyfin API key: {inject_result.stderr.strip()}")
-        subprocess.run(
-            ["docker", "compose", "-f", str(HERE / "docker-compose.test.yml"), "start", "jellyfin"],
-            check=True,
-            capture_output=True,
-        )
-        _wait_for_http(f"{base_url}/System/Info/Public")
+    token = _jf_existing_token()
+    need_restart = not _jf_plugin_loaded(base_url)  # plugin just installed / not yet loaded
+
+    if not token or need_restart:
+        subprocess.run([*_COMPOSE, "stop", "jellyfin"], check=True, capture_output=True)
+        # try/finally so a sqlite failure (locked DB, schema drift) never leaves
+        # Jellyfin stopped — the next up.sh would find a dead server.
+        try:
+            if not token:
+                import sqlite3
+
+                token = f"integration-{secrets.token_hex(16)}"
+                now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
+                con = sqlite3.connect(str(_JF_DB))
+                con.execute(
+                    "INSERT INTO ApiKeys (DateCreated, DateLastActivity, Name, AccessToken) VALUES (?,?,?,?)",
+                    (now, now, "integration-test", token),
+                )
+                con.commit()
+                con.close()
+        finally:
+            subprocess.run([*_COMPOSE, "start", "jellyfin"], check=True, capture_output=True)
+
+    _wait_for_http(f"{base_url}/System/Info/Public")
 
     # Verify the token works + capture identity.
     info = requests.get(
@@ -337,6 +419,8 @@ def setup_jellyfin_via_api_key_injection(*, base_url: str = JELLYFIN_URL) -> Ser
         user_id="",  # API-key auth doesn't have a user context
         base_url=base_url,
         library_remote_path="/jf-media/Movies",
+        # ProgramDataPath host path = off-media jellyfin_config_folder.
+        config_dir=str(_JF_PROGRAMDATA.resolve()),
     )
 
 
@@ -397,6 +481,8 @@ def _write_env_file(credentials: list[ServerCredentials]) -> None:
         existing[f"{prefix}_ACCESS_TOKEN"] = c.access_token
         existing[f"{prefix}_USER_ID"] = c.user_id
         existing[f"{prefix}_LIBRARY_REMOTE_PATH"] = c.library_remote_path
+        if c.config_dir:
+            existing[f"{prefix}_CONFIG_DIR"] = c.config_dir
 
     SERVERS_ENV.write_text(
         "\n".join(f"{k}={v}" for k, v in existing.items()) + "\n",

@@ -155,13 +155,18 @@ servers publish immediately.
   `save_with_media` + `jellyfin_config_folder` to the API **and** settings.json,
   re-open pre-populates. Runs in the standard CI e2e job.
 - **Live container** (`tests/integration/test_e2e_jellyfin_off_media.py`) — the real
-  dispatcher (`process_canonical_path`) against a real Jellyfin **10.11+** with the
-  plugin: FFmpeg → publish into the data folder → plugin registers (correct
-  `ThumbnailCount`) → Jellyfin serves the off-media tile **byte-identical** to what
-  we wrote. Verified locally against the canary rig; env-gated
-  (`MPG_OFFMEDIA_JELLYFIN_*`) so it skips cleanly. **Follow-up:** wire it into the
-  `e2e-real-vendors` CI job — needs the integration harness bumped from Jellyfin
-  10.9.11 → 10.11, the plugin built + installed, and the config dir mounted RW.
+  dispatcher (`process_canonical_path`) against a real Jellyfin **10.11** with the
+  plugin, in the `e2e-real-vendors` CI job: FFmpeg → publish into the data folder →
+  plugin registers (correct `ThumbnailCount`) → Jellyfin serves the off-media tile
+  **byte-identical** to what we wrote, across a path-mapped `/jf-media` ↔ local mount.
+  The harness now boots Jellyfin 10.11 (`docker-compose.test.yml`), and
+  `setup_servers.py` builds + installs the plugin and bind-mounts the config dir RW
+  (so the publisher can write into Jellyfin's data folder). Skips cleanly when that
+  stack isn't up.
+- **Path-mapped resolution** — off-media needs the item id, so the Jellyfin
+  reverse-lookup now translates the local canonical path → Jellyfin's own path space
+  via `apply_inverse_path_mappings` (the plugin's `FindByPath` + library scoping key
+  on Jellyfin's paths, not the app's mount). No-op for local==remote setups.
 
 ## Acceptance criteria
 - A Jellyfin server can be configured for off-media trickplay.
