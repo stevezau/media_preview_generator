@@ -141,6 +141,28 @@ servers publish immediately.
   sweep is a tracked follow-up (a failed server query must never delete valid tiles).
 - Flipping a server to off-media leaves existing media-adjacent tiles in place (documented).
 
+## Test coverage
+
+- **Unit / adapter** — off-media GUID layout, dashless→dashed GUID normalisation,
+  `needs_server_metadata` flip, config wiring, health-check recommendation flip +
+  plugin-required gate + RW-mount check (writable/missing/read-only/unset), viewer
+  branch + allowed roots, settings round-trip.
+- **Multi-server fan-out** (`TestMultiServerFanout`) — one shared frame_dir →
+  media-adjacent Jellyfin + off-media Jellyfin + Emby sidecar → three distinct
+  outputs, off-media isolated to the config dir (real `_adapter_for_server` wiring).
+- **Playwright E2E** (`tests/e2e/test_journey_jellyfin_off_media.py`) — real browser
+  drives the edit modal: toggle reveals the config field, Save round-trips
+  `save_with_media` + `jellyfin_config_folder` to the API **and** settings.json,
+  re-open pre-populates. Runs in the standard CI e2e job.
+- **Live container** (`tests/integration/test_e2e_jellyfin_off_media.py`) — the real
+  dispatcher (`process_canonical_path`) against a real Jellyfin **10.11+** with the
+  plugin: FFmpeg → publish into the data folder → plugin registers (correct
+  `ThumbnailCount`) → Jellyfin serves the off-media tile **byte-identical** to what
+  we wrote. Verified locally against the canary rig; env-gated
+  (`MPG_OFFMEDIA_JELLYFIN_*`) so it skips cleanly. **Follow-up:** wire it into the
+  `e2e-real-vendors` CI job — needs the integration harness bumped from Jellyfin
+  10.9.11 → 10.11, the plugin built + installed, and the config dir mounted RW.
+
 ## Acceptance criteria
 - A Jellyfin server can be configured for off-media trickplay.
 - With the plugin installed and config dir mounted RW, generated tiles land in Jellyfin's

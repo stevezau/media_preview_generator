@@ -470,3 +470,60 @@ class TestOffMediaPublish:
         assert [p.name for p in sheets] == ["0.jpg"]
         # Media dir holds only the media file — no .trickplay was written there.
         assert {p.name for p in media_dir.iterdir()} == {"Test (2024).mkv"}
+
+
+class TestMultiServerFanout:
+    """Multi-server: one extraction (one shared frame_dir) fans out to every
+    owning server's adapter, each writing its own format/location with no
+    interference. Proves a media-adjacent Jellyfin and an off-media Jellyfin
+    can coexist for the same file. Adapters are built via the real
+    ``_adapter_for_server`` config->adapter wiring."""
+
+    def test_one_frame_dir_to_media_adjacent_offmedia_and_emby(self, tmp_path):
+        from media_preview_generator.processing.multi_server import _adapter_for_server
+        from media_preview_generator.servers.base import ServerConfig, ServerType
+
+        frame_dir = tmp_path / "frames"
+        _populate_frames(frame_dir, count=12)
+
+        media_dir = tmp_path / "media" / "Foo (2024)"
+        media_dir.mkdir(parents=True)
+        media_file = media_dir / "Foo (2024).mkv"
+        media_file.write_bytes(b"")
+        config_dir = tmp_path / "jellyfin-config"
+
+        def cfg(sid, output):
+            return ServerConfig(
+                id=sid,
+                type=ServerType.JELLYFIN if "jf" in sid else ServerType.EMBY,
+                name=sid,
+                enabled=True,
+                url="x",
+                auth={},
+                output=output,
+            )
+
+        jf_adjacent = _adapter_for_server(cfg("jf-adj", {"width": 320}))
+        jf_offmedia = _adapter_for_server(
+            cfg("jf-off", {"width": 320, "save_with_media": False, "jellyfin_config_folder": str(config_dir)})
+        )
+        emby = _adapter_for_server(cfg("emby", {"width": 320}))
+
+        # One shared frame_dir feeds every adapter (the extract-once contract).
+        bundle = _make_bundle(str(media_file), frame_dir, frame_count=12)
+        outs = {}
+        for tag, ad, item in [("jf_adj", jf_adjacent, None), ("jf_off", jf_offmedia, _GUID), ("emby", emby, None)]:
+            paths = ad.compute_output_paths(bundle, server=None, item_id=item)
+            ad.publish(bundle, paths, item_id=item)
+            outs[tag] = paths[0]
+
+        # Three distinct outputs, all written, off-media isolated to the config dir.
+        assert outs["jf_adj"].exists() and str(outs["jf_adj"]).startswith(str(media_dir))
+        assert outs["jf_off"].exists() and str(config_dir) in str(outs["jf_off"])
+        assert outs["emby"].exists() and str(outs["emby"]).startswith(str(media_dir))
+        assert len({str(p) for p in outs.values()}) == 3
+        # Off-media did NOT pollute the media dir: it holds EXACTLY the media file
+        # + the two media-adjacent artifacts, nothing GUID-keyed. Asserting the
+        # exact set (not just "contains") catches a stray off-media write here.
+        media_names = {p.name for p in media_dir.iterdir()}
+        assert media_names == {"Foo (2024).mkv", "Foo (2024).trickplay", "Foo (2024)-320-10.bif"}, media_names
