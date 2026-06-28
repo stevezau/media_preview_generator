@@ -17,6 +17,7 @@ Verifies that:
 from __future__ import annotations
 
 import os
+import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -356,3 +357,116 @@ class TestPublish:
         with Image.open(sheets[0]) as sheet:
             # Tile size = first frame's size = 320x180.
             assert sheet.size == (3200, 1800)
+
+
+# A real Jellyfin item GUID (dashed, lowercase "D" form == item.Id.ToString("D")).
+_GUID = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"
+_GUID_DASHLESS = "a1b2c3d4e5f64a7b8c9d0e1f2a3b4c5d"
+
+
+class TestOffMediaNeedsServerMetadata:
+    """Off-media tiles are keyed by the Jellyfin item GUID, so the adapter
+    must resolve the GUID before it can compute its path — the same
+    contract Plex uses (slow-backoff retry until indexed). Media-adjacent
+    mode stays item-id-optional."""
+
+    def test_off_media_needs_server_metadata_true(self):
+        adapter = JellyfinTrickplayAdapter(save_with_media=False, jellyfin_config_folder="/jc")
+        assert adapter.needs_server_metadata() is True
+
+    def test_media_adjacent_needs_server_metadata_false(self):
+        # Regression: the default (media-adjacent) contract is unchanged.
+        assert JellyfinTrickplayAdapter().needs_server_metadata() is False
+        assert JellyfinTrickplayAdapter(save_with_media=True).needs_server_metadata() is False
+
+
+class TestOffMediaComputeOutputPaths:
+    def test_off_media_path_uses_config_dir_guid_layout(self, tmp_path):
+        """Off-media sheet-0 must match Jellyfin's
+        ``GetTrickplayDirectory(item, saveWithMedia=false)`` —
+        ``<TrickplayPath>/<id[:2]>/<id>/<width> - <tileW>x<tileH>`` —
+        verified against release-10.11.z PathManager.cs#L79."""
+        adapter = JellyfinTrickplayAdapter(width=320, save_with_media=False, jellyfin_config_folder="/jellyfin-config")
+        bundle = _make_bundle("/m/Foo (2024)/Foo (2024).mkv", tmp_path, frame_count=0)
+
+        paths = adapter.compute_output_paths(bundle, server=None, item_id=_GUID)
+
+        assert paths == [
+            Path("/jellyfin-config/data/trickplay/a1/a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d/320 - 10x10/0.jpg")
+        ]
+
+    def test_off_media_normalizes_dashless_guid(self, tmp_path):
+        """Jellyfin's REST API returns dashless 32-hex ids, but the on-disk
+        shard uses the dashed ``"D"`` form (``item.Id.ToString("D")``). The
+        adapter must normalise so the path matches what Jellyfin reads."""
+        adapter = JellyfinTrickplayAdapter(width=320, save_with_media=False, jellyfin_config_folder="/jc")
+        bundle = _make_bundle("/m/Foo.mkv", tmp_path, frame_count=0)
+
+        paths = adapter.compute_output_paths(bundle, server=None, item_id=_GUID_DASHLESS)
+
+        assert paths == [Path(f"/jc/data/trickplay/a1/{_GUID}/320 - 10x10/0.jpg")]
+
+    def test_off_media_prefers_server_reported_trickplay_root(self, tmp_path):
+        """If the plugin's Ping reported a different config-relative trickplay
+        root (future Jellyfin path move), the adapter follows it instead of
+        the built-in ``data/trickplay`` default."""
+        adapter = JellyfinTrickplayAdapter(width=320, save_with_media=False, jellyfin_config_folder="/jc")
+        server = types.SimpleNamespace(offmedia_trickplay_root="cache/trickplay")
+        bundle = _make_bundle("/m/Foo.mkv", tmp_path, frame_count=0)
+
+        paths = adapter.compute_output_paths(bundle, server=server, item_id=_GUID)
+
+        assert paths == [Path(f"/jc/cache/trickplay/a1/{_GUID}/320 - 10x10/0.jpg")]
+
+    def test_off_media_missing_item_id_raises(self, tmp_path):
+        """No GUID → no off-media path. Raising lets the dispatcher route the
+        item into the not-in-library retry queue (Mode 1), exactly like Plex."""
+        adapter = JellyfinTrickplayAdapter(save_with_media=False, jellyfin_config_folder="/jc")
+        bundle = _make_bundle("/m/Foo.mkv", tmp_path, frame_count=0)
+        with pytest.raises(ValueError):
+            adapter.compute_output_paths(bundle, server=None, item_id=None)
+
+    def test_off_media_missing_config_folder_raises(self, tmp_path):
+        """Off-media with no config folder configured is a misconfiguration —
+        fail loudly rather than write tiles to a bogus relative path."""
+        adapter = JellyfinTrickplayAdapter(save_with_media=False, jellyfin_config_folder=None)
+        bundle = _make_bundle("/m/Foo.mkv", tmp_path, frame_count=0)
+        with pytest.raises(ValueError):
+            adapter.compute_output_paths(bundle, server=None, item_id=_GUID)
+
+    def test_media_adjacent_path_unchanged(self, tmp_path):
+        """Regression: with save_with_media (default) the path is still the
+        media-adjacent layout and item_id is ignored."""
+        adapter = JellyfinTrickplayAdapter(width=320, jellyfin_config_folder="/jc")
+        bundle = _make_bundle("/m/Foo.mkv", tmp_path, frame_count=0)
+        paths = adapter.compute_output_paths(bundle, server=None, item_id=None)
+        assert paths == [Path("/m/Foo.trickplay/320 - 10x10/0.jpg")]
+
+
+class TestOffMediaPublish:
+    def test_off_media_publish_writes_to_config_dir_not_media(self, tmp_path):
+        """End-to-end: tiles land in the Jellyfin config dir, the media
+        directory is never written to (the whole point — clean media drive,
+        works with a read-only media mount)."""
+        frame_dir = tmp_path / "frames"
+        _populate_frames(frame_dir, count=12)
+
+        media_dir = tmp_path / "Movies" / "Test (2024)"
+        media_dir.mkdir(parents=True)
+        media_file = media_dir / "Test (2024).mkv"
+        media_file.write_bytes(b"")
+
+        config_dir = tmp_path / "jellyfin-config"
+        config_dir.mkdir()
+
+        adapter = JellyfinTrickplayAdapter(width=320, save_with_media=False, jellyfin_config_folder=str(config_dir))
+        bundle = _make_bundle(str(media_file), frame_dir, frame_count=12)
+        sheet0 = adapter.compute_output_paths(bundle, server=None, item_id=_GUID)[0]
+
+        adapter.publish(bundle, [sheet0], item_id=_GUID)
+
+        expected_dir = config_dir / "data" / "trickplay" / "a1" / _GUID / "320 - 10x10"
+        sheets = sorted(expected_dir.glob("*.jpg"))
+        assert [p.name for p in sheets] == ["0.jpg"]
+        # Media dir holds only the media file — no .trickplay was written there.
+        assert {p.name for p in media_dir.iterdir()} == {"Test (2024).mkv"}

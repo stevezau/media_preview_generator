@@ -663,6 +663,40 @@ class TestCreateServerDefaultsFrameInterval:
 
 
 class TestUpdateServer:
+    def test_jellyfin_off_media_output_keys_round_trip(self, client, auth_headers):
+        """The off-media UI writes ``output.save_with_media`` +
+        ``output.jellyfin_config_folder``; both must survive a PUT and land in
+        settings.json. Guards against a future whitelist silently dropping them."""
+        _seed_media_servers(
+            [
+                {
+                    "id": "j1",
+                    "type": "jellyfin",
+                    "name": "Jelly",
+                    "enabled": True,
+                    "url": "http://jellyfin",
+                    "auth": {"api_key": "k"},
+                    "output": {"width": 320},
+                }
+            ]
+        )
+        response = client.put(
+            "/api/servers/j1",
+            headers=auth_headers,
+            json={
+                "output": {
+                    "width": 320,
+                    "save_with_media": False,
+                    "jellyfin_config_folder": "/jellyfin-config",
+                }
+            },
+        )
+        assert response.status_code == 200
+        servers = get_settings_manager().get("media_servers")
+        assert servers[0]["output"]["save_with_media"] is False
+        assert servers[0]["output"]["jellyfin_config_folder"] == "/jellyfin-config"
+        assert servers[0]["output"]["width"] == 320
+
     def test_renames_server(self, client, auth_headers):
         _seed_media_servers(
             [

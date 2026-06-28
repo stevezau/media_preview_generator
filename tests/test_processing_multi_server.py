@@ -1413,6 +1413,40 @@ class TestAdapterFactory:
         )
         assert _adapter_for_server(cfg) is None
 
+    def test_jellyfin_defaults_to_media_adjacent(self):
+        """A Jellyfin server with no off-media settings stays media-adjacent —
+        the default behaviour every existing deployment relies on."""
+        cfg = ServerConfig(id="j", type=ServerType.JELLYFIN, name="J", enabled=True, url="x", auth={}, output={})
+        adapter = _adapter_for_server(cfg)
+        assert adapter is not None
+        assert adapter.name == "jellyfin_trickplay"
+        assert adapter.needs_server_metadata() is False
+
+    def test_jellyfin_off_media_wired_from_output(self):
+        """``output.save_with_media=false`` + ``jellyfin_config_folder`` flow
+        through to the adapter so it publishes into the config dir and needs
+        the item GUID first."""
+        cfg = ServerConfig(
+            id="j",
+            type=ServerType.JELLYFIN,
+            name="J",
+            enabled=True,
+            url="x",
+            auth={},
+            output={
+                "save_with_media": False,
+                "jellyfin_config_folder": "/jellyfin-config",
+                "width": 320,
+            },
+        )
+        adapter = _adapter_for_server(cfg)
+        assert adapter is not None
+        assert adapter.needs_server_metadata() is True
+        sheet0 = adapter.offmedia_sheet_dir(
+            "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d", trickplay_root="data/trickplay", width=320
+        )
+        assert str(sheet0).startswith("/jellyfin-config/data/trickplay/a1/")
+
 
 class TestSummariseResults:
     """D16 — friendly per-result message text used as the file's Details column."""

@@ -54,6 +54,7 @@ from __future__ import annotations
 import math
 import os
 import shutil
+import uuid
 from pathlib import Path
 
 from loguru import logger
@@ -70,6 +71,26 @@ _TILE_W = 10
 _TILE_H = 10
 _TILES_PER_SHEET = _TILE_W * _TILE_H
 
+# Jellyfin's off-media (``SaveTrickplayWithMedia=false``) trickplay folder,
+# relative to the config/program-data root. ``ApplicationPaths.TrickplayPath``
+# = ``<ProgramDataPath>/data/trickplay`` and is stable across all supported
+# versions (plugin floor is 10.11+). The plugin's ``Ping`` reports the live
+# value, which the server caches and the adapter prefers over this default
+# — so a future Jellyfin path move is picked up automatically.
+_DEFAULT_TRICKPLAY_ROOT = "data/trickplay"
+
+
+def _normalize_item_guid(item_id: str) -> str:
+    """Normalise a Jellyfin item id to its dashed-lowercase ``"D"`` form.
+
+    Jellyfin's REST API returns dashless 32-hex ids while the on-disk
+    off-media shard uses ``item.Id.ToString("D")`` (dashed, lowercase).
+    :class:`uuid.UUID` accepts either form and renders the canonical
+    dashed-lowercase string, guaranteeing our path matches what Jellyfin
+    reads at playback. Raises :class:`ValueError` on a non-GUID input.
+    """
+    return str(uuid.UUID(str(item_id)))
+
 
 class JellyfinTrickplayAdapter(OutputAdapter):
     """Publish Jellyfin's native saved-with-media tile layout next to the media file.
@@ -85,6 +106,19 @@ class JellyfinTrickplayAdapter(OutputAdapter):
             unset). Kept on the adapter for symmetry with EmbyBifAdapter.
         jpeg_quality: Output JPEG quality for the assembled sheets
             (Jellyfin's own default is 90; we mirror it).
+        save_with_media: ``True`` (default) writes the media-adjacent
+            layout (``<media>/<basename>.trickplay/…``, requires the
+            library option ``SaveTrickplayWithMedia=true``). ``False``
+            writes Jellyfin's off-media data-folder layout
+            (``<jellyfin_config_folder>/data/trickplay/<id[:2]>/<id>/…``),
+            keying the path by the item GUID — so off-media mode reports
+            ``needs_server_metadata() == True``.
+        jellyfin_config_folder: This container's read-write mount of the
+            Jellyfin server's config dir. Required for off-media mode;
+            ignored for media-adjacent.
+        trickplay_root: Off-media trickplay folder relative to the config
+            root. Defaults to ``data/trickplay``; a server that reports a
+            live value via the plugin's ``Ping`` overrides this per call.
     """
 
     def __init__(
@@ -93,22 +127,29 @@ class JellyfinTrickplayAdapter(OutputAdapter):
         width: int = 320,
         frame_interval: int = 10,
         jpeg_quality: int = 90,
+        save_with_media: bool = True,
+        jellyfin_config_folder: str | None = None,
+        trickplay_root: str = _DEFAULT_TRICKPLAY_ROOT,
     ) -> None:
         self._width = int(width)
         self._frame_interval = int(frame_interval)
         self._jpeg_quality = int(jpeg_quality)
+        self._save_with_media = bool(save_with_media)
+        self._jellyfin_config_folder = jellyfin_config_folder or None
+        self._trickplay_root = trickplay_root or _DEFAULT_TRICKPLAY_ROOT
 
     @property
     def name(self) -> str:
         return "jellyfin_trickplay"
 
     def needs_server_metadata(self) -> bool:
-        # Tile layout + geometry are derivable from ``canonical_path``
-        # alone. ``item_id`` is an optional fast-path (the Media Preview
-        # Bridge plugin's instant-activation endpoint) — the adapter
-        # itself never needs it, and ``publish()`` writes successfully
-        # with ``item_id=None``.
-        return False
+        # Media-adjacent: tile layout + geometry derive from
+        # ``canonical_path`` alone, so ``item_id`` is an optional fast-path
+        # and ``publish()`` writes fine with ``item_id=None``.
+        # Off-media: the path is keyed by the Jellyfin item GUID, so we must
+        # resolve it first — same contract as Plex (the dispatcher runs the
+        # live lookup + slow-backoff retry until the item is indexed).
+        return not self._save_with_media
 
     def compute_output_paths(
         self,
@@ -118,13 +159,63 @@ class JellyfinTrickplayAdapter(OutputAdapter):
     ) -> list[Path]:
         """Return the path of sheet 0 — used for the freshness check.
 
-        Sheet 0 is always present whenever any trickplay output exists
-        for this item, so its mtime is a safe stand-in for the whole
-        trickplay output's freshness. ``item_id`` is ignored — the path
-        is derived entirely from ``bundle.canonical_path``.
+        Sheet 0 is always present whenever any trickplay output exists for
+        this item, so its mtime is a safe stand-in for the whole trickplay
+        output's freshness.
+
+        Media-adjacent: derived purely from ``bundle.canonical_path``;
+        ``item_id`` is ignored. Off-media: derived from the item GUID +
+        the configured Jellyfin config folder; raises :class:`ValueError`
+        when the GUID or config folder is missing (the dispatcher routes
+        the former into the not-in-library retry queue).
         """
-        del server, item_id  # layout is derived purely from canonical_path
-        return [self.sheet_dir(bundle.canonical_path, width=self._width) / "0.jpg"]
+        if self._save_with_media:
+            del server, item_id  # media-adjacent layout derives from canonical_path
+            return [self.sheet_dir(bundle.canonical_path, width=self._width) / "0.jpg"]
+        trickplay_root = self._resolve_trickplay_root(server)
+        return [self.offmedia_sheet_dir(item_id, trickplay_root=trickplay_root, width=self._width) / "0.jpg"]
+
+    def _resolve_trickplay_root(self, server: MediaServer | None) -> str:
+        """Prefer the server's plugin-reported trickplay root over the default.
+
+        Falls back to ``self._trickplay_root`` when the server doesn't expose
+        a usable string (e.g. ``None``, or a test double's auto-attribute).
+        """
+        reported = getattr(server, "offmedia_trickplay_root", None) if server is not None else None
+        if isinstance(reported, str) and reported.strip():
+            return reported
+        return self._trickplay_root
+
+    def offmedia_sheet_dir(
+        self,
+        item_id: str | None,
+        *,
+        trickplay_root: str | None = None,
+        width: int,
+        tile_w: int = _TILE_W,
+        tile_h: int = _TILE_H,
+    ) -> Path:
+        """Compute the off-media per-resolution sheet directory.
+
+        Mirrors Jellyfin's ``GetTrickplayDirectory(item, saveWithMedia=false)``
+        (``Path.Join(TrickplayPath, id[:2], id)``) plus the
+        ``"{width} - {tileW}x{tileH}"`` sub-dir — i.e.
+        ``<config>/<trickplay_root>/<id[:2]>/<id>/<width> - <tileW>x<tileH>``.
+        Verified against release-10.11.z PathManager.cs#L79 + TrickplayManager.cs#L669.
+        """
+        if not self._jellyfin_config_folder:
+            raise ValueError("off-media Jellyfin trickplay requires a configured jellyfin_config_folder")
+        if not item_id:
+            raise ValueError("off-media Jellyfin trickplay requires the item GUID")
+        guid = _normalize_item_guid(item_id)
+        rel_root = str(trickplay_root or self._trickplay_root or _DEFAULT_TRICKPLAY_ROOT).strip("/\\")
+        return (
+            Path(self._jellyfin_config_folder)
+            / rel_root
+            / guid[:2]
+            / guid
+            / f"{int(width)} - {int(tile_w)}x{int(tile_h)}"
+        )
 
     @staticmethod
     def trickplay_dir(canonical_path: str) -> Path:

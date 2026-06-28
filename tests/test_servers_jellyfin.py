@@ -9,6 +9,7 @@ webhook payload, ``/Items/{id}/Refresh`` instead of
 from __future__ import annotations
 
 import json
+import os
 import re
 from unittest.mock import MagicMock, patch
 
@@ -36,6 +37,7 @@ def _jelly_config(
     auth=_SENTINEL,
     libraries: list[Library] | None = None,
     url: str = "http://jellyfin:8096",
+    output: dict | None = None,
 ) -> ServerConfig:
     if auth is _SENTINEL:
         auth = dict(_DEFAULT_AUTH)
@@ -47,6 +49,7 @@ def _jelly_config(
         url=url,
         auth=auth,
         libraries=libraries or [],
+        output=output or {},
     )
 
 
@@ -2186,3 +2189,237 @@ class TestRegistryWiring:
         cfg = registry.get_config("jelly-1")
         assert cfg is not None
         assert cfg.url == "http://jellyfin:8096"
+
+
+class TestOffMediaServerConfig:
+    """Off-media (`output.save_with_media=false`) reshapes the Jellyfin
+    server's recommended settings, vendor-extraction writes, plugin
+    requirement, and adds a config-dir RW-mount readiness check."""
+
+    def test_recommended_save_trickplay_with_media_true_by_default(self):
+        jelly = JellyfinServer(_jelly_config())
+        rec = {flag: want for flag, _label, want, _sev, _why in jelly._recommended_settings()}
+        assert rec["SaveTrickplayWithMedia"] is True
+
+    def test_recommended_save_trickplay_with_media_flips_false_off_media(self):
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False}))
+        rows = {flag: (want, sev) for flag, _label, want, sev, _why in jelly._recommended_settings()}
+        # Off-media: Jellyfin must read from <config>/data/trickplay (where the
+        # app writes), so the recommended value is the inverse of the default.
+        assert rows["SaveTrickplayWithMedia"][0] is False
+        assert rows["SaveTrickplayWithMedia"][1] == "critical"
+
+    def test_vendor_status_counts_off_media_library_as_stopped(self):
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False}))
+        folders = [
+            {
+                "Name": "Movies",
+                "ItemId": "m",
+                "CollectionType": "movies",
+                "LibraryOptions": {
+                    "ExtractTrickplayImagesDuringLibraryScan": False,
+                    "SaveTrickplayWithMedia": False,  # off-media recommended state
+                },
+            }
+        ]
+        with patch.object(
+            JellyfinServer,
+            "_request",
+            return_value=MagicMock(status_code=200, json=MagicMock(return_value=folders), raise_for_status=MagicMock()),
+        ):
+            status = jelly.get_vendor_extraction_status()
+        assert status["stopped_count"] == 1
+        assert status["extracting_count"] == 0
+
+    def test_set_vendor_extraction_writes_save_false_when_off_media(self):
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False}))
+        folders = [{"Name": "Movies", "ItemId": "m", "CollectionType": "movies", "LibraryOptions": {}}]
+        sent = {}
+
+        def fake_request(method, url, **kwargs):
+            if url == "/Library/VirtualFolders" and method == "GET":
+                return MagicMock(status_code=200, json=MagicMock(return_value=folders), raise_for_status=MagicMock())
+            if url == "/Library/VirtualFolders/LibraryOptions":
+                sent.update(kwargs["json_body"]["LibraryOptions"])
+                return MagicMock(status_code=204, raise_for_status=MagicMock())
+            raise AssertionError(f"unexpected {method} {url}")
+
+        with patch.object(JellyfinServer, "_request", side_effect=fake_request):
+            jelly.set_vendor_extraction(scan_extraction=False)
+        assert sent["SaveTrickplayWithMedia"] is False
+        assert sent["EnableTrickplayImageExtraction"] is True
+
+    def test_set_vendor_extraction_writes_save_true_media_adjacent(self):
+        jelly = JellyfinServer(_jelly_config())  # default media-adjacent
+        folders = [{"Name": "Movies", "ItemId": "m", "CollectionType": "movies", "LibraryOptions": {}}]
+        sent = {}
+
+        def fake_request(method, url, **kwargs):
+            if url == "/Library/VirtualFolders" and method == "GET":
+                return MagicMock(status_code=200, json=MagicMock(return_value=folders), raise_for_status=MagicMock())
+            if url == "/Library/VirtualFolders/LibraryOptions":
+                sent.update(kwargs["json_body"]["LibraryOptions"])
+                return MagicMock(status_code=204, raise_for_status=MagicMock())
+            raise AssertionError(f"unexpected {method} {url}")
+
+        with patch.object(JellyfinServer, "_request", side_effect=fake_request):
+            jelly.set_vendor_extraction(scan_extraction=False)
+        assert sent["SaveTrickplayWithMedia"] is True
+
+    def test_check_plugin_installed_caches_trickplay_root(self):
+        jelly = JellyfinServer(_jelly_config())
+        resp = MagicMock(
+            status_code=200,
+            json=MagicMock(return_value={"ok": True, "version": "10.11.0.3", "trickplayRoot": "data/trickplay"}),
+        )
+        with patch.object(JellyfinServer, "_request", return_value=resp):
+            jelly.check_plugin_installed()
+        assert jelly.offmedia_trickplay_root == "data/trickplay"
+
+    def test_offmedia_trickplay_root_none_when_absent(self):
+        jelly = JellyfinServer(_jelly_config())
+        resp = MagicMock(status_code=200, json=MagicMock(return_value={"ok": True, "version": "10.11.0.2"}))
+        with patch.object(JellyfinServer, "_request", return_value=resp):
+            jelly.check_plugin_installed()
+        assert jelly.offmedia_trickplay_root is None
+
+
+class TestOffMediaReadiness:
+    """Off-media adds a config-dir RW-mount readiness section and makes the
+    plugin a hard requirement."""
+
+    def _wire(self, *, config_folder: str, plugin_ok: bool):
+        def fake_request(method, url, **kwargs):
+            if url == "/MediaPreviewBridge/Ping":
+                if plugin_ok:
+                    return MagicMock(
+                        status_code=200,
+                        json=MagicMock(
+                            return_value={"ok": True, "version": "10.11.0.3", "trickplayRoot": "data/trickplay"}
+                        ),
+                    )
+                return MagicMock(status_code=404, json=MagicMock(return_value={}))
+            if url == "/System/Info":
+                return MagicMock(
+                    status_code=200, json=MagicMock(return_value={"Version": "10.11.8"}), raise_for_status=MagicMock()
+                )
+            if url == "/System/Configuration":
+                return MagicMock(
+                    status_code=200,
+                    json=MagicMock(return_value={"TrickplayOptions": {"Interval": 10000, "WidthResolutions": [320]}}),
+                    raise_for_status=MagicMock(),
+                )
+            if url == "/Library/VirtualFolders":
+                return MagicMock(
+                    status_code=200,
+                    json=MagicMock(
+                        return_value=[
+                            {
+                                "Name": "Movies",
+                                "ItemId": "m",
+                                "CollectionType": "movies",
+                                "LibraryOptions": {
+                                    "EnableTrickplayImageExtraction": True,
+                                    "SaveTrickplayWithMedia": False,
+                                    "ExtractTrickplayImagesDuringLibraryScan": False,
+                                },
+                            }
+                        ]
+                    ),
+                    raise_for_status=MagicMock(),
+                )
+            if url == "/ScheduledTasks":
+                return MagicMock(status_code=200, json=MagicMock(return_value=[]), raise_for_status=MagicMock())
+            raise AssertionError(f"unexpected {method} {url}")
+
+        return fake_request
+
+    def _find_check(self, payload, check_id):
+        for section in payload["sections"]:
+            for check in section["checks"]:
+                if check["id"] == check_id:
+                    return section, check
+        return None, None
+
+    def test_config_folder_writable_section_present_and_ok(self, tmp_path):
+        cfg_dir = tmp_path / "jellyfin-config"
+        cfg_dir.mkdir()
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False, "jellyfin_config_folder": str(cfg_dir)}))
+        with patch.object(
+            JellyfinServer, "_request", side_effect=self._wire(config_folder=str(cfg_dir), plugin_ok=True)
+        ):
+            payload = jelly.previews_readiness()
+        _section, check = self._find_check(payload, "config_folder_writable")
+        assert check is not None
+        assert check["ok"] is True
+        assert check["current"] == "writable"
+
+    def test_config_folder_missing_is_critical(self, tmp_path):
+        missing = tmp_path / "does-not-exist"
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False, "jellyfin_config_folder": str(missing)}))
+        with patch.object(
+            JellyfinServer, "_request", side_effect=self._wire(config_folder=str(missing), plugin_ok=True)
+        ):
+            payload = jelly.previews_readiness()
+        section, check = self._find_check(payload, "config_folder_writable")
+        assert check is not None
+        assert check["ok"] is False
+        assert section["severity"] == "critical"
+
+    def test_no_config_folder_section_when_media_adjacent(self, tmp_path):
+        jelly = JellyfinServer(_jelly_config())  # default media-adjacent
+        with patch.object(JellyfinServer, "_request", side_effect=self._wire(config_folder="", plugin_ok=True)):
+            payload = jelly.previews_readiness()
+        _section, check = self._find_check(payload, "config_folder_writable")
+        assert check is None
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root bypasses filesystem write permission checks (os.access W_OK always True)",
+    )
+    def test_config_folder_read_only_mount_is_critical(self, tmp_path):
+        """A :ro Docker mount is the most common real failure for this feature —
+        the probe must catch it as read-only/critical without a test write."""
+        cfg_dir = tmp_path / "jellyfin-config-ro"
+        cfg_dir.mkdir()
+        os.chmod(cfg_dir, 0o555)  # readable + executable, NOT writable
+        try:
+            jelly = JellyfinServer(
+                _jelly_config(output={"save_with_media": False, "jellyfin_config_folder": str(cfg_dir)})
+            )
+            with patch.object(
+                JellyfinServer, "_request", side_effect=self._wire(config_folder=str(cfg_dir), plugin_ok=True)
+            ):
+                payload = jelly.previews_readiness()
+        finally:
+            os.chmod(cfg_dir, 0o755)  # restore so tmp cleanup can remove it
+        section, check = self._find_check(payload, "config_folder_writable")
+        assert check is not None
+        assert check["ok"] is False
+        assert check["current"] == "read-only"
+        assert section["severity"] == "critical"
+
+    def test_config_folder_unset_is_critical(self, tmp_path):
+        """Off-media on but no config folder configured is an incomplete setup —
+        surface it as critical so Setup Health guides the user to set it."""
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False}))
+        with patch.object(JellyfinServer, "_request", side_effect=self._wire(config_folder="", plugin_ok=True)):
+            payload = jelly.previews_readiness()
+        section, check = self._find_check(payload, "config_folder_writable")
+        assert check is not None
+        assert check["ok"] is False
+        assert check["current"] == "unset"
+        assert section["severity"] == "critical"
+
+    def test_plugin_required_when_off_media(self, tmp_path):
+        cfg_dir = tmp_path / "jellyfin-config"
+        cfg_dir.mkdir()
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False, "jellyfin_config_folder": str(cfg_dir)}))
+        with patch.object(
+            JellyfinServer, "_request", side_effect=self._wire(config_folder=str(cfg_dir), plugin_ok=False)
+        ):
+            payload = jelly.previews_readiness()
+        _section, check = self._find_check(payload, "plugin_installed")
+        assert check["ok"] is False
+        assert check["severity"] == "critical"
+        assert check["meta"]["plugin_required"] is True

@@ -5,6 +5,7 @@ using System.Net.Mime;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Database.Implementations.Entities;
+using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Trickplay;
@@ -34,21 +35,25 @@ public class TrickplayBridgeController : ControllerBase
 {
     private readonly ILibraryManager _libraryManager;
     private readonly ITrickplayManager _trickplayManager;
+    private readonly IApplicationPaths _appPaths;
     private readonly ILogger<TrickplayBridgeController> _logger;
 
     /// <summary>
     /// Initialises a new instance.
     /// </summary>
     /// <param name="libraryManager">Jellyfin's library manager (for item lookup).</param>
-    /// <param name="trickplayManager">Jellyfin's trickplay manager (for SaveTrickplayInfo).</param>
+    /// <param name="trickplayManager">Jellyfin's trickplay manager (for SaveTrickplayInfo + path resolution).</param>
+    /// <param name="appPaths">Jellyfin's application paths (for reporting the data-folder trickplay root).</param>
     /// <param name="logger">DI logger.</param>
     public TrickplayBridgeController(
         ILibraryManager libraryManager,
         ITrickplayManager trickplayManager,
+        IApplicationPaths appPaths,
         ILogger<TrickplayBridgeController> logger)
     {
         _libraryManager = libraryManager;
         _trickplayManager = trickplayManager;
+        _appPaths = appPaths;
         _logger = logger;
     }
 
@@ -56,6 +61,13 @@ public class TrickplayBridgeController : ControllerBase
     /// Health-probe + plugin-detection endpoint. The Python publisher
     /// hits this on connection-test to know whether the plugin is
     /// installed; if it returns 200, skip the brief flag-flip fallback.
+    ///
+    /// Also reports <c>trickplayRoot</c> — Jellyfin's trickplay data
+    /// folder expressed relative to the program-data (config) root,
+    /// e.g. <c>data/trickplay</c>. The publisher uses this to locate
+    /// the off-media (<c>SaveTrickplayWithMedia=false</c>) destination
+    /// inside a config dir it has mounted, without hard-coding a path
+    /// that moved between Jellyfin versions.
     /// </summary>
     /// <returns>200 with a tiny JSON body identifying the plugin.</returns>
     [HttpGet("Ping")]
@@ -67,7 +79,27 @@ public class TrickplayBridgeController : ControllerBase
             plugin = "MediaPreviewBridge",
             version = Plugin.Instance?.Version?.ToString() ?? "unknown",
             ok = true,
+            trickplayRoot = GetRelativeTrickplayRoot(),
         });
+    }
+
+    /// <summary>
+    /// Jellyfin's off-media trickplay folder relative to the program-data
+    /// (config) root — e.g. <c>data/trickplay</c>. Resolved live from
+    /// <see cref="IApplicationPaths" /> so it tracks whatever the running
+    /// server uses (the absolute location moved between 10.10 and 10.11).
+    /// </summary>
+    private string GetRelativeTrickplayRoot()
+    {
+        try
+        {
+            return Path.GetRelativePath(_appPaths.ProgramDataPath, _appPaths.TrickplayPath);
+        }
+        catch (Exception exc)
+        {
+            _logger.LogDebug(exc, "MediaPreviewBridge: could not derive relative trickplay root");
+            return Path.Combine("data", "trickplay");
+        }
     }
 
     /// <summary>
@@ -110,16 +142,27 @@ public class TrickplayBridgeController : ControllerBase
     }
 
     /// <summary>
-    /// Register the trickplay tiles a publisher just wrote next to a
-    /// media file. Jellyfin scans the per-resolution sub-directory
-    /// (<c>&lt;basename&gt;.trickplay/&lt;width&gt; - &lt;tileW&gt;x&lt;tileH&gt;</c>),
-    /// computes <see cref="TrickplayInfo" /> from the on-disk files,
-    /// and persists it via <c>ITrickplayManager.SaveTrickplayInfo</c>
-    /// — no ffmpeg, no flag flip.
+    /// Register the trickplay tiles a publisher just wrote for a media
+    /// item. Jellyfin scans the per-resolution sub-directory, computes
+    /// <see cref="TrickplayInfo" /> from the on-disk files, and persists
+    /// it via <c>ITrickplayManager.SaveTrickplayInfo</c> — no ffmpeg, no
+    /// flag flip.
+    ///
+    /// The sheet directory is resolved with
+    /// <c>ITrickplayManager.GetTrickplayDirectory(item, tileW, tileH, width, saveWithMedia)</c>,
+    /// so the publisher and Jellyfin agree on the location for *both*
+    /// layouts regardless of Jellyfin version: <paramref name="saveWithMedia" />
+    /// <c>true</c> → <c>&lt;media&gt;/&lt;basename&gt;.trickplay/&lt;width&gt; - &lt;tileW&gt;x&lt;tileH&gt;</c>;
+    /// <c>false</c> → Jellyfin's data folder (<c>&lt;config&gt;/data/trickplay/&lt;id[..2]&gt;/&lt;id&gt;/…</c>).
     /// </summary>
     /// <param name="itemId">Jellyfin item id (GUID with or without dashes).</param>
     /// <param name="width">Trickplay resolution width in pixels (default 320).</param>
     /// <param name="intervalMs">Frame interval in milliseconds (default 10000 = one frame every 10s).</param>
+    /// <param name="saveWithMedia">
+    /// Where the publisher wrote the tiles. <c>true</c> (default) = next to the
+    /// media file (back-compat); <c>false</c> = Jellyfin's data folder. Must match
+    /// the library's <c>SaveTrickplayWithMedia</c> option for playback to find them.
+    /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>204 on success, 404 if the item or sheet directory is missing, 400 on bad input.</returns>
     [HttpPost("Trickplay/{itemId:guid}")]
@@ -130,6 +173,7 @@ public class TrickplayBridgeController : ControllerBase
         [FromRoute] Guid itemId,
         [FromQuery] int width = 320,
         [FromQuery] int intervalMs = 10000,
+        [FromQuery] bool saveWithMedia = true,
         CancellationToken cancellationToken = default)
     {
         if (width <= 0 || intervalMs <= 0)
@@ -153,17 +197,12 @@ public class TrickplayBridgeController : ControllerBase
         const int tileWidth = 10;
         const int tileHeight = 10;
 
-        // Build the path the publisher must have written to. Mirrors
-        // Jellyfin's PathManager.GetTrickplayDirectory(item, saveWithMedia=true)
-        // + the per-resolution sub-dir formatted as "<width> - <tileW>x<tileH>".
-        var containingFolder = item.ContainingFolderPath;
-        var basename = Path.GetFileNameWithoutExtension(item.Path);
-        var sheetsDir = Path.Combine(
-            containingFolder,
-            basename + ".trickplay",
-            $"{width.ToString(System.Globalization.CultureInfo.InvariantCulture)} - " +
-            $"{tileWidth.ToString(System.Globalization.CultureInfo.InvariantCulture)}x" +
-            $"{tileHeight.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+        // Ask Jellyfin itself where the tiles live for this layout +
+        // resolution. This returns the full per-resolution leaf dir
+        // ("<width> - <tileW>x<tileH>" appended) and is version-proof —
+        // it tracks the 10.10->10.11 data-folder move and honours
+        // saveWithMedia, so the publisher and the server never disagree.
+        var sheetsDir = _trickplayManager.GetTrickplayDirectory(item, tileWidth, tileHeight, width, saveWithMedia);
 
         if (!Directory.Exists(sheetsDir))
         {
