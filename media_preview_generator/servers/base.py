@@ -6,6 +6,7 @@ pipeline interacts with servers exclusively through this interface; vendor
 specifics live in concrete subclasses under this package.
 """
 
+import re
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
@@ -150,6 +151,36 @@ class MediaItem:
 
 
 @dataclass(frozen=True)
+class MediaSuggestion:
+    """A container- or leaf-level search hit for the Manual Generation picker.
+
+    Unlike :class:`MediaItem` — which ``search_items`` returns after expanding
+    every show into its individual episodes — a suggestion keeps shows whole so
+    the user can pick "Ben 10 (2005)" once and have the dispatcher expand its
+    folder(s) into episodes. Movies and standalone episodes are leaf hits.
+
+    Attributes:
+        kind: One of ``"show"``, ``"movie"`` or ``"episode"``.
+        title: Display title (show/movie name, or ``"Show - S01E02"`` for episodes).
+        year: Release year when the server exposes one, else ``None``.
+        remote_paths: Server-side paths. A show carries its folder(s) (Plex spreads
+            one show across multiple disks), a movie/episode carries its file. Apply
+            the server's ``path_mappings`` to obtain canonical local paths.
+        library_id: Identifier of the owning :class:`Library`, for disabled-library
+            filtering. Empty when the vendor doesn't expose it on the hit.
+        child_count: Episode count for shows when cheaply known, else ``None``.
+            Display-only ("· 52 eps"); never drives path expansion.
+    """
+
+    kind: str
+    title: str
+    year: int | None = None
+    remote_paths: tuple[str, ...] = ()
+    library_id: str = ""
+    child_count: int | None = None
+
+
+@dataclass(frozen=True)
 class WebhookEvent:
     """Normalised representation of an inbound webhook event.
 
@@ -287,6 +318,34 @@ class MediaServer(ABC):
                     if len(results) >= limit:
                         return results
         return results
+
+    def search_suggestions(self, query: str, limit: int = 20) -> list[MediaSuggestion]:
+        """Return container-level (show/movie) + episode hits for ``query``.
+
+        Powers the Manual Generation typeahead. Distinct from
+        :meth:`search_items` in two ways: shows are kept whole (their folder
+        path, not their expanded episodes) and the result carries a ``kind`` so
+        the UI can group rows. Concrete subclasses override to use the vendor's
+        native search; the default derives leaf suggestions from
+        :meth:`search_items` so a vendor without an override still functions.
+        """
+        suggestions: list[MediaSuggestion] = []
+        season_ep = re.compile(r"\bS\d{1,2}E\d{1,3}\b", re.IGNORECASE)
+        for item in self.search_items(query, limit=limit):
+            if not item.remote_path:
+                continue
+            kind = "episode" if season_ep.search(item.title or "") else "movie"
+            suggestions.append(
+                MediaSuggestion(
+                    kind=kind,
+                    title=item.title,
+                    remote_paths=(item.remote_path,),
+                    library_id=item.library_id,
+                )
+            )
+            if len(suggestions) >= limit:
+                break
+        return suggestions
 
     @abstractmethod
     def resolve_item_to_remote_path(self, item_id: str) -> str | None:

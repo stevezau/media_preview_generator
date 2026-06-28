@@ -955,7 +955,8 @@ unless noted.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/api/jobs/manual` | Submit one or more absolute file paths — `{"file_paths": ["/a.mkv", "/b.mkv"], "force_regenerate": false, "priority": 2, "server_id": "..."}`. Bypasses library scan. |
+| POST | `/api/jobs/manual` | Submit one or more absolute paths — `{"file_paths": ["/a.mkv", "/tv/Show"], "force_regenerate": false, "priority": 2, "server_id": "..."}`. Directories are expanded to the video files inside; bypasses library scan. |
+| GET | `/api/media/search` | Backs the Manual Generation typeahead. `?q=` (min 2 chars), optional `?server_id=` to scope to one server. Fans across enabled servers and returns `{results: [{kind: "show"\|"movie"\|"episode", title, year, paths: [local container paths], child_count, servers: [{id, name, type}]}]}`. Shows resolve to their folder(s); the same item reported by several servers is merged into one row (union of paths + servers). |
 | POST | `/api/jobs/{id}/priority` | Change a pending/running job's priority (`{"priority": 1\|2\|3}`; 1 = high) |
 | POST | `/api/jobs/{id}/reprocess` | Re-run a finished job with the same config |
 | POST | `/api/jobs/{id}/retry-now` | Skip the retry back-off on a chain-head job whose next attempt is currently in the back-off countdown. Returns 200 + `{"fired": true, ...}` on success, 409 when no retry is pending, 400 if the job isn't a chain head. |
@@ -1016,6 +1017,7 @@ unless noted.
 | GET | `/api/system/vulkan/debug` | Plain-text diagnostic bundle for attaching to GitHub issues (DV Profile 5 troubleshooting) |
 | POST | `/api/system/rescan-gpus` | Re-probe all GPUs (refreshes `gpu_config` candidate list) |
 | GET | `/api/system/version` | App version + commit SHA + build date |
+| GET | `/api/system/browse` | Folder picker: lists sub-directories of `?path=` (default `/`). `?include_files=1` also returns video files (each entry has `is_dir`); `?show_hidden=1` includes dot-entries. System dirs (`/proc`, `/sys`, …) are denied. |
 | GET | `/api/system/notifications` | In-app notification list (health checks, deprecations, warnings) |
 | POST | `/api/system/notifications/{id}/dismiss` | Session-only dismiss |
 | POST | `/api/system/notifications/{id}/dismiss-permanent` | Persistent dismiss (stored in settings) |

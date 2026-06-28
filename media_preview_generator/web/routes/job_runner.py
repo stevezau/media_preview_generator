@@ -10,7 +10,7 @@ from contextlib import ExitStack
 
 from loguru import logger
 
-from ..jobs import get_job_manager, parse_priority
+from ..jobs import WorkerStatus, get_job_manager, parse_priority
 
 # Tracks job IDs that already have a run_job thread in flight so that
 # resume / auto-resume calls during the long library scan don't spawn
@@ -584,8 +584,6 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
 
             def worker_callback(workers_list):
                 """Update worker statuses from processing."""
-                from ..jobs import WorkerStatus
-
                 active_worker_keys = set()
                 for worker_data in workers_list:
                     worker_key = f"{worker_data['worker_type']}_{worker_data['worker_id']}"
@@ -1842,8 +1840,6 @@ def _start_recently_added_job_async(
                 )
 
             def worker_callback(workers_list):
-                from ...jobs import WorkerStatus
-
                 active_keys = set()
                 for worker_data in workers_list:
                     key = f"{worker_data['worker_type']}_{worker_data['worker_id']}"

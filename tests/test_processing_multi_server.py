@@ -400,6 +400,41 @@ class TestSourceMissing:
         )
         assert "not found" in result.message.lower()
 
+    def test_directory_path_reports_folder_not_missing_file(self, mock_config_for_processing, tmp_path):
+        """A folder reaching the worker is reported as a folder, NOT as a
+        missing file with a retry.
+
+        Issue #266: folders are normally expanded into their video files in
+        _run_webhook_paths_phase. A folder with no recognised video files
+        survives that and lands here. Returning SKIPPED_FILE_NOT_FOUND would
+        emit the misleading "missing on disk / wrong path mappings" message
+        and retry forever — a folder never becomes a file. NO_FRAMES maps to
+        a terminal 'failed' outcome (not the retryable not-found class).
+        """
+        media_root = tmp_path / "data" / "tv"
+        empty_show = media_root / "Empty Show (2024)"
+        empty_show.mkdir(parents=True)
+        (empty_show / "readme.txt").write_text("")  # no video files
+
+        registry = ServerRegistry.from_settings(
+            [
+                _server_config(
+                    server_id="plex-1",
+                    server_type=ServerType.PLEX,
+                    libraries=[Library(id="1", name="TV", remote_paths=(str(media_root),), enabled=True)],
+                )
+            ],
+        )
+        result = process_canonical_path(
+            canonical_path=str(empty_show),
+            registry=registry,
+            config=mock_config_for_processing,
+        )
+        assert result.status is MultiServerStatus.NO_FRAMES, (
+            f"got {result.status} — a folder must not be classified as a retryable missing file"
+        )
+        assert "folder" in result.message.lower()
+
 
 class TestSinglePublisher:
     def test_emby_publisher_runs_one_ffmpeg_pass(self, mock_config_for_processing, tmp_path):

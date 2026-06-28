@@ -405,19 +405,45 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <div class="modal-body">
-                <form id="manualTriggerForm">
-                    <div class="mb-3">
-                        <label class="form-label" for="manualFilePaths">File or Directory Paths</label>
-                        <textarea class="form-control font-monospace" id="manualFilePaths" rows="5"
-                            placeholder="/media/tv/Show Name (2024)&#10;/media/movies/Movie (2024)/Movie (2024).mkv"></textarea>
-                        <div class="form-text">Enter one path per line (absolute paths as seen by the container). Directories will be expanded to include all media files within.</div>
+                <form id="manualTriggerForm" autocomplete="off">
+                    <div class="mb-3 position-relative">
+                        <label class="form-label" for="manualSearchInput">
+                            Find media
+                            <i class="bi bi-info-circle text-muted ms-1" data-bs-toggle="tooltip"
+                               title="Pick a show to generate previews for every episode, or a movie/episode for just that file. To target one episode, add its number — e.g. 'The Office S01E01' (or '1x01'). Paths come straight from your servers, so you don't need to know the container path."></i>
+                        </label>
+                        <div class="input-group">
+                            <span class="input-group-text"><i class="bi bi-search"></i></span>
+                            <input type="text" class="form-control" id="manualSearchInput"
+                                   placeholder="Search a show, movie, or episode (e.g. The Office S01E01)…" autocomplete="off" spellcheck="false">
+                            <button class="btn btn-outline-secondary" type="button" id="manualBrowseBtn"
+                                    title="Browse folders & files">
+                                <i class="bi bi-folder2-open me-1"></i>Browse
+                            </button>
+                        </div>
+                        <div id="manualSearchResults" class="list-group shadow-sm mt-1 d-none"
+                             style="max-height: 320px; overflow-y: auto;"></div>
                     </div>
+                    <div class="mb-3">
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                            <label class="form-label mb-0">Selected</label>
+                            <a href="#" id="manualClearAll" class="small text-muted d-none">Clear all</a>
+                        </div>
+                        <div id="manualChips" class="d-flex flex-wrap gap-2"></div>
+                        <div id="manualChipsEmpty" class="form-text">Nothing selected yet — search or browse above.</div>
+                    </div>
+                    <details class="mb-3" id="manualAdvanced">
+                        <summary class="small text-muted" style="cursor: pointer;">Or paste paths manually</summary>
+                        <textarea class="form-control font-monospace mt-2" id="manualFilePaths" rows="3"
+                            placeholder="/data/media/tv/Show Name (2024)&#10;/data/media/movies/Movie (2024)/Movie (2024).mkv"></textarea>
+                        <div class="form-text">One absolute container path per line. Directories expand to the media inside.</div>
+                    </details>
                     <div class="mb-3">
                         <label for="manualServerScope" class="form-label">Publish to which server?</label>
                         <select class="form-select" id="manualServerScope">
                             <option value="">All servers (publish to whoever owns the file)</option>
                         </select>
-                        <div class="form-text">Limit to one server (when the file exists on more than one).</div>
+                        <div class="form-text">Limits both the search above and where previews are published.</div>
                     </div>
                     <div class="mb-3">
                         <label for="manualPriority" class="form-label">Priority</label>

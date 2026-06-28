@@ -872,21 +872,25 @@ def _is_in_denylist(path: str) -> bool:
 @api.route("/system/browse")
 @api_token_required
 def browse_directories():
-    """List sub-directories of an absolute path on the running container.
+    """List sub-directories (and optionally video files) of an absolute path.
 
-    Used by the folder-picker modal so users can pick path-mapping locals or
-    the Plex config folder without typing. Lists directories only — files are
-    omitted, since every input that opens this picker stores a directory path.
+    Used by the folder-picker modal. By default lists directories only —
+    every legacy caller (path-mapping locals, Plex config folder) stores a
+    directory. The Manual Generation picker passes ``include_files=1`` so the
+    user can also pick an individual video file.
 
     Query params:
         path: absolute path to list (default ``/``).
         show_hidden: ``1`` to include dot-prefixed entries (default ``0``).
+        include_files: ``1`` to also return video files (default ``0``).
 
     Returns JSON:
-        ``{"path": str, "parent": str|null, "entries": [{"name", "path"}], "error": str|null}``
+        ``{"path": str, "parent": str|null, "entries": [{"name", "path",
+        "is_dir"}], "error": str|null}``
     """
     raw_path = (request.args.get("path") or "/").strip() or "/"
     show_hidden = request.args.get("show_hidden") in ("1", "true", "yes")
+    include_files = request.args.get("include_files") in ("1", "true", "yes")
 
     if "\x00" in raw_path:
         return jsonify({"path": "/", "parent": None, "entries": [], "error": "Invalid path"}), 400
@@ -909,6 +913,8 @@ def browse_directories():
 
     parent = None if canonical == "/" else os.path.dirname(canonical) or "/"
 
+    from ...plex_client import VIDEO_EXTENSIONS
+
     try:
         with os.scandir(canonical) as it:
             entries = []
@@ -916,18 +922,27 @@ def browse_directories():
                 if not show_hidden and entry.name.startswith("."):
                     continue
                 try:
-                    if not entry.is_dir(follow_symlinks=False):
-                        continue
+                    is_dir = entry.is_dir(follow_symlinks=False)
                 except OSError:
                     continue
+                if not is_dir:
+                    # Only surface files when asked, and only playable video —
+                    # a flat media folder shouldn't drown the picker in .nfo,
+                    # .srt and artwork.
+                    if not include_files:
+                        continue
+                    if os.path.splitext(entry.name)[1].lower() not in VIDEO_EXTENSIONS:
+                        continue
                 child = os.path.join(canonical, entry.name)
                 if _is_in_denylist(child):
                     continue
-                entries.append({"name": entry.name, "path": child})
+                entries.append({"name": entry.name, "path": child, "is_dir": is_dir})
     except PermissionError:
         return jsonify({"path": canonical, "parent": parent, "entries": [], "error": "Permission denied"}), 403
     except OSError as exc:
         return jsonify({"path": canonical, "parent": parent, "entries": [], "error": str(exc)}), 500
 
-    entries.sort(key=lambda e: e["name"].lower())
+    # Directories first, then files, each alphabetical — the conventional
+    # file-browser ordering.
+    entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
     return jsonify({"path": canonical, "parent": parent, "entries": entries, "error": None})
