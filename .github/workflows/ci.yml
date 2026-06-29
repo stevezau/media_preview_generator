@@ -3,7 +3,14 @@ name: CI
 on:
   push:
     branches: [dev]
-    tags: ['*.*.*']
+    # App release tags are pure semver (e.g. 4.2.1). Exclude plugin tags
+    # (plugin-v10.11.0.3) — they own jellyfin-plugin.yml and must NOT trigger
+    # the app image build: the tag name is fed to SETUPTOOLS_SCM_PRETEND_VERSION,
+    # and a non-PEP440 value ("plugin-v…") aborts the wheel build (and would
+    # otherwise push :latest from a plugin release).
+    tags:
+      - '*.*.*'
+      - '!plugin-*'
     paths-ignore:
       - 'docs/**'
       - '*.md'
