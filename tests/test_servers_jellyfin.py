@@ -2478,6 +2478,7 @@ class TestOffMediaReadiness:
     def test_config_folder_writable_section_present_and_ok(self, tmp_path):
         cfg_dir = tmp_path / "jellyfin-config"
         cfg_dir.mkdir()
+        (cfg_dir / "data").mkdir()  # the data/ marker — a real Jellyfin config dir
         jelly = JellyfinServer(_jelly_config(output={"save_with_media": False, "jellyfin_config_folder": str(cfg_dir)}))
         with patch.object(
             JellyfinServer, "_request", side_effect=self._wire(config_folder=str(cfg_dir), plugin_ok=True)
@@ -2485,6 +2486,39 @@ class TestOffMediaReadiness:
             payload = jelly.previews_readiness()
         _section, check = self._find_check(payload, "config_folder_writable")
         assert check is not None
+        assert check["ok"] is True
+        assert check["current"] == "writable"
+
+    def test_config_folder_wrong_folder_is_critical(self, tmp_path):
+        """Exists + writable but NOT a Jellyfin config dir (no data/, plugins/,
+        config/) — e.g. the user pointed it at a media folder or one level too
+        deep. Must be caught as critical, mirroring Plex's Media/localhost
+        check, instead of silently writing tiles Jellyfin will never read."""
+        wrong = tmp_path / "some-media-folder"
+        wrong.mkdir()
+        (wrong / "Movie.mkv").write_bytes(b"\x00")  # looks like a media dir, not a config dir
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False, "jellyfin_config_folder": str(wrong)}))
+        with patch.object(JellyfinServer, "_request", side_effect=self._wire(config_folder=str(wrong), plugin_ok=True)):
+            payload = jelly.previews_readiness()
+        section, check = self._find_check(payload, "config_folder_writable")
+        assert check is not None
+        assert check["ok"] is False
+        assert check["current"] == "wrong folder"
+        assert section["severity"] == "critical"
+        assert "doesn't look like" in (check["reason"] or "")
+
+    def test_config_folder_valid_when_only_plugins_marker_present(self, tmp_path):
+        """The marker set is lenient — any of data/ | plugins/ | config/ counts,
+        so an unusual-but-valid Jellyfin layout isn't falsely flagged."""
+        cfg_dir = tmp_path / "jf-cfg-plugins"
+        cfg_dir.mkdir()
+        (cfg_dir / "plugins").mkdir()  # no data/ yet, but plugins/ proves it's Jellyfin's config
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False, "jellyfin_config_folder": str(cfg_dir)}))
+        with patch.object(
+            JellyfinServer, "_request", side_effect=self._wire(config_folder=str(cfg_dir), plugin_ok=True)
+        ):
+            payload = jelly.previews_readiness()
+        _section, check = self._find_check(payload, "config_folder_writable")
         assert check["ok"] is True
         assert check["current"] == "writable"
 

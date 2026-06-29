@@ -1760,6 +1760,21 @@ class JellyfinServer(EmbyApiClient):
             if config_folder:
                 exists = os.path.isdir(config_folder)
                 writable = exists and os.access(config_folder, os.W_OK)
+                # "Right folder" check — mirrors Plex's Media/localhost probe.
+                # A real Jellyfin config dir holds the data/ folder off-media
+                # trickplay writes into (<config>/<trickplay_root>/…), plus
+                # plugins/ and config/. Pointing this at a media folder or an
+                # unrelated path is the common mistake — catch it here rather
+                # than silently writing tiles Jellyfin will never find. (It
+                # can't catch pointing one level too deep, e.g. <config>/data,
+                # since that still nests data/ + plugins/ — the markers below
+                # would still match; only a wrong/unrelated root is rejected.)
+                trickplay_root = (self.offmedia_trickplay_root or "data/trickplay").replace("\\", "/")
+                data_marker = trickplay_root.split("/", 1)[0] or "data"
+                jellyfin_markers = (data_marker, "plugins", "config", ".jellyfin-data", "system.xml")
+                looks_like_jellyfin = exists and any(
+                    os.path.exists(os.path.join(config_folder, marker)) for marker in jellyfin_markers
+                )
                 if not exists:
                     folder_ok = False
                     folder_current = "missing"
@@ -1773,6 +1788,16 @@ class JellyfinServer(EmbyApiClient):
                     folder_reason = (
                         f"{config_folder!r} is not writable by this process. "
                         "Check the Docker mount (not :ro) and PUID/PGID permissions."
+                    )
+                elif not looks_like_jellyfin:
+                    folder_ok = False
+                    folder_current = "wrong folder"
+                    folder_reason = (
+                        f"{config_folder!r} exists and is writable, but it doesn't look like "
+                        f"Jellyfin's config directory — none of '{data_marker}/', 'plugins/', 'config/' "
+                        "(or other standard Jellyfin files) are inside it. Point this at the folder "
+                        "Jellyfin uses as its config dir (the one mounted into Jellyfin as /config, "
+                        f"containing '{data_marker}/'), not a media folder or unrelated path."
                     )
                 else:
                     folder_current = "writable"
@@ -1792,7 +1817,7 @@ class JellyfinServer(EmbyApiClient):
                     "checks": [
                         {
                             "id": "config_folder_writable",
-                            "label": "Config dir mounted read-write",
+                            "label": "Config dir mounted read-write & valid",
                             "docs_anchor": "jellyfin-config-folder",
                             "tooltip": "Off-media writes trickplay into Jellyfin's config dir",
                             "explanation": (
@@ -1801,8 +1826,12 @@ class JellyfinServer(EmbyApiClient):
                                 "(<code>&lt;config&gt;/data/trickplay/…</code>) instead of next to the media. "
                                 "That means Jellyfin's config dir must be bind-mounted into THIS container "
                                 "read-write, and the 'Jellyfin config folder' setting must point at that mount.</p>"
-                                "<p>This is a read-only probe — it checks the path exists and is writable "
-                                "(<code>os.access</code>), it never writes a test file.</p>"
+                                "<p>This is a read-only probe — it checks the path (1) exists, (2) is writable "
+                                "(<code>os.access</code>), and (3) actually looks like Jellyfin's config dir "
+                                "(contains <code>data/</code>, <code>plugins/</code>, <code>config/</code>, or "
+                                "other standard Jellyfin files) so a wrong path is caught instead of silently "
+                                "writing tiles Jellyfin can't find. "
+                                "It never writes a test file.</p>"
                             ),
                             "ok": folder_ok,
                             "severity": "critical" if not folder_ok else "info",
