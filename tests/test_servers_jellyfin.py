@@ -232,6 +232,87 @@ class TestListItems:
         assert all(isinstance(i, MediaItem) for i in items)
         assert any("S01E01" in i.title for i in items)
 
+    def test_yields_one_item_per_version_for_multi_version_item(self, jelly):
+        """Jellyfin side of the Emby/Jellyfin #268 multi-version fix: a merged
+        item must fan out to one MediaItem per MediaSource, each carrying the
+        per-version GUID (Jellyfin keys off-media trickplay on it ≥10.11.5)."""
+        list_resp = MagicMock()
+        list_resp.json.return_value = {
+            "Items": [
+                {
+                    "Id": "9895",
+                    "Type": "Movie",
+                    "Name": "Multi",
+                    "Path": "/m/Multi - 2160p.mkv",
+                    "MediaSourceCount": 2,
+                }
+            ]
+        }
+        list_resp.raise_for_status.return_value = None
+        sources_resp = MagicMock()
+        sources_resp.json.return_value = {
+            "Items": [
+                {
+                    "Id": "9895",
+                    "MediaSources": [
+                        {"Id": "9895", "Path": "/m/Multi - 2160p.mkv"},
+                        {"Id": "afc0", "Path": "/m/Multi - 1080p.mkv"},
+                    ],
+                }
+            ]
+        }
+        sources_resp.raise_for_status.return_value = None
+
+        with patch.object(JellyfinServer, "_request") as req:
+            req.side_effect = [list_resp, sources_resp]
+            items = list(jelly.list_items("lib-1"))
+
+        assert len(items) == 2
+        by_path = {i.remote_path: i.id for i in items}
+        assert by_path == {"/m/Multi - 2160p.mkv": "9895", "/m/Multi - 1080p.mkv": "afc0"}
+
+    def test_multi_version_falls_back_to_primary_when_sources_fetch_raises(self, jelly):
+        """Safety net: if the targeted MediaSources fetch errors (network blip),
+        the item must NOT be dropped — we degrade to the primary's top-level
+        (Id, Path) so the merged item still gets at least one preview."""
+        list_resp = MagicMock()
+        list_resp.json.return_value = {
+            "Items": [
+                {"Id": "9895", "Type": "Movie", "Name": "Multi", "Path": "/m/Multi - 2160p.mkv", "MediaSourceCount": 2}
+            ]
+        }
+        list_resp.raise_for_status.return_value = None
+
+        with patch.object(JellyfinServer, "_request") as req:
+            req.side_effect = [list_resp, RuntimeError("sources fetch boom")]
+            items = list(jelly.list_items("lib-1"))
+
+        assert len(items) == 1, "must degrade to the primary, not drop the whole item"
+        assert items[0].id == "9895"
+        assert items[0].remote_path == "/m/Multi - 2160p.mkv"
+
+    def test_multi_version_falls_back_to_primary_when_sources_empty(self, jelly):
+        """Same fallback when the sources fetch succeeds but yields no usable
+        paths (e.g. an item still being analysed): keep the primary, don't drop."""
+        list_resp = MagicMock()
+        list_resp.json.return_value = {
+            "Items": [
+                {"Id": "9895", "Type": "Movie", "Name": "Multi", "Path": "/m/Multi - 2160p.mkv", "MediaSourceCount": 2}
+            ]
+        }
+        list_resp.raise_for_status.return_value = None
+        empty_sources = MagicMock()
+        empty_sources.json.return_value = {"Items": [{"Id": "9895", "MediaSources": []}]}
+        empty_sources.raise_for_status.return_value = None
+
+        with patch.object(JellyfinServer, "_request") as req:
+            req.side_effect = [list_resp, empty_sources]
+            items = list(jelly.list_items("lib-1"))
+
+        assert len(items) == 1
+        assert items[0].id == "9895"
+        assert items[0].remote_path == "/m/Multi - 2160p.mkv"
+
     def test_pages_through_items_when_first_page_is_full(self, jelly):
         """A library larger than one page must be fetched in chunks.
 

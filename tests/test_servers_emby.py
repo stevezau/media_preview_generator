@@ -429,6 +429,54 @@ class TestListItems:
         assert second_params.get("Limit") == _LIST_ITEMS_PAGE_SIZE
         assert len(items) == _LIST_ITEMS_PAGE_SIZE + 7
 
+    def test_emby_multi_version_already_lists_each_version_separately(self, emby):
+        """Emby needs no per-version fan-out — verified live (Emby 4.9.5).
+
+        Unlike Jellyfin (which hides alternate versions behind ONE merged
+        ``/Items`` row), Emby's scan view — ``/Items`` *without* a ``UserId``,
+        exactly how ``list_items`` queries — returns each version as its OWN
+        item row (the merge into a single poster is a per-user *display* concern
+        only). So both versions are already enumerated; each row carries no
+        ``MediaSourceCount`` and ``media_item_versions`` yields exactly one
+        MediaItem per row with no extra round-trip. The #268 fan-out is a
+        no-op on Emby, and Emby was never affected by the bug.
+        """
+        resp = MagicMock()
+        resp.json.return_value = {
+            "Items": [
+                {"Id": "513286", "Type": "Movie", "Name": "Multi", "Path": "/m/Multi (2020) - 2160p.mkv"},
+                {"Id": "513287", "Type": "Movie", "Name": "Multi", "Path": "/m/Multi (2020) - 1080p.mkv"},
+            ]
+        }
+        resp.raise_for_status.return_value = None
+
+        with patch.object(EmbyServer, "_request", return_value=resp) as req:
+            items = list(emby.list_items("lib-1"))
+
+        assert len(items) == 2, "Emby lists each version as its own row; both must enumerate"
+        assert {i.remote_path for i in items} == {
+            "/m/Multi (2020) - 2160p.mkv",
+            "/m/Multi (2020) - 1080p.mkv",
+        }
+        assert {i.id for i in items} == {"513286", "513287"}
+        assert req.call_count == 1, "no per-item PlaybackInfo/MediaSources fetch — versions are already separate rows"
+
+    def test_single_version_item_does_not_fetch_media_sources(self, emby):
+        """The common case (one version) must NOT pay an extra round-trip —
+        a 100k-item library can't afford a MediaSources fetch per item."""
+        resp = MagicMock()
+        resp.json.return_value = {
+            "Items": [{"Id": "100", "Type": "Movie", "Name": "Solo", "Path": "/m/s.mkv", "MediaSourceCount": 1}]
+        }
+        resp.raise_for_status.return_value = None
+
+        with patch.object(EmbyServer, "_request", return_value=resp) as req:
+            items = list(emby.list_items("lib-1"))
+
+        assert len(items) == 1
+        assert items[0].id == "100"
+        assert req.call_count == 1, "single-version item must not trigger a MediaSources follow-up"
+
     def test_list_items_uses_extended_per_request_timeout(self, emby):
         """``list_items`` lives in the shared ``_embyish.EmbyApiClient``
         base — Emby and Jellyfin both inherit it. The extended /Items
