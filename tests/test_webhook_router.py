@@ -675,12 +675,14 @@ class TestPlexWebhook:
         from media_preview_generator.servers.plex import PlexServer
 
         self._seed_plex_server()
-        # Stub the path-resolution so we can assert on the item_id without
-        # caring how Plex would actually resolve the file.
+        # Stub the per-version path-resolution so we can assert on the item_id
+        # without caring how Plex would actually resolve the file. The router
+        # now fans out via resolve_item_to_remote_paths (plural); a single
+        # version returns one (bare-ratingKey, path) pair.
         monkeypatch.setattr(
             PlexServer,
-            "resolve_item_to_remote_path",
-            lambda self, item_id: "/data/movies/Foo.mkv",
+            "resolve_item_to_remote_paths",
+            lambda self, item_id: [(str(item_id).rsplit("/", 1)[-1], "/data/movies/Foo.mkv")],
         )
 
         plex_payload = {
@@ -715,6 +717,50 @@ class TestPlexWebhook:
             f"item_id contains '/' ({bare_id!r}) — would yield '/library/metadata//library/metadata/...' on /tree query"
         )
         assert not bare_id.startswith("/library/metadata/"), "item_id is in URL form — D31 root-cause shape"
+
+    def test_multi_version_webhook_fans_out_one_job_per_version(self, client, auth_headers, monkeypatch):
+        """A native webhook for a MULTI-version item must dispatch one Job per
+        version (the webhook analog of the #268 scan fix). Single-version
+        responses are unchanged; only multi-version returns an aggregate.
+        """
+        from media_preview_generator.servers.plex import PlexServer
+
+        self._seed_plex_server()
+        # Two versions resolved for the one ratingKey (1080p + 4K), bare id each.
+        monkeypatch.setattr(
+            PlexServer,
+            "resolve_item_to_remote_paths",
+            lambda self, item_id: [
+                ("557676", "/data/movies/Foo-1080p.mkv"),
+                ("557676", "/data/movies/Foo-2160p.mkv"),
+            ],
+        )
+        plex_payload = {"event": "library.new", "Metadata": {"ratingKey": "557676", "title": "Foo", "type": "movie"}}
+
+        with patch(
+            "media_preview_generator.web.webhook_router.create_vendor_webhook_job",
+            side_effect=["job-aaaa1111", "job-bbbb2222"],
+        ) as proc:
+            response = client.post(
+                "/api/webhooks/incoming",
+                headers=auth_headers,
+                data={"payload": json.dumps(plex_payload)},
+                content_type="multipart/form-data",
+            )
+
+        assert response.status_code == 202, response.get_data(as_text=True)
+        body = response.get_json()
+        assert body["status"] == "queued"
+        assert body["version_count"] == 2
+        assert len(body["jobs"]) == 2
+        # One create call per version, each with that version's distinct path.
+        assert proc.call_count == 2
+        dispatched_paths = {c.kwargs["canonical_path"] for c in proc.call_args_list}
+        assert dispatched_paths == {"/data/movies/Foo-1080p.mkv", "/data/movies/Foo-2160p.mkv"}
+        # Each version forwards the bare-ratingKey hint (load-bearing for
+        # the bundle-hash / off-media GUID selection downstream).
+        for c in proc.call_args_list:
+            assert c.kwargs["item_id_by_server"] == {"plex-1": "557676"}
 
     def test_non_library_new_event_returns_202(self, client, auth_headers):
         """Playback-state events (media.play etc.) must NOT dispatch."""
@@ -1014,6 +1060,133 @@ class TestPerServerFallback:
         assert response.status_code == 202
         proc.assert_called_once()
         assert proc.call_args.kwargs["server_id_filter"] == "plex-A"
+
+    def test_per_server_url_pins_every_version_of_a_multi_version_item(self, client, auth_headers, monkeypatch):
+        """Per-server pinning must hold for EVERY version of a multi-version
+        item — not just the first. Guards the fan-out from dropping
+        server_id_filter on the 2nd+ version (the highest-risk regression)."""
+        from media_preview_generator.servers.plex import PlexServer
+
+        _seed_servers(
+            [
+                {
+                    "id": "plex-A",
+                    "type": "plex",
+                    "name": "Plex A",
+                    "enabled": True,
+                    "url": "http://plex:32400",
+                    "auth": {"token": "tok"},
+                    "libraries": [{"id": "1", "name": "Movies", "remote_paths": ["/data/movies"], "enabled": True}],
+                },
+            ]
+        )
+        monkeypatch.setattr(
+            PlexServer,
+            "resolve_item_to_remote_paths",
+            lambda self, item_id: [
+                ("557676", "/data/movies/Foo-1080p.mkv"),
+                ("557676", "/data/movies/Foo-2160p.mkv"),
+            ],
+        )
+        plex_payload = {"event": "library.new", "Metadata": {"ratingKey": "557676", "title": "Foo", "type": "movie"}}
+
+        with patch(
+            "media_preview_generator.web.webhook_router.create_vendor_webhook_job",
+            side_effect=["job-a", "job-b"],
+        ) as proc:
+            response = client.post(
+                "/api/webhooks/server/plex-A",
+                headers=auth_headers,
+                data={"payload": json.dumps(plex_payload)},
+                content_type="multipart/form-data",
+            )
+
+        assert response.status_code == 202, response.get_data(as_text=True)
+        assert proc.call_count == 2
+        # EVERY version's job must carry the pin — not just the first.
+        assert all(c.kwargs["server_id_filter"] == "plex-A" for c in proc.call_args_list)
+
+    def test_jellyfin_item_id_webhook_fans_out_with_distinct_guids(self, client, auth_headers, monkeypatch):
+        """Router × Jellyfin multi-version: each version dispatched with its OWN
+        MediaSource GUID hint (off-media keys on it)."""
+        from media_preview_generator.servers.jellyfin import JellyfinServer
+
+        _seed_servers(
+            [
+                {
+                    "id": "jelly-1",
+                    "type": "jellyfin",
+                    "name": "Jellyfin",
+                    "enabled": True,
+                    "url": "http://jelly:8096",
+                    "auth": {"method": "api_key", "api_key": "k"},
+                    "libraries": [{"id": "1", "name": "Movies", "remote_paths": ["/data/movies"], "enabled": True}],
+                },
+            ]
+        )
+        monkeypatch.setattr(
+            JellyfinServer,
+            "resolve_item_to_remote_paths",
+            lambda self, item_id: [("9895", "/data/movies/Multi-2160p.mkv"), ("afc0", "/data/movies/Multi-1080p.mkv")],
+        )
+        payload = {"NotificationType": "ItemAdded", "ItemId": "9895", "ItemType": "Movie"}
+
+        with patch(
+            "media_preview_generator.web.webhook_router.create_vendor_webhook_job",
+            side_effect=["job-a", "job-b"],
+        ) as proc:
+            response = client.post(
+                "/api/webhooks/incoming",
+                headers={**auth_headers, "Content-Type": "application/json"},
+                data=json.dumps(payload),
+            )
+
+        assert response.status_code == 202, response.get_data(as_text=True)
+        assert proc.call_count == 2
+        hints = {frozenset(c.kwargs["item_id_by_server"].items()) for c in proc.call_args_list}
+        assert hints == {frozenset({"jelly-1": "9895"}.items()), frozenset({"jelly-1": "afc0"}.items())}
+
+    def test_emby_item_id_webhook_does_not_fan_out(self, client, auth_headers, monkeypatch):
+        """Router × Emby: versions are separate item-ids, so an item-id webhook
+        resolves to ONE source → single job, NO fan-out aggregate."""
+        from media_preview_generator.servers.emby import EmbyServer
+
+        _seed_servers(
+            [
+                {
+                    "id": "emby-1",
+                    "type": "emby",
+                    "name": "Emby",
+                    "enabled": True,
+                    "url": "http://emby:8096",
+                    "auth": {"method": "api_key", "api_key": "k"},
+                    "libraries": [{"id": "1", "name": "Movies", "remote_paths": ["/data/movies"], "enabled": True}],
+                },
+            ]
+        )
+        monkeypatch.setattr(
+            EmbyServer,
+            "resolve_item_to_remote_paths",
+            lambda self, item_id: [("513287", "/data/movies/Solo.mkv")],
+        )
+        # Emby plugin shape: top-level Event + a Server block (classifier signature).
+        payload = {"Event": "library.new", "Item": {"Id": "513287"}, "Server": {"Id": "srv"}}
+
+        with patch(
+            "media_preview_generator.web.webhook_router.create_vendor_webhook_job",
+            return_value="job-single",
+        ) as proc:
+            response = client.post(
+                "/api/webhooks/incoming",
+                headers={**auth_headers, "Content-Type": "application/json"},
+                data=json.dumps(payload),
+            )
+
+        assert response.status_code == 202, response.get_data(as_text=True)
+        body = response.get_json()
+        proc.assert_called_once()
+        assert body["status"] == "queued"
+        assert "version_count" not in body, "single-source Emby webhook must use the single-job response, not fan-out"
 
     def test_universal_url_does_not_pin_dispatch(self, client, auth_headers):
         """Sanity: the universal /api/webhooks/incoming endpoint should

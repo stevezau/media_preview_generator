@@ -355,6 +355,23 @@ class MediaServer(ABC):
         the dispatcher can canonicalise.
         """
 
+    def resolve_item_to_remote_paths(self, item_id: str) -> list[tuple[str, str]]:
+        """Return ``[(version_item_id, remote_path)]`` for EVERY version of ``item_id``.
+
+        A single library item can hold multiple *versions* (alternate/multi-
+        edition), each a distinct file. Native-webhook fan-out needs all of them
+        so every version gets a preview — the per-item analog of ``list_items``'
+        per-version emission. The default returns the lone
+        :meth:`resolve_item_to_remote_path` result (correct when an item has one
+        version, and for Emby where versions are already separate item ids);
+        :class:`PlexServer` and the Emby/Jellyfin base override to enumerate
+        every version. ``version_item_id`` is the id off-media publishers key on
+        (Jellyfin's per-version MediaSource GUID) and equals ``item_id`` when
+        there is a single version.
+        """
+        path = self.resolve_item_to_remote_path(item_id)
+        return [(item_id, path)] if path else []
+
     @property
     def path_mappings(self) -> list[dict[str, Any]]:
         """Per-server path mappings used to translate canonical paths

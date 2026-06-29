@@ -1874,6 +1874,42 @@ class PlexServer(MediaServer):
                     return str(file_path)
         return None
 
+    def resolve_item_to_remote_paths(self, item_id: str) -> list[tuple[str, str]]:
+        """Return ``[(ratingKey, file)]`` for EVERY version (MediaPart) of ``item_id``.
+
+        A Plex item can hold several versions (1080p + 4K); a native webhook
+        that resolves only the parent ratingKey would otherwise preview just the
+        first. This walks every ``media[*].parts[*].file`` so the webhook fans
+        out one dispatch per version — the per-item analog of #268's
+        ``list_items`` per-``locations`` emission. All versions share the bare
+        ratingKey as their id; :class:`PlexBundleAdapter` selects each version's
+        bundle hash by matching the per-version canonical path.
+
+        (The ``/webhook`` Plex endpoint already fans out via
+        ``web/webhooks.py``; this brings the universal ``/incoming`` router to
+        parity.)
+        """
+        from ..plex_client import retry_plex_call
+
+        bare = str(item_id).rsplit("/", 1)[-1]
+        try:
+            plex = self._connect()
+            item = retry_plex_call(plex.fetchItem, int(bare))
+        except (ValueError, TypeError) as exc:
+            logger.debug("Plex item id {!r} is not numeric: {}", item_id, exc)
+            return []
+        except Exception as exc:
+            logger.debug("Plex fetchItem({}) failed: {}", item_id, exc)
+            return []
+
+        files = [
+            str(f)
+            for media in (getattr(item, "media", None) or [])
+            for part in (getattr(media, "parts", None) or [])
+            if (f := getattr(part, "file", None))
+        ]
+        return [(bare, f) for f in files]
+
     def _resolve_one_path(self, server_view_path: str) -> str | None:
         """Return the Plex ratingKey for the file at ``server_view_path``.
 

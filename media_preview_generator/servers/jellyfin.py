@@ -207,11 +207,23 @@ class JellyfinServer(EmbyApiClient):
         # views agree: tiles named "<width> - 10x10/<index>.jpg"
         # match the row registered with the matching intervalMs.
         adapter_interval_ms = resolve_frame_interval(output) * 1000
+        # The plugin asks Jellyfin GetTrickplayDirectory(item, …, saveWithMedia)
+        # to locate the tiles before registering, so it MUST be told the same
+        # storage mode the JellyfinTrickplayAdapter wrote with. Omitting it
+        # let the param default to true on the plugin: an off-media publish
+        # (save_with_media=False) was then checked against the media-adjacent
+        # path, which doesn't exist → 404 → silent registration miss → off-media
+        # trickplay only appeared at the next scheduled scan, never instantly.
+        save_with_media = bool(output.get("save_with_media", True))
         try:
             resp = self._request(
                 "POST",
                 f"/MediaPreviewBridge/Trickplay/{item_id}",
-                params={"width": adapter_width, "intervalMs": adapter_interval_ms},
+                params={
+                    "width": adapter_width,
+                    "intervalMs": adapter_interval_ms,
+                    "saveWithMedia": str(save_with_media).lower(),
+                },
             )
             if resp.status_code == 204:
                 logger.info(

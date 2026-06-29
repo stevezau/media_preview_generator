@@ -1111,6 +1111,27 @@ class EmbyApiClient(MediaServer):
 
         return suggestions
 
+    def resolve_item_to_remote_paths(self, item_id: str) -> list[tuple[str, str]]:
+        """Return ``[(sourceId, path)]`` for EVERY version of ``item_id``.
+
+        Native-webhook analog of :meth:`media_item_versions`: a Jellyfin merged
+        item exposes its alternate versions only via ``MediaSources``, so a
+        webhook that resolves the parent id must fan out to one dispatch per
+        source. Each ``sourceId`` is the per-version GUID Jellyfin keys
+        trickplay on, so off-media previews land in the right per-version dir.
+
+        Emby items are already one-per-version (its ``/Items`` lists each
+        separately and a webhook carries the specific version's id), so this
+        returns that single source — no fan-out, matching the scan behaviour.
+        Falls back to :meth:`resolve_item_to_remote_path` if the MediaSources
+        fetch is empty.
+        """
+        versions = [(sid or item_id, path) for sid, path in self._fetch_media_sources(item_id) if path]
+        if versions:
+            return versions
+        path = self.resolve_item_to_remote_path(item_id)
+        return [(item_id, path)] if path else []
+
     def resolve_item_to_remote_path(self, item_id: str) -> str | None:
         """Return ``MediaSources[0].Path`` (or top-level ``Path``) for ``item_id``.
 

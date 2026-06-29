@@ -266,27 +266,33 @@ def _canonicalize_path(remote_path: str, server_config: ServerConfig | None) -> 
     return candidates[0] if candidates else remote_path
 
 
-def _resolve_to_canonical_path(
+def _resolve_to_canonical_paths(
     *,
     kind: str,
     payload: dict[str, Any],
     registry: ServerRegistry,
     explicit_server_id: str | None = None,
-) -> tuple[str | None, dict[str, str], str]:
-    """Convert any classified payload to a canonical local file path.
+) -> tuple[list[tuple[str, dict[str, str]]], str]:
+    """Convert any classified payload to one-or-more canonical local file paths.
 
-    Returns ``(canonical_path, item_id_by_server, error_message)``.
+    Returns ``([(canonical_path, item_id_by_server), ...], error_message)``.
 
-    ``item_id_by_server`` is forwarded to :func:`process_canonical_path`
-    so per-server adapters that need a server-specific item id (Plex's
-    bundle hash; Jellyfin's manifest key) can use the dispatcher's
-    hint instead of paying for a second API roundtrip.
+    Usually one entry. A native Plex/Jellyfin webhook that carries only an
+    item id for a **multi-version** item fans out to one entry per version
+    (each with that version's path + per-version item id) so every version
+    gets a preview — the webhook analog of the #268 scan fix. Path-bearing
+    webhooks (Sonarr/Radarr, templated Jellyfin) always yield one entry.
+
+    ``item_id_by_server`` is forwarded to :func:`process_canonical_path` so
+    per-server adapters that need a server-specific item id (Plex's bundle
+    hash; Jellyfin's off-media GUID) use the dispatcher's hint instead of
+    paying for a second API roundtrip.
     """
     if kind in ("sonarr", "radarr", "path"):
         path = _path_from_path_payload(payload)
         if not path:
-            return None, {}, "payload did not carry a usable file path"
-        return path, {}, ""
+            return [], "payload did not carry a usable file path"
+        return [(path, {})], ""
 
     if kind in ("plex", "emby", "jellyfin"):
         server_id_hint = explicit_server_id or _server_id_from_payload(kind, payload)
@@ -296,39 +302,45 @@ def _resolve_to_canonical_path(
             server_id_hint=server_id_hint,
         )
         if live_server is None or server_cfg is None:
-            return None, {}, f"could not match {kind} webhook to a configured server"
+            return [], f"could not match {kind} webhook to a configured server"
 
         try:
             event: WebhookEvent | None = live_server.parse_webhook(payload, headers=dict(request.headers))
         except Exception as exc:
             logger.debug("parse_webhook raised for {}: {}", live_server.name, exc)
-            return None, {}, f"{kind} webhook parsing failed: {exc}"
+            return [], f"{kind} webhook parsing failed: {exc}"
         if event is None:
-            return None, {}, f"{kind} payload not relevant (e.g. playback event)"
+            return [], f"{kind} payload not relevant (e.g. playback event)"
 
-        # Path-bearing webhook (templated Jellyfin) — short-circuit.
+        # Path-bearing webhook (templated Jellyfin) — short-circuit, one path.
         if event.remote_path:
             canonical = _canonicalize_path(event.remote_path, server_cfg)
-            return canonical, ({live_server.id: event.item_id} if event.item_id else {}), ""
+            return [(canonical, {live_server.id: event.item_id} if event.item_id else {})], ""
 
         if not event.item_id:
-            return None, {}, f"{kind} webhook had neither item id nor path"
+            return [], f"{kind} webhook had neither item id nor path"
 
+        # Item-id webhook: expand to EVERY version (multi-version fan-out).
+        # Single-version items return one pair, so the common path is unchanged.
         try:
-            remote_path = live_server.resolve_item_to_remote_path(event.item_id)
+            versions = live_server.resolve_item_to_remote_paths(event.item_id)
         except Exception as exc:
-            return None, {}, f"resolve_item_to_remote_path failed: {exc}"
-        if not remote_path:
+            return [], f"resolve_item_to_remote_paths failed: {exc}"
+        if not versions:
             return (
-                None,
-                {},
+                [],
                 f"{kind} item {event.item_id!r} could not be resolved to a path (it may not be indexed yet)",
             )
 
-        canonical = _canonicalize_path(remote_path, server_cfg)
-        return canonical, {live_server.id: event.item_id}, ""
+        return (
+            [
+                (_canonicalize_path(remote_path, server_cfg), {live_server.id: version_id})
+                for version_id, remote_path in versions
+            ],
+            "",
+        )
 
-    return None, {}, f"unsupported webhook kind: {kind}"
+    return [], f"unsupported webhook kind: {kind}"
 
 
 @webhooks_bp.route("/incoming", methods=["POST"])
@@ -383,13 +395,13 @@ def webhook_incoming():
         )
 
     registry = _build_registry_from_settings()
-    canonical, item_id_by_server, error = _resolve_to_canonical_path(
+    resolved, error = _resolve_to_canonical_paths(
         kind=kind,
         payload=payload,
         registry=registry,
     )
 
-    if not canonical:
+    if not resolved:
         logger.info(
             "Webhook router: ignoring {} payload from {} — {}",
             kind,
@@ -399,17 +411,12 @@ def webhook_incoming():
         return jsonify({"status": "ignored", "kind": kind, "reason": error}), 202
 
     logger.info(
-        "Webhook router: routing {} payload to canonical_path={} (item hints: {})",
+        "Webhook router: routing {} payload to {} version(s): {}",
         kind,
-        canonical,
-        item_id_by_server or "{}",
+        len(resolved),
+        [c for c, _ in resolved],
     )
-    return _dispatch_canonical_path(
-        canonical,
-        item_id_by_server,
-        kind=kind,
-        regenerate=_extract_regenerate_flag(payload),
-    )
+    return _dispatch_resolved(resolved, kind=kind, regenerate=_extract_regenerate_flag(payload))
 
 
 @webhooks_bp.route("/server/<server_id>", methods=["POST"])
@@ -452,18 +459,17 @@ def webhook_per_server(server_id: str):
         )
         return jsonify({"status": "ignored", "reason": "server is disabled"}), 202
 
-    canonical, item_id_by_server, error = _resolve_to_canonical_path(
+    resolved, error = _resolve_to_canonical_paths(
         kind=kind,
         payload=payload,
         registry=registry,
         explicit_server_id=server_id,
     )
-    if not canonical:
+    if not resolved:
         return jsonify({"status": "ignored", "kind": kind, "reason": error}), 202
 
-    return _dispatch_canonical_path(
-        canonical,
-        item_id_by_server,
+    return _dispatch_resolved(
+        resolved,
         kind=kind,
         server_id_filter=server_id,
         regenerate=_extract_regenerate_flag(payload),
@@ -492,6 +498,84 @@ def _extract_regenerate_flag(payload: dict | None) -> bool:
     return str(raw).strip().lower() in ("true", "1", "yes")
 
 
+def _dispatch_resolved(
+    resolved: list[tuple[str, dict[str, str]]],
+    *,
+    kind: str,
+    server_id_filter: str | None = None,
+    regenerate: bool = False,
+):
+    """Dispatch one-or-more resolved (path, hints) pairs.
+
+    Single version (the dominant case, incl. all path-based webhooks) returns
+    the exact same one-job response as before. A multi-version item fans out to
+    one Job per version and returns an aggregate ``{"status": "queued",
+    "jobs": [...]}`` so the caller sees every version that fired.
+    """
+    if len(resolved) == 1:
+        canonical, hints = resolved[0]
+        return _dispatch_canonical_path(
+            canonical, hints, kind=kind, server_id_filter=server_id_filter, regenerate=regenerate
+        )
+
+    jobs = [
+        _create_webhook_job(canonical, hints, kind=kind, server_id_filter=server_id_filter, regenerate=regenerate)
+        for canonical, hints in resolved
+    ]
+    queued = [j for j in jobs if j.get("status") == "queued"]
+    return (
+        jsonify(
+            {
+                "status": "queued" if queued else "ignored_duplicate",
+                "kind": kind,
+                "version_count": len(resolved),
+                "jobs": jobs,
+                "message": f"{len(queued)}/{len(resolved)} version(s) queued for a multi-version item",
+            }
+        ),
+        202,
+    )
+
+
+def _create_webhook_job(
+    canonical_path: str,
+    item_id_by_server: dict[str, str],
+    *,
+    kind: str,
+    server_id_filter: str | None = None,
+    regenerate: bool = False,
+) -> dict[str, Any]:
+    """Create one vendor-webhook Job and return a result dict (no Flask response).
+
+    Shared by the single-path :func:`_dispatch_canonical_path` and the
+    multi-version :func:`_dispatch_resolved` fan-out so both build jobs the
+    same way (same dedup, same owner-sid selection).
+    """
+    owner_sid = server_id_filter or (next(iter(item_id_by_server), None) if item_id_by_server else None)
+    job_id = create_vendor_webhook_job(
+        source=kind,
+        canonical_path=canonical_path,
+        item_id_by_server=item_id_by_server,
+        server_id=owner_sid,
+        server_id_filter=server_id_filter,
+        regenerate=regenerate,
+    )
+    if job_id is None:
+        return {
+            "status": "ignored_duplicate",
+            "kind": kind,
+            "canonical_path": canonical_path,
+            "message": "Recent duplicate webhook for this file — the original Job is the authoritative one.",
+        }
+    return {
+        "status": "queued",
+        "kind": kind,
+        "canonical_path": canonical_path,
+        "job_id": job_id,
+        "message": f"Job {job_id[:8]} queued for {canonical_path}",
+    }
+
+
 def _dispatch_canonical_path(
     canonical_path: str,
     item_id_by_server: dict[str, str],
@@ -518,45 +602,16 @@ def _dispatch_canonical_path(
     webhook_prefixes via ``_log_webhook_owning_servers`` and the worker
     pool) decide ownership.
     """
-    # ``server_id_filter`` (set by /api/webhooks/server/<id>) takes precedence
-    # over any single hint when picking the server that owns this webhook.
-    # Otherwise pick the lone hint server (vendor webhooks always carry
-    # exactly one hint pair).
-    owner_sid = server_id_filter or (next(iter(item_id_by_server), None) if item_id_by_server else None)
-
-    job_id = create_vendor_webhook_job(
-        source=kind,
-        canonical_path=canonical_path,
-        item_id_by_server=item_id_by_server,
-        server_id=owner_sid,
+    # Single-path wrapper around the shared job core — preserves the exact
+    # one-job response shape every existing caller/test relies on.
+    result = _create_webhook_job(
+        canonical_path,
+        item_id_by_server,
+        kind=kind,
         server_id_filter=server_id_filter,
         regenerate=regenerate,
     )
-
-    if job_id is None:
-        # Recent-duplicate suppression — the original Job is the
-        # authoritative one. 202 keeps Plex/Emby/Jelly happy (any 2xx).
-        return (
-            jsonify(
-                {
-                    "status": "ignored_duplicate",
-                    "kind": kind,
-                    "canonical_path": canonical_path,
-                    "message": "Recent duplicate webhook for this file — the original Job is the authoritative one.",
-                }
-            ),
-            202,
-        )
-
     return (
-        jsonify(
-            {
-                "status": "queued",
-                "kind": kind,
-                "canonical_path": canonical_path,
-                "job_id": job_id,
-                "message": f"Job {job_id[:8]} queued for {canonical_path}",
-            }
-        ),
+        jsonify(result),
         202,
     )

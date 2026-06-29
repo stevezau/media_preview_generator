@@ -592,6 +592,35 @@ class TestResolveItemToRemotePath:
 
         assert plex_wrapper.resolve_item_to_remote_path("42") is None
 
+    def test_resolve_paths_returns_one_entry_per_version(self, plex_wrapper):
+        """resolve_item_to_remote_paths must yield EVERY version's file (one per
+        MediaPart) so a native webhook fans out to all versions, each tagged
+        with the bare ratingKey — the per-item analog of the #268 scan fix."""
+
+        def _part(f):
+            p = MagicMock()
+            p.file = f
+            return p
+
+        media1 = MagicMock()
+        media1.parts = [_part("/data/Foo-1080p.mkv")]
+        media2 = MagicMock()
+        media2.parts = [_part("/data/Foo-2160p.mkv")]
+        item = MagicMock()
+        item.media = [media1, media2]
+        plex = MagicMock()
+        plex.fetchItem.return_value = item
+        plex_wrapper._plex = plex
+
+        result = plex_wrapper.resolve_item_to_remote_paths("/library/metadata/42")
+        assert result == [("42", "/data/Foo-1080p.mkv"), ("42", "/data/Foo-2160p.mkv")]
+
+    def test_resolve_paths_empty_on_lookup_failure(self, plex_wrapper):
+        plex = MagicMock()
+        plex.fetchItem.side_effect = RuntimeError("boom")
+        plex_wrapper._plex = plex
+        assert plex_wrapper.resolve_item_to_remote_paths("42") == []
+
 
 class TestResolveOnePath:
     """Plex's per-server-view-path resolver hook (called by the base
