@@ -490,6 +490,77 @@ class EmbyApiClient(MediaServer):
             )
         return libraries
 
+    def _fetch_media_sources(self, item_id: str) -> list[tuple[str, str]]:
+        """Return ``[(source_id, source_path)]`` for every MediaSource of an item.
+
+        Alternate-version (merged) items collapse to a single ``/Items`` row
+        whose top-level ``Path`` is only the *primary* version; the other
+        versions live in ``MediaSources``. A targeted ``Fields=MediaSources``
+        fetch surfaces them all inline (verified on Jellyfin 10.11 and Emby).
+
+        Each MediaSource's ``Id`` is the per-version item GUID Jellyfin keys
+        trickplay on — its player resolves trickplay via
+        ``GetItemById(mediaSourceId ?? itemId)`` since 10.11.5 (PR #15757) —
+        so surfacing the source id lets off-media trickplay land in the right
+        per-version directory. Returns ``[]`` on any failure; the caller then
+        falls back to the primary path so behaviour matches the pre-fix scan.
+        """
+        params: dict[str, Any] = {"Ids": item_id, "Fields": "Path,MediaSources"}
+        user_id = self._user_id()
+        if user_id:
+            params["UserId"] = user_id
+        try:
+            data = self._request("GET", "/Items", params=params).json()
+        except Exception as exc:  # noqa: BLE001 — degrade to primary-only on any error
+            logger.debug("{} MediaSources fetch failed for item {}: {}", self.vendor_name, item_id, exc)
+            return []
+        items = data.get("Items") or []
+        if not items or not isinstance(items[0], dict):
+            return []
+        sources: list[tuple[str, str]] = []
+        for src in items[0].get("MediaSources") or []:
+            if isinstance(src, dict):
+                sources.append((str(src.get("Id") or ""), str(src.get("Path") or "")))
+        return sources
+
+    def media_item_versions(self, raw: dict[str, Any]) -> list[tuple[str, str]]:
+        """Yield ``(item_id, path)`` for every version of a ``/Items`` row.
+
+        Single-version items — the overwhelming majority — return the
+        top-level ``(Id, Path)`` with **no** extra network call. Multi-version
+        items (``MediaSourceCount > 1``) trigger one targeted MediaSources
+        fetch and return one ``(sourceId, sourcePath)`` per version: the
+        Emby/Jellyfin analog of the Plex #268 per-MediaPart fan-out.
+
+        The per-version ``sourceId`` becomes the MediaItem id so off-media
+        trickplay (GUID-keyed) lands in each version's own directory; the
+        ``sourcePath`` drives both the media-adjacent layout and the canonical
+        local path. Empty when the row carries no usable path.
+
+        Vendor note — this fan-out only fires on **Jellyfin**, and that's
+        correct. Jellyfin hides alternate versions behind a single merged
+        ``/Items`` row (``MediaSourceCount > 1``; alternates only via a
+        targeted ``Fields=MediaSources`` fetch), so we must fan out. Emby
+        (verified live on 4.9.5) instead returns each version as its OWN
+        ``/Items`` row in the scan view — ``list_items`` queries without a
+        ``UserId``, and only the per-user view merges versions for display —
+        so both versions are already enumerated, each row has no
+        ``MediaSourceCount`` (``count == 1`` here), and we yield one per row
+        with no extra round-trip. Emby was never affected by the bug; this is
+        a verified no-op there.
+        """
+        item_id = str(raw.get("Id") or "")
+        top_path = str(raw.get("Path") or "")
+        try:
+            count = int(raw.get("MediaSourceCount") or 1)
+        except (TypeError, ValueError):
+            count = 1
+        if count <= 1 or not item_id:
+            return [(item_id, top_path)] if top_path else []
+        versions = [(sid or item_id, spath) for sid, spath in self._fetch_media_sources(item_id) if spath]
+        # Fall back to the primary path if the sources fetch failed or was empty.
+        return versions or ([(item_id, top_path)] if top_path else [])
+
     def list_items(self, library_id: str) -> Iterator[MediaItem]:
         """Yield every video :class:`MediaItem` inside the given library.
 
@@ -523,7 +594,10 @@ class EmbyApiClient(MediaServer):
                 "ParentId": library_id,
                 "IncludeItemTypes": "Movie,Episode",
                 "Recursive": "true",
-                "Fields": "Path",
+                # MediaSourceCount is a cheap scalar — it lets us emit one
+                # MediaItem per *version* (see media_item_versions) without
+                # paying a heavy Fields=MediaSources fetch on every row.
+                "Fields": "Path,MediaSourceCount",
                 "Limit": _LIST_ITEMS_PAGE_SIZE,
                 "StartIndex": start_index,
             }
@@ -634,15 +708,18 @@ class EmbyApiClient(MediaServer):
             for raw in raw_items:
                 if not isinstance(raw, dict):
                     continue
-                path = str(raw.get("Path") or "")
-                if not path:
-                    continue
-                yield MediaItem(
-                    id=str(raw.get("Id") or ""),
-                    library_id=library_id,
-                    title=_format_emby_title(raw),
-                    remote_path=path,
-                )
+                title = _format_emby_title(raw)
+                # #268 (Emby/Jellyfin): a single library item can hold several
+                # versions (alternate/merged versions), each a distinct file.
+                # Emit one MediaItem per version so every version gets a
+                # preview; single-version items pay no extra round-trip.
+                for version_id, version_path in self.media_item_versions(raw):
+                    yield MediaItem(
+                        id=version_id,
+                        library_id=library_id,
+                        title=title,
+                        remote_path=version_path,
+                    )
 
             if len(raw_items) < _LIST_ITEMS_PAGE_SIZE:
                 return
