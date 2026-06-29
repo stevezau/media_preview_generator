@@ -610,6 +610,30 @@ class TestResolveItemToRemotePath:
                 "Expected /Users/u/Items/42 — bare /Items/{id} returns 400 on Jellyfin."
             )
 
+    def test_resolve_paths_returns_one_entry_per_media_source(self, jelly):
+        """resolve_item_to_remote_paths fans a merged Jellyfin item out to one
+        (sourceId, path) per MediaSource — so a native webhook previews every
+        version, each keyed by its own per-version GUID for off-media."""
+        with patch.object(JellyfinServer, "_request") as req:
+            response = MagicMock()
+            response.json.return_value = {
+                "Items": [
+                    {
+                        "Id": "9895",
+                        "MediaSources": [
+                            {"Id": "9895", "Path": "/m/Multi - 2160p.mkv"},
+                            {"Id": "afc0", "Path": "/m/Multi - 1080p.mkv"},
+                        ],
+                    }
+                ]
+            }
+            response.raise_for_status.return_value = None
+            req.return_value = response
+
+            result = jelly.resolve_item_to_remote_paths("9895")
+
+        assert result == [("9895", "/m/Multi - 2160p.mkv"), ("afc0", "/m/Multi - 1080p.mkv")]
+
     def test_falls_back_to_plural_items_endpoint_when_no_user_id(self):
         """Without user_id (api_key auth), the universal /Items?Ids= endpoint is used."""
         config = _jelly_config(auth={"method": "api_key", "api_key": "k"})
@@ -914,6 +938,34 @@ class TestTriggerRefresh:
         assert params.get("intervalMs") == 5000, (
             f"Plugin intervalMs must equal frame_interval * 1000 (5*1000=5000); got {params!r}."
         )
+        # save_with_media unset → media-adjacent (the historical default).
+        assert params.get("saveWithMedia") == "true", (
+            f"saveWithMedia must mirror the adapter's storage mode; got {params!r}."
+        )
+
+    def test_plugin_registration_passes_save_with_media_false_for_off_media(self):
+        """Regression guard: off-media publishes MUST tell the plugin
+        ``saveWithMedia=false`` so it resolves the tiles in Jellyfin's data
+        folder. Omitting it (the bug) let the plugin default to true, check the
+        media-adjacent path that off-media never wrote, 404, and silently skip
+        instant registration — off-media trickplay then only appeared at the
+        next scheduled scan. Verified live: with this param the plugin returns
+        204 and registers immediately.
+        """
+        off_jelly = JellyfinServer(_jelly_config())
+        off_jelly._config.output = {"adapter": "jellyfin_trickplay", "save_with_media": False, "width": 320}
+
+        plugin_resp = MagicMock(status_code=204, text="")
+        refresh_resp = MagicMock()
+        refresh_resp.raise_for_status.return_value = None
+
+        with patch.object(JellyfinServer, "_request", side_effect=[plugin_resp, refresh_resp]) as req:
+            off_jelly.trigger_refresh(item_id="42", remote_path=None)
+
+        params = req.call_args_list[0].kwargs.get("params") or {}
+        assert params.get("saveWithMedia") == "false", (
+            f"off-media (save_with_media=False) must send saveWithMedia=false to the plugin; got {params!r}"
+        )
 
     def test_plugin_registration_falls_back_to_safe_defaults_when_output_missing(self):
         """Belt-and-braces — when ``server_config.output`` is empty
@@ -936,6 +988,7 @@ class TestTriggerRefresh:
         params = req.call_args_list[0].kwargs.get("params") or {}
         assert params.get("width") == 320
         assert params.get("intervalMs") == 10000
+        assert params.get("saveWithMedia") == "true"  # empty output → media-adjacent default
 
     def test_continues_to_per_item_refresh_when_plugin_not_installed(self, jelly):
         # Plugin returns 404 (not installed) — log and continue to the
