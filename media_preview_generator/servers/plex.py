@@ -1522,13 +1522,23 @@ class PlexServer(MediaServer):
                     locations = _extract_item_locations(m)
                     if not locations:
                         continue
-                    yield MediaItem(
-                        id=_plex_item_id(m),
-                        library_id=str(target.key),
-                        title=_build_episode_title(m),
-                        remote_path=str(locations[0]),
-                        bundle_metadata=_extract_plex_bundle_metadata(m),
-                    )
+                    # #268: one MediaItem per version. A Plex item can have
+                    # several versions (1080p + 4K), each a distinct file in
+                    # ``locations``. Emitting one item per file gives every
+                    # version its own BIF; the shared ``bundle_metadata`` holds
+                    # all (hash, file) pairs and PlexBundleAdapter selects each
+                    # version's bundle hash by matching the per-item path.
+                    bundle_md = _extract_plex_bundle_metadata(m)
+                    item_id = _plex_item_id(m)
+                    title = _build_episode_title(m)
+                    for location in locations:
+                        yield MediaItem(
+                            id=item_id,
+                            library_id=str(target.key),
+                            title=title,
+                            remote_path=str(location),
+                            bundle_metadata=bundle_md,
+                        )
             elif target.METADATA_TYPE == "movie":
                 logger.info(
                     "Plex library {!r}: requesting full movie list from server "
@@ -1545,13 +1555,18 @@ class PlexServer(MediaServer):
                     locations = _extract_item_locations(m)
                     if not locations:
                         continue
-                    yield MediaItem(
-                        id=_plex_item_id(m),
-                        library_id=str(target.key),
-                        title=str(getattr(m, "title", "") or ""),
-                        remote_path=str(locations[0]),
-                        bundle_metadata=_extract_plex_bundle_metadata(m),
-                    )
+                    # #268: one MediaItem per version (see episode branch above).
+                    bundle_md = _extract_plex_bundle_metadata(m)
+                    item_id = _plex_item_id(m)
+                    title = str(getattr(m, "title", "") or "")
+                    for location in locations:
+                        yield MediaItem(
+                            id=item_id,
+                            library_id=str(target.key),
+                            title=title,
+                            remote_path=str(location),
+                            bundle_metadata=bundle_md,
+                        )
             else:
                 logger.info(
                     "Skipping Plex library {} (unsupported METADATA_TYPE={})",
