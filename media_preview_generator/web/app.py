@@ -520,22 +520,17 @@ def _log_image_deprecation_warning() -> None:
     rather than open the dashboard. Silent when the env var is unset
     (local dev) or set to the canonical name.
     """
-    from .notifications import (
-        CANONICAL_IMAGE_NAME,
-        DEPRECATED_IMAGE_NAME,
-        DEPRECATED_IMAGE_SUNSET_DATE,
-    )
+    from .notifications import CANONICAL_IMAGE_NAME, DEPRECATED_IMAGE_NAME
 
     image_name = (os.environ.get("DOCKER_IMAGE_NAME") or "").strip()
     if image_name != DEPRECATED_IMAGE_NAME:
         return
     logger.warning(
-        "Running deprecated Docker image {!r} — switch your compose to {!r} "
-        "before {} to keep getting updates. (Both image names mirror the same "
-        "builds until then; only the canonical name receives updates after.)",
+        "Running RETIRED Docker image {!r} — it no longer receives updates. "
+        "Switch your compose 'image:' line to {!r} and re-pull to keep getting "
+        "updates. Your volumes and settings are unchanged.",
         DEPRECATED_IMAGE_NAME,
         CANONICAL_IMAGE_NAME,
-        DEPRECATED_IMAGE_SUNSET_DATE,
     )
 
 
