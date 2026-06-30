@@ -1257,7 +1257,20 @@
         const configFolderGroup = document.getElementById('editJellyfinConfigFolderGroup');
         const configFolderInput = document.getElementById('editJellyfinConfigFolder');
         if (offMediaToggle) offMediaToggle.checked = saveOffMedia;
-        if (configFolderInput) configFolderInput.value = jfOutput.jellyfin_config_folder || '';
+        if (configFolderInput) {
+            configFolderInput.value = jfOutput.jellyfin_config_folder || '';
+            configFolderInput.classList.remove('is-valid', 'is-invalid');
+            // Bind the inline structural validator once (mirrors the Plex
+            // config-folder field) so the path is checked live as you type.
+            if (!configFolderInput.dataset.validatorBound) {
+                configFolderInput.addEventListener('input', _debouncedValidatePath(configFolderInput));
+                configFolderInput.dataset.validatorBound = '1';
+            }
+            // Only validate up-front when off-media is actually on (the field is
+            // visible) — avoids a fetch against a hidden field for a server that
+            // has a stale stored config folder but off-media disabled.
+            if (configFolderInput.value && saveOffMedia) _validateLocalPathInput(configFolderInput);
+        }
         if (configFolderGroup) configFolderGroup.classList.toggle('d-none', !(isJellyfin && saveOffMedia));
         // The "Webhook & Scanner" tab now shows for ALL server types.
         // Pre-fix it was hidden for non-Plex servers — closing the user's
@@ -1433,13 +1446,20 @@
         //   * wizardPlexConfigFolder     — /setup wizard step 3 (renamed to
         //                                   avoid colliding with the partial's
         //                                   hidden input on the same page)
-        const useStructuralCheck =
+        const isPlexCfg =
             input.id === 'editPlexConfigFolder' ||
             input.id === 'plexConfigFolder' ||
             input.id === 'wizardPlexConfigFolder';
-        const endpoint = useStructuralCheck
+        // Jellyfin off-media config folder gets the same deeper structural
+        // check (mirrors Plex) so the success message can confidently say
+        // "valid Jellyfin config folder" rather than just "path exists".
+        const isJellyfinCfg = input.id === 'editJellyfinConfigFolder';
+        const useStructuralCheck = isPlexCfg || isJellyfinCfg;
+        const endpoint = isPlexCfg
             ? '/api/settings/validate-plex-config-folder'
-            : '/api/settings/validate-local-path';
+            : isJellyfinCfg
+              ? '/api/settings/validate-jellyfin-config-folder'
+              : '/api/settings/validate-local-path';
         try {
             const resp = await fetch(endpoint, {
                 method: 'POST',
@@ -1464,8 +1484,10 @@
                 input.classList.add('is-valid');
                 if (success && useStructuralCheck && data.detail) {
                     success.textContent = `Looks like a ${data.detail}`;
-                } else if (success && useStructuralCheck) {
+                } else if (success && isPlexCfg) {
                     success.textContent = 'Valid Plex config folder';
+                } else if (success && isJellyfinCfg) {
+                    success.textContent = 'Valid Jellyfin config folder';
                 } else if (success) {
                     success.textContent = 'Path exists';
                 }
@@ -3361,6 +3383,7 @@
                 const start = ((cfgInput && cfgInput.value) || '').trim() || '/';
                 window.openFolderPicker(start, (picked) => {
                     cfgInput.value = picked;
+                    _validateLocalPathInput(cfgInput);
                 });
             });
         }

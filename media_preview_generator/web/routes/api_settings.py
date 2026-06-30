@@ -915,6 +915,71 @@ def validate_plex_config_folder():
     )
 
 
+@api.route("/settings/validate-jellyfin-config-folder", methods=["POST"])
+@setup_or_auth_required
+def validate_jellyfin_config_folder():
+    """Inline check that a path looks like a real Jellyfin config folder.
+
+    The Jellyfin analog of :func:`validate_plex_config_folder` — used by the
+    Servers > Edit Jellyfin > General tab to give the user a confident "yes
+    this is the right folder" on the off-media config-folder field, instead of
+    a bare "directory exists". Shares the marker logic with the Setup Health
+    probe (``looks_like_jellyfin_config_dir``) so the two never disagree.
+
+    Unlike Plex (restricted to ``PLEX_DATA_ROOT``), the Jellyfin config dir is
+    an arbitrary admin-chosen bind mount (e.g. ``/jellyfin-config``), so there
+    is no fixed allowed root — we stat the typed path directly. Admin-only.
+
+    Request JSON: ``{"path": "/jellyfin-config"}``
+    Returns: ``{"exists": bool, "valid_jellyfin_structure": bool,
+                "writable": bool, "detail": str, "error": str|null}``
+    """
+    from ...output.jellyfin_trickplay import jellyfin_config_data_marker, looks_like_jellyfin_config_dir
+
+    def _resp(*, exists=False, valid=False, writable=False, detail="", error=None):
+        return jsonify(
+            {
+                "exists": exists,
+                "valid_jellyfin_structure": valid,
+                "writable": writable,
+                "detail": detail,
+                "error": error,
+            }
+        )
+
+    data = request.get_json() or {}
+    raw_path = (data.get("path") or "").strip()
+    if not raw_path:
+        return _resp()
+    if "\x00" in raw_path:
+        return _resp(error="Invalid path")
+
+    probe = os.path.realpath(os.path.normpath(raw_path))
+    if not os.path.isdir(probe):
+        return _resp(error="Folder not found in this container")
+
+    writable = os.access(probe, os.W_OK)
+    marker = jellyfin_config_data_marker()
+    if not looks_like_jellyfin_config_dir(probe):
+        return _resp(
+            exists=True,
+            writable=writable,
+            error=(
+                f"This doesn't look like Jellyfin's config dir — no '{marker}/', 'plugins/' or "
+                "'config/' inside. Point it at the folder mounted into Jellyfin as /config "
+                f"(containing '{marker}/'), not a media folder or unrelated path."
+            ),
+        )
+    if not writable:
+        return _resp(
+            exists=True,
+            valid=True,
+            writable=False,
+            error="Folder is not writable by this container — check the mount isn't :ro and PUID/PGID",
+        )
+    return _resp(exists=True, valid=True, writable=True, detail="valid Jellyfin config folder")
+
+
 # ============================================================================
 # Setup Wizard
 # ============================================================================

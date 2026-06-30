@@ -5895,6 +5895,75 @@ class TestValidatePlexConfigFolder:
         assert "-v" in body["error"]
 
 
+class TestValidateJellyfinConfigFolder:
+    """Inline structural check used by Servers > Edit Jellyfin (off-media field).
+    Mirrors the Plex validator; shares looks_like_jellyfin_config_dir."""
+
+    def _post(self, client, path):
+        return client.post(
+            "/api/settings/validate-jellyfin-config-folder",
+            headers=_api_headers(),
+            json={"path": path},
+        )
+
+    def test_valid_jellyfin_config_dir(self, client, tmp_path):
+        cfg = tmp_path / "jellyfin-config"
+        (cfg / "data").mkdir(parents=True)  # the data/ marker
+        body = self._post(client, str(cfg)).get_json()
+        assert body["exists"] is True
+        assert body["valid_jellyfin_structure"] is True
+        assert body["writable"] is True
+        assert body["error"] is None
+        assert "Jellyfin config folder" in body["detail"]
+
+    def test_valid_via_plugins_marker_only(self, client, tmp_path):
+        cfg = tmp_path / "jf-cfg"
+        (cfg / "plugins").mkdir(parents=True)  # leniency: plugins/ alone is enough
+        body = self._post(client, str(cfg)).get_json()
+        assert body["valid_jellyfin_structure"] is True
+
+    def test_missing_folder_reports_not_found(self, client, tmp_path):
+        body = self._post(client, str(tmp_path / "nope")).get_json()
+        assert body["exists"] is False
+        assert body["valid_jellyfin_structure"] is False
+        assert "not found" in body["error"].lower()
+
+    def test_wrong_folder_rejected_with_clear_error(self, client, tmp_path):
+        """A real, writable dir that's a media folder (no Jellyfin markers) must
+        be flagged — the exact mistake the user hit."""
+        media = tmp_path / "Movies"
+        media.mkdir()
+        (media / "Movie.mkv").write_bytes(b"\x00")
+        body = self._post(client, str(media)).get_json()
+        assert body["exists"] is True
+        assert body["valid_jellyfin_structure"] is False
+        assert "doesn't look like Jellyfin's config dir" in body["error"]
+
+    def test_empty_path_is_neutral(self, client):
+        body = self._post(client, "").get_json()
+        assert body["exists"] is False
+        assert body["error"] is None  # neutral — no nag on an empty field
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root bypasses W_OK, so a read-only dir still reports writable",
+    )
+    def test_valid_structure_but_read_only_is_flagged(self, client, tmp_path):
+        """The '/config mounted :ro' mistake: structure is right but not writable.
+        Must report valid_structure=True, writable=False with a clear error."""
+        cfg = tmp_path / "jf-ro"
+        (cfg / "data").mkdir(parents=True)
+        os.chmod(cfg, 0o555)
+        try:
+            body = self._post(client, str(cfg)).get_json()
+        finally:
+            os.chmod(cfg, 0o755)  # restore so tmp cleanup can remove it
+        assert body["exists"] is True
+        assert body["valid_jellyfin_structure"] is True
+        assert body["writable"] is False
+        assert "not writable" in body["error"].lower()
+
+
 # ---------------------------------------------------------------------------
 # Phase I5 — Per-server Plex webhook endpoints
 # ---------------------------------------------------------------------------

@@ -79,6 +79,35 @@ _TILES_PER_SHEET = _TILE_W * _TILE_H
 # — so a future Jellyfin path move is picked up automatically.
 _DEFAULT_TRICKPLAY_ROOT = "data/trickplay"
 
+# Markers that identify a directory as Jellyfin's config dir (vs a media folder
+# or unrelated path). The off-media write target's first segment (``data`` by
+# default) is the primary one; the rest cover both the official and linuxserver
+# images, before or after first boot. Any ONE present is enough.
+_JELLYFIN_CONFIG_MARKERS = ("plugins", "config", ".jellyfin-data", "system.xml")
+
+
+def jellyfin_config_data_marker(trickplay_root: str = _DEFAULT_TRICKPLAY_ROOT) -> str:
+    """First path segment of the off-media trickplay root — the ``data`` dir
+    off-media trickplay is written into (``<config>/<data_marker>/trickplay``).
+    """
+    return (trickplay_root or _DEFAULT_TRICKPLAY_ROOT).replace("\\", "/").split("/", 1)[0] or "data"
+
+
+def looks_like_jellyfin_config_dir(folder: str, trickplay_root: str = _DEFAULT_TRICKPLAY_ROOT) -> bool:
+    """Best-effort check that ``folder`` is Jellyfin's config directory.
+
+    Off-media trickplay writes into ``<folder>/<trickplay_root>``; a real
+    Jellyfin config dir (official or linuxserver image) holds that root's first
+    segment (``data`` by default) plus ``plugins``/``config``. Any one marker is
+    enough — the goal is to reject a media folder or unrelated path, not to be
+    exhaustive. Shared by the Setup Health probe and the inline field validator
+    so they can never disagree. Mirrors Plex's Media/localhost structural check.
+    """
+    if not folder or not os.path.isdir(folder):
+        return False
+    markers = (jellyfin_config_data_marker(trickplay_root), *_JELLYFIN_CONFIG_MARKERS)
+    return any(os.path.exists(os.path.join(folder, marker)) for marker in markers)
+
 
 def _normalize_item_guid(item_id: str) -> str:
     """Normalise a Jellyfin item id to its dashed-lowercase ``"D"`` form.

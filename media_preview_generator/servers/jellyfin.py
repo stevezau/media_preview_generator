@@ -1765,16 +1765,19 @@ class JellyfinServer(EmbyApiClient):
                 # trickplay writes into (<config>/<trickplay_root>/…), plus
                 # plugins/ and config/. Pointing this at a media folder or an
                 # unrelated path is the common mistake — catch it here rather
-                # than silently writing tiles Jellyfin will never find. (It
-                # can't catch pointing one level too deep, e.g. <config>/data,
-                # since that still nests data/ + plugins/ — the markers below
-                # would still match; only a wrong/unrelated root is rejected.)
-                trickplay_root = (self.offmedia_trickplay_root or "data/trickplay").replace("\\", "/")
-                data_marker = trickplay_root.split("/", 1)[0] or "data"
-                jellyfin_markers = (data_marker, "plugins", "config", ".jellyfin-data", "system.xml")
-                looks_like_jellyfin = exists and any(
-                    os.path.exists(os.path.join(config_folder, marker)) for marker in jellyfin_markers
+                # than silently writing tiles Jellyfin will never find. Shared
+                # with the inline field validator via looks_like_jellyfin_config_dir
+                # so the two can never disagree. (It can't catch pointing one
+                # level too deep, e.g. <config>/data, since that still nests
+                # data/ + plugins/ — only a wrong/unrelated root is rejected.)
+                from ..output.jellyfin_trickplay import (
+                    jellyfin_config_data_marker,
+                    looks_like_jellyfin_config_dir,
                 )
+
+                _root = self.offmedia_trickplay_root or "data/trickplay"
+                data_marker = jellyfin_config_data_marker(_root)
+                looks_like_jellyfin = looks_like_jellyfin_config_dir(config_folder, _root)
                 if not exists:
                     folder_ok = False
                     folder_current = "missing"
