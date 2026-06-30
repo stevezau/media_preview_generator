@@ -6,7 +6,7 @@
 
 GPU-accelerated video preview thumbnail generation for **Plex, Emby, and Jellyfin**. **Web UI only** — no CLI.
 
-> Previously named **Plex Generate Previews** at `stevezzau/plex_generate_vid_previews`. That image keeps mirroring updates until **2026-10-29**; after that, only this repo (`stevezzau/media_preview_generator`) is published. Update your `compose` to the new name when convenient — settings and volumes carry over unchanged.
+> Previously named **Plex Generate Previews** at `stevezzau/plex_generate_vid_previews`. **That image has been retired and no longer receives updates** — this repo (`stevezzau/media_preview_generator`) is the only one published. If you're still on the old name, update your `compose` file's `image:` line to `stevezzau/media_preview_generator` and re-pull — settings and volumes carry over unchanged.
 
 **The Problem:** Built-in preview generation has gaps depending on which server you run:
 
