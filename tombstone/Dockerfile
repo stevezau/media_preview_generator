@@ -3,8 +3,14 @@
 # .github/workflows/retire-deprecated-image.yml, then the deprecated build is
 # removed from ci.yml. Anyone who pulls the old image after that gets a page
 # telling them to switch to stevezzau/media_preview_generator.
+#
+# nginx.conf relocates the pid + temp dirs into /tmp and we drop the stock
+# entrypoint so this runs as ANY uid:gid (incl. `user: 1000:1000`) instead of
+# crash-looping on root-owned /var/cache/nginx (issue #277).
 FROM nginx:1.27-alpine
 COPY index.html /usr/share/nginx/html/index.html
-COPY default.conf /etc/nginx/conf.d/default.conf
+COPY nginx.conf /etc/nginx/nginx.conf
 EXPOSE 8080
+ENTRYPOINT []
+CMD ["nginx", "-g", "daemon off;"]
 HEALTHCHECK CMD wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 || exit 1
