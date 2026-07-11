@@ -3707,11 +3707,17 @@ document.addEventListener('DOMContentLoaded', () => {
 async function checkConfigHealth() {
     const banner = document.getElementById('configHealthBanner');
     if (!banner) return;
+    // Raw fetch, NOT apiGet: apiGet redirects to /login on 401, which would let
+    // this passive background probe hijack navigation (e.g. bounce the setup
+    // wizard to login when the config-health endpoint is auth-gated). A health
+    // check must never move the user — silently bail on any non-OK response.
     let data;
     try {
-        data = await apiGet('/api/system/config-health');
+        const resp = await fetch('/api/system/config-health');
+        if (!resp.ok) return;
+        data = await resp.json();
     } catch (e) {
-        // Never let a health-probe hiccup blank the page; leave last state.
+        // Network hiccup — leave the last banner state, never blank the page.
         return;
     }
     const cfg = data.config || {};
