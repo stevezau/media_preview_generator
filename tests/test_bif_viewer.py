@@ -1363,3 +1363,54 @@ class TestMultiServerTrickplayFrame:
             headers=_api_headers(),
         )
         assert resp.status_code == 403
+
+
+class TestJellyfinOffMediaViewer:
+    """The BIF viewer must read off-media trickplay from the Jellyfin config
+    dir (GUID-keyed) and allow that root, not just media-adjacent paths."""
+
+    def _cfg(self, output):
+        from media_preview_generator.servers.base import ServerConfig, ServerType
+
+        return ServerConfig(id="j", type=ServerType.JELLYFIN, name="J", enabled=True, url="x", auth={}, output=output)
+
+    def test_allowed_roots_includes_config_folder_off_media(self):
+        from media_preview_generator.web.routes.api_bif import _allowed_roots_for_server
+
+        cfg = self._cfg({"save_with_media": False, "jellyfin_config_folder": "/jellyfin-config"})
+        assert "/jellyfin-config" in _allowed_roots_for_server(cfg)
+
+    def test_allowed_roots_excludes_config_folder_media_adjacent(self):
+        from media_preview_generator.web.routes.api_bif import _allowed_roots_for_server
+
+        cfg = self._cfg({"jellyfin_config_folder": "/jellyfin-config"})  # save_with_media default True
+        assert "/jellyfin-config" not in _allowed_roots_for_server(cfg)
+
+    def test_resolve_previews_off_media_uses_config_dir_guid_path(self, tmp_path):
+        from media_preview_generator.servers.base import MediaItem
+        from media_preview_generator.web.routes.api_bif import _resolve_previews_for_item
+
+        cfg_dir = tmp_path / "jellyfin-config"
+        guid = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"
+        sheet_dir = cfg_dir / "data" / "trickplay" / "a1" / guid / "320 - 10x10"
+        sheet_dir.mkdir(parents=True)
+        (sheet_dir / "0.jpg").write_bytes(b"\xff\xd8\xff")
+
+        cfg = self._cfg({"save_with_media": False, "jellyfin_config_folder": str(cfg_dir), "width": 320})
+        item = MediaItem(id=guid, library_id="lib", title="Foo (2024)", remote_path="/media/Foo (2024).mkv")
+
+        rows = _resolve_previews_for_item(item, cfg)
+        assert len(rows) == 1
+        assert rows[0]["preview_kind"] == "trickplay"
+        assert rows[0]["preview_path"] == str(sheet_dir)
+        assert rows[0]["preview_exists"] is True
+
+    def test_resolve_previews_media_adjacent_unchanged(self, tmp_path):
+        from media_preview_generator.servers.base import MediaItem
+        from media_preview_generator.web.routes.api_bif import _resolve_previews_for_item
+
+        cfg = self._cfg({"width": 320})  # media-adjacent default
+        item = MediaItem(id="x", library_id="lib", title="Foo", remote_path="/media/Foo.mkv")
+        rows = _resolve_previews_for_item(item, cfg)
+        assert rows[0]["preview_kind"] == "trickplay"
+        assert rows[0]["preview_path"] == "/media/Foo.trickplay/320 - 10x10"

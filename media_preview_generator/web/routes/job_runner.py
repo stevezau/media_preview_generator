@@ -10,7 +10,7 @@ from contextlib import ExitStack
 
 from loguru import logger
 
-from ..jobs import get_job_manager
+from ..jobs import WorkerStatus, get_job_manager, parse_priority
 
 # Tracks job IDs that already have a run_job thread in flight so that
 # resume / auto-resume calls during the long library scan don't spawn
@@ -584,8 +584,6 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
 
             def worker_callback(workers_list):
                 """Update worker statuses from processing."""
-                from ..jobs import WorkerStatus
-
                 active_worker_keys = set()
                 for worker_data in workers_list:
                     worker_key = f"{worker_data['worker_type']}_{worker_data['worker_id']}"
@@ -1701,6 +1699,7 @@ def _start_recently_added_job_async(
     library_ids: list[str] | None,
     lookback_hours: float,
     library_name: str,
+    priority: int | None = None,
 ) -> str:
     """Spawn a gated daemon thread for a scheduled "Recently Added" scan.
 
@@ -1725,6 +1724,9 @@ def _start_recently_added_job_async(
     from ..settings_manager import get_settings_manager
 
     job_manager = get_job_manager()
+    # parse_priority(None) -> PRIORITY_NORMAL, so an unset schedule priority
+    # keeps the previous default while a High/Low pin now actually reaches
+    # the gate (the gate admits at job.priority below).
     job = job_manager.create_job(
         library_name=library_name,
         config={
@@ -1735,6 +1737,7 @@ def _start_recently_added_job_async(
             "lookback_hours": lookback_hours,
         },
         server_id=server_id,
+        priority=parse_priority(priority),
     )
     job_id = job.id
 
@@ -1812,6 +1815,14 @@ def _start_recently_added_job_async(
             )
 
             config = load_config()
+            # Pin the publish step to the scheduled server, not just the
+            # enumeration. _run_recently_added_multi_server filters which
+            # server it *scans*, but the per-item publish target is resolved
+            # from config.server_id_filter (resolve_per_item_pin). Without
+            # this, a recently-added scan pinned to one Plex server fans out
+            # and publishes to every server owning the file (issue #259).
+            if server_id:
+                config.server_id_filter = server_id
             settings = get_settings_manager()
             selected_gpus = _build_selected_gpus(settings)
 
@@ -1829,8 +1840,6 @@ def _start_recently_added_job_async(
                 )
 
             def worker_callback(workers_list):
-                from ...jobs import WorkerStatus
-
                 active_keys = set()
                 for worker_data in workers_list:
                     key = f"{worker_data['worker_type']}_{worker_data['worker_id']}"

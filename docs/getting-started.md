@@ -401,6 +401,14 @@ docker run -d \
   stevezzau/media_preview_generator:latest
 ```
 
+> [!WARNING]
+> On Unraid, use `--runtime=nvidia` — **not** `--gpus all`. If you see
+> `docker: Error response from daemon: AMD CDI spec not found`, that's
+> Docker trying to resolve `--gpus all` through the Container Device
+> Interface (CDI). Unraid doesn't ship CDI specs, so the daemon falls
+> through to whatever spec it finds. Switching to `--runtime=nvidia`
+> bypasses CDI and uses the Nvidia-Driver plugin directly.
+
 ### Important Unraid Notes
 
 **PUID/PGID Values** — Unraid uses `nobody:users` by default:

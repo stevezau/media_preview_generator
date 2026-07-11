@@ -400,6 +400,41 @@ class TestSourceMissing:
         )
         assert "not found" in result.message.lower()
 
+    def test_directory_path_reports_folder_not_missing_file(self, mock_config_for_processing, tmp_path):
+        """A folder reaching the worker is reported as a folder, NOT as a
+        missing file with a retry.
+
+        Issue #266: folders are normally expanded into their video files in
+        _run_webhook_paths_phase. A folder with no recognised video files
+        survives that and lands here. Returning SKIPPED_FILE_NOT_FOUND would
+        emit the misleading "missing on disk / wrong path mappings" message
+        and retry forever — a folder never becomes a file. NO_FRAMES maps to
+        a terminal 'failed' outcome (not the retryable not-found class).
+        """
+        media_root = tmp_path / "data" / "tv"
+        empty_show = media_root / "Empty Show (2024)"
+        empty_show.mkdir(parents=True)
+        (empty_show / "readme.txt").write_text("")  # no video files
+
+        registry = ServerRegistry.from_settings(
+            [
+                _server_config(
+                    server_id="plex-1",
+                    server_type=ServerType.PLEX,
+                    libraries=[Library(id="1", name="TV", remote_paths=(str(media_root),), enabled=True)],
+                )
+            ],
+        )
+        result = process_canonical_path(
+            canonical_path=str(empty_show),
+            registry=registry,
+            config=mock_config_for_processing,
+        )
+        assert result.status is MultiServerStatus.NO_FRAMES, (
+            f"got {result.status} — a folder must not be classified as a retryable missing file"
+        )
+        assert "folder" in result.message.lower()
+
 
 class TestSinglePublisher:
     def test_emby_publisher_runs_one_ffmpeg_pass(self, mock_config_for_processing, tmp_path):
@@ -1377,6 +1412,40 @@ class TestAdapterFactory:
             output={"adapter": "plex_bundle"},  # missing plex_config_folder
         )
         assert _adapter_for_server(cfg) is None
+
+    def test_jellyfin_defaults_to_media_adjacent(self):
+        """A Jellyfin server with no off-media settings stays media-adjacent —
+        the default behaviour every existing deployment relies on."""
+        cfg = ServerConfig(id="j", type=ServerType.JELLYFIN, name="J", enabled=True, url="x", auth={}, output={})
+        adapter = _adapter_for_server(cfg)
+        assert adapter is not None
+        assert adapter.name == "jellyfin_trickplay"
+        assert adapter.needs_server_metadata() is False
+
+    def test_jellyfin_off_media_wired_from_output(self):
+        """``output.save_with_media=false`` + ``jellyfin_config_folder`` flow
+        through to the adapter so it publishes into the config dir and needs
+        the item GUID first."""
+        cfg = ServerConfig(
+            id="j",
+            type=ServerType.JELLYFIN,
+            name="J",
+            enabled=True,
+            url="x",
+            auth={},
+            output={
+                "save_with_media": False,
+                "jellyfin_config_folder": "/jellyfin-config",
+                "width": 320,
+            },
+        )
+        adapter = _adapter_for_server(cfg)
+        assert adapter is not None
+        assert adapter.needs_server_metadata() is True
+        sheet0 = adapter.offmedia_sheet_dir(
+            "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d", trickplay_root="data/trickplay", width=320
+        )
+        assert str(sheet0).startswith("/jellyfin-config/data/trickplay/a1/")
 
 
 class TestSummariseResults:

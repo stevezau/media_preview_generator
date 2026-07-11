@@ -9,6 +9,7 @@ webhook payload, ``/Items/{id}/Refresh`` instead of
 from __future__ import annotations
 
 import json
+import os
 import re
 from unittest.mock import MagicMock, patch
 
@@ -36,6 +37,7 @@ def _jelly_config(
     auth=_SENTINEL,
     libraries: list[Library] | None = None,
     url: str = "http://jellyfin:8096",
+    output: dict | None = None,
 ) -> ServerConfig:
     if auth is _SENTINEL:
         auth = dict(_DEFAULT_AUTH)
@@ -47,6 +49,7 @@ def _jelly_config(
         url=url,
         auth=auth,
         libraries=libraries or [],
+        output=output or {},
     )
 
 
@@ -228,6 +231,87 @@ class TestListItems:
         assert len(items) == 2
         assert all(isinstance(i, MediaItem) for i in items)
         assert any("S01E01" in i.title for i in items)
+
+    def test_yields_one_item_per_version_for_multi_version_item(self, jelly):
+        """Jellyfin side of the Emby/Jellyfin #268 multi-version fix: a merged
+        item must fan out to one MediaItem per MediaSource, each carrying the
+        per-version GUID (Jellyfin keys off-media trickplay on it ≥10.11.5)."""
+        list_resp = MagicMock()
+        list_resp.json.return_value = {
+            "Items": [
+                {
+                    "Id": "9895",
+                    "Type": "Movie",
+                    "Name": "Multi",
+                    "Path": "/m/Multi - 2160p.mkv",
+                    "MediaSourceCount": 2,
+                }
+            ]
+        }
+        list_resp.raise_for_status.return_value = None
+        sources_resp = MagicMock()
+        sources_resp.json.return_value = {
+            "Items": [
+                {
+                    "Id": "9895",
+                    "MediaSources": [
+                        {"Id": "9895", "Path": "/m/Multi - 2160p.mkv"},
+                        {"Id": "afc0", "Path": "/m/Multi - 1080p.mkv"},
+                    ],
+                }
+            ]
+        }
+        sources_resp.raise_for_status.return_value = None
+
+        with patch.object(JellyfinServer, "_request") as req:
+            req.side_effect = [list_resp, sources_resp]
+            items = list(jelly.list_items("lib-1"))
+
+        assert len(items) == 2
+        by_path = {i.remote_path: i.id for i in items}
+        assert by_path == {"/m/Multi - 2160p.mkv": "9895", "/m/Multi - 1080p.mkv": "afc0"}
+
+    def test_multi_version_falls_back_to_primary_when_sources_fetch_raises(self, jelly):
+        """Safety net: if the targeted MediaSources fetch errors (network blip),
+        the item must NOT be dropped — we degrade to the primary's top-level
+        (Id, Path) so the merged item still gets at least one preview."""
+        list_resp = MagicMock()
+        list_resp.json.return_value = {
+            "Items": [
+                {"Id": "9895", "Type": "Movie", "Name": "Multi", "Path": "/m/Multi - 2160p.mkv", "MediaSourceCount": 2}
+            ]
+        }
+        list_resp.raise_for_status.return_value = None
+
+        with patch.object(JellyfinServer, "_request") as req:
+            req.side_effect = [list_resp, RuntimeError("sources fetch boom")]
+            items = list(jelly.list_items("lib-1"))
+
+        assert len(items) == 1, "must degrade to the primary, not drop the whole item"
+        assert items[0].id == "9895"
+        assert items[0].remote_path == "/m/Multi - 2160p.mkv"
+
+    def test_multi_version_falls_back_to_primary_when_sources_empty(self, jelly):
+        """Same fallback when the sources fetch succeeds but yields no usable
+        paths (e.g. an item still being analysed): keep the primary, don't drop."""
+        list_resp = MagicMock()
+        list_resp.json.return_value = {
+            "Items": [
+                {"Id": "9895", "Type": "Movie", "Name": "Multi", "Path": "/m/Multi - 2160p.mkv", "MediaSourceCount": 2}
+            ]
+        }
+        list_resp.raise_for_status.return_value = None
+        empty_sources = MagicMock()
+        empty_sources.json.return_value = {"Items": [{"Id": "9895", "MediaSources": []}]}
+        empty_sources.raise_for_status.return_value = None
+
+        with patch.object(JellyfinServer, "_request") as req:
+            req.side_effect = [list_resp, empty_sources]
+            items = list(jelly.list_items("lib-1"))
+
+        assert len(items) == 1
+        assert items[0].id == "9895"
+        assert items[0].remote_path == "/m/Multi - 2160p.mkv"
 
     def test_pages_through_items_when_first_page_is_full(self, jelly):
         """A library larger than one page must be fetched in chunks.
@@ -525,6 +609,30 @@ class TestResolveItemToRemotePath:
                 f"Jellyfin item lookup hit the wrong URL: {call_args.args[1]!r}. "
                 "Expected /Users/u/Items/42 — bare /Items/{id} returns 400 on Jellyfin."
             )
+
+    def test_resolve_paths_returns_one_entry_per_media_source(self, jelly):
+        """resolve_item_to_remote_paths fans a merged Jellyfin item out to one
+        (sourceId, path) per MediaSource — so a native webhook previews every
+        version, each keyed by its own per-version GUID for off-media."""
+        with patch.object(JellyfinServer, "_request") as req:
+            response = MagicMock()
+            response.json.return_value = {
+                "Items": [
+                    {
+                        "Id": "9895",
+                        "MediaSources": [
+                            {"Id": "9895", "Path": "/m/Multi - 2160p.mkv"},
+                            {"Id": "afc0", "Path": "/m/Multi - 1080p.mkv"},
+                        ],
+                    }
+                ]
+            }
+            response.raise_for_status.return_value = None
+            req.return_value = response
+
+            result = jelly.resolve_item_to_remote_paths("9895")
+
+        assert result == [("9895", "/m/Multi - 2160p.mkv"), ("afc0", "/m/Multi - 1080p.mkv")]
 
     def test_falls_back_to_plural_items_endpoint_when_no_user_id(self):
         """Without user_id (api_key auth), the universal /Items?Ids= endpoint is used."""
@@ -830,6 +938,34 @@ class TestTriggerRefresh:
         assert params.get("intervalMs") == 5000, (
             f"Plugin intervalMs must equal frame_interval * 1000 (5*1000=5000); got {params!r}."
         )
+        # save_with_media unset → media-adjacent (the historical default).
+        assert params.get("saveWithMedia") == "true", (
+            f"saveWithMedia must mirror the adapter's storage mode; got {params!r}."
+        )
+
+    def test_plugin_registration_passes_save_with_media_false_for_off_media(self):
+        """Regression guard: off-media publishes MUST tell the plugin
+        ``saveWithMedia=false`` so it resolves the tiles in Jellyfin's data
+        folder. Omitting it (the bug) let the plugin default to true, check the
+        media-adjacent path that off-media never wrote, 404, and silently skip
+        instant registration — off-media trickplay then only appeared at the
+        next scheduled scan. Verified live: with this param the plugin returns
+        204 and registers immediately.
+        """
+        off_jelly = JellyfinServer(_jelly_config())
+        off_jelly._config.output = {"adapter": "jellyfin_trickplay", "save_with_media": False, "width": 320}
+
+        plugin_resp = MagicMock(status_code=204, text="")
+        refresh_resp = MagicMock()
+        refresh_resp.raise_for_status.return_value = None
+
+        with patch.object(JellyfinServer, "_request", side_effect=[plugin_resp, refresh_resp]) as req:
+            off_jelly.trigger_refresh(item_id="42", remote_path=None)
+
+        params = req.call_args_list[0].kwargs.get("params") or {}
+        assert params.get("saveWithMedia") == "false", (
+            f"off-media (save_with_media=False) must send saveWithMedia=false to the plugin; got {params!r}"
+        )
 
     def test_plugin_registration_falls_back_to_safe_defaults_when_output_missing(self):
         """Belt-and-braces — when ``server_config.output`` is empty
@@ -852,6 +988,7 @@ class TestTriggerRefresh:
         params = req.call_args_list[0].kwargs.get("params") or {}
         assert params.get("width") == 320
         assert params.get("intervalMs") == 10000
+        assert params.get("saveWithMedia") == "true"  # empty output → media-adjacent default
 
     def test_continues_to_per_item_refresh_when_plugin_not_installed(self, jelly):
         # Plugin returns 404 (not installed) — log and continue to the
@@ -2186,3 +2323,357 @@ class TestRegistryWiring:
         cfg = registry.get_config("jelly-1")
         assert cfg is not None
         assert cfg.url == "http://jellyfin:8096"
+
+
+class TestOffMediaServerConfig:
+    """Off-media (`output.save_with_media=false`) reshapes the Jellyfin
+    server's recommended settings, vendor-extraction writes, plugin
+    requirement, and adds a config-dir RW-mount readiness check."""
+
+    def test_recommended_save_trickplay_with_media_true_by_default(self):
+        jelly = JellyfinServer(_jelly_config())
+        rec = {flag: want for flag, _label, want, _sev, _why in jelly._recommended_settings()}
+        assert rec["SaveTrickplayWithMedia"] is True
+
+    def test_recommended_save_trickplay_with_media_flips_false_off_media(self):
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False}))
+        rows = {flag: (want, sev) for flag, _label, want, sev, _why in jelly._recommended_settings()}
+        # Off-media: Jellyfin must read from <config>/data/trickplay (where the
+        # app writes), so the recommended value is the inverse of the default.
+        assert rows["SaveTrickplayWithMedia"][0] is False
+        assert rows["SaveTrickplayWithMedia"][1] == "critical"
+
+    def test_vendor_status_counts_off_media_library_as_stopped(self):
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False}))
+        folders = [
+            {
+                "Name": "Movies",
+                "ItemId": "m",
+                "CollectionType": "movies",
+                "LibraryOptions": {
+                    "ExtractTrickplayImagesDuringLibraryScan": False,
+                    "SaveTrickplayWithMedia": False,  # off-media recommended state
+                },
+            }
+        ]
+        with patch.object(
+            JellyfinServer,
+            "_request",
+            return_value=MagicMock(status_code=200, json=MagicMock(return_value=folders), raise_for_status=MagicMock()),
+        ):
+            status = jelly.get_vendor_extraction_status()
+        assert status["stopped_count"] == 1
+        assert status["extracting_count"] == 0
+
+    def test_set_vendor_extraction_writes_save_false_when_off_media(self):
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False}))
+        folders = [{"Name": "Movies", "ItemId": "m", "CollectionType": "movies", "LibraryOptions": {}}]
+        sent = {}
+
+        def fake_request(method, url, **kwargs):
+            if url == "/Library/VirtualFolders" and method == "GET":
+                return MagicMock(status_code=200, json=MagicMock(return_value=folders), raise_for_status=MagicMock())
+            if url == "/Library/VirtualFolders/LibraryOptions":
+                sent.update(kwargs["json_body"]["LibraryOptions"])
+                return MagicMock(status_code=204, raise_for_status=MagicMock())
+            raise AssertionError(f"unexpected {method} {url}")
+
+        with patch.object(JellyfinServer, "_request", side_effect=fake_request):
+            jelly.set_vendor_extraction(scan_extraction=False)
+        assert sent["SaveTrickplayWithMedia"] is False
+        assert sent["EnableTrickplayImageExtraction"] is True
+
+    def test_set_vendor_extraction_writes_save_true_media_adjacent(self):
+        jelly = JellyfinServer(_jelly_config())  # default media-adjacent
+        folders = [{"Name": "Movies", "ItemId": "m", "CollectionType": "movies", "LibraryOptions": {}}]
+        sent = {}
+
+        def fake_request(method, url, **kwargs):
+            if url == "/Library/VirtualFolders" and method == "GET":
+                return MagicMock(status_code=200, json=MagicMock(return_value=folders), raise_for_status=MagicMock())
+            if url == "/Library/VirtualFolders/LibraryOptions":
+                sent.update(kwargs["json_body"]["LibraryOptions"])
+                return MagicMock(status_code=204, raise_for_status=MagicMock())
+            raise AssertionError(f"unexpected {method} {url}")
+
+        with patch.object(JellyfinServer, "_request", side_effect=fake_request):
+            jelly.set_vendor_extraction(scan_extraction=False)
+        assert sent["SaveTrickplayWithMedia"] is True
+
+    def test_check_plugin_installed_caches_trickplay_root(self):
+        jelly = JellyfinServer(_jelly_config())
+        resp = MagicMock(
+            status_code=200,
+            json=MagicMock(return_value={"ok": True, "version": "10.11.0.3", "trickplayRoot": "data/trickplay"}),
+        )
+        with patch.object(JellyfinServer, "_request", return_value=resp):
+            jelly.check_plugin_installed()
+        assert jelly.offmedia_trickplay_root == "data/trickplay"
+
+    def test_offmedia_trickplay_root_none_when_absent(self):
+        jelly = JellyfinServer(_jelly_config())
+        resp = MagicMock(status_code=200, json=MagicMock(return_value={"ok": True, "version": "10.11.0.2"}))
+        with patch.object(JellyfinServer, "_request", return_value=resp):
+            jelly.check_plugin_installed()
+        assert jelly.offmedia_trickplay_root is None
+
+
+class TestOffMediaReadiness:
+    """Off-media adds a config-dir RW-mount readiness section and makes the
+    plugin a hard requirement."""
+
+    def _wire(self, *, config_folder: str, plugin_ok: bool):
+        def fake_request(method, url, **kwargs):
+            if url == "/MediaPreviewBridge/Ping":
+                if plugin_ok:
+                    return MagicMock(
+                        status_code=200,
+                        json=MagicMock(
+                            return_value={"ok": True, "version": "10.11.0.3", "trickplayRoot": "data/trickplay"}
+                        ),
+                    )
+                return MagicMock(status_code=404, json=MagicMock(return_value={}))
+            if url == "/System/Info":
+                return MagicMock(
+                    status_code=200, json=MagicMock(return_value={"Version": "10.11.8"}), raise_for_status=MagicMock()
+                )
+            if url == "/System/Configuration":
+                return MagicMock(
+                    status_code=200,
+                    json=MagicMock(return_value={"TrickplayOptions": {"Interval": 10000, "WidthResolutions": [320]}}),
+                    raise_for_status=MagicMock(),
+                )
+            if url == "/Library/VirtualFolders":
+                return MagicMock(
+                    status_code=200,
+                    json=MagicMock(
+                        return_value=[
+                            {
+                                "Name": "Movies",
+                                "ItemId": "m",
+                                "CollectionType": "movies",
+                                "LibraryOptions": {
+                                    "EnableTrickplayImageExtraction": True,
+                                    "SaveTrickplayWithMedia": False,
+                                    "ExtractTrickplayImagesDuringLibraryScan": False,
+                                },
+                            }
+                        ]
+                    ),
+                    raise_for_status=MagicMock(),
+                )
+            if url == "/ScheduledTasks":
+                return MagicMock(status_code=200, json=MagicMock(return_value=[]), raise_for_status=MagicMock())
+            raise AssertionError(f"unexpected {method} {url}")
+
+        return fake_request
+
+    def _find_check(self, payload, check_id):
+        for section in payload["sections"]:
+            for check in section["checks"]:
+                if check["id"] == check_id:
+                    return section, check
+        return None, None
+
+    def test_config_folder_writable_section_present_and_ok(self, tmp_path):
+        cfg_dir = tmp_path / "jellyfin-config"
+        cfg_dir.mkdir()
+        (cfg_dir / "data").mkdir()  # the data/ marker — a real Jellyfin config dir
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False, "jellyfin_config_folder": str(cfg_dir)}))
+        with patch.object(
+            JellyfinServer, "_request", side_effect=self._wire(config_folder=str(cfg_dir), plugin_ok=True)
+        ):
+            payload = jelly.previews_readiness()
+        _section, check = self._find_check(payload, "config_folder_writable")
+        assert check is not None
+        assert check["ok"] is True
+        assert check["current"] == "writable"
+
+    def test_config_folder_wrong_folder_is_critical(self, tmp_path):
+        """Exists + writable but NOT a Jellyfin config dir (no data/, plugins/,
+        config/) — e.g. the user pointed it at a media folder or one level too
+        deep. Must be caught as critical, mirroring Plex's Media/localhost
+        check, instead of silently writing tiles Jellyfin will never read."""
+        wrong = tmp_path / "some-media-folder"
+        wrong.mkdir()
+        (wrong / "Movie.mkv").write_bytes(b"\x00")  # looks like a media dir, not a config dir
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False, "jellyfin_config_folder": str(wrong)}))
+        with patch.object(JellyfinServer, "_request", side_effect=self._wire(config_folder=str(wrong), plugin_ok=True)):
+            payload = jelly.previews_readiness()
+        section, check = self._find_check(payload, "config_folder_writable")
+        assert check is not None
+        assert check["ok"] is False
+        assert check["current"] == "wrong folder"
+        assert section["severity"] == "critical"
+        assert "doesn't look like" in (check["reason"] or "")
+
+    def test_config_folder_valid_when_only_plugins_marker_present(self, tmp_path):
+        """The marker set is lenient — any of data/ | plugins/ | config/ counts,
+        so an unusual-but-valid Jellyfin layout isn't falsely flagged."""
+        cfg_dir = tmp_path / "jf-cfg-plugins"
+        cfg_dir.mkdir()
+        (cfg_dir / "plugins").mkdir()  # no data/ yet, but plugins/ proves it's Jellyfin's config
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False, "jellyfin_config_folder": str(cfg_dir)}))
+        with patch.object(
+            JellyfinServer, "_request", side_effect=self._wire(config_folder=str(cfg_dir), plugin_ok=True)
+        ):
+            payload = jelly.previews_readiness()
+        _section, check = self._find_check(payload, "config_folder_writable")
+        assert check["ok"] is True
+        assert check["current"] == "writable"
+
+    def test_config_folder_missing_is_critical(self, tmp_path):
+        missing = tmp_path / "does-not-exist"
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False, "jellyfin_config_folder": str(missing)}))
+        with patch.object(
+            JellyfinServer, "_request", side_effect=self._wire(config_folder=str(missing), plugin_ok=True)
+        ):
+            payload = jelly.previews_readiness()
+        section, check = self._find_check(payload, "config_folder_writable")
+        assert check is not None
+        assert check["ok"] is False
+        assert section["severity"] == "critical"
+
+    def test_no_config_folder_section_when_media_adjacent(self, tmp_path):
+        jelly = JellyfinServer(_jelly_config())  # default media-adjacent
+        with patch.object(JellyfinServer, "_request", side_effect=self._wire(config_folder="", plugin_ok=True)):
+            payload = jelly.previews_readiness()
+        _section, check = self._find_check(payload, "config_folder_writable")
+        assert check is None
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root bypasses filesystem write permission checks (os.access W_OK always True)",
+    )
+    def test_config_folder_read_only_mount_is_critical(self, tmp_path):
+        """A :ro Docker mount is the most common real failure for this feature —
+        the probe must catch it as read-only/critical without a test write."""
+        cfg_dir = tmp_path / "jellyfin-config-ro"
+        cfg_dir.mkdir()
+        os.chmod(cfg_dir, 0o555)  # readable + executable, NOT writable
+        try:
+            jelly = JellyfinServer(
+                _jelly_config(output={"save_with_media": False, "jellyfin_config_folder": str(cfg_dir)})
+            )
+            with patch.object(
+                JellyfinServer, "_request", side_effect=self._wire(config_folder=str(cfg_dir), plugin_ok=True)
+            ):
+                payload = jelly.previews_readiness()
+        finally:
+            os.chmod(cfg_dir, 0o755)  # restore so tmp cleanup can remove it
+        section, check = self._find_check(payload, "config_folder_writable")
+        assert check is not None
+        assert check["ok"] is False
+        assert check["current"] == "read-only"
+        assert section["severity"] == "critical"
+
+    def test_config_folder_unset_is_critical(self, tmp_path):
+        """Off-media on but no config folder configured is an incomplete setup —
+        surface it as critical so Setup Health guides the user to set it."""
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False}))
+        with patch.object(JellyfinServer, "_request", side_effect=self._wire(config_folder="", plugin_ok=True)):
+            payload = jelly.previews_readiness()
+        section, check = self._find_check(payload, "config_folder_writable")
+        assert check is not None
+        assert check["ok"] is False
+        assert check["current"] == "unset"
+        assert section["severity"] == "critical"
+
+    def test_plugin_required_when_off_media(self, tmp_path):
+        cfg_dir = tmp_path / "jellyfin-config"
+        cfg_dir.mkdir()
+        jelly = JellyfinServer(_jelly_config(output={"save_with_media": False, "jellyfin_config_folder": str(cfg_dir)}))
+        with patch.object(
+            JellyfinServer, "_request", side_effect=self._wire(config_folder=str(cfg_dir), plugin_ok=False)
+        ):
+            payload = jelly.previews_readiness()
+        _section, check = self._find_check(payload, "plugin_installed")
+        assert check["ok"] is False
+        assert check["severity"] == "critical"
+        assert check["meta"]["plugin_required"] is True
+
+
+class TestPathMappedItemResolution:
+    """Off-media trickplay REQUIRES the item id; on path-mapped Jellyfin the
+    dispatcher passes the LOCAL canonical path, so the resolver must translate
+    it to Jellyfin's own path space before the plugin's FindByPath."""
+
+    def test_resolver_translates_local_path_to_remote_for_plugin(self):
+        cfg = _jelly_config()
+        cfg.path_mappings = [{"remote_prefix": "/jf-media", "local_prefix": "/mnt/media"}]
+        jelly = JellyfinServer(cfg)
+
+        seen = {}
+
+        def fake_request(method, path, **kwargs):
+            seen["path_param"] = (kwargs.get("params") or {}).get("path")
+            return MagicMock(status_code=200, json=MagicMock(return_value={"itemId": "abc123"}))
+
+        with patch.object(JellyfinServer, "_request", side_effect=fake_request):
+            item_id = jelly._uncached_resolve_remote_path_to_item_id("/mnt/media/Movies/Foo/Foo.mkv")
+
+        assert item_id == "abc123"
+        # The plugin must be queried with the path JELLYFIN indexed, not the local mount.
+        assert seen["path_param"] == "/jf-media/Movies/Foo/Foo.mkv"
+
+    def test_resolver_unchanged_when_local_equals_remote(self):
+        # No path_mappings (the common single-host case) → path passed through verbatim.
+        jelly = JellyfinServer(_jelly_config())
+        seen = {}
+
+        def fake_request(method, path, **kwargs):
+            seen["path_param"] = (kwargs.get("params") or {}).get("path")
+            return MagicMock(status_code=200, json=MagicMock(return_value={"itemId": "xyz"}))
+
+        with patch.object(JellyfinServer, "_request", side_effect=fake_request):
+            jelly._uncached_resolve_remote_path_to_item_id("/data/Movies/Foo/Foo.mkv")
+        assert seen["path_param"] == "/data/Movies/Foo/Foo.mkv"
+
+    def test_resolver_passes_through_when_mappings_present_but_none_match(self):
+        # Mappings configured but the path is under none of them → verbatim.
+        cfg = _jelly_config()
+        cfg.path_mappings = [{"remote_prefix": "/jf-media", "local_prefix": "/mnt/media"}]
+        jelly = JellyfinServer(cfg)
+        seen = {}
+
+        def fake_request(method, path, **kwargs):
+            seen["path_param"] = (kwargs.get("params") or {}).get("path")
+            return MagicMock(status_code=200, json=MagicMock(return_value={"itemId": "q"}))
+
+        with patch.object(JellyfinServer, "_request", side_effect=fake_request):
+            jelly._uncached_resolve_remote_path_to_item_id("/other/place/Foo.mkv")
+        assert seen["path_param"] == "/other/place/Foo.mkv"
+
+    def test_resolver_tries_every_candidate_not_just_first(self):
+        """Overlapping mounts yield multiple server-side candidates; the resolver
+        must try each (a regression of taking only [0] would miss the indexed one)."""
+        cfg = _jelly_config()
+        # Both local_prefixes match /mnt/X → two candidates: /jf-a/... then /jf-b/...
+        cfg.path_mappings = [
+            {"remote_prefix": "/jf-a", "local_prefix": "/mnt"},
+            {"remote_prefix": "/jf-b", "local_prefix": "/mnt"},
+        ]
+        jelly = JellyfinServer(cfg)
+        queried = []
+
+        def fake_request(method, path, **kwargs):
+            p = (kwargs.get("params") or {}).get("path")
+            queried.append(p)
+            # First candidate isn't indexed (404); second resolves.
+            if p == "/jf-b/Movies/Foo.mkv":
+                return MagicMock(status_code=200, json=MagicMock(return_value={"itemId": "found"}))
+            return MagicMock(status_code=404, json=MagicMock(return_value={}))
+
+        # The 404 candidate falls through to the base resolver; stub it to None
+        # so the loop cleanly advances to the next candidate.
+        with (
+            patch.object(JellyfinServer, "_request", side_effect=fake_request),
+            patch(
+                "media_preview_generator.servers._embyish.EmbyApiClient._uncached_resolve_remote_path_to_item_id",
+                return_value=None,
+            ),
+        ):
+            item_id = jelly._uncached_resolve_remote_path_to_item_id("/mnt/Movies/Foo.mkv")
+
+        assert item_id == "found"
+        assert queried == ["/jf-a/Movies/Foo.mkv", "/jf-b/Movies/Foo.mkv"]

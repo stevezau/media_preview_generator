@@ -31,6 +31,7 @@ from .base import (
     Library,
     MediaItem,
     MediaServer,
+    MediaSuggestion,
     ServerConfig,
 )
 
@@ -489,6 +490,77 @@ class EmbyApiClient(MediaServer):
             )
         return libraries
 
+    def _fetch_media_sources(self, item_id: str) -> list[tuple[str, str]]:
+        """Return ``[(source_id, source_path)]`` for every MediaSource of an item.
+
+        Alternate-version (merged) items collapse to a single ``/Items`` row
+        whose top-level ``Path`` is only the *primary* version; the other
+        versions live in ``MediaSources``. A targeted ``Fields=MediaSources``
+        fetch surfaces them all inline (verified on Jellyfin 10.11 and Emby).
+
+        Each MediaSource's ``Id`` is the per-version item GUID Jellyfin keys
+        trickplay on — its player resolves trickplay via
+        ``GetItemById(mediaSourceId ?? itemId)`` since 10.11.5 (PR #15757) —
+        so surfacing the source id lets off-media trickplay land in the right
+        per-version directory. Returns ``[]`` on any failure; the caller then
+        falls back to the primary path so behaviour matches the pre-fix scan.
+        """
+        params: dict[str, Any] = {"Ids": item_id, "Fields": "Path,MediaSources"}
+        user_id = self._user_id()
+        if user_id:
+            params["UserId"] = user_id
+        try:
+            data = self._request("GET", "/Items", params=params).json()
+        except Exception as exc:  # noqa: BLE001 — degrade to primary-only on any error
+            logger.debug("{} MediaSources fetch failed for item {}: {}", self.vendor_name, item_id, exc)
+            return []
+        items = data.get("Items") or []
+        if not items or not isinstance(items[0], dict):
+            return []
+        sources: list[tuple[str, str]] = []
+        for src in items[0].get("MediaSources") or []:
+            if isinstance(src, dict):
+                sources.append((str(src.get("Id") or ""), str(src.get("Path") or "")))
+        return sources
+
+    def media_item_versions(self, raw: dict[str, Any]) -> list[tuple[str, str]]:
+        """Yield ``(item_id, path)`` for every version of a ``/Items`` row.
+
+        Single-version items — the overwhelming majority — return the
+        top-level ``(Id, Path)`` with **no** extra network call. Multi-version
+        items (``MediaSourceCount > 1``) trigger one targeted MediaSources
+        fetch and return one ``(sourceId, sourcePath)`` per version: the
+        Emby/Jellyfin analog of the Plex #268 per-MediaPart fan-out.
+
+        The per-version ``sourceId`` becomes the MediaItem id so off-media
+        trickplay (GUID-keyed) lands in each version's own directory; the
+        ``sourcePath`` drives both the media-adjacent layout and the canonical
+        local path. Empty when the row carries no usable path.
+
+        Vendor note — this fan-out only fires on **Jellyfin**, and that's
+        correct. Jellyfin hides alternate versions behind a single merged
+        ``/Items`` row (``MediaSourceCount > 1``; alternates only via a
+        targeted ``Fields=MediaSources`` fetch), so we must fan out. Emby
+        (verified live on 4.9.5) instead returns each version as its OWN
+        ``/Items`` row in the scan view — ``list_items`` queries without a
+        ``UserId``, and only the per-user view merges versions for display —
+        so both versions are already enumerated, each row has no
+        ``MediaSourceCount`` (``count == 1`` here), and we yield one per row
+        with no extra round-trip. Emby was never affected by the bug; this is
+        a verified no-op there.
+        """
+        item_id = str(raw.get("Id") or "")
+        top_path = str(raw.get("Path") or "")
+        try:
+            count = int(raw.get("MediaSourceCount") or 1)
+        except (TypeError, ValueError):
+            count = 1
+        if count <= 1 or not item_id:
+            return [(item_id, top_path)] if top_path else []
+        versions = [(sid or item_id, spath) for sid, spath in self._fetch_media_sources(item_id) if spath]
+        # Fall back to the primary path if the sources fetch failed or was empty.
+        return versions or ([(item_id, top_path)] if top_path else [])
+
     def list_items(self, library_id: str) -> Iterator[MediaItem]:
         """Yield every video :class:`MediaItem` inside the given library.
 
@@ -522,7 +594,10 @@ class EmbyApiClient(MediaServer):
                 "ParentId": library_id,
                 "IncludeItemTypes": "Movie,Episode",
                 "Recursive": "true",
-                "Fields": "Path",
+                # MediaSourceCount is a cheap scalar — it lets us emit one
+                # MediaItem per *version* (see media_item_versions) without
+                # paying a heavy Fields=MediaSources fetch on every row.
+                "Fields": "Path,MediaSourceCount",
                 "Limit": _LIST_ITEMS_PAGE_SIZE,
                 "StartIndex": start_index,
             }
@@ -633,15 +708,18 @@ class EmbyApiClient(MediaServer):
             for raw in raw_items:
                 if not isinstance(raw, dict):
                     continue
-                path = str(raw.get("Path") or "")
-                if not path:
-                    continue
-                yield MediaItem(
-                    id=str(raw.get("Id") or ""),
-                    library_id=library_id,
-                    title=_format_emby_title(raw),
-                    remote_path=path,
-                )
+                title = _format_emby_title(raw)
+                # #268 (Emby/Jellyfin): a single library item can hold several
+                # versions (alternate/merged versions), each a distinct file.
+                # Emit one MediaItem per version so every version gets a
+                # preview; single-version items pay no extra round-trip.
+                for version_id, version_path in self.media_item_versions(raw):
+                    yield MediaItem(
+                        id=version_id,
+                        library_id=library_id,
+                        title=title,
+                        remote_path=version_path,
+                    )
 
             if len(raw_items) < _LIST_ITEMS_PAGE_SIZE:
                 return
@@ -913,6 +991,146 @@ class EmbyApiClient(MediaServer):
                 sq.episode,
             )
         return results
+
+    def search_suggestions(self, query: str, limit: int = 20) -> list[MediaSuggestion]:
+        """Container-level hits for the Manual Generation picker.
+
+        Mirrors :meth:`search_items` but keeps Series whole: a Series row
+        becomes one ``show`` suggestion carrying its folder ``Path`` (the
+        dispatcher expands it into episodes), rather than being drilled into
+        ``/Shows/{id}/Episodes``. Movies and episodes become leaf suggestions.
+        Two passes — Series-first via ``NameStartsWith``, then a ``searchTerm``
+        fallback covering movies, episodes and ``The``-prefixed shows.
+        """
+        from ..search import SearchQuery
+        from ..search.rank import filter_and_rank
+
+        sq = SearchQuery.parse(query)
+        if sq.is_empty:
+            return []
+
+        suggestions: list[MediaSuggestion] = []
+        seen_ids: set[str] = set()
+        user_id = self._user_id()
+
+        def _maybe_add_user_id(params: dict[str, Any]) -> dict[str, Any]:
+            return {**params, "UserId": user_id} if user_id else params
+
+        def _emit_series(raw: dict[str, Any]) -> None:
+            path = str(raw.get("Path") or "")
+            rid = str(raw.get("Id") or "")
+            if not path or rid in seen_ids:
+                return
+            seen_ids.add(rid)
+            count = raw.get("RecursiveItemCount")
+            if not isinstance(count, int):
+                count = raw.get("ChildCount") if isinstance(raw.get("ChildCount"), int) else None
+            suggestions.append(
+                MediaSuggestion(
+                    kind="show",
+                    title=str(raw.get("Name") or ""),
+                    year=raw.get("ProductionYear") if isinstance(raw.get("ProductionYear"), int) else None,
+                    remote_paths=(path,),
+                    library_id=str(raw.get("ParentId") or ""),
+                    child_count=count,
+                )
+            )
+
+        def _emit_leaf(raw: dict[str, Any], kind: str) -> None:
+            path = str(raw.get("Path") or "")
+            rid = str(raw.get("Id") or "")
+            if not path or rid in seen_ids:
+                return
+            seen_ids.add(rid)
+            suggestions.append(
+                MediaSuggestion(
+                    kind=kind,
+                    title=_format_emby_title(raw),
+                    year=raw.get("ProductionYear") if isinstance(raw.get("ProductionYear"), int) else None,
+                    remote_paths=(path,),
+                    library_id=str(raw.get("ParentId") or ""),
+                )
+            )
+
+        # Pass 1: Series-first via NameStartsWith (skipped when the user typed
+        # S##E## — they want a specific episode, not the whole show).
+        if not sq.has_episode:
+            series_params = _maybe_add_user_id(
+                {
+                    "NameStartsWith": sq.title,
+                    "IncludeItemTypes": "Series",
+                    "Recursive": "true",
+                    "Fields": "Path,ProductionYear,RecursiveItemCount",
+                    "Limit": "10",
+                }
+            )
+            try:
+                for series in self.query_items(series_params) or []:
+                    if isinstance(series, dict) and str(series.get("Type") or "") == "Series":
+                        _emit_series(series)
+                        if len(suggestions) >= limit:
+                            return suggestions
+            except Exception as exc:
+                logger.debug("[{}] Series-first suggestion pass failed for {!r}: {}", self.name, sq.raw, exc)
+
+        # Pass 2: searchTerm fallback — movies, episodes, and shows missed above.
+        fallback_params = _maybe_add_user_id(
+            {
+                "searchTerm": sq.title,
+                "IncludeItemTypes": "Series,Movie,Episode",
+                "Recursive": "true",
+                "Fields": "Path,ProductionYear,RecursiveItemCount,IndexNumber,ParentIndexNumber",
+                "Limit": str(min(int(limit) * 4, 200)),
+            }
+        )
+        try:
+            raw_items = self.query_items(fallback_params)
+        except Exception as exc:
+            logger.info("[{}] searchTerm suggestion fallback failed for {!r}: {}", self.name, sq.raw, exc)
+            raw_items = []
+
+        candidates: list[tuple[str, str, dict]] = []
+        for raw in raw_items or []:
+            if isinstance(raw, dict):
+                candidates.append((_format_emby_title(raw), str(raw.get("Type") or "").lower(), raw))
+
+        for raw in filter_and_rank(sq, candidates, limit=limit * 2):
+            if len(suggestions) >= limit:
+                break
+            raw_type = str(raw.get("Type") or "")
+            if raw_type == "Series":
+                if not sq.has_episode:
+                    _emit_series(raw)
+                continue
+            if sq.has_episode:
+                if raw_type != "Episode":
+                    continue
+                if raw.get("ParentIndexNumber") != sq.season or raw.get("IndexNumber") != sq.episode:
+                    continue
+            _emit_leaf(raw, "episode" if raw_type == "Episode" else "movie")
+
+        return suggestions
+
+    def resolve_item_to_remote_paths(self, item_id: str) -> list[tuple[str, str]]:
+        """Return ``[(sourceId, path)]`` for EVERY version of ``item_id``.
+
+        Native-webhook analog of :meth:`media_item_versions`: a Jellyfin merged
+        item exposes its alternate versions only via ``MediaSources``, so a
+        webhook that resolves the parent id must fan out to one dispatch per
+        source. Each ``sourceId`` is the per-version GUID Jellyfin keys
+        trickplay on, so off-media previews land in the right per-version dir.
+
+        Emby items are already one-per-version (its ``/Items`` lists each
+        separately and a webhook carries the specific version's id), so this
+        returns that single source — no fan-out, matching the scan behaviour.
+        Falls back to :meth:`resolve_item_to_remote_path` if the MediaSources
+        fetch is empty.
+        """
+        versions = [(sid or item_id, path) for sid, path in self._fetch_media_sources(item_id) if path]
+        if versions:
+            return versions
+        path = self.resolve_item_to_remote_path(item_id)
+        return [(item_id, path)] if path else []
 
     def resolve_item_to_remote_path(self, item_id: str) -> str | None:
         """Return ``MediaSources[0].Path`` (or top-level ``Path``) for ``item_id``.

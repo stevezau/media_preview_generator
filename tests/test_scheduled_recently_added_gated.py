@@ -175,6 +175,124 @@ class TestStartRecentlyAddedJobAsync:
             f"gate.release MUST happen after the scan returns — got {call_log!r}"
         )
 
+    @pytest.mark.parametrize(
+        "passed_priority,expected",
+        [
+            (1, 1),  # High pin must reach the Job (issue #259)
+            (3, 3),  # Low pin must reach the Job
+            (None, 2),  # unset -> PRIORITY_NORMAL (parse_priority default)
+        ],
+    )
+    def test_priority_forwarded_to_created_job(self, tmp_path, passed_priority, expected):
+        """The schedule's priority must reach the spawned Job (issue #259).
+
+        Pre-fix the recently-added branch dropped ``priority`` entirely:
+        the helper had no parameter for it and ``create_job`` fell back to
+        PRIORITY_NORMAL, so a High/Low schedule always ran at Normal. The
+        gate admits at ``job.priority``, so this also governs queue order.
+        """
+        import media_preview_generator.web.jobs as jobs_mod
+        from media_preview_generator.web.jobs import JobManager
+        from media_preview_generator.web.routes.job_runner import (
+            _start_recently_added_job_async,
+        )
+
+        with jobs_mod._job_lock:
+            jobs_mod._job_manager = JobManager(config_dir=str(tmp_path / "config"))
+        jm = jobs_mod._job_manager
+
+        scan_called = threading.Event()
+
+        with (
+            patch(
+                "media_preview_generator.jobs.orchestrator._run_recently_added_multi_server",
+                side_effect=lambda *a, **k: scan_called.set() or {},
+            ),
+            patch("media_preview_generator.config.load_config", return_value=MagicMock()),
+            patch(
+                "media_preview_generator.web.routes.job_runner._build_selected_gpus",
+                return_value=[],
+            ),
+        ):
+            job_id = _start_recently_added_job_async(
+                schedule_id="sched-1",
+                server_id=None,
+                library_ids=None,
+                lookback_hours=1.0,
+                library_name="Recently added: all libraries",
+                priority=passed_priority,
+            )
+            assert scan_called.wait(timeout=3.0)
+
+        job = jm.get_job(job_id)
+        assert job is not None
+        assert job.priority == expected, (
+            f"schedule priority {passed_priority!r} must reach the Job as {expected}; got {job.priority}"
+        )
+
+    @pytest.mark.parametrize(
+        "server_id,expected_filter",
+        [
+            ("plex-1", "plex-1"),  # pinned -> publish only to that server (issue #259)
+            (None, None),  # unpinned -> leave fan-out behaviour untouched
+        ],
+    )
+    def test_pinned_server_sets_config_server_id_filter(self, tmp_path, server_id, expected_filter):
+        """A pinned recently-added scan must set ``config.server_id_filter``.
+
+        Enumeration is already filtered by the explicit ``server_id_filter``
+        kwarg, but the per-item PUBLISH target is resolved from
+        ``config.server_id_filter`` (``resolve_per_item_pin``). With two Plex
+        servers owning the same files, a Plex-pinned scan that left this
+        unset fanned out and published to both (issue #259 comment). When
+        unpinned we must NOT set it, so unpinned scans keep fanning out.
+        """
+        from types import SimpleNamespace
+
+        import media_preview_generator.web.jobs as jobs_mod
+        from media_preview_generator.web.jobs import JobManager
+        from media_preview_generator.web.routes.job_runner import (
+            _start_recently_added_job_async,
+        )
+
+        with jobs_mod._job_lock:
+            jobs_mod._job_manager = JobManager(config_dir=str(tmp_path / "config"))
+
+        scan_called = threading.Event()
+        captured: dict = {}
+
+        def fake_scan(config, *args, **kwargs):
+            captured["config"] = config
+            scan_called.set()
+            return {}
+
+        fake_config = SimpleNamespace(server_id_filter=None)
+
+        with (
+            patch(
+                "media_preview_generator.jobs.orchestrator._run_recently_added_multi_server",
+                side_effect=fake_scan,
+            ),
+            patch("media_preview_generator.config.load_config", return_value=fake_config),
+            patch(
+                "media_preview_generator.web.routes.job_runner._build_selected_gpus",
+                return_value=[],
+            ),
+        ):
+            _start_recently_added_job_async(
+                schedule_id="sched-1",
+                server_id=server_id,
+                library_ids=None,
+                lookback_hours=1.0,
+                library_name="Recently added: all libraries",
+            )
+            assert scan_called.wait(timeout=3.0)
+
+        assert captured["config"].server_id_filter == expected_filter, (
+            f"server_id={server_id!r} must yield config.server_id_filter={expected_filter!r}; "
+            f"got {captured['config'].server_id_filter!r}"
+        )
+
     def test_cancel_during_gate_wait_skips_scan_and_does_not_release(self, tmp_path):
         """If the user cancels the Job while it's waiting for a gate
         slot, ``acquire`` returns False and the scan must NOT run. The
@@ -233,3 +351,55 @@ class TestStartRecentlyAddedJobAsync:
         )
         # Job should land in CANCELLED, not COMPLETED.
         assert jm.get_job(job_id).status.value == "cancelled"
+
+
+class TestWorkerCallbackImportsResolve:
+    """Regression for #267. The ``worker_callback`` closure in
+    ``_start_recently_added_job_async`` did ``from ...jobs import WorkerStatus``
+    (one dot too many), resolving to the top-level ``jobs`` *package* — where
+    ``WorkerStatus`` is NOT defined — instead of ``..jobs`` -> ``web.jobs``. At
+    runtime the dispatcher swallowed the ImportError as "dispatch loop iteration
+    failed; continuing", so worker-status UI updates silently vanished for
+    scheduled recently-added scans while preview generation still completed.
+
+    The fix hoists ``WorkerStatus`` to the module-level ``from ..jobs import``,
+    so any wrong target now fails at module import time (which this test
+    forces) rather than being deferred into a closure the mocked scans never
+    fire. The two checks below pin (a) the symbol is the real class from
+    ``web.jobs`` and (b) no stray function-local import re-introduces the
+    wrong-depth footgun.
+    """
+
+    def test_workerstatus_is_live_at_module_level(self):
+        import media_preview_generator.web.routes.job_runner as jr_mod
+        from media_preview_generator.web.jobs import WorkerStatus
+
+        assert jr_mod.WorkerStatus is WorkerStatus, (
+            "job_runner.WorkerStatus must be the class from web.jobs — a wrong "
+            "relative-import depth would either shadow it or fail import (issue #267)"
+        )
+
+    def test_no_workerstatus_import_resolves_wrong(self):
+        import ast
+        import importlib
+        from pathlib import Path
+
+        import media_preview_generator.web.routes.job_runner as jr_mod
+
+        tree = ast.parse(Path(jr_mod.__file__).read_text())
+        base_pkg = "media_preview_generator.web.routes"
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if not any(alias.name == "WorkerStatus" for alias in node.names):
+                continue
+            # Resolve the relative module the same way Python would.
+            parent = base_pkg.rsplit(".", node.level - 1)[0] if node.level > 1 else base_pkg
+            target = f"{parent}.{node.module}" if node.module else parent
+            mod = importlib.import_module(target)
+            assert hasattr(mod, "WorkerStatus"), (
+                f"`from {'.' * node.level}{node.module or ''} import WorkerStatus` at "
+                f"job_runner.py:{node.lineno} resolves to {target!r}, which has no "
+                f"WorkerStatus (issue #267 — wrong relative-import depth)"
+            )

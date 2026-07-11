@@ -72,6 +72,23 @@ def save_auth_config(config: dict) -> None:
 _logged_env_token = False
 
 
+def _env_token() -> str | None:
+    """Return the WEB_AUTH_TOKEN env value, stripped, or None.
+
+    Whitespace is trimmed because incoming tokens are stripped in
+    :func:`_check_token_headers`; a trailing space/newline in the env var
+    (common when pasting into Unraid's masked field) would otherwise make the
+    stored token never match the one the user types — presenting as the token
+    being "ignored". A whitespace-only value is treated as unset rather than
+    locking the app to an unusable token.
+    """
+    raw = os.environ.get("WEB_AUTH_TOKEN")
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    return stripped or None
+
+
 def get_auth_token() -> str:
     """Get the authentication token.
 
@@ -82,7 +99,7 @@ def get_auth_token() -> str:
     """
     global _logged_env_token  # noqa: PLW0603
     # Check environment variable first
-    env_token = os.environ.get("WEB_AUTH_TOKEN")
+    env_token = _env_token()
     if env_token:
         if not _logged_env_token:
             logger.info("Using authentication token from WEB_AUTH_TOKEN environment variable")
@@ -116,7 +133,7 @@ def regenerate_token() -> str:
     # os.environ.get(...) another thread (e.g. a test) could mutate the
     # environment, leaving the second .get() returning None and the
     # `-> str` contract violated.
-    env_token = os.environ.get("WEB_AUTH_TOKEN")
+    env_token = _env_token()
     if env_token:
         logger.warning(
             "Token regeneration was requested but ignored — the token is being set by the "
@@ -141,7 +158,18 @@ def validate_token(token: str) -> bool:
 
 def is_token_env_controlled() -> bool:
     """Check if the token is controlled by WEB_AUTH_TOKEN environment variable."""
-    return bool(os.environ.get("WEB_AUTH_TOKEN"))
+    return _env_token() is not None
+
+
+def _saved_token() -> str | None:
+    """Return the token persisted in auth.json, or None.
+
+    Unlike :func:`get_auth_token`, this never falls back to the env var and
+    never generates/saves a new token — it only reports what is on disk. Used
+    by the startup banner to tell the operator when a saved token is being
+    shadowed by ``WEB_AUTH_TOKEN``.
+    """
+    return load_auth_config().get("token")
 
 
 def set_auth_token(new_token: str) -> dict:
@@ -330,6 +358,17 @@ def log_token_on_startup() -> None:
     logger.info("WEB AUTHENTICATION TOKEN")
     logger.info("=" * 60)
     logger.info("Token: {}", masked)
-    logger.info("Check /config/auth.json for the full token.")
-    logger.info("You can also set WEB_AUTH_TOKEN environment variable.")
+    if is_token_env_controlled():
+        logger.info("Source: WEB_AUTH_TOKEN environment variable (this overrides the saved token).")
+        saved = _saved_token()
+        if saved and saved != token:
+            logger.warning(
+                "A different token is also saved in {} — it is being IGNORED while "
+                "WEB_AUTH_TOKEN is set. Unset WEB_AUTH_TOKEN to use the saved token instead.",
+                AUTH_FILE,
+            )
+    else:
+        logger.info("Source: {} (auto-generated or set via the setup wizard).", AUTH_FILE)
+        logger.info("Read the full token with: cat {} | jq -r .token", AUTH_FILE)
+        logger.info("Set the WEB_AUTH_TOKEN environment variable to pin your own token.")
     logger.info("=" * 60)

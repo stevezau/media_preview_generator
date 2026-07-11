@@ -34,7 +34,11 @@ readonly SERVERS_ENV="${HERE}/servers.env"
 # 2. docker compose up
 echo
 echo "==> docker compose up -d"
-PLEX_CLAIM="${PLEX_CLAIM:-}" docker compose -f "${COMPOSE_FILE}" up -d
+# PUID/PGID make Jellyfin's bind-mounted config (./jellyfin-config) owned by the
+# invoking user, so setup_servers.py can inject the API key + install the plugin
+# and the off-media test can write trickplay into Jellyfin's data folder.
+PUID="$(id -u)" PGID="$(id -g)" PLEX_CLAIM="${PLEX_CLAIM:-}" \
+    docker compose -f "${COMPOSE_FILE}" up -d
 
 # 3. Wait for health
 echo

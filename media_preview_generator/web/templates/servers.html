@@ -158,6 +158,35 @@
                             <div class="form-text">Where this Plex server's preview bundles will be written. Mirrors the <a href="{{ url_for('main.setup_wizard') }}">Setup wizard</a> &rarr; Step 3 field.</div>
                         </div>
 
+                        <!-- Jellyfin-only: store trickplay off the media drive -->
+                        <div id="editJellyfinOffMediaGroup" class="d-none">
+                            <div class="form-check mb-2">
+                                <input type="checkbox" id="editJellyfinSaveOffMedia" class="form-check-input">
+                                <label class="form-check-label" for="editJellyfinSaveOffMedia">Store trickplay off the media drive
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                            title="Write Jellyfin scrubbing previews into Jellyfin's data folder (like Plex) instead of next to each video, keeping your media drive clean. Requires the Media Preview Bridge plugin AND Jellyfin's config dir mounted read-write into this container."><i class="bi bi-info-circle"></i></button>
+                                </label>
+                                <div class="form-text">Off (default) = previews live next to the media (<code>&lt;media&gt;.trickplay/</code>). On = previews live in Jellyfin's data folder (<code>&lt;config&gt;/data/trickplay/</code>).</div>
+                            </div>
+                            <div id="editJellyfinConfigFolderGroup" class="mb-3 d-none">
+                                <label class="form-label">Jellyfin config folder (this container)
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                            title="Path inside THIS container where Jellyfin's config dir is bind-mounted read-write. This app writes trickplay into its data/trickplay subfolder. Must be mounted :rw, not :ro."><i class="bi bi-info-circle"></i></button>
+                                </label>
+                                <div class="input-group has-validation">
+                                    <input type="text" id="editJellyfinConfigFolder" class="form-control" placeholder="/jellyfin-config">
+                                    <button type="button" class="btn btn-outline-secondary" id="editJellyfinConfigBrowseBtn" title="Browse folders">
+                                        <i class="bi bi-folder2-open"></i>
+                                    </button>
+                                    <div class="invalid-feedback small"></div>
+                                    <div class="valid-feedback small">Valid Jellyfin config folder</div>
+                                </div>
+                                <div class="alert alert-warning small mt-2 mb-0" id="editJellyfinOffMediaWarning">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>With this on, the app writes to Jellyfin's config dir (not your media). Jellyfin's <code>SaveTrickplayWithMedia</code> must be <strong>off</strong> &mdash; the <strong>Setup Health</strong> tab guides you and flags the plugin + read-write mount.
+                                </div>
+                            </div>
+                        </div>
+
                         <details class="mb-3">
                             <summary class="text-muted small">Re-authenticate (only if needed)</summary>
                             <div class="mt-3" id="editReauthSection">

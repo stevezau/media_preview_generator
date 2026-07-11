@@ -2,6 +2,8 @@
 
 import math
 import os
+import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from flask import current_app, jsonify, request, session
@@ -778,6 +780,183 @@ def create_manual_job():
     _start_job_async(job.id, config_overrides)
 
     return jsonify(job.to_dict()), 201
+
+
+_MEDIA_SEARCH_LIMIT = 25
+
+
+@api.route("/media/search")
+@api_token_required
+@limiter.limit("20 per minute")
+def media_search():
+    """Search enabled media servers for shows, movies and episodes.
+
+    Powers the Manual Generation typeahead. Each hit carries its **local**
+    container path(s) — shows resolve to their folder(s) (which the dispatcher
+    later expands into episodes), movies/episodes to their file — so the user
+    never has to know the server-vs-container path translation that trips up
+    free-text entry.
+
+    Query params:
+        q: search string (min 2 chars).
+        server_id: optional — restrict the search to one server (mirrors the
+            Manual modal's "publish to which server" scope). Omitted/blank
+            searches every enabled server.
+
+    Returns JSON ``{"query", "results": [{kind, title, year, paths,
+    child_count, servers: [{id, name, type}]}]}`` where identical hits from
+    multiple servers are collapsed into one row whose ``servers`` lists each.
+    """
+    from ...servers import ServerRegistry
+    from ...servers.base import MediaSuggestion
+    from ...servers.ownership import apply_path_mappings
+    from ..settings_manager import get_settings_manager
+
+    query = (request.args.get("q") or "").strip()
+    if len(query) < 2:
+        return jsonify({"query": query, "results": [], "error": "Query must be at least 2 characters"}), 400
+
+    scope_id = (request.args.get("server_id") or "").strip()
+
+    settings = get_settings_manager()
+    raw_servers = settings.get("media_servers") or []
+    if not isinstance(raw_servers, list):
+        raw_servers = []
+    registry = ServerRegistry.from_settings(raw_servers, legacy_config=None)
+
+    targets = []
+    for cfg in registry.configs():
+        if not cfg.enabled:
+            continue
+        if scope_id and cfg.id != scope_id:
+            continue
+        server = registry.get(cfg.id)
+        if server is not None:
+            targets.append((cfg, server))
+
+    # Collapse hits for the same logical item that several servers report.
+    # We merge by identity (kind + normalised title) rather than by exact path
+    # set, because vendors describe the same show's folders differently: Plex
+    # returns all disk folders in one row, Emby returns one merged folder, and
+    # Jellyfin emits a separate Series row per folder. Keying on paths would
+    # leave ~5 "Ben 10" rows across 3 servers (verified live, 3-server setup).
+    # The merged row's ``paths`` is the UNION of every server's folders and its
+    # ``servers`` lists each owner — so picking it once processes the whole show
+    # and publishes to whoever owns each file.
+    #
+    # Year is NOT part of the key: vendors disagree on it (Plex reports
+    # ProductionYear; Emby/Jellyfin frequently omit it → ``None``), so keying on
+    # year would re-split the same show into one row per vendor — the exact
+    # duplication this merge exists to kill. Instead each title bucket holds the
+    # rows seen so far and a hit merges into the first row with a *compatible*
+    # year (equal, or either side unknown); two genuinely different items that
+    # share a title (e.g. a 1994 vs 2019 remake, both years known and differing)
+    # still get their own rows.
+    buckets: dict[tuple[str, str], list[dict]] = {}
+    order: list[dict] = []
+
+    def _norm_title(title: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", (title or "").lower())
+
+    def _local_paths(suggestion: MediaSuggestion, mappings: list[dict]) -> list[str]:
+        # apply_path_mappings returns every plausible local candidate for a
+        # multi-mount remote; keep them all so a show whose folder maps to
+        # several local mounts isn't silently truncated to one.
+        locals_: list[str] = []
+        for remote in suggestion.remote_paths:
+            if not remote:
+                continue
+            for local in apply_path_mappings(remote, mappings) or [remote]:
+                if local not in locals_:
+                    locals_.append(local)
+        return locals_
+
+    # Fan the per-server searches out concurrently — each vendor's search API
+    # is a 2-3s network round-trip, so a sequential loop made a 3-server
+    # typeahead feel sluggish (~8s). ThreadPoolExecutor.map preserves input
+    # order, so the merge below stays deterministic regardless of which server
+    # responds first; a server that errors yields ``None`` and is skipped.
+    def _fetch(target: tuple) -> tuple:
+        cfg, server = target
+        try:
+            return cfg, server.search_suggestions(query, limit=_MEDIA_SEARCH_LIMIT)
+        except Exception as exc:
+            logger.warning(
+                "Media search on server {!r} failed ({}: {}). Other servers still return results; "
+                "verify this server's URL/credentials under Settings → Media Servers.",
+                cfg.name,
+                type(exc).__name__,
+                exc,
+            )
+            return cfg, None
+
+    if targets:
+        with ThreadPoolExecutor(max_workers=min(len(targets), 8)) as pool:
+            fetched = list(pool.map(_fetch, targets))
+    else:
+        fetched = []
+
+    for cfg, suggestions in fetched:
+        if suggestions is None:
+            continue
+        mappings = list(cfg.path_mappings or [])
+        server_tag = {"id": cfg.id, "name": cfg.name, "type": cfg.type.value}
+        for sug in suggestions:
+            paths = _local_paths(sug, mappings)
+            if not paths:
+                continue
+            bucket = buckets.setdefault((sug.kind, _norm_title(sug.title)), [])
+            row = next(
+                (r for r in bucket if r["year"] is None or sug.year is None or r["year"] == sug.year),
+                None,
+            )
+            if row is None:
+                row = {
+                    "kind": sug.kind,
+                    "title": sug.title,
+                    "year": sug.year,
+                    "paths": list(paths),
+                    "child_count": sug.child_count,
+                    "servers": [server_tag],
+                }
+                bucket.append(row)
+                order.append(row)
+            else:
+                for p in paths:
+                    if p not in row["paths"]:
+                        row["paths"].append(p)
+                if not any(s["id"] == cfg.id for s in row["servers"]):
+                    row["servers"].append(server_tag)
+                # A vendor that reports year/episode-count fills in for one
+                # (e.g. Jellyfin) that omits ProductionYear / RecursiveItemCount.
+                if row["year"] is None and sug.year is not None:
+                    row["year"] = sug.year
+                if row["child_count"] is None and sug.child_count is not None:
+                    row["child_count"] = sug.child_count
+
+    results = list(order)
+
+    # Drop episode rows whose show is already a result, UNLESS the user typed an
+    # explicit S##E## (then they want that episode). Vendors disagree wildly on
+    # episode volume for a plain show-name query — Plex/Jellyfin return one or
+    # two, Emby's searchTerm returns every episode whose series name contains
+    # the query (~25 "Ben 10" rows, verified live). Picking the show already
+    # covers them, so the flood is pure noise under the show the user wants.
+    typed_episode = bool(re.search(r"\bS\d{1,2}E\d{1,3}\b", query, re.IGNORECASE))
+    if not typed_episode:
+        show_titles = {_norm_title(r["title"]) for r in results if r["kind"] == "show"}
+        ep_suffix = re.compile(r"\s+S\d{1,2}E\d{1,3}\b.*$", re.IGNORECASE)
+        results = [
+            r
+            for r in results
+            if not (r["kind"] == "episode" and _norm_title(ep_suffix.sub("", r["title"])) in show_titles)
+        ]
+
+    # Stable, predictable ordering: shows, then movies, then episodes, each
+    # preserving per-server rank order.
+    kind_rank = {"show": 0, "movie": 1, "episode": 2}
+    results.sort(key=lambda r: kind_rank.get(r["kind"], 9))
+    return jsonify({"query": query, "results": results[:_MEDIA_SEARCH_LIMIT], "error": None})
 
 
 @api.route("/jobs/<job_id>/cancel", methods=["POST"])

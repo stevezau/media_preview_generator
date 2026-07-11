@@ -21,6 +21,7 @@ during normal operation.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from typing import Any
@@ -31,6 +32,7 @@ from loguru import logger
 from ..config import resolve_frame_interval
 from ._embyish import EmbyApiClient, is_video_library_folder
 from .base import FlagTarget, HealthCheckIssue, ServerType, WebhookEvent
+from .ownership import apply_inverse_path_mappings
 
 # Floor on how often a single Jellyfin server may receive a full
 # /Library/Refresh nudge. Without it, a webhook burst (e.g. Sonarr
@@ -68,10 +70,38 @@ class JellyfinServer(EmbyApiClient):
         # Populated by ``check_plugin_installed`` and refreshed after
         # ``install_plugin``. ``None`` means "not probed yet".
         self._media_preview_bridge_installed: bool | None = None
+        # Jellyfin's off-media trickplay folder relative to the config root
+        # (e.g. ``data/trickplay``), reported by the plugin's ``Ping``.
+        # ``None`` until probed; the off-media adapter falls back to its
+        # built-in default. See :meth:`check_plugin_installed`.
+        self._offmedia_trickplay_root: str | None = None
 
     @property
     def type(self) -> ServerType:
         return ServerType.JELLYFIN
+
+    @property
+    def offmedia_trickplay_root(self) -> str | None:
+        """Plugin-reported off-media trickplay root, relative to the config dir.
+
+        Read by :class:`JellyfinTrickplayAdapter` in off-media mode so the
+        on-disk location tracks the running server even if a future Jellyfin
+        version moves it. ``None`` when the plugin hasn't been probed (or
+        an older plugin that doesn't report it) — the adapter then uses its
+        built-in ``data/trickplay`` default.
+        """
+        return self._offmedia_trickplay_root
+
+    def _off_media(self) -> bool:
+        """Whether this server is configured to publish off the media drive.
+
+        Driven by ``output.save_with_media`` (default ``True`` = today's
+        media-adjacent layout). When ``False``, trickplay tiles land in
+        Jellyfin's data folder and the recommended library options, plugin
+        requirement and readiness checks all flip accordingly.
+        """
+        output = (self._config.output or {}) if getattr(self, "_config", None) else {}
+        return not bool(output.get("save_with_media", True))
 
     def _trigger_path_refresh(self, server_view_path: str) -> None:
         """Nudge Jellyfin to scan a single server-view path.
@@ -177,11 +207,23 @@ class JellyfinServer(EmbyApiClient):
         # views agree: tiles named "<width> - 10x10/<index>.jpg"
         # match the row registered with the matching intervalMs.
         adapter_interval_ms = resolve_frame_interval(output) * 1000
+        # The plugin asks Jellyfin GetTrickplayDirectory(item, …, saveWithMedia)
+        # to locate the tiles before registering, so it MUST be told the same
+        # storage mode the JellyfinTrickplayAdapter wrote with. Omitting it
+        # let the param default to true on the plugin: an off-media publish
+        # (save_with_media=False) was then checked against the media-adjacent
+        # path, which doesn't exist → 404 → silent registration miss → off-media
+        # trickplay only appeared at the next scheduled scan, never instantly.
+        save_with_media = bool(output.get("save_with_media", True))
         try:
             resp = self._request(
                 "POST",
                 f"/MediaPreviewBridge/Trickplay/{item_id}",
-                params={"width": adapter_width, "intervalMs": adapter_interval_ms},
+                params={
+                    "width": adapter_width,
+                    "intervalMs": adapter_interval_ms,
+                    "saveWithMedia": str(save_with_media).lower(),
+                },
             )
             if resp.status_code == 204:
                 logger.info(
@@ -267,9 +309,31 @@ class JellyfinServer(EmbyApiClient):
         path on the base class when the plugin isn't installed (404)
         or any other transport error. Caller-side cache wraps both
         paths so repeat queries within the TTL are free.
+
+        The dispatcher passes the LOCAL canonical path; both the plugin's
+        ``FindByPath`` and the base class's library scoping key on the path as
+        *Jellyfin* sees it, so we translate local → server-side via the inverse
+        of ``path_mappings`` first. This is what makes off-media trickplay (which
+        REQUIRES the item id) work on path-mapped setups; it's a no-op when the
+        app and Jellyfin share the same media paths.
         """
         if not remote_path:
             return None
+        # Translate the local canonical path into Jellyfin's path space and try
+        # EVERY candidate the path_mappings produce — overlapping mounts can yield
+        # more than one, and we mustn't silently drop a valid resolution. No-op
+        # (single passthrough candidate) for local==remote setups.
+        mappings = (self._config.path_mappings or []) if getattr(self, "_config", None) else []
+        for server_path in apply_inverse_path_mappings(remote_path, mappings):
+            result = self._resolve_server_path_to_item_id(server_path)
+            if result:
+                return result
+        return None
+
+    def _resolve_server_path_to_item_id(self, remote_path: str) -> str | None:
+        """Resolve ONE server-side path to an item id via the plugin's FindByPath,
+        falling back to the base library-scoped resolver. ``remote_path`` is in
+        Jellyfin's own path space (already translated by the caller)."""
         try:
             response = self._request(
                 "GET",
@@ -390,6 +454,11 @@ class JellyfinServer(EmbyApiClient):
             payload = response.json()
             installed = bool(payload.get("ok"))
             self._media_preview_bridge_installed = installed
+            # Cache the off-media trickplay root the plugin reports (added in
+            # 10.11.0.3). Older plugins omit it → stays None and the adapter
+            # uses its built-in default.
+            root = str(payload.get("trickplayRoot") or "").strip()
+            self._offmedia_trickplay_root = root or None
             return {
                 "installed": installed,
                 "version": str(payload.get("version") or ""),
@@ -628,6 +697,25 @@ class JellyfinServer(EmbyApiClient):
             "(Jellyfin's daily scheduled task). Strongly recommended: on."
         )
 
+        # Off-media flips SaveTrickplayWithMedia: the app writes into
+        # Jellyfin's data folder (<config>/data/trickplay/...) instead of
+        # beside the media, so Jellyfin must be told to read from there.
+        off_media = self._off_media()
+        if off_media:
+            save_with_media_label = "Store trickplay in Jellyfin's data folder (off the media drive)"
+            save_with_media_rationale = (
+                "This server is set to off-media trickplay, so the app writes into "
+                "'<config>/data/trickplay/' (the Jellyfin data folder). Jellyfin must "
+                "have SaveTrickplayWithMedia OFF to read from there instead of next to "
+                "the media file."
+            )
+        else:
+            save_with_media_label = "Look for trickplay next to the media file"
+            save_with_media_rationale = (
+                "Tells Jellyfin to look in '<media>.trickplay/' (where this app writes) "
+                "instead of '<config>/data/trickplay/' (which we never write to)."
+            )
+
         return (
             (
                 "EnableTrickplayImageExtraction",
@@ -639,11 +727,10 @@ class JellyfinServer(EmbyApiClient):
             ),
             (
                 "SaveTrickplayWithMedia",
-                "Look for trickplay next to the media file",
-                True,
+                save_with_media_label,
+                not off_media,
                 "critical",
-                "Tells Jellyfin to look in '<media>.trickplay/' (where this app writes) "
-                "instead of '<config>/data/trickplay/' (which we never write to).",
+                save_with_media_rationale,
             ),
             (
                 "ExtractTrickplayImagesDuringLibraryScan",
@@ -1419,7 +1506,11 @@ class JellyfinServer(EmbyApiClient):
                 options = raw.get("LibraryOptions") or {}
                 if options.get("ExtractTrickplayImagesDuringLibraryScan") is False:
                     mode_a_library_names.append(str(raw.get("Name") or "").strip() or "library")
-        plugin_required = bool(mode_a_library_names)
+        # Off-media mode requires the plugin unconditionally: the app writes
+        # tiles into Jellyfin's data folder and the plugin is the only thing
+        # that registers them there with the correct ThumbnailCount.
+        off_media = self._off_media()
+        plugin_required = bool(mode_a_library_names) or off_media
 
         sections: list[dict[str, Any]] = []
 
@@ -1577,16 +1668,28 @@ class JellyfinServer(EmbyApiClient):
             plugin_current = plugin.get("version") or "installed"
         elif plugin_required:
             plugin_severity = "critical"
-            libs = ", ".join(mode_a_library_names)
             probe_error = plugin.get("error") or ""
-            plugin_reason = (
-                f"Plugin required because scan-time extraction is disabled on: {libs}. "
-                f"Without the plugin, this app's published tiles never get adopted by "
-                f"Jellyfin and scrubbing previews will not render. Either install the "
-                f"plugin (for instant activation) or re-enable scan-time extraction on "
-                f"the listed libraries (Jellyfin will adopt our tiles on its next scan)."
-                + (f" Probe: {probe_error}" if probe_error else "")
-            )
+            if off_media:
+                # Off-media has no media-adjacent fallback: only the plugin
+                # can register tiles in Jellyfin's data folder correctly.
+                plugin_reason = (
+                    "Plugin required because this server stores trickplay off the media "
+                    "drive (in Jellyfin's data folder). Only the Media Preview Bridge "
+                    "plugin can register those tiles with the correct thumbnail count — "
+                    "without it, scrubbing previews will not render. Install the plugin, "
+                    "or turn off 'Store trickplay off the media drive' for this server."
+                    + (f" Probe: {probe_error}" if probe_error else "")
+                )
+            else:
+                libs = ", ".join(mode_a_library_names)
+                plugin_reason = (
+                    f"Plugin required because scan-time extraction is disabled on: {libs}. "
+                    f"Without the plugin, this app's published tiles never get adopted by "
+                    f"Jellyfin and scrubbing previews will not render. Either install the "
+                    f"plugin (for instant activation) or re-enable scan-time extraction on "
+                    f"the listed libraries (Jellyfin will adopt our tiles on its next scan)."
+                    + (f" Probe: {probe_error}" if probe_error else "")
+                )
             plugin_current = "not installed"
         else:
             plugin_severity = "info"
@@ -1643,6 +1746,107 @@ class JellyfinServer(EmbyApiClient):
                 ],
             }
         )
+
+        # --- Off-media config-dir mount (off-media only) -------------
+        # In off-media mode this app writes tiles into Jellyfin's config dir,
+        # so that dir must be mounted into THIS container read-write. Mirror
+        # Plex's config-folder probe exactly: a pure read-only check —
+        # os.access(W_OK) only, never a test-write/tempfile/chmod.
+        if off_media:
+            config_folder = str((self._config.output or {}).get("jellyfin_config_folder") or "").strip()
+            folder_ok = True
+            folder_current = "unset"
+            folder_reason: str | None = None
+            if config_folder:
+                exists = os.path.isdir(config_folder)
+                writable = exists and os.access(config_folder, os.W_OK)
+                # "Right folder" check — mirrors Plex's Media/localhost probe.
+                # A real Jellyfin config dir holds the data/ folder off-media
+                # trickplay writes into (<config>/<trickplay_root>/…), plus
+                # plugins/ and config/. Pointing this at a media folder or an
+                # unrelated path is the common mistake — catch it here rather
+                # than silently writing tiles Jellyfin will never find. Shared
+                # with the inline field validator via looks_like_jellyfin_config_dir
+                # so the two can never disagree. (It can't catch pointing one
+                # level too deep, e.g. <config>/data, since that still nests
+                # data/ + plugins/ — only a wrong/unrelated root is rejected.)
+                from ..output.jellyfin_trickplay import (
+                    jellyfin_config_data_marker,
+                    looks_like_jellyfin_config_dir,
+                )
+
+                _root = self.offmedia_trickplay_root or "data/trickplay"
+                data_marker = jellyfin_config_data_marker(_root)
+                looks_like_jellyfin = looks_like_jellyfin_config_dir(config_folder, _root)
+                if not exists:
+                    folder_ok = False
+                    folder_current = "missing"
+                    folder_reason = (
+                        f"{config_folder!r} does not exist in this container. Verify the "
+                        "Jellyfin config dir is bind-mounted here at this path."
+                    )
+                elif not writable:
+                    folder_ok = False
+                    folder_current = "read-only"
+                    folder_reason = (
+                        f"{config_folder!r} is not writable by this process. "
+                        "Check the Docker mount (not :ro) and PUID/PGID permissions."
+                    )
+                elif not looks_like_jellyfin:
+                    folder_ok = False
+                    folder_current = "wrong folder"
+                    folder_reason = (
+                        f"{config_folder!r} exists and is writable, but it doesn't look like "
+                        f"Jellyfin's config directory — none of '{data_marker}/', 'plugins/', 'config/' "
+                        "(or other standard Jellyfin files) are inside it. Point this at the folder "
+                        "Jellyfin uses as its config dir (the one mounted into Jellyfin as /config, "
+                        f"containing '{data_marker}/'), not a media folder or unrelated path."
+                    )
+                else:
+                    folder_current = "writable"
+            else:
+                folder_ok = False
+                folder_reason = (
+                    "Off-media trickplay needs the Jellyfin config folder set to this "
+                    "container's read-write mount of Jellyfin's config dir."
+                )
+            sections.append(
+                {
+                    "id": "jellyfin_config_folder",
+                    "title": "Jellyfin config folder (off-media)",
+                    "docs_anchor": "jellyfin-config-folder",
+                    "ok": folder_ok,
+                    "severity": "critical" if not folder_ok else "info",
+                    "checks": [
+                        {
+                            "id": "config_folder_writable",
+                            "label": "Config dir mounted read-write & valid",
+                            "docs_anchor": "jellyfin-config-folder",
+                            "tooltip": "Off-media writes trickplay into Jellyfin's config dir",
+                            "explanation": (
+                                "<p><strong>Why:</strong> with 'Store trickplay off the media drive' on, "
+                                "this app writes tile sheets into Jellyfin's data folder "
+                                "(<code>&lt;config&gt;/data/trickplay/…</code>) instead of next to the media. "
+                                "That means Jellyfin's config dir must be bind-mounted into THIS container "
+                                "read-write, and the 'Jellyfin config folder' setting must point at that mount.</p>"
+                                "<p>This is a read-only probe — it checks the path (1) exists, (2) is writable "
+                                "(<code>os.access</code>), and (3) actually looks like Jellyfin's config dir "
+                                "(contains <code>data/</code>, <code>plugins/</code>, <code>config/</code>, or "
+                                "other standard Jellyfin files) so a wrong path is caught instead of silently "
+                                "writing tiles Jellyfin can't find. "
+                                "It never writes a test file.</p>"
+                            ),
+                            "ok": folder_ok,
+                            "severity": "critical" if not folder_ok else "info",
+                            "current": folder_current,
+                            "recommended": "writable",
+                            "actions": {},  # read-only / manual — fix the Docker mount + setting
+                            "reason": folder_reason,
+                            "meta": {"path": config_folder},
+                        }
+                    ],
+                }
+            )
 
         # --- Library settings — per-library per-flag rows ------------
         # ``folders`` was fetched above (needed for the plugin section's
@@ -2298,21 +2502,30 @@ class JellyfinServer(EmbyApiClient):
 
         return result
 
-    # The flag(s) that ``set_vendor_extraction`` flips for Jellyfin —
-    # used by ``get_vendor_extraction_status`` to count per-library
-    # state without forcing the apply path. EnableTrickplayImageExtraction
-    # is intentionally NOT in this list: it MUST stay True regardless
-    # (D38 — Jellyfin deletes our published trickplay when it's False).
-    _VENDOR_EXTRACTION_FLAGS: tuple[tuple[str, bool], ...] = (
-        ("ExtractTrickplayImagesDuringLibraryScan", False),
-        ("SaveTrickplayWithMedia", True),
-    )
+    def _vendor_extraction_flags(self) -> tuple[tuple[str, bool], ...]:
+        """The flags + recommended values defining the "extraction stopped" state.
+
+        Used by :meth:`get_vendor_extraction_status` to count per-library
+        state without forcing the apply path. ``EnableTrickplayImageExtraction``
+        is intentionally NOT in this list: it MUST stay True regardless
+        (D38 — Jellyfin deletes our published trickplay when it's False).
+
+        ``SaveTrickplayWithMedia``'s recommended value depends on the
+        server's off-media setting: ``True`` for media-adjacent (the app
+        writes beside the media), ``False`` for off-media (the app writes
+        into Jellyfin's data folder). It's computed per-call rather than
+        held as a class constant precisely because of this dependency.
+        """
+        return (
+            ("ExtractTrickplayImagesDuringLibraryScan", False),
+            ("SaveTrickplayWithMedia", not self._off_media()),
+        )
 
     def get_vendor_extraction_status(self) -> dict[str, int]:
         """Audit per-library vendor-extraction state without writing.
 
         A library counts as ``stopped`` only when EVERY flag in
-        :data:`_VENDOR_EXTRACTION_FLAGS` matches its recommended value;
+        :meth:`_vendor_extraction_flags` matches its recommended value;
         if any one is wrong it counts as ``extracting`` (the bulk apply
         would still touch this library).
         """
@@ -2337,7 +2550,7 @@ class JellyfinServer(EmbyApiClient):
                 continue
             options = raw.get("LibraryOptions") or {}
             all_recommended = all(
-                bool(options.get(flag, False)) == want for flag, want in self._VENDOR_EXTRACTION_FLAGS
+                bool(options.get(flag, False)) == want for flag, want in self._vendor_extraction_flags()
             )
             if all_recommended:
                 stopped += 1
@@ -2424,12 +2637,13 @@ class JellyfinServer(EmbyApiClient):
             # Detection always on so our published trickplay is actually used.
             options["EnableTrickplayImageExtraction"] = True
             options["ExtractTrickplayImagesDuringLibraryScan"] = bool(scan_extraction)
-            # When we own generation, point Jellyfin at the media-relative
-            # path our adapter writes to. When the user wants Jellyfin to
-            # own generation again, leave the flag alone — they may have
-            # set it intentionally either way.
+            # When we own generation, point Jellyfin at the path our adapter
+            # writes to: media-adjacent (SaveTrickplayWithMedia=True) by
+            # default, or Jellyfin's data folder (False) in off-media mode.
+            # When the user wants Jellyfin to own generation again, leave the
+            # flag alone — they may have set it intentionally either way.
             if not scan_extraction:
-                options["SaveTrickplayWithMedia"] = True
+                options["SaveTrickplayWithMedia"] = not self._off_media()
 
             try:
                 update = self._request(

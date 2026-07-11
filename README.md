@@ -65,6 +65,9 @@ all share one universal inbound URL with vendor auto-detection. A 5-step
 backoff retry (30 s → 2 m → 5 m → 15 m → 60 m) handles files your server
 hasn't indexed yet. Source-aware dedup re-runs automatically when a file is
 swapped (e.g. a Sonarr/Radarr quality upgrade) and skips when nothing changed.
+Need to (re)generate something by hand? **Manual Generation** lets you search
+your servers by title — pick a show to cover every episode, or a movie, episode,
+folder, or single file — or browse your media tree, no path-typing required.
 
 **Hardware you already have.** NVIDIA, AMD, Intel — per-GPU worker counts and
 FFmpeg threads, automatic in-place CPU retry if a codec fails on the GPU, and

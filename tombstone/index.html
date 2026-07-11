@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>This image moved — Media Preview Generator</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:#0f172a; color:#e2e8f0;
+           display:flex; min-height:100vh; align-items:center; justify-content:center; margin:0; padding:24px; }
+    .card { max-width:680px; background:#1e293b; border:1px solid #334155; border-radius:14px; padding:32px 36px; }
+    h1 { margin:0 0 8px; font-size:1.5rem; }
+    .tag { display:inline-block; background:#7f1d1d; color:#fecaca; padding:2px 10px; border-radius:999px; font-size:.8rem; }
+    code { background:#0f172a; border:1px solid #334155; border-radius:6px; padding:2px 8px; color:#7dd3fc; }
+    .old { color:#fca5a5; text-decoration:line-through; }
+    .new { color:#86efac; font-weight:600; }
+    .steps { background:#0f172a; border-radius:10px; padding:16px 18px; margin-top:18px; }
+    a { color:#7dd3fc; }
+    .muted { color:#94a3b8; font-size:.9rem; margin-top:18px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <span class="tag">Image retired</span>
+    <h1>This Docker image has moved 🚚</h1>
+    <p><code class="old">stevezzau/plex_generate_vid_previews</code> is no longer published.
+       The project was renamed (it now supports Plex, Emby &amp; Jellyfin).</p>
+    <p>Switch your <code>image:</code> line to the new name — your config, volumes and settings carry over unchanged:</p>
+    <div class="steps">
+      <div><span class="old">image: stevezzau/plex_generate_vid_previews:latest</span></div>
+      <div><span class="new">image: stevezzau/media_preview_generator:latest</span></div>
+    </div>
+    <p class="muted">Then <code>docker compose pull &amp;&amp; docker compose up -d</code>. Same app, same data — just the new image name.
+       Docs: <a href="https://github.com/stevezau/media_preview_generator">github.com/stevezau/media_preview_generator</a></p>
+  </div>
+</body>
+</html>

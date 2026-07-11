@@ -3,7 +3,14 @@ name: CI
 on:
   push:
     branches: [dev]
-    tags: ['*.*.*']
+    # App release tags are pure semver (e.g. 4.2.1). Exclude plugin tags
+    # (plugin-v10.11.0.3) — they own jellyfin-plugin.yml and must NOT trigger
+    # the app image build: the tag name is fed to SETUPTOOLS_SCM_PRETEND_VERSION,
+    # and a non-PEP440 value ("plugin-v…") aborts the wheel build (and would
+    # otherwise push :latest from a plugin release).
+    tags:
+      - '*.*.*'
+      - '!plugin-*'
     paths-ignore:
       - 'docs/**'
       - '*.md'
@@ -25,12 +32,11 @@ on:
   workflow_dispatch:
 
 env:
-  # Canonical Docker Hub image name. The deprecated mirror below keeps
-  # publishing alongside this one until 2026-10-29 so users on the old
-  # name keep getting updates while they migrate.
+  # Canonical Docker Hub image name. The old mirror
+  # (stevezzau/plex_generate_vid_previews) was retired — a one-shot tombstone
+  # (retire-deprecated-image.yml) now sits on its tags telling users to switch.
   # Change DOCKER_IMAGE for forks; see CONTRIBUTING.md.
   DOCKER_IMAGE: stevezzau/media_preview_generator
-  DOCKER_IMAGE_DEPRECATED: stevezzau/plex_generate_vid_previews
 
 concurrency:
   # Cancel superseded PR runs; never cancel in-flight pushes to main/dev/tags
@@ -304,6 +310,11 @@ jobs:
           # need a claimed Plex skip cleanly via the auto-skip in conftest.
           PLEX_CLAIM: ${{ secrets.PLEX_CLAIM_TOKEN }}
         run: |
+          # PUID/PGID = the runner user so Jellyfin's bind-mounted config
+          # (./jellyfin-config) is writable: setup_servers.py injects the API
+          # key + installs the plugin, and the off-media test writes trickplay
+          # into Jellyfin's data folder.
+          export PUID="$(id -u)" PGID="$(id -g)"
           docker compose -f docker-compose.test.yml up -d
           # Wait for healthchecks (compose has them on each service).
           for i in {1..60}; do
@@ -354,7 +365,6 @@ jobs:
       head_sha: ${{ steps.ctx.outputs.head_sha }}
       is_tag: ${{ steps.ctx.outputs.is_tag }}
       docker_tags_canonical: ${{ steps.ctx.outputs.docker_tags_canonical }}
-      docker_tags_deprecated: ${{ steps.ctx.outputs.docker_tags_deprecated }}
     steps:
       - name: Compute build context
         id: ctx
@@ -368,12 +378,10 @@ jobs:
           if [[ "$REF_TYPE" == "tag" ]]; then
             echo "is_tag=true" >> "$GITHUB_OUTPUT"
             echo "docker_tags_canonical=-t ${{ env.DOCKER_IMAGE }}:$HEAD_BRANCH -t ${{ env.DOCKER_IMAGE }}:latest" >> "$GITHUB_OUTPUT"
-            echo "docker_tags_deprecated=-t ${{ env.DOCKER_IMAGE_DEPRECATED }}:$HEAD_BRANCH -t ${{ env.DOCKER_IMAGE_DEPRECATED }}:latest" >> "$GITHUB_OUTPUT"
           else
             # dev branch push or manual workflow_dispatch
             echo "is_tag=false" >> "$GITHUB_OUTPUT"
             echo "docker_tags_canonical=-t ${{ env.DOCKER_IMAGE }}:dev" >> "$GITHUB_OUTPUT"
-            echo "docker_tags_deprecated=-t ${{ env.DOCKER_IMAGE_DEPRECATED }}:dev" >> "$GITHUB_OUTPUT"
           fi
 
   build:
@@ -382,24 +390,16 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          # 4 jobs total: 2 platforms × 2 image flavours. The deprecated
-          # mirror and the canonical image differ only in the published
-          # name + the DOCKER_IMAGE_NAME build-arg baked in (drives the
-          # in-app deprecation banner). Layer cache is shared across
-          # flavours via cache-scope so the second flavour's build is
-          # near-instant.
+          # 2 jobs: amd64 + arm64 of the canonical image. The deprecated
+          # mirror (stevezzau/plex_generate_vid_previews) was retired — a
+          # one-shot tombstone image (see retire-deprecated-image.yml) now
+          # sits on its tags telling users to switch to the canonical name.
           - platform: linux/amd64
             runner: ubuntu-latest
             image_flavour: canonical
-          - platform: linux/amd64
-            runner: ubuntu-latest
-            image_flavour: deprecated
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
             image_flavour: canonical
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            image_flavour: deprecated
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -425,14 +425,9 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Resolve image name for this flavour
+      - name: Resolve image name
         id: image
-        run: |
-          if [[ "${{ matrix.image_flavour }}" == "canonical" ]]; then
-            echo "name=${{ env.DOCKER_IMAGE }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "name=${{ env.DOCKER_IMAGE_DEPRECATED }}" >> "$GITHUB_OUTPUT"
-          fi
+        run: echo "name=${{ env.DOCKER_IMAGE }}" >> "$GITHUB_OUTPUT"
 
       - name: Generate bundled release notes
         # Fetches GitHub Releases into media_preview_generator/release_notes.json
@@ -500,13 +495,6 @@ jobs:
           pattern: digest-*-canonical
           merge-multiple: true
 
-      - name: Download deprecated digests
-        uses: actions/download-artifact@v4
-        with:
-          path: /tmp/digests/deprecated
-          pattern: digest-*-deprecated
-          merge-multiple: true
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -522,13 +510,6 @@ jobs:
           docker buildx imagetools create \
             ${{ needs.context.outputs.docker_tags_canonical }} \
             $(printf '${{ env.DOCKER_IMAGE }}@sha256:%s ' *)
-
-      - name: Create deprecated mirror manifest list and push
-        working-directory: /tmp/digests/deprecated
-        run: |
-          docker buildx imagetools create \
-            ${{ needs.context.outputs.docker_tags_deprecated }} \
-            $(printf '${{ env.DOCKER_IMAGE_DEPRECATED }}@sha256:%s ' *)
 
   update-dockerhub-description:
     runs-on: ubuntu-latest
@@ -546,11 +527,3 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: stevezzau/media_preview_generator
           readme-filepath: ./DOCKERHUB_README.md
-
-      - name: Update deprecated mirror Docker Hub description
-        uses: peter-evans/dockerhub-description@v5
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: stevezzau/plex_generate_vid_previews
-          readme-filepath: ./DOCKERHUB_DEPRECATED_README.md

@@ -5416,6 +5416,34 @@ class TestFolderBrowse:
         )
         assert {e["name"] for e in resp.get_json()["entries"]} == {".secret", "public"}
 
+    def test_browse_includes_video_files_when_requested(self, client, tmp_path):
+        """``include_files=1`` (Manual Generation picker) surfaces video files
+        alongside dirs and tags every entry with ``is_dir``. Non-video files
+        (.nfo/.srt/artwork) stay filtered so the picker isn't drowned.
+        """
+        sandbox = tmp_path / "file_sandbox"
+        sandbox.mkdir()
+        (sandbox / "Season 01").mkdir()
+        (sandbox / "episode.mkv").write_text("v")
+        (sandbox / "movie.mp4").write_text("v")
+        (sandbox / "poster.jpg").write_text("art")
+        (sandbox / "subtitles.srt").write_text("sub")
+
+        # Default: files omitted entirely.
+        resp = client.get(f"/api/system/browse?path={sandbox}", headers=_api_headers())
+        assert {e["name"] for e in resp.get_json()["entries"]} == {"Season 01"}
+
+        # include_files=1: dirs + video files only, each carrying is_dir.
+        resp = client.get(f"/api/system/browse?path={sandbox}&include_files=1", headers=_api_headers())
+        assert resp.status_code == 200
+        entries = resp.get_json()["entries"]
+        by_name = {e["name"]: e for e in entries}
+        assert set(by_name) == {"Season 01", "episode.mkv", "movie.mp4"}
+        assert by_name["Season 01"]["is_dir"] is True
+        assert by_name["episode.mkv"]["is_dir"] is False
+        # Directories sort before files.
+        assert entries[0]["name"] == "Season 01"
+
     def test_browse_rejects_relative_paths(self, client):
         resp = client.get("/api/system/browse?path=relative/dir", headers=_api_headers())
         assert resp.status_code == 400
@@ -5443,6 +5471,322 @@ class TestFolderBrowse:
         body = resp.get_json()
         assert body["error"] == "Folder not found"
         assert body["entries"] == []
+
+
+class TestMediaSearch:
+    """/api/media/search — the Manual Generation typeahead backend.
+
+    Fans ``search_suggestions`` across enabled servers, translates each hit's
+    server-side paths to local container paths, and collapses identical hits
+    that several servers report. Matrix: path mapping, multi-server dedup,
+    server scope, disabled-server skipping, short-query guard.
+    """
+
+    @staticmethod
+    def _cfg(server_id, name, *, enabled=True, mappings=None):
+        from media_preview_generator.servers.base import ServerConfig, ServerType
+
+        return ServerConfig(
+            id=server_id,
+            type=ServerType.PLEX,
+            name=name,
+            enabled=enabled,
+            url=f"http://{name}:32400",
+            auth={"token": "t"},
+            path_mappings=mappings or [],
+        )
+
+    class _FakeServer:
+        def __init__(self, server_id, suggestions, call_log):
+            self._id = server_id
+            self._suggestions = suggestions
+            self._call_log = call_log
+
+        def search_suggestions(self, query, limit=20):
+            self._call_log.append(self._id)
+            return self._suggestions
+
+    @classmethod
+    def _registry(cls, entries, call_log):
+        """Build a fake ServerRegistry. ``entries`` = [(cfg, suggestions)]."""
+        configs = [cfg for cfg, _ in entries]
+        servers = {cfg.id: cls._FakeServer(cfg.id, sugg, call_log) for cfg, sugg in entries}
+
+        class _FakeRegistry:
+            def configs(self):
+                return configs
+
+            def get(self, server_id):
+                return servers.get(server_id)
+
+        return _FakeRegistry()
+
+    def _patch_registry(self, registry):
+        return patch(
+            "media_preview_generator.servers.ServerRegistry.from_settings",
+            return_value=registry,
+        )
+
+    def test_short_query_returns_400(self, client):
+        resp = client.get("/api/media/search?q=a", headers=_api_headers())
+        assert resp.status_code == 400
+        assert resp.get_json()["results"] == []
+
+    def test_maps_remote_paths_to_local(self, client):
+        from media_preview_generator.servers.base import MediaSuggestion
+
+        cfg = self._cfg(
+            "plex-1",
+            "Plex",
+            mappings=[{"remote_prefix": "/remote", "local_prefix": "/local"}],
+        )
+        sugg = [
+            MediaSuggestion(
+                kind="show",
+                title="Ben 10",
+                year=2005,
+                remote_paths=("/remote/TV/Ben 10", "/remote2/TV/Ben 10"),
+                child_count=52,
+            )
+        ]
+        call_log = []
+        with self._patch_registry(self._registry([(cfg, sugg)], call_log)):
+            resp = client.get("/api/media/search?q=ben 10", headers=_api_headers())
+
+        assert resp.status_code == 200
+        results = resp.get_json()["results"]
+        assert len(results) == 1
+        row = results[0]
+        assert row["kind"] == "show"
+        assert row["child_count"] == 52
+        # First path mapped /remote→/local; second has no mapping so passes through.
+        assert row["paths"] == ["/local/TV/Ben 10", "/remote2/TV/Ben 10"]
+        assert [s["id"] for s in row["servers"]] == ["plex-1"]
+
+    def test_dedups_identical_hits_across_servers(self, client):
+        from media_preview_generator.servers.base import MediaSuggestion
+
+        # Two servers expose the same disk, so both report the same local path.
+        sugg = [
+            MediaSuggestion(kind="movie", title="Inception", year=2010, remote_paths=("/data/Movies/Inception.mkv",))
+        ]
+        entries = [
+            (self._cfg("plex-1", "PlexA"), list(sugg)),
+            (self._cfg("plex-2", "PlexB"), list(sugg)),
+        ]
+        call_log = []
+        with self._patch_registry(self._registry(entries, call_log)):
+            resp = client.get("/api/media/search?q=inception", headers=_api_headers())
+
+        results = resp.get_json()["results"]
+        assert len(results) == 1, "identical hits from two servers must collapse to one row"
+        assert sorted(s["id"] for s in results[0]["servers"]) == ["plex-1", "plex-2"]
+        assert sorted(call_log) == ["plex-1", "plex-2"]
+
+    def test_merges_same_show_despite_different_folder_granularity(self, client):
+        """The real 3-vendor case (verified live): Plex returns a show with all
+        disk folders in one row, while Jellyfin emits a separate row per folder.
+        Keying on identity (not paths) must merge them into ONE row whose paths
+        are the UNION, with the episode count back-filled from whichever vendor
+        reported it.
+        """
+        from media_preview_generator.servers.base import MediaSuggestion
+
+        plex_sugg = [
+            MediaSuggestion(
+                kind="show",
+                title="Ben 10: Ultimate Alien",
+                year=2010,
+                remote_paths=("/data_16tb/TV/Ben 10", "/data_16tb2/TV/Ben 10", "/data_16tb3/TV/Ben 10"),
+                child_count=52,
+            )
+        ]
+        # Jellyfin: three separate Series rows, one folder each, no child_count.
+        jelly_sugg = [
+            MediaSuggestion(
+                kind="show", title="Ben 10: Ultimate Alien", year=2010, remote_paths=("/data_16tb/TV/Ben 10",)
+            ),
+            MediaSuggestion(
+                kind="show", title="Ben 10: Ultimate Alien", year=2010, remote_paths=("/data_16tb2/TV/Ben 10",)
+            ),
+            MediaSuggestion(
+                kind="show", title="Ben 10: Ultimate Alien", year=2010, remote_paths=("/data_16tb3/TV/Ben 10",)
+            ),
+        ]
+        entries = [
+            (self._cfg("plex-1", "Plex"), plex_sugg),
+            (self._cfg("jelly-1", "Jelly"), jelly_sugg),
+        ]
+        call_log = []
+        with self._patch_registry(self._registry(entries, call_log)):
+            resp = client.get("/api/media/search?q=ben 10", headers=_api_headers())
+
+        results = resp.get_json()["results"]
+        shows = [r for r in results if r["kind"] == "show"]
+        assert len(shows) == 1, f"one merged show row expected, got {len(shows)}: {shows}"
+        row = shows[0]
+        assert row["paths"] == ["/data_16tb/TV/Ben 10", "/data_16tb2/TV/Ben 10", "/data_16tb3/TV/Ben 10"]
+        assert sorted(s["id"] for s in row["servers"]) == ["jelly-1", "plex-1"]
+        assert row["child_count"] == 52, "episode count must back-fill from Plex when Jellyfin omits it"
+
+    def test_merges_same_show_when_one_vendor_omits_year(self, client):
+        """Emby/Jellyfin frequently report ``year=None`` while Plex reports it.
+        The merge must NOT key on year, or the same show splits into one row per
+        vendor. Compatible-year merge collapses them and back-fills the year.
+        """
+        from media_preview_generator.servers.base import MediaSuggestion
+
+        entries = [
+            (
+                self._cfg("plex-1", "Plex"),
+                [
+                    MediaSuggestion(
+                        kind="show", title="Ben 10", year=2010, remote_paths=("/data/TV/Ben 10",), child_count=52
+                    )
+                ],
+            ),
+            (
+                self._cfg("jelly-1", "Jelly"),
+                [MediaSuggestion(kind="show", title="Ben 10", year=None, remote_paths=("/data/TV/Ben 10b",))],
+            ),
+        ]
+        with self._patch_registry(self._registry(entries, [])):
+            resp = client.get("/api/media/search?q=ben 10", headers=_api_headers())
+        shows = [r for r in resp.get_json()["results"] if r["kind"] == "show"]
+        assert len(shows) == 1, f"year=None must not split the row, got {shows}"
+        assert shows[0]["year"] == 2010, "known year must back-fill the None side"
+        assert sorted(s["id"] for s in shows[0]["servers"]) == ["jelly-1", "plex-1"]
+
+    def test_keeps_distinct_items_with_same_title_different_known_years(self, client):
+        """A remake (e.g. 1994 vs 2019) shares a title but is a different movie —
+        when BOTH years are known and differ, the rows must stay separate.
+        """
+        from media_preview_generator.servers.base import MediaSuggestion
+
+        entries = [
+            (
+                self._cfg("plex-1", "Plex"),
+                [
+                    MediaSuggestion(
+                        kind="movie", title="The Lion King", year=1994, remote_paths=("/data/M/LK1994.mkv",)
+                    ),
+                    MediaSuggestion(
+                        kind="movie", title="The Lion King", year=2019, remote_paths=("/data/M/LK2019.mkv",)
+                    ),
+                ],
+            ),
+        ]
+        with self._patch_registry(self._registry(entries, [])):
+            resp = client.get("/api/media/search?q=lion king", headers=_api_headers())
+        movies = [r for r in resp.get_json()["results"] if r["kind"] == "movie"]
+        assert {m["year"] for m in movies} == {1994, 2019}, f"distinct-year remakes must not merge, got {movies}"
+
+    def test_unions_all_local_candidates_from_path_mapping(self, client):
+        """When a remote prefix maps to several local mounts, every candidate
+        must reach the job — not just the first — or some episodes silently
+        won't process on multi-mount setups.
+        """
+        from media_preview_generator.servers.base import MediaSuggestion
+
+        cfg = self._cfg(
+            "plex-1",
+            "Plex",
+            mappings=[
+                {"remote_prefix": "/remote", "local_prefix": "/mnt/a"},
+                {"remote_prefix": "/remote", "local_prefix": "/mnt/b"},
+            ],
+        )
+        sugg = [MediaSuggestion(kind="show", title="Ben 10", year=2010, remote_paths=("/remote/TV/Ben 10",))]
+        with self._patch_registry(self._registry([(cfg, sugg)], [])):
+            resp = client.get("/api/media/search?q=ben 10", headers=_api_headers())
+        row = resp.get_json()["results"][0]
+        assert row["paths"] == ["/mnt/a/TV/Ben 10", "/mnt/b/TV/Ben 10"], (
+            f"both mapped mounts must be kept, got {row['paths']}"
+        )
+
+    def test_plain_query_suppresses_episodes_whose_show_is_present(self, client):
+        """Emby floods a plain show-name query with every episode (verified
+        live). When the show itself is a result, those episode rows are noise —
+        drop them. But an explicit S##E## query keeps the episode.
+        """
+        from media_preview_generator.servers.base import MediaSuggestion
+
+        sugg = [
+            MediaSuggestion(
+                kind="show",
+                title="Ben 10: Ultimate Alien",
+                year=2010,
+                remote_paths=("/data/TV/Ben 10",),
+                child_count=52,
+            ),
+            MediaSuggestion(
+                kind="episode", title="Ben 10: Ultimate Alien S01E01", remote_paths=("/data/TV/Ben 10/S01/E01.mkv",)
+            ),
+            MediaSuggestion(
+                kind="episode", title="Ben 10: Ultimate Alien S01E02", remote_paths=("/data/TV/Ben 10/S01/E02.mkv",)
+            ),
+        ]
+        cfg = self._cfg("emby-1", "Emby")
+
+        # Plain query: only the show survives.
+        with self._patch_registry(self._registry([(cfg, list(sugg))], [])):
+            resp = client.get("/api/media/search?q=ben 10", headers=_api_headers())
+        kinds = [r["kind"] for r in resp.get_json()["results"]]
+        assert kinds == ["show"], f"episodes of a shown show must be suppressed, got {kinds}"
+
+        # Explicit S##E##: the episode is what the user asked for, keep it.
+        with self._patch_registry(self._registry([(cfg, list(sugg))], [])):
+            resp = client.get("/api/media/search?q=ben 10 s01e01", headers=_api_headers())
+        kinds = [r["kind"] for r in resp.get_json()["results"]]
+        assert "episode" in kinds, f"explicit S##E## must keep the episode, got {kinds}"
+
+    def test_server_scope_limits_search_to_one_server(self, client):
+        from media_preview_generator.servers.base import MediaSuggestion
+
+        entries = [
+            (self._cfg("plex-1", "PlexA"), [MediaSuggestion(kind="movie", title="A", remote_paths=("/data/a.mkv",))]),
+            (self._cfg("plex-2", "PlexB"), [MediaSuggestion(kind="movie", title="B", remote_paths=("/data/b.mkv",))]),
+        ]
+        call_log = []
+        with self._patch_registry(self._registry(entries, call_log)):
+            resp = client.get("/api/media/search?q=movie&server_id=plex-2", headers=_api_headers())
+
+        results = resp.get_json()["results"]
+        assert call_log == ["plex-2"], "scope must restrict the fan-out to the chosen server only"
+        assert [s["id"] for row in results for s in row["servers"]] == ["plex-2"]
+
+    def test_disabled_servers_are_skipped(self, client):
+        from media_preview_generator.servers.base import MediaSuggestion
+
+        entries = [
+            (self._cfg("plex-1", "PlexA"), [MediaSuggestion(kind="movie", title="A", remote_paths=("/data/a.mkv",))]),
+            (
+                self._cfg("plex-2", "PlexB", enabled=False),
+                [MediaSuggestion(kind="movie", title="B", remote_paths=("/data/b.mkv",))],
+            ),
+        ]
+        call_log = []
+        with self._patch_registry(self._registry(entries, call_log)):
+            resp = client.get("/api/media/search?q=movie", headers=_api_headers())
+
+        assert call_log == ["plex-1"], "disabled server must not be searched"
+        results = resp.get_json()["results"]
+        assert all(s["id"] != "plex-2" for row in results for s in row["servers"])
+
+    def test_sorted_shows_then_movies_then_episodes(self, client):
+        from media_preview_generator.servers.base import MediaSuggestion
+
+        sugg = [
+            MediaSuggestion(kind="episode", title="Ep", remote_paths=("/data/ep.mkv",)),
+            MediaSuggestion(kind="show", title="Show", remote_paths=("/data/show",)),
+            MediaSuggestion(kind="movie", title="Movie", remote_paths=("/data/movie.mkv",)),
+        ]
+        call_log = []
+        with self._patch_registry(self._registry([(self._cfg("plex-1", "Plex"), sugg)], call_log)):
+            resp = client.get("/api/media/search?q=anything", headers=_api_headers())
+
+        kinds = [r["kind"] for r in resp.get_json()["results"]]
+        assert kinds == ["show", "movie", "episode"]
 
 
 # ---------------------------------------------------------------------------
@@ -5549,6 +5893,75 @@ class TestValidatePlexConfigFolder:
         assert body["valid_plex_structure"] is False
         assert str(plex_root) in body["error"]
         assert "-v" in body["error"]
+
+
+class TestValidateJellyfinConfigFolder:
+    """Inline structural check used by Servers > Edit Jellyfin (off-media field).
+    Mirrors the Plex validator; shares looks_like_jellyfin_config_dir."""
+
+    def _post(self, client, path):
+        return client.post(
+            "/api/settings/validate-jellyfin-config-folder",
+            headers=_api_headers(),
+            json={"path": path},
+        )
+
+    def test_valid_jellyfin_config_dir(self, client, tmp_path):
+        cfg = tmp_path / "jellyfin-config"
+        (cfg / "data").mkdir(parents=True)  # the data/ marker
+        body = self._post(client, str(cfg)).get_json()
+        assert body["exists"] is True
+        assert body["valid_jellyfin_structure"] is True
+        assert body["writable"] is True
+        assert body["error"] is None
+        assert "Jellyfin config folder" in body["detail"]
+
+    def test_valid_via_plugins_marker_only(self, client, tmp_path):
+        cfg = tmp_path / "jf-cfg"
+        (cfg / "plugins").mkdir(parents=True)  # leniency: plugins/ alone is enough
+        body = self._post(client, str(cfg)).get_json()
+        assert body["valid_jellyfin_structure"] is True
+
+    def test_missing_folder_reports_not_found(self, client, tmp_path):
+        body = self._post(client, str(tmp_path / "nope")).get_json()
+        assert body["exists"] is False
+        assert body["valid_jellyfin_structure"] is False
+        assert "not found" in body["error"].lower()
+
+    def test_wrong_folder_rejected_with_clear_error(self, client, tmp_path):
+        """A real, writable dir that's a media folder (no Jellyfin markers) must
+        be flagged — the exact mistake the user hit."""
+        media = tmp_path / "Movies"
+        media.mkdir()
+        (media / "Movie.mkv").write_bytes(b"\x00")
+        body = self._post(client, str(media)).get_json()
+        assert body["exists"] is True
+        assert body["valid_jellyfin_structure"] is False
+        assert "doesn't look like Jellyfin's config dir" in body["error"]
+
+    def test_empty_path_is_neutral(self, client):
+        body = self._post(client, "").get_json()
+        assert body["exists"] is False
+        assert body["error"] is None  # neutral — no nag on an empty field
+
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root bypasses W_OK, so a read-only dir still reports writable",
+    )
+    def test_valid_structure_but_read_only_is_flagged(self, client, tmp_path):
+        """The '/config mounted :ro' mistake: structure is right but not writable.
+        Must report valid_structure=True, writable=False with a clear error."""
+        cfg = tmp_path / "jf-ro"
+        (cfg / "data").mkdir(parents=True)
+        os.chmod(cfg, 0o555)
+        try:
+            body = self._post(client, str(cfg)).get_json()
+        finally:
+            os.chmod(cfg, 0o755)  # restore so tmp cleanup can remove it
+        assert body["exists"] is True
+        assert body["valid_jellyfin_structure"] is True
+        assert body["writable"] is False
+        assert "not writable" in body["error"].lower()
 
 
 # ---------------------------------------------------------------------------

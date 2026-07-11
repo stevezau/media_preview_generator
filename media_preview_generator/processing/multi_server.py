@@ -185,7 +185,17 @@ def _adapter_for_server(server_config: ServerConfig) -> OutputAdapter | None:
     if adapter_name == "emby_sidecar":
         return EmbyBifAdapter(width=width, frame_interval=frame_interval)
     if adapter_name == "jellyfin_trickplay":
-        return JellyfinTrickplayAdapter(width=width, frame_interval=frame_interval)
+        # ``save_with_media`` defaults true (today's media-adjacent layout).
+        # When false, ``jellyfin_config_folder`` is this container's RW mount
+        # of the Jellyfin config dir; the adapter then publishes into the
+        # off-media data folder and needs the item GUID first.
+        save_with_media = bool(output.get("save_with_media", True))
+        return JellyfinTrickplayAdapter(
+            width=width,
+            frame_interval=frame_interval,
+            save_with_media=save_with_media,
+            jellyfin_config_folder=(str(output.get("jellyfin_config_folder") or "") or None),
+        )
 
     logger.warning(
         "Server {!r} is configured for an unknown preview format ({!r}); skipping it. "
@@ -647,12 +657,24 @@ def _make_item_id_resolver(canonical_path: str, phase_callback=None):
       path-based ``/Library/Media/Updated`` endpoint when id is None.
       Skip the lookup unconditionally when no hint is supplied —
       Sonarr/Radarr never provide Emby ids in practice.
-    * **Jellyfin** — tile layout is filename-derived. Lookup is only
-      worthwhile when the Media Preview Bridge plugin is installed
-      (then it's ~200ms via the plugin's ``/ResolvePath`` and unlocks
-      instant activation via ``SaveTrickplayInfo``). Without the
+    * **Jellyfin** — media-adjacent tile layout is filename-derived.
+      Lookup is only worthwhile when the Media Preview Bridge plugin is
+      installed (then it's ~200ms via the plugin's ``/ResolvePath`` and
+      unlocks instant activation via ``SaveTrickplayInfo``). Without the
       plugin the lookup costs ~30s cold (Pass-2 enumeration) and buys
       nothing — the same path-based scan nudge fires either way.
+
+      Off-media Jellyfin servers genuinely *need* the id (the path is
+      GUID-keyed, so ``needs_server_metadata() == True``) AND genuinely
+      *need* the plugin (only it registers data-folder tiles with the
+      correct ``ThumbnailCount``). Off-media is therefore gated on
+      plugin-installed by a *critical* readiness check, so the cached
+      plugin probe below resolves the id for every correctly-configured
+      off-media server. An off-media server with the plugin missing is a
+      flagged misconfiguration: it can't produce valid output regardless,
+      so skipping the lookup (→ ``SKIPPED_NOT_IN_LIBRARY`` → bounded
+      retry → exhaust) is the right no-op, not an unsatisfiable loop to
+      paper over here.
 
     Result is cached per-dispatch so the (still-slow-for-Plex-misses)
     lookup doesn't re-burn across sub-phases.
@@ -1296,6 +1318,26 @@ def process_canonical_path(
     )
 
     if not os.path.isfile(canonical_path):
+        # Issue #266 — a folder (TV series root, season dir) reached the
+        # worker. Manual/webhook folder paths are normally expanded into
+        # their video files upstream in _run_webhook_paths_phase; the only
+        # folder that survives that is one with no recognised video files.
+        # Say so plainly instead of the misleading "missing on disk /
+        # wrong path mappings" message — the path is fine, it's just not a
+        # video file, and no retry will turn a folder into one.
+        if os.path.isdir(canonical_path):
+            logger.warning(
+                "Path is a folder, not a video file: {}. It contains no recognised video files "
+                "(.mkv/.mp4/.avi/.m4v/.ts/.wmv/.mov/.flv/.webm). Point manual generation at a "
+                "video file, or at a folder that actually holds episodes/movies.",
+                canonical_path,
+            )
+            return MultiServerResult(
+                canonical_path=canonical_path,
+                status=MultiServerStatus.NO_FRAMES,
+                message=f"Path is a folder with no video files: {canonical_path}",
+            )
+
         # D35 — Sibling-disk probe before declaring the source missing.
         # When the user runs multiple data disks under one logical view
         # (mergerfs, etc.), Plex's indexed path can go stale: file was at

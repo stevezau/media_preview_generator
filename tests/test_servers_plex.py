@@ -486,6 +486,75 @@ class TestListItems:
             "introducing _extract_plex_bundle_metadata."
         )
 
+    def test_yields_one_item_per_version_for_multi_version_movie(self, mock_config):
+        """#268: a movie with multiple versions (multiple files) must yield ONE
+        MediaItem per version so each version gets its own BIF — regression from
+        the #225 rewrite which collapsed to ``locations[0]`` (first version only)."""
+        wrapper = PlexServer(mock_config)
+
+        def _media(hash_, file_):
+            part = MagicMock()
+            part.hash = hash_
+            part.file = file_
+            media = MagicMock()
+            media.parts = [part]
+            return media
+
+        movie = MagicMock(spec=["key", "ratingKey", "title", "locations", "media"])
+        movie.key = "/library/metadata/99"
+        movie.ratingKey = 99
+        movie.title = "Foo (2024)"
+        movie.locations = ["/data/Foo (2024)/Foo-1080p.mkv", "/data/Foo (2024)/Foo-2160p.mkv"]
+        movie.media = [
+            _media("hash1080", "/data/Foo (2024)/Foo-1080p.mkv"),
+            _media("hash4k", "/data/Foo (2024)/Foo-2160p.mkv"),
+        ]
+
+        section = MagicMock()
+        section.key = 1
+        section.METADATA_TYPE = "movie"
+        section.search.return_value = [movie]
+        plex = MagicMock()
+        plex.library.sections.return_value = [section]
+        wrapper._plex = plex
+
+        items = list(wrapper.list_items("1"))
+        assert len(items) == 2, "expected one MediaItem per version"
+        assert {it.remote_path for it in items} == {
+            "/data/Foo (2024)/Foo-1080p.mkv",
+            "/data/Foo (2024)/Foo-2160p.mkv",
+        }
+        assert all(it.id == "99" for it in items), "all versions share the item id"
+
+    def test_yields_one_item_per_version_for_multi_version_episode(self, mock_config):
+        """#268, episode side: multi-version episodes must also fan out per version."""
+        wrapper = PlexServer(mock_config)
+        ep = MagicMock(
+            spec=["key", "ratingKey", "title", "grandparentTitle", "parentIndex", "index", "locations", "media"]
+        )
+        ep.key = "/library/metadata/7"
+        ep.ratingKey = 7
+        ep.grandparentTitle = "Test Show"
+        ep.parentIndex = 1
+        ep.index = 1
+        ep.locations = ["/tv/Show/S01E01-1080p.mkv", "/tv/Show/S01E01-2160p.mkv"]
+        ep.media = []
+
+        section = MagicMock()
+        section.key = 2
+        section.METADATA_TYPE = "episode"
+        section.search.return_value = [ep]
+        plex = MagicMock()
+        plex.library.sections.return_value = [section]
+        wrapper._plex = plex
+
+        items = list(wrapper.list_items("2"))
+        assert len(items) == 2
+        assert {it.remote_path for it in items} == {
+            "/tv/Show/S01E01-1080p.mkv",
+            "/tv/Show/S01E01-2160p.mkv",
+        }
+
 
 class TestResolveItemToRemotePath:
     def test_returns_first_part_path(self, plex_wrapper):
@@ -522,6 +591,35 @@ class TestResolveItemToRemotePath:
         plex_wrapper._plex = plex
 
         assert plex_wrapper.resolve_item_to_remote_path("42") is None
+
+    def test_resolve_paths_returns_one_entry_per_version(self, plex_wrapper):
+        """resolve_item_to_remote_paths must yield EVERY version's file (one per
+        MediaPart) so a native webhook fans out to all versions, each tagged
+        with the bare ratingKey — the per-item analog of the #268 scan fix."""
+
+        def _part(f):
+            p = MagicMock()
+            p.file = f
+            return p
+
+        media1 = MagicMock()
+        media1.parts = [_part("/data/Foo-1080p.mkv")]
+        media2 = MagicMock()
+        media2.parts = [_part("/data/Foo-2160p.mkv")]
+        item = MagicMock()
+        item.media = [media1, media2]
+        plex = MagicMock()
+        plex.fetchItem.return_value = item
+        plex_wrapper._plex = plex
+
+        result = plex_wrapper.resolve_item_to_remote_paths("/library/metadata/42")
+        assert result == [("42", "/data/Foo-1080p.mkv"), ("42", "/data/Foo-2160p.mkv")]
+
+    def test_resolve_paths_empty_on_lookup_failure(self, plex_wrapper):
+        plex = MagicMock()
+        plex.fetchItem.side_effect = RuntimeError("boom")
+        plex_wrapper._plex = plex
+        assert plex_wrapper.resolve_item_to_remote_paths("42") == []
 
 
 class TestResolveOnePath:

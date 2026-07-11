@@ -101,13 +101,17 @@ RUN apt-get update && \
       mediainfo python3 python3-pip gosu pciutils git curl gnupg ca-certificates \
       mesa-va-drivers mesa-vulkan-drivers libva2 libva-drm2 vainfo && \
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
-      # Jellyfin apt repo (Ubuntu Noble) for jellyfin-ffmpeg7
-      curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
+      # Jellyfin apt repo (Ubuntu Noble) for jellyfin-ffmpeg7.
+      # --retry-all-errors so a flaky HTTP 403 from the repo (seen
+      # intermittently in CI) is retried instead of failing the build.
+      curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --retry-connrefused \
+        https://repo.jellyfin.org/jellyfin_team.gpg.key \
         | gpg --dearmor -o /usr/share/keyrings/jellyfin.gpg && \
       printf 'Types: deb\nURIs: https://repo.jellyfin.org/ubuntu\nSuites: noble\nComponents: main\nArchitectures: amd64\nSigned-By: /usr/share/keyrings/jellyfin.gpg\n' \
         > /etc/apt/sources.list.d/jellyfin.sources && \
       # Intel graphics apt repo (Ubuntu Noble) for newer VAAPI + OpenCL
-      curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key \
+      curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --retry-connrefused \
+        https://repositories.intel.com/gpu/intel-graphics.key \
         | gpg --dearmor -o /usr/share/keyrings/intel-graphics.gpg && \
       echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu noble unified" \
         > /etc/apt/sources.list.d/intel-graphics.list && \
