@@ -294,6 +294,13 @@
     </nav>
     {% endif %}
 
+    {% if request.endpoint != 'main.login' %}
+    <!-- Config-health banner (issue #278): rendered by checkConfigHealth()
+         in app.js when /config isn't writable, mounted :ro, or a media
+         mount is missing. Hidden until a problem is detected. -->
+    <div id="configHealthBanner" class="container-fluid pt-3 d-none"></div>
+    {% endif %}
+
     <!-- Main Content -->
     <main class="{% if request.endpoint != 'main.login' %}container-fluid py-4{% endif %}">
         {% block content %}{% endblock %}

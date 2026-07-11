@@ -7,7 +7,7 @@ import re as _re
 import threading
 import time
 
-from flask import jsonify, request
+from flask import current_app, jsonify, request
 from loguru import logger
 
 from ...logging_config import LEVEL_ORDER, get_app_log_path
@@ -219,6 +219,48 @@ def get_system_status():
             "The traceback above identifies the cause."
         )
         return jsonify({"error": "Failed to retrieve system status"}), 500
+
+
+def _current_media_mount_issues() -> list[dict[str, str]]:
+    """Live re-probe of configured media mounts for the dashboard banner.
+
+    Cheap ``os.stat``/``listdir`` checks over each server's ``local_prefix``
+    so a stale bind-mount (empty underlay) or an unmounted share is visible
+    the same way a read-only /config is — instead of surfacing job-by-job as
+    "missing on disk" failures. Recomputed per poll so the banner clears once
+    the share mounts, without a restart.
+    """
+    from ...config.paths import detect_unhealthy_media_mounts
+    from ..app import _get_media_servers_from_settings
+
+    config_dir = current_app.config.get("CONFIG_DIR", "/config")
+    mappings: list[dict] = []
+    for server in _get_media_servers_from_settings(config_dir) or []:
+        if isinstance(server, dict):
+            mappings.extend(server.get("path_mappings") or [])
+    return detect_unhealthy_media_mounts(mappings)
+
+
+@api.route("/system/config-health")
+@setup_or_auth_required
+def get_config_health():
+    """Report config-dir writability + media-mount health for the UI banner.
+
+    Kept intentionally cheap (no GPU detection) so every page can poll it to
+    render the "config folder isn't writable" / "media mount missing" banner.
+    Available during setup too, since a read-only /config blocks the wizard.
+    """
+    from ..config_health import probe_config_health
+
+    config_dir = current_app.config.get("CONFIG_DIR", "/config")
+    payload = {"config": probe_config_health(config_dir)}
+    try:
+        payload["media_mount_issues"] = _current_media_mount_issues()
+    except Exception:
+        # A settings-read failure must never break the health banner itself.
+        logger.debug("Could not probe media-mount health for the config-health banner", exc_info=True)
+        payload["media_mount_issues"] = []
+    return jsonify(payload)
 
 
 _media_server_status_cache: dict = {"result": None, "fetched_at": 0.0}

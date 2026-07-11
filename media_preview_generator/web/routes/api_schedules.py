@@ -1,6 +1,6 @@
 """Schedule management API routes."""
 
-from flask import jsonify, request
+from flask import current_app, jsonify, request
 from loguru import logger
 
 from ..auth import api_token_required
@@ -105,6 +105,29 @@ def create_schedule():
         )
         return jsonify({"error": "Invalid schedule parameters"}), 400
     except Exception as e:
+        # A read-only /config makes APScheduler's INSERT into scheduler.db
+        # fail with "attempt to write a readonly database" — nothing to do
+        # with cron syntax. Detect it and give the actionable permissions fix
+        # instead of the misleading duplicate/cron hint (issue #278).
+        if "readonly database" in str(e).lower() or "unable to open database" in str(e).lower():
+            from ..config_health import probe_config_health
+
+            health = probe_config_health(current_app.config.get("CONFIG_DIR", "/config"))
+            # The re-probe may transiently disagree with the DB write that just
+            # failed (race, or config made writable in the interim) — never emit
+            # a blank 503; fall back to the DB error's own message.
+            detail = health["detail"] or "The config folder isn't writable, so the schedule can't be saved."
+            hint = health["hint"] or (
+                "Make the config folder writable by the container (check PUID/PGID and that the "
+                "mount isn't read-only), then try again."
+            )
+            logger.error(
+                "Could not save the new schedule {!r} — the config folder isn't writable. {} {}",
+                data.get("name", "<unnamed>"),
+                detail,
+                hint,
+            )
+            return jsonify({"error": detail, "hint": hint, "config_health": health}), 503
         logger.exception(
             "Could not save the new schedule {!r} ({}: {}). "
             "Most often this is a malformed cron expression or a clash with an existing schedule — "

@@ -3950,7 +3950,80 @@ document.addEventListener('DOMContentLoaded', () => {
     // For elements added dynamically after page load, call
     // window._initBootstrapTooltips(scope) — see below.
     _initBootstrapTooltips(document);
+
+    // Config-health banner (issue #278) — runs on every page so a
+    // read-only /config or a missing media mount is visible even on the
+    // Settings/Schedules pages, not just the dashboard. Polled so it
+    // clears once the user fixes permissions (no restart needed).
+    if (document.getElementById('configHealthBanner')) {
+        checkConfigHealth();
+        setInterval(checkConfigHealth, 60000);
+    }
 });
+
+/**
+ * Fetch config-dir + media-mount health and render the global banner.
+ * Red (danger) when /config isn't writable — the app can't save anything;
+ * yellow (warning) for non-fatal advisories (network fs, low space,
+ * missing media mount). Clears when everything is healthy.
+ */
+async function checkConfigHealth() {
+    const banner = document.getElementById('configHealthBanner');
+    if (!banner) return;
+    // Raw fetch, NOT apiGet: apiGet redirects to /login on 401, which would let
+    // this passive background probe hijack navigation (e.g. bounce the setup
+    // wizard to login when the config-health endpoint is auth-gated). A health
+    // check must never move the user — silently bail on any non-OK response.
+    let data;
+    try {
+        const resp = await fetch('/api/system/config-health');
+        if (!resp.ok) return;
+        data = await resp.json();
+    } catch (e) {
+        // Network hiccup — leave the last banner state, never blank the page.
+        return;
+    }
+    const cfg = data.config || {};
+    const cards = [];
+
+    if (cfg.writable === false) {
+        cards.push(`
+            <div class="alert alert-danger d-flex align-items-start mb-2" role="alert">
+                <i class="bi bi-x-octagon-fill me-2 mt-1"></i>
+                <div>
+                    <div class="fw-semibold">${escapeHtml(cfg.detail || "Config folder isn't writable")}</div>
+                    <div class="small mt-1">${escapeHtml(cfg.hint || '')}</div>
+                    <div class="small mt-1 text-muted">Settings, schedules, and job history can't be saved until this is fixed.</div>
+                </div>
+            </div>`);
+    }
+    (cfg.warnings || []).forEach((w) => {
+        cards.push(`
+            <div class="alert alert-warning d-flex align-items-start mb-2" role="alert">
+                <i class="bi bi-exclamation-triangle-fill me-2 mt-1"></i>
+                <div class="small">${escapeHtml(w.message || '')}</div>
+            </div>`);
+    });
+    (data.media_mount_issues || []).forEach((m) => {
+        const msg = m.issue === 'empty'
+            ? `Media mount "${m.path}" is mounted but EMPTY inside the container (stale bind-mount / unmounted share). Every preview job for files on this disk will fail as "missing on disk".`
+            : `Media mount "${m.path}" doesn't exist inside the container — check the volume mount and the path mapping under Settings → Media Servers.`;
+        cards.push(`
+            <div class="alert alert-warning d-flex align-items-start mb-2" role="alert">
+                <i class="bi bi-hdd-network me-2 mt-1"></i>
+                <div class="small">${escapeHtml(msg)}</div>
+            </div>`);
+    });
+
+    if (cards.length === 0) {
+        banner.classList.add('d-none');
+        banner.innerHTML = '';
+        return;
+    }
+    banner.innerHTML = cards.join('');
+    banner.classList.remove('d-none');
+}
+window.checkConfigHealth = checkConfigHealth;
 
 /**
  * Initialise Bootstrap tooltips on every `[data-bs-toggle="tooltip"]`
