@@ -554,6 +554,15 @@ def create_app(config_dir: str | None = None) -> Flask:
     if config_dir is None:
         config_dir = os.environ.get("CONFIG_DIR", "/config")
 
+    # Preflight the config directory FIRST so a read-only / wrong-owner
+    # /config surfaces as one clear log line at boot (issue #278) instead of
+    # a flood of per-item "attempt to write a readonly database" failures.
+    # The dashboard reads the same probe via /api/system/config-health to
+    # render a banner; scan + schedule creation refuse to start when it fails.
+    from .config_health import log_config_health
+
+    log_config_health(config_dir)
+
     # Create Flask app
     app = Flask(__name__, template_folder="templates", static_folder="static")
 

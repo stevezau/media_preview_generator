@@ -4,7 +4,7 @@ import math
 import os
 from datetime import datetime
 
-from flask import jsonify, request, session
+from flask import current_app, jsonify, request, session
 from loguru import logger
 
 from ..auth import (
@@ -600,6 +600,28 @@ def get_chain_attempts(chain_id):
     )
 
 
+def _config_unwritable_response():
+    """Return a 503 (payload, status) tuple when /config isn't writable, else None.
+
+    Starting a scan on a read-only /config lets FFmpeg burn CPU while every
+    job-state persist to jobs.db fails and the UI looks frozen (issue #278).
+    Refuse up front with the actionable fix instead. Returns ``None`` when
+    the config dir is writable so callers can proceed.
+    """
+    from ..config_health import probe_config_health
+
+    config_dir = current_app.config.get("CONFIG_DIR", "/config")
+    health = probe_config_health(config_dir)
+    if health["writable"]:
+        return None
+    logger.error(
+        "Refusing to start a job — {} {}",
+        health["detail"],
+        health["hint"],
+    )
+    return jsonify({"error": health["detail"], "hint": health["hint"], "config_health": health}), 503
+
+
 @api.route("/jobs", methods=["POST"])
 @api_token_required
 def create_job():
@@ -610,6 +632,10 @@ def create_job():
     * ``library_names: list[str]`` — back-compat from older clients.
     * ``library_id: str`` — back-compat single-library shape.
     """
+    blocked = _config_unwritable_response()
+    if blocked is not None:
+        return blocked
+
     data = request.get_json() or {}
 
     library_ids = list(data.get("library_ids") or [])
@@ -698,6 +724,10 @@ def create_manual_job():
         201 with job dict on success, 400 on validation failure.
 
     """
+    blocked = _config_unwritable_response()
+    if blocked is not None:
+        return blocked
+
     data = request.get_json() or {}
     raw_paths = data.get("file_paths") or []
     force_regenerate = _param_to_bool(data.get("force_regenerate"), False)
