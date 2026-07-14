@@ -250,10 +250,25 @@ def get_config_health():
     render the "config folder isn't writable" / "media mount missing" banner.
     Available during setup too, since a read-only /config blocks the wizard.
     """
-    from ..config_health import probe_config_health
+    from ..config_health import (
+        DISMISSED_WARNINGS_SETTING,
+        filter_dismissed_warnings,
+        probe_config_health,
+    )
 
     config_dir = current_app.config.get("CONFIG_DIR", "/config")
-    payload = {"config": probe_config_health(config_dir)}
+    health = probe_config_health(config_dir)
+    try:
+        from ..settings_manager import get_settings_manager
+
+        dismissed = get_settings_manager().get(DISMISSED_WARNINGS_SETTING, [])
+        health["warnings"] = filter_dismissed_warnings(health["warnings"], dismissed)
+    except Exception:
+        # A settings-read failure must never hide a real advisory — fall through
+        # showing all of them.
+        logger.debug("Could not read dismissed config-health advisories", exc_info=True)
+
+    payload = {"config": health}
     try:
         payload["media_mount_issues"] = _current_media_mount_issues()
     except Exception:
@@ -261,6 +276,36 @@ def get_config_health():
         logger.debug("Could not probe media-mount health for the config-health banner", exc_info=True)
         payload["media_mount_issues"] = []
     return jsonify(payload)
+
+
+@api.route("/system/config-health/dismiss", methods=["POST"])
+@setup_or_auth_required
+def dismiss_config_health_warning():
+    """Permanently dismiss one non-fatal config-health advisory.
+
+    Only the advisories in ``DISMISSIBLE_WARNING_KINDS`` can be dismissed. The
+    blocking ``writable=False`` state is not among them on purpose: it is the
+    explanation for why nothing saves, so it must stay on screen until fixed.
+    """
+    from ..config_health import DISMISSED_WARNINGS_SETTING, DISMISSIBLE_WARNING_KINDS
+    from ..settings_manager import get_settings_manager
+
+    kind = (request.get_json(silent=True) or {}).get("kind")
+    # isinstance first: ``x in frozenset`` raises TypeError on an unhashable
+    # body value (``{"kind": ["network_fs"]}``), and this route is reachable
+    # unauthenticated before setup — a 500 there is a bad-input bug, not a 400.
+    if not isinstance(kind, str) or kind not in DISMISSIBLE_WARNING_KINDS:
+        return jsonify({"error": f"'{kind}' is not a dismissible advisory"}), 400
+
+    settings = get_settings_manager()
+    dismissed = settings.get(DISMISSED_WARNINGS_SETTING, [])
+    if not isinstance(dismissed, list):
+        dismissed = []
+    if kind not in dismissed:
+        dismissed = [*dismissed, kind]
+        settings.set(DISMISSED_WARNINGS_SETTING, dismissed)
+        logger.info("Config-health advisory '{}' dismissed by the user", kind)
+    return jsonify({"ok": True, "dismissed": dismissed})
 
 
 _media_server_status_cache: dict = {"result": None, "fetched_at": 0.0}

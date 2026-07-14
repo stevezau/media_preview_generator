@@ -3997,11 +3997,18 @@ async function checkConfigHealth() {
                 </div>
             </div>`);
     }
+    // Advisories are opinions about the setup, not failures — the app works.
+    // Each can be dismissed forever. (The writable=false card above cannot: it
+    // is the reason nothing saves.)
     (cfg.warnings || []).forEach((w) => {
+        const kind = escapeHtml(w.kind || '');
         cards.push(`
             <div class="alert alert-warning d-flex align-items-start mb-2" role="alert">
                 <i class="bi bi-exclamation-triangle-fill me-2 mt-1"></i>
-                <div class="small">${escapeHtml(w.message || '')}</div>
+                <div class="small flex-grow-1">${escapeHtml(w.message || '')}</div>
+                <button type="button" class="btn-close ms-2" aria-label="Dismiss this advisory"
+                        title="Dismiss — don't show this again"
+                        data-dismiss-config-warning="${kind}"></button>
             </div>`);
     });
     (data.media_mount_issues || []).forEach((m) => {
@@ -4022,6 +4029,29 @@ async function checkConfigHealth() {
     }
     banner.innerHTML = cards.join('');
     banner.classList.remove('d-none');
+
+    banner.querySelectorAll('[data-dismiss-config-warning]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+            const kind = btn.getAttribute('data-dismiss-config-warning');
+            // Hide immediately — the advisory is cosmetic, so don't make the
+            // user wait on the round-trip. The next poll (60s) reconciles.
+            btn.closest('.alert')?.remove();
+            try {
+                await fetch('/api/system/config-health/dismiss', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken() },
+                    body: JSON.stringify({ kind }),
+                });
+            } catch (e) {
+                // Persisting failed — it'll simply reappear on the next poll.
+                console.warn('Failed to dismiss config-health advisory:', e);
+            }
+            if (!banner.querySelector('.alert')) {
+                banner.classList.add('d-none');
+                banner.innerHTML = '';
+            }
+        });
+    });
 }
 window.checkConfigHealth = checkConfigHealth;
 

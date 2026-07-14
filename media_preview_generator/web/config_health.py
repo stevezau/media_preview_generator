@@ -29,7 +29,98 @@ _LOW_SPACE_THRESHOLD_BYTES = 50 * 1024 * 1024  # 50 MB
 # Pointing /config at an NFS/SMB share is a common NAS setup that produces
 # intermittent "database is locked" errors — we warn, never block, because
 # it often works well enough that a hard failure would be wrong.
-_NETWORK_FS_TYPES = {"nfs", "nfs4", "cifs", "smbfs", "smb3", "ncpfs", "9p"}
+_NETWORK_FS_TYPES = {
+    "nfs",
+    "nfs4",
+    "cifs",
+    "smbfs",
+    "smb3",
+    "ncpfs",
+    "9p",
+    # Kernel-side network/cluster filesystems — no ``fuse.`` prefix.
+    "ceph",
+    "lustre",
+    "beegfs",
+    "afs",
+}
+
+# Network- and cloud-backed FUSE drivers, matched on the ``<name>`` in
+# ``fuse.<name>``. The locking risk is the same as NFS/SMB, so they get the
+# same warning. Kept as an allowlist rather than "any FUSE is remote": that
+# assumption is what produced the false alarm on Unraid and mergerfs.
+_NETWORK_FUSE_TYPES = {
+    "sshfs",
+    "rclone",
+    "glusterfs",
+    "s3fs",
+    "davfs",
+    "davfs2",
+    "ftpfs",
+    "curlftpfs",
+    "smbnetfs",
+    "juicefs",
+    "gcsfuse",
+    "blobfuse",
+    "moosefs",
+    "mfs",
+    "seaweedfs",
+    "ossfs",
+    "ceph",
+    "ceph-fuse",
+}
+
+# Unraid's user-share layer. This is a FUSE union over LOCAL disks — calling it
+# a network share is simply wrong, and it's what most Unraid users see. But
+# running the app's SQLite databases on /mnt/user is still discouraged on
+# Unraid (the standard advice is /mnt/cache/appdata or a specific disk), so it
+# earns its own advisory with wording that names the actual fix.
+_UNRAID_SHARE_FUSE_TYPE = "shfs"
+
+# Advisories the user may permanently dismiss. These are opinions about the
+# setup, not failures — the app works. Note the absence of the writability
+# statuses: ``writable=False`` means nothing saves, so hiding it would only
+# hide the reason the app appears broken.
+DISMISSIBLE_WARNING_KINDS = frozenset({"network_fs", "unraid_share", "low_space"})
+
+#: settings.json key holding the list of dismissed advisory kinds.
+DISMISSED_WARNINGS_SETTING = "dismissed_config_warnings"
+
+
+def _classify_fs(fstype: str) -> str | None:
+    """Classify a filesystem for the SQLite-reliability advisory.
+
+    Returns ``"network"`` (POSIX locking genuinely unreliable),
+    ``"unraid_share"`` (local, but running a DB there is discouraged), or
+    ``None`` for anything we shouldn't nag about.
+
+    Local union FUSE — ``fuse.mergerfs`` and, deliberately, any FUSE driver we
+    don't recognise — classifies as ``None``. Defaulting an unknown FUSE mount
+    to "network share" is what produced the false alarm this function exists to
+    prevent: a warning that's wrong on the user's actual setup teaches them to
+    ignore the warnings that aren't.
+    """
+    if fstype in _NETWORK_FS_TYPES:
+        return "network"
+    if fstype.startswith("fuse"):
+        driver = fstype.partition(".")[2]
+        if driver in _NETWORK_FUSE_TYPES:
+            return "network"
+        if driver == _UNRAID_SHARE_FUSE_TYPE:
+            return "unraid_share"
+    return None
+
+
+def filter_dismissed_warnings(warnings: list[dict], dismissed: object) -> list[dict]:
+    """Drop advisories the user has dismissed.
+
+    ``dismissed`` comes from user-editable settings.json, so anything that
+    isn't a list is treated as "nothing dismissed" rather than raising — a
+    mangled value must not take the health banner down with it.
+    """
+    if not isinstance(dismissed, list):
+        return list(warnings)
+    dropped = {d for d in dismissed if isinstance(d, str)}
+    return [w for w in warnings if w.get("kind") not in dropped]
 
 
 def _proc_mounts() -> list[tuple[str, str, set[str]]]:
@@ -91,10 +182,14 @@ def probe_config_health(config_dir: str) -> dict:
           settings, schedules, and job history cannot be saved.
         * ``status`` — ``"ok"`` | ``"not_writable"`` | ``"read_only_mount"``.
         * ``detail`` / ``hint`` — human message + the exact host-side fix.
-        * ``warnings`` — list of non-fatal advisories (network fs, low space),
-          each ``{"kind", "message"}``.
+        * ``warnings`` — list of non-fatal advisories (network fs, Unraid user
+          share, low space), each ``{"kind", "message"}``. Dismissible; see
+          :data:`DISMISSIBLE_WARNING_KINDS`.
         * diagnostics: ``process_user``, ``dir_owner``, ``dir_mode``,
-          ``read_only_mount``, ``network_fs``, ``free_bytes``, ``low_space``.
+          ``read_only_mount``, ``fs_type``, ``fs_advisory``, ``free_bytes``,
+          ``low_space``. ``network_fs`` is legacy: it is now set ONLY for
+          genuinely networked mounts (it used to be set for every FUSE mount,
+          which mislabelled Unraid and mergerfs as network shares).
     """
     process_user = f"{os.getuid()}:{os.getgid()}"
     result: dict = {
@@ -103,6 +198,8 @@ def probe_config_health(config_dir: str) -> dict:
         "status": "ok",
         "read_only_mount": False,
         "network_fs": None,
+        "fs_type": None,
+        "fs_advisory": None,
         "free_bytes": None,
         "low_space": False,
         "process_user": process_user,
@@ -131,7 +228,11 @@ def probe_config_health(config_dir: str) -> dict:
     mount = _mount_for_path(config_dir)
     if mount is not None:
         fstype, options = mount
-        if fstype in _NETWORK_FS_TYPES or fstype.startswith("fuse"):
+        result["fs_type"] = fstype
+        result["fs_advisory"] = _classify_fs(fstype)
+        # Retained for API compatibility: only set for genuinely networked
+        # mounts now, so it no longer mislabels Unraid/mergerfs as "network".
+        if result["fs_advisory"] == "network":
             result["network_fs"] = fstype
         if "ro" in options:
             result["read_only_mount"] = True
@@ -188,15 +289,28 @@ def probe_config_health(config_dir: str) -> dict:
     # Non-fatal advisories only make sense when writes actually work; a
     # read-only mount already dominates the message.
     if result["writable"]:
-        if result["network_fs"]:
+        if result["fs_advisory"] == "network":
             result["warnings"].append(
                 {
                     "kind": "network_fs",
                     "message": (
-                        f"Config folder {config_dir} is on a '{result['network_fs']}' network "
+                        f"Config folder {config_dir} is on a '{result['fs_type']}' network "
                         "filesystem. SQLite's file locking is unreliable over network shares and "
                         "can cause intermittent 'database is locked' errors — a local disk/volume "
                         "for the config folder is strongly recommended."
+                    ),
+                }
+            )
+        elif result["fs_advisory"] == "unraid_share":
+            result["warnings"].append(
+                {
+                    "kind": "unraid_share",
+                    "message": (
+                        f"Config folder {config_dir} is on an Unraid user share (/mnt/user). That's "
+                        "local storage, not a network share — but running the app's database on a "
+                        "user share can still cause intermittent 'database is locked' errors. "
+                        "Pointing the config volume at /mnt/cache/appdata (or a specific disk) is "
+                        "the usual fix. If it's working fine for you, you can dismiss this."
                     ),
                 }
             )
