@@ -738,14 +738,64 @@ def _clean_output_images(output_folder: str) -> None:
     """Remove any ``*.jpg`` files in ``output_folder``, silently ignoring
     files that vanish or are unremovable.
 
-    Called between FFmpeg retry tiers so the next attempt starts with an
-    empty output directory.
+    Called at the start of each extraction — and again between FFmpeg retry
+    tiers — so a run only ever counts the frames it produced itself, never
+    leftovers sitting in the (deterministic) frame-cache slot.
     """
     for img in glob.glob(os.path.join(output_folder, "*.jpg")):
         try:
             os.remove(img)
         except OSError:
             pass
+
+
+def _warn_if_frame_count_disagrees_with_duration(
+    video_file: str,
+    output_folder: str,
+    image_count: int,
+    media_info,
+    config: Config,
+) -> None:
+    """Warn when the thumbnails don't span the movie's actual runtime.
+
+    A BIF's playback timeline is positional: thumbnail *i* is presented at
+    ``i * frame_interval``. So ``image_count * interval`` must track the
+    source duration, or the scrubber drifts — the failure is silent, and
+    surfaces only as previews that lag the playhead.
+
+    This is a backstop, not the fix: the known cause (frames left behind by a
+    previous run) is prevented by cleaning the output folder up front. It
+    stays because every other route to a wrong count — a partial BIF unpack, a
+    truncated extraction — would otherwise ship a wrong-length BIF with
+    nothing in the logs to show for it.
+
+    Logs only; a slightly-off count is never worth failing an otherwise good
+    preview over.
+    """
+    try:
+        tracks = getattr(media_info, "video_tracks", None) or []
+        duration_ms = float(getattr(tracks[0], "duration", 0) or 0) if tracks else 0.0
+    except (TypeError, ValueError, IndexError):
+        return
+    if duration_ms <= 0:
+        return
+
+    interval = config.plex_bif_frame_interval
+    expected = duration_ms / 1000.0 / interval
+    # Two intervals of slack absorbs the usual rounding (fps=…:round=up emits
+    # a final frame at the tail) without hiding a real mismatch.
+    if expected > 0 and abs(image_count - expected) > 2:
+        logger.warning(
+            "Preview thumbnails for '{}' span {:.0f} min but the video runs {:.0f} min "
+            "({} thumbnails x {}s). Plex scrubbing would be out of sync. This is unexpected — "
+            "please report it with this log line. Frames folder: {}",
+            os.path.basename(video_file),
+            image_count * interval / 60,
+            duration_ms / 1000.0 / 60,
+            image_count,
+            interval,
+            output_folder,
+        )
 
 
 def _probe_max_keyframe_gap(video_file: str) -> float | None:
@@ -1149,8 +1199,19 @@ def generate_images(
                 gap_limit,
             )
 
-    # Ensure output folder exists
+    # Ensure output folder exists and holds no frames from an earlier run.
+    #
+    # The frame-cache slot for a file is deterministic (``frames-<hash>``), so
+    # a re-extraction lands in the same directory.  The rename below maps
+    # FFmpeg's ``img-%06d.jpg`` onto ``{frame_no * interval}.jpg``, so a run at
+    # a *different* thumbnail interval writes a different set of filenames
+    # (2 s → 0, 2, 4 …; 5 s → 0, 5, 10 …).  Only the colliding names would be
+    # overwritten — the rest would survive and be counted as if this run had
+    # produced them, yielding a BIF longer than the movie and a Plex scrubber
+    # that drifts (a 1 h 55 m film re-generated 2 s → 5 s left 4141 frames
+    # instead of 1381, a 5 h 45 m BIF).
     os.makedirs(output_folder, exist_ok=True)
+    _clean_output_images(output_folder)
 
     # First attempt
     rc, seconds, speed, stderr_lines = _run_ffmpeg(use_skip_initial, init_vulkan=use_libplacebo)
@@ -1381,6 +1442,7 @@ def generate_images(
             frame_second = frame_no * config.plex_bif_frame_interval
             os.rename(image, os.path.join(output_folder, f"{frame_second:010d}.jpg"))
         image_count = len(glob.glob(os.path.join(output_folder, "*.jpg")))
+        _warn_if_frame_count_disagrees_with_duration(video_file, output_folder, image_count, media_info, config)
 
     hw = gpu is not None
     success = image_count > 0

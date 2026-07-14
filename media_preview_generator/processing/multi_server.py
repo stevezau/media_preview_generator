@@ -1634,9 +1634,10 @@ def process_canonical_path(
         )
 
     # Frame cache: when enabled, the second+ webhook for the same file
-    # within the cache TTL skips FFmpeg entirely. Disabled callers
-    # (regenerate=True, or callers that explicitly opt out) write into
-    # an ad-hoc tmp dir that's cleaned up at the end.
+    # within the cache TTL skips FFmpeg entirely. ``regenerate=True`` skips
+    # the cache *read* (it must re-extract) but still shares the same
+    # deterministic ``frames-<hash>/`` slot and re-populates it afterwards —
+    # only ``use_frame_cache=False`` gets an ad-hoc tmp dir.
     #
     # Anchor the cache at ``tmp_folder`` (stable across jobs), NOT at
     # ``working_tmp_folder`` (a per-job subdir created by job_runner).
@@ -1660,15 +1661,26 @@ def process_canonical_path(
     # subsequent cache.get / frame_dir_for / os.makedirs can't raise
     # without releasing it — every non-trivial step lives in the try
     # below whose finally always releases.
-    if use_frame_cache and not regenerate:
+    #
+    # The lock is taken whenever we touch the shared ``frames-<hash>/`` slot,
+    # INCLUDING regenerate. A regenerate run empties that slot before
+    # extracting (generate_images cleans it so it can't count a previous
+    # run's frames); without the lock a concurrent non-regenerate dispatch
+    # for the same path could be cache-HITting the very same directory and
+    # reading those JPGs to build its BIF, and we'd delete them mid-read.
+    if use_frame_cache:
         generation_lock = cache.generation_lock(canonical_path)
         generation_lock.acquire()
 
     try:
-        if generation_lock is not None:
+        if generation_lock is not None and not regenerate:
             # Per-path lock so simultaneous webhook fires for the same
             # canonical path serialise. The first thread generates; the
             # rest wait, then re-check the cache and hit it.
+            #
+            # Skipped for regenerate: it must re-extract, so it never reads
+            # the cache — but it still holds the lock (above) because it
+            # writes to the shared slot.
             cached = cache.get(canonical_path)
             if cached is not None:
                 tmp_path = str(cached.frame_dir)
@@ -1822,8 +1834,9 @@ def process_canonical_path(
             )
 
         # Store in cache only on a fresh generation; cache hits already
-        # have an entry. Skip caching when use_frame_cache=False so
-        # regenerate flows don't re-populate stale slots.
+        # have an entry. Regenerate re-populates the slot too — that's
+        # intended: it just re-extracted into the (now emptied) shared dir,
+        # so the entry it writes describes exactly the frames on disk.
         if not cache_hit and use_frame_cache:
             cache.put(canonical_path, frame_dir=Path(tmp_path), frame_count=frame_count)
 
