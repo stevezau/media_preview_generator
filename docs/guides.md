@@ -546,7 +546,7 @@ The tool picks the fastest working path per GPU vendor:
 | AMD Radeon | (untested locally; same flags as NVIDIA) | |
 | CPU-only fallback | ~5–10× (CPU-bound) | When no GPU is available |
 
-The image ships **jellyfin-ffmpeg 7.1.3** as its preferred FFmpeg because Jellyfin's fork carries a Dolby-Vision-aware tone-mapping patch upstream FFmpeg still lacks. Non-amd64 builds fall back to the base image's FFmpeg 8.0.1 automatically.
+The image ships **jellyfin-ffmpeg 8.1.2** as its preferred FFmpeg because Jellyfin's fork carries a Dolby-Vision-aware tone-mapping patch upstream FFmpeg still lacks. Non-amd64 builds fall back to the base image's FFmpeg 8.1.2 automatically.
 
 Profile 7/8 (with HDR10 fallback) uses the standard tone-mapping chain — no Vulkan or special handling needed.
 
