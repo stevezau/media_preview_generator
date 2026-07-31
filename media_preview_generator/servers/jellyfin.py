@@ -53,9 +53,11 @@ class JellyfinServer(EmbyApiClient):
             - ``{"method": "password", "access_token": "...", "user_id": "..."}``
             - ``{"method": "api_key", "api_key": "..."}``
 
-            The token (whichever flow produced it) goes out on the
-            ``X-Emby-Token`` header — Jellyfin honours the legacy Emby
-            header name alongside the modern ``Authorization`` form.
+            The token (whichever flow produced it) goes out on both the
+            modern ``Authorization: MediaBrowser Token="..."`` header
+            (required by Jellyfin 10.11+, the only scheme accepted on
+            12.0) and the legacy ``X-Emby-Token`` header (Emby + older
+            Jellyfin). See #282.
     """
 
     vendor_name = "Jellyfin"

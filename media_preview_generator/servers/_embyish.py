@@ -26,6 +26,7 @@ import requests
 import urllib3
 from loguru import logger
 
+from ._mediabrowser_auth import _AUTH_DEVICE_ID, mediabrowser_authorization_header
 from .base import (
     ConnectionResult,
     Library,
@@ -169,11 +170,13 @@ class EmbyApiClient(MediaServer):
 
     # ------------------------------------------------------------------ HTTP
     def _token(self) -> str:
-        """Extract the X-Emby-Token value from the persisted auth dict.
+        """Extract the access token from the persisted auth dict.
 
         Both vendors accept either ``access_token`` (from the
-        password / Quick Connect flow) or ``api_key`` (paste-in) on
-        the legacy ``X-Emby-Token`` header.
+        password / Quick Connect flow) or ``api_key`` (paste-in). The
+        value is sent on both the modern ``Authorization: MediaBrowser
+        Token="..."`` header and the legacy ``X-Emby-Token`` header —
+        see :meth:`_request`.
         """
         auth = self._config.auth or {}
         return str(auth.get("access_token") or auth.get("api_key") or auth.get("token") or "")
@@ -201,8 +204,14 @@ class EmbyApiClient(MediaServer):
         ``_LIST_ITEMS_TIMEOUT_S``.
         """
         url = f"{self._config.url.rstrip('/')}{path}"
+        token = self._token()
+        # Send both auth schemes: the modern ``Authorization: MediaBrowser
+        # Token="..."`` form (mandatory on Jellyfin 10.11+, the *only*
+        # accepted scheme on 12.0 which disables the legacy header) and the
+        # legacy ``X-Emby-Token`` header (Emby + older Jellyfin). See #282.
         headers = {
-            "X-Emby-Token": self._token(),
+            "Authorization": mediabrowser_authorization_header(device_id=_AUTH_DEVICE_ID, token=token),
+            "X-Emby-Token": token,
             "Accept": "application/json",
         }
         verify = bool(self._config.verify_ssl)

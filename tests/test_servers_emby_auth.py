@@ -24,6 +24,22 @@ class TestAuthorizationHeader:
         assert "Version=" in header
         assert header.startswith("MediaBrowser ")
 
+    def test_no_token_component_on_handshake_form(self):
+        # The unauthenticated handshake form must NOT carry a token.
+        from media_preview_generator.servers._mediabrowser_auth import mediabrowser_authorization_header
+
+        header = mediabrowser_authorization_header(device_id="abc123")
+        assert "Token=" not in header
+
+    def test_token_component_prepended_when_supplied(self):
+        # Authenticated form Jellyfin 10.11+/12.0 requires (#282).
+        from media_preview_generator.servers._mediabrowser_auth import mediabrowser_authorization_header
+
+        header = mediabrowser_authorization_header(device_id="abc123", token="tok-xyz")
+        assert header.startswith('MediaBrowser Token="tok-xyz"')
+        assert 'DeviceId="abc123"' in header
+        assert "Version=" in header
+
 
 class TestAuthenticateEmbyWithPassword:
     def test_success_returns_token_and_user_id(self):

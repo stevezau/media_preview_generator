@@ -151,8 +151,22 @@ class TestRequestUrlConstruction:
         with ctx:
             emby._request("GET", "/System/Info")
         headers = captured[0].get("headers") or {}
-        assert headers.get("X-Emby-Token"), f"X-Emby-Token missing from headers: {headers!r}"
+        assert headers.get("X-Emby-Token") == emby._token(), f"X-Emby-Token missing/wrong in headers: {headers!r}"
         assert headers.get("Accept") == "application/json"
+
+    def test_modern_authorization_header_carries_token(self, emby):
+        """Every authed call MUST also send the modern ``Authorization: MediaBrowser
+        Token="..."`` header. Jellyfin 12.0 disables the legacy X-Emby-Token, so an
+        X-Emby-Token-only request 401s there — the #282 regression. The token value
+        must appear inside the header, not just the scheme."""
+        captured, ctx = self._capture_request(emby)
+        with ctx:
+            emby._request("GET", "/System/Info")
+        headers = captured[0].get("headers") or {}
+        auth = headers.get("Authorization", "")
+        assert auth.startswith("MediaBrowser "), f"Authorization not MediaBrowser scheme: {auth!r}"
+        assert f'Token="{emby._token()}"' in auth, f"token not carried in Authorization: {auth!r}"
+        assert 'DeviceId="' in auth, f"DeviceId component missing: {auth!r}"
 
     def test_session_is_reused_across_calls(self, emby):
         """All requests share one Session so HTTP keep-alive amortises the

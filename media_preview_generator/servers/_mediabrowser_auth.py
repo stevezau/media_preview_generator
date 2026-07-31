@@ -53,19 +53,38 @@ class MediaBrowserAuthResult:
     message: str = ""
 
 
-def mediabrowser_authorization_header(*, device_id: str) -> str:
+def mediabrowser_authorization_header(*, device_id: str, token: str | None = None) -> str:
     """Build the strict Emby/Jellyfin ``Authorization`` header.
 
     Format: ``MediaBrowser Client="...", Device="...", DeviceId="...", Version="..."``.
     Both Emby and Jellyfin require this exact form on unauthenticated
     endpoints and reject malformed variants with HTTP 400.
+
+    When ``token`` is supplied, a leading ``Token="..."`` component is
+    prepended — the modern authenticated form Jellyfin 10.11+ mandates
+    and 12.0 makes the *only* accepted scheme (the legacy ``X-Emby-Token``
+    header and ``api_key`` query param are disabled at 12.0). Emby and
+    older Jellyfin accept this form too, so it is safe to always send.
+
+    Args:
+        device_id: Stable per-install DeviceId; keep it identical to the
+            value used at auth time so the token stays bound to the same
+            server session row.
+        token: The access token / API key. Omit (or pass ``None``/empty)
+            for unauthenticated handshake endpoints.
     """
-    return (
-        f'MediaBrowser Client="{_AUTH_CLIENT}", '
-        f'Device="{_AUTH_DEVICE}", '
-        f'DeviceId="{device_id}", '
-        f'Version="{_AUTH_VERSION}"'
+    parts = []
+    if token:
+        parts.append(f'Token="{token}"')
+    parts.extend(
+        (
+            f'Client="{_AUTH_CLIENT}"',
+            f'Device="{_AUTH_DEVICE}"',
+            f'DeviceId="{device_id}"',
+            f'Version="{_AUTH_VERSION}"',
+        )
     )
+    return "MediaBrowser " + ", ".join(parts)
 
 
 def authenticate_with_password(
