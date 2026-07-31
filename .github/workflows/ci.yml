@@ -65,7 +65,11 @@ jobs:
           cache: pip
 
       - name: Install ruff
-        run: pip install ruff
+        # Pin to match .pre-commit-config.yaml's ruff-pre-commit rev so the
+        # commit-time gate and CI agree. Unpinned `pip install ruff` chased
+        # latest and broke when 0.16 began reformatting code inside markdown
+        # fences — a formatting change no committed file had been run through.
+        run: pip install ruff==0.9.6
 
       - name: Ruff check
         run: ruff check .
