@@ -144,15 +144,19 @@ services:
 | **NVIDIA** | Linux | CUDA/NVENC | `--gpus all` |
 | **AMD** | Linux | VAAPI | `--device /dev/dri` |
 | **Intel** | Linux | QuickSync/VAAPI | `--device /dev/dri` |
-| **NVIDIA** | Windows | CUDA | Native only |
-| **AMD/Intel** | Windows | D3D11VA | Native only |
-| **Apple Silicon** | macOS | VideoToolbox | Native only |
+| **NVIDIA** | Windows | CUDA/NVENC | `--gpus all` (Docker Desktop, WSL2 backend) |
+| **AMD/Intel** | Windows | — | Not available — CPU only |
+| **Apple Silicon / Intel** | macOS | — | Not available — CPU only |
 
-> **"Native only"** means GPU acceleration requires running the app from source on that platform. Docker on Windows (WSL2) and macOS runs a Linux VM — D3D11VA and VideoToolbox are not available inside Docker. Docker on these platforms will use CPU-only processing. Apple Silicon users benefit from the native ARM64 Docker image (no Rosetta overhead).
+> **NVIDIA on Windows works under Docker.** The NVIDIA Windows driver exposes CUDA and NVDEC into WSL2, so Docker Desktop with the WSL2 backend accelerates just like Linux — use `--gpus all` as below, with no extra install inside WSL.
+
+> **AMD/Intel on Windows and all GPUs on macOS cannot be accelerated under Docker.** Docker Desktop runs a Linux VM, and D3D11VA and VideoToolbox are host-OS frameworks it cannot reach — those setups process on CPU. Run the container on a Linux host if you need GPU acceleration. Apple Silicon still benefits from the native ARM64 image (no Rosetta overhead).
 
 ### NVIDIA GPU
 
-Prerequisites: NVIDIA drivers + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
+Prerequisites (Linux hosts): NVIDIA drivers + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
+
+On **Windows**, skip the Container Toolkit — Docker Desktop provides it. You need the NVIDIA Windows driver, the WSL2 backend, and an up-to-date WSL kernel (`wsl --update`). Omit `--device /dev/dri:/dev/dri` on Windows.
 
 ```bash
 docker run -d \

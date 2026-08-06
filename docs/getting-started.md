@@ -182,12 +182,15 @@ Hardware-accelerated video processing for faster thumbnail generation. To check 
 | **NVIDIA** | Linux | CUDA/NVENC | NVIDIA Container Toolkit |
 | **AMD** | Linux | VAAPI | Device passthrough |
 | **Intel** | Linux | VAAPI/QuickSync | Device passthrough |
-| **NVIDIA** | Windows | CUDA | Native only |
-| **AMD/Intel** | Windows | D3D11VA | Native only |
-| **Apple Silicon** | macOS | VideoToolbox | Native only |
+| **NVIDIA** | Windows | CUDA/NVENC | Docker Desktop (WSL2 backend) + `--gpus all` |
+| **AMD/Intel** | Windows | — | Not available — CPU only |
+| **Apple Silicon / Intel** | macOS | — | Not available — CPU only |
 
 > [!NOTE]
-> **"Native only"** means GPU acceleration requires running the app from source on that platform. Docker on Windows (WSL2) and macOS runs a Linux VM — D3D11VA and VideoToolbox are not available inside Docker. Docker on these platforms will use CPU-only processing. Apple Silicon users benefit from the native ARM64 Docker image (no Rosetta overhead).
+> **NVIDIA on Windows works under Docker.** The NVIDIA Windows driver exposes CUDA and NVDEC into WSL2, so Docker Desktop using the WSL2 backend accelerates much like Linux does. Follow the [NVIDIA GPU](#nvidia-gpu) steps below — you do not need to install anything inside WSL. Treat it as best-effort: GPU detection under WSL2 is less reliable than on a native Linux host.
+
+> [!NOTE]
+> **AMD/Intel on Windows and all GPUs on macOS cannot be accelerated under Docker.** Docker Desktop runs a Linux VM, and D3D11VA (Windows AMD/Intel) and VideoToolbox (macOS) are host-OS frameworks that the VM cannot reach. Those setups process on CPU — raise **CPU Workers** in Settings to compensate. If you need GPU acceleration, run the container on a Linux host. Apple Silicon users still benefit from the native ARM64 image (no Rosetta overhead).
 
 ### Intel iGPU (QuickSync)
 
@@ -229,10 +232,13 @@ stat -c '%g' /dev/dri/renderD128
 
 ### NVIDIA GPU
 
-Prerequisites:
+Prerequisites (Linux hosts):
 
 1. Install NVIDIA drivers
 2. Install [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+
+> [!NOTE]
+> **On Windows, skip step 2.** Docker Desktop provides the toolkit itself — you only need the NVIDIA Windows driver and the WSL2 backend. See [Windows](#windows) below. The `docker run` command itself is identical.
 
 ```bash
 docker run -d \
@@ -246,7 +252,7 @@ docker run -d \
 > **Why `NVIDIA_DRIVER_CAPABILITIES=all`?** Dolby Vision videos need the NVIDIA Vulkan driver to render colours correctly; the `all` value is what makes that driver available inside the container. Without it, Dolby Vision thumbnails may show with a green tint. (The older `compute,video,utility` setting is fine for everything except Dolby Vision.)
 
 > [!TIP]
-> **Multi-GPU?** Hosts with two or more NVIDIA cards are detected automatically — each card appears as a separate row in **Settings → GPUs** with its own enable toggle, worker count, and FFmpeg thread setting. Work spreads across cards.
+> **Multi-GPU?** Hosts with two or more NVIDIA cards are detected automatically — each card appears as a separate row in **Settings → Processing Options → GPU Configuration** with its own enable toggle, worker count, and FFmpeg thread setting. Work spreads across cards.
 
 Docker Compose:
 
@@ -276,21 +282,30 @@ docker run -d \
 AMD requires proper VAAPI drivers on the host system. GPU device groups
 are auto-detected at container startup.
 
-### Windows (Native Only)
+### Windows
 
-Windows uses hardware acceleration automatically: NVIDIA GPUs use CUDA, while AMD and Intel GPUs use D3D11VA. This requires running the app **natively from source** — Docker Desktop on Windows uses WSL2 (a Linux VM) where these accelerators are not available.
+**NVIDIA:** works under Docker. Requirements:
 
-**Requirements:** Latest GPU drivers and FFmpeg with CUDA (NVIDIA) or D3D11VA (AMD/Intel) support.
+1. Docker Desktop using the **WSL2 backend** (Settings → General → *Use the WSL 2 based engine*) — GPU support is WSL2-only, it does not work with the Hyper-V backend.
+2. A current NVIDIA Windows driver with WSL2 GPU paravirtualization support. This is what provides CUDA and NVDEC inside WSL2.
+3. An up-to-date WSL2 kernel — run `wsl --update`.
 
-> [!WARNING]
-> Docker on Windows runs in a Linux VM (WSL2) and cannot access CUDA or D3D11VA. If you run the Docker image on Windows, processing will use CPU only. For GPU acceleration on Windows, install from source with Python and FFmpeg.
+Then use the same `docker run` command as Linux, including `--gpus all`; see [NVIDIA GPU](#nvidia-gpu) above. There is nothing to install inside WSL itself, and the NVIDIA Container Toolkit step is **not** needed — Docker Desktop wires that up for you.
 
-### macOS (Native Only)
+Omit `--device /dev/dri:/dev/dri` on Windows. Under WSL2 that node is a WSLg/d3d12 stub rather than a real GPU, and passing it through can register a phantom device or muddy vendor detection.
 
-Apple Silicon and Intel Macs use VideoToolbox for GPU-accelerated decoding. This requires running the app **natively from source** — Docker on macOS runs a Linux VM that has no access to macOS frameworks.
+Verify by opening the web UI and checking **Settings** → **Processing Options** → **GPU Configuration**; your card should be listed with CUDA acceleration.
 
-> [!WARNING]
-> Docker on macOS runs in a Linux VM and cannot access VideoToolbox. If you run the Docker image on macOS, processing will use CPU only. Apple Silicon users still benefit from the native ARM64 Docker image (no Rosetta emulation overhead). For GPU acceleration on macOS, install from source with Python and FFmpeg.
+> [!NOTE]
+> Treat WSL2 as best-effort. GPU vendor detection via `lspci` is unreliable inside WSL2, so the app leans on `nvidia-smi` instead and logs a note saying so. If GPU jobs misbehave, run the container on a Linux host.
+
+**AMD and Intel:** not accelerated under Docker. These rely on D3D11VA, a Windows-only framework that Docker Desktop's Linux VM cannot reach, so processing falls back to CPU. Raise **CPU Workers** in Settings to compensate, or run the container on a Linux host to use VAAPI/QuickSync.
+
+### macOS
+
+Not accelerated under Docker, on either Apple Silicon or Intel. VideoToolbox is a macOS framework and Docker Desktop's Linux VM has no access to it, so processing uses CPU. Raise **CPU Workers** in Settings to compensate, or run the container on a Linux host for GPU acceleration.
+
+Apple Silicon Macs do still benefit from the native ARM64 image — the container runs without Rosetta emulation overhead, which makes CPU processing meaningfully faster than an emulated x86 image.
 
 ### Worker Configuration
 
