@@ -197,6 +197,7 @@ class TestGetLatestGitHubRelease:
 class TestCheckForUpdates:
     """Test update checking logic."""
 
+    @patch.dict(os.environ, {"GIT_BRANCH": "", "GIT_SHA": ""}, clear=False)
     @patch("media_preview_generator.version_check.get_git_commit_sha", return_value=None)
     @patch("media_preview_generator.version_check.get_git_branch", return_value=None)
     @patch("media_preview_generator.version_check.get_latest_github_release")
@@ -259,42 +260,54 @@ class TestCheckForUpdates:
         check_for_updates()
         assert "newer version is available" not in loguru_caplog.text
 
+    @patch.dict(os.environ, {"GIT_BRANCH": "", "GIT_SHA": ""}, clear=False)
     @patch("media_preview_generator.version_check.get_git_commit_sha", return_value=None)
     @patch("media_preview_generator.version_check.get_git_branch", return_value=None)
-    @patch("media_preview_generator.version_check.is_docker_environment")
     @patch("media_preview_generator.version_check.get_latest_github_release")
     @patch("media_preview_generator.version_check.get_current_version")
-    def test_check_for_updates_docker_message(
-        self, mock_current, mock_latest, mock_docker, _mock_branch, _mock_sha, loguru_caplog
-    ):
-        """Docker installs receive the docker pull instruction."""
-        mock_docker.return_value = True
+    def test_check_for_updates_docker_message(self, mock_current, mock_latest, _mock_branch, _mock_sha, loguru_caplog):
+        """The Path 3 upgrade instruction points at the Docker image."""
         mock_current.return_value = "2.0.0"
         mock_latest.return_value = "v2.1.0"
 
         check_for_updates()
         text = loguru_caplog.text
+        assert mock_current.called, "Path 3 was skipped — the assertions below would pass vacuously"
         assert "docker pull" in text
         assert "stevezzau/media_preview_generator" in text
 
+    @pytest.mark.parametrize("current", ["2.0.0", "0.0.0.dev1"])
+    @patch.dict(os.environ, {"GIT_BRANCH": "", "GIT_SHA": ""}, clear=False)
     @patch("media_preview_generator.version_check.get_git_commit_sha", return_value=None)
     @patch("media_preview_generator.version_check.get_git_branch", return_value=None)
-    @patch("media_preview_generator.version_check.is_docker_environment")
     @patch("media_preview_generator.version_check.get_latest_github_release")
     @patch("media_preview_generator.version_check.get_current_version")
-    def test_check_for_updates_non_docker_message(
-        self, mock_current, mock_latest, mock_docker, _mock_branch, _mock_sha, loguru_caplog
+    def test_check_for_updates_never_suggests_source_install(
+        self, mock_current, mock_latest, _mock_branch, _mock_sha, loguru_caplog, current
     ):
-        """Non-Docker installs receive the pip install instruction (not docker pull)."""
-        mock_docker.return_value = False
-        mock_current.return_value = "2.0.0"
+        """Neither Path 3 branch may advertise a pip/source install — Docker is the only supported deployment.
+
+        Covers both Path 3 branches: the normal "newer version" path and the
+        0.0.0 dev-snapshot path, which each used to emit a pip/git+https hint.
+
+        Path 2's ``git pull origin <branch>`` is deliberately out of scope — that
+        fires only for a real git checkout (a developer working in the repo), not
+        for an end-user install. See ``test_check_for_updates_git_checkout_behind``.
+
+        GIT_BRANCH/GIT_SHA are cleared because Path 1 reads os.environ directly
+        rather than the mocked getters, and would otherwise return before Path 3.
+        """
+        mock_current.return_value = current
         mock_latest.return_value = "v2.1.0"
 
         check_for_updates()
         text = loguru_caplog.text
-        assert "pip install" in text
-        assert "git+https://github.com/stevezau/media_preview_generator.git" in text
+        assert mock_current.called, "Path 3 was skipped — the assertions below would pass vacuously"
+        assert "docker pull" in text
+        assert "pip install" not in text
+        assert "git+https://" not in text
 
+    @patch.dict(os.environ, {"GIT_BRANCH": "", "GIT_SHA": ""}, clear=False)
     @patch("media_preview_generator.version_check.get_git_commit_sha", return_value=None)
     @patch("media_preview_generator.version_check.get_git_branch", return_value=None)
     @patch("media_preview_generator.version_check.get_latest_github_release")

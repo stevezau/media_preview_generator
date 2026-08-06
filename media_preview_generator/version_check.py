@@ -14,8 +14,6 @@ import subprocess
 import requests
 from loguru import logger
 
-from .utils import is_docker_environment
-
 
 def get_current_version() -> str:
     """Get the current version from package metadata.
@@ -320,20 +318,15 @@ def check_for_updates() -> None:
                 logger.warning("ℹ️  Running from development snapshot (not an official release)")
                 logger.warning("ℹ️  Latest stable release: {}", latest_version)
                 logger.warning("🐳 Install stable: docker pull stevezzau/media_preview_generator:latest")
-                logger.warning(
-                    "🔗 Or from source: pip install git+https://github.com/stevezau/media_preview_generator.git"
-                )
             else:
                 # Normal version update available
                 logger.warning("⚠️  A newer version is available: {} (you have: {})", latest_version, current_version)
 
-                # Provide appropriate update instructions based on environment
-                if is_docker_environment():
-                    logger.warning("🐳 Update: docker pull stevezzau/media_preview_generator:latest")
-                else:
-                    logger.warning(
-                        "📦 Update: pip install --upgrade git+https://github.com/stevezau/media_preview_generator.git"
-                    )
+                # Path 3 no longer branches on is_docker_environment(): with the
+                # from-source install path gone, both arms said "docker pull".
+                # (Path 2 above still suggests `git pull` — that is a deliberate
+                # affordance for a real git checkout, not an end-user install.)
+                logger.warning("🐳 Update: docker pull stevezzau/media_preview_generator:latest")
 
             logger.warning("🔗 Release notes: https://github.com/stevezau/media_preview_generator/releases/latest")
         else:

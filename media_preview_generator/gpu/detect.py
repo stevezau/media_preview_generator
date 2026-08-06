@@ -800,7 +800,7 @@ def _detect_linux_gpus() -> list[tuple[str, str, dict]]:
                 logger.warning(
                     "{}: every hardware-acceleration method tested ({} primary, {} fallback) failed. "
                     "This GPU will be skipped; CPU fallback still works for jobs that targeted it. "
-                    "See Settings → GPU for the per-device error detail.",
+                    "See Settings → Processing Options → GPU Configuration for the per-device error detail.",
                     card_name,
                     primary_method,
                     fallback_method,
@@ -823,7 +823,7 @@ def _detect_linux_gpus() -> list[tuple[str, str, dict]]:
             logger.warning(
                 "{}: {} {} test failed and there's no fallback acceleration method for this vendor. "
                 "This GPU will be skipped; CPU fallback still works for jobs that targeted it. "
-                "See Settings → GPU for the per-device error detail.",
+                "See Settings → Processing Options → GPU Configuration for the per-device error detail.",
                 card_name,
                 vendor,
                 primary_method,
@@ -921,7 +921,7 @@ def _detect_macos_gpus() -> list[tuple[str, str, dict]]:
             "Apple VideoToolbox hardware-decode test failed on this Mac. "
             "All preview generation will fall back to CPU, which is slow on large libraries. "
             "Fix: confirm `ffmpeg -hwaccels` lists 'videotoolbox' on this machine, "
-            "and that you're not running ffmpeg under Rosetta. See Settings → GPU for details."
+            "and that you're not running ffmpeg under Rosetta. See Settings → Processing Options → GPU Configuration for details."
         )
 
     return detected_gpus

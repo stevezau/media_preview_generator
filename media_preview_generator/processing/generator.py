@@ -1407,7 +1407,7 @@ def generate_images(
             logger.warning(
                 "GPU processing failed for {} (reason: {}, exit code {}) — automatically handing off "
                 "to a CPU worker. No action needed unless this happens to most files, which usually "
-                "indicates a GPU driver problem worth checking under Settings → GPU.",
+                "indicates a GPU driver problem worth checking under Settings → Processing Options → GPU Configuration.",
                 video_file,
                 fallback_reason,
                 rc,

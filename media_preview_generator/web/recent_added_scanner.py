@@ -376,7 +376,7 @@ def _build_plex_client(settings):
     except ImportError as exc:
         logger.warning(
             "Recently Added scan: a required module is missing ({}). "
-            "This usually means the install is incomplete — re-run 'pip install -e .' or rebuild the Docker image.",
+            "This usually means the image is incomplete — re-pull or rebuild the Docker image.",
             exc,
         )
         return None

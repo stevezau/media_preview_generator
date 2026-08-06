@@ -554,7 +554,7 @@ def create_ffmpeg_runner(
                         "This usually means a slow disk, a stuck hardware decoder, or a damaged file. "
                         "Other files in the queue will keep processing; this one will be marked failed. "
                         "If it happens often on the same file, try toggling hardware acceleration off "
-                        "in Settings → GPU.",
+                        "in Settings → Processing Options → GPU Configuration.",
                         FFMPEG_STALL_TIMEOUT_SEC,
                         video_file,
                     )
@@ -596,7 +596,7 @@ def create_ffmpeg_runner(
                 "(unsupported codec, broken hardware acceleration, corrupted file, full disk). "
                 "Other files in the queue will keep processing. "
                 "If this happens often on the same file, try toggling hardware acceleration off "
-                "in Settings → GPU.",
+                "in Settings → Processing Options → GPU Configuration.",
                 video_file,
                 proc.returncode,
                 exit_diagnosis,
