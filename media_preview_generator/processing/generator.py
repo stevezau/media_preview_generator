@@ -66,6 +66,52 @@ from .retry_cascade import (
 # and the safety net agree on what "too many duplicates" means.
 KEYFRAME_DUPLICATE_TOLERANCE = 0.06
 
+# Discussion #283 — the keyframe probe samples the file instead of scanning it
+# end to end.  ``ffprobe -show_entries packet`` has to demux every byte of the
+# container to reach the video packets (measured: 18.1 GB read on an 18.2 GB
+# MKV), so the old full-file scan cost a complete extra read of every file
+# before any work started — 13 s on fast local storage, and past the 120 s
+# timeout on a large file over slower storage, at which point the probe
+# returned "no verdict" and the caller slow-decoded a file whose keyframes
+# were perfectly fine.
+#
+# Seeking to a handful of windows spread through the runtime answers the same
+# question from a fraction of the bytes (measured on the same 18 GB file:
+# 0.33 s vs 7.2 s warm / 13 s cold, identical 2.00 s max-gap verdict).
+#
+# Sampling can miss a sparse stretch that a full scan would have caught; that
+# residual is what the post-extract duplicate check exists for (it re-runs the
+# file without ``-skip_frame`` when the output is duplicate-heavy), so a miss
+# costs one wasted fast pass rather than a wrong BIF.
+KEYFRAME_PROBE_WINDOWS = 12
+
+# Each window must be long enough that a *compliant* file (gap <= gap_limit)
+# is guaranteed at least two keyframes inside it — otherwise a window holding
+# one keyframe would be ambiguous between "sparse file" and "window too short",
+# and the sparse rule in _max_gap_within_windows would misfire.  3x the limit
+# gives that margin with room to spare; the floor covers very short intervals.
+#
+# Deliberately uncapped.  An earlier version clamped this at 60 s, which broke
+# the guarantee for large intervals: the probe can never report a gap above
+# ``window_len``, so at interval >= 57 (gap_limit 60.6) the fast path could not
+# be denied for *any* file, and from interval >= 29 a compliant file could land
+# a single keyframe in a window and be falsely slow-decoded.  A long interval
+# means long windows; the runtime guard below is what keeps the read bounded,
+# by falling back to a full scan when the windows aren't a small slice of it.
+KEYFRAME_PROBE_WINDOW_FACTOR = 3.0
+KEYFRAME_PROBE_WINDOW_MIN_S = 15.0
+
+# Sampling requires the *jumps between* windows to be clearly longer than a
+# window, so _max_gap_within_windows can tell a boundary from a keyframe gap.
+# Windows sit ``duration / (WINDOWS + 1)`` apart, so demanding a runtime of
+# ``window_len * (WINDOWS + 1) * MIN_SPACING_FACTOR`` puts the spacing at
+# 2.5x a window and the jump at 1.5x — comfortably above the split threshold.
+# Below that the windows crowd together, adjacent ones merge into one cluster,
+# and their boundary jump gets measured as a keyframe gap (a 13-minute file at
+# the default 10 s interval reported a 30 s gap and slow-decoded — precisely
+# the #283 symptom this change exists to remove).
+KEYFRAME_PROBE_MIN_SPACING_FACTOR = 2.5
+
 
 class ProcessingResult(Enum):
     """Outcome of processing a single media item.
@@ -749,6 +795,21 @@ def _clean_output_images(output_folder: str) -> None:
             pass
 
 
+def _video_duration_seconds(media_info) -> float | None:
+    """Runtime of the first video track in seconds, or ``None`` when
+    MediaInfo didn't report a usable duration.
+
+    MediaInfo reports milliseconds, and returns it as a str on some builds —
+    hence the float() rather than trusting the attribute's type.
+    """
+    try:
+        tracks = getattr(media_info, "video_tracks", None) or []
+        duration_ms = float(getattr(tracks[0], "duration", 0) or 0) if tracks else 0.0
+    except (TypeError, ValueError, IndexError):
+        return None
+    return duration_ms / 1000.0 if duration_ms > 0 else None
+
+
 def _warn_if_frame_count_disagrees_with_duration(
     video_file: str,
     output_folder: str,
@@ -772,16 +833,12 @@ def _warn_if_frame_count_disagrees_with_duration(
     Logs only; a slightly-off count is never worth failing an otherwise good
     preview over.
     """
-    try:
-        tracks = getattr(media_info, "video_tracks", None) or []
-        duration_ms = float(getattr(tracks[0], "duration", 0) or 0) if tracks else 0.0
-    except (TypeError, ValueError, IndexError):
-        return
-    if duration_ms <= 0:
+    duration_s = _video_duration_seconds(media_info)
+    if duration_s is None:
         return
 
     interval = config.plex_bif_frame_interval
-    expected = duration_ms / 1000.0 / interval
+    expected = duration_s / interval
     # Two intervals of slack absorbs the usual rounding (fps=…:round=up emits
     # a final frame at the tail) without hiding a real mismatch.
     if expected > 0 and abs(image_count - expected) > 2:
@@ -791,59 +848,45 @@ def _warn_if_frame_count_disagrees_with_duration(
             "please report it with this log line. Frames folder: {}",
             os.path.basename(video_file),
             image_count * interval / 60,
-            duration_ms / 1000.0 / 60,
+            duration_s / 60,
             image_count,
             interval,
             output_folder,
         )
 
 
-def _probe_max_keyframe_gap(video_file: str) -> float | None:
-    """Scan the whole file's packets (no decode) and return the biggest
-    gap, in seconds, between consecutive keyframes on the first video
-    stream.
+def _keyframe_probe_window_length(gap_limit: float) -> float:
+    """Window length, in seconds, for one sample of the keyframe probe.
 
-    Used by :func:`generate_images` to decide whether
-    ``-skip_frame:v nokey`` is safe at the user's configured thumbnail
-    interval.  When the largest keyframe gap exceeds the interval, the
-    fast keyframe-only decode path produces duplicate thumbnails — the
-    fps filter has no fresh input frames to choose from between
-    keyframes, so it repeats the previous one across multiple output
-    slots (issue #238).
-
-    Returns:
-        Max keyframe gap in seconds, or ``None`` when the probe could
-        not reach a verdict (corrupt headers, ffprobe failure, fewer
-        than two keyframes found).  Callers must treat ``None`` as
-        "not safe" — better to take the slow path on a quirky file
-        than ship a BIF full of duplicate frames.
+    Sized so a file whose keyframes honour ``gap_limit`` always lands at
+    least two keyframes inside a window — that's what lets the parser read
+    "this window held one keyframe" as "the gap here is larger than the
+    window", rather than as a measurement artefact.  The result is therefore
+    always ``>= 2 * gap_limit``, which also keeps the sparse verdict
+    reachable (the probe can never report a gap larger than one window).
     """
-    try:
-        proc = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "packet=pts_time,flags",
-                "-of",
-                "csv=p=0",
-                video_file,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None
-    if proc.returncode != 0:
-        return None
+    return max(KEYFRAME_PROBE_WINDOW_MIN_S, gap_limit * KEYFRAME_PROBE_WINDOW_FACTOR)
 
+
+def _keyframe_probe_window_starts(duration_s: float, window_len: float, count: int) -> list[float]:
+    """Evenly spaced window start offsets across ``duration_s``.
+
+    Starts sit at ``duration * i / (count + 1)``, so the first window never
+    begins at 0 and the last always ends before EOF — a window that ran past
+    the end would come back empty and read as a false "sparse here" signal.
+    """
+    return [duration_s * i / (count + 1) for i in range(1, count + 1)]
+
+
+def _parse_keyframe_times(stdout: str) -> list[float]:
+    """Extract keyframe presentation timestamps from ``ffprobe`` csv output.
+
+    Input rows are ``pts_time,flags`` (``-of csv=p=0``).  Rows whose flags
+    lack ``K`` are non-key packets; rows with an unparseable timestamp
+    (``N/A`` on a stream carrying only DTS) are skipped rather than fatal.
+    """
     kf_times: list[float] = []
-    for line in proc.stdout.splitlines():
+    for line in stdout.splitlines():
         parts = line.strip().split(",")
         if len(parts) < 2:
             continue
@@ -856,8 +899,157 @@ def _probe_max_keyframe_gap(video_file: str) -> float | None:
             kf_times.append(float(parts[0]))
         except ValueError:
             continue
+    return kf_times
+
+
+def _max_gap_within_windows(kf_times: list[float], window_len: float) -> float | None:
+    """Largest keyframe gap in ``kf_times``, ignoring the jumps *between*
+    sample windows.
+
+    The probe issues one ffprobe call covering several disjoint windows, so
+    consecutive timestamps in the output straddle a window boundary whenever
+    they're further apart than a window is long.  Those jumps are an artefact
+    of sampling, not keyframe spacing, and must not be measured.
+
+    A window holding fewer than two keyframes means the real gap there is at
+    least ``window_len`` (see :func:`_keyframe_probe_window_length`), which is
+    always beyond the caller's limit.  The returned value is then a *lower
+    bound* rather than the true gap: the fast/slow decision is still correct,
+    but the gap quoted in the caller's WARN understates reality on that rare
+    path (a file whose keyframes are 3x sparser than the thumbnail interval).
+
+    Timestamps are de-duplicated first.  ``-read_intervals`` seeks to the
+    keyframe *preceding* each window start, so when several windows land in
+    the same GOP, ffprobe re-emits that one keyframe once per window.  Left
+    in, those repeats cluster together (distance 0) and mask the sparse rule:
+    a file with 300 s keyframes reported a 0.0 s gap and was cleared for the
+    fast path — the one direction that costs a wasted pass rather than time.
+
+    Returns:
+        Max gap in seconds, or ``None`` when no window yielded a measurable
+        pair and none looked sparse either (i.e. the probe learned nothing).
+    """
+    if not kf_times:
+        return None
+
+    # Round before de-duplicating: the repeats are re-reads of one packet, so
+    # they're byte-identical in the output, but rounding costs nothing and
+    # guards against a container reporting the same frame at 1 µs of drift.
+    ordered = sorted({round(ts, 3) for ts in kf_times})
+    clusters: list[list[float]] = [[ordered[0]]]
+    for ts in ordered[1:]:
+        if ts - clusters[-1][-1] > window_len:
+            clusters.append([ts])
+        else:
+            clusters[-1].append(ts)
+
+    # Any window holding a lone keyframe dominates the answer: clusters split
+    # on jumps larger than a window, so every *measured* gap is <= window_len
+    # by construction, and the unmeasurable one is larger than all of them.
+    if any(len(cluster) < 2 for cluster in clusters):
+        return window_len
+
+    gaps = [b - a for cluster in clusters for a, b in zip(cluster, cluster[1:], strict=False)]
+    return max(gaps) if gaps else None
+
+
+def _probe_max_keyframe_gap(
+    video_file: str,
+    duration_s: float | None = None,
+    gap_limit: float | None = None,
+) -> float | None:
+    """Return the biggest gap, in seconds, between consecutive keyframes
+    on the first video stream — without decoding anything.
+
+    Used by :func:`generate_images` to decide whether
+    ``-skip_frame:v nokey`` is safe at the user's configured thumbnail
+    interval.  When the largest keyframe gap exceeds the interval, the
+    fast keyframe-only decode path produces duplicate thumbnails — the
+    fps filter has no fresh input frames to choose from between
+    keyframes, so it repeats the previous one across multiple output
+    slots (issue #238).
+
+    With ``duration_s`` and ``gap_limit`` known, the file is *sampled*:
+    ffprobe seeks to :data:`KEYFRAME_PROBE_WINDOWS` windows spread across
+    the runtime and reads only those (discussion #283 — the full-file scan
+    this replaced read every byte of the container).  Without them — no
+    duration from MediaInfo, or a file too short to sample meaningfully —
+    it falls back to scanning the whole file, which is cheap on exactly
+    those files.
+
+    Args:
+        video_file: Path to the media file.
+        duration_s: Runtime in seconds, when known.
+        gap_limit: Largest keyframe gap the caller would still accept, used
+            to size the sample windows.
+
+    Returns:
+        Max keyframe gap in seconds, or ``None`` when the probe could
+        not reach a verdict (corrupt headers, ffprobe failure, fewer
+        than two keyframes found).  Callers must treat ``None`` as
+        "not safe" — better to take the slow path on a quirky file
+        than ship a BIF full of duplicate frames.
+    """
+    window_len: float | None = None
+    read_intervals: str | None = None
+
+    if duration_s and gap_limit and duration_s > 0 and gap_limit > 0:
+        candidate = _keyframe_probe_window_length(gap_limit)
+        # Sampling needs the runtime to be long enough that the windows sit
+        # well apart (see KEYFRAME_PROBE_MIN_SPACING_FACTOR) — otherwise
+        # adjacent windows merge and their boundary reads as a keyframe gap.
+        # Short files fall back to the full scan, which is cheap on exactly
+        # those files and exact besides.
+        if duration_s > candidate * (KEYFRAME_PROBE_WINDOWS + 1) * KEYFRAME_PROBE_MIN_SPACING_FACTOR:
+            window_len = candidate
+            starts = _keyframe_probe_window_starts(duration_s, window_len, KEYFRAME_PROBE_WINDOWS)
+            read_intervals = ",".join(f"{start:.0f}%+{window_len:.0f}" for start in starts)
+
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0"]
+    if read_intervals:
+        cmd += ["-read_intervals", read_intervals]
+    cmd += ["-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", video_file]
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        # Distinct from the generic failure below: a sampled probe timing out
+        # means the storage stalled, not that the file is odd. Discussion #283
+        # was exactly this, misread as "quirky file" for want of this line.
+        logger.debug("keyframe-probe: timed out after 120s for '{}' (sampled={})", video_file, bool(read_intervals))
+        return None
+    except (subprocess.SubprocessError, OSError) as exc:
+        logger.debug("keyframe-probe: ffprobe could not run for '{}': {}", video_file, exc)
+        return None
+    if proc.returncode != 0:
+        logger.debug(
+            "keyframe-probe: ffprobe exited {} for '{}': {}",
+            proc.returncode,
+            video_file,
+            (proc.stderr or "").strip()[:200],
+        )
+        return None
+
+    kf_times = _parse_keyframe_times(proc.stdout)
+
+    if window_len is not None:
+        gap = _max_gap_within_windows(kf_times, window_len)
+        if gap is None:
+            logger.debug(
+                "keyframe-probe: sampled {} window(s) of '{}' but found no measurable keyframe pair",
+                KEYFRAME_PROBE_WINDOWS,
+                video_file,
+            )
+        return gap
 
     if len(kf_times) < 2:
+        logger.debug("keyframe-probe: full scan of '{}' found {} keyframe(s)", video_file, len(kf_times))
         return None
     return max(b - a for a, b in zip(kf_times, kf_times[1:], strict=False))
 
@@ -1150,11 +1342,17 @@ def generate_images(
     # of byte-identical thumbnails (the BIF then claims interval=2 s but
     # the content only changes every 4–10 s).
     #
-    # The probe scans the whole file in packet-only mode (~1–5 s typical,
-    # no decode work) so we never miss mid-file GOP variations.  When the
-    # max gap exceeds the interval (plus a small tolerance, see below) we
-    # disable the fast path up front, and log a user-friendly WARN line
-    # explaining what happened in plain language (no jargon, no FFmpeg flags).
+    # The probe samples keyframe spacing at windows spread across the runtime
+    # (discussion #283 — it used to scan the whole file, which cost a full
+    # extra read of every file and timed out on large ones).  When the max
+    # gap exceeds the interval (plus a small tolerance, see below) we disable
+    # the fast path up front, and log a user-friendly WARN line explaining
+    # what happened in plain language (no jargon, no FFmpeg flags).
+    #
+    # Sampling trades a little coverage for a lot of I/O: a sparse stretch
+    # between two windows can slip through.  That residual lands in the
+    # post-extract duplicate check below, which re-runs the file without
+    # ``-skip_frame`` — so a miss costs one wasted fast pass, never a wrong BIF.
     #
     # Issue #256 — the comparison is not a strict ``> interval``. Keyframe
     # spacing is rarely an exact multiple of the interval, so a file with
@@ -1169,9 +1367,13 @@ def generate_images(
         # FFmpeg invocations downstream already cover "user cancelled
         # mid-job".  Adding one here would bypass the FFmpeg-terminate
         # path that callers (and tests) rely on.
-        max_gap = _probe_max_keyframe_gap(video_file)
         interval = config.plex_bif_frame_interval
         gap_limit = interval / (1 - KEYFRAME_DUPLICATE_TOLERANCE)
+        max_gap = _probe_max_keyframe_gap(
+            video_file,
+            duration_s=_video_duration_seconds(media_info),
+            gap_limit=gap_limit,
+        )
         if max_gap is None:
             logger.warning(
                 "Slow path for '{}': we couldn't read this file's snapshot frame layout. "
