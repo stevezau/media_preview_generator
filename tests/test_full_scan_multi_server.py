@@ -2300,24 +2300,21 @@ class TestWorkerFFmpegStartedFlag:
         def _wcb(workers_list):
             snapshots.append(list(workers_list))
 
-        call_count = {"n": 0}
-
         def _pcp(*, canonical_path, progress_callback=None, **kwargs):
-            # Scan pass returns instantly and does NOT advance call_count, so
-            # call_count tracks generation calls only (item 1 then item 2).
             if kwargs.get("check_only"):
                 return MagicMock(status=MultiServerStatus.NEEDS_GENERATION, publishers=[])
-            call_count["n"] += 1
-            if call_count["n"] == 1:
+            # Branch on the path, not on call order: the dispatcher makes no
+            # promise about which item a worker picks up first, and under load
+            # it routinely runs item 2 first. Keying off a call counter then
+            # fires item 1's progress callback at item 2 and asserts the
+            # ffmpeg_started expectations against the wrong item.
+            if canonical_path.endswith("item1.mkv"):
                 # Item 1 — real FFmpeg pass; flips the flag True.
                 if progress_callback:
                     progress_callback(80.0, 160.0, 200.0, "7.1x", 20.0)
-                _time.sleep(1.7)
-            else:
-                # Item 2 — cache-hit / skipped-FFmpeg; no progress
-                # callback. Hold open long enough for the poller to
-                # capture an in-flight snapshot of the (reset) state.
-                _time.sleep(1.7)
+            # Both items hold the slot open long enough for the poller to
+            # capture an in-flight snapshot; item 2's must show the reset state.
+            _time.sleep(1.7)
             return SimpleNamespace(
                 publishers=[],
                 canonical_path=canonical_path,
