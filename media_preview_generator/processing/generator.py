@@ -873,7 +873,8 @@ def _keyframe_probe_window_starts(duration_s: float, window_len: float, count: i
 
     Starts sit at ``duration * i / (count + 1)``, so the first window never
     begins at 0 and the last always ends before EOF — a window that ran past
-    the end would come back empty and read as a false "sparse here" signal.
+    the end answers with the file's final keyframe rather than nothing, which
+    reads as a false "sparse here" signal.
     """
     return [duration_s * i / (count + 1) for i in range(1, count + 1)]
 
@@ -1039,6 +1040,17 @@ def _probe_max_keyframe_gap(
     kf_times = _parse_keyframe_times(proc.stdout)
 
     if window_len is not None:
+        # A file holding less video than its container declares (truncated
+        # download, bad remux — MediaInfo still reports the header's runtime)
+        # lands its last windows past the real content, where ffprobe answers
+        # with the file's final keyframe. That reads as sparse spacing, so such
+        # a file takes the slow path. Left deliberately alone: detecting it and
+        # re-measuring the real runtime was implemented and reverted, because
+        # nothing distinguishes it from a healthy file whose tail simply has
+        # sparse keyframes (long static end credits), and the correction turned
+        # those from a correct "slow" into a wrong "fast". A truncated file
+        # yields a short BIF whichever path it takes, and
+        # _warn_if_frame_count_disagrees_with_duration is what surfaces that.
         gap = _max_gap_within_windows(kf_times, window_len)
         if gap is None:
             logger.debug(

@@ -223,6 +223,21 @@ def test_probe_invokes_ffprobe_with_correct_args():
 # keyframe gaps, and that short files still get the exact whole-file answer.
 
 
+def _healthy_rows(duration_s: float = 7200.0) -> str:
+    """Synthetic ffprobe output for a file whose content actually reaches its
+    declared runtime.
+
+    Keyframes must extend near the end, or the probe (correctly) reads the
+    empty trailing windows as a truncated file and re-samples — which would
+    make the argv these tests inspect belong to the retry, not the first pass.
+    """
+    rows = []
+    for i in range(1, KEYFRAME_PROBE_WINDOWS + 1):
+        start = duration_s * i / (KEYFRAME_PROBE_WINDOWS + 1)
+        rows += [(start, "K_"), (start + 1.0, "K_"), (start + 2.0, "K_")]
+    return _ffprobe_stdout(rows)
+
+
 def _sampled(stdout: str, *, duration_s: float = 7200.0, gap_limit: float = 2.13):
     """Run the probe in sampled mode over synthetic ffprobe output."""
     with patch("media_preview_generator.processing.generator.subprocess.run") as mock_run:
@@ -234,7 +249,7 @@ def _sampled(stdout: str, *, duration_s: float = 7200.0, gap_limit: float = 2.13
 def test_sampled_probe_requests_read_intervals():
     """Duration + gap_limit present → ffprobe is asked for a fixed number
     of windows rather than the whole file."""
-    _, args = _sampled(_ffprobe_stdout([(0.0, "K_"), (2.0, "K_")]))
+    _, args = _sampled(_healthy_rows())
     assert "-read_intervals" in args, "sampled mode must not scan the whole file"
     intervals = args[args.index("-read_intervals") + 1]
     assert len(intervals.split(",")) == KEYFRAME_PROBE_WINDOWS
@@ -244,10 +259,10 @@ def test_sampled_probe_requests_read_intervals():
 
 
 def test_sampled_probe_windows_stay_inside_the_runtime():
-    """A window starting past EOF would come back empty and read as a
-    false 'keyframes are sparse here' signal."""
+    """A window starting past EOF is answered with the file's final keyframe
+    rather than nothing, which reads as a false 'sparse here' signal."""
     duration = 7200.0
-    _, args = _sampled(_ffprobe_stdout([(0.0, "K_"), (2.0, "K_")]), duration_s=duration)
+    _, args = _sampled(_healthy_rows(duration), duration_s=duration)
     intervals = args[args.index("-read_intervals") + 1].split(",")
     starts = [float(window.split("%")[0]) for window in intervals]
     length = float(intervals[0].split("%+")[1])
@@ -259,7 +274,7 @@ def test_sampled_probe_windows_stay_inside_the_runtime():
 def test_sampled_probe_window_length_scales_with_gap_limit():
     """Windows must be long enough to hold several keyframes of a
     compliant file, or a single-keyframe window is ambiguous."""
-    _, args = _sampled(_ffprobe_stdout([(0.0, "K_"), (2.0, "K_")]), gap_limit=10.64)
+    _, args = _sampled(_healthy_rows(), gap_limit=10.64)
     length = float(args[args.index("-read_intervals") + 1].split("%+")[1].split(",")[0])
     assert length >= 10.64 * 2, "window must fit at least two gap_limit-spaced keyframes"
 
@@ -455,6 +470,84 @@ def test_sampled_verdict_matches_full_scan_on_real_files(tmp_path, gop_s, expect
 
 
 @needs_ffmpeg
+def test_truncated_file_falls_to_the_slow_path(tmp_path):
+    """A file holding less video than it declares takes the slow path, by
+    decision rather than by accident.
+
+    Chopping a finished MKV leaves the header's duration intact, so the probe
+    aims its last windows past the real content and ffprobe answers them with
+    the file's final keyframe — which reads as sparse spacing. The verdict is
+    therefore "slow" even though the surviving video has dense keyframes.
+
+    That is deliberate. Detecting truncation and re-measuring the real runtime
+    was implemented and then removed: the detector could not distinguish a
+    short file from a healthy one whose tail simply has sparse keyframes (a
+    long static end-credits roll), and it turned a correct "slow" into a wrong
+    "fast" on those — trading a real correctness risk on good files for a
+    little speed on broken ones. A truncated file produces a short BIF either
+    way; ``_warn_if_frame_count_disagrees_with_duration`` is what surfaces it.
+
+    Keep this test as the record of that decision: a future "fix" that makes
+    truncated files fast again should have to justify re-opening it.
+    """
+    whole = Path(_make_test_video(tmp_path / "whole.mkv", _REAL_PROBE_DURATION_S, 1))
+    cut = tmp_path / "cut.mkv"
+    cut.write_bytes(whole.read_bytes()[: int(whole.stat().st_size * 0.6)])
+
+    gap_limit = _REAL_PROBE_INTERVAL / (1 - KEYFRAME_DUPLICATE_TOLERANCE)
+    sampled = _probe_max_keyframe_gap(str(cut), duration_s=float(_REAL_PROBE_DURATION_S), gap_limit=gap_limit)
+
+    assert sampled is None or sampled > gap_limit, (
+        f"a truncated file must land on the slow path, not the fast one (gap={sampled})"
+    )
+
+
+@needs_ffmpeg
+def test_healthy_file_with_a_sparse_tail_still_takes_the_slow_path(tmp_path):
+    """A dense film with a sparse tail — long static end credits — must not
+    be cleared for the fast path.
+
+    This is the shape that killed the truncation handling: those windows come
+    back short-looking, and an earlier revision "corrected" for it by
+    re-measuring only up to the last keyframe seen, which discarded the sparse
+    region and reported the dense body as the whole file. Measured on this
+    fixture: a correct 200 s verdict became 1 s (fast), a real correctness
+    regression on an ordinary file.
+    """
+    dense = _make_test_video(tmp_path / "body.mp4", 1200, 1)
+    sparse = tmp_path / "tail.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=black:size=64x48:rate=5:duration=400",
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p",
+            "-g", "1000", "-keyint_min", "1000", "-sc_threshold", "0",
+            str(sparse),
+        ],
+        check=True,
+        capture_output=True,
+    )  # fmt: skip
+    listing = tmp_path / "concat.txt"
+    listing.write_text(f"file '{dense}'\nfile '{sparse}'\n")
+    mixed = tmp_path / "mixed.mp4"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(listing),
+         "-c", "copy", str(mixed)],
+        check=True,
+        capture_output=True,
+    )  # fmt: skip
+
+    gap_limit = 10 / (1 - KEYFRAME_DUPLICATE_TOLERANCE)
+    full_scan = _probe_max_keyframe_gap(str(mixed))
+    sampled = _probe_max_keyframe_gap(str(mixed), duration_s=1600.0, gap_limit=gap_limit)
+
+    assert full_scan is not None and full_scan > gap_limit, "fixture must genuinely need the slow path"
+    assert sampled is None or sampled > gap_limit, (
+        f"sparse tail must keep the file on the slow path, got gap={sampled} against limit {gap_limit:.2f}"
+    )
+
+
+@needs_ffmpeg
 def test_sampled_probe_asks_real_ffprobe_for_a_fraction_of_the_runtime(tmp_path):
     """The point of the change.  Asserting on the span requested rather than
     wall-clock keeps it meaningful on a warm cache and on any storage speed."""
@@ -523,6 +616,12 @@ def test_max_gap_within_windows_dedupes_without_hiding_a_real_gap():
     """De-duplication must not swallow a genuine measurement: the same
     window's distinct keyframes still produce their real spacing."""
     assert _max_gap_within_windows([600.0, 600.0, 609.0, 609.0], 31.9) == pytest.approx(9.0)
+
+
+def test_max_gap_within_windows_still_flags_sparse_when_earlier_windows_are_lone():
+    """Ignoring the trailing cluster must not blunt the rule: a genuinely
+    sparse file trips it on every earlier window."""
+    assert _max_gap_within_windows([0.0, 300.0, 600.0, 900.0], 60.0) == pytest.approx(60.0)
 
 
 def test_max_gap_within_windows_measured_gap_never_exceeds_window():
