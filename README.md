@@ -9,6 +9,7 @@
 [![Docker Pulls][docker-shield]][docker-url]
 [![codecov][codecov-shield]][codecov-url]
 [![AI-Assisted][ai-shield]][ai-url]
+[![Sponsor][sponsor-shield]][sponsor-url]
 
 </div>
 
@@ -196,6 +197,21 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for local setu
 
 ---
 
+## Support
+
+This project is free and MIT-licensed, and always will be. If it saves your
+media server a few hundred hours of CPU time, sponsorship helps fund the time
+that goes into it — new server integrations, GPU support, and keeping up with
+FFmpeg and the Plex/Emby/Jellyfin APIs.
+
+[:heart: **Sponsor this project**][sponsor-url]
+
+Not in a position to sponsor? Starring the repo, reporting bugs, and answering
+questions in [Discussions](https://github.com/stevezau/media_preview_generator/discussions)
+all help just as much.
+
+---
+
 ## License
 
 Distributed under the MIT License. See [LICENSE](LICENSE) for details.
@@ -238,6 +254,9 @@ Star this repo if you find it useful!
 
 [ai-shield]: https://img.shields.io/badge/AI--Assisted-Cursor%20%2B%20Claude-blue?style=for-the-badge&logo=openai&logoColor=white
 [ai-url]: #about
+
+[sponsor-shield]: https://img.shields.io/badge/Sponsor-db61a2?style=for-the-badge&logo=githubsponsors&logoColor=white
+[sponsor-url]: https://github.com/sponsors/stevezau
 
 [python-shield]: https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white
 [python-url]: https://python.org

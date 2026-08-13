@@ -1,0 +1,3 @@
+# GitHub reads this from the DEFAULT branch only — changes here have no
+# effect until they land on main.
+github: [stevezau]

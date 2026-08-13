@@ -267,6 +267,14 @@
                             <li><hr class="dropdown-divider"></li>
                             <li>
                                 <a class="dropdown-item d-flex align-items-center"
+                                   href="https://github.com/sponsors/stevezau"
+                                   target="_blank" rel="noopener noreferrer">
+                                    <i class="bi bi-heart-fill me-2 sponsor-heart"></i>Sponsor this project
+                                    <i class="bi bi-box-arrow-up-right ms-auto small text-muted" aria-label="Opens in a new tab"></i>
+                                </a>
+                            </li>
+                            <li>
+                                <a class="dropdown-item d-flex align-items-center"
                                    href="https://github.com/stevezau/media_preview_generator"
                                    target="_blank" rel="noopener noreferrer">
                                     <i class="bi bi-github me-2"></i>GitHub repository
@@ -274,6 +282,19 @@
                                 </a>
                             </li>
                         </ul>
+                    </li>
+                    <li class="nav-item">
+                        {# Sponsor heart sits between Help and the theme toggle so it reads as a
+                           utility affordance, not a nag. Styled by #sponsorLinkBtn in style.css,
+                           which opts it into the same 38px circular hover treatment as the bell
+                           and theme toggle (desktop) / full-width labelled row (mobile). #}
+                        <a class="nav-link btn btn-link d-flex align-items-center" id="sponsorLinkBtn"
+                           href="https://github.com/sponsors/stevezau"
+                           target="_blank" rel="noopener noreferrer"
+                           aria-label="Sponsor this project on GitHub" title="Sponsor this project">
+                            <i class="bi bi-heart-fill sponsor-heart"></i>
+                            <span class="d-lg-none ms-2">Sponsor this project</span>
+                        </a>
                     </li>
                     <li class="nav-item">
                         <button type="button" class="nav-link btn btn-link d-flex align-items-center" id="themeToggleBtn"
