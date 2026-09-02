@@ -30,6 +30,31 @@ from media_preview_generator.web.settings_manager import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _stub_jellyfin_plugin_probe(monkeypatch):
+    """Stub the Jellyfin plugin probe for every test in this module.
+
+    Both /health-check and /health-check/apply probe the plugin in
+    addition to check_settings_health, which these tests already mock.
+    Left live, that probe is a REAL HTTP request to a host that doesn't
+    resolve — ~5s apiece, which made these the slowest tests in the suite
+    and the first to blow the 30s per-test timeout whenever the machine
+    was busy. That is how they became intermittent CI failures rather than
+    merely slow tests.
+
+    Module-scoped rather than per-class: the probe is called from several
+    routes, so a new test class here would otherwise silently reintroduce
+    the stall.
+    """
+    from media_preview_generator.servers.jellyfin import JellyfinServer
+
+    monkeypatch.setattr(
+        JellyfinServer,
+        "check_plugin_installed",
+        lambda self: {"installed": True, "version": "10.11.0.3", "error": ""},
+    )
+
+
 @pytest.fixture
 def mock_auth_config(tmp_path, monkeypatch):
     auth_file = str(tmp_path / "auth.json")

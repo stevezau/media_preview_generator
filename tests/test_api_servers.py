@@ -48,6 +48,11 @@ def _seed_media_servers(servers: list[dict]) -> None:
     sm.set("media_servers", servers)
 
 
+def _read_media_servers() -> list[dict]:
+    """Read back settings.json's ``media_servers`` key."""
+    return get_settings_manager().get("media_servers") or []
+
+
 class TestListServers:
     def test_empty_when_no_servers_configured(self, client, auth_headers):
         response = client.get("/api/servers", headers=auth_headers)
@@ -276,12 +281,30 @@ class TestRefreshLibraries:
 
         monkeypatch.setattr(JellyfinServer, "list_libraries", fake_list_libraries)
 
+        # The route also probes identity when the entry has no
+        # server_identity yet. Left unmocked that was a REAL outbound
+        # request to http://jellyfin:8096, retried internally — 5s of
+        # wall-clock in a unit test, and the slowest test in the suite by
+        # 25x. Under load it was the first thing to blow the 30s per-test
+        # timeout, which is how it turned into an intermittent CI failure
+        # rather than just a slow test.
+        from media_preview_generator.servers import ConnectionResult
+
+        def fake_test_connection(self):
+            return ConnectionResult(ok=True, server_id="jf-server-id", server_name="Jellyfin", message="ok")
+
+        monkeypatch.setattr(JellyfinServer, "test_connection", fake_test_connection)
+
         response = client.post(
             "/api/servers/jelly-1/refresh-libraries",
             headers=auth_headers,
         )
         assert response.status_code == 200
         assert response.get_json()["count"] == 1
+        # The probe result is persisted, so webhook auto-routing can match
+        # this server later.
+        stored = _read_media_servers()[0]
+        assert stored["server_identity"] == "jf-server-id"
 
     def test_persists_libraries_and_preserves_enabled_toggle(self, client, auth_headers, monkeypatch):
         from media_preview_generator.servers import Library
