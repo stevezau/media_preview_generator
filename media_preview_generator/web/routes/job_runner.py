@@ -10,7 +10,8 @@ from contextlib import ExitStack
 
 from loguru import logger
 
-from ..jobs import WorkerStatus, get_job_manager, parse_priority
+from ..job_gate import format_wait_message
+from ..jobs import PRIORITY_NORMAL, WorkerStatus, get_job_manager, incoming_job_priority, parse_priority
 
 # Tracks job IDs that already have a run_job thread in flight so that
 # resume / auto-resume calls during the long library scan don't spawn
@@ -311,6 +312,12 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
         # all run BEFORE the gate is acquired, so this flag stays
         # False for those paths.
         _slot_held = False
+        # The priority the slot was ADMITTED at, captured at acquire
+        # time. The user can re-prioritise a running job from the queue
+        # UI; releasing with a live ``job.priority`` read would then
+        # settle up against the wrong counter and corrupt the gate's
+        # high-priority reservation.
+        _slot_priority = PRIORITY_NORMAL
         try:
             import os
 
@@ -699,7 +706,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     # job to CANCELLED without ever consuming a slot.
                     from ..job_gate import get_job_gate
 
-                    def _on_wait(active: int, cap: int) -> None:
+                    def _on_wait(active: int, cap: int, effective_cap: int) -> None:
                         # Fires on every 1s poll tick while waiting.
                         # Safe to take job_manager._lock here — the gate
                         # releases its Condition during wait(), and no
@@ -709,11 +716,12 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             percent=0,
                             processed_items=0,
                             total_items=0,
-                            current_item=f"Queued — waiting for active slot ({active} of {cap} busy)",
+                            current_item=format_wait_message(active, cap, effective_cap),
                         )
 
+                    _slot_priority = job.priority
                     admitted = get_job_gate().acquire(
-                        priority=job.priority,
+                        priority=_slot_priority,
                         cancel_check=lambda: job_manager.is_cancellation_requested(job_id),
                         on_wait=_on_wait,
                     )
@@ -1668,7 +1676,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                 try:
                     from ..job_gate import get_job_gate
 
-                    get_job_gate().release()
+                    get_job_gate().release(_slot_priority)
                 except Exception as gate_err:
                     logger.debug("Could not release job gate for {}: {}", job_id, gate_err)
                 finally:
@@ -1724,9 +1732,10 @@ def _start_recently_added_job_async(
     from ..settings_manager import get_settings_manager
 
     job_manager = get_job_manager()
-    # parse_priority(None) -> PRIORITY_NORMAL, so an unset schedule priority
-    # keeps the previous default while a High/Low pin now actually reaches
-    # the gate (the gate admits at job.priority below).
+    # An explicit High/Low pin on the schedule wins; an unset one falls back
+    # to the global "Incoming job priority" setting (issue #285) so Recently
+    # Added sweeps overtake full scans by default, same as webhooks. Either
+    # way the value reaches the gate, which admits at job.priority below.
     job = job_manager.create_job(
         library_name=library_name,
         config={
@@ -1737,7 +1746,7 @@ def _start_recently_added_job_async(
             "lookback_hours": lookback_hours,
         },
         server_id=server_id,
-        priority=parse_priority(priority),
+        priority=parse_priority(priority) if priority is not None else incoming_job_priority(),
     )
     job_id = job.id
 
@@ -1753,6 +1762,8 @@ def _start_recently_added_job_async(
     def run_job():
         log_handler_id = None
         _slot_held = False
+        # Priority captured at admission — see the note in _start_job_async.
+        _slot_priority = PRIORITY_NORMAL
         try:
             from loguru import logger as loguru_logger
 
@@ -1781,17 +1792,18 @@ def _start_recently_added_job_async(
             # of N really means "at most N concurrent dispatches/scans".
             from ..job_gate import get_job_gate
 
-            def _on_wait(active: int, cap: int) -> None:
+            def _on_wait(active: int, cap: int, effective_cap: int) -> None:
                 job_manager.update_progress(
                     job_id,
                     percent=0,
                     processed_items=0,
                     total_items=0,
-                    current_item=f"Queued — waiting for active slot ({active} of {cap} busy)",
+                    current_item=format_wait_message(active, cap, effective_cap),
                 )
 
+            _slot_priority = job.priority
             admitted = get_job_gate().acquire(
-                priority=job.priority,
+                priority=_slot_priority,
                 cancel_check=lambda: job_manager.is_cancellation_requested(job_id),
                 on_wait=_on_wait,
             )
@@ -1914,7 +1926,7 @@ def _start_recently_added_job_async(
                 try:
                     from ..job_gate import get_job_gate
 
-                    get_job_gate().release()
+                    get_job_gate().release(_slot_priority)
                 except Exception as gate_err:
                     logger.debug("Could not release job gate for {}: {}", job_id, gate_err)
                 _slot_held = False

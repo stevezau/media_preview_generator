@@ -650,6 +650,13 @@ Test Plex connection. Request: `{"url": "...", "token": "..."}`. Returns `{"succ
 }
 ```
 
+`priority` (optional, `1`|`2`|`3`) pins the schedule. Omit it — or send
+`null` on a `PUT` — to leave the schedule unpinned, which is the default: a
+`recently_added` schedule then follows the global `incoming_job_priority`
+setting (High out of the box), and a `full_library` schedule runs at Normal.
+On `PUT`, an absent `priority` key leaves an existing pin untouched; an
+explicit `null` clears it.
+
 `config.job_type` accepts:
 
 - `"full_library"` *(default — optional, omit to get the same behaviour)* — schedule runs a full library scan via the standard job pipeline, processing every item in `library_id` that's missing previews.

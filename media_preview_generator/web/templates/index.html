@@ -364,7 +364,7 @@
                     </div>
                     <div class="mb-3">
                         <label for="jobPriority" class="form-label">Priority
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Order in the queue when more than one job is waiting. High runs before Normal, Normal before Low. The currently-running job isn't interrupted by a higher-priority new job."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Order in the queue when more than one job is waiting: High runs before Normal, Normal before Low. It also applies file-by-file — a running job is never cancelled or paused, but each worker that frees up goes to the highest-priority job first, so a High job overtakes a long scan mid-run."><i class="bi bi-info-circle"></i></button>
                         </label>
                         <select class="form-select" id="jobPriority">
                             <option value="1">High</option>

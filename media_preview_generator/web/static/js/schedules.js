@@ -406,14 +406,23 @@ function updateScheduleList() {
 
         const nextRun = schedule.next_run ? formatDate(schedule.next_run) : '-';
 
-        const schedPri = schedule.priority || 2;
-        const schedPriLabel = PRIORITY_LABELS[schedPri] || 'Normal';
-        const schedPriBadge = PRIORITY_BADGE_CLASS[schedPri] || 'bg-primary';
-
         // Recently-added schedules get a subtle primary badge next to
         // the name so users can tell them apart from full-library scans.
         const cfg = schedule.config || {};
         const isRecentlyAdded = cfg.job_type === 'recently_added';
+
+        // A null priority means "no pin". Rendering it as Normal would lie
+        // about a Recently Added sweep, which inherits the global Incoming
+        // job priority (High by default) at run time.
+        const rawPri = schedule.priority;
+        const priIsDefault = rawPri === null || rawPri === undefined;
+        const schedPriLabel = priIsDefault ? 'Default' : (PRIORITY_LABELS[rawPri] || 'Normal');
+        const schedPriBadge = priIsDefault ? 'bg-secondary' : (PRIORITY_BADGE_CLASS[rawPri] || 'bg-primary');
+        const schedPriTitle = priIsDefault
+            ? (isRecentlyAdded
+                ? 'Follows Settings → Processing Options → Incoming job priority'
+                : 'Full-library scans run at Normal unless pinned')
+            : '';
         const typeBadge = isRecentlyAdded
             ? ' <span class="badge bg-primary bg-opacity-25 text-primary" title="Scans items added in the last ' + (cfg.lookback_hours || 1) + 'h"><i class="bi bi-arrow-repeat me-1"></i>Recently Added</span>'
             : '';
@@ -439,7 +448,7 @@ function updateScheduleList() {
                 <td>${escapeHtml(schedule.name)}${typeBadge}${overlapBadge}</td>
                 <td>${escapeHtml(schedule.library_name) || 'All Libraries'}${_serverBadge(schedule)}</td>
                 <td><code>${escapeHtml(cronDisplay)}</code>${stopBadge}</td>
-                <td><span class="badge ${schedPriBadge} priority-badge">${schedPriLabel}</span></td>
+                <td><span class="badge ${schedPriBadge} priority-badge" title="${escapeHtml(schedPriTitle)}">${schedPriLabel}</span></td>
                 <td>${nextRun}</td>
                 <td>${statusBadge}</td>
                 <td class="text-nowrap">

@@ -1189,6 +1189,11 @@ class ScheduleManager:
         except Exception:
             logger.debug("No stop-cron to remove for schedule {}", schedule_id)
 
+    #: Distinguishes "caller omitted priority" from "caller passed null to
+    #: clear the pin". A plain ``None`` default cannot express both, and
+    #: clearing is what lets a schedule fall back to the global default.
+    _PRIORITY_UNSET = object()
+
     def update_schedule(
         self,
         schedule_id: str,
@@ -1199,7 +1204,7 @@ class ScheduleManager:
         library_name: str | None = None,
         config: dict | None = None,
         enabled: bool | None = None,
-        priority: int | None = None,
+        priority: int | None | object = _PRIORITY_UNSET,
         server_id: str | None = None,
         library_ids: list[str] | None = None,
         stop_time: str | None = None,
@@ -1208,6 +1213,11 @@ class ScheduleManager:
 
         ``stop_time``: pass an "HH:MM" string to set, "" to clear, or
         ``None`` to leave unchanged. D20.
+
+        ``priority``: pass 1/2/3 to pin, ``None`` to clear the pin (the
+        job then takes the global default — for Recently Added sweeps
+        that is the ``incoming_job_priority`` setting, issue #285), or
+        omit the argument entirely to leave it unchanged.
         """
         with self._lock:
             if schedule_id not in self._schedules:
@@ -1234,7 +1244,7 @@ class ScheduleManager:
             schedule["config"] = config
         if enabled is not None:
             schedule["enabled"] = enabled
-        if priority is not None:
+        if priority is not ScheduleManager._PRIORITY_UNSET:
             schedule["priority"] = priority
         if server_id is not None:
             # Empty string means "clear the pin", null means "leave alone".

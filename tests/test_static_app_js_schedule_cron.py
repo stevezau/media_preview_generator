@@ -86,24 +86,36 @@ _VM_PRELUDE = r"""
 const vm = require('vm');
 const fs = require('fs');
 
+function makeElementStub() {
+    return {
+        value: '',
+        checked: false,
+        dataset: {},
+        addEventListener: function () {},
+        innerHTML: '',
+        disabled: false,
+        classList: { add() {}, remove() {}, contains() { return false; }, toggle() {} },
+        style: {},
+        // <select> stubs need an iterable options list — the edit modal
+        // checks membership before assigning a lookback value.
+        options: [],
+    };
+}
+
 function loadSchedulesContext(formValues) {
     // formValues maps element id -> { value?, checked?, dataset? } shape.
     // Anything missing returns null from getElementById to mimic the real
     // browser when a control is absent (the early-return guards rely on
     // this).
+    //
+    // __autoStubMissing flips that: unknown ids get a blank stub instead
+    // of null. Needed by anything that goes through _resetScheduleForm,
+    // which writes to every control in the dialog — enumerating all ~15
+    // in each test would bury the assertion under setup.
+    const autoStub = !!(formValues && formValues.__autoStubMissing);
     const elements = {};
     for (const [id, props] of Object.entries(formValues || {})) {
-        elements[id] = Object.assign(
-            {
-                value: '',
-                checked: false,
-                dataset: {},
-                addEventListener: function () {},
-                innerHTML: '',
-                disabled: false,
-            },
-            props,
-        );
+        elements[id] = Object.assign(makeElementStub(), props);
     }
 
     // Special: query selectors used by saveSchedule for the day checkboxes.
@@ -114,7 +126,12 @@ function loadSchedulesContext(formValues) {
     const docStub = {
         addEventListener: function () {},
         removeEventListener: function () {},
-        getElementById: (id) => elements[id] || null,
+        getElementById: (id) => {
+            if (elements[id]) return elements[id];
+            if (!autoStub) return null;
+            elements[id] = makeElementStub();
+            return elements[id];
+        },
         querySelectorAll: (sel) => {
             if (sel === '.schedule-day') {
                 // For showEditScheduleModal: every day checkbox exists; we'll
@@ -544,6 +561,106 @@ class TestSaveScheduleIntervalBranch:
         assert "cron_expression" not in body or body["cron_expression"] is None, body
         # And stop_time must be cleared for interval triggers (D20 rule).
         assert body.get("stop_time") == "", body
+
+
+# ---------------------------------------------------------------------------
+# saveSchedule / showEditScheduleModal — the priority pin (issue #285)
+# ---------------------------------------------------------------------------
+
+
+def _priority_form(priority_value: str, edit_id: str = "") -> dict:
+    return {
+        "scheduleEditId": {"value": edit_id},
+        "scheduleName": {"value": "Sweep"},
+        "scheduleEnabled": {"checked": True},
+        "schedulePriority": {"value": priority_value},
+        "scheduleStopTime": {"value": ""},
+        "scheduleLibraryAll": {"checked": True},
+        "scheduleServer": {"value": ""},
+        "scheduleTime": {"value": "06:00"},
+        # Only the recently_added branch reads these two; the priority
+        # logic is shared with full_library, but exercising the sweep
+        # path is what issue #285 is actually about.
+        "scheduleLookback": {"value": "1", "options": [{"value": "1"}]},
+        "scheduleSortBy": {"value": ""},
+        "__scheduleType": "specific-time",
+        "__checkedDays": [1],
+        "__scanMode": "recently_added",
+    }
+
+
+class TestSaveSchedulePriorityPin:
+    """The modal must be able to express "no pin".
+
+    Issue #285 shipped a global "Incoming job priority" setting that
+    Recently Added sweeps inherit — but only when the schedule stores
+    ``priority: null``. The first cut of that feature was inert because
+    this exact function did ``parseInt(value, 10) || 2``, so every save
+    posted an explicit Normal and the inherit branch was unreachable. The
+    Python route tests POST JSON directly and cannot catch a regression
+    here; this is the only coverage of the JS half.
+    """
+
+    def test_default_option_posts_null_priority(self) -> None:
+        out = _eval_js("saveSchedule()", form_values=_priority_form(""))
+        posts = out["captured"]["posts"]
+        assert len(posts) == 1, f"expected 1 POST, got {posts}"
+        assert posts[0]["body"]["priority"] is None, (
+            "An empty priority select means 'Default (from Settings)' and MUST post null. "
+            "Posting 2 here is the original #285 bug: the schedule looks unpinned in the UI "
+            f"but is pinned to Normal on disk, so it never inherits the global setting. "
+            f"Got {posts[0]['body']['priority']!r}"
+        )
+
+    @pytest.mark.parametrize(("selected", "expected"), [("1", 1), ("2", 2), ("3", 3)])
+    def test_explicit_pin_posts_that_int(self, selected: str, expected: int) -> None:
+        out = _eval_js("saveSchedule()", form_values=_priority_form(selected))
+        assert out["captured"]["posts"][0]["body"]["priority"] == expected
+
+
+class TestEditModalPriorityPrefill:
+    """Reopening a schedule must show the pin it actually has.
+
+    ``String(schedule.priority || 2)`` rewrote a stored null to Normal the
+    first time anyone opened the modal, so a subsequent save pinned a
+    schedule the user never pinned — the inherit state decayed away on
+    contact with the edit dialog.
+    """
+
+    @staticmethod
+    def _prefill_for(stored_priority) -> str:
+        form = _priority_form("2", edit_id="sch-1")
+        # showEditScheduleModal runs the real _resetScheduleForm first,
+        # which touches every control in the dialog.
+        form["__autoStubMissing"] = True
+        form["__schedules"] = [
+            {
+                "id": "sch-1",
+                "name": "Sweep",
+                "enabled": True,
+                "priority": stored_priority,
+                "trigger_type": "cron",
+                "trigger_value": "0 6 * * 1",
+                "library_ids": [],
+                "config": {"job_type": "recently_added", "lookback_hours": 1},
+            }
+        ]
+        out = _eval_js(
+            "(function(){ showEditScheduleModal('sch-1');"
+            " return document.getElementById('schedulePriority').value; })()",
+            form_values=form,
+        )
+        return out["result"]
+
+    def test_null_priority_prefills_the_default_option(self) -> None:
+        assert self._prefill_for(None) == "", (
+            "A schedule stored with no pin must reopen on 'Default (from Settings)'. "
+            "Prefilling '2' silently converts it to a Normal pin on the next save."
+        )
+
+    @pytest.mark.parametrize("stored", [1, 2, 3])
+    def test_explicit_pin_prefills_itself(self, stored: int) -> None:
+        assert self._prefill_for(stored) == str(stored)
 
 
 # ---------------------------------------------------------------------------

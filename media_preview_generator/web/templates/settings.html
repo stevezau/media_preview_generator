@@ -64,7 +64,24 @@
                     <div class="form-text">
                         Keep this at 3 for most setups. Lower values (1–2) reduce API pressure on media servers when
                         many webhook jobs arrive at once. Higher values (5–10) let more scans run in parallel — useful
-                        only if your servers + disks can handle it.
+                        only if your servers + disks can handle it. While the cap is above 1, one slot is held back for
+                        High-priority jobs so newly imported media never waits behind a long scan.
+                    </div>
+                </div>
+
+                <div class="mb-3">
+                    <label for="incomingJobPriority" class="form-label">Incoming job priority
+                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Priority given to jobs this app creates for itself when new media lands — webhook deliveries (Sonarr/Radarr/Plex/Emby/Jellyfin) and Recently Added sweeps. High lets a new episode jump ahead of a running full-library regeneration, both in the queue and file-by-file. Schedules with their own priority set keep it."><i class="bi bi-info-circle"></i></button>
+                    </label>
+                    <select class="form-select" id="incomingJobPriority" style="max-width: 14rem;">
+                        <option value="1">High</option>
+                        <option value="2">Normal</option>
+                        <option value="3">Low</option>
+                    </select>
+                    <div class="form-text">
+                        Applies to webhook-triggered jobs and Recently Added sweeps. Manual and scheduled full scans
+                        stay at whatever priority you give them, so leaving this on <strong>High</strong> is what makes
+                        new imports overtake a long regeneration run.
                     </div>
                 </div>
 
@@ -80,8 +97,11 @@
                     in the <em>active</em> phase at the same time. Jobs beyond the
                     cap go into the Pending queue and promote to Active one-by-one
                     as slots free up. The cap is priority-aware: High-priority jobs
-                    jump to the front of the Pending queue (but don't interrupt an
-                    already-running job).</p>
+                    jump to the front of the Pending queue, and whenever the cap is
+                    above 1 the last slot is <em>reserved</em> for them — at the
+                    default of 3, two Normal jobs run alongside one High slot kept
+                    free for incoming webhook work. A High job never interrupts an
+                    already-running job; it takes the reserved slot instead.</p>
 
                     <p><strong>What the cap does NOT control:</strong></p>
                     <ul>
@@ -870,6 +890,11 @@ async function loadSettings() {
         document.getElementById('maxConcurrentJobs').value = maxConcurrent;
         document.getElementById('maxConcurrentJobsValue').textContent = String(maxConcurrent);
 
+        const incomingPriority = [1, 2, 3].includes(parseInt(settings.incoming_job_priority, 10))
+            ? parseInt(settings.incoming_job_priority, 10)
+            : 1;
+        document.getElementById('incomingJobPriority').value = String(incomingPriority);
+
         document.getElementById('webhookRetryCount').value = Math.min(10, Math.max(0, parseInt(settings.webhook_retry_count, 10) || 3));
         document.getElementById('webhookRetryDelay').value = settings.webhook_retry_delay || 30;
         document.getElementById('retryDelayValue').textContent = settings.webhook_retry_delay || 30;
@@ -1021,6 +1046,7 @@ async function saveAllSettings() {
             10,
             Math.max(1, parseInt(document.getElementById('maxConcurrentJobs').value, 10) || 3),
         ),
+        incoming_job_priority: parseInt(document.getElementById('incomingJobPriority').value, 10) || 1,
         webhook_retry_count: Math.min(
             10,
             Math.max(0, parseInt(document.getElementById('webhookRetryCount').value, 10) || 0),

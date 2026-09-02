@@ -175,3 +175,137 @@ class TestSchedulesWebhookJobCarriesSourceInOverrides:
             f"now been fixed to forward source through to Config.webhook_source. "
             f"Got overrides={last['overrides']!r}"
         )
+
+
+class TestWebhookJobsUseIncomingPriority:
+    """Issue #285 — both webhook-creation paths must stamp the configured
+    "Incoming job priority" onto the Job they create.
+
+    Without it the Job lands at Normal, ties with the running full scan on
+    ``(priority, submission_order)``, and loses the tiebreak to the scan's
+    earlier submission — the reporter's exact complaint. Both paths are
+    covered because they build their ``create_job`` call independently;
+    fixing one and forgetting the other leaves Sonarr/Radarr users (or
+    Plex/Emby/Jellyfin users) still stuck behind the scan.
+    """
+
+    @staticmethod
+    def _fire_debounced(source: str, path: str, before_fire=None) -> None:
+        """Run ``_schedule_webhook_job`` and its debounce callback inline.
+
+        ``before_fire`` runs between the two, i.e. during the window where
+        the batch is open but the timer has not yet fired.
+        """
+        from media_preview_generator.web import webhooks as wh
+
+        with (
+            patch.object(wh, "_check_and_record_dedup", return_value=None),
+            patch("media_preview_generator.web.webhooks.threading.Timer") as TimerMock,
+        ):
+            captured_fns: list = []
+
+            def fake_timer(_delay, fn, *positional, args=None, kwargs=None):
+                t = MagicMock()
+                t.start = lambda: captured_fns.append((fn, list(positional) + list(args or []), kwargs or {}))
+                return t
+
+            TimerMock.side_effect = fake_timer
+            assert wh._schedule_webhook_job(source, "Some Show S01E01", path) is True
+            if before_fire is not None:
+                before_fire()
+            assert captured_fns, "Timer callback should have been scheduled"
+            fn, fn_args, fn_kwargs = captured_fns[-1]
+            fn(*fn_args, **fn_kwargs)
+
+    @pytest.mark.parametrize(
+        ("configured", "expected"),
+        [
+            (None, 1),  # unset → High, the shipped default
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            ("low", 3),  # label form, as a hand-edited settings.json might hold
+        ],
+    )
+    def test_vendor_webhook_job_gets_configured_priority(self, configured, expected, captured_overrides):
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        if configured is not None:
+            get_settings_manager().set("incoming_job_priority", configured)
+
+        with patch("media_preview_generator.web.webhooks._check_and_record_dedup", return_value=None):
+            job_id = create_vendor_webhook_job(
+                source="plex",
+                title="Test",
+                canonical_path="/data/Movies/Baz (2024)/Baz (2024).mkv",
+                server_id=None,
+            )
+
+        job = get_job_manager().get_job(job_id)
+        assert job is not None
+        assert job.priority == expected, (
+            f"Vendor webhook job must be created at the configured incoming priority "
+            f"({configured!r} → {expected}); got {job.priority}"
+        )
+
+    @pytest.mark.parametrize(
+        ("configured", "expected"),
+        [
+            (None, 1),
+            (2, 2),
+            (3, 3),
+        ],
+    )
+    def test_debounced_webhook_job_gets_configured_priority(self, configured, expected, captured_overrides):
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        if configured is not None:
+            get_settings_manager().set("incoming_job_priority", configured)
+
+        self._fire_debounced("sonarr", "/data/TV Shows/Some Show/Season 01/S01E01.mkv")
+
+        assert captured_overrides, "_schedule_webhook_job MUST hand the job to _start_job_async"
+        job = get_job_manager().get_job(captured_overrides[-1]["job_id"])
+        assert job is not None
+        assert job.priority == expected, (
+            f"Debounced webhook job must be created at the configured incoming priority "
+            f"({configured!r} → {expected}); got {job.priority}"
+        )
+
+    @pytest.mark.parametrize(("configured", "expected"), [(None, 1), (3, 3)])
+    def test_recreated_batch_job_gets_configured_priority(self, configured, expected, captured_overrides):
+        """The third ``create_job`` site: the batch's Job was deleted from
+        the UI before the debounce timer fired, so ``_execute_webhook_job``
+        rebuilds it.
+
+        It is a separate ``create_job`` call from the batch-open one, and
+        the rarely-exercised branch is exactly where a forgotten kwarg
+        survives review. A user who tidies the queue mid-debounce should
+        not silently get a Normal-priority job back.
+        """
+        from media_preview_generator.web import webhooks as wh
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        if configured is not None:
+            get_settings_manager().set("incoming_job_priority", configured)
+
+        def delete_the_batch_job():
+            key = wh._debounce_key("sonarr")
+            batch_job_id = wh._pending_batches[key]["job_id"]
+            assert get_job_manager().delete_job(batch_job_id) is True
+
+        self._fire_debounced(
+            "sonarr",
+            "/data/TV Shows/Some Show/Season 01/S01E02.mkv",
+            before_fire=delete_the_batch_job,
+        )
+
+        assert captured_overrides, "the recreated job must still be handed to _start_job_async"
+        job = get_job_manager().get_job(captured_overrides[-1]["job_id"])
+        assert job is not None, "the recreate branch must produce a live Job"
+        assert job.priority == expected, (
+            f"recreated batch job must carry incoming_job_priority={configured!r} as {expected}; got {job.priority}"
+        )

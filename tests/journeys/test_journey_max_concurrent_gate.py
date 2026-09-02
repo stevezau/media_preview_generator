@@ -11,15 +11,23 @@ test controls release timing. External boundaries (Plex API, FFmpeg,
 publishers) are mocked; the Flask app, JobManager, JobGate, and
 ``_start_job_async`` itself run for real.
 
-Matrix (from the approved plan):
-  1. basic_cap              — cap=3 + 4 jobs → 3 RUNNING, 1 PENDING queued
-  2. drain_on_complete      — finishing 1 active admits the waiting 4th
+Matrix (from the approved plan, extended for the issue #285 reservation):
+  1. basic_cap              — cap=3 + 3 normal jobs → 2 RUNNING, 1 PENDING
+  2. drain_on_complete      — finishing 1 active admits the waiting 3rd
   3. priority_at_gate       — cap=1, 3 waiters; high-pri jumps normal/low
   4. cancel_while_waiting   — cancelled waiter releases without consuming
   5. pause_skips_gate       — global pause bails before gate entirely
   6. runtime_cap_change     — cap lowered at runtime stops new admissions
   7. run_processing_raises  — gate released on exception path
-  8. startup_requeue_flood  — 30 simultaneous starts with cap=3 serialise
+  8. startup_requeue_flood  — 12 simultaneous starts with cap=3 serialise
+  9. high_takes_reserved    — high-pri admits into the slot normals can't
+ 10. reserved_slot_reused   — the reservation survives a high job finishing
+
+Reservation contract (issue #285): while the cap is above 1, normal/low
+jobs are admitted only up to ``cap - 1``; the remaining slot is held for
+priority-1 work so a webhook never waits out a multi-hour full scan. The
+tests below encode the resulting counts explicitly — a "cap=3 → 3 active"
+expectation anywhere in this file would mean the reservation regressed.
 """
 
 from __future__ import annotations
@@ -235,15 +243,17 @@ class TestMaxConcurrentGate:
     """
 
     def test_basic_cap_holds_excess_in_pending(self, app):
-        """cap=3, 4 jobs submitted → exactly 3 enter run_processing;
-        the 4th stays PENDING with a "Queued" current_item message.
+        """cap=3, 3 normal jobs submitted → exactly 2 enter run_processing;
+        the 3rd stays PENDING with a "Queued" current_item message that
+        names the reserved high-priority slot.
 
-        Submits the first 3 jobs, waits for them to ALL reach
-        run_processing (so the gate is definitely saturated), THEN
-        submits the 4th. This avoids races where the 4th thread's
-        config-load runs faster/slower than peers — by the time its
-        acquire() is called, the gate is already full and the waiter
-        enters the "Queued —" state deterministically.
+        Only 2 admit because of the issue #285 reservation: at cap=3 the
+        normal/low budget is ``cap - 1``. Submits the first 2 jobs, waits
+        for them to BOTH reach run_processing (so the normal budget is
+        definitely spent), THEN submits the waiter. This avoids races
+        where the waiter's config-load runs faster/slower than its peers
+        — by the time its acquire() is called, the normal budget is
+        already gone and it enters the "Queued —" state deterministically.
         """
         from media_preview_generator.web.jobs import JobStatus, get_job_manager
         from media_preview_generator.web.routes.job_runner import _start_job_async
@@ -259,16 +269,17 @@ class TestMaxConcurrentGate:
             ),
         ):
             jm = get_job_manager()
-            # Start the first 3 — they should all enter run_processing
+            # Start the first 2 — they should both enter run_processing
             # once config-load + gate-admission complete.
-            active_ids = [jm.create_job(library_name=f"Active {i}", config={}).id for i in range(3)]
+            active_ids = [jm.create_job(library_name=f"Active {i}", config={}).id for i in range(2)]
             for jid in active_ids:
                 _start_job_async(jid, None)
-            assert _wait_for(lambda: len(blocker.entered()) == 3, timeout=10.0), (
-                f"First 3 jobs must reach run_processing under cap=3; got {len(blocker.entered())}"
+            assert _wait_for(lambda: len(blocker.entered()) == 2, timeout=10.0), (
+                f"First 2 normal jobs must reach run_processing under cap=3 (budget = cap - 1); "
+                f"got {len(blocker.entered())}"
             )
 
-            # Gate is now saturated. Submit the waiter.
+            # Normal budget is now spent. Submit the waiter.
             waiter_id = jm.create_job(library_name="Waiter", config={}).id
             _start_job_async(waiter_id, None)
 
@@ -277,24 +288,30 @@ class TestMaxConcurrentGate:
             # for cold-cache first test runs.
             import re
 
-            queued_re = re.compile(r"Queued — waiting for active slot \((\d+) of (\d+) busy\)")
+            queued_re = re.compile(
+                r"Queued — waiting for active slot \((\d+) of (\d+) busy, (\d+) reserved for high priority\)"
+            )
             assert _wait_for(
                 lambda: queued_re.match(jm.get_job(waiter_id).progress.current_item or "") is not None,
                 timeout=10.0,
             ), (
-                f"Waiter must show the fully-formatted 'Queued — waiting for active slot (X of Y busy)' "
-                f"message — the counter is the SUT's contract, not just the prefix. "
+                f"Waiter must show the fully-formatted 'Queued — waiting for active slot "
+                f"(X of Y busy, Z reserved for high priority)' message — the counters AND the "
+                f"reservation clause are the SUT's contract, not just the prefix. "
                 f"got {jm.get_job(waiter_id).progress.current_item!r}"
             )
-            # The counter must match the gate's view: 3 active / 3 cap.
+            # The counters must match the gate's view: 2 active / 3 cap,
+            # 1 of which is reserved (which is WHY this job is waiting —
+            # without the clause the user sees "2 of 3 busy" and files a
+            # bug about the gate refusing to use a free slot).
             match = queued_re.match(jm.get_job(waiter_id).progress.current_item)
-            assert match.group(1) == "3" and match.group(2) == "3", (
-                f"Counter must report (3 of 3 busy); got {match.group(0)!r}"
+            assert (match.group(1), match.group(2), match.group(3)) == ("2", "3", "1"), (
+                f"Counter must report (2 of 3 busy, 1 reserved for high priority); got {match.group(0)!r}"
             )
             # Waiter stays PENDING because on_dispatch_start hasn't fired.
             assert jm.get_job(waiter_id).status is JobStatus.PENDING
-            # No extra admission — still exactly 3 in run_processing.
-            assert len(blocker.entered()) == 3, (
+            # No extra admission — still exactly 2 in run_processing.
+            assert len(blocker.entered()) == 2, (
                 f"Waiter must not leak into run_processing; entered={len(blocker.entered())}"
             )
 
@@ -306,11 +323,16 @@ class TestMaxConcurrentGate:
 
     def test_waiting_job_is_admitted_when_active_completes(self, app):
         """Finishing a running job must wake the queued waiter within 1s
-        (the gate's poll interval) and actually call run_processing."""
+        (the gate's poll interval) and actually call run_processing.
+
+        cap=3 gives normal-priority jobs a budget of 2 (the third slot is
+        reserved for high priority), so 3 normal jobs = 2 active + 1
+        waiting — the shape this test needs.
+        """
         from media_preview_generator.web.jobs import get_job_manager
         from media_preview_generator.web.routes.job_runner import _start_job_async
 
-        _set_cap(2)
+        _set_cap(3)
         blocker = _BlockingRunProcessing()
 
         with (
@@ -595,14 +617,19 @@ class TestMaxConcurrentGate:
             )
 
     def test_runtime_cap_change_takes_effect_without_restart(self, app):
-        """Dropping cap from 3 → 1 at runtime must stop new admissions.
-        Raising back to 3 must wake queued waiters. Validates the
-        cap_provider closure in JobGate._cap."""
+        """Dropping cap from 4 → 1 at runtime must stop new admissions.
+        Raising back to 4 must wake queued waiters. Validates the
+        cap_provider closure in JobGate._cap.
+
+        cap=4 rather than 3 so the normal-priority budget (``cap - 1``)
+        is 3 and the original 3-active / 2-waiting shape still holds
+        under the issue #285 reservation.
+        """
         from media_preview_generator.web.job_gate import get_job_gate
         from media_preview_generator.web.jobs import get_job_manager
         from media_preview_generator.web.routes.job_runner import _start_job_async
 
-        _set_cap(3)
+        _set_cap(4)
         blocker = _BlockingRunProcessing()
 
         with (
@@ -617,7 +644,7 @@ class TestMaxConcurrentGate:
             for jid in ids:
                 _start_job_async(jid, None)
 
-            # With cap=3, 3 enter; 2 wait.
+            # With cap=4, the normal budget is 3: 3 enter; 2 wait.
             assert _wait_for(lambda: len(blocker.entered()) == 3, timeout=3.0)
 
             # Drop cap to 1 — running jobs keep running, but new admissions
@@ -635,19 +662,19 @@ class TestMaxConcurrentGate:
                 f"entered={len(blocker.entered())}, expected=3"
             )
 
-            # Raise cap back to 3 — queued waiters should now re-admit as
+            # Raise cap back to 4 — queued waiters should now re-admit as
             # each release happens.
-            _set_cap(3)
+            _set_cap(4)
             blocker.release(first_three[1])
             blocker.release(first_three[2])
-            # Both waiters should now enter (cap=3, _active went 3→1 via
-            # two releases, _active+waiters=2 fits). Give a generous
-            # 3 polls worth.
+            # Both waiters should now enter (cap=4 → normal budget 3,
+            # _active went 3→1 via two releases, so 2 more fit). Give a
+            # generous 3 polls worth.
             assert _wait_for(
                 lambda: len(blocker.entered()) == 5,
                 timeout=5.0,
             ), (
-                f"After restoring cap=3 and releasing two active jobs, all 5 should have run. "
+                f"After restoring cap=4 and releasing two active jobs, all 5 should have run. "
                 f"entered={len(blocker.entered())}"
             )
             blocker.release_all()
@@ -691,10 +718,12 @@ class TestMaxConcurrentGate:
 
     def test_startup_requeue_flood_is_paced_by_gate(self, app):
         """Simulate the _requeue_interrupted_on_startup path: 12 jobs
-        started in rapid succession with cap=3. Exactly 3 should reach
-        run_processing; the other 9 must sit queued. This is the exact
-        regression that prompted the gate — without it, 30+ simultaneous
-        enumerations would hammer Jellyfin's plugin endpoint."""
+        started in rapid succession with cap=3. Exactly 2 should reach
+        run_processing (the normal budget, ``cap - 1``); the other 10
+        must sit queued. This is the exact regression that prompted the
+        gate — without it, 30+ simultaneous enumerations would hammer
+        Jellyfin's plugin endpoint. It also pins that a revive flood
+        can never eat the slot held for incoming webhook work."""
         from media_preview_generator.web.jobs import get_job_manager
         from media_preview_generator.web.routes.job_runner import _start_job_async
 
@@ -713,22 +742,149 @@ class TestMaxConcurrentGate:
             for jid in ids:
                 _start_job_async(jid, None)
 
-            assert _wait_for(lambda: len(blocker.entered()) == 3, timeout=3.0), (
-                f"Under cap=3, exactly 3 of the 12 flood jobs must enter run_processing; got {len(blocker.entered())}"
+            assert _wait_for(lambda: len(blocker.entered()) == 2, timeout=3.0), (
+                f"Under cap=3, exactly 2 of the 12 flood jobs must enter run_processing "
+                f"(normal budget = cap - 1); got {len(blocker.entered())}"
             )
             # Give it a second — no more should squeeze in.
             time.sleep(1.0)
-            assert len(blocker.entered()) == 3, (
-                f"Flood must stay paced at 3 — no admissions without releases. entered={len(blocker.entered())}"
+            assert len(blocker.entered()) == 2, (
+                f"Flood must stay paced at 2 — no admissions without releases, and the third "
+                f"slot stays reserved for high priority. entered={len(blocker.entered())}"
             )
             queued = [j for j in ids if j not in blocker.entered()]
             queued_messages = [jm.get_job(j).progress.current_item for j in queued]
             assert all(m.startswith("Queued —") for m in queued_messages), (
-                f"All 9 waiting flood jobs must show a 'Queued —' message; got {queued_messages!r}"
+                f"All 10 waiting flood jobs must show a 'Queued —' message; got {queued_messages!r}"
             )
 
             blocker.release_all()
             _wait_for(
                 lambda: all(jm.get_job(j).status.value in ("completed", "cancelled") for j in ids),
                 timeout=8.0,
+            )
+
+    def test_high_priority_admits_into_the_slot_normals_cannot_take(self, app):
+        """The issue #285 reservation, end to end.
+
+        cap=3 with three normal jobs: two run, one waits. A high-priority
+        job submitted afterwards must start immediately — it takes the
+        reserved third slot — while the normal waiter stays queued. This
+        is the reporter's scenario: a Sonarr import landing mid-full-scan
+        should not have to wait out the scan.
+        """
+        from media_preview_generator.web.jobs import PRIORITY_HIGH, PRIORITY_NORMAL, get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        _set_cap(3)
+        blocker = _BlockingRunProcessing()
+
+        with (
+            app.app_context(),
+            patch(
+                "media_preview_generator.jobs.orchestrator.run_processing",
+                side_effect=blocker,
+            ),
+        ):
+            jm = get_job_manager()
+            scans = [jm.create_job(library_name=f"Scan {i}", config={}, priority=PRIORITY_NORMAL) for i in range(2)]
+            for job in scans:
+                _start_job_async(job.id, None)
+            assert _wait_for(lambda: len(blocker.entered()) == 2, timeout=10.0)
+
+            waiter = jm.create_job(library_name="Third scan", config={}, priority=PRIORITY_NORMAL)
+            _start_job_async(waiter.id, None)
+            assert _wait_for(
+                lambda: (jm.get_job(waiter.id).progress.current_item or "").startswith("Queued —"),
+                timeout=10.0,
+            ), "Third normal job must be held by the reservation, not admitted"
+
+            webhook = jm.create_job(library_name="Sonarr import", config={}, priority=PRIORITY_HIGH)
+            _start_job_async(webhook.id, None)
+            assert _wait_for(lambda: webhook.id in blocker.entered(), timeout=10.0), (
+                f"High-priority job must take the reserved slot without waiting for a scan to "
+                f"finish. entered={blocker.entered()!r}"
+            )
+            assert waiter.id not in blocker.entered(), (
+                "The reserved slot belongs to high priority — the queued normal job must not "
+                "have slipped in alongside it"
+            )
+            assert len(blocker.entered()) == 3, (
+                f"Total in flight must never exceed the user's cap of 3; entered={len(blocker.entered())}"
+            )
+
+            blocker.release_all()
+            _wait_for(
+                lambda: all(
+                    jm.get_job(j.id).status.value in ("completed", "cancelled") for j in (*scans, waiter, webhook)
+                ),
+                timeout=10.0,
+            )
+
+    def test_finished_high_job_does_not_widen_the_normal_budget(self, app):
+        """Releasing a high-priority slot must settle up against the
+        high counter, not the normal one.
+
+        If ``release()`` decremented only the total, a finished
+        high-priority job would leave the gate believing one of the
+        remaining normal jobs was the high one — and the queued normal
+        job would be admitted into the reserved slot, putting three
+        normal jobs on a cap of 3. The reservation would then quietly
+        evaporate after the first webhook of the session.
+        """
+        from media_preview_generator.web.jobs import PRIORITY_HIGH, PRIORITY_NORMAL, get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        _set_cap(3)
+        blocker = _BlockingRunProcessing()
+
+        with (
+            app.app_context(),
+            patch(
+                "media_preview_generator.jobs.orchestrator.run_processing",
+                side_effect=blocker,
+            ),
+        ):
+            jm = get_job_manager()
+            scans = [jm.create_job(library_name=f"Scan {i}", config={}, priority=PRIORITY_NORMAL) for i in range(2)]
+            for job in scans:
+                _start_job_async(job.id, None)
+            assert _wait_for(lambda: len(blocker.entered()) == 2, timeout=10.0)
+
+            webhook = jm.create_job(library_name="Sonarr import", config={}, priority=PRIORITY_HIGH)
+            _start_job_async(webhook.id, None)
+            assert _wait_for(lambda: webhook.id in blocker.entered(), timeout=10.0)
+
+            waiter = jm.create_job(library_name="Third scan", config={}, priority=PRIORITY_NORMAL)
+            _start_job_async(waiter.id, None)
+            assert _wait_for(
+                lambda: (jm.get_job(waiter.id).progress.current_item or "").startswith("Queued —"),
+                timeout=10.0,
+            )
+
+            # The high job finishes. Two normal jobs remain active, which
+            # is already the whole normal budget — the waiter must stay put.
+            blocker.release(webhook.id)
+            assert _wait_for(
+                lambda: jm.get_job(webhook.id).status.value in ("completed", "cancelled"),
+                timeout=10.0,
+            )
+            time.sleep(1.5)  # Two gate poll ticks.
+            assert waiter.id not in blocker.entered(), (
+                f"Normal waiter was admitted into the reserved slot after the high job finished "
+                f"— release() is not decrementing the high-slot counter. entered={blocker.entered()!r}"
+            )
+
+            # A normal job finishing does free the waiter.
+            blocker.release(scans[0].id)
+            assert _wait_for(lambda: waiter.id in blocker.entered(), timeout=10.0), (
+                f"Waiter must admit once a NORMAL peer finishes; entered={blocker.entered()!r}"
+            )
+
+            blocker.release_all()
+            _wait_for(
+                lambda: all(
+                    jm.get_job(j.id).status.value in ("completed", "cancelled") for j in (*scans, waiter, webhook)
+                ),
+                timeout=10.0,
             )

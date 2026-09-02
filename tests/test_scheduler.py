@@ -187,6 +187,98 @@ class TestScheduleCRUD:
         assert updated["trigger_type"] == "cron"
         assert updated["trigger_value"] == "0 3 * * *"
 
+    def test_update_schedule_omitting_priority_leaves_the_pin(self, scheduler_manager):
+        """Not sending ``priority`` must not disturb an existing pin.
+
+        Every other field follows "None = leave alone", so ``priority``
+        needs a sentinel to keep that behaviour while still allowing an
+        explicit clear (issue #285).
+        """
+        schedule = scheduler_manager.create_schedule(
+            name="Pinned",
+            library_id="123",
+            library_name="Movies",
+            cron_expression="0 2 * * *",
+            priority=3,
+        )
+
+        updated = scheduler_manager.update_schedule(schedule["id"], name="Renamed")
+
+        assert updated["priority"] == 3
+
+    def test_update_schedule_null_priority_clears_the_pin(self, scheduler_manager):
+        """Explicit ``None`` unpins, so the job falls back to the global
+        default — for Recently Added sweeps that is
+        ``incoming_job_priority`` (issue #285).
+
+        Before the sentinel, ``if priority is not None`` made this a no-op:
+        a user switching a schedule back to "Default (from Settings)" saw
+        the modal accept the change and the old pin silently survive.
+        """
+        schedule = scheduler_manager.create_schedule(
+            name="Pinned",
+            library_id="123",
+            library_name="Movies",
+            cron_expression="0 2 * * *",
+            priority=1,
+        )
+
+        updated = scheduler_manager.update_schedule(schedule["id"], priority=None)
+
+        assert updated["priority"] is None
+
+    def test_update_schedule_can_still_set_a_pin(self, scheduler_manager):
+        schedule = scheduler_manager.create_schedule(
+            name="Unpinned",
+            library_id="123",
+            library_name="Movies",
+            cron_expression="0 2 * * *",
+        )
+        assert schedule["priority"] is None
+
+        updated = scheduler_manager.update_schedule(schedule["id"], priority=1)
+
+        assert updated["priority"] == 1
+
+    @pytest.mark.parametrize(
+        ("stored_priority", "expected_forwarded"),
+        [
+            (None, None),  # unpinned -> the recently-added path applies the global default
+            (1, 1),
+            (3, 3),
+        ],
+    )
+    def test_run_now_forwards_the_stored_priority_for_recently_added(
+        self, scheduler_manager, stored_priority, expected_forwarded
+    ):
+        """Drive the REAL caller: a persisted schedule through ``run_now``.
+
+        Calling ``_start_recently_added_job_async(priority=...)`` directly
+        proves nothing about what the app does, because the value comes
+        from ``schedules.json``. ``None`` has to survive the whole trip for
+        the incoming-priority fallback to ever fire.
+        """
+        schedule = scheduler_manager.create_schedule(
+            name="Sweep",
+            library_id="123",
+            library_name="Movies",
+            cron_expression="*/15 * * * *",
+            config={"job_type": "recently_added", "lookback_hours": 1},
+            priority=stored_priority,
+        )
+
+        with patch(
+            "media_preview_generator.web.routes.job_runner._start_recently_added_job_async",
+            return_value="job-1",
+        ) as mock_start:
+            assert scheduler_manager.run_now(schedule["id"]) is True
+
+        mock_start.assert_called_once()
+        assert mock_start.call_args.kwargs["priority"] == expected_forwarded, (
+            f"stored priority {stored_priority!r} must reach the helper unchanged; "
+            f"got {mock_start.call_args.kwargs.get('priority')!r}"
+        )
+
     def test_update_nonexistent_schedule(self, scheduler_manager):
         """Test that updating a nonexistent schedule returns None."""
         assert scheduler_manager.update_schedule("nonexistent", name="X") is None
@@ -972,6 +1064,40 @@ class TestExecuteScheduledJobDispatch:
         assert kwargs.get("parent_schedule_id") == schedule["id"], (
             f"parent_schedule_id missing — schedule's stop_time can't cancel this job. kwargs={kwargs!r}"
         )
+        # Issue #285: ABSENCE is the contract. An unpinned full-library scan
+        # must let run_scheduled_job fall back to PRIORITY_NORMAL — it must
+        # NOT inherit the global incoming-priority setting the way a
+        # Recently Added sweep does. Forwarding a value here (even None)
+        # would eventually put full scans on the reserved High slot and
+        # cancel out the reservation the whole feature depends on.
+        assert "priority" not in kwargs, (
+            f"unpinned full_library schedules must not forward a priority at all; kwargs={kwargs!r}"
+        )
+
+    def test_dispatches_full_library_with_an_explicit_pin(self, scheduler_manager):
+        """A pinned full-library schedule still forwards its priority."""
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        mock_callback = MagicMock()
+        scheduler_manager.set_run_job_callback(mock_callback)
+
+        schedule = scheduler_manager.create_schedule(
+            name="Pinned scan",
+            library_id="123",
+            library_name="Movies",
+            cron_expression="0 2 * * *",
+            priority=3,
+        )
+
+        execute_scheduled_job(
+            schedule["id"],
+            library_id="123",
+            library_name="Movies",
+            config={},
+            priority=3,
+        )
+
+        assert mock_callback.call_args.kwargs["priority"] == 3
 
     def test_dispatches_recently_added_calls_multi_server_scan(self, scheduler_manager, monkeypatch):
         """A schedule with job_type='recently_added' dispatches via the

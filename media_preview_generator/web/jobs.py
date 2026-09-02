@@ -164,6 +164,25 @@ def parse_priority(value) -> int:
     return PRIORITY_NORMAL
 
 
+def incoming_job_priority() -> int:
+    """Priority for jobs the app creates for itself, from settings.
+
+    Covers the two "new media just landed" paths — webhook deliveries
+    (Sonarr/Radarr/Plex/Emby/Jellyfin) and Recently Added sweeps. It
+    defaults to :data:`PRIORITY_HIGH` (issue #285) so a freshly imported
+    episode overtakes a running full-library regeneration instead of
+    queueing behind its remaining ~100k items. Users who prefer the old
+    behaviour set it to Normal under Settings → Processing Options →
+    Job Execution → Incoming job priority.
+
+    Returns:
+        The configured priority as an int (1=high, 2=normal, 3=low).
+    """
+    from .settings_manager import get_settings_manager
+
+    return parse_priority(get_settings_manager().get("incoming_job_priority", PRIORITY_HIGH))
+
+
 class JobStatus(str, Enum):
     """Job status enumeration."""
 
@@ -1270,6 +1289,7 @@ class JobManager:
         publishers: list[dict] | None = None,
         wait_active: int | None = None,
         wait_cap: int | None = None,
+        wait_effective_cap: int | None = None,
     ) -> Job | None:
         """Mutate the originating dispatch Job to ADD or UPDATE retry-chain state.
 
@@ -1298,7 +1318,9 @@ class JobManager:
                                     "Queued — waiting for active slot (X of Y busy)";
                                     fired by JobGate's on_wait callback while a retry
                                     callback is blocked waiting for max_concurrent_jobs.
-                                    Requires ``wait_active`` + ``wait_cap`` kwargs.
+                                    Requires ``wait_active`` + ``wait_cap`` kwargs
+                                    (plus ``wait_effective_cap`` to name the
+                                    high-priority reservation).
           * ``"running"``         → status=RUNNING, retry_eta cleared (countdown stops)
           * ``"completed"``       → status=COMPLETED, completed_at set, error cleared
           * ``"exhausted"``       → status=FAILED with ``reason`` written to ``error``
@@ -1445,15 +1467,24 @@ class JobManager:
                 job.progress.current_item = ""
             elif outcome == "queued_for_slot":
                 # Retry callback fired (backoff is over) but waiting for
-                # a JobGate slot. Same status text format dispatches use
-                # at job_runner.py:533-544 so the dashboard's existing
-                # "Queued — waiting" regex matches.
+                # a JobGate slot. Renders through the same
+                # ``job_gate.format_wait_message`` the two dispatch call
+                # sites use, so the dashboard never shows two phrasings
+                # for one state (and the "Queued — waiting" regex matches).
+                # Imported lazily: job_gate imports this module for the
+                # PRIORITY_* constants, so a module-level import here
+                # would close the cycle.
+                from .job_gate import format_wait_message
+
                 job.status = JobStatus.PENDING
                 job.progress.retry_eta = None
                 job.progress.retry_wait_total = None
                 active = wait_active if wait_active is not None else 0
                 cap = wait_cap if wait_cap is not None else 0
-                job.progress.current_item = f"Queued — waiting for active slot ({active} of {cap} busy)"
+                # Callers that don't know the waiter's priority get the
+                # plain message rather than a wrong reservation claim.
+                effective_cap = wait_effective_cap if wait_effective_cap is not None else cap
+                job.progress.current_item = format_wait_message(active, cap, effective_cap)
                 job.error = None
             elif outcome == "running":
                 job.status = JobStatus.RUNNING

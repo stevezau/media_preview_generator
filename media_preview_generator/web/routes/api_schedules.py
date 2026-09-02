@@ -159,9 +159,14 @@ def update_schedule(schedule_id):
             library_name=data.get("library_name"),
             config=data.get("config"),
             enabled=data.get("enabled"),
-            priority=data.get("priority"),
             server_id=data.get("server_id"),
         )
+        # priority: absent = leave alone; null = clear the pin (fall back to
+        # the global default); 1|2|3 = pin. Forwarding ``data.get("priority")``
+        # unconditionally would make "absent" and "null" indistinguishable,
+        # so an unpinned schedule could never be saved.
+        if "priority" in data:
+            update_kwargs["priority"] = data.get("priority")
         if "stop_time" in data:
             update_kwargs["stop_time"] = str(data.get("stop_time") or "").strip()
         schedule = schedule_manager.update_schedule(**update_kwargs)

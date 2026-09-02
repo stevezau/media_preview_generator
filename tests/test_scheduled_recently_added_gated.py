@@ -45,6 +45,23 @@ def _reset_singletons():
         jr_mod._inflight_jobs.clear()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_settings(tmp_path, monkeypatch):
+    """Point the settings singleton at a per-test dir.
+
+    ``_start_recently_added_job_async`` now consults
+    ``incoming_job_priority()`` when a schedule has no priority pin
+    (issue #285), so an unrelated test leaving a value in the shared
+    singleton would silently change what these tests assert.
+    """
+    import media_preview_generator.web.settings_manager as sm_mod
+
+    sm_mod.reset_settings_manager()
+    monkeypatch.setenv("CONFIG_DIR", str(tmp_path / "settings"))
+    yield
+    sm_mod.reset_settings_manager()
+
+
 def _wait_for(predicate, timeout=3.0, interval=0.02):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -117,7 +134,14 @@ class TestStartRecentlyAddedJobAsync:
 
     def test_acquires_gate_before_running_scan(self, tmp_path):
         """The gate must be acquired BEFORE the scan runs — otherwise
-        the cap doesn't actually bound concurrent work."""
+        the cap doesn't actually bound concurrent work.
+
+        Also pins that ``release`` settles up at the SAME priority
+        ``acquire`` was admitted at (issue #285). The gate tracks
+        high-priority slots separately to keep one reserved; releasing at
+        a different priority would decrement the wrong counter and leak
+        the reservation away.
+        """
         import media_preview_generator.web.jobs as jobs_mod
         from media_preview_generator.web.jobs import JobManager
         from media_preview_generator.web.routes.job_runner import (
@@ -128,11 +152,22 @@ class TestStartRecentlyAddedJobAsync:
             jobs_mod._job_manager = JobManager(config_dir=str(tmp_path / "config"))
 
         call_log: list[str] = []
+        acquired_at: list[int] = []
+        released_at: list[int] = []
         scan_done = threading.Event()
 
+        def fake_acquire(**kw):
+            acquired_at.append(kw["priority"])
+            call_log.append("acquire")
+            return True
+
+        def fake_release(priority):
+            released_at.append(priority)
+            call_log.append("release")
+
         gate_mock = MagicMock()
-        gate_mock.acquire = MagicMock(side_effect=lambda **kw: call_log.append("acquire") or True)
-        gate_mock.release = lambda: call_log.append("release")
+        gate_mock.acquire = MagicMock(side_effect=fake_acquire)
+        gate_mock.release = fake_release
 
         def fake_scan(*args, **kwargs):
             call_log.append("scan")
@@ -174,13 +209,17 @@ class TestStartRecentlyAddedJobAsync:
         assert call_log.index("scan") < call_log.index("release"), (
             f"gate.release MUST happen after the scan returns — got {call_log!r}"
         )
+        assert acquired_at == released_at == [1], (
+            f"acquire and release must use the same priority (High here, from the default "
+            f"incoming_job_priority) — acquired={acquired_at!r}, released={released_at!r}"
+        )
 
     @pytest.mark.parametrize(
         "passed_priority,expected",
         [
             (1, 1),  # High pin must reach the Job (issue #259)
+            (2, 2),  # An explicit Normal pin must survive the #285 fallback
             (3, 3),  # Low pin must reach the Job
-            (None, 2),  # unset -> PRIORITY_NORMAL (parse_priority default)
         ],
     )
     def test_priority_forwarded_to_created_job(self, tmp_path, passed_priority, expected):
@@ -190,6 +229,11 @@ class TestStartRecentlyAddedJobAsync:
         the helper had no parameter for it and ``create_job`` fell back to
         PRIORITY_NORMAL, so a High/Low schedule always ran at Normal. The
         gate admits at ``job.priority``, so this also governs queue order.
+
+        The Normal cell matters since issue #285: an unpinned schedule now
+        falls back to the global incoming-priority setting (High by
+        default), so "the schedule said Normal" and "the schedule said
+        nothing" must not collapse into the same code path.
         """
         import media_preview_generator.web.jobs as jobs_mod
         from media_preview_generator.web.jobs import JobManager
@@ -228,6 +272,66 @@ class TestStartRecentlyAddedJobAsync:
         assert job is not None
         assert job.priority == expected, (
             f"schedule priority {passed_priority!r} must reach the Job as {expected}; got {job.priority}"
+        )
+
+    @pytest.mark.parametrize(
+        "configured,expected",
+        [
+            (None, 1),  # nothing configured -> High, the shipped default
+            (1, 1),
+            (2, 2),
+            (3, 3),
+        ],
+    )
+    def test_unpinned_schedule_inherits_incoming_job_priority(self, tmp_path, configured, expected):
+        """A Recently Added schedule with no priority of its own follows
+        the global "Incoming job priority" setting (issue #285).
+
+        The reporter asked for recently-added sweeps to jump the queue
+        alongside webhooks. Sweeps created before the schedule UI grew a
+        priority selector have no pin at all, so the fallback — not the
+        pin — is what actually decides their priority for most users.
+        """
+        import media_preview_generator.web.jobs as jobs_mod
+        from media_preview_generator.web.jobs import JobManager
+        from media_preview_generator.web.routes.job_runner import (
+            _start_recently_added_job_async,
+        )
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        if configured is not None:
+            get_settings_manager().set("incoming_job_priority", configured)
+
+        with jobs_mod._job_lock:
+            jobs_mod._job_manager = JobManager(config_dir=str(tmp_path / "config"))
+        jm = jobs_mod._job_manager
+
+        scan_called = threading.Event()
+
+        with (
+            patch(
+                "media_preview_generator.jobs.orchestrator._run_recently_added_multi_server",
+                side_effect=lambda *a, **k: scan_called.set() or {},
+            ),
+            patch("media_preview_generator.config.load_config", return_value=MagicMock()),
+            patch(
+                "media_preview_generator.web.routes.job_runner._build_selected_gpus",
+                return_value=[],
+            ),
+        ):
+            job_id = _start_recently_added_job_async(
+                schedule_id="sched-unpinned",
+                server_id=None,
+                library_ids=None,
+                lookback_hours=1.0,
+                library_name="Recently added: all libraries",
+            )
+            assert scan_called.wait(timeout=3.0)
+
+        job = jm.get_job(job_id)
+        assert job is not None
+        assert job.priority == expected, (
+            f"unpinned schedule must inherit incoming_job_priority={configured!r} as {expected}; got {job.priority}"
         )
 
     @pytest.mark.parametrize(

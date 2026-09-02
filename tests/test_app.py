@@ -164,6 +164,41 @@ class TestRunScheduledJob:
                 )
 
     @patch("media_preview_generator.web.routes._start_job_async")
+    def test_unpinned_full_scan_stays_normal_even_when_incoming_is_high(self, mock_start, tmp_path):
+        """``incoming_job_priority`` must not leak into full-library scans.
+
+        The setting exists to let *new media* overtake a long scan. If the
+        scan itself inherited High, both sides would sit on the reserved
+        slot and the reservation would buy nobody anything — the feature
+        would silently undo itself. High is the shipped default, so this
+        is the configuration nearly every install runs.
+        """
+        from media_preview_generator.web.app import create_app
+
+        config_dir = str(tmp_path / "scheduled_job_priority")
+        os.makedirs(config_dir, exist_ok=True)
+        with open(os.path.join(config_dir, "auth.json"), "w") as f:
+            json.dump({"token": "test-token-12345678"}, f)
+        with open(os.path.join(config_dir, "settings.json"), "w") as f:
+            json.dump({"setup_complete": True, "incoming_job_priority": 1}, f)
+
+        with patch.dict(
+            os.environ,
+            {"CONFIG_DIR": config_dir, "WEB_AUTH_TOKEN": "test-token-12345678"},
+        ):
+            from media_preview_generator.web.jobs import PRIORITY_NORMAL, get_job_manager
+
+            app = create_app(config_dir=config_dir)
+            with app.app_context():
+                run_scheduled_job(library_name="Movies")
+
+                job = get_job_manager().get_job(mock_start.call_args.args[0])
+                assert job.priority == PRIORITY_NORMAL, (
+                    f"An unpinned scheduled full scan must run at Normal even with "
+                    f"incoming_job_priority=High; got priority={job.priority}."
+                )
+
+    @patch("media_preview_generator.web.routes._start_job_async")
     def test_includes_library_id_in_config(self, mock_start, tmp_path):
         from media_preview_generator.web.app import create_app
 

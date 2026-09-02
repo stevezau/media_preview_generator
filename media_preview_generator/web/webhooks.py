@@ -20,7 +20,7 @@ from flask import Blueprint, jsonify, request
 from loguru import logger
 
 from .auth import api_token_required, validate_token
-from .jobs import get_job_manager
+from .jobs import get_job_manager, incoming_job_priority
 from .settings_manager import get_settings_manager
 
 webhooks_bp = Blueprint("webhooks_bp", __name__, url_prefix="/api/webhooks")
@@ -445,6 +445,7 @@ def create_vendor_webhook_job(
         server_id=b_sid,
         server_name=b_sname,
         server_type=b_stype,
+        priority=incoming_job_priority(),
     )
 
     settings = get_settings_manager()
@@ -855,6 +856,7 @@ def _schedule_webhook_job(
                 job_manager = get_job_manager()
                 job = job_manager.create_job(
                     library_name=safe_title,
+                    priority=incoming_job_priority(),
                     config={
                         "source": source,
                         "path_count": 1,
@@ -1113,6 +1115,7 @@ def _execute_webhook_job(debounce_key: str) -> None:
                 server_id=b_sid,
                 server_name=b_sname,
                 server_type=b_stype,
+                priority=incoming_job_priority(),
             )
         else:
             job_manager.update_job_library_name(job.id, library_display)

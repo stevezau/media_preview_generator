@@ -74,6 +74,36 @@ After setup completes, you'll land on the dashboard. You can add additional serv
 > gate releases them in priority order as slots free up. Manual, webhook, and
 > scheduled jobs all share the same gate. To hard-stop everything, use
 > **Pause Processing** — the global pause is persisted and survives restarts.
+>
+> Priority also decides who gets the next free worker **file by file**, so a
+> High job overtakes a running full scan without cancelling or pausing it — the
+> scan simply stops being fed new files until the High job drains. Whenever the
+> concurrent-job cap is above 1, the last slot is reserved for High-priority
+> work so an incoming webhook never has to wait out a multi-hour scan.
+
+### Letting new imports jump the queue
+
+A full-library regeneration can run for hours. **Settings → Processing Options →
+Incoming job priority** controls the priority stamped on the jobs this app
+creates for itself when new media lands — webhook deliveries from
+Sonarr/Radarr/Plex/Emby/Jellyfin, and **Recently Added** sweeps. It defaults to
+**High**, so a freshly imported episode is processed within one file of arriving
+even while a full scan is running.
+
+Manual and scheduled full scans keep whatever priority you gave them (Normal by
+default), which is what leaves room for the High jobs to overtake.
+
+A schedule only follows this setting while its own **Job Priority** is
+**Default (from Settings)** — the value new schedules start on. Pick High,
+Normal, or Low there to pin that schedule instead, and the global setting stops
+applying to it. Schedules created before this option existed carry an explicit
+**Normal** pin; switch them to **Default (from Settings)** if you want their
+sweeps to jump the queue.
+
+Set the global setting to **Normal** to go back to strict
+first-come-first-served ordering. The reserved slot is independent of this
+setting — it is held back whenever the concurrent-job cap is above 1, so a job
+you pin to High by hand can still overtake a running scan.
 
 **Manual Generation:**
 
@@ -584,7 +614,7 @@ Use this table to diagnose common failures quickly.
 | `GPU permission denied` | Container user cannot access GPU device files | Set `PUID`/`PGID` to a user with GPU access; on Unraid use `PUID=99`, `PGID=100`. |
 | `Plex config folder does not exist` / unwritable | Incorrect mount or wrong `plex_config_folder` | Confirm the mounted `/plex` path contains `Cache`, `Media`, and `Metadata`. Previews Readiness surfaces this per-Plex-server. |
 | `Connection failed` on a server card | Bad URL, unreachable host, or invalid token | Use server IP (not `localhost` in Docker), verify the server is running, and test the URL + token with curl. |
-| Webhook job sits in **Pending** for a long time | The concurrent-job gate is full — active jobs are running at capacity | Wait for a slot to free up (priority-ordered), raise the cap in **Settings → Processing Options**, or check the global **Pause Processing** toggle isn't on. Pausing ≠ cancelling — paused jobs stay in Pending. |
+| Webhook job sits in **Pending** for a long time | The concurrent-job gate is full — active jobs are running at capacity | Check **Settings → Processing Options → Incoming job priority** is **High** (the default) so webhook jobs take the reserved slot instead of queueing. Otherwise wait for a slot to free up (priority-ordered), raise the cap, or check the global **Pause Processing** toggle isn't on. Pausing ≠ cancelling — paused jobs stay in Pending. |
 | Webhook returns `401` | Invalid or missing authentication | In Sonarr/Radarr webhook settings, leave **Username** empty and set **Password** to your API token or webhook secret. |
 | Webhook test passes but imports do not trigger jobs | Wrong webhook events or webhooks disabled | Enable **On Import** in Radarr/Sonarr and verify `webhook_enabled=true`. |
 | New files are imported but previews are not generated | Plex indexing delay or wrong library mapping | Increase webhook delay and verify Radarr/Sonarr library mapping in Webhooks settings. |

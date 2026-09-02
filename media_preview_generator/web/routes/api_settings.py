@@ -10,6 +10,7 @@ from loguru import logger
 from ...config import validate_processing_thread_totals
 from ...utils import is_docker_environment
 from ..auth import api_token_required, setup_or_auth_required
+from ..jobs import PRIORITY_FROM_LABEL, PRIORITY_HIGH, PRIORITY_LABELS, parse_priority
 from . import api
 from ._helpers import (
     MEDIA_ROOT,
@@ -320,6 +321,11 @@ def get_settings():
             # manually-edited settings.json can't starve the queue or
             # overwhelm media servers on bursts.
             "max_concurrent_jobs": max(1, min(10, int(settings.get("max_concurrent_jobs", 3) or 3))),
+            # Issue #285 — priority stamped on jobs the app creates for
+            # itself (webhooks + Recently Added sweeps). Defaults to High
+            # so newly-imported media overtakes a running full scan
+            # without the user having to demote the scan by hand.
+            "incoming_job_priority": parse_priority(settings.get("incoming_job_priority", PRIORITY_HIGH)),
             # D17 — backup retention (count + max-age days). 0 max_age_days
             # disables age-based pruning so existing installs keep behaving
             # exactly as before until the user opts in.
@@ -367,6 +373,7 @@ _SAVE_SETTINGS_ALLOWED_FIELDS = (
     "auto_requeue_on_restart",
     "requeue_max_age_minutes",
     "max_concurrent_jobs",
+    "incoming_job_priority",
     "frame_reuse",
     "config_backup_keep",
     "config_backup_max_age_days",
@@ -445,6 +452,25 @@ def _validate_and_coerce_settings_updates(data: dict) -> tuple[dict | None, tupl
                 jsonify({"error": "max_concurrent_jobs must be between 1 and 10"}),
                 400,
             )
+
+    # Issue #285 — priority for webhook / Recently Added jobs. Accepts
+    # either the label the UI sends ("high") or the raw int, and is
+    # normalised to an int so downstream readers never have to branch.
+    # Rejected rather than coerced when unrecognised: silently saving
+    # Normal for a typo'd value would leave the user believing their
+    # webhooks jump the queue when they don't. ``isinstance(raw, bool)``
+    # is excluded explicitly — ``True in {1: ...}`` is True in Python,
+    # so a stray JSON ``true`` would otherwise validate as High.
+    if "incoming_job_priority" in updates:
+        raw = updates["incoming_job_priority"]
+        valid_int = isinstance(raw, int) and not isinstance(raw, bool) and raw in PRIORITY_LABELS
+        valid_label = isinstance(raw, str) and raw.lower() in PRIORITY_FROM_LABEL
+        if not (valid_int or valid_label):
+            return None, (
+                jsonify({"error": "incoming_job_priority must be one of: high, normal, low (or 1, 2, 3)"}),
+                400,
+            )
+        updates["incoming_job_priority"] = parse_priority(raw)
 
     # Library-scanning concurrency. 0 = Auto; an explicit value is bounded
     # to [1, 256]. Reject out-of-range rather than silently clamping (same

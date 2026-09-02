@@ -2150,6 +2150,63 @@ class TestSettingsAPI:
         assert data["webhook_retry_count"] == 5
         assert data["webhook_retry_delay"] == 60
 
+    def test_get_settings_defaults_incoming_priority_to_high(self, client):
+        """Issue #285 — a fresh install must default to High.
+
+        The whole point of the feature is that webhook/Recently Added
+        work overtakes a full scan without the user configuring anything;
+        a Normal default would ship the plumbing and none of the benefit.
+        """
+        resp = client.get("/api/settings", headers=_api_headers())
+        assert resp.status_code == 200
+        assert resp.get_json()["incoming_job_priority"] == 1
+
+    @pytest.mark.parametrize(
+        ("sent", "expected"),
+        [
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            ("high", 1),
+            ("normal", 2),
+            ("low", 3),
+            ("HIGH", 1),
+        ],
+    )
+    def test_save_incoming_priority_accepts_ints_and_labels(self, client, sent, expected):
+        """Both wire forms round-trip, and both land as an int.
+
+        The UI posts an int; a hand-written settings.json or a script is
+        far more likely to use the label. Downstream readers (create_job,
+        the gate) compare against ints, so normalisation has to happen
+        here rather than at each call site.
+        """
+        resp = client.post(
+            "/api/settings",
+            headers=_api_headers(),
+            json={"incoming_job_priority": sent},
+        )
+        assert resp.status_code == 200, resp.get_json()
+        assert client.get("/api/settings", headers=_api_headers()).get_json()["incoming_job_priority"] == expected
+
+    @pytest.mark.parametrize("bad", [0, 4, -1, "urgent", "", None, True, 1.5])
+    def test_save_incoming_priority_rejects_unknown_values(self, client, bad):
+        """Reject rather than silently coerce to Normal.
+
+        ``True`` is in the list deliberately: ``True in {1: "high"}`` is
+        True in Python, so a stray JSON ``true`` would validate as High
+        unless bools are excluded explicitly.
+        """
+        resp = client.post(
+            "/api/settings",
+            headers=_api_headers(),
+            json={"incoming_job_priority": bad},
+        )
+        assert resp.status_code == 400, f"{bad!r} must be rejected, got {resp.get_json()!r}"
+        assert "incoming_job_priority" in resp.get_json()["error"]
+        # And nothing was persisted — the default still stands.
+        assert client.get("/api/settings", headers=_api_headers()).get_json()["incoming_job_priority"] == 1
+
 
 # ---------------------------------------------------------------------------
 # Job config / path_mappings (settings vs config_overrides)
@@ -3143,6 +3200,62 @@ class TestSchedulesCRUD:
             json={"name": "Nope"},
         )
         assert resp.status_code == 404
+
+    def test_create_schedule_without_priority_stores_no_pin(self, client):
+        """Issue #285 — an unpinned schedule must persist as null, not 2.
+
+        The recently-added dispatch path applies the global incoming
+        priority only when the stored value is None; a schedule that
+        silently records Normal can never inherit it.
+        """
+        resp = client.post(
+            "/api/schedules",
+            headers=_api_headers(),
+            json={"name": "Unpinned", "cron_expression": "0 0 * * *"},
+        )
+        assert resp.status_code == 201
+        assert resp.get_json()["priority"] is None
+
+    def test_update_schedule_null_priority_clears_the_pin(self, client):
+        """Switching the modal back to "Default (from Settings)" posts null
+        and must actually unpin."""
+        create_resp = client.post(
+            "/api/schedules",
+            headers=_api_headers(),
+            json={"name": "Pinned", "cron_expression": "0 0 * * *", "priority": 1},
+        )
+        schedule_id = create_resp.get_json()["id"]
+        assert create_resp.get_json()["priority"] == 1
+
+        resp = client.put(
+            f"/api/schedules/{schedule_id}",
+            headers=_api_headers(),
+            json={"name": "Pinned", "priority": None},
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()["priority"] is None
+        assert client.get(f"/api/schedules/{schedule_id}", headers=_api_headers()).get_json()["priority"] is None
+
+    def test_update_schedule_without_priority_key_keeps_the_pin(self, client):
+        """A partial PUT (e.g. the enable/disable toggle) must not unpin.
+
+        This is the other half of the null contract — if "absent" and
+        "null" collapsed, every unrelated update would wipe the pin.
+        """
+        create_resp = client.post(
+            "/api/schedules",
+            headers=_api_headers(),
+            json={"name": "Pinned", "cron_expression": "0 0 * * *", "priority": 3},
+        )
+        schedule_id = create_resp.get_json()["id"]
+
+        resp = client.put(
+            f"/api/schedules/{schedule_id}",
+            headers=_api_headers(),
+            json={"name": "Renamed"},
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()["priority"] == 3
 
     def test_delete_schedule(self, client):
         create_resp = client.post(
