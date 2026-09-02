@@ -60,6 +60,11 @@ CLAUDE.local.md
 
 # setuptools-scm auto-generated version file
 plex_generate_previews/_version.py
+# setuptools-scm writes this at build time. The entry above still names the
+# PRE-RENAME package, so after the rename the real one was committed and
+# froze at 3.7.6.dev142 — then shadowed every image whose wheel metadata was
+# the 0.0.0 fallback, making :dev report a version from four releases ago.
+media_preview_generator/_version.py
 
 # CI-generated release-notes bundle. Source of truth is GitHub Releases;
 # CI fetches and bakes into the docker image at build time. Local
