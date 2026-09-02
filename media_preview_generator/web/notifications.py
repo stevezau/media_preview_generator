@@ -135,8 +135,8 @@ def _build_schema_migration_notification() -> dict[str, Any] | None:
     notice = get_settings_manager().get("_pending_migration_notice")
     if not isinstance(notice, dict):
         return None
-    from_v = notice.get("from", "?")
-    to_v = notice.get("to", "?")
+    from_v = notice.get("from")
+    to_v = notice.get("to")
     backup = notice.get("backup") or ""
     notes = notice.get("notes") or []
     notes_html = ""
@@ -155,10 +155,17 @@ def _build_schema_migration_notification() -> dict[str, Any] | None:
         if backup
         else ""
     )
-    body = (
-        f"<p class='mb-0'>Your settings were migrated from schema "
-        f"<strong>v{from_v}</strong> to <strong>v{to_v}</strong>.</p>{backup_html}{notes_html}"
-    )
+    # A retry boot finishes a migration whose schema bump already happened,
+    # so there is no version move to report — printing "from v14 to v14" (or
+    # "from v? to v?") reads like a bug. Lead with the change itself instead.
+    if from_v is None or to_v is None or from_v == to_v:
+        headline = "<p class='mb-0'>Your settings were updated.</p>"
+    else:
+        headline = (
+            f"<p class='mb-0'>Your settings were migrated from schema "
+            f"<strong>v{from_v}</strong> to <strong>v{to_v}</strong>.</p>"
+        )
+    body = f"{headline}{backup_html}{notes_html}"
     return {
         "id": SCHEMA_MIGRATION_ID,
         "severity": "info",

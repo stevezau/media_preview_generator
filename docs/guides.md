@@ -96,9 +96,14 @@ default), which is what leaves room for the High jobs to overtake.
 A schedule only follows this setting while its own **Job Priority** is
 **Default (from Settings)** — the value new schedules start on. Pick High,
 Normal, or Low there to pin that schedule instead, and the global setting stops
-applying to it. Schedules created before this option existed carry an explicit
-**Normal** pin; switch them to **Default (from Settings)** if you want their
-sweeps to jump the queue.
+applying to it.
+
+Recently Added schedules created before this option existed are switched to
+**Default (from Settings)** automatically on first start after upgrading. Those
+carried an explicit *Normal* only because the old dialog had no way to say "no
+pin", so there was no choice to preserve. Schedules you had deliberately set to
+High or Low keep their setting, and so does any schedule you pin after
+upgrading — the migration runs once.
 
 Set the global setting to **Normal** to go back to strict
 first-come-first-served ordering. The reserved slot is independent of this

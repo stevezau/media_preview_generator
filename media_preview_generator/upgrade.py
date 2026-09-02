@@ -21,7 +21,61 @@ from loguru import logger
 # -------------------------------------------------------------------------
 # Schema version — bump when adding new migrations
 # -------------------------------------------------------------------------
-_CURRENT_SCHEMA_VERSION = 13
+_CURRENT_SCHEMA_VERSION = 14
+
+#: Count of consecutive v14 attempts that failed on IO. The version gate
+#: alone would forfeit the migration forever after one transient error,
+#: leaving the install permanently inert with only a log line to show for
+#: it — a non-zero count lets the next boot retry. Reset to 0 on every
+#: outcome that isn't an IO failure (success, clean no-op, nothing to do),
+#: so a schedule the user re-pins to Normal AFTER upgrading is never
+#: touched again.
+_V14_RETRY_KEY = "_v14_retry_attempts"
+
+#: Give up after this many failed attempts. Unbounded retrying is not free:
+#: each one rewrites settings.json and rotates a timestamped backup, so a
+#: permanently unreadable schedules.json in a restart loop would churn the
+#: user's genuine pre-upgrade backups out of ``config_backup_keep`` (10) in
+#: a handful of boots.
+_V14_MAX_ATTEMPTS = 3
+
+
+def _v14_retry_pending(sm) -> bool:
+    """Whether v14 should re-run despite the version gate being closed."""
+    try:
+        attempts = int(sm.get(_V14_RETRY_KEY) or 0)
+    except (TypeError, ValueError):
+        return False
+    return 0 < attempts < _V14_MAX_ATTEMPTS
+
+
+def _v14_mark_settled(sm) -> None:
+    """Clear the retry counter. Safe to call on every non-IO-failure path."""
+    _v14_set_attempts(sm, 0)
+
+
+def _v14_set_attempts(sm, value: int) -> None:
+    """Persist the retry counter, swallowing a failure to do so.
+
+    ``sm.set`` writes settings.json and re-raises on failure. The whole
+    point of the surrounding handlers is that a cosmetic priority rewrite
+    must never abort startup — and the likeliest causes of a schedules.json
+    IO error (read-only /config, wrong PUID/PGID, full disk) hit
+    settings.json identically. The error is already logged either way.
+    """
+    try:
+        sm.set(_V14_RETRY_KEY, value)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("v14: could not persist the retry counter ({}); it will not be retried.", exc)
+
+
+def _v14_record_failure(sm) -> None:
+    """Bump the retry counter after an IO failure."""
+    try:
+        attempts = int(sm.get(_V14_RETRY_KEY) or 0)
+    except (TypeError, ValueError):
+        attempts = 0
+    _v14_set_attempts(sm, attempts + 1)
 
 
 # -------------------------------------------------------------------------
@@ -57,6 +111,15 @@ _USER_FACING_NOTES: dict[int, str] = {
         "routing matches on Plex's own machine identifier, not on the renamed id. "
         "If you'd like the URL on plex.tv to use the new cleaner form, open "
         "Servers → Plex → Webhook & Scanner and click Re-register. Optional, not required."
+    ),
+    14: (
+        "Your Recently Added schedules now follow the new Incoming job priority "
+        "setting (High by default), so newly imported media is processed ahead of "
+        "a running full-library scan. Schedules set to Normal were changed — the "
+        "old dialog wrote Normal automatically and had no way to say 'use the "
+        "default', so it couldn't be told apart from a deliberate choice. If you "
+        "did mean Normal, re-pin it under Automation → Schedules. Anything you set "
+        "to High or Low was left alone."
     ),
     13: (
         "Your Thumbnail Interval setting now applies to every server consistently. "
@@ -297,6 +360,9 @@ def _migrate_schema(sm) -> None:
                via a post-save hook; this one-shot heals already-affected
                installs without requiring the user to re-save settings.
                Issue #238.
+        v14 -- Unpins Recently Added schedules that carry the old UI's
+               unconditional ``priority: 2`` seed so they inherit the new
+               ``incoming_job_priority`` setting. Issue #285.
     """
     current = sm.get("_schema_version", 1)
     if current > _CURRENT_SCHEMA_VERSION:
@@ -311,7 +377,11 @@ def _migrate_schema(sm) -> None:
             f"Either run a newer build of the app, or restore the previous settings.json "
             f"(a backup is at {bak_path}) and start the older app version that wrote it."
         )
-    if current == _CURRENT_SCHEMA_VERSION:
+    # A pending v14 retry has to get past the version gate: the failure that
+    # set it happened AFTER _schema_version was already bumped, so `current`
+    # is 14 and the plain equality check would return before retrying.
+    v14_retry = _v14_retry_pending(sm)
+    if current == _CURRENT_SCHEMA_VERSION and not v14_retry:
         return
 
     log_notes: list[str] = []
@@ -351,6 +421,8 @@ def _migrate_schema(sm) -> None:
         _run(12, _migrate_to_v12)
     if current < 13:
         _run(13, _migrate_to_v13)
+    if current < 14 or v14_retry:
+        _run(14, _migrate_to_v14)
 
     sm.set("_schema_version", _CURRENT_SCHEMA_VERSION)
 
@@ -363,16 +435,40 @@ def _migrate_schema(sm) -> None:
         from datetime import timezone as _tz
 
         bak_path = f"{getattr(sm, 'settings_file', '')}.bak" if getattr(sm, "settings_file", None) else ""
-        sm.set(
-            "_pending_migration_notice",
-            {
-                "from": current,
-                "to": _CURRENT_SCHEMA_VERSION,
-                "at": _dt.now(_tz.utc).isoformat(),
-                "backup": bak_path,
-                "notes": user_notes,
-            },
-        )
+        existing = sm.get("_pending_migration_notice") or {}
+        if current == _CURRENT_SCHEMA_VERSION:
+            # Retry-only boot (the version gate was already closed; a pending
+            # v14 attempt got us here). A fresh header would claim "migrated
+            # from schema v14 to v14"; where a notice already exists,
+            # replacing it would also drop v12/v13 notes the user hadn't
+            # opened the bell to read yet. Merge into it, and when the
+            # original boot never wrote one (its migration failed, so it
+            # produced no notes), omit from/to entirely — the renderer drops
+            # the sentence rather than printing "v? to v?".
+            merged = list(existing.get("notes") or [])
+            merged.extend(note for note in user_notes if note not in merged)
+            if existing:
+                sm.set("_pending_migration_notice", {**existing, "notes": merged})
+            else:
+                sm.set(
+                    "_pending_migration_notice",
+                    {
+                        "at": _dt.now(_tz.utc).isoformat(),
+                        "backup": bak_path,
+                        "notes": merged,
+                    },
+                )
+        else:
+            sm.set(
+                "_pending_migration_notice",
+                {
+                    "from": current,
+                    "to": _CURRENT_SCHEMA_VERSION,
+                    "at": _dt.now(_tz.utc).isoformat(),
+                    "backup": bak_path,
+                    "notes": user_notes,
+                },
+            )
 
 
 def _migrate_to_v2(sm) -> list:
@@ -1095,13 +1191,22 @@ def _migrate_to_v12(sm) -> list:
             with open(schedules_file) as fh:
                 data = json.load(fh)
             n = 0
-            for sched in (data.get("schedules") or []) if isinstance(data, dict) else []:
-                if isinstance(sched, dict) and sched.get("server_id") == "plex-default":
+            # schedules.json stores a MAPPING of id -> record; iterating it
+            # directly walked the keys and rewrote nothing. Latent since v12
+            # shipped — fixed here so an install still below v12 migrates
+            # correctly (already-migrated ones are past the gate).
+            for sched in _iter_schedule_records(data):
+                if sched.get("server_id") == "plex-default":
                     sched["server_id"] = new_id
                     n += 1
             if n:
-                with open(schedules_file, "w") as fh:
-                    json.dump(data, fh, indent=2)
+                # Atomic + backup. This write was dead code while the
+                # key-iteration bug above kept ``n`` at 0; fixing that made it
+                # live, and a truncating open(..., "w") here would risk losing
+                # every schedule to a disk-full mid-dump (see v14's note).
+                from .utils import atomic_json_save_with_backup
+
+                atomic_json_save_with_backup(str(schedules_file), data)
                 runtime_notes.append(f"schedules.json: rewrote {n} entries")
         except Exception as exc:
             logger.warning(
@@ -1193,6 +1298,124 @@ def _migrate_to_v13(sm) -> list:
             f"global thumbnail_interval={global_interval} (#238)"
         ]
     return []
+
+
+def _iter_schedule_records(data) -> list:
+    """Return the schedule records from ``schedules.json``, whatever its shape.
+
+    ``ScheduleManager._save_schedules`` persists
+    ``{"schedules": {<id>: <record>}}`` — a **mapping**, not a list, and
+    ``_load_schedules`` reads it back with ``.items()``. Iterating
+    ``data["schedules"]`` directly therefore walks the *keys* (plain
+    strings), every ``isinstance(row, dict)`` guard fails, and the
+    migration silently rewrites nothing. v12's ``server_id`` rewrite
+    shipped with exactly that bug; this helper exists so no future
+    migration repeats it.
+
+    Legacy/hand-written files may still hold a list, so both are accepted.
+    Records are returned by reference — mutate them and re-dump ``data``.
+    """
+    raw = data.get("schedules") if isinstance(data, dict) else None
+    if isinstance(raw, dict):
+        rows = list(raw.values())
+    elif isinstance(raw, list):
+        rows = raw
+    else:
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _migrate_to_v14(sm) -> list:
+    """Unpin Recently Added schedules still carrying the old ``priority: 2`` seed.
+
+    Issue #285 added a global "Incoming job priority" (default High) that
+    Recently Added sweeps inherit — but only when the schedule stores
+    ``priority: null``. Every schedule written by a pre-#285 UI has an
+    explicit ``2``, because the modal seeded ``'2'`` on open and posted
+    ``parseInt(value, 10) || 2`` on save. There was no way to express "no
+    pin", so a 2 recorded before this release carries no user intent: it
+    is the absence of a choice, not a choice of Normal. Without this
+    migration every existing install would have to hand-edit each sweep
+    before the feature did anything for them.
+
+    Deliberately narrow:
+
+    * Only ``config.job_type == "recently_added"``. A full-library
+      schedule runs at Normal whether pinned or not, so rewriting it
+      would churn the file for no behaviour change — and would wrongly
+      drop a pin the user might later rely on.
+    * Only an exact ``2``. High (1) and Low (3) can only have come from
+      a deliberate pick, so they survive untouched.
+    * Runs once, gated on ``_schema_version``. Someone who re-pins a
+      sweep to Normal *after* upgrading has made a real choice, and the
+      next boot must not undo it.
+
+    Idempotent — a re-run against already-unpinned schedules is a no-op
+    (no notes).
+    """
+    config_dir = getattr(sm, "config_dir", None)
+    if not config_dir:
+        _v14_mark_settled(sm)
+        return []
+    schedules_file = Path(config_dir) / "schedules.json"
+    if not schedules_file.exists():
+        # "No schedules at all" is a settled outcome, not a deferred one.
+        # Leaving a pending marker here means every subsequent boot re-runs
+        # v14, returns right back to this line, and still rewrites
+        # settings.json + rotates a backup — churning the user's genuine
+        # pre-upgrade backups out of config_backup_keep, forever.
+        _v14_mark_settled(sm)
+        return []
+
+    try:
+        with open(schedules_file) as fh:
+            data = json.load(fh)
+    except Exception as exc:
+        # Broad on purpose: _migrate_schema runs unguarded from create_app,
+        # so anything escaping here aborts startup for a cosmetic rewrite.
+        _v14_record_failure(sm)
+        logger.error(
+            "v14: could not read schedules.json ({}). Recently Added schedules keep their "
+            "existing Normal priority — set Job Priority to 'Default (from Settings)' on each "
+            "one if you want them to follow the Incoming job priority setting. Retried on "
+            "the next start.",
+            exc,
+        )
+        return []
+
+    unpinned = 0
+    for sched in _iter_schedule_records(data):
+        config = sched.get("config")
+        job_type = config.get("job_type") if isinstance(config, dict) else None
+        if job_type == "recently_added" and sched.get("priority") == 2:
+            sched["priority"] = None
+            unpinned += 1
+
+    if not unpinned:
+        _v14_mark_settled(sm)
+        return []
+
+    try:
+        # Atomic + backup, same as ScheduleManager._save_schedules. A plain
+        # open(..., "w") truncates first, so a disk-full or container kill
+        # mid-dump leaves a partial file and the next boot loads ZERO
+        # schedules — losing every schedule to make a cosmetic priority edit.
+        from .utils import atomic_json_save_with_backup
+
+        atomic_json_save_with_backup(str(schedules_file), data)
+    except Exception as exc:
+        _v14_record_failure(sm)
+        logger.error(
+            "v14: could not write schedules.json ({}). Your Recently Added schedules were NOT "
+            "changed and may not follow the Incoming job priority setting; a timestamped backup "
+            "of the previous file sits next to it as schedules.json.<timestamp>.bak. This will "
+            "be retried on the next start.",
+            exc,
+        )
+        return []
+
+    _v14_mark_settled(sm)
+    return [f"v14: unpinned {unpinned} Recently Added schedule(s) so they inherit incoming_job_priority (#285)"]
 
 
 # =========================================================================
