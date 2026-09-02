@@ -904,24 +904,32 @@ class TestFileResultEmissionFromMultiServerDispatch:
         # with the same id it passes to the scan). The unified dispatch runs
         # each item under failure_scope(job_id), which never falls back to the
         # "" bucket, so scope and registration must share the id.
+        # Key the stub off the path it was CALLED with, not off call order.
+        # A list side_effect binds result N to the Nth call, so with more
+        # than one worker /data/m1.mkv could be handed m0's PUBLISHED result
+        # — the rows came out mismatched, and which file "won" depended on
+        # thread scheduling. Flaked in CI on 2026-09-02 while passing on the
+        # same commit's tag build.
+        results_by_path = {
+            "/data/m0.mkv": SimpleNamespace(
+                publishers=[],
+                canonical_path="/data/m0.mkv",
+                status=MultiServerStatus.PUBLISHED,
+                message="",
+            ),
+            "/data/m1.mkv": SimpleNamespace(
+                publishers=[],
+                canonical_path="/data/m1.mkv",
+                status=MultiServerStatus.SKIPPED,
+                message="cached",
+            ),
+        }
+
         set_file_result_callback(_cb, job_id="job-fr")
         try:
             with patch(
                 "media_preview_generator.processing.multi_server.process_canonical_path",
-                side_effect=[
-                    SimpleNamespace(
-                        publishers=[],
-                        canonical_path="/data/m0.mkv",
-                        status=MultiServerStatus.PUBLISHED,
-                        message="",
-                    ),
-                    SimpleNamespace(
-                        publishers=[],
-                        canonical_path="/data/m1.mkv",
-                        status=MultiServerStatus.SKIPPED,
-                        message="cached",
-                    ),
-                ],
+                side_effect=lambda canonical_path, *a, **kw: results_by_path[canonical_path],
             ):
                 _dispatch_processable_items(
                     items=self._items(2),
@@ -935,10 +943,16 @@ class TestFileResultEmissionFromMultiServerDispatch:
             set_file_result_callback(None, job_id="job-fr")
 
         assert len(recorded) == 2, f"Expected 2 file rows, got {len(recorded)}: {recorded!r}"
-        assert recorded[0][0] == "/data/m0.mkv"
-        assert recorded[0][1] == "generated"
-        assert recorded[1][0] == "/data/m1.mkv"
-        assert recorded[1][1] == "skipped_bif_exists"
+        # Index-free: rows arrive in worker COMPLETION order, which is not
+        # the dispatch order once more than one worker is live. The contract
+        # is "one row per item, carrying that item's outcome" — not "m0 is
+        # emitted first".
+        by_path = {row[0]: row for row in recorded}
+        assert set(by_path) == {"/data/m0.mkv", "/data/m1.mkv"}, (
+            f"expected one row per dispatched item; got {sorted(by_path)}"
+        )
+        assert by_path["/data/m0.mkv"][1] == "generated"
+        assert by_path["/data/m1.mkv"][1] == "skipped_bif_exists"
         # Worker label is present and non-empty so the Files panel column
         # never shows a row with no attribution at all.
         for r in recorded:

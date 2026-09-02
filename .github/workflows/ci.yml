@@ -299,6 +299,20 @@ jobs:
           packages: ffmpeg mediainfo
           version: 1
 
+      - name: Verify FFmpeg + mediainfo are on PATH
+        # The apt cache action can report a hit whose restore leaves the
+        # binaries missing; the next step then dies on "ffmpeg not found on
+        # PATH" with nothing pointing at the cache as the cause (seen
+        # 2026-09-02). Fall back to a real install rather than fail the job.
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v mediainfo >/dev/null 2>&1; then
+            echo "::warning::Cached apt restore did not provide ffmpeg/mediainfo — installing directly."
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg mediainfo
+          fi
+          ffmpeg -version | head -1
+          mediainfo --Version | head -1
+
       - name: Install dependencies
         run: pip install -e ".[test]"
 
@@ -433,6 +447,26 @@ jobs:
         id: image
         run: echo "name=${{ env.DOCKER_IMAGE }}" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve the version to bake into the image
+        id: pkgver
+        # .dockerignore excludes .git/, so setuptools-scm inside the build
+        # has no history to describe from. Tag builds were already handed
+        # the tag via SETUPTOOLS_SCM_PRETEND_VERSION; dev builds were handed
+        # nothing and shipped whatever setuptools-scm guessed without git —
+        # :dev images self-reported a stale version (e.g. 3.7.6.dev142 long
+        # after 4.4.x), which the About page and the update check both show.
+        # Compute it out here, where the full history IS checked out.
+        run: |
+          if [[ "${{ needs.context.outputs.is_tag }}" == "true" ]]; then
+            echo "version=${{ needs.context.outputs.head_branch }}" >> "$GITHUB_OUTPUT"
+          else
+            python3 -m pip install --quiet "setuptools-scm>=8"
+            echo "version=$(python3 -m setuptools_scm)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Show resolved version
+        run: echo "Baking version ${{ steps.pkgver.outputs.version }} into ${{ matrix.platform }} image"
+
       - name: Generate bundled release notes
         # Fetches GitHub Releases into media_preview_generator/release_notes.json
         # so the docker COPY picks it up. Powers the "What's new" popup
@@ -458,7 +492,7 @@ jobs:
             GIT_BRANCH=${{ needs.context.outputs.head_branch }}
             GIT_SHA=${{ needs.context.outputs.head_sha }}
             DOCKER_IMAGE_NAME=${{ steps.image.outputs.name }}
-            ${{ needs.context.outputs.is_tag == 'true' && format('SETUPTOOLS_SCM_PRETEND_VERSION={0}', needs.context.outputs.head_branch) || '' }}
+            SETUPTOOLS_SCM_PRETEND_VERSION=${{ steps.pkgver.outputs.version }}
           outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,scope=${{ matrix.platform }},mode=max
