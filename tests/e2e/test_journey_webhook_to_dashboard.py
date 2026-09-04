@@ -108,11 +108,12 @@ class TestWebhookToDashboard:
         assert fire_resp.status_code in (200, 202), f"fire-now: {fire_resp.status_code} {fire_resp.text}"
 
         # 4. A new job should appear in /api/jobs (polling, no SocketIO).
-        # Filter is_retry=False — when no servers are configured the
-        # dispatcher fast-skips the path and the retry-queue spawns a
-        # child retry job with the same webhook_paths. The contract we're
-        # verifying is the PARENT (the one fire-now spawned), not its
-        # retry child.
+        # No client-side visibility filter: /api/jobs already applies the
+        # real ``is_user_visible_job`` server-side, so every row here is
+        # user-visible by construction. An earlier ``not cfg["is_retry"]``
+        # check here was wrong — ``upsert_retry_chain_job`` stamps
+        # ``is_retry=True`` on the chain HEAD as well as its children, so it
+        # hid the very parent this test is looking for ~0.5s after creation.
         deadline = time.monotonic() + 15
         job_id = None
         while time.monotonic() < deadline:
@@ -124,7 +125,7 @@ class TestWebhookToDashboard:
             if jobs_resp.ok:
                 for job in jobs_resp.json().get("jobs", []):
                     cfg = job.get("config") or {}
-                    if webhook_path in cfg.get("webhook_paths", []) and not cfg.get("is_retry"):
+                    if webhook_path in cfg.get("webhook_paths", []):
                         job_id = job.get("id")
                         break
             if job_id:
@@ -137,23 +138,36 @@ class TestWebhookToDashboard:
             "didn't record it."
         )
 
-        # 5. Job should reach a terminal state (no servers configured -> the
-        #    orchestrator marks unresolved and completes/fails fast).
+        # 5. The job must settle: either a terminal status, or an armed retry
+        #    chain. Both are "the dispatcher finished with it" — with no
+        #    servers configured the orchestrator marks the path unresolved,
+        #    and ``upsert_retry_chain_job`` may then re-arm this same row as a
+        #    chain head (status back to PENDING with a retry_eta). Polling for
+        #    a terminal status alone is racy: the row oscillates, and a 0.25s
+        #    poll can straddle the terminal instant and never see it again.
         # 10s budget — global pytest timeout is 30s; steps 1-4 already
-        # consumed ~5-10s. Empty-server jobs reach terminal in <1s typically.
+        # consumed ~5-10s. Empty-server jobs settle in <1s typically.
         deadline = time.monotonic() + 10
-        terminal = False
+        settled = None
         while time.monotonic() < deadline:
             r = requests.get(
                 f"{app_url}/api/jobs/{job_id}",
                 headers=_AUTH_HEADERS,
                 timeout=_API_TIMEOUT,
             )
-            if r.ok and r.json().get("status") in ("completed", "failed", "cancelled"):
-                terminal = True
+            if r.ok:
+                body = r.json()
+                cfg = body.get("config") or {}
+                if body.get("status") in ("completed", "failed", "cancelled"):
+                    settled = f"terminal:{body.get('status')}"
+                elif cfg.get("is_retry_chain") and body.get("retry_eta"):
+                    settled = "retry-chain-armed"
+            if settled:
                 break
             time.sleep(0.25)
-        assert terminal, f"Job {job_id} created from webhook never reached terminal state."
+        assert settled, (
+            f"Job {job_id} created from webhook neither reached a terminal state nor was armed as a retry chain."
+        )
 
     def test_natural_debounce_fires_without_explicit_fire_now(
         self,
@@ -179,7 +193,6 @@ class TestWebhookToDashboard:
 
         # With webhook_delay=1 (seeded), the natural timer should fire
         # within ~3s and produce a parent Job visible in /api/jobs.
-        # is_retry=False filter — see test above for rationale.
         deadline = time.monotonic() + 8
         observed = False
         while time.monotonic() < deadline:
@@ -191,7 +204,7 @@ class TestWebhookToDashboard:
             if jobs_resp.ok:
                 for job in jobs_resp.json().get("jobs", []):
                     cfg = job.get("config") or {}
-                    if webhook_path in cfg.get("webhook_paths", []) and not cfg.get("is_retry"):
+                    if webhook_path in cfg.get("webhook_paths", []):
                         observed = True
                         break
             if observed:

@@ -29,6 +29,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Generator
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
@@ -58,6 +59,36 @@ def get_free_port() -> int:
         return int(s.getsockname()[1])
 
 
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent.parent)
+
+
+def app_boot_payload(port: int, host: str = "0.0.0.0") -> str:
+    """``python -c`` source that boots the app with dotenv disabled.
+
+    ``tests/conftest.py::_isolate_dotenv_from_tests`` neuters ``load_dotenv``
+    inside the pytest process, but the e2e app runs in a *subprocess* and so
+    escapes it. A developer's untracked repo-root ``.env`` then reaches
+    ``config.load_dotenv()`` and injects real PLEX_URL/PLEX_TOKEN: config
+    validation starts passing instead of failing, and jobs these tests expect
+    to fail fast become 60s retry chains. CI never saw it — runners have no
+    ``.env`` — so it presented as "passes in CI, fails locally".
+
+    Patching ``dotenv.load_dotenv`` here rather than relying on cwd is
+    deliberate: ``find_dotenv()`` only consults ``os.getcwd()`` because
+    ``python -c`` leaves ``__main__`` without a ``__file__``. Under any other
+    launcher it walks up from ``config/__init__.py`` instead, which under the
+    editable install lives *inside* the repo — so a cwd-only fix would go
+    silently decorative the moment this becomes ``python -m``. The patch runs
+    before ``config`` is imported, so its ``from dotenv import load_dotenv``
+    binds the no-op.
+    """
+    return (
+        "import dotenv; dotenv.load_dotenv = lambda *a, **k: None; "
+        "from media_preview_generator.web.app import run_server; "
+        f"run_server(host='{host}', port={port})"
+    )
+
+
 def _start_app(config_dir: str, port: int, extra_env: dict | None = None) -> subprocess.Popen:
     env = {
         **os.environ,
@@ -78,9 +109,12 @@ def _start_app(config_dir: str, port: int, extra_env: dict | None = None) -> sub
         [
             sys.executable,
             "-c",
-            f"from media_preview_generator.web.app import run_server; run_server(host='0.0.0.0', port={port})",
+            app_boot_payload(port),
         ],
-        env=env,
+        env={**env, "PYTHONPATH": _REPO_ROOT},
+        # Defence in depth behind ``app_boot_payload``'s dotenv patch —
+        # a cwd with no ``.env`` in it.
+        cwd=config_dir,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
