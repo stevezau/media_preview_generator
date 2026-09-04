@@ -8,10 +8,12 @@ and thread safety of progress updates.
 
 import threading
 import time
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from media_preview_generator.jobs import worker as worker_module
 from media_preview_generator.jobs.worker import Worker, WorkerPool
 from tests.conftest import _ms, _pi, _pi_list_or_passthrough  # noqa: F401
 
@@ -41,11 +43,14 @@ def _slow_process_item(*args, **kwargs):
 
 
 def _very_slow_process_item(*args, progress_callback=None, **kwargs):
-    """Simulate long processing so headless polling emits worker updates.
+    """Simulate processing slow enough for the headless poll loop to observe.
 
-    The polling loop in ``process_items_headless`` only emits a worker
-    callback every 1.0 s. Sleep just past that threshold so the callback
-    fires at least once without burning the whole budget on a single test.
+    Pair this with ``_instant_worker_emits`` rather than relying on the sleep
+    alone: the poll loop's real cadence is 1.0 s, and sleeping just past it
+    made the test a race that flaked in CI (run 33882999354) while passing
+    locally even under 3x CPU oversubscription. With the cadence forced to 0
+    the loop emits on its very first 5 ms poll, so this only has to outlast
+    the dispatch, not a wall-clock threshold.
     """
     if progress_callback:
         progress_callback(
@@ -55,8 +60,19 @@ def _very_slow_process_item(*args, progress_callback=None, **kwargs):
             total_duration=60.0,
             remaining_time=30.0,
         )
-    time.sleep(1.05)
+    time.sleep(0.2)
     return _ms("generated")
+
+
+@contextmanager
+def _instant_worker_emits():
+    """Force the headless poll loop to emit worker status on every poll.
+
+    Removes the wall-clock race from callback assertions — see
+    ``_very_slow_process_item``.
+    """
+    with patch.object(worker_module, "WORKER_STATUS_EMIT_INTERVAL_S", 0.0):
+        yield
 
 
 def _failing_process_item(*args, **kwargs):
@@ -429,9 +445,12 @@ class TestWorkerCallback:
         def worker_cb(statuses):
             worker_updates.append(statuses)
 
-        # ``_very_slow_process_item`` sleeps just past the 1.0s emit
-        # threshold so the polling loop guarantees ≥1 callback fire.
-        with patch("media_preview_generator.processing.multi_server.process_canonical_path", _very_slow_process_item):
+        # ``_instant_worker_emits`` drops the emit cadence to 0 so the poll
+        # loop fires on its first 5 ms tick — no wall-clock race.
+        with (
+            _instant_worker_emits(),
+            patch("media_preview_generator.processing.multi_server.process_canonical_path", _very_slow_process_item),
+        ):
             pool.process_items_headless(
                 _pi_list_or_passthrough(items),
                 mock_config,
@@ -464,7 +483,10 @@ class TestWorkerCallback:
         def worker_cb(statuses):
             worker_updates.append(statuses)
 
-        with patch("media_preview_generator.processing.multi_server.process_canonical_path", _very_slow_process_item):
+        with (
+            _instant_worker_emits(),
+            patch("media_preview_generator.processing.multi_server.process_canonical_path", _very_slow_process_item),
+        ):
             pool.process_items_headless(
                 _pi_list_or_passthrough(items),
                 mock_config,
