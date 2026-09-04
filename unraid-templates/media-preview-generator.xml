@@ -86,7 +86,7 @@ GPU SETUP — pick ONE path:
 
     <!-- Processing Options (seed values; configure per-GPU in Web UI Settings after first run) -->
     <Config Name="Frame Interval (seconds)" Target="PLEX_BIF_FRAME_INTERVAL" Default="5" Mode="" Description="Seconds between each preview frame (default: 5). Migrated to settings.json on first start." Type="Variable" Display="advanced" Required="false" Mask="false">5</Config>
-    <Config Name="Thumbnail Quality" Target="THUMBNAIL_QUALITY" Default="4" Mode="" Description="Preview image quality 1-10, higher = better quality but larger files (default: 4). Migrated to settings.json on first start." Type="Variable" Display="advanced" Required="false" Mask="false">4</Config>
+    <Config Name="Thumbnail Quality" Target="THUMBNAIL_QUALITY" Default="4" Mode="" Description="Preview image quality 1-10, lower = better quality but larger files (2 = sharpest, 10 = blurriest; default: 4). Migrated to settings.json on first start." Type="Variable" Display="advanced" Required="false" Mask="false">4</Config>
     <Config Name="CPU Threads" Target="CPU_THREADS" Default="1" Mode="" Description="Number of parallel CPU workers for fallback (default: 1). Migrated to settings.json on first start. GPU config (enable/disable, workers per GPU) is in Web UI Settings." Type="Variable" Display="advanced" Required="false" Mask="false">1</Config>
 
     <!-- Web Authentication -->

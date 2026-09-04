@@ -37,7 +37,7 @@ Open `http://YOUR_IP:8080`, get the auth token from `docker logs media-preview-g
 - Frame reuse cache: a webhook arriving for a file recently extracted by a sibling server reuses the frames without re-running FFmpeg.
 - Slow-backoff retry queue for items the source server hasn't indexed yet.
 - Per-server library filtering, path mappings, and exclude rules.
-- Adjustable thumbnail quality (1-10) and frame interval (1-60s).
+- Adjustable thumbnail quality (1-10, lower = sharper) and frame interval (1-60s).
 - Plex OAuth sign-in via setup wizard.
 - REST API with token authentication.
 - WebSocket real-time progress updates.

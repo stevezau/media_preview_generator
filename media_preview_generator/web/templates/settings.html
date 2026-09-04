@@ -274,8 +274,9 @@
                     </div>
                     <div class="col-md-6 mb-3">
                         <label for="thumbnailQuality" class="form-label">
-                            Thumbnail Quality: <span id="qualityValue">4</span>/10
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="JPEG quality of each thumbnail (1 = smallest and blurriest, 10 = sharpest and largest). Default 4 looks fine at typical scrubbing sizes. Raise if thumbs look blocky on a 4K display; lower to shrink BIF files."><i class="bi bi-info-circle"></i></button>
+                            Thumbnail Quality: <span id="qualityValue">4</span>
+                            <small class="text-muted fw-normal">(lower = sharper)</small>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="JPEG quality of each thumbnail — lower is better, like FFmpeg&#39;s -q:v (2 = sharpest and largest, 10 = blurriest and smallest; 1 behaves the same as 2). Default 4 looks fine at typical scrubbing sizes. Lower it if thumbs look blocky on a 4K display; raise it to shrink BIF files."><i class="bi bi-info-circle"></i></button>
                         </label>
                         <input type="range" class="form-range" id="thumbnailQuality"
                                min="1" max="10" value="4">

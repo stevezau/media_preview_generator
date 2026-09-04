@@ -6,6 +6,7 @@ Regressions covered:
 * `+`/`−` stepper buttons mutate the input value and respect min/max.
 * Disabling a GPU greys out its workers/threads cells.
 * Re-scan GPUs button POSTs `/api/system/rescan-gpus`.
+* Thumbnail Quality copy states the qscale direction (issue #286).
 """
 
 from __future__ import annotations
@@ -157,3 +158,35 @@ class TestCpuWorkersStepper:
         plus = cpu.locator(".. >> .stepper-plus").first
         plus.click()
         expect(cpu).to_have_value("2")
+
+
+@pytest.mark.e2e
+class TestThumbnailQualityDirection:
+    """Issue #286 — the wizard's copy of the tooltip drifted the same way.
+
+    settings.html and setup.html are independent copies; both shipped the
+    inverted scale, so both cells need a row.
+    """
+
+    def test_wizard_tooltip_states_lower_is_better(self, wizard_page: Page, app_url_wizard: str) -> None:
+        mock_plex_libraries(wizard_page)
+        capture_settings_save(wizard_page)
+        mock_setup_status(wizard_page, complete=False)
+        mock_validate_plex_config_folder(wizard_page, valid=True)
+        mock_settings_get(wizard_page)
+        mock_system_status(wizard_page)
+        _drive_to_step4(wizard_page, app_url_wizard)
+
+        icon = wizard_page.locator('label[for="thumbnailQuality"] .info-icon')
+        # Bootstrap's Tooltip constructor moves `title` to
+        # `data-bs-original-title`, so read whichever survived init.
+        title = icon.get_attribute("data-bs-original-title") or icon.get_attribute("title")
+        assert title, "thumbnail quality tooltip has no text"
+        title_lc = title.lower()
+        assert "lower is better" in title_lc
+        assert "higher = better" not in title_lc
+        assert "10 = sharpest" not in title_lc
+
+        # setup.html puts the visible hint in the .form-text under the
+        # slider, not in the label like settings.html does.
+        expect(wizard_page.locator("#qualityValue").locator("..")).to_contain_text("lower = sharper")
