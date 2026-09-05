@@ -508,3 +508,238 @@ class TestPublish:
         bundle = _make_bundle("/m/foo.mkv", tmp_path)
         with pytest.raises(ValueError):
             adapter.publish(bundle, [])
+
+
+class TestChapterThumbnailPathHelper:
+    def test_path_structure_matches_plex_chapters_layout(self):
+        path = PlexBundleAdapter.chapter_thumb_path("/cfg", "abcdef0123456789", 3)
+        assert path == Path("/cfg/Media/localhost/a/bcdef0123456789.bundle/Contents/Chapters/chapter3.jpg")
+
+
+class TestComputeOutputPathsChapterThumbnails:
+    """chapter_thumbnails=True adds chapter-thumb paths alongside the BIF path.
+
+    Off by default (see TestComputeOutputPaths — those tests never enable it
+    and never see chapter paths), so these tests exercise the opt-in behavior
+    specifically.
+    """
+
+    def test_disabled_by_default_never_calls_get_item_chapters(self, tmp_path, mock_config):
+        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10)  # chapter_thumbnails defaults False
+        server = PlexServer(mock_config)
+        _wire_plex_query(server, parts=[("abcdef0123456789", "/m/foo.mkv")])
+        server.get_item_chapters = MagicMock(side_effect=AssertionError("must not be called when disabled"))
+
+        paths = adapter.compute_output_paths(_make_bundle("/m/foo.mkv", tmp_path), server, item_id="42")
+
+        assert len(paths) == 1
+        server.get_item_chapters.assert_not_called()
+
+    def test_enabled_appends_chapter_paths_in_index_order(self, tmp_path, mock_config):
+        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10, chapter_thumbnails=True)
+        server = PlexServer(mock_config)
+        _wire_plex_query(server, parts=[("abcdef0123456789", "/m/foo.mkv")])
+        server.get_item_chapters = MagicMock(return_value=[(1, 0), (2, 120000), (3, 300000)])
+
+        paths = adapter.compute_output_paths(_make_bundle("/m/foo.mkv", tmp_path), server, item_id="42")
+
+        assert paths[0] == Path("/cfg/Media/localhost/a/bcdef0123456789.bundle/Contents/Indexes/index-sd.bif")
+        assert paths[1:] == [
+            Path("/cfg/Media/localhost/a/bcdef0123456789.bundle/Contents/Chapters/chapter1.jpg"),
+            Path("/cfg/Media/localhost/a/bcdef0123456789.bundle/Contents/Chapters/chapter2.jpg"),
+            Path("/cfg/Media/localhost/a/bcdef0123456789.bundle/Contents/Chapters/chapter3.jpg"),
+        ]
+        server.get_item_chapters.assert_called_once_with("42")
+
+    def test_enabled_but_no_chapters_returns_only_bif_path(self, tmp_path, mock_config):
+        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10, chapter_thumbnails=True)
+        server = PlexServer(mock_config)
+        _wire_plex_query(server, parts=[("abcdef0123456789", "/m/foo.mkv")])
+        server.get_item_chapters = MagicMock(return_value=[])
+
+        paths = adapter.compute_output_paths(_make_bundle("/m/foo.mkv", tmp_path), server, item_id="42")
+
+        assert len(paths) == 1
+
+    def test_pending_chapters_reset_on_each_call(self, tmp_path, mock_config):
+        """A chapter-less item processed after a chapter-ful one on the same
+        adapter instance must not publish the previous item's stale chapters.
+        (Guards the instance-state design in __init__'s docstring — this
+        adapter is expected to be constructed fresh per dispatch, but the
+        reset must hold even if that assumption is ever violated.)"""
+        adapter = PlexBundleAdapter(plex_config_folder="/cfg", frame_interval=10, chapter_thumbnails=True)
+        server = PlexServer(mock_config)
+        _wire_plex_query(server, parts=[("abcdef0123456789", "/m/foo.mkv")])
+        server.get_item_chapters = MagicMock(return_value=[(1, 0)])
+        adapter.compute_output_paths(_make_bundle("/m/foo.mkv", tmp_path), server, item_id="42")
+        assert adapter._pending_chapters == [(1, 0)]
+
+        server.get_item_chapters = MagicMock(return_value=[])
+        paths = adapter.compute_output_paths(_make_bundle("/m/foo.mkv", tmp_path), server, item_id="43")
+
+        assert len(paths) == 1
+        assert adapter._pending_chapters == []
+
+
+class TestPublishChapterThumbnails:
+    def _bif_bundle(self, tmp_path, canonical_path="/m/foo.mkv"):
+        frame_dir = tmp_path / "frames"
+        frame_dir.mkdir(exist_ok=True)
+        (frame_dir / "00000.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
+        return BifBundle(
+            canonical_path=canonical_path,
+            frame_dir=frame_dir,
+            bif_path=None,
+            frame_interval=5,
+            width=320,
+            height=180,
+            frame_count=1,
+        )
+
+    def test_writes_one_frame_per_chapter_path_in_order(self, tmp_path):
+        from unittest.mock import call, patch
+
+        adapter = PlexBundleAdapter(plex_config_folder=str(tmp_path), frame_interval=5, chapter_thumbnails=True)
+        adapter._pending_chapters = [(1, 0), (2, 120000)]
+        bif_path = tmp_path / "Indexes" / "index-sd.bif"
+        chapter_paths = [tmp_path / "Chapters" / "chapter1.jpg", tmp_path / "Chapters" / "chapter2.jpg"]
+
+        with patch("media_preview_generator.output.plex_bundle._extract_chapter_frame", return_value=True) as extract:
+            adapter.publish(self._bif_bundle(tmp_path), [bif_path, *chapter_paths])
+
+        assert extract.call_args_list == [
+            call("/m/foo.mkv", 0, chapter_paths[0]),
+            call("/m/foo.mkv", 120000, chapter_paths[1]),
+        ]
+
+    def test_no_chapter_paths_skips_extraction_entirely(self, tmp_path):
+        from unittest.mock import patch
+
+        adapter = PlexBundleAdapter(plex_config_folder=str(tmp_path), frame_interval=5)
+        bif_path = tmp_path / "Indexes" / "index-sd.bif"
+
+        with patch("media_preview_generator.output.plex_bundle._extract_chapter_frame") as extract:
+            adapter.publish(self._bif_bundle(tmp_path), [bif_path])
+
+        extract.assert_not_called()
+
+    def test_one_chapter_extraction_failure_does_not_stop_the_others(self, tmp_path):
+        from unittest.mock import patch
+
+        adapter = PlexBundleAdapter(plex_config_folder=str(tmp_path), frame_interval=5, chapter_thumbnails=True)
+        adapter._pending_chapters = [(1, 0), (2, 120000)]
+        bif_path = tmp_path / "Indexes" / "index-sd.bif"
+        chapter_paths = [tmp_path / "Chapters" / "chapter1.jpg", tmp_path / "Chapters" / "chapter2.jpg"]
+
+        with patch(
+            "media_preview_generator.output.plex_bundle._extract_chapter_frame",
+            side_effect=[False, True],
+        ) as extract:
+            adapter.publish(self._bif_bundle(tmp_path), [bif_path, *chapter_paths])
+
+        assert extract.call_count == 2
+
+    def test_path_count_mismatch_is_logged_and_skipped_not_raised(self, tmp_path):
+        """Defensive guard: if pending_chapters and chapter output paths ever
+        disagree in length (should be impossible given compute_output_paths
+        builds both together), publish must not raise or write anything."""
+        from unittest.mock import patch
+
+        adapter = PlexBundleAdapter(plex_config_folder=str(tmp_path), frame_interval=5, chapter_thumbnails=True)
+        adapter._pending_chapters = [(1, 0), (2, 120000), (3, 300000)]  # 3 chapters
+        bif_path = tmp_path / "Indexes" / "index-sd.bif"
+        chapter_paths = [tmp_path / "Chapters" / "chapter1.jpg"]  # only 1 path
+
+        with patch("media_preview_generator.output.plex_bundle._extract_chapter_frame") as extract:
+            adapter.publish(self._bif_bundle(tmp_path), [bif_path, *chapter_paths])
+
+        extract.assert_not_called()
+
+
+class TestExtractChapterFrame:
+    """Unit tests for the standalone single-frame FFmpeg extraction helper.
+
+    Mocks subprocess.run to avoid needing a real FFmpeg binary + video file
+    in the unit test environment; verifies command construction and
+    success/failure classification.
+    """
+
+    def test_builds_expected_ffmpeg_command(self, tmp_path):
+        from unittest.mock import patch
+
+        from media_preview_generator.output.plex_bundle import _extract_chapter_frame
+
+        output_path = tmp_path / "Chapters" / "chapter1.jpg"
+
+        fake_result = MagicMock(returncode=0, stderr="")
+        with patch("media_preview_generator.output.plex_bundle.subprocess.run", return_value=fake_result) as run:
+            # output_path won't exist since subprocess.run is mocked — create
+            # it manually so the post-call existence check passes.
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"\xff\xd8\xff")
+
+            ok = _extract_chapter_frame("/m/foo.mkv", 120000, output_path)
+
+        assert ok is True
+        command = run.call_args.args[0]
+        assert command[0] == "ffmpeg"
+        assert "-ss" in command
+        assert command[command.index("-ss") + 1] == "120.000"
+        assert command[command.index("-i") + 1] == "/m/foo.mkv"
+        assert "scale=w=1280:h=-2:force_original_aspect_ratio=decrease" in command
+        assert command[-1] == str(output_path)
+
+    def test_zero_and_negative_start_ms_clamped_to_zero_seconds(self, tmp_path):
+        from unittest.mock import patch
+
+        from media_preview_generator.output.plex_bundle import _extract_chapter_frame
+
+        output_path = tmp_path / "chapter1.jpg"
+        fake_result = MagicMock(returncode=0, stderr="")
+        with patch("media_preview_generator.output.plex_bundle.subprocess.run", return_value=fake_result) as run:
+            output_path.write_bytes(b"\xff\xd8\xff")
+            _extract_chapter_frame("/m/foo.mkv", -500, output_path)
+
+        command = run.call_args.args[0]
+        assert command[command.index("-ss") + 1] == "0.000"
+
+    def test_nonzero_exit_code_returns_false(self, tmp_path):
+        from unittest.mock import patch
+
+        from media_preview_generator.output.plex_bundle import _extract_chapter_frame
+
+        output_path = tmp_path / "chapter1.jpg"
+        fake_result = MagicMock(returncode=1, stderr="Invalid data found when processing input")
+        with patch("media_preview_generator.output.plex_bundle.subprocess.run", return_value=fake_result):
+            ok = _extract_chapter_frame("/m/foo.mkv", 0, output_path)
+
+        assert ok is False
+
+    def test_missing_output_file_returns_false_even_on_zero_exit(self, tmp_path):
+        """FFmpeg can exit 0 without producing output in rare edge cases
+        (e.g. a seek past EOF that still exits cleanly) — verify on-disk
+        existence rather than trusting the exit code alone."""
+        from unittest.mock import patch
+
+        from media_preview_generator.output.plex_bundle import _extract_chapter_frame
+
+        output_path = tmp_path / "chapter1.jpg"  # deliberately never created
+        fake_result = MagicMock(returncode=0, stderr="")
+        with patch("media_preview_generator.output.plex_bundle.subprocess.run", return_value=fake_result):
+            ok = _extract_chapter_frame("/m/foo.mkv", 0, output_path)
+
+        assert ok is False
+
+    def test_subprocess_launch_failure_returns_false(self, tmp_path):
+        from unittest.mock import patch
+
+        from media_preview_generator.output.plex_bundle import _extract_chapter_frame
+
+        output_path = tmp_path / "chapter1.jpg"
+        with patch(
+            "media_preview_generator.output.plex_bundle.subprocess.run",
+            side_effect=OSError("ffmpeg not found"),
+        ):
+            ok = _extract_chapter_frame("/m/foo.mkv", 0, output_path)
+
+        assert ok is False
