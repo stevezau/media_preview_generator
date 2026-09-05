@@ -181,6 +181,7 @@ def _adapter_for_server(server_config: ServerConfig) -> OutputAdapter | None:
         return PlexBundleAdapter(
             plex_config_folder=plex_config_folder,
             frame_interval=frame_interval,
+            chapter_thumbnails=bool(output.get("chapter_thumbnails", False)),
         )
     if adapter_name == "emby_sidecar":
         return EmbyBifAdapter(width=width, frame_interval=frame_interval)

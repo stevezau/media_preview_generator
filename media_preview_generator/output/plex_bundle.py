@@ -10,11 +10,29 @@ where ``<h0>`` is the first character of the per-item bundle hash returned by
 
 The adapter calls :meth:`PlexServer.get_bundle_metadata` to resolve the hash,
 which is why :meth:`needs_server_metadata` returns ``True``.
+
+When ``chapter_thumbnails`` is enabled, this adapter *also* publishes Plex's
+chapter-view thumbnails — a separate, optional Plex feature from the BIF
+scrubber preview. Their on-disk format (found by inspecting real
+Plex-generated bundles) is a sibling of the BIF index under the same
+bundle hash:
+
+    {plex_config_folder}/Media/localhost/<h0>/<h[1:]>.bundle/Contents/Chapters/chapter<N>.jpg
+
+``N`` is 1-based and matches the chapter's ``index`` from Plex's own
+``<Chapter>`` metadata (``PlexServer.get_item_chapters``). Unlike the BIF
+frames — extracted once per file at fixed intervals via the GPU-accelerated
+pipeline in ``processing/generator.py`` — chapter thumbnails are a handful
+of single-frame grabs at arbitrary timestamps, so this module does its own
+minimal, CPU-only FFmpeg extraction (``_extract_chapter_frame``) rather than
+routing through that pipeline's GPU/HDR-tonemap machinery, which is built
+for continuous interval extraction and would be substantial overkill here.
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 from loguru import logger
@@ -22,6 +40,66 @@ from loguru import logger
 from ..servers.base import LibraryNotYetIndexedError, MediaServer
 from ..utils import sanitize_path
 from .base import BifBundle, OutputAdapter
+
+# Matches the width Plex itself uses for chapter thumbnails (verified by
+# inspecting Plex-generated ``chapterN.jpg`` files: 1280px wide, source
+# aspect ratio preserved via letterboxing-free ``force_original_aspect_ratio``
+# scaling — e.g. 1280x539 for a 2.39:1 source).
+_CHAPTER_THUMB_WIDTH = 1280
+
+
+def _extract_chapter_frame(video_path: str, start_ms: int, output_path: Path) -> bool:
+    """Grab a single frame at ``start_ms`` and write it as a JPEG to ``output_path``.
+
+    Deliberately simple: seeks with ``-ss`` before ``-i`` (fast, keyframe-ish
+    seek — good enough for a chapter-view thumbnail, unlike BIF scrubbing
+    which needs frame-accurate coverage), grabs exactly one frame, and scales
+    to ``_CHAPTER_THUMB_WIDTH`` wide preserving aspect ratio. No GPU decode,
+    no HDR tonemap chain — a single frame grab is cheap enough on CPU that
+    the complexity in ``processing/generator.py`` isn't worth reusing here.
+
+    Returns ``True`` on success, ``False`` on any FFmpeg failure (logged as a
+    warning; callers skip that one chapter rather than failing the whole
+    publish).
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    start_seconds = max(start_ms, 0) / 1000.0
+    command = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{start_seconds:.3f}",
+        "-i",
+        video_path,
+        "-frames:v",
+        "1",
+        "-vf",
+        f"scale=w={_CHAPTER_THUMB_WIDTH}:h=-2:force_original_aspect_ratio=decrease",
+        "-q:v",
+        "4",
+        str(output_path),
+    ]
+    try:
+        result = subprocess.run(  # noqa: S603 — fixed argv, no shell, no user-controlled binary
+            command,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("Chapter thumbnail extraction failed to launch FFmpeg for {}: {}", video_path, exc)
+        return False
+    if result.returncode != 0 or not output_path.exists():
+        logger.warning(
+            "Chapter thumbnail extraction failed for {} at {}ms (exit {}): {}",
+            video_path,
+            start_ms,
+            result.returncode,
+            (result.stderr or "").strip().splitlines()[-1:] or "no output",
+        )
+        return False
+    return True
 
 
 class PlexBundleAdapter(OutputAdapter):
@@ -32,11 +110,22 @@ class PlexBundleAdapter(OutputAdapter):
             (the directory that contains ``Media/localhost/...``).
         frame_interval: BIF frame interval in seconds. Persisted in the BIF
             header so Plex spaces preview frames correctly during scrubbing.
+        chapter_thumbnails: When True, also fetch the item's chapter list
+            and publish ``Contents/Chapters/chapter<N>.jpg`` images
+            alongside the BIF. Off by default — it costs one extra Plex
+            API round-trip per item (see ``PlexServer.get_item_chapters``).
     """
 
-    def __init__(self, plex_config_folder: str, frame_interval: int) -> None:
+    def __init__(self, plex_config_folder: str, frame_interval: int, chapter_thumbnails: bool = False) -> None:
         self._plex_config_folder = plex_config_folder
         self._frame_interval = int(frame_interval)
+        self._chapter_thumbnails = bool(chapter_thumbnails)
+        # Chapters resolved by the most recent compute_output_paths() call,
+        # consumed by the following publish() call. Safe as instance state
+        # because _resolve_publishers() constructs a fresh adapter instance
+        # per canonical_path dispatch (see processing/multi_server.py) — this
+        # instance is never shared across files or reused concurrently.
+        self._pending_chapters: list[tuple[int, int]] = []
 
     @property
     def name(self) -> str:
@@ -96,13 +185,30 @@ class PlexBundleAdapter(OutputAdapter):
 
         bundle_hash = self._select_hash_for_path(parts, bundle.canonical_path, item_id)
 
-        return [self._bundle_bif_path(bundle_hash)]
+        output_paths = [self._bundle_bif_path(bundle_hash)]
+
+        # Chapter thumbnails are a separate Plex feature (Chapters tab, not
+        # the BIF scrubber) — see module docstring. Reset pending state on
+        # every call so a disabled/chapter-less item never publishes stale
+        # chapters left over from this same instance's own prior call.
+        self._pending_chapters = []
+        if self._chapter_thumbnails:
+            chapters = server.get_item_chapters(item_id)
+            if chapters:
+                self._pending_chapters = chapters
+                output_paths.extend(self._chapter_thumb_path(bundle_hash, index) for index, _start_ms in chapters)
+
+        return output_paths
 
     def publish(self, bundle: BifBundle, output_paths: list[Path], item_id: str | None = None) -> None:
-        """Pack ``bundle.frame_dir`` into a BIF file at the first output path.
+        """Pack ``bundle.frame_dir`` into a BIF, and write any chapter thumbnails.
 
-        Plex stores exactly one ``index-sd.bif`` per bundle, so we expect
-        ``output_paths`` to have a single entry. Parent directories are
+        Plex stores exactly one ``index-sd.bif`` per bundle, so
+        ``output_paths[0]`` is always the BIF. Any remaining entries are
+        chapter thumbnail paths computed by the preceding
+        ``compute_output_paths`` call, in the same order as
+        ``self._pending_chapters`` — each gets its own single-frame FFmpeg
+        extraction at that chapter's timestamp. Parent directories are
         created if missing.
         """
         if not output_paths:
@@ -135,6 +241,40 @@ class PlexBundleAdapter(OutputAdapter):
         )
         logger.debug("Plex BIF written to {}", index_bif)
 
+        chapter_paths = output_paths[1:]
+        if not chapter_paths:
+            return
+        if len(chapter_paths) != len(self._pending_chapters):
+            # Should not happen — compute_output_paths always builds these two
+            # lists together in the same call — but fail loudly rather than
+            # silently mismatching chapter N's timestamp to chapter M's path.
+            logger.warning(
+                "Chapter thumbnail path/timestamp count mismatch for {} ({} paths, {} chapters) "
+                "— skipping chapter thumbnail generation for this item.",
+                bundle.canonical_path,
+                len(chapter_paths),
+                len(self._pending_chapters),
+            )
+            return
+
+        written = 0
+        for path, (index, start_ms) in zip(chapter_paths, self._pending_chapters, strict=True):
+            if _extract_chapter_frame(bundle.canonical_path, start_ms, path):
+                written += 1
+            else:
+                logger.warning(
+                    "Skipped chapter {} thumbnail for {} (extraction failed at {}ms)",
+                    index,
+                    bundle.canonical_path,
+                    start_ms,
+                )
+        logger.debug(
+            "Plex chapter thumbnails written for {}: {}/{}",
+            bundle.canonical_path,
+            written,
+            len(chapter_paths),
+        )
+
     # ------------------------------------------------------------------ helpers
     @staticmethod
     def bundle_bif_path(plex_config_folder: str, bundle_hash: str) -> Path:
@@ -153,6 +293,23 @@ class PlexBundleAdapter(OutputAdapter):
     def _bundle_bif_path(self, bundle_hash: str) -> Path:
         """Instance-bound shim that calls :meth:`bundle_bif_path`."""
         return self.bundle_bif_path(self._plex_config_folder, bundle_hash)
+
+    @staticmethod
+    def chapter_thumb_path(plex_config_folder: str, bundle_hash: str, chapter_index: int) -> Path:
+        """Compute ``{plex}/Media/localhost/<h0>/<h[1:]>.bundle/Contents/Chapters/chapter<N>.jpg``.
+
+        Mirrors :meth:`bundle_bif_path`'s hash-to-bundle-directory mapping —
+        same bundle, sibling ``Contents`` subdirectory. ``chapter_index`` is
+        1-based, matching Plex's own ``<Chapter index="N">`` numbering.
+        """
+        bundle_file = sanitize_path(f"{bundle_hash[0]}/{bundle_hash[1:]}.bundle")
+        bundle_path = sanitize_path(os.path.join(plex_config_folder, "Media", "localhost", bundle_file))
+        chapters_path = sanitize_path(os.path.join(bundle_path, "Contents", "Chapters"))
+        return Path(sanitize_path(os.path.join(chapters_path, f"chapter{chapter_index}.jpg")))
+
+    def _chapter_thumb_path(self, bundle_hash: str, chapter_index: int) -> Path:
+        """Instance-bound shim that calls :meth:`chapter_thumb_path`."""
+        return self.chapter_thumb_path(self._plex_config_folder, bundle_hash, chapter_index)
 
     @staticmethod
     def _select_hash_for_path(
