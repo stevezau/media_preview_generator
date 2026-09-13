@@ -71,8 +71,9 @@ jobs:
           build-args: |
             GIT_BRANCH=pr-${{ github.event.pull_request.number }}
             GIT_SHA=${{ github.event.pull_request.head.sha }}
-          cache-from: type=gha,scope=pr-${{ github.event.pull_request.number }}
-          cache-to: type=gha,scope=pr-${{ github.event.pull_request.number }},mode=max
+          # No GHA layer cache: since GitHub's 2026 cache hardening, pull_request_target runs on the default
+          # branch get a read-only cache token ("refs/heads/dev: read"), so cache-to fails the whole build with
+          # "failed to reserve cache" and nothing could ever be written for cache-from to read.
 
       - name: Post/update sticky PR comment
         uses: marocchino/sticky-pull-request-comment@v2
