@@ -177,6 +177,7 @@ extend-exclude = [
     ".venv-test",
     "htmlcov",
     "tmp_migration_test",
+    "docs/design/intro-credits/evidence",
 ]
 
 [tool.ruff.lint]

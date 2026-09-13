@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AssemblyVersion>10.11.0.1</AssemblyVersion>
+    <FileVersion>10.11.0.1</FileVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Jellyfin.Controller" Version="10.11.0" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,60 @@
+# Intro & Credits — evidence and lab
+
+Everything the design spec (`../spec.md`) cites lives here. Nothing important lives in a
+session scratchpad. **Local-only (gitignored, public repo):** every `*.json`/`*.jsonl` truth set and result (they list
+real library file paths), `lab/*_truth.txt`, `credits/spot.txt`, `credits/framechecks/`, `lab/env`, `lab/synth/`,
+`online/skipdb-dump.json`, `plugins/emby-4.10/embylibs/`. They exist only on `storage`. `lab/env` holds lab-server tokens: chmod 600, never commit, never paste into docs.
+
+## Map
+
+| Folder | What | Key files |
+|---|---|---|
+| `lab/` | Throwaway servers on `storage` + clients | `up.sh` (bring-up), `env` (tokens), `jf_client.py`, `emby_client.py` (API + Playwright skip-button checks), `plexdb.sh` (Plex SQLite in the lab container), `plex_inject.py` (Plex `extra_data` builder), `py_write.py` (stock-sqlite write proof), `synth/` (VP9/Opus episodes — Playwright Chromium has no H.264) |
+| `plugins/` | Prototype plugins proven in the lab | `jellyfin-10.11/` (net9), `jellyfin-12.0/` (net10), `emby-4.10/` (+ `embylibs/` reference DLLs copied from the Emby container `/system/`), `built/` DLLs |
+| `plex-provider-redirect/` | Plex `MetadataProviderUrl` redirect test (not honoured) | `proxy.py`, `log.jsonl`, `pms_marker_strings.txt` |
+| `online/` | TheIntroDB / IntroDB / SkipDB accuracy on 43 verified cases | `cases.json`, `query.py`, `online_results.json`, `skipdb-dump.json` (30 MB snapshot — don't commit) |
+| `coverage/` | Online coverage on a random prod sample | `cov.py`, `coverage_results.json` |
+| `eval/` | TV intro detection eval (118 episodes with studio chapters) | `named_seasons.json`, `run_eval_v3.py`, `eval_results_v3.json` (v1/v2/v3 results), `sweep_intro.*`, `snap_test.py`, `fp_variants.py` + `.log` (alg0/1/2/4, downmix), `fp_alg2.py`, `few_siblings.py` + `.log` (weekly releases / previous season). Fingerprint caches are not kept — first run recomputes (~2 s/episode) |
+| `detect/` | Detector prototypes | `fp.py`, `fp3.py` (v3 season matcher), credits OCR prototypes |
+| `credits/` | Credits-start eval (80 files with chapter truth) | `movie_credit_truth.json` (205 movies), `movies40.json`, `tv40.json`, `features3.py` (GPU extractor → `f3.jsonl`), `eval_rules3.py` (rules + grid), **`rule_j.py` (reproduces spec §5.4 table)**, `compare_rules.py`, `adjudicated.json` (truth fixed by frame checks), `framechecks/` (contact sheets), `framecheck.py`, `gpu_bench.py` (CPU vs CUDA text detection), `gpu/` (**cross-vendor GPU: WebGPU/Vulkan in the app image, ncnn attempt — see `gpu/RESULTS.md`**) |
+| `design/` | Design report source (artifact https://claude.ai/code/artifact/65394c1a-e878-4fc2-985b-63bc4c307c5d) | `index.html`, `before_*.jpg`, `shot.py` |
+| `history/` | Superseded spec revisions and old report copies | `spec-rev2-2026-09-13.md` |
+
+## Lab servers
+
+```bash
+cd docs/design/intro-credits/evidence/lab
+./up.sh              # create missing containers (state in docker volumes mlab_*)
+./up.sh recreate     # recreate all, volumes kept
+set -a; . ./env; set +a
+```
+
+| Server | URL | Notes |
+|---|---|---|
+| Emby 4.10 | http://127.0.0.1:18096 | Lab plugin `MarkersLabEmby` installed; markers on Rick and Morty S01 + Synth Show |
+| Jellyfin 10.11 | http://127.0.0.1:18097 | Lab plugin `MarkersLab` installed; `JF_ITEM` has Intro + Outro segments |
+| Jellyfin 12.0 | http://127.0.0.1:18098 | net10 build of the lab plugin; `JF12_ITEM` |
+| Plex (latest) | http://127.0.0.1:32402 | **Unclaimed → no Plex Pass → markers not served.** For Plex end-to-end tests ask the owner for a https://plex.tv/claim token (valid 4 min), then `PLEX_CLAIM=… ./up.sh recreate`; remove from the owner's account afterwards |
+
+Never test on the prod Plex on `plex`. Prod Plex DB is read-only: `sqlite3 "file:<db>?mode=ro"` over ssh.
+
+## Tools
+
+Resource rule: one heavy job at a time, `nice -n 19`, thread caps, GPU where it helps (owner, 2026-09-13).
+
+```bash
+# CPU text detector venv (what the app would ship)
+uv venv -p 3.12 ocrvenv && VIRTUAL_ENV=$PWD/ocrvenv uv pip install rapidocr_onnxruntime==1.4.4 pillow numpy
+
+# GPU text detector venv (lab only; Quadro P5000 = Pascal 6.1)
+uv venv -p 3.12 ocrgpu
+VIRTUAL_ENV=$PWD/ocrgpu uv pip install rapidocr_onnxruntime==1.4.4 pillow
+VIRTUAL_ENV=$PWD/ocrgpu uv pip uninstall onnxruntime            # rapidocr pulls the CPU build; it shadows the GPU one
+VIRTUAL_ENV=$PWD/ocrgpu uv pip install "onnxruntime-gpu[cuda,cudnn]==1.22.0" "nvidia-cudnn-cu12==9.5.1.17"
+# onnxruntime-gpu 1.30 = CUDA 13 (no Pascal); cuDNN 9.26 fails on Pascal with CUDNN_BACKEND_API_FAILED.
+# Call onnxruntime.preload_dlls() before creating sessions.
+
+# Chromaprint: storage's /usr/bin/ffmpeg has it; in the app image only /usr/lib/jellyfin-ffmpeg/ffmpeg does.
+# Plugin builds: docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:9.0 dotnet build -c Release
+#   (Jellyfin 12.0 build: sdk:10.0)
+```
