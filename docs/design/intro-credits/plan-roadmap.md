@@ -25,12 +25,18 @@ Every task in every phase implicitly includes these. Values are copied from the 
 - Feature is **off until turned on per server** (`media_servers[].markers.enabled`, default `false`). Nothing is
   detected for a file with no enabled owner; nothing is written to a server whose switch is off.
 - **Precision over coverage:** a missing marker is acceptable; a wrong one is not.
-- Default publish rule `publish_when = "high"`: chapters, or two independent sources agree (intro **end** within
-  **5 s**; credits **start** within **10 s**). `"medium"` also accepts one source after sanity checks.
-- Sanity bounds: inside the file; intro starts in the first **35%**; credits start in the last **25%** (movies also
-  ≤ **900 s** from the end); nothing starts past the end.
-- IntroDB + TheIntroDB agreeing counts as **one** source. Markers already on a server count as agreement evidence,
-  **never** as a sole source. A **locked** user marker always wins.
+- Default publish rule `publish_when = "high"`: chapters (unless two agreeing independent sources contradict them), or
+  two independent sources agree (intro/recap **end** within **5 s**; credits/preview **start** within **10 s**). Only
+  agreeing candidates supply times; the unchecked edge takes the safer value (latest intro start, earliest credits end).
+  Conflicting groups of agreeing sources, or any agreeing pair from different sources outside tolerance of the result,
+  → needs review. `"medium"` also accepts one source after sanity checks when no other independent source (server
+  markers included) contradicts it and every pair of its own candidates agrees. Results never depend on input order.
+- Sanity bounds (chapters too): inside the file (end ≤ duration + 2 s, clamped); length ≥ **3 s** (intro/recap
+  ≤ **300 s**); intro/recap start in the first **35%**, never running to the end of the file; credits/preview start in
+  the last **25%** (movie credits also ≤ **900 s** from the end); unknown duration fails.
+- IntroDB + TheIntroDB always count as **one** source. Markers already on a server count as agreement evidence,
+  **never** as a sole source and never supply times. A **locked** user marker always wins. Intro/recap overlap > 5 s
+  and preview/credits overlap > 10 s → needs review.
 - File identity = canonical path + size + mtime. A change invalidates fingerprints, evidence and unlocked markers.
 - All marker times are integer **milliseconds** internally. Jellyfin/Emby ticks = ms × 10,000.
 - Plex: write both `taggings` (on Plex's existing `tags` row with `tag_type=12 AND tag=''`) **and**

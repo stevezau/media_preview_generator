@@ -279,15 +279,38 @@ Full rule tuning happens in phase 3 on a larger hand-checked set.
 
 ### 5.5 Combining evidence
 Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
-1. A **locked** user marker wins, always.
-2. Chapters → accept.
-3. Otherwise accept when two independent sources agree (intro end within 5 s; credits start within 10 s).
-4. A single source is accepted only at the **"Medium"** publish setting, and only after sanity checks: inside the
-   file; intro starts in the first 35%; credits start in the last 25% (movies ≤ 900 s from end); not past end.
-5. Markers already on a server count as agreement evidence, never as a sole source.
-6. No agreement → no marker; shown as **"Needs review"**.
-7. Online sources are independent of each other only if they don't copy each other: IntroDB data looks partly seeded
-   from others — IntroDB + TheIntroDB agreeing counts as one source unless a local source also agrees.
+1. A **locked** user marker wins, always (even for a type whose detection is off); it is never demoted by rules 9–10.
+2. Sanity checks apply to every candidate, chapters included: inside the file (end ≤ duration + 2 s, clamped to the
+   duration; unknown duration fails; a segment can't end before it starts); length ≥ 3 s for every type and ≤ 300 s for
+   intros and recaps; intro/recap starts in the first 35% and must not run to the end of the file (end missing or
+   ≥ duration − 2 s); credits/preview start in the last 25%; movie credits start ≤ 900 s from the end.
+3. Chapters → accept (first intro/recap chapter, last credits/preview chapter; on a tie the one with the earlier end),
+   unless two agreeing independent non-chapter sources contradict the chapter → **"Needs review"**. One contradicting
+   source never overrides chapters. When two or more independent sources agree with the chapter's checked edge, the
+   other edge takes their safer value if it is safer (later intro/recap start, earlier credits/preview end).
+4. Otherwise accept when two independent sources agree: intro/recap **end** within 5 s; credits/preview **start**
+   within 10 s. Every maximal set of mutually agreeing candidates is considered (a sliding window over the compared
+   times). Only candidates that agree with a different independent source may supply times: the agreed edge comes
+   from the first of them in source order; the other edge takes the safer value across them (latest intro/recap
+   start, earliest credits/preview end). If the composed marker fails sanity → "Needs review".
+5. If two groups of agreeing sources would publish times that don't agree with each other → "Needs review". Before
+   anything is published (chapters, agreement or "Medium"), any two agreeing candidates from different independent
+   sources that are both outside the tolerance of the published time send it to "Needs review" — a third source that
+   agrees with both sides can't hide a contradiction. Another chapter of the same type counts as one side of such a
+   pair; a chapter within tolerance of two groups that disagree with each other is still accepted.
+6. A single source is accepted only at the **"Medium"** publish setting, and only when no sane candidate from another
+   independent source (markers already on a server included) contradicts it and every pair of the source's own
+   candidates agrees; its other edge takes the safer value across those candidates.
+7. Markers already on a server count as agreement evidence, never as a sole source, and never supply the published
+   times. Markers from several servers count as one source.
+8. Online sources are independent of each other only if they don't copy each other: IntroDB data looks partly seeded
+   from others — IntroDB + TheIntroDB always count as one source.
+9. A decided intro and recap overlapping by more than 5 s → both "Needs review".
+10. A decided preview overlapping decided credits by more than 10 s → the preview goes to "Needs review".
+11. No agreement → no marker; shown as **"Needs review"**. `decided_by`: agreement → the sources that agree with the
+    winner plus any that supplied an edge; chapters → `chapters`, plus the agreeing sources when they replaced the
+    chapter's other edge; "Medium" → the sources that supplied an edge. Results never depend on the order candidates
+    arrive in.
 
 ### 5.6 Resource rules
 Intro & Credits jobs: 1 worker by default, lowest priority, ffmpeg `-threads 2`, ONNX Runtime `intra_op_num_threads=2`,
@@ -626,3 +649,20 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   fresh `extra_data` keys survive; the library-wide marker-version sample runs once per job (refreshed every 5 min), each write
   validates the item's own parts. A follow-up doesn't wait while its preview job counts down to a retry. Per-file outcomes gain `markers_waiting` and `markers_skipped`; any server failure makes the file
   count as failed unless another server was written.
+- 2026-09-13 · Decision rules tightened during Task 3 review (§5.5): sanity checks apply to chapters too; an intro or
+  recap may not run to the end of the file; at "Medium" a single source is refused when another independent source
+  (server markers included) contradicts it; published times come only from candidates that agree with a different
+  independent source.
+- 2026-09-13 · Task 3 review round 2 (§5.5): conflicting groups of agreeing sources → review; the edge the tolerance
+  doesn't check takes the safer value; chapters yield to two agreeing contradicting sources; server markers never
+  supply times; intro/recap and preview/credits overlaps → review; IntroDB + TheIntroDB always one source.
+- 2026-09-13 · Task 3 review round 3 (§5.5): agreement search considers every maximal agreeing set (the greedy search
+  could miss a conflicting group and flip with input order); at "Medium" a source whose own candidates disagree doesn't
+  publish; `decided_by` includes the sources that supplied either edge.
+- 2026-09-13 · Task 3 review round 4 (§5.5): chapter ties pick the earlier end; an agreeing pair from different sources
+  outside the tolerance of a result blocks it even when a third source bridges them; "Medium" needs every pair of the
+  source's own candidates to agree.
+- 2026-09-13 · Task 3 review round 5 (§5.5): the edge the tolerance doesn't check takes the safer value for "Medium"
+  single sources and for chapters confirmed by two sources; remaining ties prefer the shorter skip.
+- 2026-09-14 · Task 3 final review (§5.5): a second chapter of the same type that another source agrees with blocks the
+  first chapter (review); `decided_by` wording per path.
