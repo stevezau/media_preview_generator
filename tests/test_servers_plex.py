@@ -29,6 +29,21 @@ def plex_wrapper(mock_config):
     return PlexServer(mock_config, server_id="plex-test", name="Test Plex")
 
 
+@pytest.fixture
+def plex_server_under_test(mock_config):
+    """A :class:`PlexServer` whose ``_connect`` is a ``MagicMock``.
+
+    ``retry_plex_call`` is patched to call straight through so tests can
+    drive ``conn.query`` directly without exercising the real retry/backoff
+    loop (which only matters for ``ParseError``/connection-error handling,
+    already covered elsewhere).
+    """
+    server = PlexServer(mock_config, server_id="plex-test", name="Test Plex")
+    server._connect = MagicMock()
+    with patch("media_preview_generator.plex_client.retry_plex_call", side_effect=lambda f, *a, **k: f(*a, **k)):
+        yield server
+
+
 class TestConstruction:
     def test_implements_media_server(self, plex_wrapper):
         from media_preview_generator.servers import MediaServer
@@ -1555,3 +1570,138 @@ class TestPlexPreviewsReadiness:
         assert row["severity"] == "recommended"
         assert "boom" in (row["reason"] or "")
         assert row["current"] == "unknown (probe failed)"
+
+
+class TestGetExternalIds:
+    def _xml(self, text):
+        import xml.etree.ElementTree as ET
+
+        return ET.fromstring(text)
+
+    def test_episode_uses_show_guids_and_indexes(self, plex_server_under_test):
+        episode = self._xml(
+            '<MediaContainer><Video type="episode" parentIndex="1" index="3" grandparentRatingKey="99">'
+            '<Guid id="imdb://tt5555555"/></Video></MediaContainer>'
+        )
+        show = self._xml(
+            '<MediaContainer><Directory type="show"><Guid id="imdb://tt2861424"/><Guid id="tmdb://60625"/>'
+            '<Guid id="tvdb://275274"/></Directory></MediaContainer>'
+        )
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = [episode, show]
+        ids = plex_server_under_test.get_external_ids("/library/metadata/123")
+        assert ids == {
+            "kind": "episode",
+            "tmdb": "60625",
+            "imdb": "tt2861424",
+            "tvdb": "275274",
+            "season": 1,
+            "episode": 3,
+        }
+        assert [c.args[0] for c in conn.query.call_args_list] == [
+            "/library/metadata/123?includeGuids=1",
+            "/library/metadata/99?includeGuids=1",
+        ]
+
+    def test_movie(self, plex_server_under_test):
+        movie = self._xml(
+            '<MediaContainer><Video type="movie"><Guid id="tmdb://862"/><Guid id="imdb://tt0114709"/>'
+            "</Video></MediaContainer>"
+        )
+        plex_server_under_test._connect.return_value.query.return_value = movie
+        assert plex_server_under_test.get_external_ids("862") == {
+            "kind": "movie",
+            "tmdb": "862",
+            "imdb": "tt0114709",
+            "tvdb": None,
+            "season": None,
+            "episode": None,
+        }
+
+    def test_query_failure_returns_none(self, plex_server_under_test):
+        plex_server_under_test._connect.return_value.query.side_effect = RuntimeError("down")
+        assert plex_server_under_test.get_external_ids("1") is None
+
+    def test_grandparent_query_failure_keeps_season_episode_but_no_ids(self, plex_server_under_test):
+        """RULING (fix round 1, HIGH-1, lab-verified on Plex): a show-guid lookup
+
+        failure must NEVER fall back to the episode's own (wrong, episode-scoped)
+        guids — that leaks an episode id into the series-id slot, which sends
+        another show's markers to this file. kind/season/episode are still
+        reported; tmdb/imdb/tvdb stay None."""
+        episode = self._xml(
+            '<MediaContainer><Video type="episode" parentIndex="1" index="3" grandparentRatingKey="99">'
+            '<Guid id="imdb://tt5555555"/></Video></MediaContainer>'
+        )
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = [episode, RuntimeError("show down")]
+        ids = plex_server_under_test.get_external_ids("123")
+        assert ids == {"kind": "episode", "tmdb": None, "imdb": None, "tvdb": None, "season": 1, "episode": 3}
+
+    def test_grandparent_lookup_empty_keeps_season_episode_but_no_ids(self, plex_server_under_test):
+        """RULING (fix round 1, HIGH-1): an empty show container (no children
+
+        at all) must NOT fall back to the episode's own guids either — same
+        leak as above, just via a different failure shape (empty vs. raising)."""
+        episode = self._xml(
+            '<MediaContainer><Video type="episode" parentIndex="1" index="3" grandparentRatingKey="99">'
+            '<Guid id="imdb://tt5555555"/></Video></MediaContainer>'
+        )
+        empty_show = self._xml("<MediaContainer></MediaContainer>")
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = [episode, empty_show]
+        ids = plex_server_under_test.get_external_ids("123")
+        assert ids == {"kind": "episode", "tmdb": None, "imdb": None, "tvdb": None, "season": 1, "episode": 3}
+
+    def test_episode_without_grandparent_key_keeps_season_episode_but_no_ids(self, plex_server_under_test):
+        """RULING (fix round 1, HIGH-1): no grandparentRatingKey at all (e.g. a
+
+        loose episode file Plex hasn't fully indexed into a show) must not
+        fall back to the episode's own guids, and must not issue a second
+        query at all."""
+        episode = self._xml(
+            '<MediaContainer><Video type="episode" parentIndex="1" index="3">'
+            '<Guid id="imdb://tt5555555"/></Video></MediaContainer>'
+        )
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = episode
+        ids = plex_server_under_test.get_external_ids("1")
+        assert ids == {"kind": "episode", "tmdb": None, "imdb": None, "tvdb": None, "season": 1, "episode": 3}
+        conn.query.assert_called_once()
+
+    def test_unknown_type_maps_to_unknown_kind_with_no_ids(self, plex_server_under_test):
+        """RULING (fix round 1, MED-3): an unrecognised type (e.g. the show
+
+        item itself) reports NO ids at all, not just kind="unknown" with the
+        node's own guids still leaking through."""
+        node = self._xml('<MediaContainer><Directory type="show"><Guid id="tmdb://1"/></Directory></MediaContainer>')
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = node
+        ids = plex_server_under_test.get_external_ids("5")
+        assert ids == {"kind": "unknown", "tmdb": None, "imdb": None, "tvdb": None, "season": None, "episode": None}
+        conn.query.assert_called_once()  # no further lookup for an unrecognised kind
+
+    def test_movie_never_reports_tvdb_even_if_present(self, plex_server_under_test):
+        """RULING (fix round 1, LOW): movies never report a tvdb id — different id space."""
+        movie = self._xml(
+            '<MediaContainer><Video type="movie"><Guid id="tmdb://862"/><Guid id="tvdb://999"/>'
+            "</Video></MediaContainer>"
+        )
+        plex_server_under_test._connect.return_value.query.return_value = movie
+        ids = plex_server_under_test.get_external_ids("1")
+        assert ids["tvdb"] is None
+        assert ids["tmdb"] == "862"
+
+    def test_empty_item_id_returns_none_without_query(self, plex_server_under_test):
+        assert plex_server_under_test.get_external_ids("") is None
+        assert plex_server_under_test.get_external_ids(None) is None
+        plex_server_under_test._connect.return_value.query.assert_not_called()
+
+    def test_missing_parent_and_index_become_none(self, plex_server_under_test):
+        episode = self._xml('<MediaContainer><Video type="episode" grandparentRatingKey="99"></Video></MediaContainer>')
+        show = self._xml('<MediaContainer><Directory type="show"><Guid id="tvdb://1"/></Directory></MediaContainer>')
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = [episode, show]
+        ids = plex_server_under_test.get_external_ids("1")
+        assert ids["season"] is None
+        assert ids["episode"] is None

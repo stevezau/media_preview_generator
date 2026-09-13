@@ -170,8 +170,11 @@ seasons (11%) carry them. Exact when present. Chapter truth can still be off vs 
 a late or wrong "End Credits" chapter by frame check).
 
 ### 5.2 Online lookups
-External ids come from each server's metadata (Plex `guids`, Emby/Jellyfin `ProviderIds`) — new `MediaServer`
-helper. TheIntroDB is queried with `duration_ms` of the actual file. Every online answer passes the sanity checks in
+External ids come from the path first (`{tvdb-…}`/`{tmdb-…}`/`{imdb-tt…}` on the show or movie folder, `SxxEyy`), then
+from each server's metadata (Plex `guids`, Emby/Jellyfin `ProviderIds`) — new `MediaServer` helper. An episode only
+ever uses its **show's** ids (if the show lookup fails, no ids); a path counts as a movie only with a tmdb/imdb id and
+no tvdb id; movies drop tvdb ids (different id space); items that are neither movie nor episode, and extras (trailers,
+featurettes, `Extras/` folders…), get no ids. TheIntroDB is queried with `duration_ms` of the actual file. Every online answer passes the sanity checks in
 §5.5 before it counts.
 
 ### 5.3 TV intros — season audio matching
@@ -672,3 +675,5 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
 - 2026-09-14 · Chapters (§5.1), from real-library review: a generic "Intro" chapter yields to a specific opening chapter
   in the same file (cold open); chapter ends clamp to the next chapter start; `OP`/`ED` match only in capitals;
   Matroska `ChapterSkipType` deferred (ffprobe can't read it).
+- 2026-09-14 · External ids (§5.2), from Task 6 review + lab check: episodes use only show ids (no fallback to episode
+  ids), path "movie" needs tmdb/imdb and no tvdb, movies drop tvdb, extras and non-movie/episode items get no ids.

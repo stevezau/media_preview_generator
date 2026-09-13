@@ -570,6 +570,13 @@ class MediaServer(ABC):
         format detection details (multipart vs JSON, header conventions).
         """
 
+    def get_external_ids(self, item_id: str) -> dict[str, Any] | None:
+        """Return tmdb/imdb/tvdb ids plus season/episode for an item (series ids for episodes).
+
+        Default: unsupported → None. Vendors override.
+        """
+        return None
+
     def check_settings_health(self) -> list[HealthCheckIssue]:
         """Return a list of mis-configured settings on this server.
 

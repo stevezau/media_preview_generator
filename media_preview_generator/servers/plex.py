@@ -34,6 +34,8 @@ from .base import (
 )
 
 if TYPE_CHECKING:
+    import xml.etree.ElementTree as ET
+
     from ..config import Config
 
 
@@ -2090,6 +2092,71 @@ class PlexServer(MediaServer):
             if bundle_hash and file_path:
                 results.append((bundle_hash, file_path))
         return results
+
+    def get_external_ids(self, item_id: str) -> dict[str, Any] | None:
+        """Plex guids (``includeGuids=1``).
+
+        Episodes take tmdb/imdb/tvdb ONLY from the show's own guids (via ``grandparentRatingKey``);
+        if that key is missing, or the show lookup fails or returns nothing, the ids stay ``None``
+        (season/episode are still reported) — the episode's own guids are never used as a stand-in
+        for the show's, since a wrong id would route another show's markers to this file. Movies
+        never report a ``tvdb`` id (different id space to tmdb/imdb). Unrecognised item types
+        report no ids at all.
+        """
+        from ..plex_client import retry_plex_call
+
+        bare_id = str(item_id or "").strip().rsplit("/", 1)[-1]
+        if not bare_id:
+            return None
+
+        def _first_node(key: str) -> ET.Element | None:
+            root = retry_plex_call(self._connect().query, f"/library/metadata/{key}?includeGuids=1")
+            return next(iter(root), None) if root is not None else None
+
+        try:
+            node = _first_node(bare_id)
+        except Exception as exc:
+            logger.debug("Plex external-id lookup failed for {}: {}", bare_id, exc)
+            return None
+        if node is None:
+            return None
+
+        kind = node.get("type")
+        kind_norm = kind if kind in ("movie", "episode") else "unknown"
+        out: dict[str, Any] = {
+            "kind": kind_norm,
+            "tmdb": None,
+            "imdb": None,
+            "tvdb": None,
+            "season": None,
+            "episode": None,
+        }
+        if kind_norm == "unknown":
+            return out
+
+        if kind_norm == "episode":
+            out["season"] = int(node.get("parentIndex")) if (node.get("parentIndex") or "").isdigit() else None
+            out["episode"] = int(node.get("index")) if (node.get("index") or "").isdigit() else None
+            grandparent_key = node.get("grandparentRatingKey")
+            if not grandparent_key:
+                return out
+            try:
+                guid_node = _first_node(grandparent_key)
+            except Exception as exc:
+                logger.debug("Plex show-guid lookup failed for {}: {}", grandparent_key, exc)
+                return out
+            if guid_node is None:
+                return out
+            allowed_schemes = ("tmdb", "imdb", "tvdb")
+        else:
+            guid_node = node
+            allowed_schemes = ("tmdb", "imdb")  # movies: tvdb is a different id space
+
+        for guid in guid_node.findall("Guid"):
+            scheme, _, value = (guid.get("id") or "").partition("://")
+            if scheme in allowed_schemes and value:
+                out[scheme] = value
+        return out
 
     def parse_webhook(self, payload: dict[str, Any] | bytes, headers: dict[str, str]) -> WebhookEvent | None:
         """Normalise a Plex webhook payload to a :class:`WebhookEvent`.

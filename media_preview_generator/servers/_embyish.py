@@ -532,6 +532,70 @@ class EmbyApiClient(MediaServer):
                 sources.append((str(src.get("Id") or ""), str(src.get("Path") or "")))
         return sources
 
+    def _fetch_item_fields(self, item_id: str, fields: str) -> dict[str, Any] | None:
+        """Fetch one item with extra ``Fields`` using the endpoint that works for this auth shape."""
+        user_id = self._user_id()
+        try:
+            if user_id:
+                resp = self._request("GET", f"/Users/{user_id}/Items/{item_id}", params={"Fields": fields})
+                resp.raise_for_status()
+                data = resp.json()
+            else:
+                resp = self._request("GET", "/Items", params={"Ids": item_id, "Fields": fields})
+                resp.raise_for_status()
+                items = resp.json().get("Items") or []
+                data = items[0] if items else None
+        except Exception as exc:
+            logger.debug("{} item field lookup failed for {}: {}", self.vendor_name, item_id, exc)
+            return None
+        return data if isinstance(data, dict) else None
+
+    def get_external_ids(self, item_id: str) -> dict[str, Any] | None:
+        """ProviderIds (series ids for episodes) plus season/episode numbers.
+
+        Episodes take tmdb/imdb/tvdb ONLY from the series' own ProviderIds. If ``SeriesId`` is
+        missing, or the series re-fetch fails or returns nothing, the ids stay ``None``
+        (season/episode are still reported) — the episode's own (per-episode) ProviderIds are
+        never used as a stand-in for the series', since a wrong id would route another show's
+        markers to this file. Movies never report a ``tvdb`` id (different id space to
+        tmdb/imdb). Unrecognised item types report no ids at all.
+        """
+        item = self._fetch_item_fields(item_id, "ProviderIds,ParentIndexNumber,IndexNumber,SeriesId")
+        if item is None:
+            return None
+        item_type = str(item.get("Type") or "")
+        kind = {"Movie": "movie", "Episode": "episode"}.get(item_type, "unknown")
+        out: dict[str, Any] = {
+            "kind": kind,
+            "tmdb": None,
+            "imdb": None,
+            "tvdb": None,
+            "season": None,
+            "episode": None,
+        }
+        if kind == "unknown":
+            return out
+
+        if kind == "episode":
+            out["season"] = item.get("ParentIndexNumber")
+            out["episode"] = item.get("IndexNumber")
+            series_id = item.get("SeriesId")
+            if not series_id:
+                return out
+            series = self._fetch_item_fields(str(series_id), "ProviderIds")
+            if series is None:
+                return out
+            providers_source = series
+            allowed_schemes = ("tmdb", "imdb", "tvdb")
+        else:
+            providers_source = item
+            allowed_schemes = ("tmdb", "imdb")  # movies: tvdb is a different id space
+
+        providers = {str(k).lower(): str(v) for k, v in (providers_source.get("ProviderIds") or {}).items() if v}
+        for scheme in allowed_schemes:
+            out[scheme] = providers.get(scheme)
+        return out
+
     def media_item_versions(self, raw: dict[str, Any]) -> list[tuple[str, str]]:
         """Yield ``(item_id, path)`` for every version of a ``/Items`` row.
 
