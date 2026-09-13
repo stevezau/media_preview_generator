@@ -33,3 +33,23 @@ tvdb 4711142; Plex: tmdb 973400) — fixed in Task 6 fix round 1 (episodes use s
 Real library, read-only, 271,394 video files: TV episodes with ids 221,972 (4-digit seasons like `S2023Exx` now parse);
 unknown 9,866 (9,638 extras + 228 date-named episodes left to the server). Movies with ids 19,102; the 16,627 that
 became unknown are all `-trailer` files. No movie returns a tvdb id. All 4,911 TV show folders carry `{tvdb-…}` only.
+
+## Task 7 — online sources live smoke (2026-09-14, storage egress, one request per source)
+
+`pytest --no-cov -n 0 -s -m integration tests/markers/test_online_sources_live.py` — 3 passed, exactly 3 requests.
+Item: Rick and Morty S01E01 (tmdb 60625, imdb tt2861424, tvdb 275274), file duration given to TheIntroDB.
+
+| Source | HTTP | Candidates (ms) | Rate/usage headers |
+|---|---|---|---|
+| TheIntroDB (no key) | 200 | intro 127 894–156 824, credits 1 298 000–end | `x-ratelimit-limit 30`, `-remaining 29`, `-reset 10`; `x-usagelimit-limit 500`, `-remaining 173`, `-reset 0`; `x-usagelimit-specificmedia-limit 2000`, `-remaining 1997`, `-reset 0` |
+| IntroDB.app | 200 | intro 128 000–160 000, credits 1 295 000–1 321 000 | none |
+| SkipDB | 200 | intro 129 000–157 800 (conf 0.91), credits 1 296 000–1 320 000 (conf 0.9) | none |
+
+Findings:
+- TheIntroDB sends `x-usagelimit-reset: 0` mid-day, so trusting it as "seconds until reset" would refill the budget
+  on every response. The limiter ends the daily budget at the UTC day change only
+  (`test_live_theintrodb_headers_keep_the_budget_until_the_day_rolls` pins the captured header set).
+- The keyless daily budget was already at 173/500 at 05:54 UTC on storage's IP; the pipeline shares that allowance.
+- IntroDB.app and SkipDB send no rate headers; they are paced by the 0.5 s floor plus 429 handling.
+- The three sources agree within 1.2 s on the intro start and 3 s on the credits start for this item.
+- The TheIntroDB keyed limit (spec §13 item 9) is still unverified: no key available.
