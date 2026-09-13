@@ -8925,7 +8925,7 @@ def item_payload(canonical_path: str, *, registry, store: MarkerStore) -> dict:
                 item_id = None
         current = None
         if item_id:
-            found = read_server_markers(server, cfg, item_id)
+            found = read_server_markers(server, cfg, item_id, include_ours=True)  # Inspector "current" shows what clients see, ours included (Task 10 review)
             current = None if found is None else [
                 {"type": c.type.value, "start_ms": c.start_ms, "end_ms": c.end_ms} for c in found if c.type.value in can_show
             ]

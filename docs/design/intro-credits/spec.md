@@ -689,3 +689,9 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   `NeedsLocalDb` (or unreachable when Plex is down). Unknown filesystem types are not ready. Removing a type we
   published deletes its `pv:<type>` key (not `""`) and only rows/keys still equal to what we wrote, so Plex's own
   re-detected markers stay and Plex can analyse the part again (verify in the lab matrix).
+- 2026-09-14 · Jellyfin publisher and server-marker evidence (§5.5, §6.3), from Task 10 deep review: a Jellyfin publish
+  counts as written only when core `/MediaSegments` then shows our segments (otherwise a clear "provider switched off" or
+  "file size differs" problem); `read()` returns only served segments. Plex/Emby markers are not read as evidence for
+  an item any file has been published to (Plex serves one set per item across versions). Known limit: after a
+  `markers.db` reset or a server re-added under a new id, markers we wrote to Plex earlier can count as Plex's own
+  opinion once.
