@@ -25,6 +25,8 @@ from typing import Any, Optional
 
 from loguru import logger
 
+from ..job_kinds import JOB_KIND_PREVIEWS, parse_job_kind
+
 # Message shown in UI when a job's log file was removed by retention policy.
 LOG_RETENTION_CLEARED_MESSAGE = "Log file was cleared due to log retention policy."
 
@@ -328,6 +330,7 @@ class Job:
     # job from this schedule that should be resumed instead of spawning
     # a new one?" so library scans can naturally span multiple nights.
     parent_schedule_id: str = ""
+    kind: str = JOB_KIND_PREVIEWS
 
     def __post_init__(self):
         if not self.created_at:
@@ -346,6 +349,7 @@ class Job:
         if isinstance(self.status, str):
             self.status = JobStatus(self.status)
         self.priority = parse_priority(self.priority)
+        self.kind = parse_job_kind(self.kind)
 
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
@@ -367,6 +371,7 @@ class Job:
             "paused": self.paused,
             "priority": self.priority,
             "parent_schedule_id": self.parent_schedule_id,
+            "kind": self.kind,
         }
 
 
@@ -403,7 +408,8 @@ class JobStorage:
             progress_json       TEXT NOT NULL DEFAULT '{}',
             config_json         TEXT NOT NULL DEFAULT '{}',
             publishers_json     TEXT NOT NULL DEFAULT '[]',
-            parent_schedule_id  TEXT NOT NULL DEFAULT ''
+            parent_schedule_id  TEXT NOT NULL DEFAULT '',
+            kind                TEXT NOT NULL DEFAULT 'previews'
         );
         """,
         "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);",
@@ -492,6 +498,10 @@ class JobStorage:
                 self._conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_parent_schedule_id ON jobs(parent_schedule_id)")
             except sqlite3.OperationalError:
                 pass
+            try:
+                self._conn.execute("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'previews'")
+            except sqlite3.OperationalError:
+                pass
 
     def upsert(self, job: "Job") -> None:
         d = job.to_dict()
@@ -502,8 +512,8 @@ class JobStorage:
                                   library_id, library_name, server_id, server_name, server_type,
                                   priority, paused, error,
                                   progress_json, config_json, publishers_json,
-                                  parent_schedule_id)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                  parent_schedule_id, kind)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET
                     status=excluded.status,
                     started_at=excluded.started_at,
@@ -519,7 +529,8 @@ class JobStorage:
                     progress_json=excluded.progress_json,
                     config_json=excluded.config_json,
                     publishers_json=excluded.publishers_json,
-                    parent_schedule_id=excluded.parent_schedule_id
+                    parent_schedule_id=excluded.parent_schedule_id,
+                    kind=excluded.kind
                 """,
                 (
                     d["id"],
@@ -539,6 +550,7 @@ class JobStorage:
                     json.dumps(d["config"]),
                     json.dumps(d["publishers"]),
                     d.get("parent_schedule_id") or "",
+                    d.get("kind") or JOB_KIND_PREVIEWS,
                 ),
             )
 
@@ -590,6 +602,11 @@ class JobStorage:
             _psi = row["parent_schedule_id"] or ""
         except (IndexError, KeyError):
             pass
+        _kind = JOB_KIND_PREVIEWS
+        try:
+            _kind = row["kind"] or JOB_KIND_PREVIEWS
+        except (IndexError, KeyError):
+            pass
         return Job(
             id=row["id"],
             status=row["status"],
@@ -608,6 +625,7 @@ class JobStorage:
             config=_safe_json(row["config_json"], {}),
             publishers=_safe_json(row["publishers_json"], []),
             parent_schedule_id=_psi,
+            kind=_kind,
         )
 
 
@@ -1109,6 +1127,7 @@ class JobManager:
         server_name: str | None = None,
         server_type: str | None = None,
         parent_schedule_id: str = "",
+        kind: str = JOB_KIND_PREVIEWS,
     ) -> Job:
         """Create a new job.
 
@@ -1123,6 +1142,7 @@ class JobManager:
             parent_schedule_id: id of the schedule that spawned this job
                 (D20). Empty for manual / webhook-triggered jobs. Used
                 for pause-on-stop-time and resume-on-next-start lookups.
+            kind: Job kind — previews or intro_credits.
         """
         with self._lock:
             job = Job(
@@ -1135,6 +1155,7 @@ class JobManager:
                 config=config or {},
                 priority=parse_priority(priority),
                 parent_schedule_id=parent_schedule_id or "",
+                kind=parse_job_kind(kind),
             )
             self._jobs[job.id] = job
             self._persist_job(job)

@@ -9,6 +9,7 @@ from datetime import datetime
 from flask import current_app, jsonify, request, session
 from loguru import logger
 
+from ...job_kinds import JOB_KIND_INTRO_CREDITS
 from ..auth import (
     api_token_required,
     get_auth_method,
@@ -1094,20 +1095,35 @@ def fire_webhook_now(job_id):
 @api.route("/jobs/<job_id>/pause", methods=["POST"])
 @api_token_required
 def pause_job(job_id):
-    """Pause processing (global). Kept for backward compatibility; delegates to global pause."""
+    """Pause a job. Intro & Credits jobs pause on their own; preview jobs pause all processing (legacy)."""
     job_manager = get_job_manager()
-    if not job_manager.get_job(job_id):
+    job = job_manager.get_job(job_id)
+    if not job:
         return jsonify({"error": "Job not found"}), 404
+    if job.kind == JOB_KIND_INTRO_CREDITS:
+        if not job_manager.request_pause(job_id):
+            return jsonify({"error": "Only running jobs can be paused"}), 409
+        return jsonify(job_manager.get_job(job_id).to_dict())
     return pause_processing()
 
 
 @api.route("/jobs/<job_id>/resume", methods=["POST"])
 @api_token_required
 def resume_job(job_id):
-    """Resume processing (global). Kept for backward compatibility; delegates to global resume."""
+    """Resume a job. Intro & Credits jobs resume on their own; preview jobs resume all processing (legacy)."""
     job_manager = get_job_manager()
-    if not job_manager.get_job(job_id):
+    job = job_manager.get_job(job_id)
+    if not job:
         return jsonify({"error": "Job not found"}), 404
+    if job.kind == JOB_KIND_INTRO_CREDITS:
+        from ..settings_manager import get_settings_manager
+
+        if not job_manager.request_resume(job_id):
+            return jsonify({"error": "Only running jobs can be resumed"}), 409
+        # Pause all still holds the job while the global flag is set; the UI says so.
+        body = job_manager.get_job(job_id).to_dict()
+        body["processing_paused"] = bool(get_settings_manager().processing_paused)
+        return jsonify(body)
     return resume_processing()
 
 
@@ -1164,6 +1180,9 @@ def pause_processing():
     job_manager = get_job_manager()
     sm.processing_paused = True
     for running in job_manager.get_running_jobs():
+        # Intro & Credits jobs are held by the global flag itself; their per-job flag is the user's own pause.
+        if running.kind == JOB_KIND_INTRO_CREDITS:
+            continue
         job_manager.request_pause(running.id)
     job_manager.emit_processing_paused_changed(True)
     logger.info("Global processing paused")
@@ -1173,7 +1192,7 @@ def pause_processing():
 @api.route("/processing/resume", methods=["POST"])
 @api_token_required
 def resume_processing():
-    """Clear global processing pause and resume all running jobs."""
+    """Clear the global pause and resume running preview jobs (Intro & Credits jobs keep their own pause)."""
     from ..settings_manager import get_settings_manager
     from .job_runner import resume_running_and_drain_pending
 
@@ -1715,6 +1734,7 @@ def reprocess_job(job_id):
         server_id=job.server_id,
         server_name=job.server_name,
         server_type=job.server_type,
+        kind=job.kind,
     )
     from ..settings_manager import get_settings_manager
 

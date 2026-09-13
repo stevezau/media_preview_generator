@@ -10,6 +10,7 @@ from contextlib import ExitStack
 
 from loguru import logger
 
+from ...job_kinds import JOB_KIND_INTRO_CREDITS
 from ..job_gate import format_wait_message
 from ..jobs import PRIORITY_NORMAL, WorkerStatus, get_job_manager, incoming_job_priority, parse_priority
 
@@ -264,7 +265,9 @@ def _is_force_fire_now_set(job_manager, job_id: str) -> bool:
 
 
 def resume_running_and_drain_pending() -> None:
-    """Resume paused running jobs and start every PENDING job, in priority order.
+    """Resume paused running preview jobs and start every PENDING job, in priority order.
+
+    Intro & Credits jobs keep their own per-job pause; "Pause all" holds them through the global flag instead.
 
     The shared body for ALL resume paths — manual resume
     (``api_jobs.resume_processing``), worker-availability auto-resume
@@ -282,6 +285,10 @@ def resume_running_and_drain_pending() -> None:
 
     jm = get_job_manager()
     for running in jm.get_running_jobs():
+        # A global resume must not clear an Intro & Credits job's own pause; Pause all holds those jobs through
+        # the global flag, which the caller has already cleared.
+        if running.kind == JOB_KIND_INTRO_CREDITS:
+            continue
         jm.request_resume(running.id)
     pending = sorted(jm.get_pending_jobs(), key=lambda j: (j.priority, j.created_at or ""))
     for pj in pending:

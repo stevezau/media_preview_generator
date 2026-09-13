@@ -16,6 +16,7 @@ from typing import Any
 from loguru import logger
 
 from ..config import Config
+from ..job_kinds import JOB_KIND_PREVIEWS, ItemOutcome, KindHandlers, normalize_outcome, outcome_value
 from ..processing.generator import ProcessingResult
 from ..web.jobs import PRIORITY_NORMAL
 from .worker import Worker, WorkerPool
@@ -47,6 +48,8 @@ class JobTracker:
         library_name: Library name for log prefixes.
         callbacks: Dict of per-job callback functions.
         priority: Dispatch priority (1=high, 2=normal, 3=low).
+        kind: Job kind (previews or intro_credits).
+        handlers: Per-kind check/process functions; None keeps the previews flow.
     """
 
     def __init__(
@@ -59,9 +62,13 @@ class JobTracker:
         library_name: str = "",
         callbacks: dict[str, Any] | None = None,
         priority: int = PRIORITY_NORMAL,
+        kind: str = JOB_KIND_PREVIEWS,
+        handlers: KindHandlers | None = None,
     ):
         """Initialize tracker for a single job."""
         self.job_id = job_id
+        self.kind = kind
+        self.handlers = handlers
         self.priority = priority
         self.submission_order = _next_submission_order()
         self.config = config
@@ -85,7 +92,10 @@ class JobTracker:
         self.successful = 0
         self.failed = 0
         self.cancelled = False
-        self.outcome_counts: dict[str, int] = {r.value: 0 for r in ProcessingResult}
+        if handlers is not None:
+            self.outcome_counts: dict[str, int] = {key: 0 for key in handlers.outcome_keys}
+        else:
+            self.outcome_counts = {r.value: 0 for r in ProcessingResult}
         # D12 — per-server aggregate (one entry per server_id) so the Job
         # views render a fixed-size summary regardless of file count.
         # Per-file × per-server detail lives in the Files-panel JSONL via
@@ -199,7 +209,8 @@ class JobTracker:
                     if self.generation_started:
                         msg = f"{self.library_prefix}{self.completed}/{self.total_items} completed"
                     else:
-                        msg = f"{self.library_prefix}Checking existing previews… {self.completed}/{self.total_items}"
+                        check_label = self.handlers.check_label if self.handlers else "Checking existing previews…"
+                        msg = f"{self.library_prefix}{check_label} {self.completed}/{self.total_items}"
                     # Push the live per-file outcome BEFORE the progress callback
                     # fires, so the file-level footnote (not found, no media
                     # parts, …) rides the same throttled job_progress emit
@@ -324,6 +335,72 @@ class JobTracker:
         title = getattr(item, "title", "") or item.canonical_path
         self.record_completion(success, "Library scan", title)
 
+    def record_custom_check_result(self, item, outcome: ItemOutcome) -> None:
+        """Record an item a kind's ``check_fn`` finished without a worker.
+
+        Mirrors :meth:`record_check_result` for non-preview kinds: count, fold per-server rows, write the
+        Files-panel row, complete. Must run inside ``failure_scope(job_id)``.
+
+        Args:
+            item: The :class:`ProcessableItem` the check decided.
+            outcome: What ``check_fn`` returned (validated here; an invalid value counts as failed).
+        """
+        if self.done_event.is_set():
+            return
+        from ..processing.generator import _notify_file_result
+        from .orchestrator import fold_publisher_rows_into_aggregate
+
+        label = self.handlers.check_worker_label if self.handlers else "Library scan"
+        title = getattr(item, "title", "") or item.canonical_path
+        valid = normalize_outcome(outcome, self.handlers.outcome_keys if self.handlers else ())
+        if valid is not outcome:
+            logger.warning(
+                "Dispatcher: {} check for {!r} returned {}; counting it as failed.",
+                self.kind,
+                item.canonical_path,
+                valid.message,
+            )
+        # record_completion must run exactly once whatever happens above it — a skipped completion leaves
+        # tracker.wait() blocked forever while the job holds its gate slot.
+        with self._counts_lock:
+            self.outcome_counts[valid.outcome_key] = self.outcome_counts.get(valid.outcome_key, 0) + 1
+        try:
+            raw_rows = list(valid.publisher_rows or [])
+            rows = [row for row in raw_rows if isinstance(row, dict)]
+            if len(rows) != len(raw_rows):
+                logger.warning(
+                    "Dispatcher: dropped {} non-dict publisher row(s) for {!r}",
+                    len(raw_rows) - len(rows),
+                    item.canonical_path,
+                )
+            publishers_snapshot = None
+            with self._counts_lock:
+                if rows:
+                    try:
+                        fold_publisher_rows_into_aggregate(self.publishers_aggregate, rows)
+                        publishers_snapshot = list(self.publishers_aggregate.values())
+                    except Exception as exc:
+                        logger.debug("Could not fold publisher rows for {}: {}", item.canonical_path, exc)
+            if publishers_snapshot is not None:
+                try:
+                    from ..web.jobs import get_job_manager
+
+                    get_job_manager().set_publishers(self.job_id, publishers_snapshot)
+                except Exception as exc:
+                    logger.debug("Could not set publisher aggregate for job {}: {}", self.job_id, exc)
+            try:
+                _notify_file_result(
+                    item.canonical_path, outcome_value(valid.outcome_key), valid.message, label, servers=rows
+                )
+            except Exception as exc:
+                logger.debug("Could not notify file result for {}: {}", item.canonical_path, exc)
+        except Exception as exc:
+            logger.warning(
+                "Dispatcher: recording the {} result for {!r} failed: {}", self.kind, item.canonical_path, exc
+            )
+        finally:
+            self.record_completion(not valid.failed, label, title)
+
     def wait(self, timeout: float | None = None) -> bool:
         """Block until all items are processed.
 
@@ -383,6 +460,8 @@ class JobDispatcher:
         # processing worker. Decouples the fast "does a fresh preview exist?"
         # sweep from the heavy FFmpeg cap. Items already fresh are recorded
         # straight away; only items needing FFmpeg reach the processing pool.
+        # A tracker with ``handlers`` (a non-preview kind) runs its own
+        # ``check_fn`` here instead, via ``_run_custom_check``.
         #
         # Driven by the dispatch loop (single priority-aware picker) which
         # spawns one short-lived **daemon** thread per check, capped at
@@ -397,6 +476,8 @@ class JobDispatcher:
         # nothing accumulates.
         self._max_checks = 0
         self._checks_in_flight = 0
+        # In-flight checks per job kind, guarded by ``_checks_in_flight_lock``; enforces KindHandlers.check_share.
+        self._checks_by_kind: dict[str, int] = {}
         self._checks_in_flight_lock = threading.Lock()
         self._check_pool_started = False
 
@@ -410,6 +491,8 @@ class JobDispatcher:
         library_name: str = "",
         callbacks: dict[str, Any] | None = None,
         priority: int = PRIORITY_NORMAL,
+        kind: str = JOB_KIND_PREVIEWS,
+        handlers: KindHandlers | None = None,
     ) -> JobTracker:
         """Submit items for a job to the shared dispatch queue.
 
@@ -423,6 +506,8 @@ class JobDispatcher:
             callbacks: Dict with keys: progress_callback, worker_callback,
                 on_item_complete, cancel_check, pause_check.
             priority: Dispatch priority (1=high, 2=normal, 3=low).
+            kind: Job kind (previews or intro_credits).
+            handlers: Per-kind check/process functions; None keeps the previews flow.
 
         Returns:
             JobTracker that callers can wait() on for completion.
@@ -436,6 +521,8 @@ class JobDispatcher:
             library_name=library_name,
             callbacks=callbacks,
             priority=priority,
+            kind=kind,
+            handlers=handlers,
         )
         # Wire the in-flight fraction getter so JobTracker.record_completion
         # emits the same percent the dispatcher's periodic _emit_progress_updates
@@ -445,7 +532,11 @@ class JobDispatcher:
         with self._trackers_lock:
             self._trackers[job_id] = tracker
         logger.info(
-            "Dispatcher: submitted {} items for job {} ({})", len(items), job_id[:8], library_name or "no library"
+            "Dispatcher: submitted {} {} items for job {} ({})",
+            len(items),
+            kind,
+            job_id[:8],
+            library_name or "no library",
         )
         self._ensure_check_pool_running(config)
         self._has_work.set()
@@ -610,9 +701,18 @@ class JobDispatcher:
 
             if tracker and not tracker.done_event.is_set():
                 success = worker.last_task_succeeded()
-                # Merge worker outcome counts into tracker
-                self._merge_worker_outcome(worker, tracker)
-                tracker.record_completion(success, worker.display_name, title)
+                # The worker is already idle, so a merge error that skipped record_completion would leave
+                # tracker.wait() blocked forever.
+                try:
+                    self._merge_worker_outcome(worker, tracker)
+                except Exception:
+                    logger.exception(
+                        "Dispatcher: merging {}'s outcome for job {} failed; completing the item anyway",
+                        worker.display_name,
+                        tracker.job_id[:8],
+                    )
+                finally:
+                    tracker.record_completion(success, worker.display_name, title)
             else:
                 # No tracker for this item — just log
                 success = worker.last_task_succeeded()
@@ -659,8 +759,14 @@ class JobDispatcher:
             from .orchestrator import fold_publisher_rows_into_aggregate
 
             with tracker._counts_lock:
-                fold_publisher_rows_into_aggregate(tracker.publishers_aggregate, worker.last_publishers)
-                publishers_snapshot = list(tracker.publishers_aggregate.values())
+                try:
+                    fold_publisher_rows_into_aggregate(tracker.publishers_aggregate, worker.last_publishers)
+                    publishers_snapshot = list(tracker.publishers_aggregate.values())
+                except Exception as exc:
+                    logger.warning(
+                        "Could not fold {}'s publisher rows into job {}: {}", worker.display_name, tracker.job_id, exc
+                    )
+                    return
             try:
                 from ..web.jobs import get_job_manager
 
@@ -718,6 +824,8 @@ class JobDispatcher:
                 library_name=library_name,
                 cancel_check=tracker.cancel_check,
                 pause_check=tracker.pause_check,
+                process_fn=tracker.handlers.process_fn if tracker.handlers else None,
+                outcome_keys=tracker.handlers.outcome_keys if tracker.handlers else None,
             )
             logger.info(
                 "Dispatch: assigned canonical item {!r} (job {}) to {}",
@@ -732,8 +840,15 @@ class JobDispatcher:
         Mirrors :meth:`_get_next_item` but drains ``check_queue`` (the
         pre-FFmpeg checking stage) instead of ``item_queue`` (processing).
 
+        A tracker whose kind already holds its ``check_share`` of in-flight
+        checks is passed over so a lower-priority job still gets a thread.
+
         Returns ``(tracker, item)`` or ``None``.
         """
+        # Snapshot before taking _trackers_lock: the two locks are never held together. Only the dispatch loop
+        # picks and increments, so no other picker can overtake this snapshot (check threads only decrement).
+        with self._checks_in_flight_lock:
+            by_kind = dict(self._checks_by_kind)
         with self._trackers_lock:
             eligible = [
                 t
@@ -742,9 +857,24 @@ class JobDispatcher:
             ]
             eligible.sort(key=lambda t: (t.priority, t.submission_order))
             for tracker in eligible:
+                if (cap := self._kind_check_cap(tracker)) is not None and by_kind.get(tracker.kind, 0) >= cap:
+                    continue
                 item = tracker.check_queue.popleft()
                 return (tracker, item)
         return None
+
+    def _kind_check_cap(self, tracker: JobTracker) -> int | None:
+        """In-flight check limit for the tracker's kind, or None when the kind may use every checking thread.
+
+        Args:
+            tracker: Tracker whose kind's limit is wanted.
+
+        Returns:
+            ``max(1, int(_max_checks * check_share))`` for a kind with ``check_share < 1``, else None.
+        """
+        if tracker.handlers is None or tracker.handlers.check_share >= 1:
+            return None
+        return max(1, int(self._max_checks * tracker.handlers.check_share))
 
     def _submit_checks(self) -> None:
         """Spawn checking tasks as bounded, short-lived daemon threads.
@@ -767,12 +897,22 @@ class JobDispatcher:
             tracker, item = picked
             with self._checks_in_flight_lock:
                 self._checks_in_flight += 1
-            threading.Thread(
+                self._checks_by_kind[tracker.kind] = self._checks_by_kind.get(tracker.kind, 0) + 1
+            thread = threading.Thread(
                 target=self._run_check_and_release,
                 args=(tracker, item),
                 name="job-checker",
                 daemon=True,
-            ).start()
+            )
+            try:
+                thread.start()
+            except Exception:
+                # Nothing will run _run_check_and_release, so release the slots here and keep the item for the
+                # next tick — a leaked slot shrinks the checking pool (and a kind's share) for the process lifetime.
+                self._on_check_done(tracker.kind)
+                tracker.check_queue.appendleft(item)
+                logger.warning("Dispatcher: could not start a check thread for {!r}; will retry", item.canonical_path)
+                raise
 
     def _run_check_and_release(self, tracker: JobTracker, item) -> None:
         """Run one check then release its in-flight slot + wake the loop."""
@@ -785,11 +925,17 @@ class JobDispatcher:
             # short-lived check thread's ident doesn't linger in the per-job
             # log-routing map after it exits.
             unregister_job_thread()
-            self._on_check_done()
+            self._on_check_done(tracker.kind)
 
-    def _on_check_done(self) -> None:
+    def _on_check_done(self, kind: str = JOB_KIND_PREVIEWS) -> None:
+        """Release one in-flight check slot (global and per-kind) and wake the dispatch loop.
+
+        Args:
+            kind: Job kind of the check that finished.
+        """
         with self._checks_in_flight_lock:
             self._checks_in_flight -= 1
+            self._checks_by_kind[kind] = max(0, self._checks_by_kind.get(kind, 0) - 1)
         # Wake the dispatch loop so it can submit more checks, assign any
         # newly-queued processing items, and refresh progress/idle state.
         self._has_work.set()
@@ -804,10 +950,16 @@ class JobDispatcher:
         appended to the tracker's processing queue. ``check_only=True`` is
         contractually guaranteed never to run FFmpeg, so generation only
         happens later under the capped processing workers.
+
+        A tracker with ``handlers`` (a non-preview kind) is routed to
+        :meth:`_run_custom_check` instead of ``process_canonical_path``.
         """
         # Re-check cancel/done right before any work so a job cancelled
         # between pick and run does no I/O.
         if tracker.is_cancelled() or tracker.done_event.is_set():
+            return
+        if tracker.handlers is not None:
+            self._run_custom_check(tracker, item)
             return
 
         from ..processing.generator import failure_scope
@@ -865,6 +1017,35 @@ class JobDispatcher:
                 if not tracker.is_cancelled() and not tracker.done_event.is_set():
                     tracker.item_queue.append(item)
                 return
+
+    def _run_custom_check(self, tracker: JobTracker, item) -> None:
+        """Check stage for a non-preview kind: terminal outcome → record; None or an exception → worker queue.
+
+        Args:
+            tracker: Tracker of the job the item belongs to (``tracker.handlers`` is set).
+            item: The :class:`ProcessableItem` to check.
+        """
+        from ..processing.generator import failure_scope
+        from .worker import register_job_thread
+
+        register_job_thread(tracker.job_id)
+        with failure_scope(tracker.job_id):
+            try:
+                outcome = tracker.handlers.check_fn(item, cancel_check=tracker.cancel_check)
+            except Exception as exc:
+                logger.debug(
+                    "Dispatcher: {} check raised for {!r} ({}: {}); routing to a worker.",
+                    tracker.kind,
+                    item.canonical_path,
+                    type(exc).__name__,
+                    exc,
+                )
+                outcome = None
+            if outcome is None:
+                if not tracker.is_cancelled() and not tracker.done_event.is_set():
+                    tracker.item_queue.append(item)
+                return
+            tracker.record_custom_check_result(item, outcome)
 
     def update_job_priority(self, job_id: str, priority: int) -> None:
         """Update the dispatch priority of a running job's tracker.
