@@ -5935,6 +5935,14 @@ releases happen at merge, spec §11).
 Spec §5.5 item 5, §6.3. Server markers are agreement evidence only, and only read before we have published to that
 server (after that the server shows our own markers).
 
+> **Amendment (Task 9 review ruling, 2026-09-14).** The plugin's POST body takes an optional `fileSize` (bytes of the
+> file the markers were detected on); the plugin serves nothing when that differs from the item's current on-disk
+> length, so a replaced file never shows the old file's markers on Jellyfin 10.11 (which keeps our stored copy). So:
+> `put_bridge_markers(item_id, segments, file_size: int | None = None)` sends `{"segments": [...], "fileSize": n}`
+> (key omitted when None); `JellyfinMarkerPublisher.write` passes `os.stat(canonical_path).st_size` (None on
+> `OSError`). The pipeline (Task 11) must still compare the analysed file identity with the current one right before
+> publishing and re-detect instead of publishing when it changed. Tests cover: size sent, size omitted on stat error.
+
 **Files:**
 - Create: `media_preview_generator/markers/publishers/jellyfin.py`, `media_preview_generator/markers/sources/server_markers.py`,
   `media_preview_generator/markers/publishers/factory.py`
