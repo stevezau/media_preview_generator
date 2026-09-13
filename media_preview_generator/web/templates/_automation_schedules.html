@@ -300,13 +300,16 @@
                         </div>
                     </div>
                     <div class="mb-3">
-                        <label for="schedulePriority" class="form-label">Job Priority</label>
+                        <label for="schedulePriority" class="form-label">Job Priority
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Default: a Recently Added sweep follows Settings → Processing Options → Incoming job priority (High out of the box, so new imports overtake a running full scan); a full-library scan runs at Normal. Pick High/Normal/Low to pin this schedule regardless of that setting."><i class="bi bi-info-circle"></i></button>
+                        </label>
                         <select class="form-select" id="schedulePriority">
+                            <option value="" selected>Default (from Settings)</option>
                             <option value="1">High</option>
-                            <option value="2" selected>Normal</option>
+                            <option value="2">Normal</option>
                             <option value="3">Low</option>
                         </select>
-                        <div class="form-text">Priority assigned to jobs created by this schedule</div>
+                        <div class="form-text">Priority assigned to jobs created by this schedule. <strong>Default</strong> lets Recently Added sweeps follow the global <em>Incoming job priority</em> setting; full-library scans stay at Normal.</div>
                     </div>
                     <div class="mb-3" id="scheduleSortByGroup">
                         <label for="scheduleSortBy" class="form-label">Processing Order</label>

@@ -58,7 +58,7 @@ def _safe_keyframe_probe(monkeypatch):
     """
     from media_preview_generator.processing import generator as _gen
 
-    monkeypatch.setattr(_gen, "_probe_max_keyframe_gap", lambda _file: 0.5)
+    monkeypatch.setattr(_gen, "_probe_max_keyframe_gap", lambda *_a, **_kw: 0.5)
     monkeypatch.setattr(_gen, "_has_duplicate_thumbnails", lambda *_a, **_kw: False)
 
 

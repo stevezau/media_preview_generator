@@ -185,7 +185,17 @@ def _adapter_for_server(server_config: ServerConfig) -> OutputAdapter | None:
     if adapter_name == "emby_sidecar":
         return EmbyBifAdapter(width=width, frame_interval=frame_interval)
     if adapter_name == "jellyfin_trickplay":
-        return JellyfinTrickplayAdapter(width=width, frame_interval=frame_interval)
+        # ``save_with_media`` defaults true (today's media-adjacent layout).
+        # When false, ``jellyfin_config_folder`` is this container's RW mount
+        # of the Jellyfin config dir; the adapter then publishes into the
+        # off-media data folder and needs the item GUID first.
+        save_with_media = bool(output.get("save_with_media", True))
+        return JellyfinTrickplayAdapter(
+            width=width,
+            frame_interval=frame_interval,
+            save_with_media=save_with_media,
+            jellyfin_config_folder=(str(output.get("jellyfin_config_folder") or "") or None),
+        )
 
     logger.warning(
         "Server {!r} is configured for an unknown preview format ({!r}); skipping it. "
@@ -647,12 +657,24 @@ def _make_item_id_resolver(canonical_path: str, phase_callback=None):
       path-based ``/Library/Media/Updated`` endpoint when id is None.
       Skip the lookup unconditionally when no hint is supplied —
       Sonarr/Radarr never provide Emby ids in practice.
-    * **Jellyfin** — tile layout is filename-derived. Lookup is only
-      worthwhile when the Media Preview Bridge plugin is installed
-      (then it's ~200ms via the plugin's ``/ResolvePath`` and unlocks
-      instant activation via ``SaveTrickplayInfo``). Without the
+    * **Jellyfin** — media-adjacent tile layout is filename-derived.
+      Lookup is only worthwhile when the Media Preview Bridge plugin is
+      installed (then it's ~200ms via the plugin's ``/ResolvePath`` and
+      unlocks instant activation via ``SaveTrickplayInfo``). Without the
       plugin the lookup costs ~30s cold (Pass-2 enumeration) and buys
       nothing — the same path-based scan nudge fires either way.
+
+      Off-media Jellyfin servers genuinely *need* the id (the path is
+      GUID-keyed, so ``needs_server_metadata() == True``) AND genuinely
+      *need* the plugin (only it registers data-folder tiles with the
+      correct ``ThumbnailCount``). Off-media is therefore gated on
+      plugin-installed by a *critical* readiness check, so the cached
+      plugin probe below resolves the id for every correctly-configured
+      off-media server. An off-media server with the plugin missing is a
+      flagged misconfiguration: it can't produce valid output regardless,
+      so skipping the lookup (→ ``SKIPPED_NOT_IN_LIBRARY`` → bounded
+      retry → exhaust) is the right no-op, not an unsatisfiable loop to
+      paper over here.
 
     Result is cached per-dispatch so the (still-slow-for-Plex-misses)
     lookup doesn't re-burn across sub-phases.
@@ -1296,6 +1318,26 @@ def process_canonical_path(
     )
 
     if not os.path.isfile(canonical_path):
+        # Issue #266 — a folder (TV series root, season dir) reached the
+        # worker. Manual/webhook folder paths are normally expanded into
+        # their video files upstream in _run_webhook_paths_phase; the only
+        # folder that survives that is one with no recognised video files.
+        # Say so plainly instead of the misleading "missing on disk /
+        # wrong path mappings" message — the path is fine, it's just not a
+        # video file, and no retry will turn a folder into one.
+        if os.path.isdir(canonical_path):
+            logger.warning(
+                "Path is a folder, not a video file: {}. It contains no recognised video files "
+                "(.mkv/.mp4/.avi/.m4v/.ts/.wmv/.mov/.flv/.webm). Point manual generation at a "
+                "video file, or at a folder that actually holds episodes/movies.",
+                canonical_path,
+            )
+            return MultiServerResult(
+                canonical_path=canonical_path,
+                status=MultiServerStatus.NO_FRAMES,
+                message=f"Path is a folder with no video files: {canonical_path}",
+            )
+
         # D35 — Sibling-disk probe before declaring the source missing.
         # When the user runs multiple data disks under one logical view
         # (mergerfs, etc.), Plex's indexed path can go stale: file was at
@@ -1592,9 +1634,10 @@ def process_canonical_path(
         )
 
     # Frame cache: when enabled, the second+ webhook for the same file
-    # within the cache TTL skips FFmpeg entirely. Disabled callers
-    # (regenerate=True, or callers that explicitly opt out) write into
-    # an ad-hoc tmp dir that's cleaned up at the end.
+    # within the cache TTL skips FFmpeg entirely. ``regenerate=True`` skips
+    # the cache *read* (it must re-extract) but still shares the same
+    # deterministic ``frames-<hash>/`` slot and re-populates it afterwards —
+    # only ``use_frame_cache=False`` gets an ad-hoc tmp dir.
     #
     # Anchor the cache at ``tmp_folder`` (stable across jobs), NOT at
     # ``working_tmp_folder`` (a per-job subdir created by job_runner).
@@ -1618,15 +1661,26 @@ def process_canonical_path(
     # subsequent cache.get / frame_dir_for / os.makedirs can't raise
     # without releasing it — every non-trivial step lives in the try
     # below whose finally always releases.
-    if use_frame_cache and not regenerate:
+    #
+    # The lock is taken whenever we touch the shared ``frames-<hash>/`` slot,
+    # INCLUDING regenerate. A regenerate run empties that slot before
+    # extracting (generate_images cleans it so it can't count a previous
+    # run's frames); without the lock a concurrent non-regenerate dispatch
+    # for the same path could be cache-HITting the very same directory and
+    # reading those JPGs to build its BIF, and we'd delete them mid-read.
+    if use_frame_cache:
         generation_lock = cache.generation_lock(canonical_path)
         generation_lock.acquire()
 
     try:
-        if generation_lock is not None:
+        if generation_lock is not None and not regenerate:
             # Per-path lock so simultaneous webhook fires for the same
             # canonical path serialise. The first thread generates; the
             # rest wait, then re-check the cache and hit it.
+            #
+            # Skipped for regenerate: it must re-extract, so it never reads
+            # the cache — but it still holds the lock (above) because it
+            # writes to the shared slot.
             cached = cache.get(canonical_path)
             if cached is not None:
                 tmp_path = str(cached.frame_dir)
@@ -1733,7 +1787,7 @@ def process_canonical_path(
                     "This file will be marked failed and skipped — the rest of the queue keeps running. "
                     "Common causes: corrupt video file, unsupported codec, or a crash inside FFmpeg's "
                     "hardware acceleration. The traceback above shows the exact failure; if it keeps "
-                    "happening on the same file try toggling hardware acceleration off in Settings → GPU.",
+                    "happening on the same file try toggling hardware acceleration off in Settings → Processing Options → GPU Configuration.",
                     canonical_path,
                     type(exc).__name__,
                     exc,
@@ -1780,8 +1834,9 @@ def process_canonical_path(
             )
 
         # Store in cache only on a fresh generation; cache hits already
-        # have an entry. Skip caching when use_frame_cache=False so
-        # regenerate flows don't re-populate stale slots.
+        # have an entry. Regenerate re-populates the slot too — that's
+        # intended: it just re-extracted into the (now emptied) shared dir,
+        # so the entry it writes describes exactly the frames on disk.
         if not cache_hit and use_frame_cache:
             cache.put(canonical_path, frame_dir=Path(tmp_path), frame_count=frame_count)
 

@@ -21,9 +21,31 @@ from media_preview_generator.servers import (
     server_owns_path,
 )
 from media_preview_generator.servers.ownership import (
+    apply_inverse_path_mappings,
     apply_path_mappings,
     apply_webhook_prefixes,
 )
+
+
+class TestApplyInversePathMappings:
+    """Local (canonical) path -> server-side path. Used by the Jellyfin
+    reverse-lookup so off-media item-id resolution works on path-mapped setups."""
+
+    def test_translates_local_to_remote(self):
+        mappings = [{"remote_prefix": "/jf-media", "local_prefix": "/mnt/media"}]
+        assert apply_inverse_path_mappings("/mnt/media/Movies/X/X.mkv", mappings) == ["/jf-media/Movies/X/X.mkv"]
+
+    def test_no_match_returns_input_unchanged(self):
+        # local==remote setups (no mapping, or a non-matching prefix) are untouched.
+        assert apply_inverse_path_mappings("/data/Movies/X.mkv", []) == ["/data/Movies/X.mkv"]
+        mappings = [{"remote_prefix": "/jf-media", "local_prefix": "/mnt/media"}]
+        assert apply_inverse_path_mappings("/other/X.mkv", mappings) == ["/other/X.mkv"]
+
+    def test_round_trips_with_apply_path_mappings(self):
+        mappings = [{"remote_prefix": "/jf-media", "local_prefix": "/mnt/media"}]
+        remote = "/jf-media/Movies/Foo (2024)/Foo (2024).mkv"
+        local = apply_path_mappings(remote, mappings)[0]
+        assert apply_inverse_path_mappings(local, mappings) == [remote]
 
 
 def _server(

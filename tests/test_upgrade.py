@@ -4,11 +4,15 @@ Tests env var migration, schema migrations, and GPU config building.
 """
 
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION
+
+#: "the config key is absent entirely", distinct from ``config: null``.
+_MISSING = object()
 
 
 @pytest.fixture
@@ -2102,3 +2106,441 @@ class TestMigrateToV13:
         settings_manager.update({"thumbnail_interval": 5, "media_servers": []})
         notes = _migrate_to_v13(settings_manager)
         assert notes == []
+
+
+class TestMigrateToV14:
+    """Tests for the v14 Recently-Added unpin migration (#285).
+
+    Pre-#285 the schedule modal seeded ``'2'`` on open and posted
+    ``parseInt(value, 10) || 2`` on save, so EVERY schedule on disk carries
+    an explicit Normal — there was no way to express "no pin". The new
+    ``incoming_job_priority`` setting only applies to sweeps whose stored
+    priority is ``None``, so without this migration the feature is inert on
+    every existing install.
+
+    **The fixture writes the mapping shape on purpose.**
+    ``ScheduleManager._save_schedules`` persists
+    ``{"schedules": {<id>: <record>}}``. The first cut of these tests built
+    a *list* — a shape nothing in the app ever writes — and all ten passed
+    against a migration that iterated the dict's keys and rewrote nothing on
+    any real install. Build the fixture through the real writer, or the
+    tests pin the fixture instead of the product.
+
+    The migration has to be narrow enough not to destroy real choices:
+      a) recently_added + priority 2  -> unpinned (the seeded default)
+      b) recently_added + priority 1 or 3 -> untouched (deliberate)
+      c) full_library  + priority 2  -> untouched (Normal is already its
+         effective default; rewriting churns the file and drops a pin)
+      d) already-null / missing file / unreadable file / junk rows -> no-op
+      e) gated on _schema_version so a post-upgrade re-pin to Normal is
+         never silently undone on the next boot
+    """
+
+    @staticmethod
+    def _sched(name, job_type, priority):
+        rec = {
+            "id": name,
+            "name": name,
+            "enabled": True,
+            "priority": priority,
+            "trigger_type": "interval",
+            "trigger_value": "15",
+            "config": {"job_type": job_type, "lookback_hours": 1},
+        }
+        if job_type is _MISSING:
+            rec.pop("config")
+        elif job_type is None:
+            rec["config"] = None
+        return rec
+
+    @classmethod
+    def _write_via_manager(cls, config_dir, records) -> Path:
+        """Persist through ScheduleManager so the on-disk shape is the real one."""
+        from media_preview_generator.web.scheduler import ScheduleManager
+
+        manager = ScheduleManager(config_dir=str(config_dir), run_job_callback=None)
+        manager._schedules = {r["id"]: r for r in records}
+        manager._save_schedules()
+        return Path(config_dir) / "schedules.json"
+
+    @staticmethod
+    def _read_by_id(path) -> dict:
+        raw = json.loads(path.read_text())["schedules"]
+        rows = raw.values() if isinstance(raw, dict) else raw
+        return {r["id"]: r for r in rows if isinstance(r, dict)}
+
+    def _run(self, settings_manager, records):
+        from media_preview_generator.upgrade import _migrate_to_v14
+
+        path = self._write_via_manager(settings_manager.config_dir, records)
+        notes = _migrate_to_v14(settings_manager)
+        return notes, self._read_by_id(path)
+
+    def test_on_disk_shape_is_a_mapping_not_a_list(self, settings_manager):
+        """Guard the assumption the rest of this class rests on.
+
+        If ScheduleManager ever switches to a list, the migration's
+        dict-handling branch stops being the one under test and these
+        tests would quietly cover the wrong path.
+        """
+        path = self._write_via_manager(settings_manager.config_dir, [self._sched("sweep", "recently_added", 2)])
+        assert isinstance(json.loads(path.read_text())["schedules"], dict)
+
+    def test_unpins_seeded_normal_recently_added_schedule(self, settings_manager):
+        notes, out = self._run(settings_manager, [self._sched("sweep", "recently_added", 2)])
+
+        assert out["sweep"]["priority"] is None, (
+            "A pre-#285 Recently Added sweep records Normal because the modal had no "
+            "'no pin' option — not because the user chose Normal. Leaving it pinned means "
+            "incoming_job_priority never applies and the feature is inert on every upgrade."
+        )
+        assert any("v14: unpinned 1 Recently Added schedule" in n for n in notes), notes
+
+    def test_tolerates_the_legacy_list_shape(self, settings_manager):
+        """Hand-edited and very old files may hold a list; still migrate them."""
+        from media_preview_generator.upgrade import _migrate_to_v14
+
+        path = Path(settings_manager.config_dir) / "schedules.json"
+        path.write_text(json.dumps({"schedules": [self._sched("sweep", "recently_added", 2)]}))
+
+        notes = _migrate_to_v14(settings_manager)
+
+        assert self._read_by_id(path)["sweep"]["priority"] is None
+        assert notes
+
+    @pytest.mark.parametrize("deliberate", [1, 3])
+    def test_leaves_deliberate_pins_alone(self, settings_manager, deliberate):
+        """High and Low can only have come from a real choice."""
+        notes, out = self._run(settings_manager, [self._sched("sweep", "recently_added", deliberate)])
+
+        assert out["sweep"]["priority"] == deliberate
+        assert notes == []
+
+    def test_leaves_full_library_schedules_alone(self, settings_manager):
+        """Full scans run at Normal pinned or not — and must NOT end up
+        inheriting the High incoming priority, which would put them on the
+        gate's reserved slot and cancel out the whole reservation."""
+        notes, out = self._run(settings_manager, [self._sched("nightly", "full_library", 2)])
+
+        assert out["nightly"]["priority"] == 2
+        assert notes == []
+
+    def test_mixed_file_only_rewrites_the_matching_rows(self, settings_manager):
+        notes, out = self._run(
+            settings_manager,
+            [
+                self._sched("sweep-a", "recently_added", 2),
+                self._sched("sweep-b", "recently_added", 1),
+                self._sched("nightly", "full_library", 2),
+                self._sched("sweep-c", "recently_added", 2),
+            ],
+        )
+
+        assert [out[k]["priority"] for k in ("sweep-a", "sweep-b", "nightly", "sweep-c")] == [None, 1, 2, None]
+        assert any("unpinned 2 Recently Added schedule" in n for n in notes), notes
+
+    @pytest.mark.parametrize("job_type", [None, _MISSING], ids=["config-is-null", "config-key-absent"])
+    def test_rows_without_a_usable_config_are_skipped(self, settings_manager, job_type):
+        """``config`` absent or explicitly null must not raise mid-boot.
+
+        A row with no job_type defaults to full_library downstream, so
+        leaving it pinned is also the correct outcome.
+        """
+        notes, out = self._run(settings_manager, [self._sched("odd", job_type, 2)])
+
+        assert out["odd"]["priority"] == 2
+        assert notes == []
+
+    def test_non_dict_rows_are_skipped(self, settings_manager):
+        from media_preview_generator.upgrade import _migrate_to_v14
+
+        path = Path(settings_manager.config_dir) / "schedules.json"
+        path.write_text(
+            json.dumps({"schedules": {"junk": "not-a-record", "ok": self._sched("ok", "recently_added", 2)}})
+        )
+
+        notes = _migrate_to_v14(settings_manager)
+
+        assert self._read_by_id(path)["ok"]["priority"] is None
+        assert notes
+
+    def test_row_without_a_priority_key_is_skipped(self, settings_manager):
+        rec = self._sched("sweep", "recently_added", 2)
+        rec.pop("priority")
+        notes, out = self._run(settings_manager, [rec])
+
+        assert "priority" not in out["sweep"]
+        assert notes == []
+
+    @pytest.mark.parametrize("payload", ["[]", '"nope"', "{}", '{"schedules": null}'])
+    def test_unexpected_top_level_json_is_a_no_op(self, settings_manager, payload):
+        from media_preview_generator.upgrade import _migrate_to_v14
+
+        (Path(settings_manager.config_dir) / "schedules.json").write_text(payload)
+
+        assert _migrate_to_v14(settings_manager) == []
+
+    def test_already_unpinned_is_a_no_op(self, settings_manager):
+        from media_preview_generator.upgrade import _V14_RETRY_KEY
+
+        notes, out = self._run(settings_manager, [self._sched("sweep", "recently_added", None)])
+
+        assert out["sweep"]["priority"] is None
+        assert notes == [], "a second run must not re-announce a migration that changed nothing"
+        # A clean no-op is a SETTLED outcome. Leaving a retry pending here
+        # makes every later boot re-run v14 and rewrite settings.json.
+        assert settings_manager.get(_V14_RETRY_KEY) == 0
+
+    def test_missing_schedules_file_is_a_no_op(self, settings_manager):
+        from media_preview_generator.upgrade import _migrate_to_v14
+
+        assert _migrate_to_v14(settings_manager) == []
+
+    def test_unreadable_schedules_file_does_not_break_startup(self, settings_manager):
+        """A corrupt schedules.json must not stop the app from booting — and
+        must leave a retry pending.
+
+        Asserting only ``== []`` was bug-blind: deleting the marker write from
+        the read handler kept every test green while the read path silently
+        forfeited the migration forever, which is the exact failure the
+        marker exists to prevent.
+        """
+        from media_preview_generator.upgrade import _V14_RETRY_KEY, _migrate_to_v14
+
+        (Path(settings_manager.config_dir) / "schedules.json").write_text("{not json")
+
+        assert _migrate_to_v14(settings_manager) == []
+        assert settings_manager.get(_V14_RETRY_KEY) == 1
+
+    def test_read_failure_is_retried_on_the_next_start(self, settings_manager):
+        """The read path retries too, not just the write path."""
+        from media_preview_generator.upgrade import _V14_RETRY_KEY, _migrate_schema
+
+        settings_manager.apply_changes(updates={"_schema_version": 13})
+        path = Path(settings_manager.config_dir) / "schedules.json"
+        path.write_text("{not json")
+
+        _migrate_schema(settings_manager)
+        assert settings_manager.get(_V14_RETRY_KEY) == 1
+        assert settings_manager.get("_schema_version") == 14
+
+        # The user restores the file; the next boot must pick it up despite
+        # the version gate already being closed.
+        self._write_via_manager(settings_manager.config_dir, [self._sched("sweep", "recently_added", 2)])
+        _migrate_schema(settings_manager)
+
+        assert self._read_by_id(path)["sweep"]["priority"] is None
+        assert settings_manager.get(_V14_RETRY_KEY) == 0
+
+    def test_pending_retry_with_the_file_gone_settles_instead_of_looping(self, settings_manager):
+        """A pending retry + no schedules.json must stop retrying.
+
+        Otherwise every boot re-runs v14, returns at the exists() check, and
+        still rewrites settings.json + rotates a timestamped backup — churning
+        the user's genuine pre-upgrade backups out of config_backup_keep (10)
+        after ten restarts, silently and forever.
+        """
+        from media_preview_generator.upgrade import _V14_RETRY_KEY, _migrate_schema
+
+        settings_manager.apply_changes(updates={"_schema_version": 14, _V14_RETRY_KEY: 1})
+
+        _migrate_schema(settings_manager)
+
+        assert settings_manager.get(_V14_RETRY_KEY) == 0, "the marker must settle when there is nothing to migrate"
+
+    def test_retries_are_bounded(self, settings_manager):
+        """A permanently unreadable file must stop being retried.
+
+        Each attempt costs a settings.json write plus a backup rotation; an
+        unbounded retry in a container restart loop burns through
+        config_backup_keep in a handful of boots.
+        """
+        from media_preview_generator.upgrade import _V14_MAX_ATTEMPTS, _V14_RETRY_KEY, _migrate_schema
+
+        settings_manager.apply_changes(updates={"_schema_version": 13})
+        (Path(settings_manager.config_dir) / "schedules.json").write_text("{not json")
+
+        for _ in range(_V14_MAX_ATTEMPTS + 2):
+            _migrate_schema(settings_manager)
+
+        assert settings_manager.get(_V14_RETRY_KEY) == _V14_MAX_ATTEMPTS, (
+            "attempts must stop accumulating once the cap is reached"
+        )
+
+    def test_write_failure_is_retried_on_the_next_start(self, settings_manager):
+        """One transient IO error must not forfeit the migration forever.
+
+        The schema version is bumped after the migration runs, so without a
+        retry marker a single failed write leaves the install permanently
+        inert with nothing but a log line to show for it.
+        """
+        from media_preview_generator.upgrade import _V14_RETRY_KEY, _migrate_schema
+
+        settings_manager.apply_changes(updates={"_schema_version": 13})
+        path = self._write_via_manager(settings_manager.config_dir, [self._sched("sweep", "recently_added", 2)])
+
+        # Fail ONLY the schedules write: settings.json goes through the same
+        # helper, and blanket-patching it breaks the sm.set() the failure
+        # handler itself makes (the OSError then escapes and aborts boot,
+        # which is the opposite of what this test is asserting).
+        from media_preview_generator import utils as utils_mod
+
+        real_save = utils_mod.atomic_json_save_with_backup
+
+        def fail_schedules_only(filepath, data, **kwargs):
+            if str(filepath).endswith("schedules.json"):
+                raise OSError("disk full")
+            return real_save(filepath, data, **kwargs)
+
+        with patch.object(utils_mod, "atomic_json_save_with_backup", side_effect=fail_schedules_only):
+            _migrate_schema(settings_manager)
+
+        assert self._read_by_id(path)["sweep"]["priority"] == 2, "nothing should have been written"
+        assert settings_manager.get(_V14_RETRY_KEY) == 1
+        assert settings_manager.get("_schema_version") == 14
+
+        # Next boot: the version gate says "done", the retry marker says otherwise.
+        _migrate_schema(settings_manager)
+
+        assert self._read_by_id(path)["sweep"]["priority"] is None
+        assert settings_manager.get(_V14_RETRY_KEY) == 0
+
+        # A retry boot must not claim "migrated from schema v14 to v14".
+        # The first boot's migration failed, so it wrote no notice at all —
+        # the retry writes one with no version header for the renderer to
+        # drop, rather than a self-contradicting one.
+        notice = settings_manager.get("_pending_migration_notice") or {}
+        assert notice.get("from") != notice.get("to") or notice.get("from") is None, (
+            f"retry boot rendered a no-op version move: {notice!r}"
+        )
+        assert any("Incoming job priority" in n for n in notice.get("notes") or []), notice
+
+    def test_schema_gate_stops_a_post_upgrade_repin_being_undone(self, settings_manager):
+        """Re-pinning a sweep to Normal AFTER upgrading is a real choice.
+
+        The version gate is the only thing separating "the old UI wrote
+        this" from "the user meant it".
+        """
+        from media_preview_generator.upgrade import _migrate_schema
+
+        settings_manager.apply_changes(updates={"_schema_version": 13})
+        path = self._write_via_manager(settings_manager.config_dir, [self._sched("sweep", "recently_added", 2)])
+        _migrate_schema(settings_manager)
+
+        assert self._read_by_id(path)["sweep"]["priority"] is None
+        assert settings_manager.get("_schema_version") == 14
+
+        # The user deliberately pins it back to Normal, then restarts.
+        data = json.loads(path.read_text())
+        data["schedules"]["sweep"]["priority"] = 2
+        path.write_text(json.dumps(data))
+        _migrate_schema(settings_manager)
+
+        assert self._read_by_id(path)["sweep"]["priority"] == 2, (
+            "v14 re-ran on an already-migrated install and undid a deliberate Normal pin"
+        )
+
+    def test_v14_emits_friendly_user_string(self, settings_manager):
+        """The dashboard notice must explain the change in user language and
+        never leak the dev ``v14: unpinned N ...`` log string."""
+        from media_preview_generator.upgrade import _migrate_schema
+
+        settings_manager.apply_changes(updates={"_schema_version": 13})
+        self._write_via_manager(settings_manager.config_dir, [self._sched("sweep", "recently_added", 2)])
+        _migrate_schema(settings_manager)
+
+        notes = (settings_manager.get("_pending_migration_notice") or {}).get("notes") or []
+        assert len(notes) == 1, f"expected 1 user note (v14 only), got {notes}"
+        assert "Incoming job priority" in notes[0], notes
+        assert not notes[0].startswith("v14:"), f"dev prefix leaked into the user notice: {notes}"
+        assert "unpinned" not in notes[0], f"dev wording leaked into the user notice: {notes}"
+
+
+class TestIterScheduleRecords:
+    """``_iter_schedule_records`` is the guard against the shape bug that made
+    both v12's and v14's rewrites silent no-ops on real installs."""
+
+    @pytest.mark.parametrize(
+        ("data", "expected_ids"),
+        [
+            ({"schedules": {"a": {"id": "a"}, "b": {"id": "b"}}}, ["a", "b"]),  # production shape
+            ({"schedules": [{"id": "a"}]}, ["a"]),  # legacy/hand-written
+            ({"schedules": {}}, []),
+            ({"schedules": []}, []),
+            ({"schedules": None}, []),
+            ({}, []),
+            ([], []),
+            ("nope", []),
+            ({"schedules": {"a": "not-a-record"}}, []),
+            ({"schedules": ["not-a-record"]}, []),
+        ],
+    )
+    def test_shape_matrix(self, data, expected_ids):
+        from media_preview_generator.upgrade import _iter_schedule_records
+
+        assert [r["id"] for r in _iter_schedule_records(data)] == expected_ids
+
+    def test_records_are_returned_by_reference(self):
+        """Callers mutate in place and re-dump; a copy would silently drop
+        every edit."""
+        from media_preview_generator.upgrade import _iter_schedule_records
+
+        data = {"schedules": {"a": {"id": "a", "priority": 2}}}
+        _iter_schedule_records(data)[0]["priority"] = None
+
+        assert data["schedules"]["a"]["priority"] is None
+
+
+class TestMigrationNoticeRetryBoot:
+    """A retry boot finishes a migration whose schema bump already happened.
+
+    Reported naively that renders "Your settings were migrated from schema
+    v14 to v14", and — where the original boot did leave a notice — replaces
+    it, dropping v12/v13 notes the user never opened the bell to read.
+    """
+
+    def test_notes_merge_into_an_undismissed_notice(self, settings_manager):
+        from media_preview_generator.upgrade import _V14_RETRY_KEY, _migrate_schema
+
+        settings_manager.apply_changes(
+            updates={
+                "_schema_version": 14,
+                _V14_RETRY_KEY: 1,
+                "_pending_migration_notice": {
+                    "from": 11,
+                    "to": 14,
+                    "at": "2026-01-01T00:00:00+00:00",
+                    "backup": "/config/settings.json.bak",
+                    "notes": ["An earlier note the user has not read yet."],
+                },
+            }
+        )
+        TestMigrateToV14._write_via_manager(
+            settings_manager.config_dir,
+            [TestMigrateToV14._sched("sweep", "recently_added", 2)],
+        )
+
+        _migrate_schema(settings_manager)
+
+        notice = settings_manager.get("_pending_migration_notice")
+        assert notice["from"] == 11 and notice["to"] == 14, f"header must survive the merge: {notice!r}"
+        assert notice["notes"][0] == "An earlier note the user has not read yet."
+        assert any("Incoming job priority" in n for n in notice["notes"]), notice
+
+    @pytest.mark.parametrize(
+        ("notice", "expect_sentence"),
+        [
+            ({"from": 13, "to": 14, "notes": []}, True),
+            ({"from": 14, "to": 14, "notes": []}, False),  # retry boot
+            ({"notes": []}, False),  # retry boot, no prior notice
+        ],
+    )
+    def test_card_only_claims_a_version_move_when_there_was_one(self, settings_manager, notice, expect_sentence):
+        from media_preview_generator.web import notifications as notif
+
+        settings_manager.apply_changes(updates={"_pending_migration_notice": notice})
+        with patch("media_preview_generator.web.settings_manager.get_settings_manager", return_value=settings_manager):
+            card = notif._build_schema_migration_notification()
+
+        assert ("migrated from schema" in card["body_html"]) is expect_sentence, card["body_html"]
+        assert "v?" not in card["body_html"], f"placeholder leaked into the card: {card['body_html']}"

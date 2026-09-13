@@ -28,7 +28,13 @@ from pathlib import Path
 import pytest
 
 from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION
-from tests.e2e.conftest import _build_fake_ffmpeg_path, _capture_session_cookie, get_free_port, wait_for_port
+from tests.e2e.conftest import (
+    _build_fake_ffmpeg_path,
+    _capture_session_cookie,
+    app_boot_payload,
+    get_free_port,
+    wait_for_port,
+)
 
 
 def _write_legacy_settings(config_dir: Path, schema_version: int) -> None:
@@ -88,7 +94,7 @@ def _start_app_for_migration(config_dir: Path, port: int) -> subprocess.Popen:
         [
             sys.executable,
             "-c",
-            f"from media_preview_generator.web.app import run_server; run_server(host='0.0.0.0', port={port})",
+            app_boot_payload(port, host="0.0.0.0"),
         ],
         env=env,
         stdout=subprocess.PIPE,

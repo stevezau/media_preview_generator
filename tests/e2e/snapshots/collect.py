@@ -79,7 +79,12 @@ def _start_app(config_dir: str, port: int) -> subprocess.Popen:
         [
             sys.executable,
             "-c",
-            f"from media_preview_generator.web.app import run_server; run_server(host='127.0.0.1', port={port})",
+            # Same dotenv-disabled boot as the e2e harness — see
+            # ``tests/e2e/conftest.py::app_boot_payload`` for why. Inlined
+            # rather than imported: this is a standalone script, not a test.
+            "import dotenv; dotenv.load_dotenv = lambda *a, **k: None; "
+            "from media_preview_generator.web.app import run_server; "
+            f"run_server(host='127.0.0.1', port={port})",
         ],
         env=env,
         stdout=subprocess.PIPE,

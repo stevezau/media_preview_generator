@@ -47,7 +47,7 @@ class _EmbyishProcessor(_MediaServerProcessor):
         params: dict[str, Any] = {
             "IncludeItemTypes": "Movie,Episode",
             "Recursive": "true",
-            "Fields": "Path,DateCreated",
+            "Fields": "Path,DateCreated,MediaSourceCount",
             "SortBy": "DateCreated",
             "SortOrder": "Descending",
             "Limit": 500,
@@ -66,17 +66,21 @@ class _EmbyishProcessor(_MediaServerProcessor):
             created_str = str(raw.get("DateCreated") or "")
             if not created_str or not _within_lookback(created_str, cutoff):
                 continue
-            path = str(raw.get("Path") or "")
-            if not path:
-                continue
-            for canonical in self._canonical_paths_for(path, server_config):
-                yield ProcessableItem(
-                    canonical_path=canonical,
-                    server_id=server_config.id,
-                    item_id_by_server={server_config.id: str(raw.get("Id") or "")},
-                    title=_format_title(raw),
-                    library_id=str(raw.get("ParentId") or "") or None,
-                )
+            # #268 (Emby/Jellyfin): emit one ProcessableItem per *version*
+            # so a recently-added multi-version item previews every version,
+            # keyed by each version's own MediaSource id (off-media trickplay
+            # is per-GUID). Single-version items pay no extra round-trip.
+            title = _format_title(raw)
+            library_id = str(raw.get("ParentId") or "") or None
+            for version_id, version_path in client.media_item_versions(raw):
+                for canonical in self._canonical_paths_for(version_path, server_config):
+                    yield ProcessableItem(
+                        canonical_path=canonical,
+                        server_id=server_config.id,
+                        item_id_by_server={server_config.id: version_id},
+                        title=title,
+                        library_id=library_id,
+                    )
 
 
 def _within_lookback(created_iso: str, cutoff: datetime) -> bool:

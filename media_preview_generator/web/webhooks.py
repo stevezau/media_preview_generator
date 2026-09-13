@@ -20,7 +20,7 @@ from flask import Blueprint, jsonify, request
 from loguru import logger
 
 from .auth import api_token_required, validate_token
-from .jobs import get_job_manager
+from .jobs import get_job_manager, incoming_job_priority
 from .settings_manager import get_settings_manager
 
 webhooks_bp = Blueprint("webhooks_bp", __name__, url_prefix="/api/webhooks")
@@ -445,6 +445,7 @@ def create_vendor_webhook_job(
         server_id=b_sid,
         server_name=b_sname,
         server_type=b_stype,
+        priority=incoming_job_priority(),
     )
 
     settings = get_settings_manager()
@@ -855,6 +856,7 @@ def _schedule_webhook_job(
                 job_manager = get_job_manager()
                 job = job_manager.create_job(
                     library_name=safe_title,
+                    priority=incoming_job_priority(),
                     config={
                         "source": source,
                         "path_count": 1,
@@ -1113,6 +1115,7 @@ def _execute_webhook_job(debounce_key: str) -> None:
                 server_id=b_sid,
                 server_name=b_sname,
                 server_type=b_stype,
+                priority=incoming_job_priority(),
             )
         else:
             job_manager.update_job_library_name(job.id, library_display)
@@ -1851,7 +1854,13 @@ def plex_webhook():
     job_kwargs: dict = {}
     if resolved_server_id:
         job_kwargs["server_id"] = resolved_server_id
-    queued_any = any(_schedule_webhook_job("plex", display_title, path, **job_kwargs) for path in paths)
+    # Schedule EVERY resolved path. A list comprehension (not a generator)
+    # is load-bearing here: ``any(generator)`` short-circuits on the first
+    # truthy result, so when one library.new resolves to multiple episode
+    # paths (a show/season add — see _walk_to_leaf_items) only the first
+    # episode would ever get queued. Regression #257: the reporter's batch
+    # showed only S01E01 of each multi-episode show.
+    queued_any = any([_schedule_webhook_job("plex", display_title, path, **job_kwargs) for path in paths])
 
     if not queued_any:
         _add_history_entry("plex", "library.new", display_title, "ignored_no_path")

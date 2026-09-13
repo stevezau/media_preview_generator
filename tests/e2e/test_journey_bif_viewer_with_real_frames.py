@@ -107,7 +107,13 @@ def backend_real_app_with_bif(tmp_path_factory, real_bif_setup):
 
     # Build config_dir + seed settings.json.
     config_dir = tmp_path_factory.mktemp("backend_real_with_bif")
-    from .conftest import _build_fake_ffmpeg_path, _seed_settings_complete, get_free_port, wait_for_port
+    from .conftest import (
+        _build_fake_ffmpeg_path,
+        _seed_settings_complete,
+        app_boot_payload,
+        get_free_port,
+        wait_for_port,
+    )
 
     _seed_settings_complete(str(config_dir), overrides)
 
@@ -124,7 +130,7 @@ def backend_real_app_with_bif(tmp_path_factory, real_bif_setup):
         [
             sys.executable,
             "-c",
-            f"from media_preview_generator.web.app import run_server; run_server(host='0.0.0.0', port={port})",
+            app_boot_payload(port, host="0.0.0.0"),
         ],
         env=env,
         stdout=sp.PIPE,

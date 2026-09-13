@@ -1,7 +1,7 @@
 # =============================================================================
 # Stage 1: Builder — compile native extensions and build wheels
 # =============================================================================
-FROM linuxserver/ffmpeg:8.0.1-cli-ls64 AS builder
+FROM linuxserver/ffmpeg:8.1.2-cli-ls73 AS builder
 
 ARG SETUPTOOLS_SCM_PRETEND_VERSION=""
 
@@ -53,7 +53,7 @@ RUN if [ -n "$SETUPTOOLS_SCM_PRETEND_VERSION" ]; then \
 # =============================================================================
 # Stage 2: Runtime — lean production image (no compiler toolchain)
 # =============================================================================
-FROM linuxserver/ffmpeg:8.0.1-cli-ls56
+FROM linuxserver/ffmpeg:8.1.2-cli-ls73
 
 # Build metadata (optional; set via --build-arg in CI)
 ARG GIT_BRANCH=unknown
@@ -92,28 +92,37 @@ ARG DOCKER_IMAGE_NAME=local
 # - git: For version detection when running from mounted git repository
 # - mediainfo: For media file metadata
 #
-# ffmpeg: we ship jellyfin-ffmpeg (7.1.3) as /usr/lib/jellyfin-ffmpeg/ffmpeg.
-# The base image also has an 8.0.1 build at /usr/local/bin/ffmpeg which we
+# ffmpeg: we ship jellyfin-ffmpeg (8.1.2) as /usr/lib/jellyfin-ffmpeg/ffmpeg.
+# The base image also has an 8.1.2 build at /usr/local/bin/ffmpeg which we
 # leave in place as a fallback (our code defaults to the Jellyfin binary
 # because it carries the DV RPU-aware tonemap_opencl patches upstream lacks).
+#
+# Both must stay >= 8.1.2: earlier builds are vulnerable to CVE-2026-8461
+# ("PixelSmash"), a heap OOB write in the MagicYUV decoder reachable from
+# ordinary preview generation on an untrusted library file.  jellyfin-ffmpeg7
+# is NOT an option -- it stopped at 7.1.4-3 (2026-06-06), before the fix.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       mediainfo python3 python3-pip gosu pciutils git curl gnupg ca-certificates \
       mesa-va-drivers mesa-vulkan-drivers libva2 libva-drm2 vainfo && \
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
-      # Jellyfin apt repo (Ubuntu Noble) for jellyfin-ffmpeg7
-      curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
+      # Jellyfin apt repo (Ubuntu Noble) for jellyfin-ffmpeg8.
+      # --retry-all-errors so a flaky HTTP 403 from the repo (seen
+      # intermittently in CI) is retried instead of failing the build.
+      curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --retry-connrefused \
+        https://repo.jellyfin.org/jellyfin_team.gpg.key \
         | gpg --dearmor -o /usr/share/keyrings/jellyfin.gpg && \
       printf 'Types: deb\nURIs: https://repo.jellyfin.org/ubuntu\nSuites: noble\nComponents: main\nArchitectures: amd64\nSigned-By: /usr/share/keyrings/jellyfin.gpg\n' \
         > /etc/apt/sources.list.d/jellyfin.sources && \
       # Intel graphics apt repo (Ubuntu Noble) for newer VAAPI + OpenCL
-      curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key \
+      curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --retry-connrefused \
+        https://repositories.intel.com/gpu/intel-graphics.key \
         | gpg --dearmor -o /usr/share/keyrings/intel-graphics.gpg && \
       echo "deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu noble unified" \
         > /etc/apt/sources.list.d/intel-graphics.list && \
       apt-get update && \
       apt-get install -y --no-install-recommends \
-        jellyfin-ffmpeg7 \
+        jellyfin-ffmpeg8 \
         intel-media-va-driver-non-free \
         i965-va-driver \
         libmfx-gen1 \

@@ -247,6 +247,11 @@ class TestEmbyishRecentlyAdded:
                 {"Id": "i1", "Name": "Recent", "Path": "/r/recent.mkv", "DateCreated": recent_iso},
                 {"Id": "i2", "Name": "Old", "Path": "/r/old.mkv", "DateCreated": old_iso},
             ]
+            # Single-version pass-through: real media_item_versions returns
+            # the top-level (Id, Path) for MediaSourceCount<=1 with no extra call.
+            instance.media_item_versions.side_effect = lambda raw: [
+                (str(raw.get("Id") or ""), str(raw.get("Path") or ""))
+            ]
 
             items = list(proc.scan_recently_added(cfg, lookback_hours=24))
 
@@ -254,6 +259,43 @@ class TestEmbyishRecentlyAdded:
         assert items[0].canonical_path == "/l/recent.mkv"
         assert items[0].title == "Recent"
         assert items[0].item_id_by_server == {"srv-x": "i1"}
+
+    def test_scan_recently_added_fans_out_multi_version(self):
+        """A recently-added multi-version item must yield one ProcessableItem
+        per version, each keyed by its own MediaSource id and path-mapped
+        independently — the recently-added analog of the list_items #268 fix."""
+        from datetime import datetime, timezone
+
+        proc = EmbyProcessor()
+        cfg = _config(
+            "srv-x",
+            ServerType.EMBY,
+            mappings=[{"remote_prefix": "/r", "local_prefix": "/l"}],
+        )
+        recent_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+        with patch("media_preview_generator.processing.emby.EmbyServer") as klass:
+            instance = MagicMock()
+            klass.return_value = instance
+            instance.query_items.return_value = [
+                {
+                    "Id": "item1",
+                    "Name": "Multi",
+                    "Path": "/r/Multi - 2160p.mkv",
+                    "DateCreated": recent_iso,
+                    "MediaSourceCount": 2,
+                },
+            ]
+            instance.media_item_versions.return_value = [
+                ("item1", "/r/Multi - 2160p.mkv"),
+                ("alt", "/r/Multi - 1080p.mkv"),
+            ]
+
+            items = list(proc.scan_recently_added(cfg, lookback_hours=24))
+
+        assert len(items) == 2
+        by_path = {i.canonical_path: i.item_id_by_server["srv-x"] for i in items}
+        assert by_path == {"/l/Multi - 2160p.mkv": "item1", "/l/Multi - 1080p.mkv": "alt"}
 
 
 class TestPlexProcessorRecentlyAdded:

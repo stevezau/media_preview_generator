@@ -74,6 +74,51 @@ After setup completes, you'll land on the dashboard. You can add additional serv
 > gate releases them in priority order as slots free up. Manual, webhook, and
 > scheduled jobs all share the same gate. To hard-stop everything, use
 > **Pause Processing** — the global pause is persisted and survives restarts.
+>
+> Priority also decides who gets the next free worker **file by file**, so a
+> High job overtakes a running full scan without cancelling or pausing it — the
+> scan simply stops being fed new files until the High job drains. Whenever the
+> concurrent-job cap is above 1, the last slot is reserved for High-priority
+> work so an incoming webhook never has to wait out a multi-hour scan.
+
+### Letting new imports jump the queue
+
+A full-library regeneration can run for hours. **Settings → Processing Options →
+Incoming job priority** controls the priority stamped on the jobs this app
+creates for itself when new media lands — webhook deliveries from
+Sonarr/Radarr/Plex/Emby/Jellyfin, and **Recently Added** sweeps. It defaults to
+**High**, so a freshly imported episode is processed within one file of arriving
+even while a full scan is running.
+
+Manual and scheduled full scans keep whatever priority you gave them (Normal by
+default), which is what leaves room for the High jobs to overtake.
+
+A schedule only follows this setting while its own **Job Priority** is
+**Default (from Settings)** — the value new schedules start on. Pick High,
+Normal, or Low there to pin that schedule instead, and the global setting stops
+applying to it.
+
+Recently Added schedules created before this option existed are switched to
+**Default (from Settings)** automatically on first start after upgrading. Those
+carried an explicit *Normal* only because the old dialog had no way to say "no
+pin", so there was no choice to preserve. Schedules you had deliberately set to
+High or Low keep their setting, and so does any schedule you pin after
+upgrading — the migration runs once.
+
+Set the global setting to **Normal** to go back to strict
+first-come-first-served ordering. The reserved slot is independent of this
+setting — it is held back whenever the concurrent-job cap is above 1, so a job
+you pin to High by hand can still overtake a running scan.
+
+**Manual Generation:**
+
+The **Manual Trigger** button generates previews for specific media on demand — no Sonarr/Radarr webhook or library scan needed. There are three ways to pick what to process, and they can be mixed:
+
+- **Search** — start typing a show, movie, or episode name. The app searches your enabled servers and lists matches grouped by **Shows / Movies / Episodes**, each tagged with a badge showing which server(s) it came from. Pick a **show** to generate previews for every episode in it; pick a **movie** or **episode** for just that file. The path comes straight from the server, so you never have to know the in-container path (the common cause of "missing on disk" confusion).
+- **Browse** — open the folder picker to navigate your mounted media and select either a **folder** (expanded to every video inside) or an individual **video file**.
+- **Or paste paths manually** — the collapsible box still accepts one absolute container path per line, for power users or scripts.
+
+Each pick becomes a removable chip; **Start Job** processes them all. The **Publish to which server?** dropdown scopes both the search and where previews are published — leave it on *All servers* to publish to whoever owns each file, or pick one server to limit both.
 
 **Pause / Resume (global):**
 
@@ -536,7 +581,7 @@ The tool picks the fastest working path per GPU vendor:
 | AMD Radeon | (untested locally; same flags as NVIDIA) | |
 | CPU-only fallback | ~5–10× (CPU-bound) | When no GPU is available |
 
-The image ships **jellyfin-ffmpeg 7.1.3** as its preferred FFmpeg because Jellyfin's fork carries a Dolby-Vision-aware tone-mapping patch upstream FFmpeg still lacks. Non-amd64 builds fall back to the base image's FFmpeg 8.0.1 automatically.
+The image ships **jellyfin-ffmpeg 8.1.2** as its preferred FFmpeg because Jellyfin's fork carries a Dolby-Vision-aware tone-mapping patch upstream FFmpeg still lacks. Non-amd64 builds fall back to the base image's FFmpeg 8.1.2 automatically.
 
 Profile 7/8 (with HDR10 fallback) uses the standard tone-mapping chain — no Vulkan or special handling needed.
 
@@ -574,7 +619,7 @@ Use this table to diagnose common failures quickly.
 | `GPU permission denied` | Container user cannot access GPU device files | Set `PUID`/`PGID` to a user with GPU access; on Unraid use `PUID=99`, `PGID=100`. |
 | `Plex config folder does not exist` / unwritable | Incorrect mount or wrong `plex_config_folder` | Confirm the mounted `/plex` path contains `Cache`, `Media`, and `Metadata`. Previews Readiness surfaces this per-Plex-server. |
 | `Connection failed` on a server card | Bad URL, unreachable host, or invalid token | Use server IP (not `localhost` in Docker), verify the server is running, and test the URL + token with curl. |
-| Webhook job sits in **Pending** for a long time | The concurrent-job gate is full — active jobs are running at capacity | Wait for a slot to free up (priority-ordered), raise the cap in **Settings → Processing Options**, or check the global **Pause Processing** toggle isn't on. Pausing ≠ cancelling — paused jobs stay in Pending. |
+| Webhook job sits in **Pending** for a long time | The concurrent-job gate is full — active jobs are running at capacity | Check **Settings → Processing Options → Incoming job priority** is **High** (the default) so webhook jobs take the reserved slot instead of queueing. Otherwise wait for a slot to free up (priority-ordered), raise the cap, or check the global **Pause Processing** toggle isn't on. Pausing ≠ cancelling — paused jobs stay in Pending. |
 | Webhook returns `401` | Invalid or missing authentication | In Sonarr/Radarr webhook settings, leave **Username** empty and set **Password** to your API token or webhook secret. |
 | Webhook test passes but imports do not trigger jobs | Wrong webhook events or webhooks disabled | Enable **On Import** in Radarr/Sonarr and verify `webhook_enabled=true`. |
 | New files are imported but previews are not generated | Plex indexing delay or wrong library mapping | Increase webhook delay and verify Radarr/Sonarr library mapping in Webhooks settings. |

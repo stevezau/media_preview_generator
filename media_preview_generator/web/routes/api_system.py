@@ -7,7 +7,7 @@ import re as _re
 import threading
 import time
 
-from flask import jsonify, request
+from flask import current_app, jsonify, request
 from loguru import logger
 
 from ...logging_config import LEVEL_ORDER, get_app_log_path
@@ -219,6 +219,93 @@ def get_system_status():
             "The traceback above identifies the cause."
         )
         return jsonify({"error": "Failed to retrieve system status"}), 500
+
+
+def _current_media_mount_issues() -> list[dict[str, str]]:
+    """Live re-probe of configured media mounts for the dashboard banner.
+
+    Cheap ``os.stat``/``listdir`` checks over each server's ``local_prefix``
+    so a stale bind-mount (empty underlay) or an unmounted share is visible
+    the same way a read-only /config is — instead of surfacing job-by-job as
+    "missing on disk" failures. Recomputed per poll so the banner clears once
+    the share mounts, without a restart.
+    """
+    from ...config.paths import detect_unhealthy_media_mounts
+    from ..app import _get_media_servers_from_settings
+
+    config_dir = current_app.config.get("CONFIG_DIR", "/config")
+    mappings: list[dict] = []
+    for server in _get_media_servers_from_settings(config_dir) or []:
+        if isinstance(server, dict):
+            mappings.extend(server.get("path_mappings") or [])
+    return detect_unhealthy_media_mounts(mappings)
+
+
+@api.route("/system/config-health")
+@setup_or_auth_required
+def get_config_health():
+    """Report config-dir writability + media-mount health for the UI banner.
+
+    Kept intentionally cheap (no GPU detection) so every page can poll it to
+    render the "config folder isn't writable" / "media mount missing" banner.
+    Available during setup too, since a read-only /config blocks the wizard.
+    """
+    from ..config_health import (
+        DISMISSED_WARNINGS_SETTING,
+        filter_dismissed_warnings,
+        probe_config_health,
+    )
+
+    config_dir = current_app.config.get("CONFIG_DIR", "/config")
+    health = probe_config_health(config_dir)
+    try:
+        from ..settings_manager import get_settings_manager
+
+        dismissed = get_settings_manager().get(DISMISSED_WARNINGS_SETTING, [])
+        health["warnings"] = filter_dismissed_warnings(health["warnings"], dismissed)
+    except Exception:
+        # A settings-read failure must never hide a real advisory — fall through
+        # showing all of them.
+        logger.debug("Could not read dismissed config-health advisories", exc_info=True)
+
+    payload = {"config": health}
+    try:
+        payload["media_mount_issues"] = _current_media_mount_issues()
+    except Exception:
+        # A settings-read failure must never break the health banner itself.
+        logger.debug("Could not probe media-mount health for the config-health banner", exc_info=True)
+        payload["media_mount_issues"] = []
+    return jsonify(payload)
+
+
+@api.route("/system/config-health/dismiss", methods=["POST"])
+@setup_or_auth_required
+def dismiss_config_health_warning():
+    """Permanently dismiss one non-fatal config-health advisory.
+
+    Only the advisories in ``DISMISSIBLE_WARNING_KINDS`` can be dismissed. The
+    blocking ``writable=False`` state is not among them on purpose: it is the
+    explanation for why nothing saves, so it must stay on screen until fixed.
+    """
+    from ..config_health import DISMISSED_WARNINGS_SETTING, DISMISSIBLE_WARNING_KINDS
+    from ..settings_manager import get_settings_manager
+
+    kind = (request.get_json(silent=True) or {}).get("kind")
+    # isinstance first: ``x in frozenset`` raises TypeError on an unhashable
+    # body value (``{"kind": ["network_fs"]}``), and this route is reachable
+    # unauthenticated before setup — a 500 there is a bad-input bug, not a 400.
+    if not isinstance(kind, str) or kind not in DISMISSIBLE_WARNING_KINDS:
+        return jsonify({"error": f"'{kind}' is not a dismissible advisory"}), 400
+
+    settings = get_settings_manager()
+    dismissed = settings.get(DISMISSED_WARNINGS_SETTING, [])
+    if not isinstance(dismissed, list):
+        dismissed = []
+    if kind not in dismissed:
+        dismissed = [*dismissed, kind]
+        settings.set(DISMISSED_WARNINGS_SETTING, dismissed)
+        logger.info("Config-health advisory '{}' dismissed by the user", kind)
+    return jsonify({"ok": True, "dismissed": dismissed})
 
 
 _media_server_status_cache: dict = {"result": None, "fetched_at": 0.0}
@@ -872,21 +959,25 @@ def _is_in_denylist(path: str) -> bool:
 @api.route("/system/browse")
 @api_token_required
 def browse_directories():
-    """List sub-directories of an absolute path on the running container.
+    """List sub-directories (and optionally video files) of an absolute path.
 
-    Used by the folder-picker modal so users can pick path-mapping locals or
-    the Plex config folder without typing. Lists directories only — files are
-    omitted, since every input that opens this picker stores a directory path.
+    Used by the folder-picker modal. By default lists directories only —
+    every legacy caller (path-mapping locals, Plex config folder) stores a
+    directory. The Manual Generation picker passes ``include_files=1`` so the
+    user can also pick an individual video file.
 
     Query params:
         path: absolute path to list (default ``/``).
         show_hidden: ``1`` to include dot-prefixed entries (default ``0``).
+        include_files: ``1`` to also return video files (default ``0``).
 
     Returns JSON:
-        ``{"path": str, "parent": str|null, "entries": [{"name", "path"}], "error": str|null}``
+        ``{"path": str, "parent": str|null, "entries": [{"name", "path",
+        "is_dir"}], "error": str|null}``
     """
     raw_path = (request.args.get("path") or "/").strip() or "/"
     show_hidden = request.args.get("show_hidden") in ("1", "true", "yes")
+    include_files = request.args.get("include_files") in ("1", "true", "yes")
 
     if "\x00" in raw_path:
         return jsonify({"path": "/", "parent": None, "entries": [], "error": "Invalid path"}), 400
@@ -909,6 +1000,8 @@ def browse_directories():
 
     parent = None if canonical == "/" else os.path.dirname(canonical) or "/"
 
+    from ...plex_client import VIDEO_EXTENSIONS
+
     try:
         with os.scandir(canonical) as it:
             entries = []
@@ -916,18 +1009,27 @@ def browse_directories():
                 if not show_hidden and entry.name.startswith("."):
                     continue
                 try:
-                    if not entry.is_dir(follow_symlinks=False):
-                        continue
+                    is_dir = entry.is_dir(follow_symlinks=False)
                 except OSError:
                     continue
+                if not is_dir:
+                    # Only surface files when asked, and only playable video —
+                    # a flat media folder shouldn't drown the picker in .nfo,
+                    # .srt and artwork.
+                    if not include_files:
+                        continue
+                    if os.path.splitext(entry.name)[1].lower() not in VIDEO_EXTENSIONS:
+                        continue
                 child = os.path.join(canonical, entry.name)
                 if _is_in_denylist(child):
                     continue
-                entries.append({"name": entry.name, "path": child})
+                entries.append({"name": entry.name, "path": child, "is_dir": is_dir})
     except PermissionError:
         return jsonify({"path": canonical, "parent": parent, "entries": [], "error": "Permission denied"}), 403
     except OSError as exc:
         return jsonify({"path": canonical, "parent": parent, "entries": [], "error": str(exc)}), 500
 
-    entries.sort(key=lambda e: e["name"].lower())
+    # Directories first, then files, each alphabetical — the conventional
+    # file-browser ordering.
+    entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
     return jsonify({"path": canonical, "parent": parent, "entries": entries, "error": None})

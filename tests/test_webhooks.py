@@ -1142,6 +1142,74 @@ def test_duplicate_after_dispatch_is_dropped_end_to_end(
     assert mock_start_job.call_count == 1
 
 
+@patch("media_preview_generator.web.webhooks._schedule_webhook_job")
+@patch("media_preview_generator.web.webhooks._resolve_plex_webhook_paths_and_title")
+@patch("media_preview_generator.web.webhooks._resolve_plex_source_server_id", return_value=None)
+def test_plex_library_new_schedules_every_resolved_path(mock_resolve_sid, mock_resolve_paths, mock_schedule, client):
+    """A single Plex ``library.new`` for a show resolves to many episode
+    paths; EVERY path must be scheduled, not just the first.
+
+    Regression for #257: the dispatch used ``any(_schedule_webhook_job(...)
+    for p in paths)``, which short-circuits once the first path returns
+    True (queued). For a show/season event resolving to [E01, E02, E03],
+    only E01 was scheduled and E02/E03 were silently dropped — the reporter
+    saw thumbnails for only the first episode of each show (both files in
+    their batch were S01E01).
+    """
+    episode_paths = [
+        "/tv/Warrant/Season 01/Warrant - S01E01.mkv",
+        "/tv/Warrant/Season 01/Warrant - S01E02.mkv",
+        "/tv/Warrant/Season 01/Warrant - S01E03.mkv",
+    ]
+    mock_resolve_paths.return_value = (episode_paths, "Warrant")
+    mock_schedule.return_value = True
+
+    resp = client.post(
+        "/api/webhooks/plex",
+        json={"event": "library.new", "Metadata": {"ratingKey": "12345", "type": "show"}},
+        headers=_auth_headers(),
+    )
+
+    assert resp.status_code == 202
+    scheduled = [call.args[2] for call in mock_schedule.call_args_list]
+    assert scheduled == episode_paths, f"expected all {len(episode_paths)} episodes scheduled, got {scheduled}"
+
+
+@patch("media_preview_generator.web.webhooks._schedule_webhook_job")
+@patch("media_preview_generator.web.webhooks._resolve_plex_webhook_paths_and_title")
+@patch("media_preview_generator.web.webhooks._resolve_plex_source_server_id", return_value=None)
+def test_plex_library_new_schedules_all_paths_regardless_of_return_value(
+    mock_resolve_sid, mock_resolve_paths, mock_schedule, client
+):
+    """Every resolved path must be handed to ``_schedule_webhook_job`` even
+    when an earlier path is a dedup-skip (returns False).
+
+    Complements the all-queued case: the old ``any(generator)`` would have
+    scanned past the leading False to the first True and then stopped,
+    dropping any path after it. The list-comprehension fix evaluates all
+    paths eagerly, so the call list is independent of return values.
+    """
+    episode_paths = [
+        "/tv/Warrant/Season 01/Warrant - S01E01.mkv",
+        "/tv/Warrant/Season 01/Warrant - S01E02.mkv",
+        "/tv/Warrant/Season 01/Warrant - S01E03.mkv",
+    ]
+    mock_resolve_paths.return_value = (episode_paths, "Warrant")
+    # E01 is a recent-dispatch dedup (False); E02 queues (True); E03 must
+    # still be attempted — the bug would have stopped after E02.
+    mock_schedule.side_effect = [False, True, False]
+
+    resp = client.post(
+        "/api/webhooks/plex",
+        json={"event": "library.new", "Metadata": {"ratingKey": "12345", "type": "show"}},
+        headers=_auth_headers(),
+    )
+
+    assert resp.status_code == 202
+    scheduled = [call.args[2] for call in mock_schedule.call_args_list]
+    assert scheduled == episode_paths, f"expected all {len(episode_paths)} episodes attempted, got {scheduled}"
+
+
 # ---------------------------------------------------------------------------
 # Page Route Test
 # ---------------------------------------------------------------------------

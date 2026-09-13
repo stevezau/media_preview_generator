@@ -170,3 +170,28 @@ class TestSettingsBackupsPanel:
         assert captured[0]["file"] == "settings.json"
         # Newest entry is the timestamped one.
         assert "20260201-100000" in (captured[0].get("backup") or "")
+
+
+@pytest.mark.e2e
+class TestThumbnailQualityDirection:
+    """Issue #286 — the rendered tooltip must not invert the qscale.
+
+    ``thumbnail_quality`` is passed verbatim to FFmpeg's ``-q:v``, so lower
+    is better.  The tooltip claimed the opposite and users cranked the
+    slider up expecting sharper thumbs.
+    """
+
+    def test_tooltip_states_lower_is_better(self, settings_page: Page) -> None:
+        icon = settings_page.locator('label[for="thumbnailQuality"] .info-icon')
+        # Bootstrap's Tooltip constructor moves `title` to
+        # `data-bs-original-title`, so read whichever survived init.
+        title = icon.get_attribute("data-bs-original-title") or icon.get_attribute("title")
+        assert title, "thumbnail quality tooltip has no text"
+        title_lc = title.lower()
+        assert "lower is better" in title_lc
+        assert "higher = better" not in title_lc
+        assert "10 = sharpest" not in title_lc
+
+    def test_visible_label_hints_direction_without_hovering(self, settings_page: Page) -> None:
+        label = settings_page.locator('label[for="thumbnailQuality"]')
+        expect(label).to_contain_text("lower = sharper")

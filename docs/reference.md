@@ -116,7 +116,7 @@ GPU settings are configured per-GPU in **Settings** → **Processing Options**. 
 |---------|--------|---------|-------------|
 | `cpu_threads` | Yes | `1` | Number of CPU worker threads (0–32) |
 | `scan_workers` | Yes | `0` (Auto) | Full-scan only: how many files are checked **in parallel** for an existing preview, independent of the FFmpeg-generation cap (GPU + CPU workers). Checking is light disk I/O and does NOT add FFmpeg/GPU load. `0` = Auto (`max(32, generators)`); an explicit value is bounded to 1–256. Raise it to speed the "skip already-done files" sweep on large libraries; lower it on a single spinning HDD. |
-| `thumbnail_quality` | Yes | `4` | Preview quality 1-10 (2=highest) |
+| `thumbnail_quality` | Yes | `4` | Preview quality 1-10, lower = better quality (2 = highest) |
 | `thumbnail_interval` | Yes | `10` | Interval between preview images (1–60 s). Matches Plex/BIF community convention (see sidecar `-{width}-10.bif` files). |
 | `selected_libraries` | Yes | All | Library IDs to process |
 | `sort_by` (per-run) | Yes | `newest` | Order items are processed: `newest`, `oldest`, `random`, or empty for Plex's natural order. Set per manual run (New Job modal) or per schedule — not a global setting. |
@@ -650,6 +650,13 @@ Test Plex connection. Request: `{"url": "...", "token": "..."}`. Returns `{"succ
 }
 ```
 
+`priority` (optional, `1`|`2`|`3`) pins the schedule. Omit it — or send
+`null` on a `PUT` — to leave the schedule unpinned, which is the default: a
+`recently_added` schedule then follows the global `incoming_job_priority`
+setting (High out of the box), and a `full_library` schedule runs at Normal.
+On `PUT`, an absent `priority` key leaves an existing pin untouched; an
+explicit `null` clears it.
+
 `config.job_type` accepts:
 
 - `"full_library"` *(default — optional, omit to get the same behaviour)* — schedule runs a full library scan via the standard job pipeline, processing every item in `library_id` that's missing previews.
@@ -955,7 +962,8 @@ unless noted.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/api/jobs/manual` | Submit one or more absolute file paths — `{"file_paths": ["/a.mkv", "/b.mkv"], "force_regenerate": false, "priority": 2, "server_id": "..."}`. Bypasses library scan. |
+| POST | `/api/jobs/manual` | Submit one or more absolute paths — `{"file_paths": ["/a.mkv", "/tv/Show"], "force_regenerate": false, "priority": 2, "server_id": "..."}`. Directories are expanded to the video files inside; bypasses library scan. |
+| GET | `/api/media/search` | Backs the Manual Generation typeahead. `?q=` (min 2 chars), optional `?server_id=` to scope to one server. Fans across enabled servers and returns `{results: [{kind: "show"\|"movie"\|"episode", title, year, paths: [local container paths], child_count, servers: [{id, name, type}]}]}`. Shows resolve to their folder(s); the same item reported by several servers is merged into one row (union of paths + servers). |
 | POST | `/api/jobs/{id}/priority` | Change a pending/running job's priority (`{"priority": 1\|2\|3}`; 1 = high) |
 | POST | `/api/jobs/{id}/reprocess` | Re-run a finished job with the same config |
 | POST | `/api/jobs/{id}/retry-now` | Skip the retry back-off on a chain-head job whose next attempt is currently in the back-off countdown. Returns 200 + `{"fired": true, ...}` on success, 409 when no retry is pending, 400 if the job isn't a chain head. |
@@ -1016,6 +1024,7 @@ unless noted.
 | GET | `/api/system/vulkan/debug` | Plain-text diagnostic bundle for attaching to GitHub issues (DV Profile 5 troubleshooting) |
 | POST | `/api/system/rescan-gpus` | Re-probe all GPUs (refreshes `gpu_config` candidate list) |
 | GET | `/api/system/version` | App version + commit SHA + build date |
+| GET | `/api/system/browse` | Folder picker: lists sub-directories of `?path=` (default `/`). `?include_files=1` also returns video files (each entry has `is_dir`); `?show_hidden=1` includes dot-entries. System dirs (`/proc`, `/sys`, …) are denied. |
 | GET | `/api/system/notifications` | In-app notification list (health checks, deprecations, warnings) |
 | POST | `/api/system/notifications/{id}/dismiss` | Session-only dismiss |
 | POST | `/api/system/notifications/{id}/dismiss-permanent` | Persistent dismiss (stored in settings) |

@@ -904,24 +904,32 @@ class TestFileResultEmissionFromMultiServerDispatch:
         # with the same id it passes to the scan). The unified dispatch runs
         # each item under failure_scope(job_id), which never falls back to the
         # "" bucket, so scope and registration must share the id.
+        # Key the stub off the path it was CALLED with, not off call order.
+        # A list side_effect binds result N to the Nth call, so with more
+        # than one worker /data/m1.mkv could be handed m0's PUBLISHED result
+        # — the rows came out mismatched, and which file "won" depended on
+        # thread scheduling. Flaked in CI on 2026-09-02 while passing on the
+        # same commit's tag build.
+        results_by_path = {
+            "/data/m0.mkv": SimpleNamespace(
+                publishers=[],
+                canonical_path="/data/m0.mkv",
+                status=MultiServerStatus.PUBLISHED,
+                message="",
+            ),
+            "/data/m1.mkv": SimpleNamespace(
+                publishers=[],
+                canonical_path="/data/m1.mkv",
+                status=MultiServerStatus.SKIPPED,
+                message="cached",
+            ),
+        }
+
         set_file_result_callback(_cb, job_id="job-fr")
         try:
             with patch(
                 "media_preview_generator.processing.multi_server.process_canonical_path",
-                side_effect=[
-                    SimpleNamespace(
-                        publishers=[],
-                        canonical_path="/data/m0.mkv",
-                        status=MultiServerStatus.PUBLISHED,
-                        message="",
-                    ),
-                    SimpleNamespace(
-                        publishers=[],
-                        canonical_path="/data/m1.mkv",
-                        status=MultiServerStatus.SKIPPED,
-                        message="cached",
-                    ),
-                ],
+                side_effect=lambda canonical_path, *a, **kw: results_by_path[canonical_path],
             ):
                 _dispatch_processable_items(
                     items=self._items(2),
@@ -935,10 +943,16 @@ class TestFileResultEmissionFromMultiServerDispatch:
             set_file_result_callback(None, job_id="job-fr")
 
         assert len(recorded) == 2, f"Expected 2 file rows, got {len(recorded)}: {recorded!r}"
-        assert recorded[0][0] == "/data/m0.mkv"
-        assert recorded[0][1] == "generated"
-        assert recorded[1][0] == "/data/m1.mkv"
-        assert recorded[1][1] == "skipped_bif_exists"
+        # Index-free: rows arrive in worker COMPLETION order, which is not
+        # the dispatch order once more than one worker is live. The contract
+        # is "one row per item, carrying that item's outcome" — not "m0 is
+        # emitted first".
+        by_path = {row[0]: row for row in recorded}
+        assert set(by_path) == {"/data/m0.mkv", "/data/m1.mkv"}, (
+            f"expected one row per dispatched item; got {sorted(by_path)}"
+        )
+        assert by_path["/data/m0.mkv"][1] == "generated"
+        assert by_path["/data/m1.mkv"][1] == "skipped_bif_exists"
         # Worker label is present and non-empty so the Files panel column
         # never shows a row with no attribution at all.
         for r in recorded:
@@ -2300,24 +2314,21 @@ class TestWorkerFFmpegStartedFlag:
         def _wcb(workers_list):
             snapshots.append(list(workers_list))
 
-        call_count = {"n": 0}
-
         def _pcp(*, canonical_path, progress_callback=None, **kwargs):
-            # Scan pass returns instantly and does NOT advance call_count, so
-            # call_count tracks generation calls only (item 1 then item 2).
             if kwargs.get("check_only"):
                 return MagicMock(status=MultiServerStatus.NEEDS_GENERATION, publishers=[])
-            call_count["n"] += 1
-            if call_count["n"] == 1:
+            # Branch on the path, not on call order: the dispatcher makes no
+            # promise about which item a worker picks up first, and under load
+            # it routinely runs item 2 first. Keying off a call counter then
+            # fires item 1's progress callback at item 2 and asserts the
+            # ffmpeg_started expectations against the wrong item.
+            if canonical_path.endswith("item1.mkv"):
                 # Item 1 — real FFmpeg pass; flips the flag True.
                 if progress_callback:
                     progress_callback(80.0, 160.0, 200.0, "7.1x", 20.0)
-                _time.sleep(1.7)
-            else:
-                # Item 2 — cache-hit / skipped-FFmpeg; no progress
-                # callback. Hold open long enough for the poller to
-                # capture an in-flight snapshot of the (reset) state.
-                _time.sleep(1.7)
+            # Both items hold the slot open long enough for the poller to
+            # capture an in-flight snapshot; item 2's must show the reset state.
+            _time.sleep(1.7)
             return SimpleNamespace(
                 publishers=[],
                 canonical_path=canonical_path,

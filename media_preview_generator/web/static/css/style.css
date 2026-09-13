@@ -712,7 +712,7 @@ html[data-bs-theme="light"] .navbar {
     font-weight: bold;
 }
 
-/* Top-right utility icons (notification bell + theme toggle) — give them a
+/* Top-right utility icons (notification bell, sponsor heart + theme toggle) — give them a
  * unified circular hover affordance so they read as first-class controls
  * instead of bare text links. Matches the .icon-btn-group treatment used
  * inside tables.
@@ -724,7 +724,8 @@ html[data-bs-theme="light"] .navbar {
  */
 @media (min-width: 992px) {
     .navbar .nav-item > #notificationBellBtn,
-    .navbar .nav-item > #themeToggleBtn {
+    .navbar .nav-item > #themeToggleBtn,
+    .navbar .nav-item > #sponsorLinkBtn {
         width: 38px;
         height: 38px;
         display: inline-flex !important;
@@ -737,14 +738,52 @@ html[data-bs-theme="light"] .navbar {
     }
     .navbar .nav-item > #notificationBellBtn:hover,
     .navbar .nav-item > #themeToggleBtn:hover,
+    .navbar .nav-item > #sponsorLinkBtn:hover,
     .navbar .nav-item > #notificationBellBtn:focus-visible,
-    .navbar .nav-item > #themeToggleBtn:focus-visible {
+    .navbar .nav-item > #themeToggleBtn:focus-visible,
+    .navbar .nav-item > #sponsorLinkBtn:focus-visible {
         background-color: var(--surface-2, rgba(255, 255, 255, 0.08));
         color: var(--plex-orange) !important;
     }
     .navbar .nav-item > #notificationBellBtn .bi,
-    .navbar .nav-item > #themeToggleBtn .bi {
+    .navbar .nav-item > #themeToggleBtn .bi,
+    .navbar .nav-item > #sponsorLinkBtn .bi {
         font-size: 1.05rem;
+    }
+
+    /* "Sponsor this project" is the longest label in the Help menu, so without a
+     * floor it sets the menu width and ends up only ~8px from the trailing
+     * external-link glyph while every other row gets 20-49px. Pin a min-width so
+     * the whole menu breathes instead of hugging its longest item.
+     *
+     * Desktop-only: below 992px this same <ul> renders as a full-width accordion
+     * row inside the offcanvas drawer (min(82vw, 360px)), where a forced 15rem
+     * would overflow horizontally on a ~320px viewport. */
+    .dropdown-menu[aria-labelledby="helpMenuBtn"] {
+        min-width: 15rem;
+    }
+}
+
+/* Sponsor heart — GitHub Sponsors pink, fixed in both themes because it's a
+ * brand colour, not a semantic one. Declared on the icon itself so it survives
+ * the utility-icon hover rule above, which forces brand orange onto the parent
+ * <a> with !important; an inherited colour would lose, an own colour wins. */
+.sponsor-heart {
+    color: #db61a2;
+}
+
+a:hover > .sponsor-heart,
+a:focus-visible > .sponsor-heart,
+.dropdown-item:hover > .sponsor-heart {
+    color: #bf3989;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    #sponsorLinkBtn .sponsor-heart {
+        transition: transform 0.15s ease;
+    }
+    #sponsorLinkBtn:hover .sponsor-heart {
+        transform: scale(1.15);
     }
 }
 

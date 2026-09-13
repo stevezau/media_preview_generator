@@ -1192,8 +1192,13 @@ def _build_path_mapping_mismatch_hints(unresolved_paths: list[str], server_confi
     "Sonarr/Radarr is reporting one prefix but the server stores
     another." When found, the dict entry contains a hint string the
     file_result row can show in place of the generic "Not found"
-    message. Paths with no detectable mismatch are simply absent from
-    the dict (the caller should fall back to a generic message).
+    message. When no library location is a substring of the path at all
+    (the sender's mount root differs entirely — issue #254), the path
+    still gets a generic fallback hint naming the received root and the
+    "Path on Apps (Sonarr, Radarr, Webhooks)" field, so every unresolved path is keyed in
+    the returned dict (none are left for the caller to handle generically).
+    The only way a path is absent is if there are no configured library
+    locations at all, in which case the function returns ``{}`` early.
     """
     if not unresolved_paths or not server_configs:
         return {}
@@ -1281,6 +1286,29 @@ def _build_path_mapping_mismatch_hints(unresolved_paths: list[str], server_confi
                 )
             break
 
+        if upath not in hints:
+            # No configured library location appears anywhere in this webhook
+            # path, so the substring-pivot above found nothing — the sender's
+            # mount root differs entirely from every server's view (the classic
+            # Sonarr/Radarr-on-a-different-mount case, issue #254, where neither
+            # the media-server's remote prefix nor this app's local prefix is a
+            # prefix of the incoming path). We can't derive the exact split, but
+            # we CAN name the root the webhook arrived with and point the
+            # operator straight at the field that fixes it — far more useful
+            # than a bare "Not found".
+            upath_norm = upath.replace("\\", "/")
+            segments = [s for s in upath_norm.split("/") if s]
+            webhook_root = "/" + segments[0] if segments else upath_norm
+            example_loc = norm_locations[-1]
+            owner_name = location_owners.get(example_loc, [("your server", [])])[0][0]
+            hints[upath] = (
+                f"Webhook sent '{upath_norm}' but no configured library matches it. "
+                f"If this came from Sonarr/Radarr/Tdarr, they see your media at a different path "
+                f"than {owner_name} reports (e.g. '{example_loc}'). Add the webhook's path root "
+                f"(e.g. '{webhook_root}') under Settings → {owner_name} → Path mappings → "
+                "'Path on Apps (Sonarr, Radarr, Webhooks)'."
+            )
+
     return hints
 
 
@@ -1348,11 +1376,11 @@ def _run_webhook_paths_phase(
     skips a slow reverse-lookup. The dispatcher's lazy
     ``_make_item_id_resolver`` handles the no-hint case per-server.
     """
+    from ..plex_client import _expand_directory_to_media_files
     from ..processing.types import ProcessableItem as _PI
 
-    paths = list(config.webhook_paths or [])
-    total_paths = len(paths)
-    if not paths:
+    raw_paths = list(config.webhook_paths or [])
+    if not raw_paths:
         return {
             "unresolved_paths": [],
             "skipped_paths": [],
@@ -1361,12 +1389,36 @@ def _run_webhook_paths_phase(
             "path_hints": [],
         }
 
+    server_configs = list(registry.configs())
+
+    # Issue #266 — a manual trigger or webhook can hand us a *folder*
+    # (a TV series root, a season directory) instead of a single file.
+    # The unified dispatcher works one video file at a time, so expand
+    # any directory into the video files it contains before resolving
+    # owners. Pre-#243 this happened inside get_media_items_by_paths;
+    # the unified-engine merge dropped it, so folder submissions hit
+    # the os.path.isfile gate in process_canonical_path and were
+    # mis-reported as "missing on disk" then retried forever. We pool
+    # path_mappings from every enabled server so a folder that only
+    # exists under a mapped local prefix still resolves to disk.
+    #
+    # Hint-keying invariant: webhook_item_id_hints (read below) is keyed
+    # by the raw webhook path. Vendor webhooks always emit a single FILE
+    # path, which passes through expansion unchanged so its hint key
+    # survives; only Manual Generation submits folders, and those carry
+    # no hints. So expanded file paths intentionally have no hint — this
+    # never strips a real one.
+    all_mappings: list[dict] = []
+    for cfg in server_configs:
+        all_mappings.extend(getattr(cfg, "path_mappings", None) or [])
+    paths = _expand_directory_to_media_files(raw_paths, all_mappings)
+    total_paths = len(paths)
+
     if progress_callback:
         progress_callback(0, total_paths, f"Resolving {total_paths} webhook path(s) across configured servers…")
     _log_webhook_owning_servers(config, paths)
 
     hints = getattr(config, "webhook_item_id_hints", None) or {}
-    server_configs = list(registry.configs())
 
     webhook_items: list[_PI] = []
     # Audit A3/A4 — keep a parallel canonical→raw-input map so the
@@ -1456,9 +1508,10 @@ def _run_webhook_paths_phase(
 
     if no_owners:
         logger.info(
-            "Webhook arrived with {} path(s) that no enabled server claims — fast-skipping "
-            "(no worker pickup, no retry). Verify path mappings under Settings line up with "
-            "what each server reports for its libraries.",
+            "Webhook arrived with {} path(s) that no enabled server claims — no worker pickup. "
+            "These are retried in the background in case a library is still being added, but if "
+            "your path mappings are wrong the retries won't find them. Verify path mappings under "
+            "Settings line up with what each server reports for its libraries.",
             len(no_owners),
         )
         # When a path is unowned but a configured library's location is

@@ -38,27 +38,26 @@ services:
       retries: 30
 
   jellyfin:
-    # Pinned to 10.9.11 (the integration tests were validated against
-    # this version). Note: Jellyfin's first-run /Startup/User endpoint
-    # is broken across 10.9 / 10.10 / 10.11 — POST throws "Sequence
-    # contains no elements" because the User table starts empty and
-    # never gets seeded. Workaround: complete the wizard manually
-    # via http://127.0.0.1:8097 once, then pass --jellyfin-token to
-    # setup_servers.py. The unit tests cover JellyfinServer + the
-    # trickplay adapter exhaustively (it shares 90% with Emby via
-    # EmbyApiClient base class), so live integration is documented
-    # as a follow-up.
-    image: lscr.io/linuxserver/jellyfin:10.9.11
+    # 10.11.x — required by the off-media trickplay integration test (the
+    # Media Preview Bridge plugin floor is 10.11). setup_servers.py bootstraps
+    # an admin API key by injecting into the SQLite DB (the first-run wizard's
+    # /Startup/User is broken across 10.9-10.11); on linuxserver images the DB
+    # lives at <config>/data/data/jellyfin.db. The config dir is a BIND mount
+    # (not a named volume) so the publisher can write off-media trickplay into
+    # Jellyfin's data folder and so setup can drop the plugin in. PUID/PGID
+    # default to the invoking user (up.sh / CI export $(id -u)/$(id -g)) so the
+    # bind dir is writable by the test process.
+    image: lscr.io/linuxserver/jellyfin:10.11.0
     container_name: previews-test-jellyfin
     environment:
-      PUID: "1000"
-      PGID: "1000"
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
       TZ: UTC
       JELLYFIN_PublishedServerUrl: "http://127.0.0.1:8097"
     ports:
       - "127.0.0.1:8097:8096"   # Jellyfin API + UI (host port shifted to avoid collision)
     volumes:
-      - jellyfin_config:/config
+      - ./jellyfin-config:/config
       - jellyfin_cache:/cache
       - ./media:/jf-media:ro
     restart: unless-stopped
@@ -90,7 +89,6 @@ services:
 
 volumes:
   emby_config:
-  jellyfin_config:
   jellyfin_cache:
   plex_config:
   plex_transcode:

@@ -10,9 +10,9 @@
     <!-- Match the Jellyfin server release the plugin targets. The user
          must run a server at this version or newer for the plugin to load
          (Jellyfin's plugin loader compares NuGet AssemblyVersion). -->
-    <Version>10.11.0.2</Version>
-    <FileVersion>10.11.0.2</FileVersion>
-    <AssemblyVersion>10.11.0.2</AssemblyVersion>
+    <Version>10.11.0.3</Version>
+    <FileVersion>10.11.0.3</FileVersion>
+    <AssemblyVersion>10.11.0.3</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>

@@ -60,6 +60,13 @@ function onScanModeChange() {
     }
 }
 
+function _schedulePriorityValue() {
+    // null = "no pin, use the default"; the API distinguishes an absent
+    // priority from an explicit one, so this must not fall back to 2.
+    const raw = document.getElementById('schedulePriority').value;
+    return raw === '' ? null : (parseInt(raw, 10) || 2);
+}
+
 function _getSelectedScheduleType() {
     return document.querySelector('input[name="scheduleType"]:checked').value;
 }
@@ -71,7 +78,9 @@ function _resetScheduleForm() {
     document.getElementById('scheduleCron').value = '';
     document.getElementById('scheduleEditId').value = '';
     document.getElementById('scheduleEnabled').checked = true;
-    document.getElementById('schedulePriority').value = '2';
+    // '' = Default (inherit). Seeding '2' here was why no schedule ever
+    // reached the inherit path — every save posted an explicit Normal.
+    document.getElementById('schedulePriority').value = '';
 
     // Reset scan mode to Full library and hide lookback group
     document.getElementById('scanModeFull').checked = true;
@@ -129,7 +138,11 @@ function showEditScheduleModal(scheduleId) {
     document.getElementById('scheduleEditId').value = schedule.id;
     document.getElementById('scheduleName').value = schedule.name || '';
     document.getElementById('scheduleEnabled').checked = schedule.enabled !== false;
-    document.getElementById('schedulePriority').value = String(schedule.priority || 2);
+    // ``|| 2`` would rewrite a stored null to Normal on the first edit,
+    // silently pinning a schedule the user never pinned.
+    const storedPriority = schedule.priority;
+    document.getElementById('schedulePriority').value =
+        storedPriority === null || storedPriority === undefined ? '' : String(storedPriority);
     // D20 — pre-fill optional stop time
     const stopInput = document.getElementById('scheduleStopTime');
     if (stopInput) stopInput.value = schedule.stop_time || '';
@@ -301,7 +314,7 @@ async function saveSchedule() {
         library_name: libraryDisplay,
         server_id: serverId || null,
         enabled: document.getElementById('scheduleEnabled').checked,
-        priority: parseInt(document.getElementById('schedulePriority').value, 10) || 2,
+        priority: _schedulePriorityValue(),
         config: scheduleConfig,
         stop_time: stopTimeValue,
     };

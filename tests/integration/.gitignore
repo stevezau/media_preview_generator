@@ -3,3 +3,6 @@ media/
 
 # Captured server credentials from setup_servers.py.
 servers.env
+
+# Bind-mounted Jellyfin config (10.11 stack): DB, plugins, off-media trickplay.
+jellyfin-config/

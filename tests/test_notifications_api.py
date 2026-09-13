@@ -311,8 +311,9 @@ class TestDeprecatedImageNotification:
         # The body names both the old and the new image so users can copy-paste.
         assert "stevezzau/plex_generate_vid_previews" in deprecated["body_html"]
         assert "stevezzau/media_preview_generator" in deprecated["body_html"]
-        # And carries the sunset date.
-        assert "2026-10-29" in deprecated["body_html"]
+        # And makes clear the old image is retired (no longer updated).
+        assert "retired" in deprecated["body_html"].lower()
+        assert deprecated["title"] == "Your Docker image has been retired"
 
 
 class TestSettingsManagerDismissedNotifications:

@@ -720,6 +720,13 @@ def _allowed_roots_for_server(server_cfg) -> list[str]:
             local = (mapping.get("local_prefix") or "").strip()
             if local:
                 roots.append(local)
+        # Off-media Jellyfin keeps trickplay in its config dir, not next to the
+        # media — allow that root so the viewer can serve the GUID-keyed tiles.
+        output = server_cfg.output or {}
+        if server_cfg.type is ServerType.JELLYFIN and not bool(output.get("save_with_media", True)):
+            cfg_folder = str(output.get("jellyfin_config_folder") or "").strip()
+            if cfg_folder:
+                roots.append(cfg_folder)
     return roots
 
 
@@ -968,11 +975,35 @@ def _resolve_previews_for_item(item, server_cfg) -> list[dict]:
         )
         return [base]
     elif server_cfg.type is ServerType.JELLYFIN:
-        # Sheet directory is the on-disk root for Jellyfin's saved-with-media
-        # layout (D38). The viewer sends this path back to /trickplay/info,
-        # which synthesises the manifest from the directory listing —
-        # Jellyfin doesn't write a manifest itself, so we don't either.
-        sheet_dir = JellyfinTrickplayAdapter.sheet_dir(canonical_local, width=width)
+        # Sheet directory is the on-disk root for Jellyfin's trickplay layout.
+        # The viewer sends this path back to /trickplay/info, which synthesises
+        # the manifest from the directory listing — Jellyfin doesn't write a
+        # manifest itself, so we don't either.
+        #
+        # Media-adjacent: derive from the media path. Off-media: GUID-keyed
+        # under the Jellyfin config dir (compute via the adapter so the viewer
+        # and publisher agree on the exact location).
+        if bool(output_cfg.get("save_with_media", True)):
+            sheet_dir = JellyfinTrickplayAdapter.sheet_dir(canonical_local, width=width)
+        else:
+            adapter = JellyfinTrickplayAdapter(
+                width=width,
+                save_with_media=False,
+                jellyfin_config_folder=(str(output_cfg.get("jellyfin_config_folder") or "") or None),
+            )
+            # Use the adapter's built-in ``data/trickplay`` root — correct for
+            # every supported Jellyfin version (10.11+). The publisher follows
+            # the plugin-reported root for forward-compat, but that lives on the
+            # live server instance (warmed by a readiness probe); this viewer
+            # builds a fresh registry per request, so it isn't available here.
+            # If a future Jellyfin moves the data-folder root, the publisher
+            # tracks it automatically and this branch needs the same treatment.
+            try:
+                sheet_dir = adapter.offmedia_sheet_dir(item.id, width=width)
+            except ValueError:
+                # No GUID or no config folder configured — nothing to show yet.
+                base.update(preview_kind="trickplay", preview_path="", preview_exists=False)
+                return [base]
         base.update(
             preview_kind="trickplay",
             preview_path=str(sheet_dir),

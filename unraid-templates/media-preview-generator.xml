@@ -1,17 +1,19 @@
 <?xml version="1.0"?>
 <Container version="2">
-    <Name>plex-previews</Name>
-    <Repository>stevezzau/plex_generate_vid_previews:latest</Repository>
-    <Registry>https://hub.docker.com/r/stevezzau/plex_generate_vid_previews</Registry>
+    <Name>media-preview-generator</Name>
+    <Repository>stevezzau/media_preview_generator:latest</Repository>
+    <Registry>https://hub.docker.com/r/stevezzau/media_preview_generator</Registry>
     <Network>bridge</Network>
     <MyIP/>
     <Shell>bash</Shell>
     <Privileged>false</Privileged>
     <PrivilegedReq>false</PrivilegedReq>
-    <Support>https://github.com/stevezau/plex_generate_vid_previews/issues</Support>
-    <Project>https://github.com/stevezau/plex_generate_vid_previews</Project>
+    <Support>https://github.com/stevezau/media_preview_generator/issues</Support>
+    <Project>https://github.com/stevezau/media_preview_generator</Project>
     <Overview>
-Generate video preview thumbnails (BIF files) for Plex Media Server with GPU acceleration support.
+Generate video preview thumbnails for Plex, Emby and Jellyfin with GPU acceleration support. One FFmpeg pass writes the right format for each server (Plex BIF bundle, Emby sidecar BIF, Jellyfin trickplay tiles).
+
+This template seeds a Plex connection below; add Emby/Jellyfin servers (any mix) from the web UI after first start.
 
 Features:
 - Web UI with setup wizard for easy configuration
@@ -30,24 +32,36 @@ If your Plex container uses a custom network (like br1 or macvlan), this contain
 must use the SAME network to communicate with Plex. Change the Network Type setting
 to match your Plex container's network.
 
-For Intel QuickSync, /dev/dri is passed through automatically (see GPU Device below).
+GPU SETUP — pick ONE path:
 
-For NVIDIA GPU support, you must:
-1. Install NVIDIA driver and nvidia-container-toolkit on Unraid
-2. Add --runtime=nvidia to Extra Parameters
-3. Or use the Nvidia-Driver and nvidia-container-toolkit plugins from Community Applications
-4. Add NVIDIA_DRIVER_CAPABILITIES=all to the environment variables below (the 'graphics' capability is required for Dolby Vision Profile 5 thumbnails; 'compute,video,utility' alone only covers NVDEC and nvidia-smi).
+[Intel / AMD]
+  Pass /dev/dri through (already configured below — no further action needed).
+
+[NVIDIA] — REQUIRED STEPS, in this order:
+  1. Install the Nvidia-Driver plugin from Community Applications (bundles the NVIDIA driver and nvidia-container-toolkit needed for --runtime=nvidia).
+  2. Add  --runtime=nvidia  to "Extra Parameters" on this template (NOT --gpus all).
+  3. Set the NVIDIA_VISIBLE_DEVICES and NVIDIA_DRIVER_CAPABILITIES variables below.
+  4. Optional: if your host has no Intel iGPU and the container fails with a /dev/dri error, remove the Intel GPU Device field.
+
+  Common error: "docker: Error response from daemon: AMD CDI spec not found"
+    -> You're using --gpus all on Unraid. Replace it with --runtime=nvidia.
+
+  Why NVIDIA_DRIVER_CAPABILITIES=all? The 'graphics' capability is required for
+  Dolby Vision Profile 5 thumbnails (libplacebo Vulkan tone-mapping).
+  'compute,video,utility' alone covers only CUDA/NVDEC and nvidia-smi.
     </Overview>
     <Category>MediaApp:Video MediaServer:Video</Category>
     <WebUI>http://[IP]:[PORT:8080]/</WebUI>
-    <TemplateURL>https://raw.githubusercontent.com/stevezau/plex_generate_vid_previews/main/unraid-templates/plex-generate-previews.xml</TemplateURL>
-    <Icon>https://raw.githubusercontent.com/stevezau/plex_generate_vid_previews/main/docs/images/icon.png</Icon>
+    <TemplateURL>https://raw.githubusercontent.com/stevezau/media_preview_generator/main/unraid-templates/media-preview-generator.xml</TemplateURL>
+    <Icon>https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/icon.png</Icon>
     <ExtraParams>--restart=unless-stopped</ExtraParams>
     <PostArgs/>
     <CPUset/>
     <DateInstalled/>
     <Date>2025-01-01</Date>
     <Changes>
+[2026-06-01] Surfaced the NVIDIA --runtime=nvidia requirement in field labels and the Overview to prevent "AMD CDI spec not found" errors when users set NVIDIA env vars without adding the runtime flag to Extra Parameters (issue #260)
+[2026-05-27] Renamed to media-preview-generator; image moved to stevezzau/media_preview_generator (old plex_generate_vid_previews image is deprecated)
 [2025-01-01] Initial release with web UI and OAuth support
     </Changes>
     <DonateText/>
@@ -64,7 +78,7 @@ For NVIDIA GPU support, you must:
     <!-- Path Mappings -->
     <Config Name="Media Path" Target="/media" Default="/mnt/user/media" Mode="ro" Description="Path to your media files on Unraid (read-only)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/media</Config>
     <Config Name="Plex Data Path" Target="/plex" Default="/mnt/user/appdata/plex/Library/Application Support/Plex Media Server" Mode="rw" Description="Path to Plex application data where previews will be stored" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/plex/Library/Application Support/Plex Media Server</Config>
-    <Config Name="Config Path" Target="/config" Default="/mnt/user/appdata/plex-previews" Mode="rw" Description="Path to store configuration, schedules, and job history" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/plex-previews</Config>
+    <Config Name="Config Path" Target="/config" Default="/mnt/user/appdata/media-preview-generator" Mode="rw" Description="Path to store configuration, schedules, and job history" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/media-preview-generator</Config>
 
     <!-- Path Translation (for Docker-to-Host path mapping) -->
     <Config Name="Local Videos Path" Target="PLEX_LOCAL_VIDEOS_PATH_MAPPING" Default="/media" Mode="" Description="How this container sees media (usually /media)" Type="Variable" Display="advanced" Required="false" Mask="false">/media</Config>
@@ -72,11 +86,11 @@ For NVIDIA GPU support, you must:
 
     <!-- Processing Options (seed values; configure per-GPU in Web UI Settings after first run) -->
     <Config Name="Frame Interval (seconds)" Target="PLEX_BIF_FRAME_INTERVAL" Default="5" Mode="" Description="Seconds between each preview frame (default: 5). Migrated to settings.json on first start." Type="Variable" Display="advanced" Required="false" Mask="false">5</Config>
-    <Config Name="Thumbnail Quality" Target="THUMBNAIL_QUALITY" Default="4" Mode="" Description="Preview image quality 1-10, higher = better quality but larger files (default: 4). Migrated to settings.json on first start." Type="Variable" Display="advanced" Required="false" Mask="false">4</Config>
+    <Config Name="Thumbnail Quality" Target="THUMBNAIL_QUALITY" Default="4" Mode="" Description="Preview image quality 1-10, lower = better quality but larger files (2 = sharpest, 10 = blurriest; default: 4). Migrated to settings.json on first start." Type="Variable" Display="advanced" Required="false" Mask="false">4</Config>
     <Config Name="CPU Threads" Target="CPU_THREADS" Default="1" Mode="" Description="Number of parallel CPU workers for fallback (default: 1). Migrated to settings.json on first start. GPU config (enable/disable, workers per GPU) is in Web UI Settings." Type="Variable" Display="advanced" Required="false" Mask="false">1</Config>
 
     <!-- Web Authentication -->
-    <Config Name="Auth Token Override" Target="WEB_AUTH_TOKEN" Default="" Mode="" Description="Optional: Override the authentication token. If empty, use the token set during the setup wizard (or auto-generated if skipped)" Type="Variable" Display="advanced" Required="false" Mask="true"/>
+    <Config Name="Auth Token Override" Target="WEB_AUTH_TOKEN" Default="" Mode="" Description="Optional: Override the authentication token. If empty, use the token set during the setup wizard (or auto-generated if skipped). Left unmasked because Unraid's masked password fields can silently fail to save the value (issue #263)." Type="Variable" Display="advanced" Required="false" Mask="false"/>
     <Config Name="Web Port" Target="WEB_PORT" Default="8080" Mode="" Description="Internal port for web server (usually matches Web UI Port)" Type="Variable" Display="advanced" Required="false" Mask="false">8080</Config>
 
     <!-- User/Group -->
@@ -88,8 +102,8 @@ For NVIDIA GPU support, you must:
     <Config Name="Intel GPU Device" Target="/dev/dri" Default="/dev/dri" Mode="" Description="Pass through Intel GPU for QuickSync acceleration" Type="Device" Display="advanced" Required="false" Mask="false">/dev/dri</Config>
 
     <!-- GPU Support (NVIDIA) -->
-    <Config Name="NVIDIA Driver Capabilities" Target="NVIDIA_DRIVER_CAPABILITIES" Default="all" Mode="" Description="NVIDIA driver capabilities to inject into the container. Use 'all' (recommended) so the 'graphics' capability is included — this is required for Dolby Vision Profile 5 thumbnails (libplacebo Vulkan tone-mapping). 'compute,video,utility' alone only covers CUDA/NVDEC and will NOT give you DV5 support. Only applied if you also set --runtime=nvidia in Extra Parameters." Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
-    <Config Name="NVIDIA Visible Devices" Target="NVIDIA_VISIBLE_DEVICES" Default="" Mode="" Description="Which NVIDIA GPUs to expose (e.g. 'all', or a specific UUID). Only applied if you also set --runtime=nvidia in Extra Parameters." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+    <Config Name="NVIDIA Driver Capabilities (requires --runtime=nvidia in Extra Parameters)" Target="NVIDIA_DRIVER_CAPABILITIES" Default="all" Mode="" Description="REQUIRES --runtime=nvidia in Extra Parameters — without it, this variable is ignored and the container will either fail to start (e.g. 'AMD CDI spec not found') or fall back to CPU. Recommended value: 'all' (includes the 'graphics' capability needed for Dolby Vision Profile 5 thumbnails via libplacebo Vulkan tone-mapping). 'compute,video,utility' alone covers only CUDA/NVDEC and will NOT give you DV5 support." Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
+    <Config Name="NVIDIA Visible Devices (requires --runtime=nvidia in Extra Parameters)" Target="NVIDIA_VISIBLE_DEVICES" Default="" Mode="" Description="REQUIRES --runtime=nvidia in Extra Parameters — without it, this variable is ignored. Which NVIDIA GPUs to expose to the container, e.g. 'all' or a specific GPU UUID. Do NOT use --gpus all on Unraid; that triggers CDI resolution and fails with 'AMD CDI spec not found'." Type="Variable" Display="advanced" Required="false" Mask="false"/>
 
     <!-- Advanced -->
     <Config Name="Log Level" Target="LOG_LEVEL" Default="INFO" Mode="" Description="Logging level: DEBUG, INFO, WARNING, ERROR" Type="Variable" Display="advanced" Required="false" Mask="false">INFO</Config>

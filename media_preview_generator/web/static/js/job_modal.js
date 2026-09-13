@@ -525,6 +525,19 @@ function showLogsModal(jobId) {
 
     refreshLogs();
 
+    // Files tab is sticky across modal opens: Bootstrap keeps the last
+    // active tab on the hidden (not destroyed) modal's DOM, so closing on
+    // Files and opening another job lands on Files again. ``onFilesTabActivated``
+    // only fires on a real tab *click*, never on an already-active tab — so
+    // without this, the "Click to load file results" placeholder we reset
+    // above would sit there until the user clicked away and back. Mirror the
+    // onAttemptSelected pattern: when Files is the active tab at open time
+    // (sticky default OR a ?tab=files deep-link), load its results now.
+    const _filesTabBtn = document.getElementById('filesTab');
+    if (_filesTabBtn && _filesTabBtn.classList.contains('active')) {
+        refreshFileResults();
+    }
+
     if (logsRefreshInterval) clearInterval(logsRefreshInterval);
     // Chain rows poll regardless of their current status because a
     // PENDING chain can transition to RUNNING (mid-firing) and back to

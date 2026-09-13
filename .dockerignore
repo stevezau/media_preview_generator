@@ -24,6 +24,10 @@ build/
 
 # Development files
 .git/
+# Never ship a developer's locally-generated version stub: the runtime stage
+# copies the source tree into /app, so it would override the wheel's real
+# version at import time.
+media_preview_generator/_version.py
 .github/
 .gitignore
 .vscode/

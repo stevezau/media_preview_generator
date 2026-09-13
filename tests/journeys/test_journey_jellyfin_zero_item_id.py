@@ -275,7 +275,17 @@ class TestDispatcherLookupPolicy:
         if lookup_mock is None:
             patches.append(patch.object(EmbyApiClient, "resolve_remote_path_to_item_id", return_value=None))
         if refresh_mock is None:
+            from media_preview_generator.servers.emby import EmbyServer
+
+            # BOTH vendors. Only Jellyfin was stubbed, so the Emby-typed
+            # rows in this matrix fell through to the real
+            # EmbyServer._trigger_path_refresh — a live HTTP call to a host
+            # that doesn't resolve, 5s a piece. That made
+            # test_emby_skips_lookup_when_no_hint the slowest test in the
+            # suite and put it first in line to blow the 30s per-test
+            # timeout on a busy machine.
             patches.append(patch.object(JellyfinServer, "trigger_refresh", return_value=None))
+            patches.append(patch.object(EmbyServer, "trigger_refresh", return_value=None))
         patches.append(
             patch(
                 "media_preview_generator.processing.multi_server.generate_images",

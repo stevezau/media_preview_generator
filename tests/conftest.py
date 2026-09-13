@@ -40,6 +40,36 @@ except ImportError:  # pragma: no cover
     pass
 
 
+@pytest.fixture(autouse=True)
+def _fail_unmocked_network_fast(monkeypatch):
+    """Make an unmocked outbound connection fail instantly instead of stalling.
+
+    Several tests reach vendor code paths (``check_plugin_installed``,
+    ``test_connection``, ``trigger_refresh``) that were never stubbed. They
+    still PASS — the app is tolerant of an unreachable server — but each one
+    spends ~5s in DNS/connect before giving up. That made a handful of unit
+    tests 25-50x slower than the rest of the suite and, more importantly,
+    put them first in line to blow the 30s per-test timeout whenever the
+    machine was busy, turning them into intermittent CI failures that pass
+    on every rerun.
+
+    Resolving anything but loopback now raises immediately, so the same code
+    paths take the same branch at the same speed every time. Tests that WANT
+    a network call must mock it, which is the rule this project already has.
+    """
+    import socket
+
+    real_getaddrinfo = socket.getaddrinfo
+    loopback = {"localhost", "localhost.localdomain", "127.0.0.1", "0.0.0.0", "::1", "", None}
+
+    def guarded_getaddrinfo(host, port, *args, **kwargs):
+        if host in loopback:
+            return real_getaddrinfo(host, port, *args, **kwargs)
+        raise socket.gaierror(socket.EAI_NONAME, f"[test sandbox] refusing to resolve {host!r}")
+
+    monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _isolate_dotenv_from_tests():
     """Prevent the developer's local ``.env`` from leaking into the test suite.

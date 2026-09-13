@@ -7,7 +7,13 @@ from a single instance. A new file is processed exactly once (one FFmpeg pass
 on the GPU) and the resulting frames are published to **every** configured
 server that owns it, in the format that server expects.
 
-![Servers page showing one card per Plex / Jellyfin / Emby server, each with connection status and library count, plus the universal webhook URL at the bottom](images/servers.png)
+![Servers page showing one card per Plex / Jellyfin / Emby server, each with connection status and library count](images/servers.png)
+
+> [!NOTE]
+> The universal webhook URL is configured on the **Automation** page
+> (top nav, between Servers and Settings) under **Webhooks** — not on the
+> Servers page. The per-server Plex Direct webhook lives under
+> **Servers → edit your Plex server → Webhook & Scanner**.
 
 This page covers:
 
@@ -164,9 +170,11 @@ Each server type expects a different on-disk layout. The app picks the right for
 |---|---|---|
 | Plex | `plex_bundle` | Inside Plex's config folder: `Media/localhost/{hash}/.../index-sd.bif` |
 | Emby | `emby_sidecar` | Next to the media file: `{basename}-{width}-{interval}.bif` |
-| Jellyfin | `jellyfin_trickplay` | Next to the media file: `{basename}.trickplay/{width} - 10x10/{0,1,…}.jpg` (folders of 10×10 tile sheets) |
+| Jellyfin | `jellyfin_trickplay` | Next to the media file: `{basename}.trickplay/{width} - 10x10/{0,1,…}.jpg` (folders of 10×10 tile sheets). Optionally **off the media drive** — see below. |
 
 **Why Jellyfin's format is different.** Jellyfin (10.9 onwards) reads its own native JPG tile-grid format — *not* BIF. BIF would require users to install a third-party plugin (Jellyscrub) on their Jellyfin server. This app writes the native format, so no extra plugin is needed.
+
+**Optional: store Jellyfin trickplay off the media drive.** By default the app writes tiles next to each video. If you'd rather keep the media drive clean (like Plex), turn on **Store trickplay off the media drive** on the Jellyfin server card. The app then writes into Jellyfin's data folder (`<config>/data/trickplay/<id[:2]>/<id>/{width} - 10x10/`) instead. This needs, all together: the **Media Preview Bridge plugin** installed, Jellyfin's config dir bind-mounted **read-write** into this container (set the path in the server's **Jellyfin config folder** field), and `SaveTrickplayWithMedia` **off** for the libraries. The **Setup Health** tab guides every step and flags anything missing. Flipping this on doesn't move tiles already written next to the media — they stay until cleaned up by the usual orphan sweep or removed manually. See [previews readiness → off-media](guides/previews-readiness.md#jellyfin-config-folder).
 
 **Required Jellyfin library settings.** Three per-library settings need to be set so Jellyfin reads the trickplay folders this app writes — most importantly **Save trickplay images to media folders** = on. The Servers page in this app has a one-click **"Disable on this server"** button that flips all three correctly. See the in-app help for what each setting does.
 
@@ -236,7 +244,7 @@ that library cleanly with no retry storm.
 
 Two layers prevent the same file being processed twice:
 
-1. **Short-term frame cache** — when a second webhook arrives for the same file shortly after the first (e.g. Sonarr and Plex both notify within minutes), the second one reuses the already-extracted JPGs instead of running FFmpeg again. The cache holds the most recent files for a configurable window (default 10 minutes). Concurrent webhooks for the same file (a "webhook storm") collapse into a single FFmpeg pass.
+1. **Short-term frame cache** — when a second webhook arrives for the same file shortly after the first (e.g. Sonarr and Plex both notify within minutes), the second one reuses the already-extracted JPGs instead of running FFmpeg again. The cache holds the most recent files for a configurable window (default 1 hour). Concurrent webhooks for the same file (a "webhook storm") collapse into a single FFmpeg pass.
 
 2. **Long-term sidecar tracking** — every published output gets a small companion file (`<file>.bif.meta`) that records the source file's last-modified time and size. On any later webhook, the app checks this companion file first — if every output already exists and the source hasn't changed, the whole pipeline is skipped. This handles "Sonarr fires immediately, then Plex's own webhook fires 30 minutes later for the same file."
 

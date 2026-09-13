@@ -41,7 +41,7 @@ Disabling each vendor's built-in generation avoids duplicate work and prevents t
 
 **Does this work on Windows?**
 
-The supported deployment is Docker on Linux (or Docker Desktop on Mac via the Linux VM). There's no Windows native build — see "Is Docker required?" below.
+Yes — run the Docker image on Docker Desktop with the WSL2 backend. If you have an **NVIDIA** GPU it is accelerated: the NVIDIA Windows driver exposes CUDA and NVDEC into WSL2, so `--gpus all` works much as it does on Linux (best-effort — WSL2 GPU detection is less reliable than native Linux). **AMD and Intel** GPUs are not accelerated under Docker (D3D11VA can't be reached from Docker's Linux VM), so those setups process on CPU — raise **CPU Workers** in Settings, or run the container on a Linux host. There's no separate Windows native build. See [Getting Started — Windows](getting-started.md#windows).
 
 **Does this generate chapter thumbnails?**
 
@@ -53,7 +53,7 @@ Yes. In **Settings** → **Processing Options**, disable all GPUs (or set worker
 
 **Is Docker required? Is there a standalone .exe?**
 
-Docker is the recommended and supported way to run this tool. There is no standalone executable. Advanced users can install from source on Linux (requires Python 3.10+, FFmpeg, and mediainfo), but this is not officially supported. See [Getting Started](getting-started.md) for Docker setup.
+Docker is required. There is no standalone executable and no from-source install path — the container bundles the FFmpeg build and codec support the app depends on, so Docker is the only supported deployment. See [Getting Started](getting-started.md) for setup. It runs on Linux, Windows (Docker Desktop, WSL2 backend), macOS, Unraid, Synology, and anywhere else Docker runs.
 
 **Does my media server need to run in Docker too?**
 
@@ -145,6 +145,10 @@ Lower numbers = higher quality but larger file sizes.
 - Quality 2 = highest quality
 - Quality 4 = default (good balance)
 - Quality 10 = lowest quality
+
+The value is passed straight to FFmpeg's `-q:v`. FFmpeg's MJPEG encoder clamps
+qscale to a minimum of 2, so setting 1 produces byte-identical output to 2 —
+2 really is as sharp as it goes.
 
 **Generation feels disk-bound on my multi-disk setup (unraid/mergerfs/JBOD) — how do I speed it up?**
 

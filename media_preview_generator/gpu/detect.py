@@ -543,10 +543,14 @@ def _detect_linux_gpus() -> list[tuple[str, str, dict]]:
         if smi_gpus:
             logger.debug("=== Testing {} NVIDIA GPU(s) via nvidia-smi ===", len(smi_gpus))
             if _is_wsl2():
-                logger.warning(
-                    "WSL2 detected. NVIDIA GPU support inside WSL2 is unofficial. "
-                    "If detection or decoding misbehaves, prefer running the container directly on a Linux "
-                    "or Windows host. Intel/AMD GPUs are NOT supported under WSL2 — disable them in Settings → GPU."
+                # Fires on the fully-successful nvidia-smi path (Docker Desktop on
+                # Windows always reports a WSL2 /proc/version), so this is advisory
+                # only — a WARNING here would flag every working Windows install.
+                logger.info(
+                    "WSL2 detected — NVIDIA GPUs are accelerated here via CUDA passthrough. "
+                    "Detection is less reliable than on a native Linux host; if GPU jobs misbehave, "
+                    "run the container on Linux. Intel/AMD GPUs are NOT usable under WSL2 — "
+                    "disable them in Settings → Processing Options → GPU Configuration."
                 )
             for g in smi_gpus:
                 idx = g["index"]
@@ -667,9 +671,10 @@ def _detect_linux_gpus() -> list[tuple[str, str, dict]]:
                     if _is_wsl2():
                         logger.warning(
                             "WSL2 detected and the GPU vendor couldn't be identified via the usual channels — "
-                            "treating as NVIDIA because nvidia-smi succeeded. NVIDIA support in WSL2 is unofficial. "
-                            "If GPU jobs misbehave, run the container on Linux or Windows directly. "
-                            "Intel/AMD GPUs are NOT supported under WSL2 — disable them in Settings → GPU."
+                            "treating as NVIDIA because nvidia-smi succeeded. "
+                            "If GPU jobs misbehave, run the container on a Linux host. "
+                            "Intel/AMD GPUs are NOT usable under WSL2 — "
+                            "disable them in Settings → Processing Options → GPU Configuration."
                         )
                 else:
                     # Even if nvidia-smi didn't confirm, try CUDA anyway if available
@@ -687,10 +692,9 @@ def _detect_linux_gpus() -> list[tuple[str, str, dict]]:
                             vendor = "NVIDIA"
                             logger.warning(
                                 "CUDA hardware-decode works on this GPU but the vendor couldn't be confirmed — "
-                                "treating it as NVIDIA. This is the unofficial WSL2 NVIDIA pathway. "
-                                "Things may still work, but if GPU jobs misbehave, run the container on Linux "
-                                "or Windows directly. Intel/AMD GPUs are NOT supported under WSL2 — disable them "
-                                "in Settings → GPU."
+                                "treating it as NVIDIA. Things may still work, but if GPU jobs misbehave, "
+                                "run the container on a Linux host. Intel/AMD GPUs are NOT usable under WSL2 — "
+                                "disable them in Settings → Processing Options → GPU Configuration."
                             )
                             # Fall through to normal NVIDIA processing
                         else:
@@ -796,7 +800,7 @@ def _detect_linux_gpus() -> list[tuple[str, str, dict]]:
                 logger.warning(
                     "{}: every hardware-acceleration method tested ({} primary, {} fallback) failed. "
                     "This GPU will be skipped; CPU fallback still works for jobs that targeted it. "
-                    "See Settings → GPU for the per-device error detail.",
+                    "See Settings → Processing Options → GPU Configuration for the per-device error detail.",
                     card_name,
                     primary_method,
                     fallback_method,
@@ -819,7 +823,7 @@ def _detect_linux_gpus() -> list[tuple[str, str, dict]]:
             logger.warning(
                 "{}: {} {} test failed and there's no fallback acceleration method for this vendor. "
                 "This GPU will be skipped; CPU fallback still works for jobs that targeted it. "
-                "See Settings → GPU for the per-device error detail.",
+                "See Settings → Processing Options → GPU Configuration for the per-device error detail.",
                 card_name,
                 vendor,
                 primary_method,
@@ -917,7 +921,7 @@ def _detect_macos_gpus() -> list[tuple[str, str, dict]]:
             "Apple VideoToolbox hardware-decode test failed on this Mac. "
             "All preview generation will fall back to CPU, which is slow on large libraries. "
             "Fix: confirm `ffmpeg -hwaccels` lists 'videotoolbox' on this machine, "
-            "and that you're not running ffmpeg under Rosetta. See Settings → GPU for details."
+            "and that you're not running ffmpeg under Rosetta. See Settings → Processing Options → GPU Configuration for details."
         )
 
     return detected_gpus

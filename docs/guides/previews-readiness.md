@@ -110,17 +110,52 @@ the generator to restore them.
 ### Save trickplay with media (SaveTrickplayWithMedia)  <a id="save-trickplay-with-media"></a>
 *Jellyfin only*
 
-**What it checks:** Jellyfin looks for trickplay in
-`<media>.trickplay/` (where this app writes) rather than
-`<config>/data/trickplay/` (which this app never writes to).
+**What it checks:** that Jellyfin looks for trickplay where this app
+writes it. The recommended value depends on the server's **Store
+trickplay off the media drive** setting:
 
-**Why it matters:** off means published tiles sit on disk but are
-invisible to Jellyfin. Files aren't deleted — just unreachable until
-the flag flips back on.
+- **Off (default):** recommend **on** — Jellyfin reads from
+  `<media>.trickplay/`, where the app writes beside each video.
+- **On (off-media):** recommend **off** — Jellyfin reads from
+  `<config>/data/trickplay/`, the data folder the app writes into.
+
+**Why it matters:** a mismatch means published tiles sit on disk but are
+invisible to Jellyfin. Files aren't deleted — just unreachable until the
+flag matches the layout the app is writing.
 
 **Enable / disable:** toggle via the inline **Enable** / **Disable**
 buttons. Disable shows a click-to-confirm dialog (non-destructive but
 breaks visibility).
+
+---
+
+### Store trickplay off the media drive (off-media)  <a id="jellyfin-config-folder"></a>
+*Jellyfin only — shown when the server's "Store trickplay off the media drive" toggle is on*
+
+**What it is:** instead of writing trickplay next to each video, the app
+writes it into Jellyfin's data folder
+(`<config>/data/trickplay/<id[:2]>/<id>/<width> - 10x10/`), exactly like
+Plex keeps its previews. This keeps the media drive clean and works even
+when the media is mounted read-only.
+
+**What it checks:** that the **Jellyfin config folder** you set is mounted
+into *this* container **read-write**. It's a pure read-only probe —
+`os.access(W_OK)` only, no test write. States: `writable` (good),
+`missing` (path not mounted here), `read-only` (mounted `:ro` or wrong
+PUID/PGID), `unset` (no folder configured).
+
+**Requirements (all three):**
+1. The **Media Preview Bridge plugin** installed in Jellyfin (it's the
+   only thing that registers off-media tiles with the correct thumbnail
+   count). The plugin section becomes a hard requirement when off-media is on.
+2. Jellyfin's config dir bind-mounted read-write into this container, with
+   the **Jellyfin config folder** field pointing at that mount.
+3. `SaveTrickplayWithMedia` **off** for the libraries (Setup Health flips
+   the recommendation for you).
+
+**How to fix:** set the mount in your Docker config (e.g.
+`-v /path/to/jellyfin/config:/jellyfin-config`, not `:ro`) and enter that
+container path in the server's **Jellyfin config folder** field.
 
 ---
 

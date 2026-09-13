@@ -9,6 +9,7 @@
 [![Docker Pulls][docker-shield]][docker-url]
 [![codecov][codecov-shield]][codecov-url]
 [![AI-Assisted][ai-shield]][ai-url]
+[![Sponsor][sponsor-shield]][sponsor-url]
 
 </div>
 
@@ -65,6 +66,9 @@ all share one universal inbound URL with vendor auto-detection. A 5-step
 backoff retry (30 s → 2 m → 5 m → 15 m → 60 m) handles files your server
 hasn't indexed yet. Source-aware dedup re-runs automatically when a file is
 swapped (e.g. a Sonarr/Radarr quality upgrade) and skips when nothing changed.
+Need to (re)generate something by hand? **Manual Generation** lets you search
+your servers by title — pick a show to cover every episode, or a movie, episode,
+folder, or single file — or browse your media tree, no path-typing required.
 
 **Hardware you already have.** NVIDIA, AMD, Intel — per-GPU worker counts and
 FFmpeg threads, automatic in-place CPU retry if a codec fails on the GPU, and
@@ -127,7 +131,7 @@ For Docker Compose, Unraid, and GPU-specific setup:
 | **Unraid** | Unraid servers | [Getting Started — Unraid](docs/getting-started.md#unraid) |
 
 - **Web UI only:** The Docker image runs the web interface. There is no CLI; all configuration and job management is done via the web UI.
-- **PyPI:** The package is no longer published on PyPI; use Docker or install from source.
+- **PyPI:** The package is no longer published on PyPI. Docker is the only supported way to run it.
 
 > [!IMPORTANT]
 > The Docker Hub image is published as `stevezzau/media_preview_generator` — the **double `z`** is the author's Docker Hub username (not a typo).
@@ -139,12 +143,15 @@ For Docker Compose, Unraid, and GPU-specific setup:
 
 | Platform | Supported GPUs | Via |
 |---|---|---|
-| **Linux (Docker)** | NVIDIA, AMD, Intel | CUDA/NVENC, VAAPI, QuickSync |
-| **Windows (native)** | NVIDIA, AMD, Intel | CUDA, D3D11VA |
-| **macOS (native)** | Apple Silicon, Intel | VideoToolbox |
-| **Linux / Windows / macOS** | No GPU | CPU workers only |
+| **Linux** | NVIDIA, AMD, Intel | CUDA/NVENC, VAAPI, QuickSync |
+| **Windows** (Docker Desktop, WSL2 backend) | NVIDIA | CUDA/NVENC |
+| **Windows** (Docker Desktop, WSL2 backend) | AMD, Intel | Not available — CPU only |
+| **macOS** (Docker Desktop) | Any | Not available — CPU only |
+| **Any platform** | No GPU | CPU workers only |
 
-On Docker Desktop (Windows/WSL2 and macOS) the container runs inside a Linux VM, so D3D11VA and VideoToolbox aren't reachable — Docker on those platforms processes on CPU. For GPU acceleration on Windows or macOS, install from source.
+**NVIDIA on Windows works.** The NVIDIA Windows driver exposes CUDA and NVDEC into WSL2, so Docker Desktop with the WSL2 backend accelerates exactly like Linux — just add `--gpus all`.
+
+AMD and Intel GPUs on Windows (D3D11VA) and Apple VideoToolbox on macOS are **not** reachable from inside Docker Desktop's Linux VM, so those setups process on CPU. If you need GPU acceleration there, run the container on a Linux host.
 
 See [Getting Started — GPU Acceleration](docs/getting-started.md#gpu-acceleration) for per-vendor setup, tuning, and detection. Detected GPUs are shown in the web UI under **Settings** or **Setup**.
 
@@ -190,6 +197,21 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for local setu
 
 ---
 
+## Support
+
+This project is free and MIT-licensed, and always will be. If it saves your
+media server a few hundred hours of CPU time, sponsorship helps fund the time
+that goes into it — new server integrations, GPU support, and keeping up with
+FFmpeg and the Plex/Emby/Jellyfin APIs.
+
+[:heart: **Sponsor this project**][sponsor-url]
+
+Not in a position to sponsor? Starring the repo, reporting bugs, and answering
+questions in [Discussions](https://github.com/stevezau/media_preview_generator/discussions)
+all help just as much.
+
+---
+
 ## License
 
 Distributed under the MIT License. See [LICENSE](LICENSE) for details.
@@ -232,6 +254,9 @@ Star this repo if you find it useful!
 
 [ai-shield]: https://img.shields.io/badge/AI--Assisted-Cursor%20%2B%20Claude-blue?style=for-the-badge&logo=openai&logoColor=white
 [ai-url]: #about
+
+[sponsor-shield]: https://img.shields.io/badge/Sponsor-db61a2?style=for-the-badge&logo=githubsponsors&logoColor=white
+[sponsor-url]: https://github.com/sponsors/stevezau
 
 [python-shield]: https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white
 [python-url]: https://python.org

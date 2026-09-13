@@ -30,12 +30,12 @@ SCHEMA_MIGRATION_ID = "schema_migration_completed"
 DEPRECATED_IMAGE_ID = "deprecated_docker_image_name"
 MEDIA_MOUNT_UNHEALTHY_ID = "media_mount_unhealthy"
 
-# Image names recognised by the deprecation banner. The deprecated image
-# keeps publishing alongside the canonical name until 2026-10-29 (six months
-# after the rename); after that, only the canonical name receives updates.
+# Image names recognised by the deprecation banner. The deprecated image was
+# retired — a one-shot tombstone image now sits on its tags. This banner still
+# fires for anyone running the last real build of the old image (no auto-update
+# yet) to push them to switch to the canonical name.
 DEPRECATED_IMAGE_NAME = "stevezzau/plex_generate_vid_previews"
 CANONICAL_IMAGE_NAME = "stevezzau/media_preview_generator"
-DEPRECATED_IMAGE_SUNSET_DATE = "2026-10-29"
 
 
 _SESSION_DISMISSED: set[str] = set()
@@ -135,8 +135,8 @@ def _build_schema_migration_notification() -> dict[str, Any] | None:
     notice = get_settings_manager().get("_pending_migration_notice")
     if not isinstance(notice, dict):
         return None
-    from_v = notice.get("from", "?")
-    to_v = notice.get("to", "?")
+    from_v = notice.get("from")
+    to_v = notice.get("to")
     backup = notice.get("backup") or ""
     notes = notice.get("notes") or []
     notes_html = ""
@@ -155,10 +155,17 @@ def _build_schema_migration_notification() -> dict[str, Any] | None:
         if backup
         else ""
     )
-    body = (
-        f"<p class='mb-0'>Your settings were migrated from schema "
-        f"<strong>v{from_v}</strong> to <strong>v{to_v}</strong>.</p>{backup_html}{notes_html}"
-    )
+    # A retry boot finishes a migration whose schema bump already happened,
+    # so there is no version move to report — printing "from v14 to v14" (or
+    # "from v? to v?") reads like a bug. Lead with the change itself instead.
+    if from_v is None or to_v is None or from_v == to_v:
+        headline = "<p class='mb-0'>Your settings were updated.</p>"
+    else:
+        headline = (
+            f"<p class='mb-0'>Your settings were migrated from schema "
+            f"<strong>v{from_v}</strong> to <strong>v{to_v}</strong>.</p>"
+        )
+    body = f"{headline}{backup_html}{notes_html}"
     return {
         "id": SCHEMA_MIGRATION_ID,
         "severity": "info",
@@ -201,21 +208,21 @@ def _build_deprecated_image_notification() -> dict[str, Any] | None:
 
     body = (
         f"<p class='mb-1'>You're running the Docker image "
-        f"<code>{DEPRECATED_IMAGE_NAME}</code>, which has been renamed to "
-        f"<code>{CANONICAL_IMAGE_NAME}</code> to reflect that this app now "
-        f"supports Plex, Emby, and Jellyfin.</p>"
-        f"<p class='mb-1'>Both image names mirror the same builds until "
-        f"<strong>{DEPRECATED_IMAGE_SUNSET_DATE}</strong>; after that, only "
-        f"<code>{CANONICAL_IMAGE_NAME}</code> receives updates. Update your "
-        f"<code>compose</code> file&apos;s <code>image:</code> line and pull "
-        f"the new image to keep getting updates.</p>"
+        f"<code>{DEPRECATED_IMAGE_NAME}</code>, which has been <strong>retired</strong> "
+        f"and renamed to <code>{CANONICAL_IMAGE_NAME}</code> (this app now supports "
+        f"Plex, Emby, and Jellyfin).</p>"
+        f"<p class='mb-1'>The old image name <strong>no longer receives updates</strong>. "
+        f"Update your <code>compose</code> file&apos;s <code>image:</code> line to "
+        f"<code>{CANONICAL_IMAGE_NAME}</code> and run "
+        f"<code>docker compose pull &amp;&amp; docker compose up -d</code> to keep "
+        f"getting updates.</p>"
         f"<p class='mb-0 small text-muted'>Existing volumes, settings, and "
         f"configuration are unchanged — only the image name moves.</p>"
     )
     return {
         "id": DEPRECATED_IMAGE_ID,
         "severity": "warning",
-        "title": "Update your Docker image",
+        "title": "Your Docker image has been retired",
         "body_html": body,
         "dismissable": True,
         "source": "image_deprecation",

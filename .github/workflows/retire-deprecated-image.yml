@@ -1,0 +1,54 @@
+name: Retire deprecated Docker image
+
+# One-shot, manually triggered. Builds the tombstone image (a static "this
+# image moved" page) and pushes it OVER the deprecated repo's :latest and :dev
+# tags, so anyone still pulling stevezzau/plex_generate_vid_previews gets a
+# clear "switch to stevezzau/media_preview_generator" notice. Run this ONCE,
+# then the deprecated build is already removed from ci.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "retire" to confirm pushing the tombstone over the old image'
+        required: true
+        default: ''
+
+env:
+  DEPRECATED_IMAGE: stevezzau/plex_generate_vid_previews
+
+jobs:
+  tombstone:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.confirm == 'retire' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate Docker secrets
+        run: |
+          if [ -z "${{ secrets.DOCKER_USERNAME }}" ] || [ -z "${{ secrets.DOCKER_PASSWORD }}" ]; then
+            echo "::error::DOCKER_USERNAME and DOCKER_PASSWORD must be set in repository secrets"
+            exit 1
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build & push tombstone (multi-arch) over :latest and :dev
+        uses: docker/build-push-action@v6
+        with:
+          context: ./tombstone
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.DEPRECATED_IMAGE }}:latest
+            ${{ env.DEPRECATED_IMAGE }}:dev

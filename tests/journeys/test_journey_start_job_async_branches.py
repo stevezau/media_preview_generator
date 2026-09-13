@@ -96,6 +96,16 @@ def app(tmp_path, monkeypatch):
                 "webhook_delay": 0,
                 "webhook_retry_count": 3,
                 "webhook_retry_delay": 30,
+                # Retry chains re-enter _start_job_async from inside a job
+                # that already holds a JobGate slot. In production each
+                # attempt gets its own daemon thread, so the parent's slot
+                # is released while the child waits; under the conftest
+                # sync-thread shim the whole chain runs nested on ONE
+                # thread and every attempt holds a slot simultaneously.
+                # A 3-attempt chain therefore needs 3 concurrent slots —
+                # more than the default cap of 3 leaves to normal-priority
+                # work once one slot is reserved for high priority.
+                "max_concurrent_jobs": 10,
                 "media_servers": [
                     {
                         "id": "plex-1",

@@ -100,6 +100,24 @@ def jellyfin_credentials(servers_env: dict[str, str]) -> dict[str, str]:
     return {k: servers_env[k] for k in needed}
 
 
+@pytest.fixture(scope="session")
+def jellyfin_config_dir(servers_env: dict[str, str]) -> str:
+    """Host path of Jellyfin's ProgramDataPath (off-media jellyfin_config_folder).
+
+    Written by setup_servers.py as ``JELLYFIN_CONFIG_DIR`` (the bind-mount's
+    ``data/`` subdir). The off-media test writes trickplay into its
+    ``data/trickplay/`` and reads the plugin-installed Jellyfin from it, so the
+    dir must exist and be writable by this process. Skips cleanly otherwise."""
+    import os as _os
+
+    path = servers_env.get("JELLYFIN_CONFIG_DIR", "")
+    if not path:
+        pytest.skip("JELLYFIN_CONFIG_DIR not in servers.env (needs the 10.11 bind-mount harness)")
+    if not (_os.path.isdir(path) and _os.access(path, _os.W_OK)):
+        pytest.skip(f"Jellyfin config dir not writable by this process: {path}")
+    return path
+
+
 @pytest.fixture
 def media_root() -> Path:
     """Local path to the synthetic test fixtures (mounted into containers)."""
