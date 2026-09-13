@@ -677,3 +677,15 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   Matroska `ChapterSkipType` deferred (ffprobe can't read it).
 - 2026-09-14 · External ids (§5.2), from Task 6 review + lab check: episodes use only show ids (no fallback to episode
   ids), path "movie" needs tmdb/imdb and no tvdb, movies drop tvdb, extras and non-movie/episode items get no ids.
+- 2026-09-14 · Online sources (§5.3), from Task 7 live check + review: TheIntroDB's daily budget ends at the UTC day
+  change (it sends `x-usagelimit-reset: 0` mid-day); TheIntroDB is only asked with the file duration; empty or
+  error-shaped 200 answers and non-JSON 404s count as unavailable, not "no data"; keys with non-printable characters are
+  refused before any request.
+- 2026-09-14 · Jellyfin plugin (§6.3), from Task 9 review: POST carries optional `fileSize` of the analysed file and the
+  provider serves nothing when the item's on-disk length differs (10.11 keeps our stored copy after a file replacement);
+  a corrupt store file reads as empty; `segments` is required and types must be exact names; max 64 segments.
+- 2026-09-14 · Plex DB publisher (§6.3), from Task 8 deep review: before any write, prove a shared SQLite lock domain
+  with Plex (another process's lock on the `-shm` dead-man byte), in addition to the filesystem type; no proof →
+  `NeedsLocalDb` (or unreachable when Plex is down). Unknown filesystem types are not ready. Removing a type we
+  published deletes its `pv:<type>` key (not `""`) and only rows/keys still equal to what we wrote, so Plex's own
+  re-detected markers stay and Plex can analyse the part again (verify in the lab matrix).
