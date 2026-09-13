@@ -382,7 +382,7 @@ class GlobalMarkersSettings:
             "publish_when": self.publish_when,
             "sources": [[s.id, s.enabled] for s in self.sources],
         }
-        return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        return hashlib.sha1(json.dumps(payload, sort_keys=True).encode(), usedforsecurity=False).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -2854,7 +2854,7 @@ class MarkerStore:
     def markers_hash(markers: Iterable[Marker]) -> str:
         """Stable hash of what a server should show (type + times only)."""
         payload = sorted((m.type.value, m.start_ms, m.end_ms) for m in markers)
-        return hashlib.sha1(json.dumps(payload).encode()).hexdigest()
+        return hashlib.sha1(json.dumps(payload).encode(), usedforsecurity=False).hexdigest()
 
 
 _store: MarkerStore | None = None

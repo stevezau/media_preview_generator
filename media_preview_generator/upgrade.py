@@ -9,6 +9,7 @@ After migration, settings.json is the single source of truth for all
 application-level configuration.
 """
 
+import copy
 import json
 import os
 import sqlite3
@@ -21,7 +22,7 @@ from loguru import logger
 # -------------------------------------------------------------------------
 # Schema version — bump when adding new migrations
 # -------------------------------------------------------------------------
-_CURRENT_SCHEMA_VERSION = 14
+_CURRENT_SCHEMA_VERSION = 15
 
 #: Count of consecutive v14 attempts that failed on IO. The version gate
 #: alone would forfeit the migration forever after one transient error,
@@ -363,6 +364,7 @@ def _migrate_schema(sm) -> None:
         v14 -- Unpins Recently Added schedules that carry the old UI's
                unconditional ``priority: 2`` seed so they inherit the new
                ``incoming_job_priority`` setting. Issue #285.
+        v15 -- Seeds Intro & Credits (markers) defaults, disabled per server.
     """
     current = sm.get("_schema_version", 1)
     if current > _CURRENT_SCHEMA_VERSION:
@@ -423,6 +425,8 @@ def _migrate_schema(sm) -> None:
         _run(13, _migrate_to_v13)
     if current < 14 or v14_retry:
         _run(14, _migrate_to_v14)
+    if current < 15:
+        _run(15, _migrate_to_v15)
 
     sm.set("_schema_version", _CURRENT_SCHEMA_VERSION)
 
@@ -436,6 +440,10 @@ def _migrate_schema(sm) -> None:
 
         bak_path = f"{getattr(sm, 'settings_file', '')}.bak" if getattr(sm, "settings_file", None) else ""
         existing = sm.get("_pending_migration_notice") or {}
+        # An existing notice's notes are unread, so merge into it rather than overwrite it —
+        # regardless of whether this boot is a real version move or a retry-only boot.
+        merged_notes = list(existing.get("notes") or [])
+        merged_notes.extend(note for note in user_notes if note not in merged_notes)
         if current == _CURRENT_SCHEMA_VERSION:
             # Retry-only boot (the version gate was already closed; a pending
             # v14 attempt got us here). A fresh header would claim "migrated
@@ -445,28 +453,29 @@ def _migrate_schema(sm) -> None:
             # original boot never wrote one (its migration failed, so it
             # produced no notes), omit from/to entirely — the renderer drops
             # the sentence rather than printing "v? to v?".
-            merged = list(existing.get("notes") or [])
-            merged.extend(note for note in user_notes if note not in merged)
             if existing:
-                sm.set("_pending_migration_notice", {**existing, "notes": merged})
+                sm.set("_pending_migration_notice", {**existing, "notes": merged_notes})
             else:
                 sm.set(
                     "_pending_migration_notice",
                     {
                         "at": _dt.now(_tz.utc).isoformat(),
                         "backup": bak_path,
-                        "notes": merged,
+                        "notes": merged_notes,
                     },
                 )
         else:
+            # Real version move. Keep the ORIGINAL "from" when an undismissed notice already
+            # exists — the user hasn't opened the bell since whatever earlier version they were
+            # actually on — and bump "to" to the version this boot reaches.
             sm.set(
                 "_pending_migration_notice",
                 {
-                    "from": current,
+                    "from": existing.get("from", current),
                     "to": _CURRENT_SCHEMA_VERSION,
                     "at": _dt.now(_tz.utc).isoformat(),
                     "backup": bak_path,
-                    "notes": user_notes,
+                    "notes": merged_notes,
                 },
             )
 
@@ -1416,6 +1425,41 @@ def _migrate_to_v14(sm) -> list:
 
     _v14_mark_settled(sm)
     return [f"v14: unpinned {unpinned} Recently Added schedule(s) so they inherit incoming_job_priority (#285)"]
+
+
+def _migrate_to_v15(sm) -> list:
+    """Seed the Intro & Credits global block and a disabled per-server block (spec §8).
+
+    The feature is off until enabled per server, so this migration is purely additive: it seeds
+    ``markers`` (global detection settings) when absent, and adds a disabled ``markers`` block to
+    any ``media_servers`` entry that doesn't already have one (e.g. added by an earlier partial
+    upgrade or hand-edited settings.json). No ``_USER_FACING_NOTES[15]`` entry — nothing changed for
+    the user to see; Intro & Credits stays off everywhere until they turn it on.
+
+    Idempotent — a re-run against an already-migrated install returns no notes.
+    """
+    from .markers.settings import DEFAULT_GLOBAL_MARKERS, default_server_markers
+
+    notes: list[str] = []
+    if not isinstance(sm.get("markers"), dict):
+        sm.apply_changes(updates={"markers": copy.deepcopy(DEFAULT_GLOBAL_MARKERS)})
+        notes.append("v15: seeded Intro & Credits defaults (off until enabled per server)")
+
+    media_servers = sm.get("media_servers") or []
+    if not isinstance(media_servers, list):
+        return notes
+
+    updated: list = []
+    added = 0
+    for entry in media_servers:
+        if isinstance(entry, dict) and not isinstance(entry.get("markers"), dict):
+            entry = {**entry, "markers": default_server_markers(str(entry.get("type") or "").lower())}
+            added += 1
+        updated.append(entry)
+    if added:
+        sm.update({"media_servers": updated})
+        notes.append(f"v15: added a disabled Intro & Credits block to {added} server(s)")
+    return notes
 
 
 # =========================================================================

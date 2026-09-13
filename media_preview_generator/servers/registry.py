@@ -91,6 +91,7 @@ def server_config_from_dict(data: dict[str, Any]) -> ServerConfig:
         exclude_paths=list(data.get("exclude_paths") or []),
         output=dict(data.get("output") or {}),
         server_identity=server_identity,
+        markers=dict(data.get("markers") or {}),
     )
 
 

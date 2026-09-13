@@ -764,3 +764,5 @@ class ServerConfig:
     exclude_paths: list[dict[str, Any]] = field(default_factory=list)
     output: dict[str, Any] = field(default_factory=dict)
     server_identity: str | None = None
+    # Intro & Credits per-server block (spec §8); validated by markers.settings.validate_server.
+    markers: dict[str, Any] = field(default_factory=dict)

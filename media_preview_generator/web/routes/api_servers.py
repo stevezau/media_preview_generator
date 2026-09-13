@@ -287,6 +287,48 @@ def _validate_plex_output(output: dict) -> str:
     return ""
 
 
+def _merge_markers_update(base_markers: object, posted: object) -> object:
+    """Deep-merge a posted per-server ``markers`` block over the stored one.
+
+    PUT/PATCH is patch semantics everywhere else in this payload (see ``base.get(...)`` fallbacks
+    throughout ``_validate_server_payload``) — but ``markers`` is itself an object with several
+    independent fields (``enabled``, ``library_ids``, ``plex.db_write_confirmed_at``,
+    ``plex.on_plex_redetect``). Without a merge, posting only ``{"enabled": false}`` would fall
+    straight into ``validate_server``'s "reset to defaults" path for every field the client didn't
+    mention — wiping a confirmed Plex server's ``db_write_confirmed_at`` (forcing re-confirmation
+    to re-enable) and any explicit ``library_ids`` selection.
+
+    A field the client *does* send always wins, including an explicit ``null`` (``library_ids:
+    null`` means "all libraries"; ``plex.db_write_confirmed_at: null`` clears the confirmation) —
+    merging only fills in keys the client's payload omits entirely. Clearing the confirmation this
+    way while leaving ``enabled`` at its current ``true`` still 400s: ``validate_server`` refuses
+    an enabled Plex block with no confirmation on record, so revoking it must be sent together
+    with ``enabled: false`` in the same request.
+
+    Args:
+        base_markers: The server's currently-stored ``markers`` block (may be missing/invalid).
+        posted: The client's posted ``markers`` value.
+
+    Returns:
+        The merged block when ``posted`` is a dict; ``posted`` unchanged otherwise (``None``, or a
+        malformed non-dict value that ``validate_server`` will go on to reject).
+    """
+    if not isinstance(posted, dict):
+        return posted
+    base = base_markers if isinstance(base_markers, dict) else {}
+    merged = {**base, **posted}
+    # Only sub-merge when BOTH sides are dicts. If the client posted a non-dict "plex" (a string,
+    # a list, ...), `**posted` above already put that raw value into `merged["plex"]` — leave it
+    # there so validate_server's own "markers.plex must be an object" check rejects it with a 400,
+    # rather than this helper crashing on `{**base_plex, **"not a dict"}`. Same reasoning covers an
+    # explicit `"plex": null`: `isinstance(None, dict)` is False, so the sub-merge is skipped and
+    # the posted `None` (which clears the confirmation) is left to win, instead of `None or {}`
+    # silently discarding it and keeping the stored value.
+    if isinstance(base.get("plex"), dict) and isinstance(posted.get("plex"), dict):
+        merged["plex"] = {**base["plex"], **posted["plex"]}
+    return merged
+
+
 def _validate_server_payload(
     data: dict[str, Any],
     *,
@@ -374,6 +416,16 @@ def _validate_server_payload(
         data.get("health_dismissals") if "health_dismissals" in data else base.get("health_dismissals", [])
     )
 
+    from ...markers.settings import validate_server as _validate_markers
+
+    if "markers" in data:
+        markers_raw = _merge_markers_update(base.get("markers"), data.get("markers"))
+    else:
+        markers_raw = base.get("markers")
+    markers_block, err = _validate_markers(markers_raw, type_value)
+    if err:
+        return None, err
+
     err = _validate_path_mappings(path_mappings or [])
     if err:
         return None, err
@@ -406,6 +458,7 @@ def _validate_server_payload(
         "server_identity": str(server_identity) if server_identity else None,
         # Carry-forward only — see comment above on health_dismissals.
         "health_dismissals": list(health_dismissals or []),
+        "markers": markers_block,
     }
 
     # Sanity-check the result: server_config_from_dict applies its own
