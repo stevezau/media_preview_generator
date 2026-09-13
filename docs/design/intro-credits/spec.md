@@ -160,8 +160,11 @@ without one); no shared key ships; everything must work with the source disabled
 ## 5. Detection
 
 ### 5.1 Chapters
-Parse container chapters (and Matroska `ChapterSkipType` when present). Name → type by case-insensitive regex; a
-chapter runs to the next chapter start. Must include names the published plugins miss: **"Title Sequence"**,
+Parse container chapters. Name → type by case-insensitive regex (`OP`/`ED` only in capitals, a leading BOM ignored); a
+chapter runs to the next chapter start (its own end is clamped to the first later chapter start). A generic "Intro" /
+"Introduction" chapter is ignored when the same file has a specific opening chapter ("OP", "Opening", "Title Sequence",
+"Theme Song"…): anime files put the cold open in "Intro" (Mushoku Tensei S01E06: Intro 0–275 s, OP 275–364 s).
+Matroska `ChapterSkipType` is deferred: ffprobe 8 can't read it. Must include names the published plugins miss: **"Title Sequence"**,
 "Opening Credits", "Intro", "Recap", "Previously", "End Credits", "Credits", "Outro", "Preview". 165 of 1,500 sampled
 seasons (11%) carry them. Exact when present. Chapter truth can still be off vs the rule in §5.4 (3 of 40 movies had
 a late or wrong "End Credits" chapter by frame check).
@@ -666,3 +669,6 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   single sources and for chapters confirmed by two sources; remaining ties prefer the shorter skip.
 - 2026-09-14 · Task 3 final review (§5.5): a second chapter of the same type that another source agrees with blocks the
   first chapter (review); `decided_by` wording per path.
+- 2026-09-14 · Chapters (§5.1), from real-library review: a generic "Intro" chapter yields to a specific opening chapter
+  in the same file (cold open); chapter ends clamp to the next chapter start; `OP`/`ED` match only in capitals;
+  Matroska `ChapterSkipType` deferred (ffprobe can't read it).

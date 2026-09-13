@@ -253,9 +253,6 @@ def test_persists_across_reopen(tmp_path):
     s2.close()
 
 
-# --- Fix round 1 -------------------------------------------------------------------------------
-
-
 def test_identity_change_leaves_other_files_alone(store):
     """HIGH 1: a mutant dropping a table from the invalidation loop, dropping its WHERE file_id=?,
     or scoping the unlocked-markers delete to all files rather than one, must fail this test."""
@@ -590,9 +587,6 @@ def test_set_publish_state_ignores_verified_when_markers_is_none(store):
     store.set_publish_state(rec.id, "jf-1", item_id="abc", markers=None, status="failed", verified=True)
     # verified=True is ignored when markers=None: no new set was actually verified.
     assert store.get_publish_state(rec.id, "jf-1").verified_at is None
-
-
-# --- Fix round 2 -------------------------------------------------------------------------------
 
 
 def test_unchanged_upsert_on_one_file_does_not_touch_another_files_row(store):
