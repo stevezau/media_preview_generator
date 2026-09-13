@@ -68,6 +68,9 @@ public class TrickplayBridgeController : ControllerBase
     /// the off-media (<c>SaveTrickplayWithMedia=false</c>) destination
     /// inside a config dir it has mounted, without hard-coding a path
     /// that moved between Jellyfin versions.
+    ///
+    /// <c>features</c> lists the capabilities this build serves, so the
+    /// publisher can tell a markers-capable Bridge from an older one.
     /// </summary>
     /// <returns>200 with a tiny JSON body identifying the plugin.</returns>
     [HttpGet("Ping")]
@@ -80,6 +83,7 @@ public class TrickplayBridgeController : ControllerBase
             version = Plugin.Instance?.Version?.ToString() ?? "unknown",
             ok = true,
             trickplayRoot = GetRelativeTrickplayRoot(),
+            features = new[] { "trickplay", "markers" },
         });
     }
 
