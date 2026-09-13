@@ -127,7 +127,7 @@ real library mounted read-only.
 |---|---|---|---|
 | **TheIntroDB** v3 | **35 / 8 / 0** | 23 / 4 / 16 | `GET https://api.theintrodb.org/v3/media?tmdb_id&season&episode&duration_ms`; `credits.end_ms=null` = end of file; `null` start = 0; arrays may hold several segments |
 | IntroDB.app | 26 / 13 / 4 | 17 / 4 / 22 | `GET https://api.introdb.app/segments?imdb_id&season&episode` (no duration); TV only |
-| SkipDB | 16 / 17 / 10 | 8 / 25 / 10 | Daily ODbL dump, matched locally by id + duration ±5% (R&M "outros" are the last 7 s) |
+| SkipDB | 16 / 17 / 10 | 8 / 25 / 10 | Measured on the daily ODbL dump matched by id + duration ±5% (R&M "outros" are the last 7 s). **Build uses the read API** `GET https://api.skipdb.tv/api/segments?imdb_id&season&episode&duration&adjust=conservative` (120 req/min), accepting only `match` exact/shifted (§14) |
 | AniSkip | n/a | n/a | Anime only (MAL id + `episodeLength`); phase 4 |
 
 **Coverage** on a random prod sample of 200 TV episodes + 120 movies (`evidence/coverage/`):
@@ -148,7 +148,7 @@ default. **Local detection carries most coverage.**
 **Limits (measured from response headers 2026-09-13).** TheIntroDB without key: `x-ratelimit-limit: 30` per
 `reset: 10` s, `x-usagelimit-limit: 500`/day, `x-usagelimit-specificmedia-limit: 2000`. With a key: 1,000/day per the
 TheIntroDB Emby plugin author (**unverified** — check headers with the owner's key). IntroDB.app: anonymous, no key,
-no rate-limit headers. SkipDB: one daily download. The app paces from headers (never hard-coded), backs off on 429,
+no rate-limit headers. SkipDB: read API, 120 requests/min, anonymous. The app paces from headers (never hard-coded), backs off on 429,
 circuit-breaks on repeated 5xx. Webhook-triggered files get first call on the daily budget; backfill uses what's
 left and local detection for the rest.
 
@@ -609,3 +609,20 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   Intel tested on the plex host (iGPU slower than CPU there → CPU); AMD untested, no hardware.
 - 2026-09-13 · Build approved. Reuse PR #241 (branch `feat/markers-detection`) instead of a new `feat/intro-credits`
   PR; dev merged in; commits/pushes on that branch without per-commit asks; spec + evidence tracked on the branch.
+- 2026-09-13 · Implementation plan written (`plan-roadmap.md`, `plan-phase1.md`). Decisions taken while planning:
+  SkipDB via its read API instead of the daily dump (no 29 MB daily download, fresher data, duration matching; the
+  ODbL reciprocity term exempts read-only API use) — only `exact`/`shifted` matches count. Markers already on servers
+  are read from **every** enabled server that owns the file (even with Intro & Credits off there, so Plex's markers can
+  confirm a source for Jellyfin), and only before we have published to that server. Plex writes replace only the types
+  we decided; Plex's own marker for an undecided type stays. Intros and recaps are detected for TV episodes only;
+  previews are not detected (no setting). Intro & Credits jobs are created through `POST /api/markers/jobs` (the
+  preview job route is untouched). Server external ids come from the path first (`{tvdb-…}`, `{tmdb-…}`, SxxEyy), the
+  server only when the path can't answer.
+
+- 2026-09-13 · Plan review (Architecture Review) changes: a webhook's Intro & Credits job waits for its preview job to
+  finish before taking a slot (priority alone can't order them when previews are set to Normal/Low). A paused Intro &
+  Credits job hands its active slot back until resume. Intro & Credits holds at most a quarter of the checking threads
+  (online lookups can sleep on rate limits). Plex writes re-read the item inside the write transaction so Plex's own
+  fresh `extra_data` keys survive; the library-wide marker-version sample runs once per job (refreshed every 5 min), each write
+  validates the item's own parts. A follow-up doesn't wait while its preview job counts down to a retry. Per-file outcomes gain `markers_waiting` and `markers_skipped`; any server failure makes the file
+  count as failed unless another server was written.
