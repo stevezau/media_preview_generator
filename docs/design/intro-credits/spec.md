@@ -85,7 +85,7 @@ real library mounted read-only.
 | HTTP API to write intro/credits? | **No.** `POST /library/metadata/{id}/marker` → 400 for `type` 1–6 and every name; `attributes` override → 400; `PUT/DELETE …/marker/{id}` on intro/credits → 404; PUT converting a bookmark → 200 but ignored. Only bookmarks work. | (lab, claimed Pass server) + official spec + Plex Web 4.160 bundles + PMS binary route strings (`/marker`, `/marker/:markerID` only) |
 | Other routes | Custom Metadata Providers (Dec 2025) spec has no marker/media/part fields. Plex's cloud credits lookup (`tv.plex.provider.metadata` `/markers?hash=<media_parts.hash>&type=credits`) can be pointed elsewhere with hidden pref `MetadataProviderUrl`, but **zero requests reached the lab proxy** even on forced credits detection → not honoured. Chapter names are never converted to markers. Plex has no plugin system. | (lab) `evidence/plex-provider-redirect/` + developer.plex.tv + staff posts |
 | Where markers live | `taggings` rows (`text` = `intro`/`credits`/`commercial`, `time_offset`/`end_time_offset` ms, `extra_data` e.g. intro `{"pv:version":"5"}`, final credits `{"pv:final":"1","pv:version":"4"}`) pointing at the single `tags` row with `tag_type=12` and **`tag=''`**; plus a per-part copy in `media_parts.extra_data` (`pv:intros`, `pv:credits`: MediaPartMarkersArray JSON, sorted keys, `url` URL-encoded). `metadata_item_setting_markers` is per-user bookmarks. | prod DB (read-only) + (lab) |
-| Direct DB write served? | **Yes, immediately, no restart**, XML identical to native markers. Stock Python `sqlite3` works (only `tags` has ICU triggers; we never touch `tags`). | (lab) `evidence/lab/py_write.py` |
+| Direct DB write served? | **Yes, immediately, no restart**, XML identical to native markers. Stock Python `sqlite3` works (ICU triggers exist only on `tags` and `metadata_items` — PMS 1.43.4 — and we never write either; none on `taggings` or `media_parts`). | (lab) `evidence/lab/py_write.py` |
 | `taggings` alone enough? | Served, but **wiped** by the next forced Plex detection of any type (Plex rebuilds from `media_parts.extra_data`). Writing **both** survives. `extra_data` alone is not served. | (lab) |
 | What wipes our markers | Forced detection of the **same** type (`PUT …/credits?force=1`, season `…/intro?force=1`). **Not** wiped by metadata refresh (force), section scan, analyze with detection off, or non-forced detection. PMS 1.43.1+ forces credits detection on manual Analyze. | (lab) + release notes |
 | Tag row | Plex looks up `tag_type=12 AND tag=''`. A row created with `tag=NULL` is ignored (Plex makes its own); a new row is only served after a PMS restart. **Reuse Plex's row; never create one.** | (lab) |
@@ -695,3 +695,8 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   an item any file has been published to (Plex serves one set per item across versions). Known limit: after a
   `markers.db` reset or a server re-added under a new id, markers we wrote to Plex earlier can count as Plex's own
   opinion once.
+- 2026-09-14 · Plex multi-version publishing (§6.3), from Task 8/11 reviews: publishing is tracked per server item, not
+  per file. The Plex publisher computes the item's set from every live version (a type is shown only when every version
+  is decided and agrees within 2 s), removes only rows that serve exactly what we last left on that item, and returns
+  what is ours afterwards; markers.db keeps that per item. A newly added, not-yet-decided version hides that item's
+  markers until it is decided (precision first).
