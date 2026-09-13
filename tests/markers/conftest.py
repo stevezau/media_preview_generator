@@ -61,10 +61,17 @@ def loguru_caplog(caplog):
 @pytest.fixture(autouse=True)
 def _reset_marker_singletons():
     yield
+    # Each singleton is guarded on its own: earlier tasks land before later ones (e.g. store.py
+    # ships before sources/ratelimit.py), so one missing module must never skip resetting another.
     try:
-        from media_preview_generator.markers.sources.ratelimit import reset_limiters
         from media_preview_generator.markers.store import reset_marker_store
     except ImportError:
-        return
-    reset_marker_store()
-    reset_limiters()
+        pass
+    else:
+        reset_marker_store()
+    try:
+        from media_preview_generator.markers.sources.ratelimit import reset_limiters
+    except ImportError:
+        pass
+    else:
+        reset_limiters()
