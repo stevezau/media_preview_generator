@@ -79,6 +79,8 @@ media_preview_generator/release_notes.json
 # Intro & Credits evidence: local-only files (tokens, large dumps, regenerable media, Emby's proprietary DLLs)
 docs/design/intro-credits/evidence/lab/env
 docs/design/intro-credits/evidence/lab/synth/
+docs/design/intro-credits/evidence/lab/results/
+docs/design/intro-credits/evidence/lab/scale_mounts.sh
 docs/design/intro-credits/evidence/online/skipdb-dump.json
 docs/design/intro-credits/evidence/plugins/emby-4.10/embylibs/
 docs/design/intro-credits/evidence/detect/fpcache*/

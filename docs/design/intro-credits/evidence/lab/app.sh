@@ -40,7 +40,7 @@ if ! docker container inspect mlab-app >/dev/null 2>&1; then
     docker run -d --name mlab-app --network mlab -p 127.0.0.1:18080:8080 \
         -e PUID=1000 -e PGID=1000 -e TZ=UTC -e WEB_AUTH_TOKEN="$MLAB_APP_TOKEN" \
         -v mlab_app_config:/config:nocopy -v mlab_plex_config:/plexcfg \
-        "${MV[@]}" "$IMAGE" >/dev/null
+        "${MV[@]}" "${MV_SCALE[@]}" "$IMAGE" >/dev/null
 fi
 
 for _ in $(seq 1 60); do

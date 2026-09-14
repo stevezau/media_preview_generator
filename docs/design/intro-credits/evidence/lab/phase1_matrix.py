@@ -4,6 +4,7 @@
     ./phase1_matrix.py configure        add the four lab servers to mlab-app, refresh libraries, Intro & Credits settings
     ./phase1_matrix.py status           capability state per server
     ./phase1_matrix.py run 14 1 2 ...   run matrix rows in the given order
+    ./phase1_matrix.py scale ...        Task 20 Step 4 scale run on the real library (see `scale` for its steps)
 
 Each row writes results/row-NN.json (git-ignored: evidence/**/*.json) with its result and evidence. Credentials come
 from ./env and are scrubbed from everything written or printed. Rows change lab state; phase1-results.md lists the
@@ -25,6 +26,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1940,7 +1942,428 @@ def row_14_security() -> dict:
     )
 
 
+# ------------------------------------------------------------------------------------------------------- scale run
+# Plan Task 20 Step 4: a full backfill of the real seasons/movies up.sh mounts from `scale_score.py pick`. Each step is
+# resumable and returns within ~9 minutes, so it can be called again until it says done. Raw data: results/scale/.
+
+SCALE = RESULTS / "scale"
+SCALE_STEP_S = 540
+PROD_PLEX_DB = "/config/plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
+LAB_PLEX_QUIET_PREFS = {
+    "GenerateIntroMarkerBehavior": "never",
+    "GenerateCreditsMarkerBehavior": "never",
+    "GenerateChapterThumbBehavior": "never",
+    "LoudnessAnalysisBehavior": "never",
+    "MusicAnalysisBehavior": "never",
+    "ButlerTaskDeepMediaAnalysis": "0",
+    "ButlerTaskUpgradeMediaAnalysis": "0",
+}
+WATCHED = ("mlab-app", "mlab-plex", "mlab-jellyfin", "mlab-jf12")
+
+
+def scale_state(name: str) -> dict:
+    path = SCALE / f"{name}.json"
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def scale_save(name: str, data: Any) -> None:
+    SCALE.mkdir(parents=True, exist_ok=True)
+    (SCALE / f"{name}.json").write_text(json.dumps(scrub(data), indent=1, default=str, ensure_ascii=False) + "\n")
+
+
+def prod_dump() -> None:
+    """Prod Plex's own intro/credits rows and every movie/episode part, read-only over ssh (never written)."""
+    queries = {
+        "prod_plex_markers": (
+            "select p.file, t.metadata_item_id, t.text, t.time_offset, t.end_time_offset, t.extra_data, m.duration "
+            "from taggings t join tags g on g.id=t.tag_id join media_items m on m.metadata_item_id=t.metadata_item_id "
+            "join media_parts p on p.media_item_id=m.id where g.tag_type=12 and t.text in ('intro','credits') "
+            "order by p.file, t.text, t.time_offset",
+            ("file", "item", "type", "start", "end", "extra", "duration"),
+        ),
+        "prod_plex_parts": (
+            "select p.file, mi.id, mi.metadata_type, m.duration, mi.library_section_id from media_parts p "
+            "join media_items m on m.id=p.media_item_id join metadata_items mi on mi.id=m.metadata_item_id "
+            "where mi.metadata_type in (1,4) and m.deleted_at is null",
+            ("file", "item", "mtype", "duration", "section"),
+        ),
+    }
+    for name, (sql, keys) in queries.items():
+        remote = f"nice -n 19 sqlite3 -separator '\t' 'file:{PROD_PLEX_DB}?mode=ro' \"{sql}\""
+        out = sh("ssh", "-o", "BatchMode=yes", "plex", remote, timeout=600)
+        rows = []
+        for line in out.splitlines():
+            values = line.split("\t")
+            row = dict(zip(keys, values, strict=False))
+            for key in ("item", "start", "end", "duration", "mtype", "section"):
+                if key in row:
+                    row[key] = int(row[key]) if row[key] else None
+            rows.append(row)
+        scale_save(name, rows)
+        say(f"{name}: {len(rows)} rows")
+
+
+def lab_plex_quiet() -> None:
+    """Lab Plex: no intro/credits/chapter-thumbnail/loudness analysis while the scale folders are mounted."""
+    _, prefs = plex("GET", "/:/prefs")
+    before = {s["id"]: s["value"] for s in prefs["MediaContainer"]["Setting"] if s["id"] in LAB_PLEX_QUIET_PREFS}
+    if not (SCALE / "lab_plex_prefs_before.json").exists():
+        scale_save("lab_plex_prefs_before", before)
+    plex_set_prefs(**LAB_PLEX_QUIET_PREFS)
+    say(f"lab Plex prefs before {before} -> {LAB_PLEX_QUIET_PREFS}")
+
+
+def jf12_movies_library() -> None:
+    """Jellyfin 12.0 had no movies library; add one with the 10.11 movies library's options (no trickplay/chapter images)."""
+    _, libs = jf("mlab-jf12", "GET", "/Library/VirtualFolders")
+    if any(lib["Name"] == "movies" for lib in libs):
+        return
+    _, reference = jf("mlab-jellyfin", "GET", "/Library/VirtualFolders")
+    options = next(lib for lib in reference if lib["Name"] == "movies")["LibraryOptions"]
+    query = urllib.parse.urlencode(
+        {"name": "movies", "collectionType": "movies", "paths": MOVIES, "refreshLibrary": "false"}
+    )
+    status, body = jf("mlab-jf12", "POST", f"/Library/VirtualFolders?{query}", {"LibraryOptions": options})
+    if status >= 300:
+        raise RuntimeError(f"Jellyfin 12.0 movies library -> {status}: {body}")
+    say("added the movies library to Jellyfin 12.0")
+
+
+def expected_lab_files() -> dict[str, str]:
+    """Container path -> host path for every video under the scale mounts and the older real-media mounts."""
+    return {c: e["host"] for c, e in json.loads((SCALE / "truth.json").read_text()).items()}
+
+
+def server_counts() -> dict:
+    wanted = expected_lab_files()
+    plex_paths = set(plex_parts())
+    out = {"expected": len(wanted), "mlab-plex": len(wanted.keys() & plex_paths)}
+    for sid in JELLYFINS:
+        out[sid] = len(wanted.keys() & set(jf_items(sid)))
+    return out
+
+
+def scale_scan(target: str) -> int:
+    """Trigger (once) and wait for a library scan on `plex`, `mlab-jellyfin` or `mlab-jf12`; 3 = still running."""
+    state = scale_state("scans")
+    deadline = time.monotonic() + SCALE_STEP_S
+    if target not in state:
+        state[target] = {"started": now_iso()}
+        if target == "plex":
+            _, sections = plex("GET", "/library/sections")
+            for s in sections["MediaContainer"]["Directory"]:
+                if any(loc["path"] in ("/media/tv", MOVIES) for loc in s["Location"]):
+                    plex("GET", f"/library/sections/{s['key']}/refresh")
+        else:
+            jf(target, "POST", "/Library/Refresh")
+        scale_save("scans", state)
+        time.sleep(15)
+    while time.monotonic() < deadline:
+        if target == "plex":
+            _, data = plex("GET", "/activities")
+            busy = [a for a in data["MediaContainer"].get("Activity", []) if a.get("type") != "butler"]
+            detail = [(a.get("title"), a.get("progress")) for a in busy]
+        else:
+            task = jf_task(target, "RefreshLibrary")
+            busy = task["State"] != "Idle"
+            detail = (task["State"], task.get("CurrentProgressPercentage"))
+        if not busy:
+            time.sleep(20)
+            counts = server_counts()
+            state[target]["done"] = now_iso()
+            state[target]["counts"] = counts
+            scale_save("scans", state)
+            say(f"{target} scan idle; files known per server {counts}")
+            return 0
+        say(f"{target} scanning: {detail} load {os.getloadavg()[0]:.1f}")
+        time.sleep(30)
+    return 3
+
+
+def sample_resources(job_id: str | None) -> dict:
+    out = sh("docker", "stats", "--no-stream", "--format", "{{json .}}", *WATCHED, check=False, timeout=60)
+    stats = {}
+    for line in out.splitlines():
+        data = json.loads(line)
+        stats[data["Name"]] = {"cpu": data["CPUPerc"], "mem": data["MemUsage"].split(" / ")[0], "pids": data["PIDs"]}
+    sample: dict[str, Any] = {"t": now_iso(), "load": os.getloadavg(), "containers": stats}
+    if job_id:
+        job = app_ok("GET", f"/api/jobs/{job_id}")
+        sample["job"] = {
+            "status": job["status"],
+            "processed": job["progress"].get("processed_items"),
+            "total": job["progress"].get("total_items"),
+            "current": job["progress"].get("current_item"),
+            "paused": job.get("paused"),
+        }
+    with (SCALE / f"samples-{job_id[:8] if job_id else 'idle'}.jsonl").open("a") as fh:
+        fh.write(json.dumps(scrub(sample)) + "\n")
+    return sample
+
+
+def all_job_files(job_id: str) -> list[dict]:
+    """Every per-file result of a job (the files route pages at 500)."""
+    files, page = [], 1
+    while True:
+        data = app_ok("GET", f"/api/jobs/{job_id}/files?per_page=500&page={page}")
+        files.extend(data["files"])
+        if data.get("list_truncated"):
+            say(f"job {job_id[:8]} file list truncated: {data.get('truncated_outcomes')}")
+        if page * 500 >= data["filtered_count"]:
+            return files
+        page += 1
+
+
+def plex_full_state() -> dict:
+    """Every Plex marker row id and every part's extra_data (to prove a job made no Plex writes)."""
+    return {
+        "rows": {r["id"]: [r["item"], r["text"], r["start"], r["end"], r["extra_data"]] for r in plex_marker_rows()},
+        "parts": {p: v["extra_data"] for p, v in plex_parts().items()},
+    }
+
+
+def scale_job(name: str, *, force: bool = False) -> int:
+    """Run (resumably) an all-libraries Intro & Credits job at the default (low) priority; 3 = still running.
+
+    SCALE_PATHS (a JSON list) runs a folder/file job over those paths instead.
+    """
+    state = scale_state(name)
+    if not state.get("job_id"):
+        before = {
+            "plex": plex_full_state(),
+            "plugin_files": {c: plugin_marker_files(c) for c in JELLYFINS},
+            "usage": app_ok("GET", "/api/markers/sources/usage"),
+        }
+        scale_save(f"{name}-before", before)
+        app_ok("PUT", "/api/settings/log-level", {"log_level": "DEBUG"})
+        state = {"started": now_iso(), "force": force}
+        body: dict[str, Any] = {"library_name": f"Phase 1 scale: {name}", "force": force}
+        if os.environ.get("SCALE_PATHS"):
+            body["file_paths"] = json.loads(os.environ["SCALE_PATHS"])
+        job = start_markers_job(body)
+        state["job_id"] = job["id"]
+        scale_save(name, state)
+    job_id = state["job_id"]
+    deadline = time.monotonic() + SCALE_STEP_S
+    while time.monotonic() < deadline:
+        sample = sample_resources(job_id)
+        job = sample["job"]
+        say(
+            f"{name} {job_id[:8]} {job['status']} {job['processed']}/{job['total']} load {sample['load'][0]:.1f} "
+            f"app {sample['containers'].get('mlab-app', {}).get('cpu')} {sample['containers'].get('mlab-app', {}).get('mem')} "
+            f"| {str(job['current'])[:70]}"
+        )
+        if job["status"] in TERMINAL:
+            break
+        time.sleep(20)
+    else:
+        return 3
+    finished = now_iso()
+    app_ok("PUT", "/api/settings/log-level", {"log_level": "INFO"})
+    job = app_ok("GET", f"/api/jobs/{job_id}")
+    files = all_job_files(job_id)
+    later = [
+        {k: j.get(k) for k in ("id", "library_name", "status", "created_at", "kind", "priority")}
+        for j in app_ok("GET", "/api/jobs?page=0&per_page=200&include_retry_attempts=1")["jobs"]
+        if j["created_at"] >= state["started"] and j["id"] != job_id
+    ]
+    after = {
+        "plex": plex_full_state(),
+        "plugin_files": {c: plugin_marker_files(c) for c in JELLYFINS},
+        "usage": app_ok("GET", "/api/markers/sources/usage"),
+    }
+    scale_save(f"{name}-after", after)
+    state.update(
+        {
+            "finished": finished,
+            "job": job,
+            "files": files,
+            "other_jobs": later,
+            "lookups": online_lookup_times([state["started"], finished]),
+            "logs_tail": job_logs(job_id)[-200:],
+        }
+    )
+    scale_save(name, state)
+    outcomes = Counter(f["outcome"] for f in files)
+    say(f"{name} {job['status']}: {len(files)} files {dict(outcomes)}; other jobs since start: {len(later)}")
+    return 0
+
+
+def scale_collect(name: str = "backfill") -> None:
+    """For every file of the job: the Inspector's decisions/evidence, Plex's served markers, both Jellyfins' segments."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    files = scale_state(name)["files"]
+    parts = plex_parts()
+    items = {sid: jf_items(sid) for sid in JELLYFINS}
+
+    def one(f: dict) -> dict:
+        path = f["file"]
+        entry = {"file": path, "outcome": f["outcome"], "reason": f["reason"], "servers": f.get("servers") or []}
+        try:
+            payload = item_payload(path)
+        except RuntimeError as exc:
+            entry["payload_error"] = str(exc)[:300]
+            payload = {}
+        entry["decisions"] = payload.get("decisions")
+        entry["evidence"] = payload.get("evidence")
+        entry["duration_ms"] = payload.get("duration_ms")
+        entry["is_movie"] = payload.get("is_movie")
+        entry["inspector_servers"] = [
+            {k: s.get(k) for k in ("server_id", "plan", "plan_reason", "current", "published", "item_status", "error")}
+            for s in payload.get("servers") or []
+        ]
+        part = parts.get(path)
+        entry["plex"] = {"item": part["item"], "served": plex_served(part["item"])} if part else None
+        entry["jellyfin"] = {
+            sid: (
+                {"id": items[sid][path]["id"], "segments": jf_segments(sid, items[sid][path]["id"])}
+                if path in items[sid]
+                else None
+            )
+            for sid in JELLYFINS
+        }
+        return entry
+
+    with ThreadPoolExecutor(4) as pool:
+        collected = list(pool.map(one, files))
+    scale_save(f"collected-{name}", collected)
+    say(f"collected {len(collected)} files")
+
+
+KINDS = {"intro": "Intro", "credits": "Outro"}
+
+
+def scale_served(name: str = "backfill") -> dict:
+    """Served = decided: Plex includeMarkers=1 and both Jellyfins' /MediaSegments against the app's decisions."""
+    collected = scale_state(f"collected-{name}")
+    baseline = scale_state(f"{name}-before")["plex"]["rows"]
+    counts: Counter = Counter()
+    mismatches = []
+    for entry in collected:
+        decisions = entry.get("decisions") or {}
+        wanted = {
+            t: d["marker"] for t, d in decisions.items() if d["status"] == "decided" and d.get("marker") and t in KINDS
+        }
+        rows = {s["id"]: s["status"] for s in entry["servers"]}
+        # Plex: a written/up-to-date row must serve exactly the decided intro/credits; a type not decided keeps what Plex
+        # had before the job (none for the scale folders: lab detection is off).
+        if entry.get("plex") and rows.get("mlab-plex"):
+            item = entry["plex"]["item"]
+            before = [(r[1], r[2], r[3]) for r in baseline.values() if str(r[0]) == str(item)]
+            for mtype in KINDS:
+                got = sorted((m["start"], m["end"]) for m in entry["plex"]["served"] if m["type"] == mtype)
+                if mtype in wanted:
+                    expect = [(wanted[mtype]["start_ms"], wanted[mtype]["end_ms"])]
+                    ok = got == expect
+                    counts[f"plex {mtype} decided {'ok' if ok else 'MISMATCH'} (row {rows.get('mlab-plex')})"] += 1
+                else:
+                    ok = not got or bool(before)
+                    counts[
+                        f"plex {mtype} undecided {'nothing served' if not got else 'Plex own kept' if before else 'SERVED WITHOUT DECISION'}"
+                    ] += 1
+                    expect = "nothing or Plex's own"
+                if not ok:
+                    mismatches.append(
+                        {
+                            "file": entry["file"],
+                            "server": "mlab-plex",
+                            "type": mtype,
+                            "served": got,
+                            "decided": expect,
+                            "row": rows.get("mlab-plex"),
+                        }
+                    )
+        elif entry.get("plex") is None and wanted:
+            counts["plex item missing for a decided file"] += 1
+        for sid in JELLYFINS:
+            jfe = (entry.get("jellyfin") or {}).get(sid)
+            if not jfe or not rows.get(sid):
+                counts[f"{sid} row {rows.get(sid)}{' (no item)' if not jfe else ''}"] += 1
+                continue
+            expect = sorted(
+                (KINDS[t], m["start_ms"] * TICKS_PER_MS, m["end_ms"] * TICKS_PER_MS) for t, m in wanted.items()
+            )
+            got = sorted(
+                (s["type"], s["start_ticks"], s["end_ticks"]) for s in jfe["segments"] if s["type"] in KINDS.values()
+            )
+            ok = got == expect
+            counts[f"{sid} {'ok' if ok else 'MISMATCH'} (row {rows.get(sid)})"] += 1
+            if not ok:
+                mismatches.append(
+                    {"file": entry["file"], "server": sid, "served": got, "decided": expect, "row": rows.get(sid)}
+                )
+    result = {"counts": dict(sorted(counts.items())), "mismatches": mismatches}
+    scale_save(f"served-{name}", result)
+    say(json.dumps(result["counts"], indent=1))
+    say(f"{len(mismatches)} mismatches")
+    return result
+
+
+def scale_writes(name: str) -> dict:
+    """What a job changed: Plex rows added/removed/changed, parts extra_data changed, plugin marker files changed."""
+    before, after = scale_state(f"{name}-before"), scale_state(f"{name}-after")
+    rb, ra = before["plex"]["rows"], after["plex"]["rows"]
+    result = {
+        "plex_rows_added": len(ra.keys() - rb.keys()),
+        "plex_rows_removed": len(rb.keys() - ra.keys()),
+        "plex_rows_changed": sum(1 for k in ra.keys() & rb.keys() if ra[k] != rb[k]),
+        "plex_parts_extra_data_changed": sum(
+            1 for p in after["plex"]["parts"] if before["plex"]["parts"].get(p) != after["plex"]["parts"][p]
+        ),
+        "plugin_files": {
+            c: {
+                "added": len(after["plugin_files"][c].keys() - before["plugin_files"][c].keys()),
+                "removed": len(before["plugin_files"][c].keys() - after["plugin_files"][c].keys()),
+                "changed": sum(
+                    1
+                    for k in after["plugin_files"][c].keys() & before["plugin_files"][c].keys()
+                    if after["plugin_files"][c][k] != before["plugin_files"][c][k]
+                ),
+            }
+            for c in JELLYFINS
+        },
+        "usage_before": {k: v["used"] for k, v in before["usage"].items()},
+        "usage_after": {k: v["used"] for k, v in after["usage"].items()},
+        "theintrodb_remaining_after": after["usage"]["theintrodb"].get("remaining"),
+    }
+    state = scale_state(name)
+    result["http_lookups_logged"] = dict(Counter(f"{x['source']} {x['status']}" for x in state.get("lookups", [])))
+    scale_save(f"writes-{name}", result)
+    say(json.dumps(result, indent=1))
+    return result
+
+
+def scale(argv: list[str]) -> int:
+    step = argv[0] if argv else ""
+    if step == "prod-dump":
+        prod_dump()
+    elif step == "quiet":
+        lab_plex_quiet()
+        jf12_movies_library()
+    elif step == "scan":
+        return scale_scan(argv[1])
+    elif step == "counts":
+        say(server_counts())
+    elif step == "job":
+        return scale_job(argv[1], force=len(argv) > 2 and argv[2] == "force")
+    elif step == "collect":
+        scale_collect(argv[1] if len(argv) > 1 else "backfill")
+    elif step == "served":
+        scale_served(argv[1] if len(argv) > 1 else "backfill")
+    elif step == "writes":
+        scale_writes(argv[1])
+    else:
+        print(
+            "scale prod-dump | quiet | scan plex|mlab-jellyfin|mlab-jf12 | counts | job NAME [force] | collect NAME | served NAME | writes NAME"
+        )
+        return 2
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == "scale":
+        return scale(argv[1:])
     if not argv or argv[0] not in ("configure", "status", "run"):
         print(__doc__)
         return 2
