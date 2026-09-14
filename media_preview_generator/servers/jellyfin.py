@@ -41,6 +41,8 @@ from .ownership import apply_inverse_path_mappings
 # covers the typical Jellyfin scan cadence and keeps the publisher
 # retry-loop responsive.
 _JELLYFIN_FULL_REFRESH_COOLDOWN_S = 60.0
+# A valid GUID no library item has; the admin-only Markers route answers it with the plugin's own 404.
+_BRIDGE_ACCESS_PROBE_ID = "ffffffffffffffffffffffffffffffff"
 
 
 class JellyfinServer(EmbyApiClient):
@@ -469,6 +471,172 @@ class JellyfinServer(EmbyApiClient):
         except (ValueError, AttributeError) as exc:
             self._media_preview_bridge_installed = False
             return {"installed": False, "version": "", "error": f"bad JSON: {exc}"[:200]}
+
+    def get_bridge_info(self) -> dict[str, Any] | None:
+        """Bridge plugin presence, version and feature list.
+
+        Returns:
+            ``{"installed": bool, "version": str | None, "features": list[str]}``, or None when the server
+            can't be reached (transport error or a 5xx, which Jellyfin answers to every route while starting up).
+        """
+        not_installed: dict[str, Any] = {"installed": False, "version": None, "features": []}
+        try:
+            resp = self._request("GET", "/MediaPreviewBridge/Ping", timeout=10)
+        except requests.RequestException as exc:
+            logger.debug("Bridge ping failed on {}: {}", self.name, type(exc).__name__)
+            return None
+        if resp.status_code >= 500:
+            return None
+        if resp.status_code != 200:
+            return not_installed
+        try:
+            payload = resp.json()
+        except ValueError:
+            return not_installed
+        if not isinstance(payload, dict):
+            return not_installed
+        features = payload.get("features")
+        return {
+            "installed": bool(payload.get("ok")),
+            "version": payload.get("version"),
+            "features": [str(f) for f in features] if isinstance(features, list) else [],
+        }
+
+    def get_bridge_marker_state(self, item_id: str) -> dict[str, Any] | None:
+        """What the Bridge plugin stores for an item, served or not.
+
+        Args:
+            item_id: Jellyfin item id.
+
+        Returns:
+            ``{"segments": [{"type", "startTicks", "endTicks"}], "fileSize": int | None, "stale": bool}``.
+            ``stale`` means the stored size differs from the file on disk, so the plugin serves nothing. A plugin
+            without a markers endpoint (or no plugin) gives an empty state, since it can't have stored anything.
+            None when the answer is unknown (item not found, error, unreadable body).
+        """
+        empty: dict[str, Any] = {"segments": [], "fileSize": None, "stale": False}
+        try:
+            resp = self._request("GET", f"/MediaPreviewBridge/Markers/{item_id}")
+            if resp.status_code == 404:
+                try:
+                    body = resp.json()
+                except ValueError:
+                    body = None
+                # The plugin's own 404 carries {"error": ...}; a bare 404 means the route doesn't exist.
+                return None if isinstance(body, dict) and "error" in body else empty
+            if resp.status_code != 200:
+                return None
+            body = resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            logger.debug("Bridge markers read failed on {} for {}: {}", self.name, item_id, type(exc).__name__)
+            return None
+        segments = body.get("segments") if isinstance(body, dict) else None
+        if not isinstance(segments, list):
+            return None
+        file_size = body.get("fileSize")
+        return {
+            "segments": [s for s in segments if isinstance(s, dict)],
+            "fileSize": file_size if isinstance(file_size, int) and not isinstance(file_size, bool) else None,
+            "stale": body.get("stale") is True,
+        }
+
+    def get_bridge_markers(self, item_id: str) -> list[dict[str, Any]] | None:
+        """Segments the Bridge plugin stores for an item (served or not); see :meth:`get_bridge_marker_state`.
+
+        Args:
+            item_id: Jellyfin item id.
+
+        Returns:
+            ``[{"type", "startTicks", "endTicks"}]``, or None when unknown.
+        """
+        state = self.get_bridge_marker_state(item_id)
+        return None if state is None else state["segments"]
+
+    def get_bridge_markers_access(self) -> str | None:
+        """Whether this server's credentials may use the Bridge markers routes, which need an administrator.
+
+        Probes with an id no item has: an authorised caller gets the plugin's "item not found".
+
+        Returns:
+            ``"ok"``; ``"unauthorized"`` (401: credentials rejected); ``"forbidden"`` (403: not an administrator);
+            None when it couldn't be told (unreachable, no route, other status).
+        """
+        try:
+            resp = self._request("GET", f"/MediaPreviewBridge/Markers/{_BRIDGE_ACCESS_PROBE_ID}", timeout=10)
+        except requests.RequestException as exc:
+            logger.debug("Bridge markers access probe failed on {}: {}", self.name, type(exc).__name__)
+            return None
+        if resp.status_code == 401:
+            return "unauthorized"
+        if resp.status_code == 403:
+            return "forbidden"
+        if resp.status_code == 200:
+            return "ok"
+        if resp.status_code == 404:
+            try:
+                body = resp.json()
+            except ValueError:
+                return None
+            return "ok" if isinstance(body, dict) and "error" in body else None
+        return None
+
+    def put_bridge_markers(
+        self, item_id: str, segments: list[dict[str, Any]], file_size: int | None = None
+    ) -> requests.Response:
+        """Replace the Bridge plugin's markers for an item; it publishes them as media segments straight away.
+
+        Args:
+            item_id: Jellyfin item id.
+            segments: ``[{"type", "startTicks", "endTicks"}]``.
+            file_size: Bytes of the file the markers were detected on; the plugin stops serving them when the
+                file on disk has a different size (replaced). Omitted from the body when None.
+
+        Returns:
+            The raw response (the caller maps status codes).
+
+        Raises:
+            requests.RequestException: Transport failure.
+        """
+        body: dict[str, Any] = {"segments": segments}
+        if file_size is not None:
+            body["fileSize"] = file_size
+        return self._request("POST", f"/MediaPreviewBridge/Markers/{item_id}", json_body=body)
+
+    def delete_bridge_markers(self, item_id: str) -> requests.Response:
+        """Remove the Bridge plugin's markers for an item (other providers' segments stay).
+
+        Args:
+            item_id: Jellyfin item id.
+
+        Returns:
+            The raw response (the caller maps status codes).
+
+        Raises:
+            requests.RequestException: Transport failure.
+        """
+        return self._request("DELETE", f"/MediaPreviewBridge/Markers/{item_id}")
+
+    def get_media_segments(self, item_id: str) -> list[dict[str, Any]] | None:
+        """Segments Jellyfin serves for an item, from every registered provider.
+
+        Args:
+            item_id: Jellyfin item id.
+
+        Returns:
+            Core ``/MediaSegments`` ``Items`` (``Type``, ``StartTicks``, ``EndTicks``, ...), or None on any error.
+        """
+        try:
+            resp = self._request("GET", f"/MediaSegments/{item_id}")
+            if resp.status_code != 200:
+                return None
+            body = resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            logger.debug("Media segments read failed on {} for {}: {}", self.name, item_id, type(exc).__name__)
+            return None
+        items = body.get("Items") if isinstance(body, dict) else None
+        if not isinstance(items, list):
+            return None
+        return [i for i in items if isinstance(i, dict)]
 
     def install_plugin(self) -> dict[str, Any]:
         """One-click install: register repo, install package, restart Jellyfin.

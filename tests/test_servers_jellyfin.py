@@ -2911,3 +2911,232 @@ class TestFetchItemFieldsEdgeCases:
         resp.json.return_value = ["not", "a", "dict"]
         server._request = MagicMock(return_value=resp)
         assert server._fetch_item_fields("x", "ProviderIds") is None
+
+
+def _bridge_resp(status, body=None, *, json_error=False):
+    resp = MagicMock(status_code=status)
+    if json_error:
+        resp.json.side_effect = ValueError("no JSON")
+    else:
+        resp.json.return_value = body
+    return resp
+
+
+class TestBridgeInfo:
+    """``get_bridge_info``: installed/outdated vs not installed vs unreachable (drives the markers capability)."""
+
+    def test_ping_ok_reports_version_and_features(self, make_server):
+        server = make_server()
+        server._request = MagicMock(
+            return_value=_bridge_resp(
+                200,
+                {
+                    "plugin": "MediaPreviewBridge",
+                    "version": "10.11.1.0",
+                    "ok": True,
+                    "features": ["trickplay", "markers"],
+                },
+            )
+        )
+        assert server.get_bridge_info() == {
+            "installed": True,
+            "version": "10.11.1.0",
+            "features": ["trickplay", "markers"],
+        }
+        server._request.assert_called_once_with("GET", "/MediaPreviewBridge/Ping", timeout=10)
+
+    def test_old_plugin_without_features_reports_empty_features(self, make_server):
+        server = make_server()
+        server._request = MagicMock(return_value=_bridge_resp(200, {"version": "10.11.0.3", "ok": True}))
+        assert server.get_bridge_info() == {"installed": True, "version": "10.11.0.3", "features": []}
+
+    @pytest.mark.parametrize(
+        ("resp", "expected_installed"),
+        [
+            pytest.param(_bridge_resp(404, None, json_error=True), False, id="404-no-plugin"),
+            pytest.param(_bridge_resp(200, None, json_error=True), False, id="200-not-json"),
+            pytest.param(_bridge_resp(200, ["not", "a", "dict"]), False, id="200-json-list"),
+            pytest.param(
+                _bridge_resp(200, {"version": "x", "ok": False, "features": ["markers"]}), False, id="ok-false"
+            ),
+        ],
+    )
+    def test_not_installed_shapes(self, make_server, resp, expected_installed):
+        server = make_server()
+        server._request = MagicMock(return_value=resp)
+        info = server.get_bridge_info()
+        assert info is not None
+        assert info["installed"] is expected_installed
+
+    def test_features_not_a_list_is_empty(self, make_server):
+        server = make_server()
+        server._request = MagicMock(return_value=_bridge_resp(200, {"version": "1", "ok": True, "features": "markers"}))
+        assert server.get_bridge_info()["features"] == []
+
+    @pytest.mark.parametrize(
+        ("side_effect", "status"),
+        [
+            pytest.param(requests.ConnectionError("refused"), None, id="connection-error"),
+            pytest.param(requests.Timeout("slow"), None, id="timeout"),
+            # Jellyfin answers 503 to every route while it starts up: that's "can't reach", not "no plugin".
+            pytest.param(None, 503, id="503-starting-up"),
+            pytest.param(None, 500, id="500"),
+        ],
+    )
+    def test_unreachable_is_none(self, make_server, side_effect, status):
+        server = make_server()
+        server._request = MagicMock(side_effect=side_effect, return_value=_bridge_resp(status, None, json_error=True))
+        assert server.get_bridge_info() is None
+
+
+class TestBridgeMarkers:
+    """Marker push/read/delete against the Bridge plugin, and the core /MediaSegments read."""
+
+    def test_get_bridge_markers_returns_stored_segments(self, make_server):
+        server = make_server()
+        body = {
+            "itemId": "abc",
+            "fileSize": 123,
+            "stale": False,
+            "segments": [{"type": "Intro", "startTicks": 1, "endTicks": 2}, "junk"],
+        }
+        server._request = MagicMock(return_value=_bridge_resp(200, body))
+        assert server.get_bridge_markers("abc") == [{"type": "Intro", "startTicks": 1, "endTicks": 2}]
+        server._request.assert_called_once_with("GET", "/MediaPreviewBridge/Markers/abc")
+
+    def test_get_bridge_markers_route_missing_means_nothing_stored(self, make_server):
+        # A plugin without the markers feature (or none at all) can't have stored anything for us.
+        server = make_server()
+        server._request = MagicMock(return_value=_bridge_resp(404, None, json_error=True))
+        assert server.get_bridge_markers("abc") == []
+
+    @pytest.mark.parametrize(
+        ("side_effect", "resp"),
+        [
+            pytest.param(None, _bridge_resp(404, {"error": "item not found"}), id="item-not-found"),
+            pytest.param(None, _bridge_resp(500, None, json_error=True), id="500"),
+            pytest.param(None, _bridge_resp(401, None, json_error=True), id="401"),
+            pytest.param(None, _bridge_resp(200, None, json_error=True), id="200-not-json"),
+            pytest.param(None, _bridge_resp(200, ["x"]), id="200-json-list"),
+            pytest.param(None, _bridge_resp(200, {"segments": "x"}), id="segments-not-a-list"),
+            pytest.param(requests.ConnectionError("x"), None, id="connection-error"),
+        ],
+    )
+    def test_get_bridge_markers_unknown_is_none(self, make_server, side_effect, resp):
+        server = make_server()
+        server._request = MagicMock(side_effect=side_effect, return_value=resp)
+        assert server.get_bridge_markers("abc") is None
+        assert server.get_bridge_marker_state("abc") is None
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            pytest.param(
+                {"itemId": "abc", "fileSize": 655778272, "stale": True, "segments": [{"type": "Intro"}, 3]},
+                {"segments": [{"type": "Intro"}], "fileSize": 655778272, "stale": True},
+                id="stale-with-size",
+            ),
+            # Jellyfin drops null values from JSON, so a push without a size has no fileSize key at all.
+            pytest.param(
+                {"itemId": "abc", "stale": False, "segments": []},
+                {"segments": [], "fileSize": None, "stale": False},
+                id="no-size",
+            ),
+            pytest.param(
+                {"segments": [], "fileSize": "12", "stale": "true"},
+                {"segments": [], "fileSize": None, "stale": False},
+                id="odd-types",
+            ),
+        ],
+    )
+    def test_get_bridge_marker_state(self, make_server, body, expected):
+        server = make_server()
+        server._request = MagicMock(return_value=_bridge_resp(200, body))
+        assert server.get_bridge_marker_state("abc") == expected
+        server._request.assert_called_once_with("GET", "/MediaPreviewBridge/Markers/abc")
+
+    def test_get_bridge_marker_state_route_missing_is_empty(self, make_server):
+        server = make_server()
+        server._request = MagicMock(return_value=_bridge_resp(404, None, json_error=True))
+        assert server.get_bridge_marker_state("abc") == {"segments": [], "fileSize": None, "stale": False}
+
+    def test_get_bridge_markers_wraps_state(self, make_server):
+        server = make_server()
+        server.get_bridge_marker_state = MagicMock(
+            return_value={"segments": [{"type": "Outro"}], "fileSize": 1, "stale": True}
+        )
+        assert server.get_bridge_markers("abc") == [{"type": "Outro"}]
+        server.get_bridge_marker_state.assert_called_once_with("abc")
+
+    def test_put_bridge_markers_sends_segments_and_file_size(self, make_server):
+        server = make_server()
+        ok = MagicMock(status_code=200)
+        server._request = MagicMock(return_value=ok)
+        segments = [{"type": "Intro", "startTicks": 1, "endTicks": 2}]
+        assert server.put_bridge_markers("abc", segments, file_size=987654321) is ok
+        server._request.assert_called_once_with(
+            "POST", "/MediaPreviewBridge/Markers/abc", json_body={"segments": segments, "fileSize": 987654321}
+        )
+
+    def test_put_bridge_markers_omits_unknown_file_size(self, make_server):
+        server = make_server()
+        server._request = MagicMock(return_value=MagicMock(status_code=200))
+        segments = [{"type": "Outro", "startTicks": 3, "endTicks": 4}]
+        server.put_bridge_markers("abc", segments)
+        server._request.assert_called_once_with(
+            "POST", "/MediaPreviewBridge/Markers/abc", json_body={"segments": segments}
+        )
+
+    def test_delete_bridge_markers(self, make_server):
+        server = make_server()
+        gone = MagicMock(status_code=204)
+        server._request = MagicMock(return_value=gone)
+        assert server.delete_bridge_markers("abc") is gone
+        server._request.assert_called_once_with("DELETE", "/MediaPreviewBridge/Markers/abc")
+
+    def test_get_media_segments(self, make_server):
+        server = make_server()
+        body = {"Items": [{"Type": "Intro", "StartTicks": 1, "EndTicks": 2}, 7], "TotalRecordCount": 1}
+        server._request = MagicMock(return_value=_bridge_resp(200, body))
+        assert server.get_media_segments("abc") == [{"Type": "Intro", "StartTicks": 1, "EndTicks": 2}]
+        server._request.assert_called_once_with("GET", "/MediaSegments/abc")
+
+    @pytest.mark.parametrize(
+        ("side_effect", "resp"),
+        [
+            pytest.param(None, _bridge_resp(404, None, json_error=True), id="404"),
+            pytest.param(None, _bridge_resp(200, None, json_error=True), id="200-not-json"),
+            pytest.param(None, _bridge_resp(200, ["x"]), id="200-json-list"),
+            pytest.param(None, _bridge_resp(200, {"Items": {}}), id="items-not-a-list"),
+            pytest.param(requests.Timeout("x"), None, id="timeout"),
+        ],
+    )
+    def test_get_media_segments_unknown_is_none(self, make_server, side_effect, resp):
+        server = make_server()
+        server._request = MagicMock(side_effect=side_effect, return_value=resp)
+        assert server.get_media_segments("abc") is None
+
+
+class TestBridgeAccess:
+    """Markers capability input: whether our credentials may use the admin-only Bridge markers routes."""
+
+    @pytest.mark.parametrize(
+        ("side_effect", "resp", "expected"),
+        [
+            pytest.param(None, _bridge_resp(404, {"error": "item not found"}), "ok", id="authorised-404"),
+            pytest.param(None, _bridge_resp(200, {"segments": []}), "ok", id="authorised-200"),
+            pytest.param(None, _bridge_resp(403, None, json_error=True), "forbidden", id="403-not-admin"),
+            pytest.param(None, _bridge_resp(401, None, json_error=True), "unauthorized", id="401-bad-credentials"),
+            pytest.param(None, _bridge_resp(404, None, json_error=True), None, id="bare-404-no-route"),
+            pytest.param(None, _bridge_resp(404, {"title": "Not Found"}), None, id="404-problem-details"),
+            pytest.param(None, _bridge_resp(500, None, json_error=True), None, id="500"),
+            pytest.param(requests.Timeout("x"), None, None, id="timeout"),
+        ],
+    )
+    def test_get_bridge_markers_access(self, make_server, side_effect, resp, expected):
+        server = make_server()
+        server._request = MagicMock(side_effect=side_effect, return_value=resp)
+        assert server.get_bridge_markers_access() == expected
+        server._request.assert_called_once_with(
+            "GET", "/MediaPreviewBridge/Markers/ffffffffffffffffffffffffffffffff", timeout=10
+        )

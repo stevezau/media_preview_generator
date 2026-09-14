@@ -550,6 +550,35 @@ class EmbyApiClient(MediaServer):
             return None
         return data if isinstance(data, dict) else None
 
+    def get_chapter_markers(self, item_id: str) -> list[dict[str, Any]] | None:
+        """Chapter rows with Emby's marker types (``IntroStart``/``IntroEnd``/``CreditsStart``/``Chapter``).
+
+        Args:
+            item_id: Server item id.
+
+        Returns:
+            ``[{"marker_type", "start_ms", "name"}]`` in the server's order (rows without a usable integer start
+            are skipped), or None when the item couldn't be fetched.
+        """
+        item = self._fetch_item_fields(item_id, "Chapters")
+        if item is None:
+            return None
+        out: list[dict[str, Any]] = []
+        for chapter in item.get("Chapters") or []:
+            if not isinstance(chapter, dict):
+                continue
+            ticks = chapter.get("StartPositionTicks")
+            if not isinstance(ticks, int) or isinstance(ticks, bool):
+                continue
+            out.append(
+                {
+                    "marker_type": str(chapter.get("MarkerType") or "Chapter"),
+                    "start_ms": ticks // 10_000,
+                    "name": str(chapter.get("Name") or ""),
+                }
+            )
+        return out
+
     def get_external_ids(self, item_id: str) -> dict[str, Any] | None:
         """ProviderIds (series ids for episodes) plus season/episode numbers.
 

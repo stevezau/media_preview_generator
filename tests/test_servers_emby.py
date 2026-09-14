@@ -1958,3 +1958,50 @@ class TestFetchItemFieldsEdgeCases:
         resp.json.return_value = ["not", "a", "dict"]
         server._request = MagicMock(return_value=resp)
         assert server._fetch_item_fields("x", "ProviderIds") is None
+
+
+class TestChapterMarkers:
+    """``get_chapter_markers``: Emby's intro/credits markers live in the item's Chapters (spec §3.3)."""
+
+    def test_maps_chapters_to_marker_rows(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(
+            return_value={
+                "Chapters": [
+                    {"StartPositionTicks": 1_267_710_000, "MarkerType": "IntroStart", "Name": "Intro"},
+                    {"StartPositionTicks": 0, "Name": "Chapter 1"},
+                    {"StartPositionTicks": 12_950_004_999, "MarkerType": "CreditsStart"},
+                ]
+            }
+        )
+        assert server.get_chapter_markers("42") == [
+            {"marker_type": "IntroStart", "start_ms": 126_771, "name": "Intro"},
+            {"marker_type": "Chapter", "start_ms": 0, "name": "Chapter 1"},
+            {"marker_type": "CreditsStart", "start_ms": 1_295_000, "name": ""},
+        ]
+        server._fetch_item_fields.assert_called_once_with("42", "Chapters")
+
+    def test_lookup_failure_is_none(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(return_value=None)
+        assert server.get_chapter_markers("42") is None
+
+    def test_no_chapters_is_empty(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(return_value={"Chapters": None})
+        assert server.get_chapter_markers("42") == []
+
+    def test_malformed_rows_are_skipped(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(
+            return_value={
+                "Chapters": [
+                    "junk",
+                    {"MarkerType": "IntroStart", "Name": "no start"},
+                    {"StartPositionTicks": "abc", "MarkerType": "IntroEnd"},
+                    {"StartPositionTicks": True, "MarkerType": "IntroEnd"},
+                    {"StartPositionTicks": 20_000, "MarkerType": "IntroEnd", "Name": "ok"},
+                ]
+            }
+        )
+        assert server.get_chapter_markers("42") == [{"marker_type": "IntroEnd", "start_ms": 2, "name": "ok"}]
