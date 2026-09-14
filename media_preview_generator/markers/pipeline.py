@@ -29,6 +29,7 @@ from .decide import DecisionContext, DecisionStatus, TypeDecision, decide
 from .external_ids import ids_from_path, ids_from_server_dict, merge_ids
 from .models import Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
 from .outcomes import NOT_IN_LIBRARY, OUTCOME_KEYS, STATE_BY_STATUS, FileOutcome, ServerStatus, file_outcome
+from .ownership import marker_matches
 from .probe import ProbeError, ffprobe_path_for, probe_media
 from .publishers.base import (
     Capability,
@@ -38,7 +39,7 @@ from .publishers.base import (
     PublishError,
 )
 from .publishers.factory import publisher_for
-from .settings import GlobalMarkersSettings, get_global_settings, library_allowed, load_server
+from .settings import GlobalMarkersSettings, get_global_settings
 from .sources.chapters import chapter_candidates
 from .sources.introdb import IntroDbClient
 from .sources.online import LookupResult
@@ -304,22 +305,9 @@ def _owning_servers(item: ProcessableItem, ctx: PipelineContext) -> list[_Owning
     return out
 
 
-def _marker_owners(owning: list[_Owning]) -> list[_Owning]:
-    owners = []
-    for owner in owning:
-        cfg = owner.config
-        settings = load_server(cfg.markers, cfg.type.value)
-        if not settings.enabled:
-            continue
-        kinds = {lib.id: lib.kind for lib in cfg.libraries}
-        if any(
-            library_allowed(
-                settings, library_id=match.library_id, library_name=match.library_name, kind=kinds.get(match.library_id)
-            )
-            for match in owner.matches
-        ):
-            owners.append(owner)
-    return owners
+def _marker_owners(owning: list[_Owning], canonical_path: str) -> list[_Owning]:
+    keep = marker_matches(canonical_path, [owner.config for owner in owning])
+    return [owner for owner in owning if owner.config.id in keep]
 
 
 def _resolve_kind(
@@ -710,7 +698,7 @@ def _attempt(
         return bool(cancel_check and cancel_check())
 
     owning = _owning_servers(item, ctx)
-    owners = _marker_owners(owning)
+    owners = _marker_owners(owning, path)
     if not owners:
         return ItemOutcome(FileOutcome.NO_OWNERS.value, "No server with Intro & Credits turned on has this file")
     try:

@@ -366,6 +366,21 @@ def _check_and_record_dedup(source: str, server_id: str | None, canonical_path: 
     return None
 
 
+def _queue_intro_credits_follow_up(
+    preview_job_id: str, paths: list[str], source: str, *, item_id_hints: dict[str, dict[str, str]] | None = None
+) -> None:
+    """Queue the Intro & Credits job for a webhook's files after its preview job has started.
+
+    Never raises: a markers problem must not cost the batch its previews or its history entry.
+    """
+    try:
+        from ..markers.triggers import submit_webhook_follow_up
+
+        submit_webhook_follow_up(preview_job_id=preview_job_id, paths=paths, source=source, item_id_hints=item_id_hints)
+    except Exception:
+        logger.exception("Could not queue the Intro & Credits job that follows webhook job {}", preview_job_id)
+
+
 def create_vendor_webhook_job(
     source: str,
     canonical_path: str,
@@ -483,6 +498,9 @@ def create_vendor_webhook_job(
     from .routes import _start_job_async
 
     _start_job_async(job.id, overrides)
+    _queue_intro_credits_follow_up(
+        job.id, [canonical_path], safe_source, item_id_hints=overrides.get("webhook_item_id_hints") or None
+    )
     _add_history_entry(
         safe_source,
         "Webhook",
@@ -1178,6 +1196,7 @@ def _execute_webhook_job(debounce_key: str) -> None:
         if webhook_deleted_paths:
             overrides["webhook_deleted_paths"] = webhook_deleted_paths
         _start_job_async(job.id, overrides)
+        _queue_intro_credits_follow_up(job.id, list(webhook_paths), source)
         _add_history_entry(
             source,
             "Download",

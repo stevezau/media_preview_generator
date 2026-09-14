@@ -1226,6 +1226,290 @@ class TestExecuteScheduledJobDispatch:
         assert updated["last_run"] is not None
 
 
+class TestExecuteScheduledIntroCreditsJob:
+    """``config.job_type == "intro_credits"`` schedules create Intro & Credits jobs (LOW unless pinned)."""
+
+    @pytest.fixture
+    def env(self, scheduler_manager, monkeypatch):
+        jobs = []
+        fake_jm = MagicMock()
+        fake_jm.get_all_jobs.side_effect = lambda: list(jobs)
+        fake_jm.request_resume.return_value = True
+        monkeypatch.setattr("media_preview_generator.web.jobs.get_job_manager", lambda: fake_jm)
+        settings = {"media_servers": []}
+        fake_sm = MagicMock(processing_paused=False)
+        fake_sm.get.side_effect = lambda key, default=None: settings.get(key, default)
+        monkeypatch.setattr("media_preview_generator.web.settings_manager.get_settings_manager", lambda: fake_sm)
+        callback = MagicMock()
+        scheduler_manager.set_run_job_callback(callback)
+        create = MagicMock(return_value=MagicMock(id="ic-1"))
+        monkeypatch.setattr("media_preview_generator.markers.triggers.create_intro_credits_job", create)
+        return {
+            "jobs": jobs,
+            "jm": fake_jm,
+            "settings": settings,
+            "sm": fake_sm,
+            "callback": callback,
+            "create": create,
+        }
+
+    def _schedule(self, scheduler_manager, **kwargs):
+        return scheduler_manager.create_schedule(
+            name="Markers", cron_expression="0 3 * * 0", config={"job_type": "intro_credits"}, **kwargs
+        )
+
+    PLEX_1 = {
+        "id": "plex-1",
+        "type": "plex",
+        "enabled": True,
+        "markers": {"enabled": True, "plex": {"db_write_confirmed_at": "2026-09-13T00:00:00+00:00"}},
+        "libraries": [
+            {"id": "1", "name": "TV Shows", "remote_paths": ["/m/tv"]},
+            {"id": "2", "name": "Anime", "remote_paths": ["/m/anime"], "enabled": False},
+            {"id": "3", "name": "Sports", "remote_paths": ["/m/sports"]},
+        ],
+    }
+
+    @pytest.mark.parametrize(("priority", "expected"), [(None, 3), (1, 1), (2, 2), ("high", 1)])
+    def test_dispatches_intro_credits_job(self, scheduler_manager, env, priority, expected):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env["settings"]["media_servers"] = [self.PLEX_1]
+        schedule = self._schedule(
+            scheduler_manager, library_ids=["1", "2"], library_name="TV Shows", server_id="plex-1"
+        )
+        execute_scheduled_job(schedule["id"], ["1", "2"], "TV Shows", {"job_type": "intro_credits"}, priority, "plex-1")
+
+        env["callback"].assert_not_called()
+        env["create"].assert_called_once_with(
+            library_name="Intro & Credits: TV Shows",
+            priority=expected,
+            source="schedule",
+            libraries=[{"server_id": "plex-1", "library_id": "1"}, {"server_id": "plex-1", "library_id": "2"}],
+            parent_schedule_id=schedule["id"],
+        )
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is not None
+
+    def test_intro_credits_schedule_without_server_checks_every_enabled_server(self, scheduler_manager, env):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        execute_scheduled_job(schedule["id"], None, "", {"job_type": "intro_credits"}, None, None)
+
+        kwargs = env["create"].call_args.kwargs
+        assert kwargs["libraries"] == []
+        assert kwargs["library_name"] == "Intro & Credits: all libraries"
+        assert kwargs["priority"] == 3 and kwargs["parent_schedule_id"] == schedule["id"]
+
+    def test_server_pinned_schedule_without_libraries_takes_that_servers_marker_libraries(self, scheduler_manager, env):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env["settings"]["media_servers"] = [
+            {
+                "id": "jf-1",
+                "type": "jellyfin",
+                "enabled": True,
+                "markers": {"enabled": True},
+                "libraries": [
+                    {"id": "tv", "name": "TV Shows", "remote_paths": ["/m/tv"], "enabled": False},
+                    {"id": "sp", "name": "Sports", "remote_paths": ["/m/sp"], "enabled": True},
+                ],
+            },
+            {"id": "jf-2", "type": "jellyfin", "enabled": True, "markers": {"enabled": True}, "libraries": []},
+        ]
+        schedule = self._schedule(scheduler_manager, server_id="jf-1")
+        execute_scheduled_job(schedule["id"], [], "Jellyfin", {"job_type": "intro_credits"}, None, "jf-1")
+
+        assert env["create"].call_args.kwargs["libraries"] == [{"server_id": "jf-1", "library_id": "tv"}]
+
+    @pytest.mark.parametrize(
+        "servers",
+        [
+            [],
+            [{"id": "jf-1", "type": "jellyfin", "enabled": True, "markers": {"enabled": False}, "libraries": []}],
+            [
+                {
+                    "id": "jf-1",
+                    "type": "jellyfin",
+                    "enabled": True,
+                    "markers": {"enabled": True},
+                    "libraries": [{"id": "sp", "name": "Sports", "remote_paths": ["/m/sp"]}],
+                }
+            ],
+        ],
+    )
+    def test_server_pinned_schedule_with_nothing_to_check_starts_no_job(self, scheduler_manager, env, servers):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env["settings"]["media_servers"] = servers
+        schedule = self._schedule(scheduler_manager, server_id="jf-1")
+        execute_scheduled_job(schedule["id"], None, "", {"job_type": "intro_credits"}, None, "jf-1")
+
+        env["create"].assert_not_called()
+        env["callback"].assert_not_called()
+
+    def test_libraries_without_a_server_are_pinned_to_the_server_that_owns_them(self, scheduler_manager, env):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env["settings"]["media_servers"] = [
+            self.PLEX_1,
+            {"id": "jf-1", "type": "jellyfin", "enabled": True, "libraries": [{"id": "abc"}]},
+        ]
+        schedule = self._schedule(scheduler_manager, library_ids=["1", "2"])
+        execute_scheduled_job(schedule["id"], ["1", "2"], "TV", {"job_type": "intro_credits"}, None, None)
+
+        assert env["create"].call_args.kwargs["libraries"] == [
+            {"server_id": "plex-1", "library_id": "1"},
+            {"server_id": "plex-1", "library_id": "2"},
+        ]
+
+    def test_schedule_libraries_outside_the_markers_selection_are_left_out(self, scheduler_manager, env):
+        from media_preview_generator.web import scheduler as sched_mod
+
+        env["settings"]["media_servers"] = [self.PLEX_1]
+        schedule = self._schedule(scheduler_manager, library_ids=["1", "3", "9"], server_id="plex-1")
+        with patch.object(sched_mod, "logger") as log:
+            sched_mod.execute_scheduled_job(
+                schedule["id"], ["1", "3", "9"], "TV", {"job_type": "intro_credits"}, None, "plex-1"
+            )
+
+        assert env["create"].call_args.kwargs["libraries"] == [{"server_id": "plex-1", "library_id": "1"}]
+        warned = [c.args for c in log.warning.call_args_list]
+        assert any("isn't on" in args[0] and ["Sports", "9"] in args for args in warned), warned
+
+    @pytest.mark.parametrize("library_ids", [["3"], ["9"]], ids=["sports", "unknown"])
+    def test_schedule_with_no_library_markers_go_to_starts_no_job(self, scheduler_manager, env, library_ids):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env["settings"]["media_servers"] = [self.PLEX_1]
+        schedule = self._schedule(scheduler_manager, library_ids=library_ids, server_id="plex-1")
+        execute_scheduled_job(schedule["id"], library_ids, "TV", {"job_type": "intro_credits"}, None, "plex-1")
+
+        env["create"].assert_not_called()
+        env["callback"].assert_not_called()
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is None
+
+    @pytest.mark.parametrize(
+        "servers",
+        [
+            [],  # unknown id
+            [
+                {"id": "plex-1", "type": "plex", "enabled": True, "libraries": [{"id": "1"}]},
+                {"id": "plex-2", "type": "plex", "enabled": True, "libraries": [{"id": "1"}]},
+            ],  # ambiguous id across two Plex servers
+        ],
+    )
+    def test_libraries_that_cant_be_pinned_to_one_server_start_no_job(self, scheduler_manager, env, servers):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env["settings"]["media_servers"] = servers
+        schedule = self._schedule(scheduler_manager, library_ids=["1"])
+        execute_scheduled_job(schedule["id"], ["1"], "TV", {"job_type": "intro_credits"}, None, None)
+
+        env["create"].assert_not_called()
+        env["callback"].assert_not_called()
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is None
+
+    @pytest.mark.parametrize("status", ["pending", "running"])
+    def test_unfinished_job_from_the_last_run_is_not_started_again(self, scheduler_manager, env, status):
+        from media_preview_generator.web.jobs import JobStatus
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        env["jobs"].append(
+            MagicMock(
+                id="old",
+                parent_schedule_id=schedule["id"],
+                kind="intro_credits",
+                status=JobStatus(status),
+                paused=False,
+            )
+        )
+        execute_scheduled_job(schedule["id"], None, "", {"job_type": "intro_credits"}, None, None)
+
+        env["create"].assert_not_called()
+        env["callback"].assert_not_called()
+        env["jm"].request_resume.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("other", "starts"),
+        [
+            ({"status": "completed"}, True),
+            ({"status": "failed"}, True),
+            ({"status": "cancelled"}, True),
+            ({"status": "running", "parent_schedule_id": "another-schedule"}, True),
+            ({"status": "running", "kind": "previews"}, True),  # the schedule used to scan previews
+        ],
+    )
+    def test_other_jobs_do_not_block_a_new_run(self, scheduler_manager, env, other, starts):
+        from media_preview_generator.web.jobs import JobStatus
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        fields = {"id": "old", "parent_schedule_id": schedule["id"], "kind": "intro_credits", "paused": False, **other}
+        fields["status"] = JobStatus(fields["status"])
+        env["jobs"].append(MagicMock(**fields))
+        execute_scheduled_job(schedule["id"], None, "", {"job_type": "intro_credits"}, None, None)
+
+        assert env["create"].called is starts
+        env["jm"].request_resume.assert_not_called()
+
+    @pytest.mark.parametrize(("job_type", "kind"), [("intro_credits", "intro_credits"), ("full_library", "previews")])
+    def test_paused_job_from_this_schedule_is_resumed_instead(self, scheduler_manager, env, job_type, kind):
+        from media_preview_generator.web.jobs import JobStatus
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        env["jobs"].append(
+            MagicMock(id="old", parent_schedule_id=schedule["id"], kind=kind, status=JobStatus.RUNNING, paused=True)
+        )
+        execute_scheduled_job(schedule["id"], None, "", {"job_type": job_type}, None, None)
+
+        env["jm"].request_resume.assert_called_once_with("old")
+        env["create"].assert_not_called()
+        env["callback"].assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("job_type", "paused_kind"), [("intro_credits", "previews"), ("full_library", "intro_credits")]
+    )
+    def test_paused_job_of_the_other_kind_is_not_resumed(self, scheduler_manager, env, job_type, paused_kind):
+        from media_preview_generator.web.jobs import JobStatus
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        env["jobs"].append(
+            MagicMock(
+                id="old", parent_schedule_id=schedule["id"], kind=paused_kind, status=JobStatus.RUNNING, paused=True
+            )
+        )
+        execute_scheduled_job(schedule["id"], None, "", {"job_type": job_type}, None, None)
+
+        env["jm"].request_resume.assert_not_called()
+        if job_type == "intro_credits":
+            env["create"].assert_called_once()
+        else:
+            env["callback"].assert_called_once()
+
+    def test_processing_paused_skips_the_tick(self, scheduler_manager, env):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env["sm"].processing_paused = True
+        schedule = self._schedule(scheduler_manager)
+        execute_scheduled_job(schedule["id"], None, "", {"job_type": "intro_credits"}, None, None)
+
+        env["create"].assert_not_called()
+
+    def test_create_failure_is_logged_and_the_tick_ends_quietly(self, scheduler_manager, env):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env["create"].side_effect = RuntimeError("jobs.db locked")
+        schedule = self._schedule(scheduler_manager)
+        execute_scheduled_job(schedule["id"], None, "", {"job_type": "intro_credits"}, None, None)
+
+        env["callback"].assert_not_called()
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is None
+
+
 class TestMultiLibrarySchedules:
     """Phase H7: Schedule.library_ids list + back-compat migration."""
 

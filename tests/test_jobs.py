@@ -1085,3 +1085,69 @@ class TestSetJobOutcome:
         jm = JobManager(config_dir=config_dir)
         job = jm.create_job(library_name="Test")
         assert job.progress.outcome is None
+
+
+class TestPendingJobsUnderConcurrentCreation:
+    """Webhook threads create jobs while other threads list the pending ones (Intro & Credits follow-up dedupe)."""
+
+    def test_listing_pending_jobs_while_jobs_are_created_never_raises(self, config_dir):
+        import threading
+
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        jm._persist_job = lambda job: None  # keep creation fast so the dict grows during the listing loop
+        for i in range(3000):
+            jm.create_job(library_name=f"seed {i}")
+        stop = threading.Event()
+        created = []
+
+        def create_jobs():
+            while not stop.is_set():
+                created.append(jm.create_job(library_name="webhook").id)
+
+        errors = []
+        creator = threading.Thread(target=create_jobs)
+        creator.start()
+        try:
+            for _ in range(400):
+                try:
+                    pending = jm.get_pending_jobs()
+                except RuntimeError as exc:  # "dictionary changed size during iteration"
+                    errors.append(exc)
+                    continue
+                assert all(job.status is JobStatus.PENDING for job in pending)
+        finally:
+            stop.set()
+            creator.join(timeout=5)
+        assert errors == []
+        assert created, "the creator thread must have run during the listing"
+        assert {j.id for j in jm.get_pending_jobs()} >= set(created)
+
+
+class TestFailUnrevivedInterruptedJobs:
+    """Interrupted jobs a restart didn't revive are settled per kind."""
+
+    def test_only_pending_jobs_of_the_kind_left_behind_are_failed(self, config_dir):
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        stale_ic = jm.create_job(library_name="old backfill", kind="intro_credits")
+        stale_preview = jm.create_job(library_name="old scan")
+        finished_ic = jm.create_job(library_name="interrupted while running", kind="intro_credits")
+        finished_ic.status = JobStatus.FAILED
+        fresh_ic = jm.create_job(library_name="fresh", kind="intro_credits")
+        stale_ic.created_at = stale_preview.created_at = finished_ic.created_at = (
+            datetime.now(timezone.utc) - timedelta(hours=3)
+        ).isoformat()
+        jm._interrupted_jobs = [stale_ic, stale_preview, finished_ic, fresh_ic]
+
+        revived = jm.requeue_interrupted_jobs(max_age_minutes=60)
+        failed = jm.fail_unrevived_interrupted_jobs("intro_credits")
+
+        assert [j.id for j in revived] == [fresh_ic.id]
+        assert finished_ic.status is JobStatus.FAILED and finished_ic.error is None  # already settled at load
+        assert [j.id for j in failed] == [stale_ic.id]
+        assert stale_ic.status is JobStatus.FAILED and stale_ic.error == "Interrupted by a restart and not resumed"
+        assert stale_preview.status is JobStatus.PENDING
+        assert fresh_ic.status is JobStatus.PENDING
+        assert jm.fail_unrevived_interrupted_jobs("intro_credits") == []
+        assert JobManager(config_dir=config_dir).get_job(stale_ic.id).status is JobStatus.FAILED

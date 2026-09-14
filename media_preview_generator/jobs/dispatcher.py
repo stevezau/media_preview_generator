@@ -1297,6 +1297,43 @@ def get_dispatcher(worker_pool: WorkerPool | None = None) -> JobDispatcher | Non
         return _dispatcher
 
 
+def get_or_create_dispatcher(config: Config, selected_gpus: list) -> JobDispatcher:
+    """Return the shared dispatcher, creating its worker pool from the user's worker settings if needed.
+
+    Same sizing rule the preview scan path uses: GPU workers only when a GPU is selected (``gpu_threads`` with no
+    device would make ``WorkerPool`` raise), CPU workers from ``cpu_threads``. An existing pool is reconciled to the
+    current GPU selection.
+
+    Args:
+        config: The job's config (``gpu_threads``, ``cpu_threads``).
+        selected_gpus: ``(gpu_type, device, info)`` tuples for the enabled GPUs.
+
+    Returns:
+        The process-wide :class:`JobDispatcher`.
+    """
+    global _dispatcher
+    selected = list(selected_gpus or [])
+    # Check and create under one lock: two jobs starting together must not both see "no dispatcher" and build a
+    # pool each (the loser's pool would be dropped while its workers are already counted in the logs).
+    with _dispatcher_lock:
+        if _dispatcher is None:
+            pool = WorkerPool(
+                gpu_workers=int(getattr(config, "gpu_threads", 0) or 0) if selected else 0,
+                cpu_workers=int(getattr(config, "cpu_threads", 0) or 0),
+                selected_gpus=selected,
+            )
+            _dispatcher = JobDispatcher(pool)
+            logger.info("Created global JobDispatcher")
+            return _dispatcher
+        existing = _dispatcher
+    if selected:
+        try:
+            existing.worker_pool.reconcile_gpu_workers(selected)
+        except Exception as exc:
+            logger.debug("Could not reconcile GPU workers: {}", exc)
+    return existing
+
+
 def reset_dispatcher() -> None:
     """Reset the global dispatcher (for testing)."""
     global _dispatcher

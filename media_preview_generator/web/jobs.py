@@ -25,7 +25,7 @@ from typing import Any, Optional
 
 from loguru import logger
 
-from ..job_kinds import JOB_KIND_PREVIEWS, parse_job_kind
+from ..job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_PREVIEWS, parse_job_kind
 
 # Message shown in UI when a job's log file was removed by retention policy.
 LOG_RETENTION_CLEARED_MESSAGE = "Log file was cleared due to log retention policy."
@@ -1193,6 +1193,7 @@ class JobManager:
         max_age_minutes = max(5, min(1440, max_age_minutes))
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
         revived: list[Job] = []
+        not_revived: list[Job] = []
 
         for job in self._interrupted_jobs:
             # Check age — skip stale jobs.  Use started_at (when
@@ -1205,9 +1206,11 @@ class JobManager:
                     ref_time = ref_time.replace(tzinfo=timezone.utc)
                 if ref_time < cutoff:
                     logger.debug("Skipping revive of job {} — too old (ref={})", job.id[:8], ref_str)
+                    not_revived.append(job)
                     continue
             except (ValueError, AttributeError):
                 # Can't parse date — skip to be safe
+                not_revived.append(job)
                 continue
 
             # Revive the job in place — same ID, same created_at
@@ -1215,7 +1218,10 @@ class JobManager:
                 job.status = JobStatus.PENDING
                 job.error = None
                 job.completed_at = None
-                job.paused = False
+                # An Intro & Credits job's own pause is the user's (or its schedule's stop time's) intent and
+                # outlives the restart like the global pause does; its runner re-applies it. The preview runner
+                # can't hold a revived job paused, so a preview job's pause is dropped as before.
+                job.paused = job.paused and job.kind == JOB_KIND_INTRO_CREDITS
                 job.progress = JobProgress()
 
             self.add_log(
@@ -1230,9 +1236,39 @@ class JobManager:
                 for job in revived:
                     self._persist_job(job)
 
-        # Clear the list so it's not processed again
-        self._interrupted_jobs = []
+        # Revived jobs leave the list; the ones left behind stay for fail_unrevived_interrupted_jobs.
+        self._interrupted_jobs = not_revived
         return revived
+
+    def fail_unrevived_interrupted_jobs(self, kind: str) -> list[Job]:
+        """Mark interrupted jobs of ``kind`` that no restart revived as failed.
+
+        A PENDING job that no thread will ever run looks alive forever: an Intro & Credits schedule then never starts
+        another job and webhook follow-ups count its files as already queued. Call after
+        :meth:`requeue_interrupted_jobs` (or instead of it when auto-requeue is off).
+
+        Args:
+            kind: Job kind to settle (``intro_credits``).
+
+        Returns:
+            The jobs marked failed.
+        """
+        failed: list[Job] = []
+        with self._lock:
+            for job in self._interrupted_jobs:
+                if job.kind != kind or job.status is not JobStatus.PENDING:
+                    continue
+                job.status = JobStatus.FAILED
+                job.error = "Interrupted by a restart and not resumed"
+                job.completed_at = datetime.now(timezone.utc).isoformat()
+                job.paused = False
+                self._persist_job(job)
+                self._emit_event("job_failed", job.to_dict())
+                failed.append(job)
+        for job in failed:
+            self.add_log(job.id, "WARNING - Interrupted by a restart and not resumed")
+            logger.info("Marked interrupted job {} ({}) failed — it was not resumed", job.id[:8], job.library_name)
+        return failed
 
     def interrupted_retry_chains(self) -> list[Job]:
         """Return chain Jobs that were in PENDING/RUNNING at load time.
@@ -1267,7 +1303,10 @@ class JobManager:
 
     def get_pending_jobs(self) -> list[Job]:
         """Get all pending jobs."""
-        return [j for j in self._jobs.values() if j.status == JobStatus.PENDING]
+        # Under the lock: webhook threads create jobs while others list them, and iterating the dict while it
+        # grows raises "dictionary changed size during iteration".
+        with self._lock:
+            return [j for j in self._jobs.values() if j.status == JobStatus.PENDING]
 
     def get_running_job(self) -> Job | None:
         """Get a currently running job (first found).

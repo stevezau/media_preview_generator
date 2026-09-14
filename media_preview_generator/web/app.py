@@ -19,6 +19,7 @@ from flask_wtf.csrf import CSRFProtect
 from loguru import logger
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from ..job_kinds import JOB_KIND_INTRO_CREDITS
 from .auth import log_token_on_startup
 from .jobs import JobStatus, get_job_manager
 from .scheduler import get_schedule_manager
@@ -448,6 +449,7 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
         )
         if not auto_requeue_enabled:
             logger.info("Auto-requeue on restart is disabled")
+            get_job_manager().fail_unrevived_interrupted_jobs(JOB_KIND_INTRO_CREDITS)
             return
 
         # A pause from the previous session is honored across the restart —
@@ -461,6 +463,8 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
         max_age = int(settings.get("requeue_max_age_minutes", 720))
         job_manager = get_job_manager()
         revived = job_manager.requeue_interrupted_jobs(max_age_minutes=max_age)
+        # Intro & Credits jobs left PENDING would block their schedule and absorb webhook follow-ups for good.
+        job_manager.fail_unrevived_interrupted_jobs(JOB_KIND_INTRO_CREDITS)
 
         if not revived:
             return
@@ -872,6 +876,10 @@ def create_app(config_dir: str | None = None) -> Flask:
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         return response
 
+    # Auto-requeue jobs that were interrupted by the server restart. Runs before the scheduler starts: a tick
+    # fired right away (a missed run) would otherwise find a leftover Intro & Credits job and skip.
+    _requeue_interrupted_on_startup(config_dir)
+
     # Start scheduler
     schedule_manager.start()
 
@@ -890,9 +898,6 @@ def create_app(config_dir: str | None = None) -> Flask:
 
     # Log token on startup
     log_token_on_startup()
-
-    # Auto-requeue jobs that were interrupted by the server restart
-    _requeue_interrupted_on_startup(config_dir)
 
     # Re-arm Timers for retry-chain Jobs that were mid-backoff at restart.
     # Must run AFTER settings/config are accessible (load_config + registry

@@ -594,6 +594,12 @@ def _sync_start_job_async(request, monkeypatch):
             return getattr(_real_threading, name)
 
     monkeypatch.setattr(jr_mod, "threading", _ThreadingShim(), raising=True)
+    try:
+        import media_preview_generator.markers.job_runner as markers_jr
+    except ImportError:
+        markers_jr = None
+    if markers_jr is not None:
+        monkeypatch.setattr(markers_jr, "threading", _ThreadingShim(), raising=True)
 
 
 # ---------------------------------------------------------------------------

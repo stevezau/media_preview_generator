@@ -143,30 +143,12 @@ def _rows(out):
 
 
 class TestOwners:
+    # The ownership matrix (library, server, markers switch, Plex confirmation, sports, selection, exclusions) lives in
+    # test_marker_ownership.py; these rows check how the pipeline uses the rule.
     @pytest.mark.parametrize(
         "mutate",
-        [
-            lambda reg, media: setattr(reg.configs_by_id["plex-1"], "libraries", [Library("1", "TV", ("/elsewhere",))]),
-            lambda reg, media: setattr(reg.configs_by_id["plex-1"], "enabled", False),
-            lambda reg, media: reg.configs_by_id["plex-1"].markers.update({"enabled": False}),
-            lambda reg, media: reg.configs_by_id["plex-1"].markers.update({"plex": {"db_write_confirmed_at": None}}),
-            lambda reg, media: setattr(
-                reg.configs_by_id["plex-1"], "libraries", [Library("9", "Sports", (_media_root(media),))]
-            ),
-            lambda reg, media: reg.configs_by_id["plex-1"].markers.update({"library_ids": ["2"]}),
-            lambda reg, media: reg.configs_by_id["plex-1"].exclude_paths.append(
-                {"value": os.path.dirname(media), "type": "path"}
-            ),
-        ],
-        ids=[
-            "no-owner",
-            "server-disabled",
-            "markers-off",
-            "plex-unconfirmed",
-            "sports-default",
-            "library-not-selected",
-            "excluded",
-        ],
+        [lambda reg, media: reg.configs_by_id["plex-1"].markers.update({"enabled": False})],
+        ids=["markers-off"],
     )
     def test_no_marker_owner_cells(self, store, media, mutate):
         reg = _registry(media, ServerType.PLEX)
@@ -178,14 +160,6 @@ class TestOwners:
         probe.assert_not_called()
         assert store.get_file(media) is None  # nothing detected for a file without an enabled owner
         assert all(c.calls == [] for c in ctx.clients.values())
-
-    def test_explicitly_selected_sports_library_is_an_owner(self, store, media):
-        reg = _registry(media, ServerType.PLEX)
-        reg.configs_by_id["plex-1"].libraries = [Library("9", "Sports", (_media_root(media),))]
-        reg.configs_by_id["plex-1"].markers["library_ids"] = ["9"]
-        plex = ready_publisher()
-        out, _ = _run(_ctx(store, reg), media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
-        assert out.outcome_key == FileOutcome.PUBLISHED.value
 
     def test_owner_without_a_publisher_is_skipped_not_failed(self, store, media):
         # Emby has no publisher until phase 2: the owner counts, its row says why nothing was written.
@@ -250,28 +224,8 @@ class TestOwners:
 
     @pytest.mark.parametrize(
         ("libraries", "library_ids", "owner"),
-        [
-            (lambda root: [Library("1", "TV Shows", (root,), enabled=False)], ["1"], True),
-            (lambda root: [Library("1", "TV Shows", (root,), enabled=False)], None, True),
-            (lambda root: [Library("1", "Media", (root,)), Library("2", "TV", (root + "/tv",))], ["2"], True),
-            (lambda root: [Library("1", "Media", (root,)), Library("2", "TV", (root + "/tv",))], ["1"], True),
-            (lambda root: [Library("1", "Media", (root,)), Library("2", "TV", (root + "/tv",))], ["3"], False),
-            (lambda root: [Library("1", "Sports", (root,)), Library("2", "TV", (root + "/tv",))], None, True),
-            (
-                lambda root: [Library("1", "Sports", (root,)), Library("2", "Sports Extra", (root + "/tv",))],
-                None,
-                False,
-            ),
-        ],
-        ids=[
-            "previews-off-ticked",
-            "previews-off-default",
-            "overlapping-inner-ticked",
-            "overlapping-outer-ticked",
-            "overlapping-none-ticked",
-            "sports-overlapping-normal",
-            "sports-only",
-        ],
+        [(lambda root: [Library("1", "Media", (root,)), Library("2", "TV", (root + "/tv",))], ["2"], True)],
+        ids=["overlapping-inner-ticked"],
     )
     def test_markers_ownership_uses_every_matching_library(self, store, media, libraries, library_ids, owner):
         reg = _registry(media, ServerType.PLEX)

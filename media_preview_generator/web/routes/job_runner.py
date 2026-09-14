@@ -301,7 +301,21 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
     If a thread is already in-flight for *job_id* (e.g. still scanning
     libraries after a revive), the call is silently skipped to avoid
     duplicate work.
+
+    Intro & Credits jobs are handed to their own runner, so every start path (manual resume, pending drain,
+    restart requeue, reprocess) runs them with the marker pipeline.
     """
+    try:
+        queued = get_job_manager().get_job(job_id)
+    except Exception as exc:
+        # The preview thread below reads the job again and reports the failure on the job.
+        logger.debug("Could not read job {} to pick its runner: {}", job_id, exc)
+        queued = None
+    if queued is not None and queued.kind == JOB_KIND_INTRO_CREDITS:
+        from ...markers.job_runner import start_intro_credits_job_async
+
+        start_intro_credits_job_async(job_id, config_overrides)
+        return
     with _inflight_lock:
         if job_id in _inflight_jobs:
             logger.info("Skipping duplicate _start_job_async for {} — already in flight", job_id)
