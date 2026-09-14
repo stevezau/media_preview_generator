@@ -88,6 +88,7 @@ docs/design/intro-credits/evidence/detect/fpcache*/
 docs/design/intro-credits/evidence/**/*.json
 docs/design/intro-credits/evidence/**/*.jsonl
 docs/design/intro-credits/evidence/lab/*_truth.txt
+docs/design/intro-credits/evidence/lab/prod_plex_baseline.txt
 docs/design/intro-credits/evidence/credits/spot.txt
 docs/design/intro-credits/evidence/credits/framechecks/
 

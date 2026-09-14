@@ -16,6 +16,14 @@ def judge_intro(segment: tuple[float, float] | None, truth: tuple[float, float])
     return "useful" if useful else "wrong"
 
 
+def skips_story(segment: tuple[float, float], truth: tuple[float, float]) -> bool:
+    """Whether a wrong intro skips story: it ends more than 5 s after the truth or starts more than 15 s before it.
+
+    The other wrong answers end or start inside the intro, so the viewer only sees more of it.
+    """
+    return segment[1] > truth[1] + USEFUL_END_S or segment[0] < truth[0] - USEFUL_START_S
+
+
 @dataclass
 class Tally:
     """Useful / wrong / missed counts."""

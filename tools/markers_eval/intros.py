@@ -81,12 +81,12 @@ def _drifted(stored: tuple[float, float, int] | None, got: tuple | None) -> bool
     )
 
 
-def _season_folder_episodes(group: list[EvalEpisode]) -> list[str]:
+def season_folder_episodes(group: list[EvalEpisode]) -> list[str]:
     """The app's season group of the group's folder (spec §5.3: group = season folder), the eval's own files included."""
     return sorted(set(season_group(group[0].file).episodes) | {e.file for e in group})
 
 
-class _SeasonStep:
+class SeasonStep:
     """The app's season step over one season's fingerprints, recording the pairs it skips."""
 
     def __init__(self, season: str, fps: dict[str, np.ndarray], report: ReproductionReport) -> None:
@@ -143,10 +143,10 @@ def reproduce(
     report = ReproductionReport()
     for season, group in by_season(episodes).items():
         report.seasons += 1
-        files = _season_folder_episodes(group) if full_folder else [e.file for e in group]
+        files = season_folder_episodes(group) if full_folder else [e.file for e in group]
         fps = {f: points(f) for f in files}
         port = {f: _as_tuple(seg) for f, seg in season_intros(fps).items()}
-        step = _SeasonStep(season, fps, report)
+        step = SeasonStep(season, fps, report)
         if with_reference:
             reference = fp3_reference.analyse_points(fps, sorted(fps))
             for f in sorted(fps):

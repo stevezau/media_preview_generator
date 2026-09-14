@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +26,7 @@ class EvalEpisode:
     truth_intro: tuple[float, float] | None
     truth_credits: tuple[float, float] | None
     v3_segment: tuple[float, float, int] | None
+    duration_s: float | None = None
 
 
 def _pair(value: object) -> tuple[float, float] | None:
@@ -44,9 +46,23 @@ def load_v3_results(path: Path | None = None) -> list[EvalEpisode]:
                 truth_intro=_pair((r.get("truth") or {}).get("intro")),
                 truth_credits=_pair((r.get("truth") or {}).get("credits")),
                 v3_segment=(float(seg[0]), float(seg[1]), int(seg[2])) if seg else None,
+                duration_s=(r.get("intro") or {}).get("duration"),
             )
         )
     return out
+
+
+def without_ids(name: str) -> str:
+    """A show or movie folder name without its ``{tvdb-…}``/``{tmdb-…}``/``{imdb-…}`` tags."""
+    return re.sub(r"\s*\{(tvdb|tmdb|imdb)-[^}]*\}", "", name).strip()
+
+
+def episode_label(path: str) -> str:
+    """``Show (Year) SxxEyy`` for a library path: the show folder without its id tags, and the episode code."""
+    parts = path.split("/")
+    show = without_ids(parts[-3] if len(parts) >= 3 else "")
+    code = re.search(r"S\d+E\d+", os.path.basename(path), re.I)
+    return f"{show} {code.group(0).upper() if code else os.path.basename(path)}".strip()
 
 
 def by_season(episodes: list[EvalEpisode]) -> dict[str, list[EvalEpisode]]:

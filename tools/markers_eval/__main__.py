@@ -12,8 +12,10 @@ from media_preview_generator.markers.audio.fingerprint import chromaprint_ffmpeg
 from media_preview_generator.markers.probe import ffprobe_path_for
 
 from .cache import FingerprintCache
-from .data import load_v3_results
+from .data import evidence_dir, load_v3_results
 from .intros import SPEC_V3, reproduce
+from .plex import export_sql
+from .report import DEFAULT_BASELINE, full_report
 
 
 def _cache(args: argparse.Namespace) -> FingerprintCache:
@@ -52,6 +54,28 @@ def cmd_reproduce(args: argparse.Namespace) -> int:
     return 0 if report.passed else 1
 
 
+def cmd_plex_sql(args: argparse.Namespace) -> int:
+    folders = {e.season for e in load_v3_results()}
+    evidence = evidence_dir()
+    for name in ("movies40", "tv40", "movie_credit_truth"):
+        folders |= {os.path.dirname(r["file"]) for r in json.loads((evidence / f"credits/{name}.json").read_text())}
+    print(export_sql(sorted(folders)), end="")
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    fingerprints = _cache(args)
+    baseline = Path(args.plex_baseline) if args.plex_baseline else evidence_dir() / DEFAULT_BASELINE
+    summary, details, passed = full_report(
+        fingerprints, ffprobe=ffprobe_path_for(chromaprint_ffmpeg(args.ffmpeg)), baseline_path=baseline,
+        full_folder=args.full_folder,
+    )  # fmt: skip
+    print(json.dumps(summary, indent=2))
+    if args.json:
+        Path(args.json).write_text(json.dumps({**summary, "details": details}, indent=1, default=str))
+    return 0 if passed else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m tools.markers_eval")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -64,6 +88,17 @@ def main(argv: list[str] | None = None) -> int:
         "--full-folder", action="store_true", help="match each whole season folder (the app) instead of the eval lists"
     )
     rep.set_defaults(func=cmd_reproduce)
+    sql = sub.add_parser("plex-sql", help="read-only SQL exporting prod Plex's markers for the eval files")
+    sql.set_defaults(func=cmd_plex_sql)
+    full = sub.add_parser("report", help="decisions vs Plex's own markers, online cases, credits chapter rules")
+    full.add_argument("--ffmpeg")
+    full.add_argument("--cache")
+    full.add_argument("--plex-baseline", help=f"Plex's markers (default: evidence/{DEFAULT_BASELINE})")
+    full.add_argument("--json", help="write details (local-only: holds file paths)")
+    full.add_argument(
+        "--full-folder", action="store_true", help="match each whole season folder (the app) instead of the eval lists"
+    )
+    full.set_defaults(func=cmd_report)
     args = parser.parse_args(argv)
     return args.func(args)
 
