@@ -4,6 +4,11 @@ using System.Linq;
 using System.Net.Mime;
 using System.Threading;
 using System.Threading.Tasks;
+#if JF12
+using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Enums;
+using MediaBrowser.Controller.Dto;
+#endif
 using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities;
@@ -109,8 +114,8 @@ public class TrickplayBridgeController : ControllerBase
     /// <summary>
     /// Resolve an absolute file path to its Jellyfin item id.
     ///
-    /// Wraps <c>ILibraryManager.FindByPath</c>, which is a single
-    /// equality lookup against an indexed column on the BaseItems
+    /// Wraps <c>ILibraryManager.FindByPath</c> (plus, on Jellyfin 12, the alternate
+    /// versions it skips), which is a single equality lookup against an indexed column on the BaseItems
     /// table — sub-millisecond on libraries of any size. Lets the
     /// publisher skip the public <c>/Items?searchTerm=…</c> API,
     /// whose full-text title index silently strips tokens like
@@ -132,6 +137,9 @@ public class TrickplayBridgeController : ControllerBase
         }
 
         var item = _libraryManager.FindByPath(path, isFolder: false);
+#if JF12
+        item ??= FindAlternateVersionByPath(path);
+#endif
         if (item is null)
         {
             return NotFound(new { error = $"no item with path {path}" });
@@ -144,6 +152,32 @@ public class TrickplayBridgeController : ControllerBase
             type = item.GetType().Name,
         });
     }
+
+#if JF12
+    /// <summary>
+    /// The alternate version (or other owned, non-extra item) whose file is at <paramref name="path"/>.
+    ///
+    /// Jellyfin 12 merges versions of an episode or movie into one item. Each version keeps its own item row, with
+    /// <c>PrimaryVersionId</c> and <c>OwnerId</c> set, and its id is that version's <c>MediaSource.Id</c> (the id the
+    /// web player fetches media segments by). Item queries leave those rows out unless <c>IncludeOwnedItems</c> is
+    /// set, and <c>FindByPath</c> doesn't set it, so it never finds a version's file. Same query as <c>FindByPath</c>
+    /// otherwise.
+    /// </summary>
+    /// <param name="path">Absolute file path as Jellyfin sees it.</param>
+    /// <returns>The newest matching item, or null.</returns>
+    private BaseItem? FindAlternateVersionByPath(string path)
+    {
+        return _libraryManager.GetItemList(new InternalItemsQuery
+        {
+            Path = path,
+            IsFolder = false,
+            IncludeOwnedItems = true,
+            OrderBy = [(ItemSortBy.DateCreated, SortOrder.Descending)],
+            Limit = 1,
+            DtoOptions = new DtoOptions(true),
+        }).FirstOrDefault();
+    }
+#endif
 
     /// <summary>
     /// Register the trickplay tiles a publisher just wrote for a media
