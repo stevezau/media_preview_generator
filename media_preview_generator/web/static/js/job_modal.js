@@ -1603,13 +1603,7 @@ function renderFileResultsTable(files) {
                 + ' title="Open in Preview Inspector"><i class="bi bi-eye"></i></a>';
         }
 
-        // A server that hasn't indexed the file yet gets its own line: a "Retry: …" job checks it again.
-        var waitingNotes = (f.servers || []).filter(function (s) {
-            return s && s.reason_code === MARKERS_NOT_IN_LIBRARY;
-        }).map(function (s) {
-            return '<div class="small text-warning-emphasis markers-not-in-library">'
-                + escapeHtml((s.name || 'Server') + ': ' + MARKERS_NOT_IN_LIBRARY_LABEL) + '</div>';
-        }).join('');
+        var serverNotes = _renderFileServerNotes(f.servers || [], showServerStatus);
 
         html += '<tr>'
             + '<td style="max-width: 400px;">'
@@ -1620,11 +1614,33 @@ function renderFileResultsTable(files) {
             + '</td>'
             + '<td><span class="badge ' + meta.badge + '">' + meta.label + '</span></td>'
             + '<td>' + serversHtml + '</td>'
-            + '<td>' + waitingNotes + '<small class="text-muted" title="' + reason + '">' + reason + '</small></td>'
+            + '<td>' + serverNotes + '<small class="text-muted" title="' + reason + '">' + reason + '</small></td>'
             + '<td>' + workerBadge + '</td>'
             + '</tr>';
     }
     tbody.innerHTML = html;
+}
+
+// One line per server whose outcome needs its own words: a server that hasn't indexed the file yet (a "Retry: …" job
+// checks it again), and on Intro & Credits jobs any message beyond the pill's status, e.g. "Keeping Plex's credits".
+function _renderFileServerNotes(servers, showMessages) {
+    return servers.map(function (s) {
+        if (!s) return '';
+        var text;
+        var cls = 'text-muted';
+        if (s.reason_code === MARKERS_NOT_IN_LIBRARY) {
+            text = MARKERS_NOT_IN_LIBRARY_LABEL;
+            cls = 'text-warning-emphasis markers-not-in-library';
+        } else if (showMessages && s.message && !MARKERS_ROUTINE_MESSAGE.test(s.message)) {
+            text = s.message;
+            if (s.status === 'failed') cls = 'text-danger-emphasis';
+            else if (s.status === 'markers_waiting') cls = 'text-warning-emphasis';
+        } else {
+            return '';
+        }
+        return '<div class="small markers-server-note ' + cls + '">'
+            + escapeHtml((s.name || 'Server') + ': ' + text) + '</div>';
+    }).join('');
 }
 
 // Compact two-character worker badge for the Files table — "G0" / "C3".
@@ -1651,7 +1667,8 @@ function _compactWorkerBadge(worker) {
 // `servers` entry has {id, name, type, status, frame_source?}. The
 // vendor palette colours the pill (so users can spot Plex vs Emby at a
 // glance), and STATUS_META in app.js drives the tooltip text so the
-// per-server pill says exactly what the file-outcome chip says.
+// per-server pill says exactly what the file-outcome chip says. An Intro &
+// Credits server with its own words (not a routine message) shows those.
 var _FILE_SERVER_PALETTE = {
     plex:     'bg-warning text-dark',
     emby:     'bg-success',
@@ -1671,7 +1688,10 @@ function _renderFileServerPills(servers, showStatus) {
         // "this server skipped it" signal without needing a second column.
         var dim = (status && status !== 'published' && status !== 'markers_written') ? ' style="opacity:.55;"' : '';
         var meta = _fileOutcomeMeta(status);
-        var tip = s.reason_code === MARKERS_NOT_IN_LIBRARY ? MARKERS_NOT_IN_LIBRARY_LABEL : (meta.label || status || '');
+        var tip = s.reason_code === MARKERS_NOT_IN_LIBRARY
+            ? MARKERS_NOT_IN_LIBRARY_LABEL
+            : (showStatus && s.message && !MARKERS_ROUTINE_MESSAGE.test(s.message) && s.message)
+                || meta.label || status || '';
         var title = tip ? (escapeHtmlAttr(label) + ' \u2014 ' + escapeHtmlAttr(tip)) : escapeHtmlAttr(label);
         html += '<span class="badge me-1 ' + cls + '"' + dim + ' title="' + title + '">'
             + escapeHtml(label) + (showStatus && status ? ' \u00b7 ' + escapeHtml(meta.label) : '') + '</span>';

@@ -1552,6 +1552,8 @@ const JOB_KIND_INTRO_CREDITS = 'intro_credits';
 // Waiting rows whose server hasn't indexed the file yet (markers.outcomes.NOT_IN_LIBRARY); a "Retry: …" job follows.
 const MARKERS_NOT_IN_LIBRARY = 'not_in_library';
 const MARKERS_NOT_IN_LIBRARY_LABEL = 'Not in the server\'s library yet — will retry';
+// Server messages that only repeat the pill or the file's reason (markers/pipeline.py); the Files panel lists the rest.
+const MARKERS_ROUTINE_MESSAGE = /^(Up to date|No markers found|Sources don't agree yet|\d+ marker\(s\))$/;
 
 function _isMarkersJob(job) {
     return !!job && job.kind === JOB_KIND_INTRO_CREDITS;

@@ -2219,6 +2219,7 @@ class JobManager:
         reason: str = "",
         worker: str = "",
         servers: list[dict] | None = None,
+        server_messages: bool = False,
     ) -> None:
         """Append a per-file processing result to the job's JSONL file.
 
@@ -2235,6 +2236,9 @@ class JobManager:
                 so the user can see which servers received each preview
                 (single-server installs always get one pill; multi-server
                 fan-out gets one per target).
+            server_messages: Keep each server's own message on its entry when the row's reason doesn't already say
+                it (Intro & Credits: "Keeping Plex's credits"). Preview rows leave it out: their per-server
+                "Published" never matches the "Published to N servers" reason and would grow every row.
         """
         path = self._file_results_path(job_id)
 
@@ -2342,6 +2346,9 @@ class JobManager:
                 # Why a row is waiting (e.g. the server hasn't indexed the file yet); preview rows carry none.
                 if s.get("reason_code"):
                     entry["reason_code"] = s["reason_code"]
+                message = s.get("message") or ""
+                if server_messages and message and message != derived_reason:
+                    entry["message"] = message
                 slim.append(entry)
                 # First publisher with a .bif output wins. We surface this
                 # at the top level (not on each server entry) because the

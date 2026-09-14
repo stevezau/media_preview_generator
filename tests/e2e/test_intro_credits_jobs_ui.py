@@ -690,6 +690,55 @@ class TestFilesPanel:
         expect(second.locator("td").nth(2).locator(".badge", has_text="Home Plex")).to_contain_text("Waiting")
         expect(second.locator("td").nth(2).locator(".badge", has_text="Home Jellyfin")).to_contain_text("Failed")
 
+    def test_file_rows_list_each_servers_own_message_but_not_routine_ones(self, dashboard) -> None:
+        job = _markers_job(config={"kind": "intro_credits", "source": "manual", "libraries": [], "file_paths": []})
+        page = dashboard([job])
+        files = [
+            {
+                "file": "/data/tv/Synth/S01E02.mkv",
+                "outcome": "markers_up_to_date",
+                "reason": "intro 0:17–1:05 (chapters); credits 1:40–2:00 (chapters)",
+                "worker": "Intro & Credits",
+                "servers": [
+                    {
+                        "id": "plex-1",
+                        "name": "Home Plex",
+                        "type": "plex",
+                        "status": "markers_up_to_date",
+                        "message": "1 marker(s); keeping Plex's credits",
+                    },
+                    {
+                        "id": "jf-1",
+                        "name": "Home Jellyfin",
+                        "type": "jellyfin",
+                        "status": "markers_written",
+                        "message": "2 marker(s)",
+                    },
+                    {
+                        "id": "jf-2",
+                        "name": "Old Jellyfin",
+                        "type": "jellyfin",
+                        "status": "failed",
+                        "message": "Couldn't reach Jellyfin",
+                    },
+                ],
+            }
+        ]
+
+        self._open_files(page, job, files)
+
+        row = page.locator("#fileResultsBody tr").first
+        notes = row.locator(".markers-server-note")
+        expect(notes).to_have_count(2)
+        expect(notes.nth(0)).to_have_text("Home Plex: 1 marker(s); keeping Plex's credits")
+        expect(notes.nth(1)).to_have_text("Old Jellyfin: Couldn't reach Jellyfin")
+        expect(notes.nth(1)).to_have_class(re.compile(r"\btext-danger-emphasis\b"))
+        expect(row).not_to_contain_text("Home Jellyfin: 2 marker(s)")
+        plex_pill = row.locator("td").nth(2).locator(".badge", has_text="Home Plex")
+        assert plex_pill.get_attribute("title") == "Home Plex — 1 marker(s); keeping Plex's credits"
+        jellyfin_pill = row.locator("td").nth(2).locator(".badge", has_text="Home Jellyfin")
+        assert jellyfin_pill.get_attribute("title") == "Home Jellyfin — Markers written"
+
     def test_preview_file_pills_are_unchanged(self, dashboard) -> None:
         preview = _preview_job()
         page = dashboard([preview])
@@ -699,7 +748,9 @@ class TestFilesPanel:
                 "outcome": "generated",
                 "reason": "",
                 "worker": "GPU Worker 1",
-                "servers": [{"id": "plex-1", "name": "Home Plex", "type": "plex", "status": "published"}],
+                "servers": [
+                    {"id": "plex-1", "name": "Home Plex", "type": "plex", "status": "published", "message": "Queued"}
+                ],
             }
         ]
 
@@ -708,6 +759,7 @@ class TestFilesPanel:
         pill = page.locator("#fileResultsBody tr").first.locator("td").nth(2).locator(".badge")
         expect(pill).to_have_text("Home Plex")
         assert pill.get_attribute("title") == "Home Plex — Generated"
+        expect(page.locator("#fileResultsBody .markers-server-note")).to_have_count(0)
         expect(page.locator("#logsModalHeader")).not_to_contain_text("Intro & Credits")
 
 

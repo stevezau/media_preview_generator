@@ -476,7 +476,13 @@ class TestRun:
         assert set_cb.call_args_list[0].kwargs == {"job_id": "j1"}
         callback("/m/a.mkv", "markers_published", "1 marker(s)", "Lookup", servers=[{"id": "jf-1"}])
         env.jm.record_file_result.assert_called_once_with(
-            "j1", "/m/a.mkv", "markers_published", "1 marker(s)", "Lookup", servers=[{"id": "jf-1"}]
+            "j1",
+            "/m/a.mkv",
+            "markers_published",
+            "1 marker(s)",
+            "Lookup",
+            servers=[{"id": "jf-1"}],
+            server_messages=True,
         )
 
     def test_paused_job_hands_back_its_slot_so_a_high_preview_job_is_admitted(self, env, monkeypatch):
@@ -1375,7 +1381,7 @@ class TestLibraryRetry:
         retry_env.results.append(("/m/a.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]))
         self._run(["/m/a.mkv"])
         env.jm.record_file_result.assert_called_once_with(
-            "j1", "/m/a.mkv", "markers_waiting", "", "Lookup", servers=[NOT_IN_LIBRARY_ROW]
+            "j1", "/m/a.mkv", "markers_waiting", "", "Lookup", servers=[NOT_IN_LIBRARY_ROW], server_messages=True
         )
 
 

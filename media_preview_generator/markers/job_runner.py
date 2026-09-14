@@ -701,7 +701,9 @@ def run_intro_credits_job(job_id: str) -> None:
                         if isinstance(row, dict) and row.get(READ_BACK_FAILED):
                             name = str(row.get("server_name") or row.get("server_id") or "a server")
                             unchecked.setdefault(name, set()).add(file_path)
-                    jm.record_file_result(job_id, file_path, outcome, reason, worker, servers=servers)
+                    jm.record_file_result(
+                        job_id, file_path, outcome, reason, worker, servers=servers, server_messages=True
+                    )
 
                 set_file_result_callback(on_file_result, job_id=job_id)
                 dispatcher = get_or_create_dispatcher(config, _build_selected_gpus(settings))
