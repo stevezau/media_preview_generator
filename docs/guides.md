@@ -15,6 +15,7 @@ Guides for the web interface, automation and webhooks, HDR handling, and trouble
 - [Previews readiness (per-check toggles & explanations)](guides/previews-readiness.md)
 - [Webhook Integration](#webhook-integration)
 - [Auto-trigger from Plex (no Sonarr/Radarr)](#auto-trigger-from-plex-no-sonarrradarr)
+- [Intro & Credits](#intro--credits)
 - [HDR & Dolby Vision](#hdr--dolby-vision)
 - [Troubleshooting](#troubleshooting)
 - [FAQ](faq.md)
@@ -542,6 +543,155 @@ You can enable **both** if you want belt-and-suspenders behavior — the recentl
 
 ---
 
+## Intro & Credits
+
+Skip Intro / Skip Credits markers for Plex and Jellyfin. Detected once per file — from chapters inside the file,
+online databases, and (in a later update) matching the theme tune across a season or reading the on-screen credit
+roll — then published to every server that has that file. **Precision over coverage:** a missing marker is fine, a
+wrong one isn't, so a marker only ships when the evidence clears the bar below.
+
+### Turning it on
+
+Detection settings are shared by every server: **Settings → Intro & Credits**. What each server actually *receives*
+is controlled per server: **Servers → (server) → Edit → Intro & Credits tab → "Send intro & credits markers to this
+server"**. A server is off by default even after you turn the shared settings on.
+
+Under the switch, tick which libraries get markers on that server. **Sports libraries start unticked** — no online
+source covers sports and local detection isn't reliable there either. You can still tick one by hand if you want to
+try it.
+
+### Sources and the publish rule
+
+In **Settings → Intro & Credits**, "Where evidence comes from" lists every source in the order it's checked, with
+drag-to-reorder:
+
+| Source | Notes |
+|---|---|
+| Chapters inside the file | Free, exact when present (~1 in 9 seasons in a sampled library). |
+| TheIntroDB | Optional **API key** (masked once saved). Works without one (500 lookups/day); your own free key raises that. Off by default — see the note below. |
+| IntroDB.app | No key needed, TV only. |
+| SkipDB | Free, only counts an answer matched to your file's own length. |
+| Matching audio across a season | **Coming soon** — researched and measured, not built yet. The switch is disabled in this release. |
+| On-screen credit text | **Coming soon** — same as above. |
+| Markers already on your servers | Second opinion only — see below. |
+
+**"Publish when"** decides how sure the app must be before it writes anything:
+
+- **High** (default) — needs two independent sources to agree (chapters count as one).
+- **Medium** — also accepts a single source, but only one that checks *your* file's own cut: chapters, or a SkipDB
+  exact/shifted match. A single IntroDB or TheIntroDB answer never publishes alone, because neither knows which cut
+  of the file you have.
+
+Markers already on a Plex/Jellyfin/Emby server only ever *confirm* another source — they never publish on their own,
+and they can only **shorten** a skip (a later intro start, an earlier credits end), never lengthen one. That's
+deliberate: a crowd-sourced answer that runs to the very end of the file must never swallow a scene after the
+credits that the server's own marker correctly stops before. A server's markers imported by its own intro-database
+plugin (e.g. an AniSkip-style importer), or markers from another cut/version of the same Plex item, don't count as
+an independent second opinion — they join the online-database group instead of adding a vote of their own.
+
+**"Never overwrite my edits"** (on by default) means anything you adjust or lock in the Inspector always wins.
+
+**TheIntroDB** is used without the site's written permission (its terms restrict server-side use); it's off by
+default, and pasting your own free key is optional and entirely up to you. The key is masked (`****`) everywhere it's
+shown or returned by the API, and never logged.
+
+### Needs review
+
+When the sources don't clear the bar above — nothing agrees, or two credible answers disagree — the file shows
+**Needs review** and nothing is sent to any server. Nothing is guessed; you can still add markers by hand in the
+Inspector.
+
+### Plex: writing straight into Plex's database
+
+Plex has no API or plugin system for markers, so this app writes them directly into Plex's own SQLite database — the
+exact place Plex stores its own. Because that's unsupported by Plex, it's **opt-in with a one-time confirmation** the
+first time you turn it on for a Plex server:
+
+- **The app must run on the same machine as Plex.** SQLite's write mode (WAL) doesn't work over a network filesystem,
+  so a network-mounted database stays read-only.
+- **Map Plex's config folder into both containers from the identical host path.** On unRAID specifically, don't mix
+  `/mnt/user` and `/mnt/cache` between the two containers — even though both paths can reach the same files, Plex and
+  this app must open the database through the exact same path for the app's same-host proof to succeed.
+- **Viewers need Plex Pass** (or Plex Home) to see skip buttons at all — Plex hides markers entirely without it, even
+  ones already in its database.
+- If Plex's own detection re-analyzes an item, it can replace our markers with its own. By default the app puts ours
+  back on the next check (**"If Plex re-detects and replaces our markers" → "Put ours back"**); switch it to
+  **"Keep Plex's"** to leave Plex's answer alone and use it as evidence instead.
+- Tested against Plex 1.43. If a future Plex update changes the database's shape, the app stops writing and shows a
+  message rather than guessing.
+
+### Jellyfin: the Media Preview Bridge plugin
+
+Jellyfin also has no core API for markers. This app's existing **Media Preview Bridge** plugin (the same one used for
+trickplay tiles) gets a markers feature. The Edit tab's status block shows whether it's installed, its version, and
+an **Install** / **Update** button that uses the same plugin-install flow as trickplay. Markers show as Skip Intro /
+Skip Credits / Skip Recap / Skip Preview depending on what was decided.
+
+### Emby
+
+Not supported yet — an Emby publisher plugin is planned for a later phase. The Edit tab shows **"Not available
+yet"** and nothing is written to Emby in this release.
+
+### Multi-version Plex items
+
+When a Plex item has more than one version (a movie in two cuts, an episode with two releases), Plex serves **one**
+marker set for the whole item, not one per file. A marker type only shows up once every version has a decided marker
+of that type **and** they agree within 2 seconds. A newly added version that hasn't been decided yet temporarily
+hides that item's markers on Plex until it catches up — precision first.
+
+### Turning it off, or revoking the Plex confirmation
+
+Turning the per-server switch off — or revoking the Plex database-write confirmation — takes effect immediately,
+including for a job that's already running: its next per-file write to that server is skipped rather than going
+ahead on a stale setting.
+
+### Webhook follow-ups and retries
+
+A Sonarr/Radarr/webhook import queues an Intro & Credits job right after the preview job for the same files (at
+Normal priority, so previews still drain first). If a file isn't on disk yet, or a server hasn't indexed it into its
+library yet, it's retried using the same backoff as preview retries — **Settings → Retry policy → Retry count /
+Initial retry delay**. A retry batch holds at most 500 files at a time — a bigger backlog (e.g. a brand new library)
+is picked up on the next run instead.
+
+### Troubleshooting Intro & Credits
+
+Each server's Edit → Intro & Credits tab checks whether that server can actually receive markers right now. This
+table covers every state the check can report, using its exact wording:
+
+| What you see | Why | What to do |
+|---|---|---|
+| Green "Installed ✓" / no warning banner, status block all green | Everything needed to write markers checks out | Nothing — turn the server switch on if you haven't |
+| No status block; only the off switch | "Intro & Credits is off for this server" | Turn on "Send intro & credits markers to this server" |
+| *(Plex)* Status block: "Confirm the Plex database write to turn this on" | Plex has no marker API, so writing needs a one-time confirmation per Plex server; flipping the switch opens that confirmation dialog | Read the dialog and click "Enable for Plex" |
+| *(Jellyfin)* Red "Not installed" badge + **Install** button: "Install the Media Preview Bridge plugin" | Jellyfin has no core marker-write API; the plugin renders markers as media segments | Click **Install** |
+| *(Emby)* Grey "Not available yet" badge: "Emby needs the Media Preview Bridge for Emby plugin (coming in the next phase)" | Emby publishing isn't built yet | Nothing to do yet |
+| *(Plex)* Red "✕ Not active" next to Plex Pass: "This Plex server has no Plex Pass, so Plex won't show any markers." | Plex hides all markers — even ones already in its database — without Plex Pass | Add Plex Pass to this Plex server |
+| *(Plex)* "Plex's database is on a network share (…). The app must run on the same machine as Plex to write markers; Plex stays read-only." | SQLite's write mode doesn't work over NFS/SMB/CIFS | Run this app on the same machine as Plex |
+| *(Plex)* "Plex's database is on a filesystem this app doesn't recognise as a local disk (…); Plex stays read-only." | The app couldn't prove the folder is a real local disk, so it refuses to risk Plex's database | Check the mount; open an issue if it's genuinely local |
+| *(Plex)* "Plex is running, but not with the database file this app sees at …. Mount the exact folder Plex uses, on the same machine (on unRAID, the same /mnt/cache or /mnt/user path Plex uses)." | The app proves it shares Plex's live database lock before ever writing; this Plex has a different copy open | Map Plex's config folder into both containers from the identical host path |
+| *(Plex)* "Plex doesn't have its database open through this folder right now (Plex is stopped, or this app sees a different path to the file). Markers are only written while Plex is running." | Same same-host proof, failing because nothing has the database open | Start Plex; recheck the mounted path |
+| *(Plex)* "Plex hasn't created its marker tag yet. Run Plex's own intro or credits detection once on any item, then try again." | Markers reuse a database row Plex creates itself the first time it ever writes a marker | Run Plex's own intro or credits analysis once on any item, then recheck |
+| *(Jellyfin)* Amber "Update needed" badge + **Update** button: "Update Media Preview Bridge (installed …) to get markers support" | An older plugin build predates the markers feature | Click **Update** |
+| *(Plex)* "Plex […] data has an unknown shape; not writing markers." / "Plex's database has more than one marker tag row, so it's unclear which one Plex serves; not writing markers." | A future Plex version changed its database in a way the app doesn't recognise | Check for an app update; report your Plex version in an issue |
+| *(Plex)* "Plex is busy writing its database; trying again on the next run (…)." | Another process (usually Plex itself) holds the database briefly | Nothing — it retries on the next job |
+| *(Jellyfin)* "Can't reach this Jellyfin server" / "Can't reach the Media Preview Bridge markers endpoint on this Jellyfin server" | A transient connection problem | Confirm the server is up and reachable; recheck |
+| *(Jellyfin)* "Jellyfin rejected this server's credentials; reconnect it" | The stored token/login no longer works | Reconnect the server from the Servers page |
+| *(Jellyfin)* "Jellyfin refused the Media Preview Bridge markers endpoint; this server's API key or user needs administrator rights" | The connected account isn't an administrator | Reconnect with an admin account or API key |
+| *(Plex)* "This app (user N) can't write …. Run it with the user that owns Plex's database (user M)." | A `PUID`/`PGID` mismatch between the two containers | Set this container's `PUID`/`PGID` to the user that owns Plex's files |
+| *(Plex)* "Disk full: Plex's database can't take any writes (…)." | The disk holding Plex's database is full | Free up space on that disk |
+| Status block fails to load: "Couldn't check this server's Intro & Credits status" (Edit tab) or "Couldn't read this server's Intro & Credits state (…)" (Inspector row) | An unexpected error while checking (e.g. `markers.db` unreadable) — one server's failure never blocks the rest of the page | Reload; check the logs for the exception type named in the message |
+
+Per-file job outcomes use plainer labels in the job queue and Files panel: **Markers written**, **Up to date**,
+**Needs review**, **Waiting** (server hasn't indexed the file yet, or the item's versions don't agree yet),
+**Skipped** (the server can't take markers right now — see the table above for why), **No markers found**, and **No
+server with Intro & Credits on**.
+
+> [!NOTE]
+> Rolling back to a version before Intro & Credits existed needs an extra step — see
+> [Rolling back to a previous version](#rolling-back-to-a-previous-version).
+
+---
+
 ## HDR & Dolby Vision
 
 **The short version:** HDR thumbnails get **tone-mapped** to SDR (standard dynamic range) automatically, so you don't see washed-out or pitch-black previews. Most HDR formats just work; the trickiest case is **Dolby Vision Profile 5** (4K Dolby Vision rips with no HDR10 fallback layer), and the only setup step you may need is on NVIDIA — see the warning at the bottom of this section.
@@ -662,6 +812,19 @@ Schema downgrades are **not automated**. If you need to revert from a release th
    ```bash
    docker run ... your/image:older-tag
    ```
+
+> [!WARNING]
+> **Rolling back from a version with Intro & Credits (settings schema v15 or newer).** The older binary doesn't know
+> about the `intro_credits` job kind — it treats every job row it finds the same way, so a leftover Intro & Credits
+> job comes back as a **full preview scan** of that job's libraries instead of quietly disappearing. Before you stop
+> the container, **cancel any pending or running Intro & Credits jobs** from the Dashboard, or run this against your
+> config volume's `jobs.db` (check `web/jobs.py`'s `jobs` table — columns `kind` and `status` — before running
+> anything against a database you haven't looked at):
+> ```bash
+> sqlite3 /config/jobs.db "UPDATE jobs SET status='cancelled' WHERE kind='intro_credits' AND status IN ('pending','running')"
+> ```
+> This only stops the surprise scan; it doesn't restore markers already written to Plex or Jellyfin, and the older
+> binary can't write or read them either way.
 
 > **Multi-server caveat.** Multi-server installs cannot meaningfully downgrade to a single-server release without losing the second / third server's settings. The newer schema holds richer data than the older one can represent. The downgrade-refusal guard (introduced in this release) intentionally refuses to start the older binary against a newer `settings.json` — its log message names the `.bak` path so you have a one-line recovery hint.
 

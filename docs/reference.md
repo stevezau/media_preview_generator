@@ -17,6 +17,7 @@ Complete reference for all configuration options and REST API endpoints.
 - [Environment Variables](#environment-variables)
 - [Web Interface Settings](#web-interface-settings)
 - [Webhook Settings](#webhook-settings)
+- [Intro & Credits](#intro--credits)
 - [Path Mappings](#path-mappings)
 - [REST API](#rest-api)
 - [WebSocket Events](#websocket-events)
@@ -238,6 +239,179 @@ The **Recently Added Scanner** is not configured via settings keys any more — 
 
 > [!TIP]
 > Configure webhooks on the **Automation** page (`/automation`, Triggers tab) in the web UI. See [Webhook Integration](guides.md#webhook-integration) for setup instructions. The legacy `/webhooks` and `/schedules` URLs still work — they 302-redirect to the relevant tab.
+
+---
+
+## Intro & Credits
+
+Skip Intro / Skip Credits markers for Plex and Jellyfin (Emby publishing is a later phase). See the
+[Intro & Credits guide](guides.md#intro--credits) for setup and troubleshooting; this section is the settings/API
+reference. Schema version 15 (`upgrade.py`) added this feature, off everywhere by default.
+
+### Global settings (`settings.json["markers"]`)
+
+Shared detection settings — one file is detected once, whatever the publish rule decides. Managed from
+**Settings → Intro & Credits**.
+
+```json
+{
+  "detect": {"intro": true, "credits": true, "recap": false},
+  "publish_when": "high",
+  "respect_locks": true,
+  "sources": [
+    {"id": "chapters", "enabled": true},
+    {"id": "theintrodb", "enabled": false, "api_key": ""},
+    {"id": "introdb", "enabled": true},
+    {"id": "skipdb", "enabled": true},
+    {"id": "season_audio", "enabled": true},
+    {"id": "credits_text", "enabled": true},
+    {"id": "server_markers", "enabled": true}
+  ]
+}
+```
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `detect.intro` | bool | `true` | TV episodes only. |
+| `detect.credits` | bool | `true` | TV episodes and movies. |
+| `detect.recap` | bool | `false` | Jellyfin's player is the only one with a Skip Recap button. |
+| `publish_when` | `"high"` \| `"medium"` | `"high"` | **High:** needs two independent sources to agree (chapters count as one). **Medium:** also accepts a single source that checks the file's own cut — chapters, or a SkipDB `exact`/`shifted` match. IntroDB and TheIntroDB never decide alone at either level. |
+| `respect_locks` | bool | `true` | A marker adjusted or locked in the Inspector is never replaced by detection. |
+| `sources` | array | see above | Evidence sources, in checking/precedence order. Reordering in the UI reorders this array. |
+| `sources[].id` | one of `chapters`, `theintrodb`, `introdb`, `skipdb`, `season_audio`, `credits_text`, `server_markers` | — | `season_audio` and `credits_text` are "Coming soon" in this release: measured and speced, not yet built. Their `enabled` value and position still round-trip through save/load, but detection doesn't run for them. |
+| `sources[].enabled` | bool | varies | `theintrodb` defaults to `false` (used without the vendor's written permission); the rest default to `true`. |
+| `sources[].api_key` | string | `""` | `theintrodb` only. Optional. `GET`/`POST /api/settings` mask a set key as `****`; posting `****` back keeps the stored key unchanged. Never logged. |
+
+### Per-server settings (`media_servers[].markers`)
+
+Whether — and where — a server actually receives markers. Managed from **Servers → (server) → Edit → Intro &
+Credits tab**.
+
+```json
+{
+  "enabled": false,
+  "library_ids": null,
+  "plex": {"db_write_confirmed_at": null, "on_plex_redetect": "restore"}
+}
+```
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `false` | Off until turned on for this server. On a Plex server, setting this `true` requires `plex.db_write_confirmed_at` to already be set (or included in the same request) — 400 otherwise. |
+| `library_ids` | array of strings \| `null` | `null` | `null` = every library except sports-type ones (name matched, whole word "sport"/"sports" — no vendor exposes an actual sports library kind). An explicit list is taken literally, including a deliberate sports library. |
+| `plex` | object | *(Plex servers only)* | Absent on Emby/Jellyfin entries. |
+| `plex.db_write_confirmed_at` | ISO-8601 timestamp \| `null` | `null` | Set once the one-time "Send intro & credits markers to Plex?" confirmation is accepted. Clearing it while `enabled` stays `true` in the same request is rejected (400) — send `enabled: false` in the same PUT to revoke. |
+| `plex.on_plex_redetect` | `"restore"` \| `"keep_plex"` | `"restore"` | What happens after Plex's own detection replaces our markers: put ours back on the next check, or leave Plex's answer and use it as evidence. |
+
+### Job kind `intro_credits`
+
+Intro & Credits jobs are a distinct `kind` (alongside `previews`) on the same `Job`/`jobs.db` row shape as preview
+jobs (see [Jobs Endpoints](#jobs-endpoints)) — same queue, priority levels, pause/cancel and dashboard, routed to
+`markers`-specific check/process functions instead of the preview pipeline. `config` (the job's `config_json`
+column) holds:
+
+| Key | Type | Notes |
+|---|---|---|
+| `kind` | `"intro_credits"` | Always this value for a markers job. |
+| `source` | string | What created it: `manual`, `schedule`, `inspector` (re-detect), or a webhook source name (`sonarr`, `radarr`, `plex`, `retry`, …). |
+| `libraries` | `[{"server_id", "library_id"}]` | Libraries to enumerate. Empty with no `file_paths` = every library Intro & Credits goes to. |
+| `file_paths` | array of strings | Explicit files/folders instead of libraries (webhook follow-ups, Inspector re-detect, retries). |
+| `follows_job_id` | string \| `null` | The preview job this job waits for before taking a job-gate slot (webhook follow-ups only). |
+| `force` | bool | Re-detect files already decided, asking every source again. |
+| `webhook_item_id_hints` | `{path: {server_id: item_id}}` | Item ids a vendor webhook already supplied, so the job skips a lookup. |
+| `retry_attempt` | int | Present only on a retry job: which retry this is (1-based). |
+| `retry_delay` | int | Present only on a retry job: seconds waited before it took a slot. |
+| `retry_not_before` | ISO-8601 timestamp | Present only on a retry job: the due time (survives a restart without waiting again in full). |
+
+Retries (files not yet on disk, or not yet in a server's library) reuse the webhook preview-retry backoff
+(`webhook_retry_count` / `webhook_retry_delay`) and cap at **500 files** per retry job — a bigger backlog waits for
+the next run.
+
+### Outcome keys
+
+Per-file outcomes (`markers.outcomes.FileOutcome`, shown in the job's Files panel and progress breakdown):
+
+| Key | Label | Meaning |
+|---|---|---|
+| `markers_published` | Markers written | At least one server received markers |
+| `markers_up_to_date` | Up to date | Every enabled server already showed these markers |
+| `markers_waiting` | Waiting | A server hasn't indexed the file yet, or a Plex item's versions don't yet agree |
+| `markers_needs_review` | Needs review | Sources don't agree yet, so nothing was sent |
+| `markers_none` | No markers found | No source found an intro or credits for this file |
+| `markers_no_owners` | No server with Intro & Credits on | No enabled server with Intro & Credits on holds this file |
+| `skipped_file_not_found` | Not Found | File not found on disk |
+| `markers_skipped` | Skipped | Every server that owns this file can't take markers right now (see the [capability states](guides.md#troubleshooting-intro--credits) — a plugin missing, Plex not ready, etc.) |
+| `failed` | Failed | Processing failed |
+
+Per-server row statuses (`markers.outcomes.ServerStatus`) use the same `markers_written` / `markers_up_to_date` /
+`markers_needs_review` / `markers_skipped` / `markers_waiting` / `failed` keys, plus `markers_none` (nothing to
+publish on that server). A file's overall outcome folds its per-server rows by precedence: any server written →
+published; any failed → failed; any up to date → up to date; any waiting → waiting; otherwise needs review, no
+markers, or skipped.
+
+### Intro & Credits Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/markers/jobs` | Start an Intro & Credits job |
+| GET | `/api/markers/servers/{server_id}/status` | This server's Intro & Credits status (Edit tab) |
+| GET | `/api/markers/sources/usage` | Today's online-lookup usage per source |
+| GET | `/api/markers/item` | Inspector data for one file |
+| POST | `/api/markers/item/redetect` | Re-run Intro & Credits for one file, asking every source again |
+
+All five require the same `X-Auth-Token` / `Authorization: Bearer` auth as the rest of the API. `POST
+/api/markers/jobs` is CSRF-exempt (like `POST /api/jobs`) so token-authenticated scripts can call it directly without
+a browser session.
+
+#### POST /api/markers/jobs
+
+**Request:** `{"libraries": [{"server_id", "library_id"}]}` or `{"file_paths": [...]}` — omit both for every library
+Intro & Credits goes to. Optional: `priority` (`1`-`3` or `high`/`normal`/`low`, default `low`), `force` (re-detect
+files already done), `library_name` (job title).
+
+**Response:** `201` with the created job; `400` for an invalid body (both `libraries` and `file_paths` given, a bad
+`priority`, …); `503` when the config directory isn't writable.
+
+#### GET /api/markers/servers/{server_id}/status
+
+**Response:** `200` with `server_id`, `server_type`, `enabled`, `settings` (as stored), `capability` (`{state,
+message, details}`, checked as if Intro & Credits were already on — one of `ready`, `disabled`,
+`needs_confirmation`, `needs_plugin`, `plugin_outdated`, `needs_pass`, `needs_local_db`,
+`needs_plex_detection_once`, `unsupported_schema`, `unreachable`, `misconfigured`, or `unknown` when the check itself
+failed), `can_show` (marker types this server type can display) and `libraries` (with each one's default selection).
+`404` for an unknown server; `500` with a JSON error when the status can't be built. A server turned off on the
+Servers page isn't contacted (`capability.state` is `disabled`).
+
+#### GET /api/markers/sources/usage
+
+**Response:** `200` with `{source_id: {day, used, limit, remaining, has_key}}` for `theintrodb`, `introdb` and
+`skipdb`. `has_key` is only meaningful for `theintrodb`; the key itself is never returned.
+
+#### GET /api/markers/item
+
+**Query:** either `path` (a file inside a server library), or `server_id` + `item_id`.
+
+**Response:** `200` with `known`, `canonical_path`, `duration_ms`, `is_movie`, `decisions` (by marker type),
+`evidence` rows, and `servers` (one row per owning server: `current` markers as read live, `published` markers that
+are ours, `plan` — `will_add` / `will_replace` / `will_remove` / `up_to_date` / `waiting` / `not_enabled` /
+`nothing_to_publish` / `unknown` — with `plan_reason`; a server whose state can't be read gets a degraded row with
+`error` set instead of failing the whole response). `400` when the path isn't a file inside a server library, the
+query is incomplete, or `item_id` isn't shaped like an id that server's type uses (checked before any server is
+contacted). `404` for an unknown server, or a `server_id`+`item_id` with no file on this app's disk. `409` when the
+server is disabled. `500` with a JSON error when the file's data can't be built.
+
+#### POST /api/markers/item/redetect
+
+**Request:** `{"path"}`.
+
+**Response:** `202` with `{"job_id"}` — a HIGH-priority, forced, single-file job. If this same file already has a
+re-detect queued or running, that job's id is returned instead of starting a second one (a double-click, or clicking
+again before the first finishes, doesn't spend the online sources' daily budget twice). `400` when the path isn't a
+file inside a server library. `503` when the config directory isn't writable.
+
+> [!NOTE]
+> There is no separate "install the Jellyfin plugin" route for Intro & Credits — the Edit tab's Install/Update button
+> calls the existing `POST /api/servers/{id}/install-plugin` (see [Servers](#servers-beyond-the-basics-in-multi-media-server-endpoints)).
 
 ---
 
@@ -661,6 +835,7 @@ explicit `null` clears it.
 
 - `"full_library"` *(default — optional, omit to get the same behaviour)* — schedule runs a full library scan via the standard job pipeline, processing every item in `library_id` that's missing previews.
 - `"recently_added"` — schedule runs a Recently Added scan instead. Requires `config.lookback_hours` (float, clamped to 0.25–720). Scans only items added within the lookback window (Plex `addedAt`, Emby/Jellyfin `DateCreated`), queuing each through the webhook job pipeline. When `library_id` is `null`, the scan falls back to the globally selected libraries in Settings (or every supported library when no global filter is set); when set, only that section is scanned. Works for Plex, Emby, and Jellyfin — each vendor's processor implements `scan_recently_added` against its native API.
+- `"intro_credits"` — schedule creates an [Intro & Credits](#intro--credits) job (`kind=intro_credits`) instead of a preview job, for the schedule's libraries (every library Intro & Credits goes to when none are chosen). LOW priority unless the schedule sets one. Skipped while an earlier Intro & Credits job from the same schedule is still pending or running.
 
 ### System Endpoints
 

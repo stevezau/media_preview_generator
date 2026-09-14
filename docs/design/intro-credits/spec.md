@@ -19,11 +19,17 @@ published to every server that has the file. Feature name in the UI: **"Intro & 
    https://claude.ai/code/artifact/65394c1a-e878-4fc2-985b-63bc4c307c5d (source: `evidence/design/index.html`).
 5. Memory notes: `intro-credits-markers-design`, `lab-servers-on-storage`, `design-doc-survives-clear`.
 
-**Status (2026-09-13).** Owner approved the build. All server write paths proven in the lab. Detection settings
-measured on the owner's library. Decisions §14 closed. Build runs on PR #241, branch `feat/markers-detection`
-(dev merged in); spec + slimmed evidence + plans live on the branch in `docs/design/intro-credits/`. Local-only,
-gitignored files stay beside them: `evidence/lab/env` (tokens), `evidence/lab/synth/` (webm), `evidence/online/skipdb-dump.json`,
-`evidence/plugins/emby-4.10/embylibs/`. Next step: the first unchecked task in the current phase plan.
+**Status (2026-09-14).** Phase 1 (§12: store, chapters/online detection, Intro & Credits job type, Plex + Jellyfin
+publishers, per-server Edit tab, Settings section, Inspector tab, config migration, docs) is built, reviewed and on
+the branch — season audio matching and credits text detection are researched and speced (§5.3, §5.4) but not wired
+into a job yet ("Coming soon" in the UI); Emby publishing is still phase 2. A milestone whole-branch audit (audits
+A/B/C) found 3 HIGH / 10 MED across detection, jobs and publishing, fixed across three parallel lanes; §14 has the
+dated rulings. Build runs
+on PR #241, branch `feat/markers-detection` (dev merged in); spec + slimmed evidence + plans live on the branch in
+`docs/design/intro-credits/`. Local-only, gitignored files stay beside them: `evidence/lab/env` (tokens),
+`evidence/lab/synth/` (webm), `evidence/online/skipdb-dump.json`, `evidence/plugins/emby-4.10/embylibs/`. **Next
+step: the lab matrix (Task 19)** — proving every server write/serve/wipe behaviour end to end on the claimed lab
+servers, per §10.3 — then the PR.
 
 **Working rules (owner's, non-negotiable).**
 - Prove server behaviour on the **lab servers on storage** (§10.3), never on the prod Plex on `plex`. Prod Plex DB:
@@ -726,3 +732,23 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   rules and online parsers carry versions so stored evidence is re-derived after a rules change. Cost measured on the
   43 verified online cases: with TheIntroDB on, Medium's correct credits drop from 22 to 1 (precision chosen over
   coverage). Evidence scripts: `evidence/audit-phase1/`.
+- 2026-09-14 · Milestone audit fix lanes (§6.2, §6.4, §7, §8), from audits A and C: turning a server's Intro & Credits
+  switch off, or revoking a Plex server's database-write confirmation, now stops an already-running job's next
+  per-file write to that server (it re-reads the setting per file rather than caching it at job start) instead of
+  finishing the write on a stale setting. A webhook-triggered file not yet on disk, not only one a server hasn't
+  indexed yet, now gets the same delayed retry follow-up (`webhook_retry_count`/`webhook_retry_delay`); a retry job
+  is capped at 500 files, the rest wait for the next run. `POST /api/markers/jobs` is CSRF-exempt like `POST
+  /api/jobs` (a token script's endpoint, not browser-only). `GET /api/markers/item?server_id&item_id` rejects an
+  `item_id` that isn't shaped like that server type's ids (400) before any server is contacted. Inspector re-detect
+  reuses an already-queued or already-running forced job for the same file instead of starting a second one. There
+  is still no separate "install the Jellyfin plugin" route for markers — the Edit tab uses the existing `POST
+  /api/servers/{id}/install-plugin` (per the Task 13 ruling above), whose result now also drops the per-server
+  capability cache so the tab re-checks instead of showing the pre-install plugin state.
+- 2026-09-14 · Jellyfin plugin (§6.3), from the docs/lab pass: the Bridge's segment provider does no per-item work
+  until markers have been pushed to that server at least once (`Supports()` gates on the marker store folder
+  existing), so a server that never receives markers pays no per-video provider cost on scans. A new background
+  service follows Jellyfin's `ILibraryManager.ItemRemoved` on both ABI builds and deletes a removed item's stored
+  markers — broader than the 12.0-only `CleanupExtractedData` hook (file-changed only), which stays as an additional
+  cleanup path on 12.0. Jellyfin 10.11 reports only the top item when a whole folder is removed, so a
+  scheduled task (after start and daily) also deletes stored markers for items Jellyfin no longer has, once startup
+  and library scans are done.

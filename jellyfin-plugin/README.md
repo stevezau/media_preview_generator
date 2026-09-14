@@ -69,6 +69,7 @@ Content-Type: application/json
 - On Jellyfin 12, a refresh that finds the media file changed deletes the item's stored markers along with its other extracted data; push them again for the new file.
 - When Jellyfin removes a video from the library, its stored markers are deleted too. Jellyfin 10.11 reports only the top item when a whole show or season folder is removed, so the scheduled task **Media Preview Bridge: clean up Intro & Credits markers** (Dashboard → Scheduled Tasks → Maintenance; after every start and daily at 03:00) deletes the stored markers of items Jellyfin no longer has. It waits while Jellyfin is still starting or a library scan is running (up to 10 minutes) and skips the run if that doesn't end, so a cold start never reads every item as gone.
 - The **Media Preview Bridge** segment provider takes part only once markers have been pushed to the server (the `markers` folder exists). Until then Jellyfin skips it for every item, so servers that only use trickplay do no extra work during library scans or the Media Segment Scan task.
+- On 10.11 the `fileSize` check above is what keeps a replaced file's old markers from being served until new markers are pushed.
 
 ## Required Jellyfin library options
 
