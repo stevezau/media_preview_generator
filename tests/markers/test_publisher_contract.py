@@ -424,8 +424,8 @@ def test_single_version_publishes_once_then_is_up_to_date(plex_item):
     assert _outcomes(item.run("1080p"), item.run("1080p")) == ["published", "up_to_date"]
     assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.commits == 1
 
-    item.touch("1080p", 5)  # replaced by a file with the same chapters: published again, nothing changes on Plex
-    assert _outcomes(item.run("1080p"), item.run("1080p")) == ["published", "up_to_date"]
+    item.touch("1080p", 5)  # replaced by a file with the same chapters: checked again, nothing changes on Plex
+    assert _outcomes(item.run("1080p"), item.run("1080p")) == ["up_to_date", "up_to_date"]
     assert item.commits == 1
 
     item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X)
@@ -463,7 +463,8 @@ def test_partial_agreement_then_agreeing_credits_with_different_times(plex_item)
     item.touch("2160p", 12)
     assert _outcomes(item.run("1080p")) == ["waiting"]  # B not decided again yet: our intro comes off
     assert item.served() == item.recorded() == [] and item.commits == 2
-    assert _outcomes(item.run("2160p"), item.run("1080p")) == ["published", "published"]
+    # A's run changes nothing: B's publish already shows the credits A agrees with.
+    assert _outcomes(item.run("2160p"), item.run("1080p")) == ["published", "up_to_date"]
     shown = item.served()
     assert shown == item.recorded() and [t for t, *_ in shown] == ["credits"] and item.commits == 3
     assert _outcomes(item.run("2160p"), item.run("1080p"), item.run("2160p")) == ["up_to_date"] * 3
@@ -528,7 +529,7 @@ def test_agreeing_versions_with_different_runtimes_commit_once(plex_item):
     item.chapters[a] = chapters(credits=CREDITS_AT)
     item.chapters[b] = chapters(credits=CREDITS_AT)
     assert _outcomes(item.run("1080p"), item.run("2160p")) == ["waiting", "published"]
-    assert _outcomes(item.run("1080p")) == ["published"]
+    assert _outcomes(item.run("1080p")) == ["up_to_date"]  # 2160p's publish already shows what 1080p decided
     outs = [item.run(v) for _ in range(3) for v in ("2160p", "1080p")]
     assert _outcomes(*outs) == ["up_to_date"] * 6
     assert item.commits == 1 and item.served() == item.recorded()
@@ -645,3 +646,232 @@ def test_concurrent_versions_leave_the_item_row_matching_what_plex_serves(plex_i
         item.run("2160p")
         item.run("1080p")
         assert item.served() == item.recorded() == []
+
+
+@pytest.mark.parametrize(
+    ("served", "others_alongside", "shown"),
+    [
+        ({T.INTRO: [(1, 2)], T.CREDITS: [(5, 9)]}, False, "ours"),
+        ({T.INTRO: [(1, 2)]}, False, "missing"),
+        ({T.INTRO: [(1, 2)], T.CREDITS: [(4, 9)]}, False, "replaced"),
+        ({T.INTRO: [(1, 2)], T.CREDITS: [(5, 9), (7, 8)]}, False, "replaced"),  # Plex: a row beside ours
+        ({T.INTRO: [(1, 2)], T.CREDITS: [(5, 9), (7, 8)]}, True, "ours"),  # Jellyfin: another provider beside ours
+        ({T.INTRO: [(1, 2)], T.CREDITS: [(7, 8)]}, True, "replaced"),
+        ({}, True, "missing"),
+    ],
+)
+def test_compare_shown_matrix(served, others_alongside, shown):
+    from media_preview_generator.markers.publishers.base import compare_shown
+
+    ours = [Marker(T.INTRO, 1, 2, ("a",)), Marker(T.CREDITS, 5, 9, ("a",))]
+    assert compare_shown(ours, served, others_alongside=others_alongside).value == shown
+
+
+# --- Read-back verify: a file whose decision and item row are unchanged is only "Up to date" when the server still
+# --- shows what this app left there (lab: Plex re-detection and rescans wiped markers while jobs said up to date).
+
+
+def _plex_native_credits(item: PlexItem, start: int, end: int) -> None:
+    """What Plex's own credits detection leaves: our credits rows gone, one of its own (no pv: keys) in their place."""
+    item._sql(
+        ("DELETE FROM taggings WHERE metadata_item_id=7 AND text='credits'",),
+        (
+            "INSERT INTO taggings (metadata_item_id, tag_id, [index], text, time_offset, end_time_offset, thumb_url, "
+            "created_at, extra_data) VALUES (7, 563, 9, 'credits', ?, ?, '', 0, '')",
+            (start, end),
+        ),
+    )
+
+
+class TestReadBackVerify:
+    def test_plex_wiped_by_a_rescan_is_written_again(self, plex_item):
+        item = plex_item(versions=("1080p",))
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        assert _outcomes(item.run("1080p")) == ["published"]
+        item._sql(("DELETE FROM taggings WHERE metadata_item_id=7",))
+        assert item.served() == []
+
+        out = item.run("1080p")
+
+        assert _outcomes(out) == ["published"]
+        assert (out.publisher_rows[0]["status"], out.publisher_rows[0]["message"]) == ("markers_written", "2 marker(s)")
+        assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.commits == 2
+        assert _outcomes(item.run("1080p")) == ["up_to_date"] and item.commits == 2
+
+    @pytest.mark.parametrize(
+        ("setting", "outcome", "served_credits", "message"),
+        [
+            ("restore", "published", SHOWN_CREDITS, "2 marker(s)"),
+            ("keep_plex", "up_to_date", ("credits", 1_282_000, 1_300_000), "Plex's own markers are kept (Keep Plex's)"),
+        ],
+        ids=["restore", "keep_plex"],
+    )
+    def test_plex_own_detection_replacing_ours_follows_on_plex_redetect(
+        self, plex_item, setting, outcome, served_credits, message
+    ):
+        item = plex_item(versions=("1080p",))
+        item.cfg.markers["plex"]["on_plex_redetect"] = setting
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        item.run("1080p")
+        _plex_native_credits(item, 1_280_000, 1_302_000)  # served 1:21:20–1:21:40 (Plex's non-final shift)
+
+        outs = [item.run("1080p"), item.run("1080p")]
+
+        assert _outcomes(*outs) == [outcome, "up_to_date"]
+        assert outs[0].publisher_rows[0]["message"] == message
+        assert item.served() == [SHOWN_INTRO, served_credits]
+        assert item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS]  # still what this app last left there
+        assert item.commits == (2 if setting == "restore" else 1)
+
+    @pytest.mark.parametrize(("setting", "outcome"), [("restore", "published"), ("keep_plex", "up_to_date")])
+    def test_a_plex_row_next_to_ours_counts_as_replaced(self, plex_item, setting, outcome):
+        # Plex added its own credits beside ours: two credits markers show, so ours no longer stand alone.
+        item = plex_item(versions=("1080p",))
+        item.cfg.markers["plex"]["on_plex_redetect"] = setting
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        item.run("1080p")
+        item._sql(
+            (
+                "INSERT INTO taggings (metadata_item_id, tag_id, [index], text, time_offset, end_time_offset, "
+                "thumb_url, created_at, extra_data) VALUES (7, 563, 9, 'credits', 600000, 660000, '', 0, '')",
+            )
+        )
+        assert _outcomes(item.run("1080p")) == [outcome]
+        expected = (
+            [SHOWN_INTRO, SHOWN_CREDITS]
+            if setting == "restore"
+            else [SHOWN_INTRO, ("credits", 602_000, 658_000), SHOWN_CREDITS]
+        )
+        assert sorted(item.served(), key=lambda s: s[1]) == sorted(expected, key=lambda s: s[1])
+
+    def test_keep_plex_still_restores_markers_that_are_simply_gone(self, plex_item):
+        item = plex_item(versions=("1080p",))
+        item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        item.run("1080p")
+        item._sql(("DELETE FROM taggings WHERE metadata_item_id=7 AND text='credits'",))
+        assert _outcomes(item.run("1080p")) == ["published"]
+        assert item.served() == [SHOWN_INTRO, SHOWN_CREDITS]
+
+    def test_plex_read_failure_keeps_up_to_date_and_writes_nothing(self, plex_item, monkeypatch):
+        item = plex_item(versions=("1080p",))
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        ctx = _ctx(item.store, item.registry, settings_raw=NO_ONLINE)
+        path = ProcessableItem(canonical_path=item.paths["1080p"], server_id="plex-1")
+        assert pipeline.check_item(path, ctx=ctx).outcome_key == "markers_published"  # capability cached READY
+        item._sql(("DELETE FROM taggings WHERE metadata_item_id=7",))
+        # Plex stops holding its database: the read-back can't be trusted, so nothing is decided from it.
+        monkeypatch.setattr(plex_db, "shm_lock_held_elsewhere", lambda _db, **_kw: False)
+
+        out = pipeline.check_item(path, ctx=ctx)
+
+        assert (out.outcome_key, out.publisher_rows[0]["message"]) == ("markers_up_to_date", "Up to date")
+        assert item.commits == 1
+
+    def test_a_write_that_finds_nothing_left_to_do_under_the_lock_is_up_to_date(self, plex_item, monkeypatch):
+        # Another version's publish wrote the same rows between the snapshot plan and the write lock.
+        item = plex_item(versions=("1080p",))
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        item.run("1080p")
+        real = plex_db._nothing_to_write
+        calls = []
+
+        def stale_snapshot(plan, wanted):
+            calls.append(plan)
+            return False if len(calls) == 1 else real(plan, wanted)
+
+        monkeypatch.setattr(plex_db, "_nothing_to_write", stale_snapshot)
+        assert _outcomes(item.run("1080p", force=True)) == ["up_to_date"]
+        assert len(calls) == 2 and item.commits == 1
+
+    def test_forced_run_that_restores_plex_markers_is_labelled_written(self, plex_item):
+        item = plex_item(versions=("1080p",))
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        item.run("1080p")
+        assert _outcomes(item.run("1080p", force=True)) == ["up_to_date"] and item.commits == 1  # a true no-op
+        item._sql(("DELETE FROM taggings WHERE metadata_item_id=7",))
+        assert _outcomes(item.run("1080p", force=True)) == ["published"] and item.commits == 2
+
+
+@pytest.fixture
+def jf_run(jellyfin, tmp_path):
+    jellyfin.server.resolve_remote_path_to_item_id.return_value = jellyfin.item_id
+    jellyfin.server.get_external_ids.return_value = None
+    reg = FakeRegistry({jellyfin.cfg.id: jellyfin.cfg}, servers_by_id={jellyfin.cfg.id: jellyfin.server})
+    store = MarkerStore(str(tmp_path / "markers.db"))
+    item = ProcessableItem(canonical_path=jellyfin.path, server_id=jellyfin.cfg.id)
+
+    def run(*, force=False):
+        with (
+            patch.object(pipeline, "probe_media", return_value=MediaProbe(DUR, CHAPTERS_BOTH)),
+            patch.object(
+                type(_publisher(jellyfin)), "capability", return_value=CapabilityReport(Capability.READY, "ok")
+            ),
+        ):
+            return pipeline.check_item(item, ctx=_ctx(store, reg, settings_raw=NO_ONLINE, force=force))
+
+    yield run
+    store.close()
+
+
+class TestJellyfinReadBackVerify:
+    def test_markers_the_plugin_lost_are_written_again(self, jellyfin, jf_run):
+        assert jf_run().outcome_key == "markers_published"
+        jellyfin.server.put_bridge_markers.reset_mock()
+        assert jf_run().outcome_key == "markers_up_to_date"
+        jellyfin.server.put_bridge_markers.assert_not_called()
+
+        jellyfin.server.delete_bridge_markers("abc")  # the plugin's cleanup after a remove and re-add
+        out = jf_run()
+
+        assert (out.outcome_key, out.publisher_rows[0]["message"]) == ("markers_published", "2 marker(s)")
+        assert jellyfin.shown() == jellyfin.both
+        assert jellyfin.server.put_bridge_markers.call_count == 1
+
+    def test_another_providers_segment_beside_ours_is_still_up_to_date(self, jellyfin, jf_run):
+        jf_run()
+        jellyfin.server.put_bridge_markers.reset_mock()
+        served = jellyfin.server.get_media_segments.side_effect
+        other = {"Id": "x", "ItemId": "abc", "Type": "Intro", "StartTicks": 50_000_000, "EndTicks": 400_000_000}
+        jellyfin.server.get_media_segments.side_effect = lambda item_id: [*served(item_id), other]
+        assert jf_run().outcome_key == "markers_up_to_date"
+        assert jf_run(force=True).outcome_key == "markers_up_to_date"
+        jellyfin.server.put_bridge_markers.assert_not_called()
+
+    @pytest.mark.parametrize("first_read", ["replaced", "unreadable"])
+    def test_forced_run_posts_unless_jellyfin_is_known_to_serve_ours(self, jellyfin, jf_run, first_read):
+        jf_run()
+        served = jellyfin.server.get_media_segments.side_effect
+        jellyfin.server.delete_bridge_markers("abc")
+        answers = []
+
+        def segments(item_id):
+            answers.append(item_id)
+            if len(answers) > 1:
+                return served(item_id)
+            if first_read == "unreadable":
+                return None
+            return [{"Id": "x", "ItemId": item_id, "Type": "Intro", "StartTicks": 1, "EndTicks": 300_000_000}]
+
+        jellyfin.server.get_media_segments.side_effect = segments
+        jellyfin.server.put_bridge_markers.reset_mock()
+        assert jf_run(force=True).outcome_key == "markers_published"
+        assert jellyfin.server.put_bridge_markers.call_count == 1 and jellyfin.shown() == jellyfin.both
+
+    def test_read_failure_keeps_up_to_date_without_writing(self, jellyfin, jf_run):
+        jf_run()
+        jellyfin.server.delete_bridge_markers("abc")
+        jellyfin.server.put_bridge_markers.reset_mock()
+        jellyfin.server.get_media_segments.side_effect = lambda item_id: None  # Jellyfin didn't answer
+        out = jf_run()
+        assert (out.outcome_key, out.publisher_rows[0]["message"]) == ("markers_up_to_date", "Up to date")
+        jellyfin.server.put_bridge_markers.assert_not_called()
+
+    def test_forced_run_is_written_only_when_it_restores_something(self, jellyfin, jf_run):
+        jf_run()
+        jellyfin.server.put_bridge_markers.reset_mock()
+        assert jf_run(force=True).outcome_key == "markers_up_to_date"  # still shown: no POST, a true no-op
+        jellyfin.server.put_bridge_markers.assert_not_called()
+        jellyfin.server.delete_bridge_markers("abc")
+        assert jf_run(force=True).outcome_key == "markers_published"
+        assert jellyfin.shown() == jellyfin.both and jellyfin.server.put_bridge_markers.call_count == 1

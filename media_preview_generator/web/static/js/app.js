@@ -1538,7 +1538,7 @@ const STATUS_META = {
 
     // Intro & Credits — file outcomes (markers.outcomes.FileOutcome) and per-server row statuses (ServerStatus).
     // markers_up_to_date / _none / _skipped / _waiting are both, with one label each.
-    markers_published:      { label: 'Markers written', cls: 'bg-success', tip: 'Markers were sent to at least one server' },
+    markers_published:      { label: 'Markers written', cls: 'bg-success', tip: 'The job changed what at least one server shows' },
     markers_written:        { label: 'Markers written', cls: 'bg-success', tip: 'Markers were written to this server' },
     markers_up_to_date:     { label: 'Up to date', cls: 'bg-secondary', tip: 'The server already shows these markers' },
     markers_needs_review:   { label: 'Needs review', cls: 'bg-warning text-dark', tip: 'The sources don\'t agree yet, so nothing was sent' },
@@ -1567,9 +1567,10 @@ function _markersPauseState(job) {
     return processingPaused ? 'all' : '';
 }
 
-// Queue titles from the backend start with "Intro & Credits: " or "Intro & Credits · "; the kind badge says it already.
+// Queue titles from the backend start with "Intro & Credits: " or "Intro & Credits · " (after "Retry: " or "Verify: ");
+// the kind badge says it already.
 function _markersDisplayName(name) {
-    const match = /^(Retry: )?Intro & Credits(?::| ·) (.+)$/.exec(name || '');
+    const match = /^((?:Retry|Verify): )?Intro & Credits(?::| ·) (.+)$/.exec(name || '');
     return match ? (match[1] || '') + match[2] : (name || '');
 }
 

@@ -25,7 +25,7 @@ from ..web.job_gate import format_wait_message, get_job_gate
 from ..web.jobs import JobStatus, WorkerStatus, get_job_manager
 from ..web.routes.job_runner import _build_selected_gpus, _format_eta, _inflight_jobs, _inflight_lock
 from ..web.settings_manager import get_settings_manager
-from .outcomes import NOT_IN_LIBRARY, FileOutcome, ServerStatus
+from .outcomes import NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN, RETRY_REASON_CODES, VERIFY_LATER, FileOutcome, ServerStatus
 from .ownership import marker_libraries
 from .pipeline import build_context, kind_handlers
 from .settings import load_server
@@ -34,8 +34,11 @@ _POLL_S = 1.0
 # Polls a PENDING preview job may go without a thread before its follow-up stops waiting for it. Covers the moment
 # between two starts of the pending drain or the restart requeue; a job not revived after a restart never gets one.
 _ORPHAN_GRACE_POLLS = 30
-# Largest retry job; a bigger backlog of unindexed files (a new library) waits for the next run instead.
+# Largest retry (or verify) job; a bigger backlog of unindexed files (a new library) waits for the next run instead.
 MAX_RETRY_FILES = 500
+# A replaced file is checked again this long after its publish at the least (servers rescan it after the job).
+MIN_VERIFY_DELAY_S = 600
+VERIFY_DELAY_FACTOR = 3
 _FINISHED = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED})
 # Job sources where the user chose the files (API/Start job dialog, Inspector re-detect).
 _USER_PICKED_SOURCES = frozenset({"manual", "inspector"})
@@ -45,19 +48,20 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def waits_for_library(row: object) -> bool:
-    """Whether a per-server row says the server hasn't indexed the file yet (a retry can fix it).
+def retry_reason(row: object) -> str | None:
+    """Why a per-server row's file is worth trying again later, if it is.
 
     Args:
         row: One of the pipeline's per-server rows.
 
     Returns:
-        True for a waiting row with the pipeline's ``not_in_library`` reason code (no item id yet, or the server says
-        the item isn't there).
+        The reason code of a waiting row the job retries (the server hasn't indexed the file yet, or Plex didn't answer
+        its Plex Pass check); None for any other row.
     """
     if not isinstance(row, dict) or row.get("status") != ServerStatus.WAITING.value:
-        return False
-    return row.get("reason_code") == NOT_IN_LIBRARY
+        return None
+    code = row.get("reason_code")
+    return code if code in RETRY_REASON_CODES else None
 
 
 def retry_delay_s(attempt: int, retry_delay: int) -> int:
@@ -74,23 +78,38 @@ def retry_delay_s(attempt: int, retry_delay: int) -> int:
     return max(1, int(BACKOFF_SCHEDULE[min(attempt - 1, len(BACKOFF_SCHEDULE) - 1)] * scale))
 
 
-def _retry_reason(not_indexed: int, not_on_disk: int) -> str:
-    if not_on_disk and not not_indexed:
-        return "not on disk yet"
-    if not_indexed and not not_on_disk:
-        return "not in a server's library yet"
-    return "not on disk or not in a server's library yet"
+NOT_ON_DISK = "not_on_disk"
+# Retry log wording per reason, in the order a combined line lists them.
+_RETRY_WORDS = {
+    NOT_ON_DISK: "not on disk",
+    NOT_IN_LIBRARY: "not in a server's library",
+    PLEX_PASS_UNKNOWN: "not checked on Plex",
+}
 
 
-def _queue_retry(job, cfg: dict, not_indexed: set[str], not_on_disk: set[str]) -> None:
-    """Create the delayed retry job for files a server hadn't indexed yet or that weren't on disk yet.
+def _retry_reason(waiting: dict[str, set[str]]) -> str:
+    words = [text for reason, text in _RETRY_WORDS.items() if waiting.get(reason)]
+    listed = words[0] if len(words) == 1 else f"{', '.join(words[:-1])} or {words[-1]}"
+    return f"{listed} yet"
 
-    Up to ``webhook_retry_count`` retries, one job for both kinds of file. Never raises: the job that found the files
-    has already completed.
+
+def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dict[str, str]) -> None:
+    """Create the delayed retry job for files that weren't on disk yet or that a server could take later.
+
+    Up to ``webhook_retry_count`` retries, one job for every reason. The retry gets each file as its sender gave it
+    (with that path's item id hints), like the preview retries: a file not on disk yet was given the first mapped
+    disk's path, and only the sender's path is resolved again against every disk. Never raises: the job that found
+    the files has already completed.
+
+    Args:
+        job: The job that found the files.
+        cfg: Its config.
+        waiting: Local paths per reason (``NOT_ON_DISK`` or a row's retry reason code).
+        sender_paths: The path each local path was given as (``build_items``); a missing entry is retried as is.
     """
     jm = get_job_manager()
-    paths = sorted(not_indexed | not_on_disk)
-    reason = _retry_reason(len(not_indexed), len(not_on_disk))
+    paths = _sent_paths({path for files in waiting.values() for path in files}, sender_paths)
+    reason = _retry_reason(waiting)
     try:
         attempt = int(cfg.get("retry_attempt") or 0) + 1
         count, delay_setting = retry_policy(get_settings_manager())
@@ -116,6 +135,7 @@ def _queue_retry(job, cfg: dict, not_indexed: set[str], not_on_disk: set[str]) -
             priority=job.priority,
             source=str(cfg.get("source") or "retry"),
             file_paths=paths,
+            item_id_hints=_hints_for(cfg, paths) or None,
             retry_attempt=attempt,
             retry_delay_s=delay,
         )
@@ -125,6 +145,53 @@ def _queue_retry(job, cfg: dict, not_indexed: set[str], not_on_disk: set[str]) -
         )
     except Exception:
         logger.exception("Could not queue the retry for files job {} found waiting", job.id)
+
+
+def _sent_paths(files: set[str], sender_paths: dict[str, str]) -> list[str]:
+    """Local paths as their senders gave them, sorted: what a later job for these files is created with."""
+    return sorted({sender_paths.get(path, path) for path in files})
+
+
+def _hints_for(cfg: dict, paths: list[str]) -> dict[str, dict[str, str]]:
+    sent_hints = cfg.get("webhook_item_id_hints") or {}
+    return {path: sent_hints[path] for path in paths if sent_hints.get(path)}
+
+
+def _queue_verify(job, cfg: dict, files: set[str], sender_paths: dict[str, str]) -> None:
+    """Create the one delayed check of files this job published after they were replaced.
+
+    Servers rescan a replaced file after the job and can drop or replace our markers then; the check reads them back
+    and writes them again if so. It waits the first retry delay three times over (at least 10 minutes), follows the
+    retry settings (none when retries are off) and cap, and never queues another check. Never raises.
+
+    Args:
+        job: The job that published the files.
+        cfg: Its config.
+        files: Local paths of the replaced files.
+        sender_paths: The path each local path was given as (``build_items``).
+    """
+    jm = get_job_manager()
+    try:
+        count, delay_setting = retry_policy(get_settings_manager())
+        if count < 1:
+            return
+        from .triggers import create_intro_credits_job
+
+        paths = _sent_paths(files, sender_paths)[:MAX_RETRY_FILES]
+        delay = max(MIN_VERIFY_DELAY_S, retry_delay_s(1, delay_setting) * VERIFY_DELAY_FACTOR)
+        base_name = (job.library_name or "Intro & Credits").removeprefix("Retry: ").removeprefix("Verify: ")
+        check = create_intro_credits_job(
+            library_name=f"Verify: {base_name}",
+            priority=job.priority,
+            source=str(cfg.get("source") or "verify"),
+            file_paths=paths,
+            item_id_hints=_hints_for(cfg, paths) or None,
+            retry_delay_s=delay,
+            verify=True,
+        )
+        jm.add_log(job.id, f"INFO - {len(paths)} replaced file(s) are checked again in {delay}s (job {check.id[:8]})")
+    except Exception:
+        logger.exception("Could not queue the later check of the replaced files job {} published", job.id)
 
 
 def _wait_for_retry_time(job_id: str, cfg: dict, cancel_check: Callable[[], bool]) -> bool:
@@ -142,12 +209,18 @@ def _wait_for_retry_time(job_id: str, cfg: dict, cancel_check: Callable[[], bool
         return True
     jm = get_job_manager()
     remaining = int((due - _utcnow()).total_seconds())
+    if cfg.get("verify"):
+        waiting_for = (
+            f"Check starting in {remaining}s — servers often rescan a replaced file after its markers are sent"
+        )
+    else:
+        waiting_for = f"Retry starting in {remaining}s — waiting for these files to appear on disk or on a server"
     jm.update_progress(
         job_id,
         percent=0,
         processed_items=0,
         total_items=0,
-        current_item=f"Retry starting in {remaining}s — waiting for the server to add these files",
+        current_item=waiting_for,
         retry_eta=raw,
         retry_wait_total=int(cfg.get("retry_delay") or remaining),
     )
@@ -170,7 +243,7 @@ def build_items(
     registry,
     cancel_check: Callable[[], bool] | None = None,
     progress_callback: Callable[..., None] | None = None,
-) -> tuple[list[ProcessableItem], list[str]]:
+) -> tuple[list[ProcessableItem], list[str], dict[str, str]]:
     """Files for a job: explicit paths (webhook, manual, Inspector) or library enumeration.
 
     Args:
@@ -180,13 +253,15 @@ def build_items(
         progress_callback: ``(current, total, message)`` for the enumeration banner.
 
     Returns:
-        Items sorted by season folder then path (a season's episodes run together), and warnings for the job.
+        Items sorted by season folder then path (a season's episodes run together), warnings for the job, and for
+        explicit paths the path each item was given as (a sender's view, before path mapping); empty for a listing.
     """
     from ..jobs import orchestrator
     from ..plex_client import _expand_directory_to_media_files
 
     warnings: list[str] = []
     items: list[ProcessableItem] = []
+    sender_paths: dict[str, str] = {}
     file_paths = [str(p).strip() for p in (job_config.get("file_paths") or []) if str(p).strip()]
     if file_paths:
         # Intro & Credits ownership ignores the preview opt-in (markers/ownership.py), so the local path is picked among
@@ -196,6 +271,7 @@ def build_items(
         hints = job_config.get("webhook_item_id_hints") or {}
         for raw in _expand_directory_to_media_files(file_paths, mappings):
             canonical, _owners = orchestrator._resolve_webhook_path_to_canonical(raw, configs, log_resolution=False)
+            sender_paths.setdefault(canonical, raw)
             items.append(
                 ProcessableItem(
                     canonical_path=canonical,
@@ -257,7 +333,7 @@ def build_items(
     unique: dict[str, ProcessableItem] = {}
     for item in sorted(items, key=lambda i: (os.path.dirname(i.canonical_path), i.canonical_path)):
         unique.setdefault(item.canonical_path, item)
-    return list(unique.values()), warnings
+    return list(unique.values()), warnings, sender_paths
 
 
 def _in_flight(job_id: str) -> bool:
@@ -565,7 +641,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 if registry is None:
                     jm.complete_job(job_id, error="Couldn't load the media servers configuration")
                     return
-                items, warnings = build_items(
+                items, warnings, sender_paths = build_items(
                     cfg, registry=registry, cancel_check=cancel_check, progress_callback=progress_callback
                 )
                 if cancel_check():
@@ -582,19 +658,22 @@ def run_intro_credits_job(job_id: str) -> None:
                     jm.set_job_outcome(job_id, carried)
                     _complete(jm, job_id, carried, warnings)
                     return
-                not_indexed: set[str] = set()
-                not_on_disk: set[str] = set()
+                waiting: dict[str, set[str]] = {}
+                replaced: set[str] = set()
                 # Webhook paths (and their retries) can arrive before the file is visible here (an import still
                 # copying over NFS); the preview job retries those too. A file the user picked, or a library
                 # listing, that isn't on disk won't appear by waiting.
                 retries_missing_files = bool(cfg.get("file_paths")) and cfg.get("source") not in _USER_PICKED_SOURCES
 
                 def on_file_result(file_path, outcome, reason, worker, servers=None):
-                    # Any server that hasn't indexed the file yet, even when another server was written.
-                    if any(waits_for_library(row) for row in servers or []):
-                        not_indexed.add(file_path)
-                    elif retries_missing_files and outcome == FileOutcome.FILE_NOT_FOUND.value:
-                        not_on_disk.add(file_path)
+                    # Any server that can take the file later, even when another server was written.
+                    codes = {code for row in servers or [] if (code := retry_reason(row))}
+                    for code in codes:
+                        waiting.setdefault(code, set()).add(file_path)
+                    if not codes and retries_missing_files and outcome == FileOutcome.FILE_NOT_FOUND.value:
+                        waiting.setdefault(NOT_ON_DISK, set()).add(file_path)
+                    if any(isinstance(row, dict) and row.get(VERIFY_LATER) for row in servers or []):
+                        replaced.add(file_path)
                     jm.record_file_result(job_id, file_path, outcome, reason, worker, servers=servers)
 
                 set_file_result_callback(on_file_result, job_id=job_id)
@@ -643,8 +722,10 @@ def run_intro_credits_job(job_id: str) -> None:
                     jm.cancel_job(job_id)
                     return
                 _complete(jm, job_id, outcome, warnings)
-                if not_indexed or not_on_disk:
-                    _queue_retry(job, cfg, not_indexed, not_on_disk)
+                if waiting:
+                    _queue_retry(job, cfg, waiting, sender_paths)
+                if replaced and not cfg.get("verify"):
+                    _queue_verify(job, cfg, replaced, sender_paths)
             finally:
                 clear_failures()
     except Exception as exc:

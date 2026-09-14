@@ -577,7 +577,8 @@ drag-to-reorder:
 
 **"Publish when"** decides how sure the app must be before it writes anything:
 
-- **High** (default) — needs two independent sources to agree (chapters count as one).
+- **High** (default) — chapters publish on their own unless two other independent sources agree on something
+  different (then the file goes to **Needs review**); without chapters, two independent sources must agree.
 - **Medium** — also accepts a single source, but only one that checks *your* file's own cut: chapters, or a SkipDB
   exact/shifted match. A single IntroDB or TheIntroDB answer never publishes alone, because neither knows which cut
   of the file you have.
@@ -585,11 +586,15 @@ drag-to-reorder:
 Markers already on a Plex/Jellyfin/Emby server only ever *confirm* another source — they never publish on their own,
 and they can only **shorten** a skip (a later intro start, an earlier credits end), never lengthen one. That's
 deliberate: a crowd-sourced answer that runs to the very end of the file must never swallow a scene after the
-credits that the server's own marker correctly stops before. A server's markers imported by its own intro-database
-plugin (e.g. an AniSkip-style importer), or markers from another cut/version of the same Plex item, don't count as
-an independent second opinion — they join the online-database group instead of adding a vote of their own.
+credits that the server's own marker correctly stops before. A Jellyfin or Emby server's markers imported by its own
+intro-database plugin (e.g. an AniSkip-style importer) don't count as an independent second opinion — they join the
+online-database group instead of adding a vote of their own. Plex and Emby keep one marker set per item, so when an
+item has another version whose length differs from this file's by more than 2 seconds (or the lengths can't be
+read), that server's markers aren't used for this file at all.
 
-**"Never overwrite my edits"** (on by default) means anything you adjust or lock in the Inspector always wins.
+**"Never overwrite my edits"** (on by default) means a marker you lock always wins over detection. In this release
+the Inspector only shows markers and offers **Re-detect**; adjusting and locking markers there comes in a later
+update.
 
 **TheIntroDB** is used without the site's written permission (its terms restrict server-side use); it's off by
 default, and pasting your own free key is optional and entirely up to you. The key is masked (`****`) everywhere it's
@@ -598,8 +603,8 @@ shown or returned by the API, and never logged.
 ### Needs review
 
 When the sources don't clear the bar above — nothing agrees, or two credible answers disagree — the file shows
-**Needs review** and nothing is sent to any server. Nothing is guessed; you can still add markers by hand in the
-Inspector.
+**Needs review** and nothing is sent to any server. Nothing is guessed. Adding markers by hand in the Inspector comes
+in a later update; for now, **Re-detect** in the Inspector asks every source again.
 
 ### Plex: writing straight into Plex's database
 
@@ -614,9 +619,11 @@ first time you turn it on for a Plex server:
   this app must open the database through the exact same path for the app's same-host proof to succeed.
 - **Viewers need Plex Pass** (or Plex Home) to see skip buttons at all — Plex hides markers entirely without it, even
   ones already in its database.
-- If Plex's own detection re-analyzes an item, it can replace our markers with its own. By default the app puts ours
-  back on the next check (**"If Plex re-detects and replaces our markers" → "Put ours back"**); switch it to
-  **"Keep Plex's"** to leave Plex's answer alone and use it as evidence instead.
+- If Plex's own detection re-analyzes an item, it can replace our markers with its own. The next Intro & Credits job
+  that checks the file notices (see [Checking the servers still show them](#checking-the-servers-still-show-them)):
+  with **"If Plex re-detects and replaces our markers" → "Put ours back"** (the default) it writes ours again; with
+  **"Keep Plex's"** it leaves Plex's markers and the file's row says **"Plex's own markers are kept (Keep Plex's)"**
+  until the file's own decision changes. Markers that are simply gone are written again either way.
 - Tested against Plex 1.43. If a future Plex update changes the database's shape, the app stops writing and shows a
   message rather than guessing.
 
@@ -639,6 +646,26 @@ marker set for the whole item, not one per file. A marker type only shows up onc
 of that type **and** they agree within 2 seconds. A newly added version that hasn't been decided yet temporarily
 hides that item's markers on Plex until it catches up — precision first.
 
+### Checking the servers still show them
+
+A server can lose or change our markers without this app doing anything: Plex's own detection replaces them, and a
+server that rescans a replaced file can drop them. So before a job reports a file **Up to date** on a server, it
+reads back what that server shows — Plex's marker rows for the item in its database (read-only, with the same
+same-machine checks as a write), Jellyfin's served segments (one request) — and writes ours again when they're gone
+or different. If that read fails, the file stays **Up to date** for this run.
+
+**Markers written** always means the job changed what the server shows (a forced **Re-detect** that restores lost
+markers included); **Up to date** means the server already showed exactly this.
+
+After a job publishes to a file that was replaced (same path, new file), servers often rescan it shortly after. The
+job therefore queues one **Verify: …** job for those files, which waits three times the first retry delay (at least
+10 minutes) and then checks them again the same way. It follows **Settings → Retry policy** (none when the retry
+count is 0), holds at most 500 files, and never queues another verify.
+
+In the Inspector, a server whose markers differ from ours shows **Will replace** or **Will add**, or **Keeps
+Plex's** when Plex's own detection replaced them and that Plex server is set to keep them. The note "All versions
+of this item share one set of markers" appears only on a Plex item with more than one version.
+
 ### Turning it off, or revoking the Plex confirmation
 
 Turning the per-server switch off — or revoking the Plex database-write confirmation — takes effect immediately,
@@ -647,10 +674,12 @@ ahead on a stale setting.
 
 ### Webhook follow-ups and retries
 
-A Sonarr/Radarr/webhook import queues an Intro & Credits job right after the preview job for the same files (at
-Normal priority, so previews still drain first). If a file isn't on disk yet, or a server hasn't indexed it into its
-library yet, it's retried using the same backoff as preview retries — **Settings → Retry policy → Retry count /
-Initial retry delay**. A retry batch holds at most 500 files at a time — a bigger backlog (e.g. a brand new library)
+A Sonarr/Radarr/webhook import queues an Intro & Credits job right after the preview job for the same files. It
+runs at Normal priority, or at Low when the preview job itself runs at Low, and it waits for that preview job to
+finish either way. If a file isn't on disk yet, a server hasn't indexed it into its library yet, or Plex didn't
+answer its Plex Pass check, it's retried using the same backoff as preview retries — **Settings → Retry policy →
+Retry count / Initial retry delay**. A retry resolves the path Sonarr/Radarr sent again, so a file that lands on a
+different disk than the first mapped one is still found. A retry batch holds at most 500 files at a time — a bigger backlog (e.g. a brand new library)
 is picked up on the next run instead.
 
 ### Troubleshooting Intro & Credits
@@ -661,6 +690,7 @@ table covers every state the check can report, using its exact wording:
 | What you see | Why | What to do |
 |---|---|---|
 | Green "Installed ✓" / no warning banner, status block all green | Everything needed to write markers checks out | Nothing — turn the server switch on if you haven't |
+| *(Plex)* No Plex Pass row, amber banner: "Can't reach Plex to confirm Plex Pass, so markers wait until Plex answers" | The database checks passed but Plex didn't answer the Plex Pass check (usually restarting or updating) | Wait for Plex to come back; affected files show **Waiting** and are retried |
 | No status block; only the off switch | "Intro & Credits is off for this server" | Turn on "Send intro & credits markers to this server" |
 | *(Plex)* Status block: "Confirm the Plex database write to turn this on" | Plex has no marker API, so writing needs a one-time confirmation per Plex server; flipping the switch opens that confirmation dialog | Read the dialog and click "Enable for Plex" |
 | *(Jellyfin)* Red "Not installed" badge + **Install** button: "Install the Media Preview Bridge plugin" | Jellyfin has no core marker-write API; the plugin renders markers as media segments | Click **Install** |
@@ -681,10 +711,28 @@ table covers every state the check can report, using its exact wording:
 | *(Plex)* "Disk full: Plex's database can't take any writes (…)." | The disk holding Plex's database is full | Free up space on that disk |
 | Status block fails to load: "Couldn't check this server's Intro & Credits status" (Edit tab) or "Couldn't read this server's Intro & Credits state (…)" (Inspector row) | An unexpected error while checking (e.g. `markers.db` unreadable) — one server's failure never blocks the rest of the page | Reload; check the logs for the exception type named in the message |
 
-Per-file job outcomes use plainer labels in the job queue and Files panel: **Markers written**, **Up to date**,
-**Needs review**, **Waiting** (server hasn't indexed the file yet, or the item's versions don't agree yet),
-**Skipped** (the server can't take markers right now — see the table above for why), **No markers found**, and **No
-server with Intro & Credits on**.
+A file's row for one server (the job's Files panel, the Inspector) can also say:
+
+| Message | Why | What to do |
+|---|---|---|
+| **Waiting**: "Can't reach Plex to confirm Plex Pass" | Plex answered its database checks but not the Plex Pass check, usually while restarting | Nothing; the file is retried (up to your retry count), and the next file checks Plex again |
+| **Waiting**: "Not in this server's library yet" | The server hasn't scanned the file in yet | Nothing; the file is retried |
+| **Up to date**: "Plex's own markers are kept (Keep Plex's)" | Plex's own detection replaced ours and this Plex server is set to **Keep Plex's** | Switch it to **Put ours back** if you want ours; the next job that checks the file writes them |
+| **Skipped**: "This server was removed" | The server was deleted while the job ran | Nothing |
+| **Skipped**: "This server is turned off on the Servers page" | The server was disabled while the job ran | Turn it back on, then run the library or Re-detect the file |
+| **Skipped**: "Intro & Credits is off for this server" | The switch was turned off (or the Plex confirmation revoked) while the job ran | Turn it back on; the job's next file already checks again |
+| **Skipped**: "This library isn't selected for Intro & Credits on this server" | The library was unticked, or removed from the server, while the job ran | Tick it again in Edit → Intro & Credits |
+| **Skipped**: "This file is excluded on this server" | The file matches one of that server's exclude paths | Remove the exclusion if it's wrong |
+| **Skipped**: "Not supported for this server type yet" | Emby has no publisher in this release | Nothing to do yet |
+| **Failed**: "Couldn't read this server's saved settings (…)" | `settings.json` couldn't be read just before the write, so nothing was written | Check the config volume and the log; the next run tries again |
+| Evidence detail: "Couldn't read this server's plugins, so its markers aren't used" | A Jellyfin/Emby server's plugin list couldn't be read, so its markers might be a crowd database's copy | Nothing; they're read again on a later run |
+| Evidence detail: "Markers on this server look imported from …; not used as a second opinion" | That server's markers came from an intro-database plugin, the same data as the online sources | Nothing; this is expected |
+
+Per-file job outcomes use plainer labels in the job queue and Files panel: **Markers written** (the job changed
+what a server shows), **Up to date** (every server already showed this),
+**Needs review**, **Waiting** (a server hasn't indexed the file yet, Plex didn't answer its Plex Pass check, or the
+item's versions don't agree yet), **Skipped** (the server can't take markers right now, or a setting changed while
+the job ran — see the tables above for why), **No markers found**, and **No server with Intro & Credits on**.
 
 > [!NOTE]
 > Rolling back to a version before Intro & Credits existed needs an extra step — see
@@ -825,6 +873,14 @@ Schema downgrades are **not automated**. If you need to revert from a release th
 > ```
 > This only stops the surprise scan; it doesn't restore markers already written to Plex or Jellyfin, and the older
 > binary can't write or read them either way.
+>
+> **Intro & Credits schedules are worse: the older binary runs each one as a full preview scan on every tick.** While
+> the new version is still running, open **Automation → Schedules** and **delete** (or **disable**) every schedule
+> with the **Intro & Credits** badge. Both remove it from the scheduler's own database (`scheduler.db`) as well as
+> from `schedules.json`. Editing `schedules.json` by hand isn't enough, because the older binary also starts the jobs
+> already stored in `scheduler.db`, and there's no reliable command for those. Then keep the current
+> `schedules.json`: in step 2, don't restore a `schedules.json` backup from before that change, or the schedules
+> come back.
 
 > **Multi-server caveat.** Multi-server installs cannot meaningfully downgrade to a single-server release without losing the second / third server's settings. The newer schema holds richer data than the older one can represent. The downgrade-refusal guard (introduced in this release) intentionally refuses to start the older binary against a newer `settings.json` — its log message names the `.bak` path so you have a one-line recovery hint.
 

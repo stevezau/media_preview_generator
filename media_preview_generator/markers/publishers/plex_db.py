@@ -4,9 +4,10 @@ Plex has no API for intro/credits markers. It serves markers from ``taggings`` r
 ``tags(tag_type=12, tag='')`` row, and rebuilds those rows from ``media_parts.extra_data`` when it re-detects, so
 both places are written in one short transaction. Proven on PMS 1.43.4 in the lab; anything unexpected stops writes.
 
-SQLite is only safe to share when both processes lock the very same file, so ``capability()`` and every write first
-prove that another process (Plex) holds the database open through the path this app sees; only then is the database
-opened. What Plex serves is read over its HTTP API (``sources.server_markers``), never from the database.
+SQLite is only safe to share when both processes lock the very same file, so ``capability()``, every write and every
+read-back first prove that another process (Plex) holds the database open through the path this app sees; only then
+is the database opened. Markers read as evidence come over Plex's HTTP API (``sources.server_markers``); only the
+read-back of what this app left on an item (``shows``) reads the database.
 """
 
 from __future__ import annotations
@@ -34,6 +35,8 @@ from .base import (
     ItemNotFoundError,
     MarkerPublisher,
     PublishError,
+    Shown,
+    compare_shown,
 )
 
 if TYPE_CHECKING:
@@ -901,6 +904,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         Raises:
             PublishError: Nothing was written (one transaction; see ``MarkerPublisher.write``).
         """
+        self.last_write_changed = False
         wanted = self.project(markers)
         # previous=None: nothing on the item is provably ours, so nothing is removed.
         prior = self.project(previous) if previous is not None else []
@@ -943,4 +947,44 @@ class PlexMarkerPublisher(MarkerPublisher):
             raise publish_error_from_sqlite(exc) from exc
         if changed:
             logger.info("Plex {}: item {} now shows {} marker(s) of ours", self._config.name, rating_key, len(desired))
+        self.last_write_changed = changed
         return desired
+
+    def shows(self, item_id: str, ours: list[Marker]) -> Shown | None:
+        """Read the item's marker rows from Plex's database (the same lock proof and read-only connection as a write).
+
+        Args:
+            item_id: Plex rating key.
+            ours: What this app last left on the item.
+
+        Returns:
+            How Plex's rows of our types compare with ``ours``; None when the database couldn't be read.
+        """
+        try:
+            rating_key = _rating_key(item_id)
+            deadline = time.monotonic() + BUSY_TIMEOUT_S
+            local = self._local_checks(deadline=deadline)
+            if not local.ready:
+                raise PublishError(local.message, state=local.state)
+            with self._database(read_only=True, deadline=deadline) as conn:
+                self._check_schema(conn)
+                tag_id = self._marker_tag_id(conn)
+                rows = conn.execute(
+                    "SELECT text, time_offset, end_time_offset, extra_data FROM taggings "
+                    "WHERE metadata_item_id=? AND tag_id=?",
+                    (rating_key, tag_id),
+                ).fetchall()
+        except (PublishError, sqlite3.Error) as exc:
+            logger.debug(
+                "Plex {}: couldn't read item {}'s markers back: {}", self._config.name, item_id, type(exc).__name__
+            )
+            return None
+        served = {
+            mtype: [
+                _served_times(mtype, start, end, _row_is_final(extra))
+                for text, start, end, extra in rows
+                if text == name
+            ]
+            for mtype, name in _TYPE_TEXT.items()
+        }
+        return compare_shown(self.project(ours), served, others_alongside=False)

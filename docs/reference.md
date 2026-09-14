@@ -275,8 +275,8 @@ Shared detection settings — one file is detected once, whatever the publish ru
 | `detect.intro` | bool | `true` | TV episodes only. |
 | `detect.credits` | bool | `true` | TV episodes and movies. |
 | `detect.recap` | bool | `false` | Jellyfin's player is the only one with a Skip Recap button. |
-| `publish_when` | `"high"` \| `"medium"` | `"high"` | **High:** needs two independent sources to agree (chapters count as one). **Medium:** also accepts a single source that checks the file's own cut — chapters, or a SkipDB `exact`/`shifted` match. IntroDB and TheIntroDB never decide alone at either level. |
-| `respect_locks` | bool | `true` | A marker adjusted or locked in the Inspector is never replaced by detection. |
+| `publish_when` | `"high"` \| `"medium"` | `"high"` | **High:** chapters publish on their own unless two other independent sources agree on something different (then Needs review); without chapters, two independent sources must agree. **Medium:** also accepts a single source that checks the file's own cut — chapters, or a SkipDB `exact`/`shifted` match. IntroDB and TheIntroDB never decide alone at either level. |
+| `respect_locks` | bool | `true` | A locked marker is never replaced by detection. The Inspector can't adjust or lock markers yet (a later update); it only shows them and offers Re-detect. |
 | `sources` | array | see above | Evidence sources, in checking/precedence order. Reordering in the UI reorders this array. |
 | `sources[].id` | one of `chapters`, `theintrodb`, `introdb`, `skipdb`, `season_audio`, `credits_text`, `server_markers` | — | `season_audio` and `credits_text` are "Coming soon" in this release: measured and speced, not yet built. Their `enabled` value and position still round-trip through save/load, but detection doesn't run for them. |
 | `sources[].enabled` | bool | varies | `theintrodb` defaults to `false` (used without the vendor's written permission); the rest default to `true`. |
@@ -301,7 +301,7 @@ Credits tab**.
 | `library_ids` | array of strings \| `null` | `null` | `null` = every library except sports-type ones (name matched, whole word "sport"/"sports" — no vendor exposes an actual sports library kind). An explicit list is taken literally, including a deliberate sports library. |
 | `plex` | object | *(Plex servers only)* | Absent on Emby/Jellyfin entries. |
 | `plex.db_write_confirmed_at` | ISO-8601 timestamp \| `null` | `null` | Set once the one-time "Send intro & credits markers to Plex?" confirmation is accepted. Clearing it while `enabled` stays `true` in the same request is rejected (400) — send `enabled: false` in the same PUT to revoke. |
-| `plex.on_plex_redetect` | `"restore"` \| `"keep_plex"` | `"restore"` | What happens after Plex's own detection replaces our markers: put ours back on the next check, or leave Plex's answer and use it as evidence. |
+| `plex.on_plex_redetect` | `"restore"` \| `"keep_plex"` | `"restore"` | What a job does when it finds Plex's own detection replaced our markers on an item whose decision hasn't changed: `restore` writes ours again, `keep_plex` leaves Plex's (row message "Plex's own markers are kept (Keep Plex's)"). Markers that are gone are written again either way, and a changed decision is always written. |
 
 ### Job kind `intro_credits`
 
@@ -320,12 +320,16 @@ column) holds:
 | `force` | bool | Re-detect files already decided, asking every source again. |
 | `webhook_item_id_hints` | `{path: {server_id: item_id}}` | Item ids a vendor webhook already supplied, so the job skips a lookup. |
 | `retry_attempt` | int | Present only on a retry job: which retry this is (1-based). |
-| `retry_delay` | int | Present only on a retry job: seconds waited before it took a slot. |
-| `retry_not_before` | ISO-8601 timestamp | Present only on a retry job: the due time (survives a restart without waiting again in full). |
+| `retry_delay` | int | Present only on a retry or verify job: seconds waited before it took a slot. |
+| `retry_not_before` | ISO-8601 timestamp | Present only on a retry or verify job: the due time (survives a restart without waiting again in full). |
+| `verify` | bool | Present only on a verify job: the delayed check of files published after they were replaced. It queues no further verify job. |
 
-Retries (files not yet on disk, or not yet in a server's library) reuse the webhook preview-retry backoff
-(`webhook_retry_count` / `webhook_retry_delay`) and cap at **500 files** per retry job — a bigger backlog waits for
-the next run.
+Retries (files not yet on disk, not yet in a server's library, or on a Plex whose Plex Pass check didn't answer)
+reuse the webhook preview-retry backoff (`webhook_retry_count` / `webhook_retry_delay`) and cap at **500 files** per
+retry job — a bigger backlog waits for the next run. A retry job's `file_paths` are the paths the job was given (a
+webhook's own paths, not the first mapped disk's), with their `webhook_item_id_hints`. A job that publishes to
+replaced files also queues one verify job (`verify: true`, named "Verify: …") for them, due after three times the
+first retry delay (at least 600 s); none when `webhook_retry_count` is 0.
 
 ### Outcome keys
 
@@ -333,9 +337,9 @@ Per-file outcomes (`markers.outcomes.FileOutcome`, shown in the job's Files pane
 
 | Key | Label | Meaning |
 |---|---|---|
-| `markers_published` | Markers written | At least one server received markers |
-| `markers_up_to_date` | Up to date | Every enabled server already showed these markers |
-| `markers_waiting` | Waiting | A server hasn't indexed the file yet, or a Plex item's versions don't yet agree |
+| `markers_published` | Markers written | The job changed what at least one server shows (a forced restore included) |
+| `markers_up_to_date` | Up to date | Every enabled server already showed these markers (read back before saying so) |
+| `markers_waiting` | Waiting | A server hasn't indexed the file yet, Plex didn't answer its Plex Pass check, or a Plex item's versions don't yet agree |
 | `markers_needs_review` | Needs review | Sources don't agree yet, so nothing was sent |
 | `markers_none` | No markers found | No source found an intro or credits for this file |
 | `markers_no_owners` | No server with Intro & Credits on | No enabled server with Intro & Credits on holds this file |
@@ -375,10 +379,11 @@ files already done), `library_name` (job title).
 #### GET /api/markers/servers/{server_id}/status
 
 **Response:** `200` with `server_id`, `server_type`, `enabled`, `settings` (as stored), `capability` (`{state,
-message, details}`, checked as if Intro & Credits were already on — one of `ready`, `disabled`,
+message, details, warning}`, checked as if Intro & Credits were already on — one of `ready`, `disabled`,
 `needs_confirmation`, `needs_plugin`, `plugin_outdated`, `needs_pass`, `needs_local_db`,
 `needs_plex_detection_once`, `unsupported_schema`, `unreachable`, `misconfigured`, or `unknown` when the check itself
-failed), `can_show` (marker types this server type can display) and `libraries` (with each one's default selection).
+failed; `warning` is `""` unless a `ready` Plex couldn't confirm Plex Pass, in which case jobs wait instead of
+writing), `can_show` (marker types this server type can display) and `libraries` (with each one's default selection).
 `404` for an unknown server; `500` with a JSON error when the status can't be built. A server turned off on the
 Servers page isn't contacted (`capability.state` is `disabled`).
 
@@ -393,11 +398,13 @@ Servers page isn't contacted (`capability.state` is `disabled`).
 
 **Response:** `200` with `known`, `canonical_path`, `duration_ms`, `is_movie`, `decisions` (by marker type),
 `evidence` rows, and `servers` (one row per owning server: `current` markers as read live, `published` markers that
-are ours, `plan` — `will_add` / `will_replace` / `will_remove` / `up_to_date` / `waiting` / `not_enabled` /
-`nothing_to_publish` / `unknown` — with `plan_reason`; a server whose state can't be read gets a degraded row with
-`error` set instead of failing the whole response). `400` when the path isn't a file inside a server library, the
-query is incomplete, or `item_id` isn't shaped like an id that server's type uses (checked before any server is
-contacted). `404` for an unknown server, or a `server_id`+`item_id` with no file on this app's disk. `409` when the
+are ours, `plan` — `will_add` / `will_replace` / `will_remove` / `up_to_date` / `waiting` / `keeps_plex` (Plex's own
+detection replaced ours and `on_plex_redetect` is `keep_plex`) / `not_enabled` / `nothing_to_publish` / `unknown` —
+with `plan_reason`, and `version_count`: a Plex item's number of versions, which share one marker set (`null` for
+other servers or when it can't be read); a server whose state can't be read gets a degraded row with `error` set
+instead of failing the whole response). `400` when the path isn't a file inside a server library, the
+query is incomplete, or `item_id` isn't shaped like an id that server's type uses (a Plex rating key is digits
+only, e.g. `42`, not `/library/metadata/42`; checked before any server is contacted). `404` for an unknown server, or a `server_id`+`item_id` with no file on this app's disk. `409` when the
 server is disabled. `500` with a JSON error when the file's data can't be built.
 
 #### POST /api/markers/item/redetect

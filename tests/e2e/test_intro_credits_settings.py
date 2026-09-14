@@ -180,7 +180,8 @@ class TestIntroCreditsSettings:
         # Bootstrap moves ``title`` into ``data-bs-original-title`` once the tooltip is initialised.
         tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
         assert tooltip == (
-            "High: needs two independent sources that agree (chapters count as one). Medium: also accepts a single "
+            "High: chapters publish on their own unless two other independent sources agree on something different; "
+            "otherwise two independent sources must agree. Medium: also accepts a single "
             "source that checks your file's length itself — chapters, or SkipDB. A single IntroDB or TheIntroDB "
             "answer never publishes on its own, because those don't know which cut you have. Anything else shows as "
             "Needs review."

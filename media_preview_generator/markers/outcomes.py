@@ -65,9 +65,19 @@ def file_outcome(statuses: set[str], *, needs_review: bool) -> FileOutcome:
     return FileOutcome.SKIPPED
 
 
-# ``reason_code`` of a waiting row whose server hasn't indexed the file yet (no item id, or the item isn't there): the
-# job retries those files later. Other rows carry no code.
+# ``reason_code`` of the waiting rows the job retries later; other rows carry no code.
+# The server hasn't indexed the file yet (no item id, or the item isn't there).
 NOT_IN_LIBRARY = "not_in_library"
+# Plex answered its database checks but not the Plex Pass check (restarting, an HTTP blip).
+PLEX_PASS_UNKNOWN = "plex_pass_unknown"
+RETRY_REASON_CODES = frozenset({NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN})
+
+
+# Row message when Plex's own detection replaced ours and the server is set to "Keep Plex's".
+KEPT_PLEX_MARKERS = "Plex's own markers are kept (Keep Plex's)"
+# Row key on a written or up-to-date row of a replaced file: servers often rescan a replaced file after the job, so
+# the job checks it again later (``job_runner._queue_verify``).
+VERIFY_LATER = "verify_later"
 
 
 # publish_state.status persisted per (file, server) for the rows that record an attempt.

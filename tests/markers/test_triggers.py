@@ -193,6 +193,36 @@ class TestCreateIntroCreditsJob:
         assert jm.create_job.call_args.kwargs["parent_schedule_id"] == ""
         start.assert_called_once_with("retry-1")
 
+    def test_verify_job_config_carries_its_due_time_and_no_attempt(self, monkeypatch):
+        from datetime import datetime, timezone
+
+        jm = MagicMock()
+        jm.create_job.return_value = MagicMock(id="verify-1")
+        monkeypatch.setattr(triggers, "get_job_manager", lambda: jm)
+        monkeypatch.setattr(triggers, "_utcnow", lambda: datetime(2026, 9, 14, 10, 0, tzinfo=timezone.utc))
+        with patch.object(triggers, "start_intro_credits_job_async"):
+            triggers.create_intro_credits_job(
+                library_name="Verify: a",
+                priority=2,
+                source="sonarr",
+                file_paths=["/data/tv/a.mkv"],
+                item_id_hints={"/data/tv/a.mkv": {"jf-1": "abc"}},
+                retry_delay_s=600,
+                verify=True,
+            )
+        assert jm.create_job.call_args.kwargs["config"] == {
+            "kind": "intro_credits",
+            "source": "sonarr",
+            "libraries": [],
+            "file_paths": ["/data/tv/a.mkv"],
+            "follows_job_id": None,
+            "force": False,
+            "webhook_item_id_hints": {"/data/tv/a.mkv": {"jf-1": "abc"}},
+            "verify": True,
+            "retry_delay": 600,
+            "retry_not_before": "2026-09-14T10:10:00+00:00",
+        }
+
     def test_created_job_row_is_an_intro_credits_job(self, tmp_path, monkeypatch):
         from media_preview_generator.web.jobs import JobManager
 
@@ -402,7 +432,7 @@ class TestWebhookFollowUp:
         assert job_id is not None
 
         registry = ServerRegistry.from_settings(settings["media_servers"])
-        items, _warnings = job_runner.build_items(jm.get_job(job_id).config, registry=registry)
+        items, _warnings, _sent = job_runner.build_items(jm.get_job(job_id).config, registry=registry)
         owning = pipeline._owning_servers(items[0], SimpleNamespace(registry=registry))
         owners = pipeline._marker_owners(owning, items[0].canonical_path)
 

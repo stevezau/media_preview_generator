@@ -17,6 +17,7 @@ from loguru import logger
 from ..servers.base import ServerConfig, ServerType
 from ..servers.ownership import OwnershipMatch, apply_path_mappings
 from .models import Marker, MarkerType
+from .outcomes import KEPT_PLEX_MARKERS
 from .ownership import allowed_matches, owning_servers
 from .publishers.base import Capability
 from .publishers.factory import publisher_for
@@ -35,11 +36,14 @@ PLEX_SAME_HOST_PATH_HINT = (
     "Map Plex's config folder into both containers from the identical host path "
     "(on unRAID, don't mix /mnt/user and /mnt/cache)."
 )
+# A ready Plex whose Plex Pass check didn't answer: jobs wait (and retry) instead of writing.
+PLEX_PASS_UNCHECKED_WARNING = "Can't reach Plex to confirm Plex Pass, so markers wait until Plex answers"
 VERSIONS_DISAGREE_REASON = "versions don't agree yet"
 SERVER_OFF_REASON = "Intro & Credits is off for this server"
 LIBRARY_OFF_REASON = "This library isn't selected for Intro & Credits on this server"
-# Servers report "credits to the end" differently (Plex's final flag, Emby has no end), and Plex stores credits 2 s
-# away from what it serves, so shown times are compared within a second.
+# Servers report "credits to the end" differently (Plex leaves out the end of final credits, Emby has no end at all),
+# and a file's runtime can differ slightly between servers, so shown times are compared within a second and an end
+# within 2 s of the file's end counts as the end.
 _SAME_TOLERANCE_MS = 1_000
 _END_OF_FILE_MS = 2_000
 CAPABILITY_TTL_S = 60.0
@@ -50,7 +54,8 @@ CAPABILITY_UNKNOWN = "unknown"
 
 
 class CapabilityCache:
-    """Capability answers per server: ready ones reused for ``ttl_s``, any other state for ``not_ready_ttl_s``.
+    """Capability answers per server: ready ones reused for ``ttl_s``, any other state (or a ready one with a warning)
+    for ``not_ready_ttl_s``.
 
     The Edit tab and the Inspector ask on every load, and one Plex check can wait 30 s on a busy database. An entry
     only counts while the server's config is unchanged, so a saved server (switch, libraries, database folder, URL,
@@ -115,8 +120,11 @@ class CapabilityCache:
 
     def _ttl_for(self, answer: Any) -> float:
         # The status tab caches a capability dict, the Inspector just the state.
-        state = answer.get("state") if isinstance(answer, dict) else answer
-        return self.ttl_s if state == Capability.READY.value else self.not_ready_ttl_s
+        if isinstance(answer, dict):
+            ready = answer.get("state") == Capability.READY.value and not answer.get("warning")
+        else:
+            ready = answer == Capability.READY.value
+        return self.ttl_s if ready else self.not_ready_ttl_s
 
     def forget(self, server_id: str) -> None:
         """Forget one server's answers (both variants), so its next load checks it again.
@@ -174,11 +182,12 @@ def _settings_block(config: ServerConfig, settings: ServerMarkersSettings) -> di
     return block
 
 
-def _capability(state: Capability | str, message: str, details: dict | None = None) -> dict:
+def _capability(state: Capability | str, message: str, details: dict | None = None, warning: str = "") -> dict:
     return {
         "state": state.value if isinstance(state, Capability) else state,
         "message": message,
         "details": details or {},
+        "warning": warning,
     }
 
 
@@ -216,13 +225,16 @@ def _checked_as_if_on(server: Any, config: ServerConfig, settings: ServerMarkers
         return _capability(Capability.NEEDS_PLUGIN, EMBY_NEEDS_PLUGIN_MESSAGE)
     report = publisher.capability()
     details = dict(report.details)
+    warning = ""
     if config.type is ServerType.PLEX:
         if "plex_version" not in details:
             details.update(_plex_status(server))
         needs_same_path = report.state is Capability.NEEDS_LOCAL_DB and details.get("lock_holder") is False
         if needs_same_path and SAME_HOST_PATH_ADVICE not in report.message:
             details["hint"] = PLEX_SAME_HOST_PATH_HINT
-    return _capability(report.state, report.message, details)
+        if report.ready and details.get("plex_pass") is None:
+            warning = PLEX_PASS_UNCHECKED_WARNING
+    return _capability(report.state, report.message, details, warning)
 
 
 def server_status_payload(server: Any, config: ServerConfig) -> dict:
@@ -234,8 +246,9 @@ def server_status_payload(server: Any, config: ServerConfig) -> dict:
 
     Returns:
         ``server_id``, ``server_type``, ``enabled``, ``settings`` (as the app reads them), ``capability`` (checked as
-        if Intro & Credits were on; state ``unknown`` when the check itself failed), ``can_show`` and every library
-        with its default selection.
+        if Intro & Credits were on; state ``unknown`` when the check itself failed; ``warning`` set when a ready server
+        still won't be written, i.e. Plex Pass couldn't be checked), ``can_show`` and every library with its default
+        selection.
 
     Raises:
         Exception: Only when the stored settings or libraries can't be read; a failing capability check doesn't.
@@ -337,7 +350,30 @@ def _current(server: Any, cfg: ServerConfig, item_id: str | None, can_show: tupl
     return [_marker_dict(c) for c in found if c.type.value in can_show]
 
 
-def _same(current: list[dict], wanted: list[dict], duration_ms: int) -> bool:
+def _version_count(server: Any, cfg: ServerConfig, item_id: str | None) -> int | None:
+    """How many versions a Plex item has (Plex shows one marker set for all of them); None when not known."""
+    if cfg.type is not ServerType.PLEX or not item_id:
+        return None
+    try:
+        durations = server.get_part_durations(item_id)
+    except Exception as exc:
+        logger.debug("Reading the versions of item {} on {} failed: {}", item_id, cfg.name, type(exc).__name__)
+        return None
+    # One part per version: stacked multi-part files aren't published to (the Plex publisher refuses them).
+    return None if durations is None else len(durations)
+
+
+def _same_end(shown_end: int | None, wanted_end: int, duration_ms: int, server_type: ServerType) -> bool:
+    to_the_end = wanted_end >= duration_ms - _END_OF_FILE_MS
+    if shown_end is None:
+        # Plex leaves out the end of credits that run to the end; Emby's markers never have an end to compare.
+        return server_type is ServerType.EMBY or to_the_end
+    if to_the_end and shown_end >= duration_ms - _END_OF_FILE_MS:
+        return True
+    return abs(shown_end - wanted_end) <= _SAME_TOLERANCE_MS
+
+
+def _same(current: list[dict], wanted: list[dict], duration_ms: int, server_type: ServerType) -> bool:
     if len(current) != len(wanted):
         return False
 
@@ -347,10 +383,18 @@ def _same(current: list[dict], wanted: list[dict], duration_ms: int) -> bool:
     for c, w in zip(sorted(current, key=order), sorted(wanted, key=order), strict=True):
         if c["type"] != w["type"] or abs(c["start_ms"] - w["start_ms"]) > _SAME_TOLERANCE_MS:
             return False
-        ends_inside = w["end_ms"] < duration_ms - _END_OF_FILE_MS
-        if c["end_ms"] is not None and ends_inside and abs(c["end_ms"] - w["end_ms"]) > _SAME_TOLERANCE_MS:
+        if not _same_end(c["end_ms"], w["end_ms"], duration_ms, server_type):
             return False
     return True
+
+
+def _replaced_on_server(shown: list[dict], ours: tuple[Marker, ...], duration_ms: int, server_type: ServerType) -> bool:
+    """Whether the server shows another marker of one of our types where ours should be (its own re-detection)."""
+    for mtype in dict.fromkeys(m.type for m in ours):
+        now = [c for c in shown if c["type"] == mtype.value]
+        if now and not _same(now, [_marker_dict(m) for m in ours if m.type is mtype], duration_ms, server_type):
+            return True
+    return False
 
 
 def _expected(
@@ -358,19 +402,17 @@ def _expected(
 ) -> list[dict]:
     """What the server should show once published, per type.
 
-    The Plex publisher keeps what is already ours on the item when it agrees with the decision within its version
-    tolerance, so a type it would keep counts as ours while the server still shows it.
+    The Plex publisher keeps (and writes back) what is already ours on the item when it agrees with the decision
+    within its version tolerance, so that is what the server should show, whatever it shows now.
     """
     expected = []
     for mtype in dict.fromkeys(m.type for m in wanted):
         want = [m for m in wanted if m.type is mtype]
         kept = [m for m in ours if m.type is mtype]
         if server_type is ServerType.PLEX and kept and versions_agree(kept, want):
-            kept_dicts = [_marker_dict(m) for m in kept]
-            if _same([c for c in shown if c["type"] == mtype.value], kept_dicts, duration_ms):
-                expected.extend(kept_dicts)
-                continue
-        expected.extend(_marker_dict(m) for m in want)
+            expected.extend(_marker_dict(m) for m in kept)
+        else:
+            expected.extend(_marker_dict(m) for m in want)
     return expected
 
 
@@ -383,6 +425,7 @@ def _plan(
     current: list[dict] | None,
     waiting_on_versions: bool,
     duration_ms: int,
+    keeps_plex_markers: bool = False,
 ) -> tuple[str, str]:
     if off_reason:
         return "not_enabled", off_reason
@@ -395,8 +438,10 @@ def _plan(
     # Only the types we manage here: Plex keeps its own marker of a type we didn't decide.
     managed = {m.type.value for m in wanted} | {m.type.value for m in ours}
     shown = [c for c in current if c["type"] in managed]
-    if _same(shown, _expected(server_type, wanted, ours, shown, duration_ms), duration_ms):
+    if _same(shown, _expected(server_type, wanted, ours, shown, duration_ms), duration_ms, server_type):
         return "up_to_date", ""
+    if keeps_plex_markers and _replaced_on_server(shown, ours, duration_ms, server_type):
+        return "keeps_plex", KEPT_PLEX_MARKERS
     return ("will_replace", "") if shown else ("will_add", "")
 
 
@@ -423,13 +468,17 @@ def _server_row(
         ours = file_state.markers
     else:
         ours = ()
-    # Plex shows one set per item: a type this file decided but the item doesn't show after this file's last publish
-    # (nothing changed since) waits for the item's other versions to agree.
-    waiting_on_versions = bool(
-        cfg.type is ServerType.PLEX
-        and rec is not None
+    # Nothing changed since this file last published there (the pipeline's "unchanged" test).
+    published_unchanged = bool(
+        rec is not None
         and item_state is not None
         and store.get_publish_basis(rec.id, cfg.id) == (MarkerStore.markers_hash(wanted), item_state.version)
+    )
+    # Plex shows one set per item: a type this file decided but the item doesn't show after this file's last publish
+    # waits for the item's other versions to agree.
+    waiting_on_versions = bool(
+        cfg.type is ServerType.PLEX
+        and published_unchanged
         and {m.type for m in wanted} - {m.type for m in item_state.markers}
     )
     current = _current(server, cfg, item_id, can_show)
@@ -441,6 +490,10 @@ def _server_row(
         current=current,
         waiting_on_versions=waiting_on_versions,
         duration_ms=(rec.duration_ms or 0) if rec else 0,
+        # A normal job leaves Plex's own re-detected markers alone for an unchanged decision ("Keep Plex's").
+        keeps_plex_markers=cfg.type is ServerType.PLEX
+        and settings.on_plex_redetect == "keep_plex"
+        and published_unchanged,
     )
     return {
         "server_id": cfg.id,
@@ -457,6 +510,7 @@ def _server_row(
         "item_status": item_state.status if item_state else None,
         "plan": plan,
         "plan_reason": reason,
+        "version_count": _version_count(server, cfg, item_id),
         "error": None,
     }
 
@@ -479,6 +533,7 @@ def _degraded_row(cfg: ServerConfig, exc: Exception) -> dict:
         "item_status": None,
         "plan": "unknown",
         "plan_reason": "",
+        "version_count": None,
         "error": f"Couldn't read this server's Intro & Credits state ({type(exc).__name__})",
     }
 
@@ -497,8 +552,10 @@ def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> d
         failed), what is ours there, this file's last publish (``publish_status``, ``publish_message``), the server
         item's last publish (``item_status``; another version of a shared Plex item may have written or failed
         since), and the ``plan``: ``will_add``, ``will_replace``, ``will_remove``, ``up_to_date``, ``waiting`` (Plex
-        versions disagree), ``not_enabled``, ``nothing_to_publish``, or ``unknown`` (the server's markers couldn't be
-        read, or its row failed: then ``error`` says why), with ``plan_reason``.
+        versions disagree), ``keeps_plex`` (Plex's own detection replaced ours and the server is set to keep them),
+        ``not_enabled``, ``nothing_to_publish``, or ``unknown`` (the server's markers couldn't be read, or its row
+        failed: then ``error`` says why), with ``plan_reason``, and ``version_count`` (a Plex item's versions, which
+        share one marker set; None for other servers or when it couldn't be read).
     """
     rec = store.get_file(canonical_path)
     decisions = store.get_decisions(rec.id) if rec else {}

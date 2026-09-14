@@ -31,7 +31,17 @@ from ..web.settings_manager import get_settings_manager
 from .decide import DecisionContext, DecisionStatus, TypeDecision, decide
 from .external_ids import ids_from_path, ids_from_server_dict, merge_ids
 from .models import SERVER_SOURCES, Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
-from .outcomes import NOT_IN_LIBRARY, OUTCOME_KEYS, STATE_BY_STATUS, FileOutcome, ServerStatus, file_outcome
+from .outcomes import (
+    KEPT_PLEX_MARKERS,
+    NOT_IN_LIBRARY,
+    OUTCOME_KEYS,
+    PLEX_PASS_UNKNOWN,
+    STATE_BY_STATUS,
+    VERIFY_LATER,
+    FileOutcome,
+    ServerStatus,
+    file_outcome,
+)
 from .ownership import marker_matches, owning_servers
 from .probe import ProbeError, ffprobe_path_for, probe_media
 from .publishers.base import (
@@ -40,6 +50,7 @@ from .publishers.base import (
     ItemNotFoundError,
     MarkerPublisher,
     PublishError,
+    Shown,
 )
 from .publishers.factory import publisher_for
 from .settings import GlobalMarkersSettings, ServerMarkersSettings, get_global_settings, load_server
@@ -72,6 +83,8 @@ _ITEM_WIDE_MARKERS = frozenset({ServerType.PLEX, ServerType.EMBY})
 _IMPORTER_PLUGIN_SERVERS = frozenset({ServerType.JELLYFIN, ServerType.EMBY})
 PLUGINS_UNKNOWN_DETAIL = "Couldn't read this server's plugins, so its markers aren't used"
 _CANCELLED = "cancelled by user"
+# Answers read from the saved settings alone: cheap, and wrong the moment the user saves, so never reused.
+_SETTINGS_ANSWERS = frozenset({Capability.DISABLED, Capability.NEEDS_CONFIRMATION})
 
 LocalDetector = Callable[..., list[Candidate]]
 
@@ -574,7 +587,11 @@ def _row(
 
 
 def _capability(ctx: PipelineContext, cfg: ServerConfig, publisher: MarkerPublisher) -> CapabilityReport:
-    """Per-server capability, cached for ``capability_ttl_s``; one fetch per server even when every check thread misses."""
+    """Per-server capability, cached for ``capability_ttl_s``; one fetch per server even when every check thread misses.
+
+    An off or unconfirmed answer isn't cached: Plex reads it from the saved settings, and switching Intro & Credits
+    back on must reach the job's next file, not one 5 minutes later.
+    """
     cached = ctx._capabilities.get(cfg.id)
     if cached and time.monotonic() - cached[0] < ctx.capability_ttl_s:
         return cached[1]
@@ -585,7 +602,8 @@ def _capability(ctx: PipelineContext, cfg: ServerConfig, publisher: MarkerPublis
         if cached and time.monotonic() - cached[0] < ctx.capability_ttl_s:
             return cached[1]
         report = publisher.capability()
-        ctx._capabilities[cfg.id] = (time.monotonic(), report)
+        if report.state not in _SETTINGS_ANSWERS:
+            ctx._capabilities[cfg.id] = (time.monotonic(), report)
         return report
 
 
@@ -628,6 +646,18 @@ def _consent_problem(ctx: PipelineContext, cfg: ServerConfig, path: str) -> str 
     if not marker_matches(path, [live]):
         return "This library isn't selected for Intro & Credits on this server"
     return None
+
+
+def _shown_on_server(publisher: MarkerPublisher, cfg: ServerConfig, item_id: str, ours: list[Marker]) -> Shown | None:
+    """What the server shows of ``ours`` now; None when nothing of ours is there to check or it couldn't be read."""
+    if not ours:
+        return None
+    try:
+        return publisher.shows(item_id, ours)
+    except Exception as exc:
+        # A transient read problem mustn't fail or rewrite a file whose records say it is up to date.
+        logger.debug("Couldn't read back the markers on {} for item {}: {}", cfg.name, item_id, type(exc).__name__)
+        return None
 
 
 def _live_markers_settings(ctx: PipelineContext, cfg: ServerConfig) -> ServerMarkersSettings:
@@ -694,8 +724,15 @@ def _publish_to(
     if not report.ready:
         return _not_written(ServerStatus.SKIPPED, report.message or report.state.value, name=publisher.name)
     if "plex_pass" in report.details and report.details["plex_pass"] is None:
-        # READY with an unknown Pass is what the status tab shows; Plex serves no markers without a Pass (spec §6.3).
-        return _not_written(ServerStatus.SKIPPED, "Can't reach Plex to confirm Plex Pass", name=publisher.name)
+        # Plex serves no markers without a Pass (spec §6.3). Usually Plex is restarting: the next file asks again and
+        # the job retries this one.
+        ctx._capabilities.pop(cfg.id, None)
+        return _not_written(
+            ServerStatus.WAITING,
+            "Can't reach Plex to confirm Plex Pass",
+            name=publisher.name,
+            reason_code=PLEX_PASS_UNKNOWN,
+        )
     item_id = servers.item_id(owner)
     if not item_id:
         message = "Not in this server's library yet"
@@ -745,7 +782,20 @@ def _publish_to(
         # A forced re-detect and a waiting row always look at the item again: a version may have been added (never
         # decided) or removed without this file's decision or the item row changing.
         if not ctx.force and item_row is not None and _unchanged(item_row.version):
-            return _up_to_date()
+            # Our records can't see the server: its own detection, or a rescan of the file, can drop or replace ours.
+            shown = _shown_on_server(publisher, cfg, item_id, list(item_row.markers))
+            if shown in (None, Shown.OURS):
+                return _up_to_date()
+            keep_plex = cfg.type is ServerType.PLEX and _live_markers_settings(ctx, cfg).on_plex_redetect == "keep_plex"
+            if shown is Shown.REPLACED and keep_plex:
+                logger.info("{} replaced this app's markers on item {} with its own; keeping them", cfg.name, item_id)
+                return _row(cfg, publisher.name, ServerStatus.UP_TO_DATE, KEPT_PLEX_MARKERS, path)
+            logger.info(
+                "{} no longer shows this app's markers on item {} ({}); writing them again",
+                cfg.name,
+                item_id,
+                shown.value,
+            )
         previous = _previous_on_item(item_row, publisher)
         if not wanted and previous == [] and own_previous is None:
             if needs_review:
@@ -789,18 +839,21 @@ def _publish_to(
             message = f"{type(exc).__name__}: {exc}"
             return _not_written(ServerStatus.FAILED, message, name=publisher.name, item_id=attempted_item)
 
+        changed = publisher.last_write_changed
         version = store.set_item_publish_state(cfg.id, item_id, ours, "written")
-        if _unchanged(version):
+        if not changed and _unchanged(version):
             return _up_to_date()  # a forced run whose write changed nothing
         store.set_publish_basis(rec.id, cfg.id, decided_hash=decided_hash, item_version=version)
-        shown = {m.type for m in ours}
-        waiting_for = [m.type.value for m in wanted if m.type not in shown]
+        shown_types = {m.type for m in ours}
+        waiting_for = [m.type.value for m in wanted if m.type not in shown_types]
         if waiting_for:
             # Plex shows a type only when every version of the item is decided and agrees on it.
             message = f"Waiting for this item's other versions to agree on: {', '.join(waiting_for)}"
             return _finish(ServerStatus.WAITING, message, name=publisher.name, item_id=item_id, published=ours)
         message = f"{len(ours)} marker(s)" if ours else "Cleared our markers from this server"
-        return _finish(ServerStatus.WRITTEN, message, name=publisher.name, item_id=item_id, published=ours)
+        written = _finish(ServerStatus.WRITTEN, message, name=publisher.name, item_id=item_id, published=ours)
+        # Recorded either way, but only a write that changed the server says so: it already showed this.
+        return written if changed else _up_to_date()
 
 
 def _clock(ms: int) -> str:
@@ -947,12 +1000,16 @@ def _attempt(
     needs_review = any(decisions[t].status is DecisionStatus.NEEDS_REVIEW for t in types)
     if _identity_changed(rec):
         raise _FileChangedError(path)
+    replaced = existing is not None and not unchanged
     rows = []
     for owner in owners:
         # Per-server publish state already tolerates a partial fan-out; a busy Plex DB can hold a write for 30 s.
         if cancelled():
             return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
-        rows.append(_publish_to(owner, rec, markers, needs_review, servers, ctx, phase))
+        row = _publish_to(owner, rec, markers, needs_review, servers, ctx, phase)
+        if replaced and row["status"] in (ServerStatus.WRITTEN.value, ServerStatus.UP_TO_DATE.value):
+            row[VERIFY_LATER] = True
+        rows.append(row)
     outcome = file_outcome({r["status"] for r in rows}, needs_review=needs_review)
     return ItemOutcome(outcome.value, _summary(decisions, types), rows)
 

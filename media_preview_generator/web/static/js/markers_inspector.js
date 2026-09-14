@@ -38,6 +38,7 @@
         will_remove: ['Will remove', 'text-bg-warning'],
         up_to_date: ['Up to date', 'text-bg-success'],
         waiting: ['Waiting', 'text-bg-info'],
+        keeps_plex: ['Keeps Plex\'s', 'text-bg-secondary'],
         unknown: ['Unknown', 'text-bg-secondary'],
         not_enabled: ['Intro & Credits off', 'text-bg-secondary'],
         nothing_to_publish: ['Nothing to send yet', 'text-bg-secondary'],
@@ -331,7 +332,10 @@
         if (server.server_type === 'emby' && wanted.some(function (m) { return m.type === 'credits'; })) {
             lines.push('Emby has no “credits end”');
         }
-        if (server.server_type === 'plex') lines.push('All versions of this item share one set of markers');
+        // Only a Plex item with several versions: the note means nothing on a single file.
+        if (server.server_type === 'plex' && server.version_count > 1) {
+            lines.push('All versions of this item share one set of markers');
+        }
         return lines;
     }
 

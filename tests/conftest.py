@@ -5,12 +5,26 @@ Provides common test fixtures including mock configs, Plex responses,
 temporary directories, and helper functions for mocking FFmpeg and Plex.
 """
 
+import atexit
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# Every default config location (webhook history, jobs.db, markers.db, ffmpeg
+# failure logs, auth.json) falls back to /config when CONFIG_DIR is unset, and
+# on a Docker host /config can hold other services' live configs. Point it at
+# a throwaway folder per test process, before anything imports the package:
+# auth.py reads CONFIG_DIR at import time. Tests that need their own folder
+# still set CONFIG_DIR themselves.
+# ---------------------------------------------------------------------------
+_TEST_CONFIG_DIR = tempfile.mkdtemp(prefix="mpg-test-config-")
+os.environ["CONFIG_DIR"] = _TEST_CONFIG_DIR
+atexit.register(shutil.rmtree, _TEST_CONFIG_DIR, ignore_errors=True)
 
 # ---------------------------------------------------------------------------
 # Session-wide: swap APScheduler's SQLAlchemyJobStore for MemoryJobStore.

@@ -455,7 +455,7 @@ class TestQueueRows:
                 "outcome": None,
                 "retry_eta": eta,
                 "retry_wait_total": 300,
-                "current_item": "Retry starting in 300s — waiting for the server to add these files",
+                "current_item": "Retry starting in 300s — waiting for these files to appear on disk or on a server",
             },
         )
         soon_eta = (datetime.now(timezone.utc) + timedelta(seconds=45)).isoformat()
@@ -473,6 +473,30 @@ class TestQueueRows:
         expect(page.locator(f"#job-row-{soon['id']}")).to_contain_text(re.compile(r"Retry starting in 4\d s"))
         expect(row.locator('button[aria-label="Retry now"]')).to_have_count(0)
         expect(row).to_contain_text("Rick and Morty S01")
+
+    def test_verify_job_keeps_its_prefix_and_has_no_retry_chip(self, dashboard) -> None:
+        eta = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+        verify = _markers_job(
+            "bbbbbbbb-0000-4000-8000-000000000005",
+            library_name="Verify: Intro & Credits · Rick and Morty S01",
+            status="pending",
+            completed_at=None,
+            publishers=[],
+            config={
+                "kind": "intro_credits",
+                "source": "sonarr",
+                "file_paths": ["/data/tv/e01.mkv"],
+                "verify": True,
+                "retry_delay": 600,
+                "retry_not_before": eta,
+            },
+            progress={"percent": 0, "outcome": None, "retry_eta": eta, "retry_wait_total": 600},
+        )
+        page = dashboard([verify])
+        row = page.locator(f"#job-row-{verify['id']}")
+        expect(row).to_contain_text("Verify: Rick and Morty S01", timeout=5000)
+        expect(row).not_to_contain_text("Intro & Credits · Rick")
+        expect(row.locator(".markers-retry-chip")).to_have_count(0)
 
 
 def _files_response(files: list[dict]) -> dict:

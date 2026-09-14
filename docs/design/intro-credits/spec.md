@@ -378,7 +378,10 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
 ### 6.3 Publishers
 `MarkerPublisher` (parallel to `OutputAdapter`): `capability() -> Ready | NeedsPlugin | NeedsPass |
 NeedsLocalDb | NeedsPlexDetectionOnce | Disabled`, `write(item_id, markers, *, previous, duration_ms, canonical_path,
-own_previous) -> list[Marker]` (the markers ours on the item after the call), `atomic_writes`.
+own_previous) -> list[Marker]` (the markers ours on the item after the call; `last_write_changed` says whether that
+call changed the server), `shows(item_id, ours) -> Ours | Missing | Replaced | None` (a cheap read-back of what the
+server shows of what we last left there: Plex's `taggings` rows under the same lock proof, Jellyfin's core
+`/MediaSegments`), `atomic_writes`.
 
 **PlexMarkerPublisher** (opt-in per Plex server; Pass servers only)
 - DB path from that server's `output.plex_config_folder` (`Plug-in Support/Databases/com.plexapp.plugins.library.db`).
@@ -392,7 +395,9 @@ own_previous) -> list[Marker]` (the markers ours on the item after the call), `a
 - Multi-version items share one marker set: publish only when all parts' decisions agree within 2 s.
 - Unknown schema (columns/JSON shape differ from 1.43) → stop writing, show message.
 - Never write `tags`; never run integrity checks with stock SQLite (custom tokenizer).
-- Warn when Plex's own detection is on (it can force-overwrite); reconcile re-applies.
+- Warn when Plex's own detection is on (it can force-overwrite). Before a file is reported up to date, the job reads
+  the item's rows back: gone → written again; replaced by Plex's own → written again (`on_plex_redetect=restore`) or
+  left and reported "kept" (`keep_plex`).
 
 **JellyfinMarkerPublisher**
 - Extend **Media Preview Bridge** (`jellyfin-plugin/`, route prefix `MediaPreviewBridge`, today `Ping`,
@@ -752,3 +757,12 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   cleanup path on 12.0. Jellyfin 10.11 reports only the top item when a whole folder is removed, so a
   scheduled task (after start and daily) also deletes stored markers for items Jellyfin no longer has, once startup
   and library scans are done.
+- 2026-09-14 · Read-back verify (§6.3), from the pre-lab lab matrix (Plex forced credits detection and rescans of a
+  replaced file wiped or replaced our markers while jobs and the Inspector said up to date): a file whose decision and
+  item record are unchanged is up to date on a server only when `shows()` still finds ours there; otherwise it is
+  written again (Plex `keep_plex`: Plex's own replacement is left, row "Plex's own markers are kept"). A read failure
+  keeps "Up to date" (debug log). Outcome labels follow `last_write_changed`: a write that changed the server is
+  "Markers written" (forced restores included), a true no-op is "Up to date". After publishing a replaced file the job
+  queues one delayed verify job (first webhook retry delay × 3, at least 10 min, retry cap and switch; verify jobs
+  queue no further verify). The Inspector compares credits ends properly (Plex's final flag, Emby's missing end) and
+  plans `keeps_plex` for a kept replacement.

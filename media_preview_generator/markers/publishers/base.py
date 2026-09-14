@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections import Counter
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -40,6 +41,44 @@ class CapabilityReport:
         return self.state is Capability.READY
 
 
+class Shown(str, Enum):
+    """What a server item shows of the markers this app last left there (``MarkerPublisher.shows``)."""
+
+    OURS = "ours"
+    MISSING = "missing"  # some of ours are gone and nothing else of that type took their place
+    REPLACED = "replaced"  # the server shows another marker of one of our types instead (its own detection)
+
+
+def compare_shown(
+    ours: Iterable[Marker], served: Mapping[MarkerType, list[tuple[int, int]]], *, others_alongside: bool
+) -> Shown:
+    """Classify what a server shows for the types of ``ours``.
+
+    Args:
+        ours: What this app last left on the item.
+        served: Per type, ``(start_ms, end_ms)`` of every marker the server shows, in the form ``write`` returns.
+        others_alongside: Whether another provider's marker of a type is shown next to ours without replacing them
+            (Jellyfin serves every provider's segments); on Plex any other row of the type is one ours gave way to.
+
+    Returns:
+        OURS when every type shows ours; REPLACED when another marker of a type stands where ours was missing (or, on
+        Plex, next to ours); otherwise MISSING.
+    """
+    mine_by_type: dict[MarkerType, Counter] = {}
+    for marker in ours:
+        mine_by_type.setdefault(marker.type, Counter())[(marker.start_ms, marker.end_ms)] += 1
+    missing = False
+    for mtype, mine in mine_by_type.items():
+        shown = Counter(served.get(mtype, []))
+        lacking, extra = mine - shown, shown - mine
+        if not lacking and (others_alongside or not extra):
+            continue
+        if extra:
+            return Shown.REPLACED
+        missing = True
+    return Shown.MISSING if missing else Shown.OURS
+
+
 class PublishError(Exception):
     """A publisher call failed; ``state`` says which capability problem caused it (if any).
 
@@ -63,10 +102,28 @@ class MarkerPublisher(ABC):
     # True when a PublishError guarantees nothing changed on the server (one transaction). A caller may then keep
     # its record of what is ours; otherwise what is ours after a failed write is unknown.
     atomic_writes: bool = False
+    # Set by every successful ``write``: whether it changed what the server shows. A publisher is built for one file's
+    # publish to one server, so the flag always belongs to the caller's last write.
+    last_write_changed: bool = True
 
     @abstractmethod
     def capability(self) -> CapabilityReport:
         """Check whether this server can receive markers."""
+
+    @abstractmethod
+    def shows(self, item_id: str, ours: list[Marker]) -> Shown | None:
+        """Read what the server item shows for the types of ``ours`` (what this app last left there).
+
+        Read-only and cheap: asked before a file is reported up to date, so a server that re-detected or rescanned
+        the item gets our markers again.
+
+        Args:
+            item_id: Server item id.
+            ours: What this app last left on the item (non-empty).
+
+        Returns:
+            How the server's markers compare with ``ours``; None when they couldn't be read.
+        """
 
     @abstractmethod
     def write(
@@ -97,7 +154,7 @@ class MarkerPublisher(ABC):
         Returns:
             The markers that are ours on the server item after the call, sorted by start (empty when none are).
             A server with one marker set per item (Plex) can return fewer types than ``markers``: those its other
-            versions haven't decided the same way.
+            versions haven't decided the same way. ``last_write_changed`` says whether the call changed the server.
 
         Raises:
             PublishError: The write failed. With ``atomic_writes`` nothing changed; otherwise the server may hold a

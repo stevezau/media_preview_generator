@@ -110,6 +110,7 @@ def test_plex_disabled_but_configured_is_checked_as_if_enabled(factory):
                 "plex_version": "1.43.0",
                 "detection": {"intro": "1"},
             },
+            "warning": "",
         },
         "can_show": ["intro", "credits"],
         "libraries": [
@@ -225,6 +226,29 @@ def test_plex_early_failure_still_shows_pass_and_version(status, expected):
     server.get_server_status.assert_called_once_with()
 
 
+@pytest.mark.parametrize(
+    ("stype", "state", "pass_known", "warning"),
+    [
+        (ServerType.PLEX, Capability.READY, False, inspect.PLEX_PASS_UNCHECKED_WARNING),
+        (ServerType.PLEX, Capability.READY, True, ""),
+        # Not ready: the message already says what's wrong, and nothing would be written either way.
+        (ServerType.PLEX, Capability.NEEDS_LOCAL_DB, False, ""),
+        (ServerType.JELLYFIN, Capability.READY, False, ""),
+    ],
+    ids=["plex-ready-pass-unknown", "plex-ready-pass-known", "plex-not-ready", "jellyfin"],
+)
+def test_ready_plex_whose_plex_pass_couldnt_be_checked_warns(factory, stype, state, pass_known, warning):
+    details = {"db_path": "/plex/db", "plex_pass": True if pass_known else None, "plex_version": "1.43.0"}
+    if stype is ServerType.JELLYFIN:
+        details = {"plugin_version": "1.4.0"}
+    factory.reports[stype] = CapabilityReport(state, "", details)
+    cfg = server_config("srv", stype)
+    capability = inspect.server_status_payload(MagicMock(), cfg)["capability"]
+    assert (capability["state"], capability["warning"]) == (state.value, warning)
+    assert capability["details"] == details
+    assert "Plex Pass" in inspect.PLEX_PASS_UNCHECKED_WARNING
+
+
 def test_plex_status_error_while_filling_details_is_not_fatal(factory):
     factory.reports[ServerType.PLEX] = CapabilityReport(Capability.MISCONFIGURED, "Plex database not found at /x")
     server = MagicMock()
@@ -284,6 +308,7 @@ def test_jellyfin_ready_details(factory):
         "state": "ready",
         "message": "Media Preview Bridge plugin",
         "details": {"plugin_version": "1.4.0"},
+        "warning": "",
     }
     assert payload["can_show"] == ["intro", "credits", "recap", "preview"]
 
@@ -308,6 +333,7 @@ def test_server_turned_off_is_never_probed(factory):
         "state": "disabled",
         "message": "This server is turned off on the Servers page",
         "details": {},
+        "warning": "",
     }
 
 
@@ -318,7 +344,12 @@ def test_missing_client_is_misconfigured(factory):
     assert payload["capability"]["state"] == "misconfigured"
 
 
-_UNKNOWN_CAPABILITY = {"state": "unknown", "message": "Couldn't check this server (RuntimeError)", "details": {}}
+_UNKNOWN_CAPABILITY = {
+    "state": "unknown",
+    "message": "Couldn't check this server (RuntimeError)",
+    "details": {},
+    "warning": "",
+}
 
 
 def test_capability_check_that_raises_reads_as_unknown_and_is_not_cached(monkeypatch):
@@ -520,6 +551,7 @@ def test_unknown_file_lists_every_owning_server(store, factory):
             "item_status": None,
             "plan": "nothing_to_publish",
             "plan_reason": "",
+            "version_count": 0,  # the fake Plex item has no parts
             "error": None,
         },
         {
@@ -536,6 +568,7 @@ def test_unknown_file_lists_every_owning_server(store, factory):
             "item_status": None,
             "plan": "not_enabled",
             "plan_reason": "Intro & Credits is off for this server",
+            "version_count": None,
             "error": None,
         },
     ]
@@ -809,6 +842,122 @@ def test_emby_row_reads_chapter_markers_and_needs_its_plugin(store, factory):
     assert row["plan"] == "up_to_date"
 
 
+@pytest.mark.parametrize(
+    ("stype", "decided_credits", "shown", "plan"),
+    [
+        # Lab: Plex's own credits detection kept the start but stopped before the end; ours ran to the end.
+        (ServerType.PLEX, CREDITS, {"start_ms": 1_290_000, "end_ms": 1_300_000, "final": False}, "will_replace"),
+        (ServerType.PLEX, CREDITS, {"start_ms": 1_290_400, "end_ms": 1_319_000, "final": True}, "up_to_date"),
+        # Ours stop inside the file; Plex's final flag says its credits run to the end.
+        (
+            ServerType.PLEX,
+            Marker(T.CREDITS, 1_290_000, 1_300_000, ("c",)),
+            {"start_ms": 1_290_000, "end_ms": 1_300_000, "final": True},
+            "will_replace",
+        ),
+        (
+            ServerType.PLEX,
+            Marker(T.CREDITS, 1_290_000, 1_300_000, ("c",)),
+            {"start_ms": 1_290_000, "end_ms": 1_300_500, "final": False},
+            "up_to_date",
+        ),
+        # Emby has no credits end at all, so only the start can be compared.
+        (ServerType.EMBY, Marker(T.CREDITS, 1_290_000, 1_300_000, ("c",)), {"start_ms": 1_290_000}, "up_to_date"),
+    ],
+    ids=["plex-ends-early", "plex-final", "plex-final-vs-inside", "plex-inside", "emby-no-end"],
+)
+def test_a_credits_end_that_differs_is_not_up_to_date(store, factory, stype, decided_credits, shown, plan):
+    _known_file(
+        store,
+        {
+            T.INTRO: _none(T.INTRO),
+            T.CREDITS: _decided(decided_credits),
+            T.RECAP: _none(T.RECAP),
+            T.PREVIEW: _none(T.PREVIEW),
+        },
+    )
+    sid = stype.value
+    registry = _registry(server_config(sid, stype))
+    if stype is ServerType.PLEX:
+        registry.get(sid).get_markers.return_value = [{"type": "credits", **shown}]
+    else:
+        registry.get(sid).get_chapter_markers.return_value = [
+            {"marker_type": "CreditsStart", "start_ms": shown["start_ms"]}
+        ]
+    assert _row(inspect.item_payload(PATH, registry=registry, store=store), sid)["plan"] == plan
+
+
+@pytest.mark.parametrize(
+    ("redetect", "shown", "plan", "reason"),
+    [
+        (
+            "keep_plex",
+            [Marker(T.INTRO, 11_000, 37_000, ()), Marker(T.CREDITS, 1_250_000, 1_280_000, ())],
+            "keeps_plex",
+            "Plex's own markers are kept (Keep Plex's)",
+        ),
+        (
+            "restore",
+            [Marker(T.INTRO, 11_000, 37_000, ()), Marker(T.CREDITS, 1_250_000, 1_280_000, ())],
+            "will_replace",
+            "",
+        ),
+        # Gone, not replaced: nothing of Plex's to keep, so ours are written again.
+        ("keep_plex", [Marker(T.INTRO, 11_000, 37_000, ())], "will_replace", ""),
+        ("keep_plex", [INTRO, CREDITS], "up_to_date", ""),
+    ],
+    ids=["keep-replaced", "restore-replaced", "keep-missing", "keep-ours-shown"],
+)
+def test_plex_markers_replaced_by_plex_follow_on_plex_redetect(store, factory, redetect, shown, plan, reason):
+    rec = _known_file(store)
+    _published(store, rec, "plex", "rk-1", [INTRO, CREDITS], basis_for=[INTRO, CREDITS])
+    markers = _plex_markers(enabled=True, redetect=redetect)
+    registry = _registry(server_config("plex", ServerType.PLEX, markers=markers))
+    registry.get("plex").get_markers.return_value = _plex_rows(*shown, final_credits=False)
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
+    assert (row["plan"], row["plan_reason"]) == (plan, reason)
+
+
+def test_keep_plex_after_this_files_decision_changed_is_a_replace(store, factory):
+    # The next job writes a changed decision whatever the setting: "Keep Plex's" only stops restoring the same one.
+    rec = _known_file(store)
+    _published(store, rec, "plex", "rk-1", [INTRO, CREDITS], basis_for=[INTRO])
+    registry = _registry(
+        server_config("plex", ServerType.PLEX, markers=_plex_markers(enabled=True, redetect="keep_plex"))
+    )
+    registry.get("plex").get_markers.return_value = _plex_rows(
+        INTRO, Marker(T.CREDITS, 1_250_000, 1_280_000, ()), final_credits=False
+    )
+    assert _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")["plan"] == "will_replace"
+
+
+@pytest.mark.parametrize(
+    ("stype", "known_item", "durations", "count"),
+    [
+        (ServerType.PLEX, True, [DURATION], 1),
+        (ServerType.PLEX, True, [DURATION, DURATION - 60_000], 2),
+        (ServerType.PLEX, True, None, None),  # Plex didn't answer
+        (ServerType.PLEX, False, [DURATION, DURATION], None),  # no item: nothing to ask
+        (ServerType.JELLYFIN, True, [DURATION, DURATION], None),  # one item per version: never asked
+    ],
+    ids=["plex-one", "plex-two", "plex-unreadable", "plex-no-item", "jellyfin"],
+)
+def test_plex_row_carries_the_items_version_count(store, factory, stype, known_item, durations, count):
+    _known_file(store)
+    sid = stype.value
+    registry = _registry(server_config(sid, stype))
+    server = registry.get(sid)
+    server.get_part_durations.return_value = durations
+    if not known_item:
+        server.resolve_remote_path_to_item_id.return_value = None
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), sid)
+    assert row["version_count"] == count
+    if stype is ServerType.PLEX and known_item:
+        server.get_part_durations.assert_called_once_with(f"item-{sid}")
+    else:
+        server.get_part_durations.assert_not_called()
+
+
 def test_capability_check_that_raises_reads_as_unknown_in_the_inspector(store, monkeypatch):
     fake = _PublisherFactory(raises=RuntimeError("x"))
     monkeypatch.setattr(inspect, "publisher_for", fake)
@@ -889,8 +1038,10 @@ def test_nothing_decided_removes_what_is_ours(store, factory, ours, plan):
 @pytest.mark.parametrize(
     ("current", "plan"),
     [
-        # ends inside the file compare within 1 s; the final credits end isn't compared
-        ([Marker(T.INTRO, 11_900, 37_900, ()), Marker(T.CREDITS, 1_290_500, 1_300_000, ())], "up_to_date"),
+        # ends inside the file compare within 1 s; credits that run to the end match anything within 2 s of it
+        ([Marker(T.INTRO, 11_900, 37_900, ()), Marker(T.CREDITS, 1_290_500, DURATION - 1_500, ())], "up_to_date"),
+        # Jellyfin serves credits that stop 20 s before the end: not what this app sent (lab: a rescan's segments)
+        ([Marker(T.INTRO, 11_900, 37_900, ()), Marker(T.CREDITS, 1_290_500, 1_300_000, ())], "will_replace"),
         ([Marker(T.INTRO, 12_100, 37_000, ()), CREDITS], "will_replace"),
         ([Marker(T.INTRO, 11_000, 38_100, ()), CREDITS], "will_replace"),
         ([INTRO], "will_replace"),
@@ -982,6 +1133,7 @@ def test_one_failing_server_gives_a_degraded_row(store, factory, monkeypatch, fa
         "item_status": None,
         "plan": "unknown",
         "plan_reason": "",
+        "version_count": None,
         "error": "Couldn't read this server's Intro & Credits state (_Boom)",
     }
     jf = _row(payload, "jf")
@@ -1162,7 +1314,8 @@ def _intro_only(marker):
         (ServerType.PLEX, [INTRO_KEPT], Marker(T.INTRO, 60_000, 92_500, ()), INTRO_KEPT, "will_replace"),
         # Ours agrees but Plex shows something else now: compared with the decided times as before.
         (ServerType.PLEX, [INTRO_KEPT], INTRO_DECIDED_LATER, Marker(T.INTRO, 75_000, 110_000, ()), "will_replace"),
-        (ServerType.PLEX, [INTRO_KEPT], INTRO_DECIDED_LATER, INTRO_DECIDED_LATER, "up_to_date"),
+        # Plex shows the decided times, but the publisher writes the kept ones back: a write will happen.
+        (ServerType.PLEX, [INTRO_KEPT], INTRO_DECIDED_LATER, INTRO_DECIDED_LATER, "will_replace"),
         # Jellyfin writes the decided times whatever it had: no keep rule (Emby has no publisher, so nothing is ours).
         (ServerType.JELLYFIN, [INTRO_KEPT], INTRO_DECIDED_LATER, INTRO_KEPT, "will_replace"),
     ],
@@ -1226,6 +1379,21 @@ def test_answers_other_than_ready_are_reused_for_5_seconds_only(variant, ready, 
     now[0] = 59.0
     assert cache.get(cfg, variant, compute(problem)) == ready
     assert computed == [problem, ready, ready]
+
+
+def test_a_ready_status_with_a_warning_is_reused_for_5_seconds_only():
+    now = [0.0]
+    cache = inspect.CapabilityCache(ttl_s=60.0, clock=lambda: now[0])
+    cfg = server_config("plex", ServerType.PLEX)
+    unchecked = {"state": "ready", "message": "", "details": {"plex_pass": None}, "warning": "Plex Pass unchecked"}
+    checked = {"state": "ready", "message": "", "details": {"plex_pass": True}, "warning": ""}
+    cache.get(cfg, "status", lambda: unchecked)
+    now[0] = 4.9
+    assert cache.get(cfg, "status", lambda: checked) == unchecked
+    now[0] = 5.1
+    assert cache.get(cfg, "status", lambda: checked) == checked  # Plex is back after its restart
+    now[0] = 60.0
+    assert cache.get(cfg, "status", lambda: unchecked) == checked
 
 
 def test_forget_capability_drops_one_servers_answers():

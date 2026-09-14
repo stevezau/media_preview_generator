@@ -91,6 +91,7 @@ def create_intro_credits_job(
     item_id_hints: dict[str, dict[str, str]] | None = None,
     retry_attempt: int = 0,
     retry_delay_s: int = 0,
+    verify: bool = False,
 ) -> Job:
     """Create and start an Intro & Credits job.
 
@@ -105,8 +106,10 @@ def create_intro_credits_job(
         parent_schedule_id: Schedule that created it.
         force: Re-detect files already done.
         item_id_hints: ``{path: {server_id: item_id}}`` from vendor webhooks.
-        retry_attempt: For a retry of files a server hadn't indexed yet: which retry this is (1-based).
-        retry_delay_s: For a retry: seconds to wait before it takes a slot.
+        retry_attempt: For a retry of files a server hadn't indexed yet or that weren't on disk yet: which retry this
+            is (1-based).
+        retry_delay_s: For a retry or a verify job: seconds to wait before it takes a slot.
+        verify: A later check of files published after they were replaced (``job_runner._queue_verify``).
 
     Returns:
         The created job.
@@ -120,9 +123,12 @@ def create_intro_credits_job(
         "force": bool(force),
         "webhook_item_id_hints": dict(item_id_hints or {}),
     }
+    if verify:
+        config["verify"] = True
     if retry_attempt:
-        # The due time (not just the delay) is stored so a retry revived after a restart doesn't wait again in full.
         config["retry_attempt"] = int(retry_attempt)
+    if retry_attempt or verify:
+        # The due time (not just the delay) is stored so a job revived after a restart doesn't wait again in full.
         config["retry_delay"] = int(retry_delay_s)
         config["retry_not_before"] = (_utcnow() + timedelta(seconds=int(retry_delay_s))).isoformat()
     jm = get_job_manager()

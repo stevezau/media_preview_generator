@@ -136,6 +136,7 @@ def test_status_with_a_failing_capability_check_is_still_200(client, servers, mo
         "state": "unknown",
         "message": "Couldn't check this server (RuntimeError)",
         "details": {},
+        "warning": "",
     }
     assert body["server_id"] == "plex-1" and body["libraries"][0]["name"] == "TV Shows"
 
@@ -357,7 +358,10 @@ def test_item_by_server_item_refusals(client, servers, item_calls, resolve_calls
     ("server_id", "item_id", "status"),
     [
         ("plex-1", "42", 404),
-        ("plex-1", "/library/metadata/42", 404),
+        # Plex's resolver takes a bare rating key (int(item_id)): the metadata key form would only ever 404.
+        ("plex-1", "/library/metadata/42", 400),
+        ("plex-1", "-42", 400),
+        ("plex-1", " 42", 400),
         ("plex-1", "abc", 400),
         ("plex-1", "42?x=1", 400),
         ("plex-1", "../../library/sections", 400),

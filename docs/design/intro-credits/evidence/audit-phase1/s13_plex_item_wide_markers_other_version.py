@@ -19,7 +19,7 @@ plex.get_markers.return_value = [{"type": "intro", "start_ms": 24_500, "end_ms":
 # Item 777's two parts (asked only by the fixed code): the Blu-ray file and a WEB cut modeled 81 s shorter (the cold-open
 # difference between the two OP positions).
 plex.get_part_durations.return_value = [1_444_574, 1_363_574]
-registry.get("jf-1").resolve_remote_path_to_item_id.side_effect = lambda p: "jf-bd" if "Bluray" in p else "jf-web"
+registry.get("jf-1").resolve_remote_path_to_item_id.side_effect = lambda p, **kw: "jf-bd" if "Bluray" in p else "jf-web"
 jf_pub = ready_publisher("jellyfin_bridge", types=("intro", "credits", "recap", "preview"))
 pubs = {"jf-1": jf_pub}   # Plex publishing left out: the wrong decision is what matters here
 store = MarkerStore(tmp + "/markers.db")

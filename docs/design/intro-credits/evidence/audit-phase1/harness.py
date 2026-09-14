@@ -9,6 +9,9 @@ from pathlib import Path as _Path
 REPO = _os.environ.get("MPG_REPO") or str(_Path(__file__).resolve().parents[5])
 EVIDENCE = _os.environ.get("MPG_EVIDENCE") or f"{REPO}/docs/design/intro-credits/evidence"
 HERE = _os.path.dirname(_os.path.abspath(__file__))
+# Every default store, limiter and settings file lives under CONFIG_DIR (default /config, which on a Docker host can
+# hold live service configs): a throwaway folder, set before the package is imported.
+_os.environ["CONFIG_DIR"] = tempfile.mkdtemp(prefix="audit-phase1-config-")
 sys.path.insert(0, REPO)
 from media_preview_generator.markers import pipeline
 from media_preview_generator.markers.models import Candidate, MarkerType as T, Source
@@ -33,9 +36,10 @@ def make_file(root, rel):
 def ctx_for(store, registry, *, sources, publish_when="high", detect=None, clients=None, force=False):
     raw = {"sources": sources, "publish_when": publish_when, "detect": detect or {"intro": True, "credits": True}}
     settings = load_global(validate_global(raw, None)[0])
+    # live_config: the registry's configs stand in for the saved settings consent is read from before each write.
     return PipelineContext(registry=registry, config=MagicMock(), settings=settings, store=store,
                            priority=lambda: 2, ffprobe="ffprobe", force=force, clients=clients or {},
-                           now=lambda: datetime(2026, 9, 14, tzinfo=timezone.utc))
+                           now=lambda: datetime(2026, 9, 14, tzinfo=timezone.utc), live_config=registry.get_config)
 
 def run(ctx, path, publishers, probe, hints=None):
     with patch.object(pipeline, "probe_media", return_value=probe), \

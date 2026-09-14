@@ -137,14 +137,20 @@
         }
         const detectionOn = plexDetectionOn(details.detection);
         if (detectionOn === true) {
+            const keepsPlex = ((status.settings || {}).plex || {}).on_plex_redetect === 'keep_plex';
+            const outcome = keepsPlex ? "it can replace ours; Plex's are kept" : 'it can replace ours; we put them back';
             rows.push(kvRow(
                 "Plex's own detection",
-                `${badge('warn', 'On', 'markers-detection')} <span class="text-muted">it can replace ours; we put them back</span>`,
+                `${badge('warn', 'On', 'markers-detection')} <span class="text-muted">${esc(outcome)}</span>`,
             ));
         } else if (detectionOn === false) {
             rows.push(kvRow("Plex's own detection", badge('off', 'Off', 'markers-detection')));
         }
-        return kvGrid(rows) + (capability.state === 'ready' ? '' : warningLine(capability));
+        // A ready Plex can still carry a warning: Plex Pass couldn't be checked, so jobs wait instead of writing.
+        const warning = capability.state === 'ready'
+            ? warningLine({ message: capability.warning })
+            : warningLine(capability);
+        return kvGrid(rows) + warning;
     }
 
     function installButton(label) {

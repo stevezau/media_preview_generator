@@ -105,6 +105,7 @@ def south_park() -> dict:
                 "plex",
                 "will_replace",
                 [_marker("intro", 76_508, 112_748), _marker("credits", 1_265_000, 1_297_000)],
+                version_count=1,
             ),
             _server("jf-1", "Jellyfin", "jellyfin", "will_add", []),
             _server("emby-1", "Emby", "emby", "will_add", []),
@@ -161,7 +162,16 @@ def every_plan() -> dict:
     intro_now = [_marker("intro", 11_000, 37_000)]
     payload["servers"] = [
         _server("s-add", "Adds", "jellyfin", "will_add", []),
-        _server("s-replace", "Replaces", "plex", "will_replace", [_marker("intro", 76_508, 112_748)]),
+        _server("s-replace", "Replaces", "plex", "will_replace", [_marker("intro", 76_508, 112_748)], version_count=2),
+        _server(
+            "s-keep",
+            "Keeps",
+            "plex",
+            "keeps_plex",
+            [_marker("intro", 11_000, 37_000), _marker("credits", 1_250_000, 1_280_000)],
+            plan_reason="Plex's own markers are kept (Keep Plex's)",
+            version_count=1,
+        ),
         _server(
             "s-remove",
             "Removes",
@@ -357,10 +367,27 @@ class TestIntroCreditsTab:
         plex = _server_card(page, "plex-1")
         expect(plex.locator(".mk-plan")).to_have_text("Will replace")
         expect(plex).to_contain_text("Intro 1:16–1:52 → 0:11–0:37")
-        expect(plex).to_contain_text("All versions of this item share one set of markers")
+        # One version: the shared-set note would only confuse.
+        expect(plex).not_to_contain_text("All versions")
         expect(_server_card(page, "jf-1").locator(".mk-plan")).to_have_text("Will add")
         expect(_server_card(page, "jf-1")).not_to_contain_text("All versions")
         expect(_server_card(page, "emby-1")).to_contain_text("Emby has no “credits end”")
+
+    @pytest.mark.parametrize(("count", "shown"), [(2, True), (1, False), (None, False)], ids=["two", "one", "unknown"])
+    def test_shared_marker_set_note_only_for_a_plex_item_with_several_versions(
+        self, authed_page: Page, app_url: str, count, shown: bool
+    ) -> None:
+        payload = south_park()
+        payload["servers"][0]["version_count"] = count
+        inspector = _Inspector(authed_page, app_url, payload)
+        inspector.open_result()
+        page = inspector.open_tab()
+        plex = _server_card(page, "plex-1")
+        expect(plex.locator(".mk-plan")).to_have_text("Will replace")
+        if shown:
+            expect(plex).to_contain_text("All versions of this item share one set of markers")
+        else:
+            expect(plex).not_to_contain_text("All versions")
 
     def test_needs_review_shows_the_chip_and_a_dashed_proposal(self, authed_page: Page, app_url: str) -> None:
         inspector = _Inspector(authed_page, app_url, needs_review())
@@ -522,6 +549,7 @@ class TestIntroCreditsTab:
         expected = {
             "s-add": ("Will add", ["Intro 0:11–0:37 · Credits 21:39–end"]),
             "s-replace": ("Will replace", ["Intro 1:16–1:52 → 0:11–0:37", "All versions of this item share"]),
+            "s-keep": ("Keeps Plex's", ["Plex's own markers are kept (Keep Plex's)"]),
             "s-remove": ("Will remove", ["Removes Intro 0:11–0:37"]),
             "s-same": ("Up to date", ["Intro 0:11–0:37 · Credits 21:39–end"]),
             "s-wait": ("Waiting", ["versions don't agree yet", "Not in this server's library yet"]),
@@ -536,6 +564,7 @@ class TestIntroCreditsTab:
             expect(card.locator(".mk-plan")).to_have_text(label)
             for line in lines:
                 expect(card).to_contain_text(line)
+        expect(_server_card(page, "s-keep")).not_to_contain_text("All versions")
         expect(_server_card(page, "s-unread")).not_to_contain_text("none yet")
         expect(_lane(page, "opening", "Unreadable now")).to_contain_text("Couldn't read what the server shows")
         expect(_lane(page, "opening", "Broken now")).to_contain_text("Couldn't read what the server shows")

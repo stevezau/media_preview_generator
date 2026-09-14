@@ -90,7 +90,7 @@ def _status(server: dict, state: str, message: str = "", details: dict | None = 
         "server_type": server["type"],
         "enabled": server["markers"]["enabled"],
         "settings": server["markers"],
-        "capability": {"state": state, "message": message, "details": details or {}},
+        "capability": {"state": state, "message": message, "details": details or {}, "warning": ""},
         "can_show": can_show,
         "libraries": [
             {"id": lib["id"], "name": lib["name"], "kind": lib["kind"], "default_selected": lib["name"] != "Sports"}
@@ -209,6 +209,20 @@ class TestPlexTab:
         expect(authed_page.locator("#markersRedetectRestore")).to_be_checked()
         expect(authed_page.locator("#markersEnabled")).not_to_be_checked()
 
+    def test_detection_on_with_keep_plex_says_plexs_markers_are_kept(self, authed_page: Page, app_url: str) -> None:
+        server = _plex_server(
+            {
+                "enabled": True,
+                "library_ids": None,
+                "plex": {"db_write_confirmed_at": "2026-09-01T10:00:00+00:00", "on_plex_redetect": "keep_plex"},
+            }
+        )
+        _mock_server_page(authed_page, server, _status(server, "ready", "", _plex_ready_details()))
+        _open_tab(authed_page, app_url, server)
+        block = authed_page.locator("#markersStatusBlock")
+        expect(block).to_contain_text("it can replace ours; Plex's are kept", timeout=5000)
+        expect(block).not_to_contain_text("we put them back")
+
     def test_detection_never_renders_off(self, authed_page: Page, app_url: str) -> None:
         server = _plex_server()
         details = _plex_ready_details(detection={"intro": "never", "credits": "never"})
@@ -217,6 +231,35 @@ class TestPlexTab:
         )
         _open_tab(authed_page, app_url, server)
         expect(authed_page.locator("#markersStatusBlock .markers-detection")).to_have_text("Off", timeout=5000)
+
+    def test_ready_plex_whose_plex_pass_couldnt_be_checked_shows_the_warning(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        server = _plex_server()
+        details = _plex_ready_details(plex_pass=None, plex_version=None, detection={"intro": None, "credits": None})
+        status = _status(server, "ready", "", details)
+        warning = "Can't reach Plex to confirm Plex Pass, so markers wait until Plex answers"
+        status["capability"]["warning"] = warning
+        _mock_server_page(authed_page, server, status)
+        _open_tab(authed_page, app_url, server)
+
+        block = authed_page.locator("#markersStatusBlock")
+        expect(block.locator(".alert-warning")).to_have_count(1, timeout=5000)
+        expect(block.locator(".alert-warning")).to_contain_text(warning)
+        expect(block).not_to_contain_text("✓ Active")
+        expect(block).to_contain_text("✓ local disk")
+
+    def test_redetect_tooltip_says_what_happens_today(self, authed_page: Page, app_url: str) -> None:
+        server = _plex_server()
+        _mock_server_page(authed_page, server, _status(server, "ready", "", _plex_ready_details()))
+        _open_tab(authed_page, app_url, server)
+        icon = authed_page.locator("#markersPlexRedetectGroup .info-icon")
+        tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
+        assert tooltip == (
+            "Plex's own detection (for example Analyze on an item) can replace our markers in its database. 'Put ours "
+            "back': the next Intro & Credits job that checks the file writes ours again. 'Keep Plex's': Plex's markers "
+            "stay until this file's own decision changes."
+        )
 
     def test_flip_then_cancel_unticks_switch_and_sends_nothing(self, authed_page: Page, app_url: str) -> None:
         server = _plex_server()

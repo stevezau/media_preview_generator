@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from unittest.mock import MagicMock
 
-from media_preview_generator.markers.publishers.base import Capability, CapabilityReport
+from media_preview_generator.markers.publishers.base import Capability, CapabilityReport, Shown, compare_shown
 from media_preview_generator.markers.sources.online import LookupResult
 from media_preview_generator.servers.base import Library, ServerConfig, ServerType
 from media_preview_generator.servers.ownership import find_owning_servers
@@ -78,7 +78,9 @@ def ready_publisher(name="plex_db", types=("intro", "credits"), *, atomic_writes
     """A ready publisher whose ``write`` returns what it was asked to show (the per-version contract).
 
     ``atomic_writes`` defaults to False for the Jellyfin bridge (the plugin may store before an error) and True for
-    everything else. Tests that make ``write`` fail restore it with ``pub.write.side_effect = pub.succeed``.
+    everything else. Tests that make ``write`` fail restore it with ``pub.write.side_effect = pub.succeed``. A write
+    changes the server unless ``previous`` already was that set; ``shows`` answers "still ours" unless a test says
+    otherwise.
     """
     from media_preview_generator.markers.models import MarkerType
     from media_preview_generator.markers.publishers.base import MarkerPublisher
@@ -91,8 +93,19 @@ def ready_publisher(name="plex_db", types=("intro", "credits"), *, atomic_writes
     pub.project.side_effect = lambda ms: sorted(
         (m for m in ms if m.type in pub.supported_types), key=lambda m: (m.start_ms, m.type.value)
     )
-    pub.succeed = lambda item_id, markers, **kwargs: pub.project(markers)
+
+    def succeed(item_id, markers, **kwargs):
+        ours = pub.project(markers)
+        previous = kwargs.get("previous")
+        pub.last_write_changed = previous is None or [_served(m) for m in pub.project(previous)] != [
+            _served(m) for m in ours
+        ]
+        return ours
+
+    pub.succeed = succeed
     pub.write.side_effect = pub.succeed
+    pub.last_write_changed = True
+    pub.shows.return_value = Shown.OURS
     return pub
 
 
@@ -155,11 +168,21 @@ class FakePlexItems:
             kept = [
                 m for m in self.shown.get(item_id, []) if m.type not in desired_types and _served(m) not in ours_before
             ]
+            before = self.served(item_id)
             self.shown[item_id] = sorted(kept + desired, key=lambda m: (m.start_ms, m.type.value))
+            # own_previous: the real publisher takes the moved part's own copy of those markers off.
+            pub.last_write_changed = self.served(item_id) != before or bool(own_previous)
             return sorted(desired, key=lambda m: (m.start_ms, m.type.value))
+
+        def shows(item_id, ours):
+            served: dict = {}
+            for mtype, start, end in self.served(item_id):
+                served.setdefault(mtype, []).append((start, end))
+            return compare_shown(ours, served, others_alongside=False)
 
         pub.succeed = write
         pub.write.side_effect = write
+        pub.shows.side_effect = shows
         return pub
 
     def served(self, item_id):

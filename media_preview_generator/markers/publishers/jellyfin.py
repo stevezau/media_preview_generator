@@ -16,7 +16,7 @@ import requests
 from loguru import logger
 
 from ..models import Marker, MarkerType
-from .base import Capability, CapabilityReport, ItemNotFoundError, MarkerPublisher, PublishError
+from .base import Capability, CapabilityReport, ItemNotFoundError, MarkerPublisher, PublishError, Shown, compare_shown
 
 if TYPE_CHECKING:
     from ...servers.base import ServerConfig
@@ -63,6 +63,10 @@ def bridge_key(segment: dict[str, Any]) -> tuple[object, object, object]:
 def core_key(row: dict[str, Any]) -> tuple[object, object, object]:
     """The same key for a core ``/MediaSegments`` row, which uses PascalCase names."""
     return row.get("Type"), row.get("StartTicks"), row.get("EndTicks")
+
+
+def _times(markers: list[Marker]) -> list[tuple[MarkerType, int, int]]:
+    return [(m.type, m.start_ms, m.end_ms) for m in markers]
 
 
 def _file_size(path: str) -> int | None:
@@ -151,6 +155,7 @@ class JellyfinMarkerPublisher(MarkerPublisher):
         """Replace the plugin's markers for the item and confirm Jellyfin serves them.
 
         An empty set deletes them instead, when something was published before or that is unknown (``previous`` None).
+        When ``previous`` already is this set and Jellyfin still serves all of it, nothing is sent.
 
         Writes are not atomic (``atomic_writes`` False): a ``PublishError`` from the confirmation comes after the POST.
         The unconfirmed markers are then deleted (best effort); if that DELETE fails too, the plugin store keeps them
@@ -167,11 +172,17 @@ class JellyfinMarkerPublisher(MarkerPublisher):
             PublishError: Not written, or stored but not shown and removed again. ``state`` is set only for problems
                 of the whole server (unreachable, plugin missing); problems of this item or library leave it None.
         """
+        self.last_write_changed = False
         wanted = self.project(markers)
+        if wanted and previous is not None and _times(self.project(previous)) == _times(wanted):
+            # A forced run or a restore check: POST only when Jellyfin no longer serves what the plugin was given.
+            if self.shows(item_id, wanted) is Shown.OURS:
+                return wanted
         try:
             if not wanted:
                 if previous is None or previous:
                     self._check(self._server.delete_bridge_markers(item_id), item_id)
+                    self.last_write_changed = True
                 return []
             segments = [
                 {
@@ -187,9 +198,31 @@ class JellyfinMarkerPublisher(MarkerPublisher):
             raise PublishError(
                 f"Can't reach Jellyfin ({type(exc).__name__}); markers not written", state=Capability.UNREACHABLE
             ) from exc
+        self.last_write_changed = True
         self._confirm_shown(item_id, segments)
         logger.info("Jellyfin {}: stored {} marker(s) for item {}", self._config.name, len(wanted), item_id)
         return wanted
+
+    def shows(self, item_id: str, ours: list[Marker]) -> Shown | None:
+        """Read core ``/MediaSegments`` for the item: what Jellyfin serves from every provider.
+
+        Args:
+            item_id: Jellyfin item id.
+            ours: What this app last left on the item.
+
+        Returns:
+            Whether Jellyfin still serves each of ``ours`` (another provider's segments may sit alongside); None when
+            the segments couldn't be read.
+        """
+        rows = self._server.get_media_segments(item_id)
+        if rows is None:
+            return None
+        served: dict[MarkerType, list[tuple[int, int]]] = {}
+        for row in rows:
+            converted = segment_times(*core_key(row))
+            if converted is not None:
+                served.setdefault(converted[0], []).append(converted[1:])
+        return compare_shown(self.project(ours), served, others_alongside=True)
 
     def _confirm_shown(self, item_id: str, segments: list[dict[str, Any]]) -> None:
         shown = self._shown(item_id, segments)

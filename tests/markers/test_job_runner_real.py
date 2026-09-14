@@ -210,7 +210,7 @@ class TestRealJobThread:
         monkeypatch.setattr(job_runner, "build_context", lambda **kw: MagicMock())
         monkeypatch.setattr(job_runner, "kind_handlers", lambda ctx: handlers)
         items = [ProcessableItem(f"/m/{name}.mkv", "") for name in ("a", "slow", "c")]
-        monkeypatch.setattr(job_runner, "build_items", lambda cfg, **kw: (items, []))
+        monkeypatch.setattr(job_runner, "build_items", lambda cfg, **kw: (items, [], {}))
 
         job = triggers.create_intro_credits_job(library_name="real thread", priority=3, source="manual")
         jm, gate = engine.jm, engine.gate
@@ -227,6 +227,7 @@ class TestRealJobThread:
         finally:
             release_item.set()
         assert _outcome(jm, job.id) == {"markers_published": 3}
-        assert gate.snapshot()[0] == 0
+        # The job is marked completed before its thread's teardown gives the slot back.
+        assert _wait_for(lambda: gate.snapshot()[0] == 0), "the finished job kept its slot"
         assert sorted(r["file"] for r in jm.get_file_results(job.id)) == ["/m/a.mkv", "/m/c.mkv", "/m/slow.mkv"]
         assert _wait_for(lambda: job.id not in job_runner._inflight_jobs)

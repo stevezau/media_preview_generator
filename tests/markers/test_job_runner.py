@@ -2,6 +2,7 @@
 
 import os
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -38,7 +39,7 @@ class TestBuildItems:
             "media_preview_generator.jobs.orchestrator._resolve_webhook_path_to_canonical",
             side_effect=lambda p, configs, log_resolution=True: (p, []),
         ) as resolve:
-            items, warnings = job_runner.build_items(cfg, registry=reg)
+            items, warnings, _sent = job_runner.build_items(cfg, registry=reg)
         assert [i.canonical_path for i in items] == [
             str(other / "S01E01.mkv"),
             str(season / "S01E01.mkv"),
@@ -60,7 +61,7 @@ class TestBuildItems:
             "media_preview_generator.jobs.orchestrator._resolve_webhook_path_to_canonical",
             return_value=("/media/tv/Show/S01E01.mkv", []),
         ):
-            items, _ = job_runner.build_items(
+            items, _, _sent = job_runner.build_items(
                 {"file_paths": ["/data/tv/Show/S01E01.mkv"], "webhook_item_id_hints": {}}, registry=reg
             )
         assert [(i.canonical_path, i.server_id) for i in items] == [("/media/tv/Show/S01E01.mkv", "")]
@@ -95,7 +96,9 @@ class TestBuildItems:
         with patch(
             "media_preview_generator.jobs.orchestrator._enumerate_items_for_servers", side_effect=fake_enumerate
         ) as enum:
-            items, warnings = job_runner.build_items(cfg, registry=reg, cancel_check=cancel, progress_callback=progress)
+            items, warnings, _sent = job_runner.build_items(
+                cfg, registry=reg, cancel_check=cancel, progress_callback=progress
+            )
         assert list(seen) == ["plex-1"]
         assert seen["plex-1"] == {"library_ids": ["1", "2"], "cancel_check": cancel, "progress_callback": progress}
         assert (
@@ -140,7 +143,7 @@ class TestBuildItems:
         with patch(
             "media_preview_generator.jobs.orchestrator._enumerate_items_for_servers", side_effect=fake_enumerate
         ):
-            _items, warnings = job_runner.build_items(cfg, registry=reg)
+            _items, warnings, _sent = job_runner.build_items(cfg, registry=reg)
         assert seen == {"jf-1": ["tv"]}
         assert warnings == [
             "Skipped Sports: Intro & Credits isn't on for it",
@@ -178,7 +181,7 @@ class TestBuildItems:
         with patch(
             "media_preview_generator.jobs.orchestrator._enumerate_items_for_servers", side_effect=fake_enumerate
         ) as enum:
-            items, warnings = job_runner.build_items({}, registry=reg)
+            items, warnings, _sent = job_runner.build_items({}, registry=reg)
         assert [c.id for c in enum.call_args.args[0]] == ["plex-1"]
         assert seen == {"plex-1": ["1"]}
         assert items == [] and warnings == []
@@ -197,7 +200,7 @@ class TestBuildItems:
         with patch(
             "media_preview_generator.jobs.orchestrator._enumerate_items_for_servers", return_value=([], [])
         ) as enum:
-            items, warnings = job_runner.build_items(
+            items, warnings, _sent = job_runner.build_items(
                 {"libraries": [{"server_id": "jf-1", "library_id": "1"}]}, registry=FakeRegistry(servers)
             )
         assert enum.call_args.args[0] == []
@@ -232,9 +235,10 @@ class TestBuildItems:
         reg = FakeRegistry({"jf-1": cfg})
         raw = "/data/anime/Show/Show - S01E01.mkv" if sender_view else str(episode)
 
-        items, warnings = job_runner.build_items({"file_paths": [raw]}, registry=reg)
+        items, warnings, sent = job_runner.build_items({"file_paths": [raw]}, registry=reg)
 
         assert [i.canonical_path for i in items] == [str(episode)]
+        assert sent == {str(episode): raw}
         assert list(marker_matches(items[0].canonical_path, reg.configs())) == ["jf-1"]
         assert warnings == []
 
@@ -245,7 +249,7 @@ class TestBuildItems:
             "media_preview_generator.jobs.orchestrator._enumerate_items_for_servers",
             return_value=([(None, first), (None, ProcessableItem("/media/tv/S/a.mkv", "jf-1"))], []),
         ):
-            items, _ = job_runner.build_items({}, registry=reg)
+            items, _, _sent = job_runner.build_items({}, registry=reg)
         assert items == [first]
 
 
@@ -316,7 +320,7 @@ def env(monkeypatch):
 class TestRun:
     def _run(self, items=None, warnings=None):
         with patch.object(
-            job_runner, "build_items", return_value=([_item()] if items is None else items, warnings or [])
+            job_runner, "build_items", return_value=([_item()] if items is None else items, warnings or [], {})
         ) as build:
             job_runner.run_intro_credits_job("j1")
         return build
@@ -803,7 +807,7 @@ class TestRun:
     def test_cancel_during_enumeration_cancels_without_submitting(self, env):
         def build(cfg, **kwargs):
             env.jm.is_cancellation_requested.return_value = True
-            return [_item()], []
+            return [_item()], [], {}
 
         with patch.object(job_runner, "build_items", side_effect=build):
             job_runner.run_intro_credits_job("j1")
@@ -943,7 +947,7 @@ class TestRestart:
         env.jm.get_file_results.return_value.append({"file": "", "outcome": "truncated:markers_up_to_date"})
         new = _item(str(tmp_path / "e.mkv"))
         items = [done, failed, replaced, store_reset, new]
-        with patch.object(job_runner, "build_items", return_value=(items, [])):
+        with patch.object(job_runner, "build_items", return_value=(items, [], {})):
             job_runner.run_intro_credits_job("j1")
         env.jm.get_file_results.assert_called_once_with("j1")
         kwargs = env.dispatcher.submit_items.call_args.kwargs
@@ -956,7 +960,7 @@ class TestRestart:
     def test_only_settled_outcomes_are_skipped(self, env, finished, outcome, skipped):
         item = finished("a.mkv", outcome)
         other = finished("b.mkv", "failed")
-        with patch.object(job_runner, "build_items", return_value=([item, other], [])):
+        with patch.object(job_runner, "build_items", return_value=([item, other], [], {})):
             job_runner.run_intro_credits_job("j1")
         submitted = env.dispatcher.submit_items.call_args.kwargs["items"]
         assert submitted == ([other] if skipped else [item, other])
@@ -974,20 +978,20 @@ class TestRestart:
         # Plex was written but Jellyfin hadn't indexed the file; the restart may have lost its retry job.
         item = finished("a.mkv", "markers_published", servers=servers)
         other = finished("b.mkv", "failed")
-        with patch.object(job_runner, "build_items", return_value=([item, other], [])):
+        with patch.object(job_runner, "build_items", return_value=([item, other], [], {})):
             job_runner.run_intro_credits_job("j1")
         assert env.dispatcher.submit_items.call_args.kwargs["items"] == ([other] if skipped else [item, other])
 
     def test_file_gone_from_disk_is_checked_again(self, env, finished, tmp_path):
         item = finished("a.mkv", "markers_published")
         os.remove(item.canonical_path)
-        with patch.object(job_runner, "build_items", return_value=([item], [])):
+        with patch.object(job_runner, "build_items", return_value=([item], [], {})):
             job_runner.run_intro_credits_job("j1")
         assert env.dispatcher.submit_items.call_args.kwargs["items"] == [item]
 
     def test_resumed_job_with_every_file_finished_completes_without_submitting(self, env, finished):
         item = finished("a.mkv", "markers_needs_review")
-        with patch.object(job_runner, "build_items", return_value=([item], [])):
+        with patch.object(job_runner, "build_items", return_value=([item], [], {})):
             job_runner.run_intro_credits_job("j1")
         env.dispatcher.submit_items.assert_not_called()
         env.jm.set_job_outcome.assert_called_once_with("j1", {"markers_needs_review": 1})
@@ -999,7 +1003,7 @@ class TestRestart:
             env.jm.get_file_results.side_effect = results
         else:
             env.jm.get_file_results.return_value = results
-        with patch.object(job_runner, "build_items", return_value=([_item("/m/a.mkv")], [])):
+        with patch.object(job_runner, "build_items", return_value=([_item("/m/a.mkv")], [], {})):
             job_runner.run_intro_credits_job("j1")
         assert env.dispatcher.submit_items.call_args.kwargs["items"] == [_item("/m/a.mkv")]
 
@@ -1019,7 +1023,7 @@ class TestRestart:
                 state["paused"] = False
 
         monkeypatch.setattr(job_runner, "time", SimpleNamespace(sleep=fake_sleep))
-        with patch.object(job_runner, "build_items", return_value=([_item()], [])):
+        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
             job_runner.run_intro_credits_job("j1")
         assert order[:2] == ["start", "pause"]
         env.jm.request_pause.assert_called_once_with("j1")
@@ -1115,6 +1119,9 @@ def _row(status, message, sid="jf-1", **extra):
 
 
 NOT_IN_LIBRARY_ROW = _row("markers_waiting", "Not in this server's library yet", reason_code="not_in_library")
+PLEX_PASS_UNKNOWN_ROW = _row(
+    "markers_waiting", "Can't reach Plex to confirm Plex Pass", sid="plex-1", reason_code="plex_pass_unknown"
+)
 
 
 class TestLibraryRetry:
@@ -1144,7 +1151,7 @@ class TestLibraryRetry:
         return SimpleNamespace(settings=settings, create=create, results=results)
 
     def _run(self, paths=("/m/a.mkv", "/m/b.mkv")):
-        with patch.object(job_runner, "build_items", return_value=([_item(p) for p in paths], [])):
+        with patch.object(job_runner, "build_items", return_value=([_item(p) for p in paths], [], {})):
             job_runner.run_intro_credits_job("j1")
 
     @pytest.mark.parametrize(
@@ -1174,6 +1181,7 @@ class TestLibraryRetry:
             priority=3,
             source="sonarr",
             file_paths=["/m/a.mkv", "/m/b.mkv"],
+            item_id_hints=None,
             retry_attempt=expected_attempt,
             retry_delay_s=expected_delay,
         )
@@ -1269,6 +1277,7 @@ class TestLibraryRetry:
                 priority=3,
                 source=source,
                 file_paths=["/m/a.mkv"],
+                item_id_hints=None,
                 retry_attempt=1,
                 retry_delay_s=60,
             )
@@ -1298,6 +1307,37 @@ class TestLibraryRetry:
         retry_env.create.assert_not_called()
         logs = [c.args[1] for c in env.jm.add_log.call_args_list]
         assert any(line.startswith("WARNING - 1 file(s) still not on disk after 3 retries") for line in logs), logs
+
+    @pytest.mark.parametrize(
+        ("rows", "reason"),
+        [
+            ([NOT_IN_LIBRARY_ROW], "not in a server's library yet"),
+            ([PLEX_PASS_UNKNOWN_ROW], "not checked on Plex yet"),  # Plex restarting: the Pass check didn't answer
+            ([PLEX_PASS_UNKNOWN_ROW, NOT_IN_LIBRARY_ROW], "not in a server's library or not checked on Plex yet"),
+        ],
+        ids=["not-indexed", "plex-pass-unknown", "both"],
+    )
+    def test_each_retry_reason_gets_the_retry_and_its_log_line(self, env, retry_env, rows, reason):
+        retry_env.results.append(("/m/a.mkv", "markers_waiting", rows))
+        self._run(["/m/a.mkv"])
+        assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a.mkv"]
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        assert f"INFO - 1 file(s) {reason}; retry 1 of 3 in 60s (job retry-1)" in logs, logs
+
+    def test_all_three_reasons_share_one_retry_and_one_log_line(self, env, retry_env):
+        retry_env.results += [
+            ("/m/a.mkv", "skipped_file_not_found", []),
+            ("/m/b.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]),
+            ("/m/c.mkv", "markers_waiting", [PLEX_PASS_UNKNOWN_ROW]),
+        ]
+        env.job.config["retry_attempt"] = 3
+        self._run(["/m/a.mkv", "/m/b.mkv", "/m/c.mkv"])
+        retry_env.create.assert_not_called()
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        assert (
+            "WARNING - 3 file(s) still not on disk, not in a server's library or not checked on Plex after 3 retries; "
+            "the next run for these files will try again"
+        ) in logs, logs
 
     def test_stable_reason_code_is_recognised_whatever_the_message(self, env, retry_env):
         retry_env.results.append(
@@ -1330,6 +1370,222 @@ class TestLibraryRetry:
         )
 
 
+class TestVerifyReplacedFilesLater:
+    """A replaced file is checked once more a while after its publish: servers rescan it and can drop our markers."""
+
+    @pytest.fixture
+    def verify_env(self, env, monkeypatch):
+        from media_preview_generator.markers import triggers
+
+        settings = {"log_level": "INFO", "webhook_retry_count": 3, "webhook_retry_delay": 30}
+        env.sm.get.side_effect = lambda key, default=None: settings.get(key, default)
+        env.job.library_name = "Show - S01E01.mkv"
+        env.job.config = {
+            "libraries": [],
+            "file_paths": ["/data/tv/a.mkv", "/data/tv/b.mkv"],
+            "webhook_item_id_hints": {"/data/tv/a.mkv": {"jf-1": "abc"}},
+            "source": "sonarr",
+        }
+        create = MagicMock(side_effect=lambda **kw: MagicMock(id=f"job-{create.call_count}"))
+        monkeypatch.setattr(triggers, "create_intro_credits_job", create)
+        results = []
+        set_cb = MagicMock()
+        monkeypatch.setattr(job_runner, "set_file_result_callback", set_cb)
+
+        def during_wait(timeout=None):
+            for path, outcome, rows in results:
+                set_cb.call_args_list[0].args[0](path, outcome, "", "Lookup", servers=rows)
+            return True
+
+        env.tracker.wait.side_effect = during_wait
+        sent = {"/m/a.mkv": "/data/tv/a.mkv", "/m/b.mkv": "/data/tv/b.mkv"}
+        return SimpleNamespace(settings=settings, create=create, results=results, sent=sent)
+
+    def _run(self, verify_env, paths=("/m/a.mkv", "/m/b.mkv")):
+        with patch.object(job_runner, "build_items", return_value=([_item(p) for p in paths], [], verify_env.sent)):
+            job_runner.run_intro_credits_job("j1")
+
+    WRITTEN_LATER = _row("markers_written", "2 marker(s)", verify_later=True)
+    UP_TO_DATE_LATER = _row("markers_up_to_date", "Up to date", sid="plex-1", verify_later=True)
+
+    @pytest.mark.parametrize(("retry_delay", "delay"), [(30, 600), (10, 600), (300, 1800)])
+    def test_one_verify_job_for_the_replaced_files(self, env, verify_env, retry_delay, delay):
+        verify_env.settings["webhook_retry_delay"] = retry_delay
+        verify_env.results += [
+            ("/m/b.mkv", "markers_published", [self.WRITTEN_LATER]),
+            ("/m/a.mkv", "markers_up_to_date", [self.UP_TO_DATE_LATER, self.WRITTEN_LATER]),
+        ]
+        self._run(verify_env)
+        verify_env.create.assert_called_once_with(
+            library_name="Verify: Show - S01E01.mkv",
+            priority=3,
+            source="sonarr",
+            file_paths=["/data/tv/a.mkv", "/data/tv/b.mkv"],
+            item_id_hints={"/data/tv/a.mkv": {"jf-1": "abc"}},
+            retry_delay_s=delay,
+            verify=True,
+        )
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        assert f"INFO - 2 replaced file(s) are checked again in {delay}s (job job-1)" in logs, logs
+
+    def test_rows_without_the_flag_queue_nothing(self, env, verify_env):
+        verify_env.results.append(("/m/a.mkv", "markers_published", [_row("markers_written", "2 marker(s)")]))
+        self._run(verify_env)
+        verify_env.create.assert_not_called()
+
+    def test_a_verify_job_never_queues_another(self, env, verify_env):
+        env.job.config["verify"] = True
+        verify_env.results.append(("/m/a.mkv", "markers_published", [self.WRITTEN_LATER]))
+        self._run(verify_env)
+        verify_env.create.assert_not_called()
+
+    def test_retries_turned_off_turn_the_verify_off_too(self, env, verify_env):
+        verify_env.settings["webhook_retry_count"] = 0
+        verify_env.results.append(("/m/a.mkv", "markers_published", [self.WRITTEN_LATER]))
+        self._run(verify_env)
+        verify_env.create.assert_not_called()
+
+    def test_a_file_waiting_on_one_server_gets_its_retry_and_its_verify(self, env, verify_env):
+        verify_env.results.append(
+            ("/m/a.mkv", "markers_published", [self.WRITTEN_LATER, {**NOT_IN_LIBRARY_ROW, "server_id": "plex-1"}])
+        )
+        self._run(verify_env, ["/m/a.mkv"])
+        assert [c.kwargs.get("verify", False) for c in verify_env.create.call_args_list] == [False, True]
+        assert all(c.kwargs["file_paths"] == ["/data/tv/a.mkv"] for c in verify_env.create.call_args_list)
+
+    def test_the_verify_takes_at_most_500_files(self, env, verify_env):
+        paths = [f"/m/{i:04d}.mkv" for i in range(501)]
+        verify_env.sent = {}
+        verify_env.results += [(p, "markers_published", [self.WRITTEN_LATER]) for p in paths]
+        self._run(verify_env, paths)
+        assert verify_env.create.call_args.kwargs["file_paths"] == paths[:500]
+
+    def test_a_cancelled_job_queues_no_verify(self, env, verify_env):
+        verify_env.results.append(("/m/a.mkv", "markers_published", [self.WRITTEN_LATER]))
+        env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "cancelled": True}
+        self._run(verify_env)
+        verify_env.create.assert_not_called()
+
+
+class TestRetryCarriesTheSenderPath:
+    """A retry resolves the path the sender gave again, so it finds the disk the file landed on (pre-lab MED-1)."""
+
+    RAW = "/data/tv/Show/Season 01/Show - S01E01.mkv"
+    TAIL = ("Show", "Season 01", "Show - S01E01.mkv")
+
+    @pytest.fixture
+    def disks(self, tmp_path, env, monkeypatch):
+        from media_preview_generator.markers import triggers
+        from media_preview_generator.servers.base import ServerConfig
+
+        for disk in ("disk1", "disk2"):
+            (tmp_path / disk / "tv").mkdir(parents=True)
+        # One "TV Shows" library spread over two disks, both reached from Sonarr's /data/tv.
+        cfg = ServerConfig(
+            id="plex-1",
+            type=ServerType.PLEX,
+            name="Plex",
+            enabled=True,
+            url="http://plex",
+            auth={},
+            libraries=[Library("2", "TV Shows", ("/tv",), enabled=True)],
+            path_mappings=[
+                {"remote_prefix": "/tv", "local_prefix": str(tmp_path / d / "tv"), "webhook_prefixes": ["/data/tv"]}
+                for d in ("disk1", "disk2")
+            ],
+            markers={"enabled": True, "library_ids": None, "plex": {"db_write_confirmed_at": "x"}},
+        )
+        reg = FakeRegistry({"plex-1": cfg})
+        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda config: reg)
+        settings = {"log_level": "INFO", "webhook_retry_count": 3, "webhook_retry_delay": 30}
+        env.sm.get.side_effect = lambda key, default=None: settings.get(key, default)
+        env.job.library_name = "Show - S01E01.mkv"
+        create = MagicMock(return_value=MagicMock(id="retry-1"))
+        monkeypatch.setattr(triggers, "create_intro_credits_job", create)
+        set_cb = MagicMock()
+        monkeypatch.setattr(job_runner, "set_file_result_callback", set_cb)
+        return SimpleNamespace(tmp=tmp_path, registry=reg, create=create, set_cb=set_cb)
+
+    def _local(self, disks, disk):
+        return str(disks.tmp.joinpath(disk, "tv", *self.TAIL))
+
+    @pytest.mark.parametrize(
+        ("result", "on_disk"),
+        [
+            (("skipped_file_not_found", []), None),  # Sonarr's import is still copying to one of the disks
+            (("markers_waiting", [NOT_IN_LIBRARY_ROW]), "disk2"),  # on disk2, the server hasn't scanned it yet
+        ],
+        ids=["not-on-disk", "not-indexed"],
+    )
+    @pytest.mark.parametrize(
+        ("source", "hints"), [("sonarr", {}), ("jellyfin", {"jf-1": "abc"})], ids=["no-hints", "vendor-hints"]
+    )
+    def test_retry_gets_the_sender_path_and_its_hints(self, env, disks, result, on_disk, source, hints):
+        if on_disk:
+            Path(self._local(disks, on_disk)).parent.mkdir(parents=True)
+            Path(self._local(disks, on_disk)).write_bytes(b"x")
+        canonical = self._local(disks, on_disk or "disk1")
+        env.job.config = {
+            "libraries": [],
+            "file_paths": [self.RAW],
+            "webhook_item_id_hints": {self.RAW: hints} if hints else {},
+            "source": source,
+        }
+
+        def during_wait(timeout=None):
+            disks.set_cb.call_args_list[0].args[0](canonical, result[0], "", "Lookup", servers=result[1])
+            return True
+
+        env.tracker.wait.side_effect = during_wait
+        job_runner.run_intro_credits_job("j1")
+
+        assert [i.canonical_path for i in env.dispatcher.submit_items.call_args.kwargs["items"]] == [canonical]
+        disks.create.assert_called_once_with(
+            library_name="Retry: Show - S01E01.mkv",
+            priority=3,
+            source=source,
+            file_paths=[self.RAW],
+            item_id_hints={self.RAW: hints} if hints else None,
+            retry_attempt=1,
+            retry_delay_s=60,
+        )
+
+        # Sonarr's copy lands on the second disk before the retry runs: the retry reads it there.
+        landed = Path(self._local(disks, "disk2"))
+        landed.parent.mkdir(parents=True, exist_ok=True)
+        landed.write_bytes(b"x")
+        kwargs = disks.create.call_args.kwargs
+        retry_config = {"file_paths": kwargs["file_paths"], "webhook_item_id_hints": kwargs["item_id_hints"] or {}}
+        items, _warnings, _sent = job_runner.build_items(retry_config, registry=disks.registry)
+        assert [(i.canonical_path, i.item_id_by_server) for i in items] == [(str(landed), hints)]
+
+    def test_files_from_a_library_listing_are_retried_by_their_local_path(self, env, disks):
+        local = self._local(disks, "disk2")
+        env.job.config = {"libraries": [], "file_paths": [], "source": "schedule"}
+
+        def during_wait(timeout=None):
+            disks.set_cb.call_args_list[0].args[0](local, "markers_waiting", "", "Lookup", servers=[NOT_IN_LIBRARY_ROW])
+            return True
+
+        env.tracker.wait.side_effect = during_wait
+        with patch.object(job_runner, "build_items", return_value=([_item(local)], [], {})):
+            job_runner.run_intro_credits_job("j1")
+
+        assert disks.create.call_args.kwargs["file_paths"] == [local]
+        assert disks.create.call_args.kwargs["item_id_hints"] is None
+
+    def test_build_items_maps_each_local_path_to_the_path_it_was_sent_as(self, disks):
+        (disks.tmp / "other.mkv").write_bytes(b"x")
+        local_pick = str(disks.tmp / "other.mkv")
+
+        items, _warnings, sent = job_runner.build_items({"file_paths": [self.RAW, local_pick]}, registry=disks.registry)
+
+        assert sent == {self._local(disks, "disk1"): self.RAW, local_pick: local_pick}
+        assert sorted(i.canonical_path for i in items) == sorted(sent)
+        _items, _warnings, listed = job_runner.build_items({}, registry=disks.registry)
+        assert listed == {}
+
+
 class TestRetryWait:
     """A retry job waits out its delay before the gate: no slot, cancellable."""
 
@@ -1338,7 +1594,18 @@ class TestRetryWait:
         monkeypatch.setattr(job_runner, "_utcnow", lambda: now["t"])
         return now
 
-    def test_waits_until_the_retry_is_due_without_a_slot(self, env, monkeypatch):
+    @pytest.mark.parametrize(
+        ("kind", "waiting_for"),
+        [
+            ({"retry_attempt": 2}, "Retry starting in 120s — waiting for these files to appear on disk or on a server"),
+            (
+                {"verify": True},
+                "Check starting in 120s — servers often rescan a replaced file after its markers are sent",
+            ),
+        ],
+        ids=["retry", "verify"],
+    )
+    def test_waits_until_the_retry_is_due_without_a_slot(self, env, monkeypatch, kind, waiting_for):
         from datetime import datetime, timedelta, timezone
 
         start = datetime(2026, 9, 14, 10, 0, tzinfo=timezone.utc)
@@ -1346,7 +1613,7 @@ class TestRetryWait:
         due = start + timedelta(seconds=120)
         env.job.config = {
             "file_paths": ["/m/a.mkv"],
-            "retry_attempt": 2,
+            **kind,
             "retry_delay": 120,
             "retry_not_before": due.isoformat(),
         }
@@ -1358,13 +1625,13 @@ class TestRetryWait:
             now["t"] += timedelta(seconds=60)
 
         monkeypatch.setattr(job_runner, "time", SimpleNamespace(sleep=fake_sleep))
-        with patch.object(job_runner, "build_items", return_value=([_item()], [])):
+        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
             job_runner.run_intro_credits_job("j1")
         assert len(sleeps) == 2
         env.gate.acquire.assert_called_once()
         first = env.jm.update_progress.call_args_list[0].kwargs
         assert first["retry_eta"] == due.isoformat() and first["retry_wait_total"] == 120
-        assert "Retry starting in 120s" in first["current_item"]
+        assert first["current_item"] == waiting_for
         env.jm.update_progress.assert_any_call("j1", retry_eta=None)
         env.dispatcher.submit_items.assert_called_once()
 
@@ -1374,7 +1641,7 @@ class TestRetryWait:
 
         self._clock(monkeypatch, datetime(2026, 9, 14, 10, 0, tzinfo=timezone.utc))
         env.job.config = {"file_paths": ["/m/a.mkv"], "retry_attempt": 1, "retry_not_before": not_before}
-        with patch.object(job_runner, "build_items", return_value=([_item()], [])):
+        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
             job_runner.run_intro_credits_job("j1")
         env.dispatcher.submit_items.assert_called_once()
         assert not any("retry_eta" in c.kwargs for c in env.jm.update_progress.call_args_list)

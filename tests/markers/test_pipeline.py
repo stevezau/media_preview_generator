@@ -23,6 +23,7 @@ from media_preview_generator.markers.publishers.base import (
     CapabilityReport,
     ItemNotFoundError,
     PublishError,
+    Shown,
 )
 from media_preview_generator.markers.settings import load_global, validate_global
 from media_preview_generator.markers.sources.online import LookupResult
@@ -434,13 +435,27 @@ class TestIdentityAndProbe:
         ctx = _ctx(store, reg)
         _run(ctx, media, pubs, probe=_probe(CHAPTERS_BOTH))
         os.utime(media, ns=(5, 6))
+
+        def jellyfin_lost_them(item_id, markers, **kwargs):
+            jf.last_write_changed = True
+            return jf.project(markers)
+
+        jf.write.side_effect = jellyfin_lost_them
         out, _ = _run(ctx, media, pubs, probe=_probe(CHAPTERS_BOTH))
         for pub, sid in ((plex, "plex-1"), (jf, "jellyfin-1")):
             assert pub.write.call_count == 2
             args, kwargs = pub.write.call_args
             assert args == (f"item-{sid}", [INTRO_CH, CREDITS_CH])
             assert kwargs["previous"] == [INTRO_CH, CREDITS_CH]
-        assert {r["status"] for r in out.publisher_rows} == {ServerStatus.WRITTEN.value}
+        rows = _rows(out)
+        # Plex still showed them (a true no-op); Jellyfin had dropped them. Both are checked again later: servers
+        # rescan a replaced file after the job.
+        assert (rows["plex-1"]["status"], rows["jellyfin-1"]["status"]) == (
+            ServerStatus.UP_TO_DATE.value,
+            ServerStatus.WRITTEN.value,
+        )
+        assert rows["plex-1"]["verify_later"] is True and rows["jellyfin-1"]["verify_later"] is True
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
 
     def test_file_changed_during_analysis_is_detected_again_before_publishing(self, store, media):
         reg = _registry(media, ServerType.PLEX)
@@ -2448,6 +2463,37 @@ class TestConsentBeforeEachWrite:
         assert pub.write.call_count == (1 if change == "unchanged" else 0)
         assert (sid in ctx._capabilities) is (change == "unchanged")
 
+    @pytest.mark.parametrize(
+        ("report", "cached"),
+        [
+            (CapabilityReport(Capability.DISABLED, "Intro & Credits is off for this server"), False),
+            (CapabilityReport(Capability.NEEDS_CONFIRMATION, "Confirm the Plex database write to turn this on"), False),
+            # Not from the saved settings: a server problem is still reused for the job's TTL.
+            (CapabilityReport(Capability.UNREACHABLE, "Can't reach this Jellyfin server"), True),
+        ],
+        ids=["off", "confirmation-cleared", "unreachable"],
+    )
+    def test_an_answer_from_the_saved_settings_is_not_reused_for_the_next_file(self, store, media, report, cached):
+        # Plex's capability reads the saved settings live: off for file 1, on again a minute later for file 2.
+        other = _second_episode(media)
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+        plex.capability.side_effect = [report, CapabilityReport(Capability.READY, "ok", {"plex_pass": True})]
+        ctx = _ctx(store, reg)  # the 300 s job cache
+        first, _ = _run(ctx, media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+        second, _ = _run(ctx, other, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+
+        assert (first.publisher_rows[0]["status"], first.publisher_rows[0]["message"]) == (
+            ServerStatus.SKIPPED.value,
+            report.message,
+        )
+        expected = (
+            (ServerStatus.SKIPPED.value, report.message) if cached else (ServerStatus.WRITTEN.value, "2 marker(s)")
+        )
+        assert (second.publisher_rows[0]["status"], second.publisher_rows[0]["message"]) == expected
+        assert plex.capability.call_count == (1 if cached else 2)
+        assert [c.kwargs["canonical_path"] for c in plex.write.call_args_list] == ([] if cached else [other])
+
     def test_plex_confirmation_cleared_loads_as_off(self, store, media):
         reg = _registry(media, ServerType.PLEX)
         live = copy.deepcopy(reg.configs_by_id["plex-1"])
@@ -2513,26 +2559,145 @@ class TestConsentBeforeEachWrite:
 
 
 class TestPlexPassUnknown:
-    """A READY Plex whose Plex Pass couldn't be read isn't written: Plex serves nothing without a Pass (audit C LOW)."""
+    """A READY Plex whose Plex Pass couldn't be read isn't written: Plex serves nothing without a Pass (audit C LOW).
+
+    The file waits with a retry code and the next file checks Plex again (pre-lab LOW-2): a Plex restart during a
+    webhook follow-up must not leave the file for the next scheduled run.
+    """
 
     # Emby has no publisher yet, so it never reaches the capability check.
     @pytest.mark.parametrize(
-        ("stype", "details", "status", "message"),
+        ("stype", "details", "status", "message", "reason_code"),
         [
-            (ServerType.PLEX, {"plex_pass": None}, ServerStatus.SKIPPED, "Can't reach Plex to confirm Plex Pass"),
-            (ServerType.PLEX, {"plex_pass": True}, ServerStatus.WRITTEN, "2 marker(s)"),
-            (ServerType.JELLYFIN, {"plugin_version": "10.11.1.0"}, ServerStatus.WRITTEN, "2 marker(s)"),
+            (
+                ServerType.PLEX,
+                {"plex_pass": None},
+                ServerStatus.WAITING,
+                "Can't reach Plex to confirm Plex Pass",
+                "plex_pass_unknown",
+            ),
+            (ServerType.PLEX, {"plex_pass": True}, ServerStatus.WRITTEN, "2 marker(s)", None),
+            (ServerType.JELLYFIN, {"plugin_version": "10.11.1.0"}, ServerStatus.WRITTEN, "2 marker(s)", None),
         ],
         ids=["plex-unknown", "plex-pass", "jellyfin"],
     )
-    def test_unknown_pass_is_not_ready_for_writes(self, store, media, stype, details, status, message):
+    def test_unknown_pass_is_not_ready_for_writes(self, store, media, stype, details, status, message, reason_code):
         reg = _registry(media, stype)
         sid = f"{stype.value}-1"
         pub = ready_publisher("plex_db" if stype is ServerType.PLEX else "jellyfin_bridge")
         pub.capability.return_value = CapabilityReport(Capability.READY, "ready", details)
-        out, _ = _run(_ctx(store, reg), media, {sid: pub}, probe=_probe(CHAPTERS_BOTH))
-        assert (out.publisher_rows[0]["status"], out.publisher_rows[0]["message"]) == (status.value, message)
-        assert pub.write.call_count == (0 if status is ServerStatus.SKIPPED else 1)
+        ctx = _ctx(store, reg)
+        out, _ = _run(ctx, media, {sid: pub}, probe=_probe(CHAPTERS_BOTH))
+        row = out.publisher_rows[0]
+        assert (row["status"], row["message"], row.get("reason_code")) == (status.value, message, reason_code)
+        assert pub.write.call_count == (0 if status is ServerStatus.WAITING else 1)
+        assert (sid in ctx._capabilities) is (status is not ServerStatus.WAITING)
+        assert _state(store, media, sid).status == ("waiting" if status is ServerStatus.WAITING else "written")
+
+    def test_the_next_file_checks_plex_again_and_writes_once_it_answers(self, store, media):
+        other = _second_episode(media)
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+        plex.capability.side_effect = [
+            CapabilityReport(Capability.READY, "", {"plex_pass": None}),
+            CapabilityReport(Capability.READY, "", {"plex_pass": True}),
+        ]
+        ctx = _ctx(store, reg)  # the 300 s job cache
+        first, _ = _run(ctx, media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+        second, _ = _run(ctx, other, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+        assert first.outcome_key == FileOutcome.WAITING.value
+        assert (second.publisher_rows[0]["status"], second.publisher_rows[0]["message"]) == (
+            ServerStatus.WRITTEN.value,
+            "2 marker(s)",
+        )
+        assert [c.kwargs["canonical_path"] for c in plex.write.call_args_list] == [other]
+
+
+class TestReadBackVerify:
+    """Before an unchanged file is "Up to date" on a server, the server is asked whether it still shows ours."""
+
+    @staticmethod
+    def _published_then_checked(store, media, stype, shows, *, redetect="restore"):
+        reg = _registry(media, stype)
+        sid = f"{stype.value}-1"
+        if stype is ServerType.PLEX:
+            reg.configs_by_id[sid].markers["plex"]["on_plex_redetect"] = redetect
+        pub = ready_publisher("plex_db" if stype is ServerType.PLEX else "jellyfin_bridge")
+        _run(_ctx(store, reg), media, {sid: pub}, probe=_probe(CHAPTERS_BOTH))
+        if isinstance(shows, Exception):
+            pub.shows.side_effect = shows
+        else:
+            pub.shows.return_value = shows
+        pub.write.side_effect = lambda item_id, markers, **kw: (setattr(pub, "last_write_changed", True), markers)[1]
+        out, _ = _run(_ctx(store, reg), media, {sid: pub})
+        return pub, out.publisher_rows[0], out
+
+    @pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.JELLYFIN])
+    @pytest.mark.parametrize(
+        ("shows", "redetect", "status", "message", "writes"),
+        [
+            (Shown.OURS, "restore", ServerStatus.UP_TO_DATE, "Up to date", 1),
+            (None, "restore", ServerStatus.UP_TO_DATE, "Up to date", 1),  # couldn't be read
+            (RuntimeError("HTTP 500"), "restore", ServerStatus.UP_TO_DATE, "Up to date", 1),
+            (Shown.MISSING, "restore", ServerStatus.WRITTEN, "2 marker(s)", 2),
+            (Shown.MISSING, "keep_plex", ServerStatus.WRITTEN, "2 marker(s)", 2),  # nothing of Plex's to keep
+            (Shown.REPLACED, "restore", ServerStatus.WRITTEN, "2 marker(s)", 2),
+            (Shown.REPLACED, "keep_plex", ServerStatus.UP_TO_DATE, "Plex's own markers are kept (Keep Plex's)", 1),
+        ],
+        ids=["ours", "unreadable", "read-raises", "missing", "missing-keep", "replaced", "replaced-keep"],
+    )
+    def test_matrix(self, store, media, stype, shows, redetect, status, message, writes):
+        pub, row, out = self._published_then_checked(store, media, stype, shows, redetect=redetect)
+        if stype is ServerType.JELLYFIN and redetect == "keep_plex":
+            # "Keep Plex's" is a Plex setting: a Jellyfin server's segments are always written again.
+            status, message, writes = ServerStatus.WRITTEN, "2 marker(s)", 2
+        assert (row["status"], row["message"]) == (status.value, message)
+        assert pub.write.call_count == writes
+        assert [c.args for c in pub.shows.call_args_list] == [(f"item-{stype.value}-1", [INTRO_CH, CREDITS_CH])]
+        assert "verify_later" not in row
+        if writes == 2:
+            assert pub.write.call_args.kwargs["previous"] == [INTRO_CH, CREDITS_CH]
+            assert out.outcome_key == FileOutcome.PUBLISHED.value
+
+    def test_nothing_of_ours_on_the_item_is_not_read_back(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+        _run(_ctx(store, reg), media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+        off = {"sources": [{"id": "theintrodb", "enabled": True}], "detect": {"intro": False, "credits": False}}
+        cleared, _ = _run(_ctx(store, reg, settings_raw=off), media, {"plex-1": plex})
+        assert cleared.publisher_rows[0]["message"] == "Cleared our markers from this server"
+        again, _ = _run(_ctx(store, reg, settings_raw=off), media, {"plex-1": plex})
+        assert again.publisher_rows[0]["status"] == ServerStatus.UP_TO_DATE.value
+        plex.shows.assert_not_called()  # the item record holds nothing of ours to look for
+
+    @pytest.mark.parametrize(
+        ("history", "verify_later"),
+        [("new", False), ("unchanged", False), ("replaced", True), ("replaced-no-op", True)],
+    )
+    def test_a_replaced_files_rows_ask_for_a_later_check(self, store, media, history, verify_later):
+        reg = _registry(media, ServerType.JELLYFIN)
+        jf = ready_publisher("jellyfin_bridge")
+        if history != "new":
+            _run(_ctx(store, reg), media, {"jellyfin-1": jf}, probe=_probe(CHAPTERS_BOTH))
+        if history.startswith("replaced"):
+            os.utime(media, ns=(7, 7))
+        if history == "replaced":
+            jf.write.side_effect = lambda item_id, markers, **kw: (setattr(jf, "last_write_changed", True), markers)[1]
+        out, _ = _run(_ctx(store, reg), media, {"jellyfin-1": jf}, probe=_probe(CHAPTERS_BOTH))
+        row = out.publisher_rows[0]
+        assert row.get("verify_later", False) is verify_later
+        expected = ServerStatus.UP_TO_DATE if history in ("unchanged", "replaced-no-op") else ServerStatus.WRITTEN
+        assert row["status"] == expected.value
+
+    def test_a_replaced_file_that_waits_asks_for_no_later_check(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+        _run(_ctx(store, reg), media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+        os.utime(media, ns=(7, 7))
+        reg.get("plex-1").resolve_remote_path_to_item_id.return_value = None
+        out, _ = _run(_ctx(store, reg), media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+        assert out.publisher_rows[0]["status"] == ServerStatus.WAITING.value
+        assert "verify_later" not in out.publisher_rows[0]
 
 
 class TestStages:
@@ -2841,7 +3006,7 @@ class TestPlexItems:
         out_b = self._check(store, reg, items, b, CHAPTERS_CREDITS_ONLY, clients=review)
         assert out_b.outcome_key == FileOutcome.PUBLISHED.value
         out_a = self._check(store, reg, items, a, clients=review)
-        assert out_a.outcome_key == FileOutcome.PUBLISHED.value
+        assert out_a.outcome_key == FileOutcome.UP_TO_DATE.value  # B's publish already shows A's credits
         assert items.served("42") == [SERVED_CREDITS]
         assert store.get_item_publish_state("plex-1", "42").markers == (CREDITS_CH,)
 
@@ -2864,6 +3029,7 @@ class TestPlexItems:
         missing = self._check(store, reg, items, media)
         assert missing.outcome_key == FileOutcome.WAITING.value
         server.resolve_remote_path_to_item_id.return_value = "42"
+        items.shown.pop("42")  # removed and added again: Plex rebuilt the item without our markers
         back = self._check(store, reg, items, media)
         assert len(items.calls) == 2 and back.outcome_key == FileOutcome.PUBLISHED.value
 

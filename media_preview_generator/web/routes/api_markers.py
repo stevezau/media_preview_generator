@@ -19,9 +19,9 @@ from .api_jobs import _config_unwritable_response
 _ONLINE_SOURCE_IDS = ("theintrodb", "introdb", "skipdb")
 _AUTH_SECRET_KEYS = ("token", "api_key", "password", "access_token")
 _MASK = "****"
-# Item ids go into the media server's URL path: Plex rating keys, Jellyfin/Emby GUIDs (with or without dashes) or
+# Item ids go into the media server's URL path: bare Plex rating keys, Jellyfin/Emby GUIDs (with or without dashes) or
 # Emby's numeric ids. Anything else is refused before the server is asked.
-_PLEX_ITEM_ID_RE = re.compile(r"(?:/library/metadata/)?\d+")
+_PLEX_ITEM_ID_RE = re.compile(r"[0-9]+")
 _EMBYISH_ITEM_ID_RE = re.compile(r"[0-9a-fA-F-]{1,36}|\d+")
 
 
