@@ -117,6 +117,37 @@ public static class MarkerStore
         }
     }
 
+    /// <summary>Ids of every item with a store file.</summary>
+    /// <returns>The ids, in no particular order; empty when the folder doesn't exist.</returns>
+    public static IReadOnlyList<Guid> StoredItemIds()
+    {
+        lock (Gate)
+        {
+            if (!Directory.Exists(Dir))
+            {
+                return Array.Empty<Guid>();
+            }
+
+            return Directory.EnumerateFiles(Dir, "*.json")
+                .Select(path => Guid.TryParseExact(Path.GetFileNameWithoutExtension(path), "N", out var id) ? id : Guid.Empty)
+                .Where(id => id != Guid.Empty)
+                .ToList();
+        }
+    }
+
+    /// <summary>Delete an item's store file when the item is still gone once the store lock is held.</summary>
+    /// <param name="itemId">Item id.</param>
+    /// <param name="itemExists">Whether the server has the item; asked again under the lock, so a push for an item
+    /// added back in the meantime is never deleted.</param>
+    /// <returns>True when a store file was deleted.</returns>
+    public static bool DeleteIfGone(Guid itemId, Func<Guid, bool> itemExists)
+    {
+        lock (Gate)
+        {
+            return !itemExists(itemId) && Delete(itemId);
+        }
+    }
+
     /// <summary>Forget an item.</summary>
     /// <param name="itemId">Item id.</param>
     /// <returns>True when a store file was deleted.</returns>

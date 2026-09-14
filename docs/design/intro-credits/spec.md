@@ -369,8 +369,9 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
 8. **Manual edit** in the Inspector: no job — save, lock, publish to every owner immediately.
 
 ### 6.3 Publishers
-`MarkerPublisher` (parallel to `OutputAdapter`): `capability(server) -> Ready | NeedsPlugin | NeedsPass |
-NeedsLocalDb | NeedsPlexDetectionOnce | Disabled`, `read(item_id) -> list[Marker]`, `write(item_id, markers)`.
+`MarkerPublisher` (parallel to `OutputAdapter`): `capability() -> Ready | NeedsPlugin | NeedsPass |
+NeedsLocalDb | NeedsPlexDetectionOnce | Disabled`, `write(item_id, markers, *, previous, duration_ms, canonical_path,
+own_previous) -> list[Marker]` (the markers ours on the item after the call), `atomic_writes`.
 
 **PlexMarkerPublisher** (opt-in per Plex server; Pass servers only)
 - DB path from that server's `output.plex_config_folder` (`Plug-in Support/Databases/com.plexapp.plugins.library.db`).
