@@ -115,15 +115,24 @@ Raw evidence is in `lab/results/row-NN.json` (git-ignored; run 1's copies are in
 
   The row 4 job that failed the old criterion also made zero writes.
 
-### Open item
+### Open item from run 2 — fixed
 
-- **"Keeping Plex's credits" isn't shown in the job's Files panel (row 16).** Only the Inspector and the job log
-  show it.
-  - Cause: `JobManager.record_file_result` keeps only `id/name/type/status/reason_code` for each server, so the
-    server row's `message` (which carries the kept note) never reaches the job's file results. For job `d64c6204` the
-    Plex entry reads just `markers_up_to_date`.
-  - Fix needed: keep the message (or the kept note) in the per-server entry and show it in the Files panel. Or change
-    `guides.md`, which says the file's row shows it.
+- **"Keeping Plex's credits" wasn't shown in the job's Files panel (row 16).** Only the Inspector and the job log
+  showed it.
+  - Cause: `JobManager.record_file_result` kept only `id/name/type/status/reason_code` for each server, so the
+    server row's `message` (which carries the kept note) never reached the job's file results. For job `d64c6204` the
+    Plex entry read just `markers_up_to_date`.
+  - Fix (`5418883`): Intro & Credits jobs keep each server's message on its saved row, and the Files panel lists the
+    ones that add something ("Lab Plex: Keeping Plex's credits"). Preview rows are unchanged.
+  - Proof: row 16 re-run on the PR image `ghcr.io/stevezau/media_preview_generator:pr-241`
+    (`sha256:b252be76…`, built from `f3113e8`) passes, with the new check "job Files panel says Keeping Plex's
+    credits". Job `2ee04be0`: Plex row `markers_up_to_date`, message "Keeping Plex's credits".
+
+### PR image check (2026-09-14)
+
+- `pr-241` pulled; `import media_preview_generator.markers.pipeline` works; `mlab-app` recreated on it (volume kept).
+- Capability: Lab Plex `ready` (written into the database), both Jellyfins `ready` (plugin), Emby `needs_plugin`.
+- Screenshots for the PR are in `../screenshots/phase1/` (synth files only).
 
 ### Lab reset used before run 2
 

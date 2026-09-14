@@ -1165,6 +1165,7 @@ def server_rows(job_id: str) -> list[dict]:
             "servers": {
                 s["id"]: s["status"] + (f" ({s['reason_code']})" if s.get("reason_code") else "") for s in f["servers"]
             },
+            "messages": {s["id"]: s["message"] for s in f["servers"] if s.get("message")},
         }
         for f in job_files(job_id)
     ]
@@ -1593,13 +1594,16 @@ def row_16_keep_plex() -> dict:
         "keep_plex: Plex's credits kept": credits_of(kept["served"]) == plex_credits,
         "keep_plex: says Keeping Plex's credits": "Keeping Plex's credits".lower()
         in (kept["inspector"].get("plan_reason") or "").lower(),
+        "keep_plex: job Files panel says Keeping Plex's credits": "keeping plex's credits"
+        in kept["rows"][0]["messages"].get("mlab-plex", "").lower(),
         "keep_plex: later runs don't touch them": credits_of(kept_again["served"]) == plex_credits
         and credits_of(kept_forced["served"]) == plex_credits
         and kept["credit_row_ids"] == kept_again["credit_row_ids"] == kept_forced["credit_row_ids"],
     }
     notes = [f"{k}: {v}" for k, v in checks.items()] + [
         f"ours {ours}; Plex's after K1 {plex_credits}",
-        f"K2 Plex row {kept['rows'][0]['servers'].get('mlab-plex')}, Inspector plan {kept['inspector'].get('plan')} "
+        f"K2 Plex row {kept['rows'][0]['servers'].get('mlab-plex')} {kept['rows'][0]['messages'].get('mlab-plex')!r}, "
+        f"Inspector plan {kept['inspector'].get('plan')} "
         f"{kept['inspector'].get('plan_reason')!r}; K2 log lines {kept['logs']}",
         f"K3 {kept_again['rows'][0]['servers'].get('mlab-plex')}; K4 (forced) {kept_forced['rows'][0]['servers'].get('mlab-plex')}",
         f"B1 back to restore: {back['rows'][0]['servers'].get('mlab-plex')}, credits {credits_of(back['served'])}",
