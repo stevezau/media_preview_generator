@@ -378,10 +378,13 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
 ### 6.3 Publishers
 `MarkerPublisher` (parallel to `OutputAdapter`): `capability() -> Ready | NeedsPlugin | NeedsPass |
 NeedsLocalDb | NeedsPlexDetectionOnce | Disabled`, `write(item_id, markers, *, previous, duration_ms, canonical_path,
-own_previous) -> list[Marker]` (the markers ours on the item after the call; `last_write_changed` says whether that
-call changed the server), `shows(item_id, ours) -> Ours | Missing | Replaced | None` (a cheap read-back of what the
-server shows of what we last left there: Plex's `taggings` rows under the same lock proof, Jellyfin's core
-`/MediaSegments`), `atomic_writes`.
+own_previous, kept_types) -> list[Marker]` (the markers ours on the item after the call; `last_write_changed` says
+whether that call changed the server, `last_kept_types` which types stay the server's own, `last_item_files` which
+version files the set was computed for), `shows(item_id, ours, *, kept_types, item_files) -> Ours | Missing |
+Replaced | VersionsChanged | None` (a cheap read-back of what the server shows of what we last left there: Plex's
+`taggings` rows and the item's live version files under the same lock proof, Jellyfin's core `/MediaSegments`;
+`Shown.VERSIONS_CHANGED` when the item's versions, optimized copies left out, differ from the `item_files` recorded
+at the last write), `atomic_writes`.
 
 **PlexMarkerPublisher** (opt-in per Plex server; Pass servers only)
 - DB path from that server's `output.plex_config_folder` (`Plug-in Support/Databases/com.plexapp.plugins.library.db`).
@@ -797,3 +800,12 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
 - 2026-09-14 · Owner approved the keep_plex semantics (Plex's own markers are kept whenever Plex has them). The Plex
   setting is renamed "When Plex has its own markers": "Use ours" (`restore`) / "Keep Plex's" (`keep_plex`); stored
   values unchanged. Its tooltip covers both before and after we publish.
+- 2026-09-15 · Plex version drift in read-back (§6.3), from the parked multi-version limit (a version added to a Plex
+  item after publishing, never decided here, left our markers showing for a cut nobody checked): every Plex write
+  records the item's version files (optimized copies left out) with the item record, without bumping its version.
+  The read-back compares them with the item's live parts and reports `VERSIONS_CHANGED`, which is written again like
+  any other drift, so the types the new version hasn't agreed on come off on the next normal run. A write that changes
+  nothing still records the files. An item record with markers but no recorded files (a markers.db from before this)
+  is written once to record them; that write takes no write lock while the item is as recorded. Jellyfin records no
+  files (item ids are per version). An item whose parts are all deleted or in Plex's trash waits as "not in library"
+  with "Plex has no live files for this item".

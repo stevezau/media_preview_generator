@@ -1468,6 +1468,83 @@ class TestOptimizedVersions:
             _write_one(_publisher(tmp_path, folder), [INTRO], path=self.OPTIMIZED)
 
 
+class TestVersionFiles:
+    """The item's versions a write records (``last_item_files``) and the read-back compares with Plex's parts now."""
+
+    A = "/data/tv/S01E01 - 1080p.mkv"
+    B = "/data/tv/S01E01 - 2160p.mkv"
+    OPTIMIZED = TestOptimizedVersions.OPTIMIZED
+
+    @staticmethod
+    def _add_part(db, part_id: int, path: str, *, proxy_type: int | None = None) -> None:
+        _exec(db, "INSERT INTO media_items (id, metadata_item_id, proxy_type) VALUES (?, 7, ?)", part_id, proxy_type)
+        _exec(db, "INSERT INTO media_parts (id, media_item_id, file) VALUES (?, ?, ?)", part_id, part_id, path)
+
+    @pytest.mark.parametrize(
+        ("change", "shown"),
+        [
+            ("none", Shown.OURS),
+            ("version-added", Shown.VERSIONS_CHANGED),
+            ("version-deleted", Shown.VERSIONS_CHANGED),
+            ("optimized-copy-added", Shown.OURS),  # a transcode Plex made takes no part in the agreement
+        ],
+    )
+    def test_read_back_compares_the_versions_the_write_recorded(self, tmp_path, change, shown):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=((self.B, None), (self.A, None)))  # Plex numbered the 2160p part first
+        pub = _publisher(tmp_path, folder, sibling_markers=lambda _path: {T.INTRO: INTRO})
+        assert _write_one(pub, [INTRO], path=self.A) == [INTRO]
+        assert pub.last_item_files == (self.A, self.B)  # sorted, as markers.db stores them
+        if change == "version-added":
+            self._add_part(db, 3, "/data/tv/S01E01 - 720p.mkv")
+        elif change == "version-deleted":
+            _exec(db, "UPDATE media_parts SET deleted_at=1 WHERE id=1")
+        elif change == "optimized-copy-added":
+            self._add_part(db, 3, self.OPTIMIZED, proxy_type=42)
+        assert pub.shows("7", [INTRO], item_files=(self.A, self.B)) is shown
+        assert pub.shows("7", [INTRO], item_files=None) is Shown.OURS
+
+    def test_an_optimized_copy_is_not_recorded_as_a_version(self, tmp_path):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=((self.A, None), (self.OPTIMIZED, None)))
+        _exec(db, "UPDATE media_items SET proxy_type=42 WHERE id=2")
+        pub = _publisher(tmp_path, folder)
+        assert _write_one(pub, [INTRO], path=self.A) == [INTRO]
+        assert pub.last_item_files == (self.A,)
+        assert pub.shows("7", [INTRO], item_files=(self.A,)) is Shown.OURS
+
+    def test_different_versions_are_reported_whatever_the_rows_show(self, tmp_path):
+        folder = tmp_path / "Plex Media Server"
+        _make_db(folder, parts=((self.A, None),))
+        pub = _publisher(tmp_path, folder)
+        assert pub.shows("7", [INTRO], item_files=(self.A,)) is Shown.MISSING  # no rows at all
+        assert pub.shows("7", [INTRO], item_files=(self.A, self.B)) is Shown.VERSIONS_CHANGED
+        assert pub.shows("7", [], kept_types=frozenset({T.INTRO}), item_files=()) is Shown.VERSIONS_CHANGED
+
+    def test_an_item_without_live_files_is_told_apart_from_an_unknown_item(self, tmp_path):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=((self.A, None), (self.B, None)))
+        pub = _publisher(tmp_path, folder)
+        _exec(db, "UPDATE media_parts SET deleted_at=1 WHERE id=1")
+        _exec(db, "UPDATE media_items SET deleted_at=1 WHERE id=2")
+        with pytest.raises(ItemNotFoundError, match="Plex has no live files for this item"):
+            _write_one(pub, [INTRO], path=self.A)
+        with pytest.raises(ItemNotFoundError, match="Plex item 8 not found in the database"):
+            _write_one(pub, [INTRO], path=self.A, item_id="8")
+
+    def test_a_write_that_did_not_read_the_item_records_no_versions(self, tmp_path):
+        folder = tmp_path / "Plex Media Server"
+        _make_db(folder, parts=((self.A, None),))
+        pub = _publisher(tmp_path, folder)
+        _write_one(pub, [INTRO], path=self.A)
+        assert _write_one(pub, [], previous=None, path=self.A) == []  # nothing to show or remove: Plex isn't read
+        assert pub.last_item_files is None
+        _write_one(pub, [INTRO], path=self.A)
+        with pytest.raises(ItemNotFoundError):
+            _write_one(pub, [INTRO], path=self.A, item_id="8")
+        assert pub.last_item_files is None
+
+
 class TestSqliteErrors:
     def test_plex_holding_the_write_lock_past_the_timeout_is_unreachable(self, tmp_path, monkeypatch):
         folder = tmp_path / "Plex Media Server"

@@ -114,6 +114,12 @@ _SCHEMA = (
         item_id TEXT NOT NULL,
         type TEXT NOT NULL,
         PRIMARY KEY (server_id, item_id, type))""",
+    # The version files a server item had when this app last wrote its markers (Plex: one set for every version).
+    """CREATE TABLE IF NOT EXISTS item_versions (
+        server_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        files_json TEXT NOT NULL,
+        PRIMARY KEY (server_id, item_id))""",
     # What a file's last publish to a server was based on: its decided set and the item row version it saw.
     """CREATE TABLE IF NOT EXISTS publish_basis (
         file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -211,6 +217,8 @@ class ItemPublishStateRow:
     updated_at: str
     # Types the server's own markers replaced and are kept there (Plex "Keep Plex's"); never ours in ``markers``.
     kept_types: frozenset[MarkerType] = frozenset()
+    # The item's version files when this app last wrote it (Plex); None when not recorded.
+    item_files: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -840,6 +848,10 @@ class MarkerStore:
             if r is None:
                 return None
             kept = self._kept_types(self._conn, server_id, item_id)
+            files_row = self._conn.execute(
+                "SELECT files_json FROM item_versions WHERE server_id=? AND item_id=?", (server_id, item_id)
+            ).fetchone()
+        item_files = tuple(json.loads(files_row["files_json"])) if files_row else None
         return ItemPublishStateRow(
             r["server_id"],
             r["item_id"],
@@ -848,6 +860,7 @@ class MarkerStore:
             r["version"],
             r["updated_at"],
             kept,
+            item_files,
         )
 
     @staticmethod
@@ -865,6 +878,7 @@ class MarkerStore:
         status: str,
         *,
         kept_types: Iterable[MarkerType] | None = None,
+        item_files: Iterable[str] | None = None,
     ) -> int:
         """Record what is ours on a server item after a publish attempt.
 
@@ -881,12 +895,19 @@ class MarkerStore:
             status: ``written`` or ``failed``.
             kept_types: Types whose rows on the item are the server's own and kept there; None keeps the recorded
                 ones. A change bumps the version like a change of markers.
+            item_files: The item's version files the write computed the set for; None keeps the recorded ones.
+                Recording them never bumps the version.
 
         Returns:
             The row's version.
         """
         now = self._now()
         with self._tx() as conn:
+            if item_files is not None:
+                conn.execute(
+                    "INSERT OR REPLACE INTO item_versions (server_id, item_id, files_json) VALUES (?,?,?)",
+                    (server_id, item_id, json.dumps(sorted(item_files))),
+                )
             row = conn.execute(
                 "SELECT markers_json, status, version FROM item_publish_state WHERE server_id=? AND item_id=?",
                 (server_id, item_id),

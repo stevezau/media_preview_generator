@@ -47,6 +47,9 @@ class Shown(str, Enum):
     OURS = "ours"
     MISSING = "missing"  # some of ours are gone and nothing else of that type took their place
     REPLACED = "replaced"  # the server shows another marker of one of our types instead (its own detection)
+    # The item's versions aren't the ones our last write agreed on (Plex: one marker set for every version, and a
+    # version added since hasn't been decided the same way).
+    VERSIONS_CHANGED = "versions_changed"
 
 
 def compare_shown(
@@ -108,6 +111,9 @@ class MarkerPublisher(ABC):
     # Set by every successful ``write``: the types whose markers on the item are the server's own and stay there
     # untouched ("Keep Plex's"); the caller records them and passes them back as ``kept_types``. Empty elsewhere.
     last_kept_types: frozenset[MarkerType] = frozenset()
+    # Set by every ``write`` that read the item: the item's version files that write computed the marker set for. The
+    # caller records them and passes them back to ``shows``. None where items have no shared versions (Jellyfin).
+    last_item_files: tuple[str, ...] | None = None
 
     @abstractmethod
     def capability(self) -> CapabilityReport:
@@ -115,7 +121,12 @@ class MarkerPublisher(ABC):
 
     @abstractmethod
     def shows(
-        self, item_id: str, ours: list[Marker], *, kept_types: frozenset[MarkerType] = frozenset()
+        self,
+        item_id: str,
+        ours: list[Marker],
+        *,
+        kept_types: frozenset[MarkerType] = frozenset(),
+        item_files: tuple[str, ...] | None = None,
     ) -> Shown | None:
         """Read what the server item shows for the types of ``ours`` (what this app last left there).
 
@@ -127,6 +138,9 @@ class MarkerPublisher(ABC):
             ours: What this app last left on the item.
             kept_types: Types whose server markers were kept last time (``last_kept_types``); one the server no
                 longer shows at all is reported MISSING, so ours can go back.
+            item_files: The item's version files recorded at the last write (``last_item_files``); a server with one
+                marker set per item reports ``VERSIONS_CHANGED`` when its versions differ now. None: not recorded, not
+                compared.
 
         Returns:
             How the server's markers compare with ``ours``; None when they couldn't be read.

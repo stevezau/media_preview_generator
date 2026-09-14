@@ -427,6 +427,11 @@ def _is_optimized_copy(part: _Part) -> bool:
     return bool(part.proxy_type) and "Plex Versions" in part.file.replace("\\", "/").split("/")
 
 
+def _version_files(parts: list[_Part]) -> tuple[str, ...]:
+    """The item's versions as its sorted part files, Plex's optimized copies left out (they take no part in agreement)."""
+    return tuple(sorted(p.file for p in parts if not _is_optimized_copy(p)))
+
+
 def _same_files(a: list[_Part], b: list[_Part]) -> bool:
     """The same parts, files and versions (extra_data aside)."""
     return [p._replace(extra_data=None) for p in a] == [p._replace(extra_data=None) for p in b]
@@ -615,6 +620,10 @@ class PlexMarkerPublisher(MarkerPublisher):
             (rating_key,),
         ).fetchall()
         return [_Part(*row) for row in rows]
+
+    @staticmethod
+    def _item_exists(conn: sqlite3.Connection, rating_key: int) -> bool:
+        return conn.execute("SELECT 1 FROM metadata_items WHERE id=?", (rating_key,)).fetchone() is not None
 
     @staticmethod
     def _marker_tag_id(conn: sqlite3.Connection) -> int:
@@ -979,6 +988,7 @@ class PlexMarkerPublisher(MarkerPublisher):
             PublishError: Nothing was written (one transaction; see ``MarkerPublisher.write``).
         """
         self.last_write_changed = False
+        self.last_item_files = None
         keep_plex = self._live_settings().on_plex_redetect == "keep_plex"
         kept_before = frozenset(kept_types)
         # Until the item's rows are read, what was kept stays kept (or is released by the setting).
@@ -1001,8 +1011,15 @@ class PlexMarkerPublisher(MarkerPublisher):
                 self._check_schema(conn)
                 self._marker_tag_id(conn)
                 parts = self._item_parts(conn, rating_key)
-            if not parts:
+                known = bool(parts) or self._item_exists(conn, rating_key)
+            if not known:
                 raise ItemNotFoundError(f"Plex item {rating_key} not found in the database")
+            if not parts:
+                # Every version is deleted or in Plex's trash: nothing to show markers on until Plex finds a file again.
+                raise ItemNotFoundError(
+                    f"Plex has no live files for this item ({rating_key}): they're deleted or in Plex's trash"
+                )
+            self.last_item_files = _version_files(parts)
             # With no Plex connection or lock held: the sibling lookups take markers.db's lock.
             desired = self._desired(parts, wanted, canonical_path, prior)
             if not desired and not prior and not own_prior and not self.last_kept_types:
@@ -1054,7 +1071,12 @@ class PlexMarkerPublisher(MarkerPublisher):
         return plan.ours
 
     def shows(
-        self, item_id: str, ours: list[Marker], *, kept_types: frozenset[MarkerType] = frozenset()
+        self,
+        item_id: str,
+        ours: list[Marker],
+        *,
+        kept_types: frozenset[MarkerType] = frozenset(),
+        item_files: tuple[str, ...] | None = None,
     ) -> Shown | None:
         """Read the item's marker rows from Plex's database (the same lock proof and read-only connection as a write).
 
@@ -1062,6 +1084,8 @@ class PlexMarkerPublisher(MarkerPublisher):
             item_id: Plex rating key.
             ours: What this app last left on the item.
             kept_types: Types kept as Plex's own; one without any rows left is MISSING (ours may go back).
+            item_files: The item's version files at the last write (``last_item_files``); a different set now is
+                VERSIONS_CHANGED, whatever the rows show. None: not compared.
 
         Returns:
             How Plex's rows of our types compare with ``ours``; None when the database couldn't be read.
@@ -1080,6 +1104,7 @@ class PlexMarkerPublisher(MarkerPublisher):
                     "WHERE metadata_item_id=? AND tag_id=?",
                     (rating_key, tag_id),
                 ).fetchall()
+                parts = self._item_parts(conn, rating_key) if item_files is not None else None
         except (PublishError, sqlite3.Error) as exc:
             logger.debug(
                 "Plex {}: couldn't read item {}'s markers back: {}", self._config.name, item_id, type(exc).__name__
@@ -1093,6 +1118,8 @@ class PlexMarkerPublisher(MarkerPublisher):
             ]
             for mtype, name in _TYPE_TEXT.items()
         }
+        if parts is not None and _version_files(parts) != tuple(item_files):
+            return Shown.VERSIONS_CHANGED
         if any(not served.get(mtype) for mtype in kept_types):
             return Shown.MISSING
         return compare_shown(self.project(ours), served, others_alongside=False)

@@ -947,3 +947,20 @@ def test_a_store_made_before_kept_types_opens_with_nothing_kept(tmp_path):
         assert row.kept_types == frozenset() and len(row.markers) == 1
     finally:
         reopened.close()
+
+
+class TestItemFiles:
+    MARKER = Marker(MarkerType.INTRO, 1_000, 30_000, ("chapters",))
+
+    def test_recorded_sorted_without_bumping_the_version_and_kept_after_a_failure(self, store):
+        v1 = store.set_item_publish_state("plex-1", "7", [self.MARKER], "written", item_files=["/b.mkv", "/a.mkv"])
+        row = store.get_item_publish_state("plex-1", "7")
+        assert row.item_files == ("/a.mkv", "/b.mkv") and row.version == v1
+        v2 = store.set_item_publish_state("plex-1", "7", [self.MARKER], "written", item_files=["/a.mkv"])
+        assert v2 == v1 and store.get_item_publish_state("plex-1", "7").item_files == ("/a.mkv",)
+        store.set_item_publish_state("plex-1", "7", None, "failed")
+        assert store.get_item_publish_state("plex-1", "7").item_files == ("/a.mkv",)
+
+    def test_rows_without_recorded_files_read_as_unknown(self, store):
+        store.set_item_publish_state("jf-1", "abc", [self.MARKER], "written")
+        assert store.get_item_publish_state("jf-1", "abc").item_files is None

@@ -215,7 +215,12 @@ class JellyfinMarkerPublisher(MarkerPublisher):
         return size is not None and state is not None and not state["stale"] and state["fileSize"] == size
 
     def shows(
-        self, item_id: str, ours: list[Marker], *, kept_types: frozenset[MarkerType] = frozenset()
+        self,
+        item_id: str,
+        ours: list[Marker],
+        *,
+        kept_types: frozenset[MarkerType] = frozenset(),
+        item_files: tuple[str, ...] | None = None,
     ) -> Shown | None:
         """Read core ``/MediaSegments`` for the item: what Jellyfin serves from every provider.
 
@@ -223,6 +228,7 @@ class JellyfinMarkerPublisher(MarkerPublisher):
             item_id: Jellyfin item id.
             ours: What this app last left on the item.
             kept_types: Ignored (see ``write``).
+            item_files: Ignored (see ``write``).
 
         Returns:
             Whether Jellyfin still serves each of ``ours`` (another provider's segments may sit alongside); None when

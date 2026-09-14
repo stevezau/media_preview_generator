@@ -107,6 +107,9 @@ def ready_publisher(name="plex_db", types=("intro", "credits"), *, atomic_writes
     pub.write.side_effect = pub.succeed
     pub.last_write_changed = True
     pub.last_kept_types = frozenset()
+    # The Plex publisher records the item's versions on every write that has markers to leave; the pipeline writes a
+    # Plex item recorded without them once more.
+    pub.last_item_files = ("/plex/item-7.mkv",) if name == "plex_db" else None
     pub.shows.return_value = Shown.OURS
     return pub
 
@@ -149,6 +152,7 @@ class FakePlexItems:
             if self.fail_next is not None:
                 error, self.fail_next = self.fail_next, None
                 raise error
+            pub.last_item_files = tuple(sorted(self.parts[item_id]))
             mine = {m.type: m for m in pub.project(markers)}
             desired = []
             for mtype, marker in mine.items():
@@ -178,7 +182,9 @@ class FakePlexItems:
             pub.last_write_changed = self.served(item_id) != before or bool(own_previous)
             return sorted(desired, key=lambda m: (m.start_ms, m.type.value))
 
-        def shows(item_id, ours, *, kept_types=frozenset()):
+        def shows(item_id, ours, *, kept_types=frozenset(), item_files=None):
+            if item_files is not None and tuple(sorted(self.parts[item_id])) != tuple(item_files):
+                return Shown.VERSIONS_CHANGED
             served: dict = {}
             for mtype, start, end in self.served(item_id):
                 served.setdefault(mtype, []).append((start, end))

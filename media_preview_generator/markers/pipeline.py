@@ -835,15 +835,20 @@ def _consent_problem(ctx: PipelineContext, cfg: ServerConfig, path: str) -> str 
 
 
 def _shown_on_server(
-    publisher: MarkerPublisher, cfg: ServerConfig, item_id: str, ours: list[Marker], kept_types: frozenset[MarkerType]
+    publisher: MarkerPublisher,
+    cfg: ServerConfig,
+    item_id: str,
+    ours: list[Marker],
+    kept_types: frozenset[MarkerType],
+    item_files: tuple[str, ...] | None,
 ) -> Shown | None:
-    """What the server shows of ``ours`` (and of the types it keeps as its own) now.
+    """What the server shows of ``ours`` (and of the types it keeps as its own, and of the item's versions) now.
 
     Returns:
         None when it couldn't be read.
     """
     try:
-        return publisher.shows(item_id, ours, kept_types=kept_types)
+        return publisher.shows(item_id, ours, kept_types=kept_types, item_files=item_files)
     except Exception as exc:
         # A transient read problem mustn't fail or rewrite a file whose records say it is up to date.
         logger.debug("Couldn't read back the markers on {} for item {}: {}", cfg.name, item_id, type(exc).__name__)
@@ -977,18 +982,26 @@ def _publish_to(
             # goes through its write; so does a kept type once the server is set to restore ours.
             if not item_row.markers and not item_row.kept_types:
                 return _up_to_date(item_row.kept_types)  # nothing of ours there to look for
-            shown = _shown_on_server(publisher, cfg, item_id, list(item_row.markers), item_row.kept_types)
-            if shown is None:
-                return {**_up_to_date(item_row.kept_types), READ_BACK_FAILED: True}
-            released = bool(item_row.kept_types) and _live_markers_settings(ctx, cfg).on_plex_redetect != "keep_plex"
-            if shown is Shown.OURS and not released:
-                return _up_to_date(item_row.kept_types)
-            logger.info(
-                "{} item {}: {}; publishing again",
-                cfg.name,
-                item_id,
-                "set to restore this app's markers" if shown is Shown.OURS else f"markers {shown.value} since last run",
-            )
+            if item_row.markers and item_row.item_files is None and cfg.type is ServerType.PLEX:
+                # Recorded before this app kept a Plex item's versions, so a version added since can't be seen: one
+                # write records them (it changes nothing, and takes no write lock, while the item is as recorded).
+                reason = "the item's versions aren't recorded yet"
+            else:
+                shown = _shown_on_server(
+                    publisher, cfg, item_id, list(item_row.markers), item_row.kept_types, item_row.item_files
+                )
+                if shown is None:
+                    return {**_up_to_date(item_row.kept_types), READ_BACK_FAILED: True}
+                released = (
+                    bool(item_row.kept_types) and _live_markers_settings(ctx, cfg).on_plex_redetect != "keep_plex"
+                )
+                if shown is Shown.OURS and not released:
+                    return _up_to_date(item_row.kept_types)
+                reason = {
+                    Shown.OURS: "set to restore this app's markers",
+                    Shown.VERSIONS_CHANGED: "the item's versions changed since last run",
+                }.get(shown, f"markers {shown.value} since last run")
+            logger.info("{} item {}: {}; publishing again", cfg.name, item_id, reason)
         previous = _previous_on_item(item_row, publisher)
         if not wanted and previous == [] and own_previous is None:
             if needs_review:
@@ -1035,7 +1048,9 @@ def _publish_to(
 
         changed = publisher.last_write_changed
         kept = publisher.last_kept_types
-        version = store.set_item_publish_state(cfg.id, item_id, ours, "written", kept_types=kept)
+        version = store.set_item_publish_state(
+            cfg.id, item_id, ours, "written", kept_types=kept, item_files=publisher.last_item_files
+        )
         if not changed and _unchanged(version):
             return _up_to_date(kept)  # a forced run whose write changed nothing
         store.set_publish_basis(rec.id, cfg.id, decided_hash=decided_hash, item_version=version)

@@ -2876,10 +2876,11 @@ class TestReadBackVerify:
     )
     def test_matrix(self, store, media, stype, shows, redetect, status, message, writes):
         pub, row, out = self._published_then_checked(store, media, stype, shows, redetect=redetect)
+        files = ("/plex/item-7.mkv",) if stype is ServerType.PLEX else None  # Jellyfin item ids are per version
         assert (row["status"], row["message"]) == (status.value, message)
         assert pub.write.call_count == writes
         assert [(c.args, c.kwargs) for c in pub.shows.call_args_list] == [
-            ((f"item-{stype.value}-1", [INTRO_CH, CREDITS_CH]), {"kept_types": frozenset()})
+            ((f"item-{stype.value}-1", [INTRO_CH, CREDITS_CH]), {"kept_types": frozenset(), "item_files": files})
         ]
         # A read that failed is still "Up to date", but the job says it couldn't check (read-back review LOW-2).
         assert row.get("read_back_failed", False) is (shows is None or isinstance(shows, Exception))
@@ -2919,7 +2920,7 @@ class TestReadBackVerify:
         second, _ = _run(_ctx(store, reg), media, {"plex-1": pub})
 
         assert pub.shows.call_args.args == ("item-plex-1", [INTRO_CH])
-        assert pub.shows.call_args.kwargs == {"kept_types": {T.CREDITS}}
+        assert pub.shows.call_args.kwargs == {"kept_types": {T.CREDITS}, "item_files": ("/plex/item-7.mkv",)}
         if redetect == "keep_plex":
             assert pub.write.call_count == 2
             assert (second.publisher_rows[0]["status"], second.publisher_rows[0]["message"]) == (
@@ -2985,6 +2986,7 @@ class TestReadBackVerify:
         again, _ = _run(_ctx(store, reg, settings_raw=off), media, {"plex-1": plex})
         assert again.publisher_rows[0]["status"] == ServerStatus.UP_TO_DATE.value
         plex.shows.assert_not_called()  # the item record holds nothing of ours to look for
+        assert plex.write.call_count == 2  # nor is it written to record the item's versions
         assert "read_back_failed" not in again.publisher_rows[0]
 
     @pytest.mark.parametrize(
@@ -3015,6 +3017,67 @@ class TestReadBackVerify:
         out, _ = _run(_ctx(store, reg), media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
         assert out.publisher_rows[0]["status"] == ServerStatus.WAITING.value
         assert "verify_later" not in out.publisher_rows[0]
+
+
+class TestReadBackVersions:
+    def test_read_back_passes_the_item_files_recorded_at_the_last_write(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+
+        def write(item_id, markers, **kwargs):
+            plex.last_item_files = ("/plex/a.mkv", "/plex/b.mkv")
+            return plex.succeed(item_id, markers, **kwargs)
+
+        plex.write.side_effect = write
+        _run(_ctx(store, reg), media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+        row = store.get_item_publish_state("plex-1", "item-plex-1")
+        assert row.item_files == ("/plex/a.mkv", "/plex/b.mkv")
+        out, _ = _run(_ctx(store, reg), media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+        assert plex.shows.call_args.args == ("item-plex-1", [INTRO_CH, CREDITS_CH])
+        assert plex.shows.call_args.kwargs == {"kept_types": frozenset(), "item_files": ("/plex/a.mkv", "/plex/b.mkv")}
+        assert out.outcome_key == FileOutcome.UP_TO_DATE.value
+
+    def test_changed_versions_publish_again(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+        _run(_ctx(store, reg), media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+        plex.shows.return_value = Shown.VERSIONS_CHANGED
+        _run(_ctx(store, reg), media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+        assert plex.write.call_count == 2
+        assert plex.write.call_args.kwargs["previous"] == [INTRO_CH, CREDITS_CH]
+
+    @pytest.mark.parametrize(
+        ("stype", "kept_only", "drift"),
+        [
+            (ServerType.PLEX, False, True),
+            (ServerType.PLEX, True, False),  # none of ours on the item for a version added since to disagree with
+            (ServerType.JELLYFIN, False, False),  # Jellyfin item ids are per version: no versions to record
+        ],
+        ids=["plex", "plex-kept-only", "jellyfin"],
+    )
+    def test_a_plex_record_without_item_files_is_written_once_to_record_them(
+        self, store, media, stype, kept_only, drift
+    ):
+        reg = _registry(media, stype)
+        sid = f"{stype.value}-1"
+        pub = ready_publisher("plex_db" if stype is ServerType.PLEX else "jellyfin_bridge")
+        pub.last_item_files = None  # published before item versions were recorded
+        if kept_only:
+            reg.configs_by_id[sid].markers["plex"]["on_plex_redetect"] = "keep_plex"
+            TestReadBackVerify._keeping(pub, {T.INTRO, T.CREDITS}, set(), changed=True)
+        _run(_ctx(store, reg), media, {sid: pub}, probe=_probe(CHAPTERS_BOTH))
+        row = store.get_item_publish_state(sid, f"item-{sid}")
+        assert row.item_files is None and bool(row.markers) is not kept_only
+        if stype is ServerType.PLEX:
+            pub.last_item_files = ("/plex/a.mkv",)
+        outs = [_run(_ctx(store, reg), media, {sid: pub}, probe=_probe(CHAPTERS_BOTH))[0] for _ in range(2)]
+        assert [o.outcome_key for o in outs] == [FileOutcome.UP_TO_DATE.value] * 2
+        assert pub.write.call_count == (2 if drift else 1)
+        if drift:
+            assert pub.write.call_args.kwargs["previous"] == [INTRO_CH, CREDITS_CH]
+            assert pub.shows.call_count == 1 and pub.shows.call_args.kwargs["item_files"] == ("/plex/a.mkv",)
+        else:
+            assert pub.shows.call_count == 2
 
 
 class TestStages:
@@ -3377,8 +3440,6 @@ class TestPlexItems:
         reg, items = self._plex(a, [a])
         self._check(store, reg, items, a, CHAPTERS_BOTH)
         items.parts["42"] = [a, b]  # added, never decided (its disk isn't mapped into the container)
-        assert self._check(store, reg, items, a).outcome_key == FileOutcome.UP_TO_DATE.value  # the known limit
-        assert len(items.calls) == 1
 
         forced = self._check(store, reg, items, a, CHAPTERS_BOTH, force=True)
         assert items.calls[-1]["previous"] == [INTRO_CH, CREDITS_CH]

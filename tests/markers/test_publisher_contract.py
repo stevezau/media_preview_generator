@@ -23,7 +23,7 @@ from media_preview_generator.markers.models import Marker, MarkerType
 from media_preview_generator.markers.outcomes import FileOutcome
 from media_preview_generator.markers.probe import Chapter, MediaProbe
 from media_preview_generator.markers.publishers import plex_db
-from media_preview_generator.markers.publishers.base import Capability, CapabilityReport, PublishError
+from media_preview_generator.markers.publishers.base import Capability, CapabilityReport, PublishError, Shown
 from media_preview_generator.markers.publishers.factory import publisher_for
 from media_preview_generator.markers.publishers.jellyfin import TICKS_PER_MS
 from media_preview_generator.markers.store import MarkerStore
@@ -272,6 +272,21 @@ def test_own_previous_is_accepted(request, vendor):
     assert target.shown() == target.both
 
 
+@pytest.mark.parametrize("vendor", VENDORS)
+def test_read_back_accepts_the_recorded_item_files(request, vendor):
+    target = request.getfixturevalue(vendor)
+    publisher = _publisher(target)
+    ours = publisher.write(target.item_id, [INTRO, CREDITS], previous=[], duration_ms=DUR, canonical_path=target.path)
+    files = publisher.last_item_files
+    assert publisher.shows(target.item_id, ours, item_files=files) is Shown.OURS
+    if vendor == "plex":
+        assert files == (target.path,)
+        assert publisher.shows(target.item_id, ours, item_files=("/other.mkv",)) is Shown.VERSIONS_CHANGED
+        assert publisher.shows(target.item_id, ours, item_files=None) is Shown.OURS
+    else:
+        assert files is None  # Jellyfin item ids are per version: nothing to track
+
+
 # --- Multi-version Plex items: the real pipeline and PlexMarkerPublisher on one item (plex-item-publish-design.md) ---
 
 NO_ONLINE = {"sources": [{"id": s, "enabled": s == "chapters"} for s in ("theintrodb", "introdb", "skipdb")]}
@@ -484,13 +499,95 @@ def test_partial_agreement_then_agreeing_credits_with_different_times(plex_item)
     assert item.served() == shown and item.commits == 3
 
 
+def test_a_version_added_later_takes_our_markers_off_on_the_next_normal_run(plex_item):
+    item = plex_item(in_item=("1080p",))
+    item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    assert _outcomes(item.run("1080p")) == ["published"]
+    assert item.store.get_item_publish_state("plex-1", "7").item_files == (item.paths["1080p"],)
+    item.add_part("2160p")  # its disk isn't mapped into the container: never decided
+    out = item.run("1080p")
+    assert _outcomes(out) == ["waiting"] and "intro, credits" in out.publisher_rows[0]["message"]
+    assert item.served() == item.recorded() == [] and item.commits == 2
+    assert item.store.get_item_publish_state("plex-1", "7").item_files == tuple(sorted(item.paths.values()))
+    assert _outcomes(item.run("1080p")) == ["waiting"] and item.commits == 2
+
+
+def _spy(monkeypatch, name: str) -> list[dict]:
+    """Record the keyword arguments of every call to one ``PlexMarkerPublisher`` method."""
+    calls: list[dict] = []
+    real = getattr(plex_db.PlexMarkerPublisher, name)
+
+    def spy(publisher, *args, **kwargs):
+        calls.append(kwargs)
+        return real(publisher, *args, **kwargs)
+
+    monkeypatch.setattr(plex_db.PlexMarkerPublisher, name, spy)
+    return calls
+
+
+def test_a_write_that_changes_nothing_still_records_the_versions_it_saw(plex_item, monkeypatch):
+    item = plex_item()
+    a, b = item.paths["1080p"], item.paths["2160p"]
+    item.chapters[a] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    item.chapters[b] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    assert _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p")) == ["waiting", "published", "up_to_date"]
+    assert item.store.get_item_publish_state("plex-1", "7").item_files == (a, b)
+    commits = item.commits
+    item._sql(("UPDATE media_parts SET deleted_at=1 WHERE file=?", (b,)))  # B's version removed from the item
+    writes = _spy(monkeypatch, "write")
+    assert _outcomes(item.run("1080p"), item.run("1080p")) == ["up_to_date", "up_to_date"]
+    assert len(writes) == 1 and item.commits == commits
+    assert item.store.get_item_publish_state("plex-1", "7").item_files == (a,)
+
+
+@pytest.mark.parametrize("version_added", [False, True], ids=["same-versions", "version-added-before-upgrade"])
+def test_an_item_recorded_without_its_versions_is_written_once_to_record_them(plex_item, monkeypatch, version_added):
+    # A markers.db from before item versions were recorded: the next normal run writes the item once.
+    item = plex_item(in_item=("1080p",))
+    a = item.paths["1080p"]
+    item.chapters[a] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    assert _outcomes(item.run("1080p")) == ["published"]
+    item.store._conn.execute("DELETE FROM item_versions")
+    assert item.store.get_item_publish_state("plex-1", "7").item_files is None
+    if version_added:
+        item.add_part("2160p")  # never decided
+    writes = _spy(monkeypatch, "write")
+    write_locks = []
+    real_database = plex_db.PlexMarkerPublisher._database
+
+    def database(publisher, *, read_only, deadline):
+        write_locks.append(not read_only)
+        return real_database(publisher, read_only=read_only, deadline=deadline)
+
+    monkeypatch.setattr(plex_db.PlexMarkerPublisher, "_database", database)
+    first, second = item.run("1080p"), item.run("1080p")
+    if version_added:
+        assert _outcomes(first, second) == ["waiting", "waiting"]
+        assert item.served() == item.recorded() == [] and item.commits == 2
+        assert item.store.get_item_publish_state("plex-1", "7").item_files == tuple(sorted(item.paths.values()))
+    else:
+        assert _outcomes(first, second) == ["up_to_date", "up_to_date"]
+        assert len(writes) == 1 and item.commits == 1 and not any(write_locks)
+        assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS]
+        assert item.store.get_item_publish_state("plex-1", "7").item_files == (a,)
+
+
+def test_an_item_whose_files_are_all_deleted_waits_for_the_library(plex_item):
+    item = plex_item(versions=("1080p",))
+    item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    assert _outcomes(item.run("1080p")) == ["published"]
+    item._sql(("UPDATE media_parts SET deleted_at=1",))  # in Plex's trash; the item id still resolves
+    row = item.run("1080p").publisher_rows[0]
+    assert (row["status"], row["reason_code"]) == ("markers_waiting", "not_in_library")
+    assert "Plex has no live files for this item" in row["message"]
+
+
 @pytest.mark.parametrize("trigger", ["forced", "file-changed"])
 def test_a_new_version_that_is_never_decided_takes_our_markers_off_at_the_next_publish(plex_item, trigger):
     item = plex_item(in_item=("1080p",))
     item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
     item.run("1080p")
     item.add_part("2160p")  # its disk isn't mapped into the container: never decided
-    assert _outcomes(item.run("1080p")) == ["up_to_date"]  # the known limit until something makes A publish
     if trigger == "file-changed":
         item.touch("1080p", 9)
     out = item.run("1080p", force=trigger == "forced")
@@ -560,8 +657,8 @@ def test_a_merge_takes_the_moved_versions_credits_off_its_part(plex_item):
 
     item.move_part("2160p", 7)  # the user merges item 8 into 7
     item._sql(("DELETE FROM taggings WHERE metadata_item_id=8",), ("DELETE FROM metadata_items WHERE id=8",))
-    # A's decision and item 7's row are unchanged, so A can't tell a part joined (the known limit); B's run can.
-    assert _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p")) == ["up_to_date", "waiting", "waiting"]
+    # A's decision and item 7's row are unchanged, but its read-back sees the part that joined.
+    assert _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p")) == ["waiting", "waiting", "waiting"]
     assert item.served() == item.recorded() == [SHOWN_INTRO]
     assert item.part_types() == {os.path.basename(a): ["pv:intros"], os.path.basename(b): ["pv:intros"]}
     commits = item.commits
