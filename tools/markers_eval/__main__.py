@@ -36,15 +36,19 @@ def cmd_reproduce(args: argparse.Namespace) -> int:
         "seasons": report.seasons,
         "episodes": report.episodes,
         "tally": report.tally.as_dict(),
+        "matcher_tally": report.matcher_tally.as_dict(),
         "spec": dict(zip(("useful", "wrong", "missed"), SPEC_V3, strict=True)),
         "port_vs_reference": len(report.port_vs_reference),
         "drift": len(report.drift),
+        "skipped_pairs": len(report.skipped_pairs),
+        "silence_dropped": len(report.silence_dropped),
         "passed": report.passed,
     }
     print(json.dumps(summary, indent=2))
     if args.json:
-        Path(args.json).write_text(json.dumps({**summary, "details": {
-            "port_vs_reference": report.port_vs_reference, "drift": report.drift}}, indent=1, default=str))  # fmt: skip
+        details = {"port_vs_reference": report.port_vs_reference, "drift": report.drift,
+                   "skipped_pairs": report.skipped_pairs, "silence_dropped": report.silence_dropped}  # fmt: skip
+        Path(args.json).write_text(json.dumps({**summary, "details": details}, indent=1, default=str))
     return 0 if report.passed else 1
 
 

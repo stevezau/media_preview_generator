@@ -1,17 +1,22 @@
-"""TV intro eval: the v3 matcher on the 118 episodes with studio-chapter truth (spec §5.3)."""
+"""TV intro eval: the v3 matcher and the app's season step on the 118 episodes with studio-chapter truth (spec §5.3)."""
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from media_preview_generator.markers.audio import POINT_S
-from media_preview_generator.markers.audio.matcher import season_intros
-from media_preview_generator.markers.external_ids import ids_from_path, is_extra
-from media_preview_generator.plex_client import VIDEO_EXTENSIONS
+from media_preview_generator.markers.audio.matcher import (
+    MAX_INTRO_S,
+    Run,
+    file_hits,
+    intro_for,
+    pair_runs,
+    season_intros,
+)
+from media_preview_generator.markers.audio.season import holds_no_intro, season_group, season_intro
 
 from . import fp3_reference
 from .data import EvalEpisode, by_season
@@ -24,18 +29,40 @@ DRIFT_TOLERANCE_S = 2 * POINT_S
 
 @dataclass
 class ReproductionReport:
-    """What the gate found."""
+    """What the gate found.
+
+    Attributes:
+        tally: The season step's answers (``markers.audio.season``: the matcher plus the silence guard and skipped
+            pairs), which is what the app stores as season audio evidence.
+        matcher_tally: The v3 matcher's answers alone.
+        port_vs_reference: Episodes where the numpy port and the pure-Python reference differ.
+        drift: Matcher answers that differ from the stored v3 segments by more than two points.
+        skipped_pairs: Pairs the season step left unmatched, with how many intro-length runs (<= 120 s) the matcher
+            finds between them (any is a deviation the gate refuses).
+        silence_dropped: Matcher answers the silence guard dropped, with the matcher answer's verdict.
+        seasons: Seasons run.
+        episodes: Eval episodes judged or compared.
+    """
 
     tally: Tally = field(default_factory=Tally)
+    matcher_tally: Tally = field(default_factory=Tally)
     port_vs_reference: list[dict] = field(default_factory=list)
     drift: list[dict] = field(default_factory=list)
+    skipped_pairs: list[dict] = field(default_factory=list)
+    silence_dropped: list[dict] = field(default_factory=list)
     seasons: int = 0
     episodes: int = 0
 
     @property
     def passed(self) -> bool:
-        """Port equals the reference everywhere and the tally is at least the spec's numbers."""
-        return not self.port_vs_reference and self.tally.at_least(SPEC_V3[0], SPEC_V3[1])
+        """Port equals the reference, the season step's tally is at least the spec's numbers, no skipped pair held an
+        intro-length run, and the silence guard dropped no useful answer."""
+        return (
+            not self.port_vs_reference
+            and self.tally.at_least(SPEC_V3[0], SPEC_V3[1])
+            and not any(pair["intro_length_runs"] for pair in self.skipped_pairs)
+            and not any(dropped["verdict"] == "useful" for dropped in self.silence_dropped)
+        )
 
 
 def _as_tuple(segment: tuple | None) -> tuple | None:
@@ -55,20 +82,43 @@ def _drifted(stored: tuple[float, float, int] | None, got: tuple | None) -> bool
 
 
 def _season_folder_episodes(group: list[EvalEpisode]) -> list[str]:
-    """Every episode file in the group's folder, the eval's own files included (spec §5.3: group = season folder).
+    """The app's season group of the group's folder (spec §5.3: group = season folder), the eval's own files included."""
+    return sorted(set(season_group(group[0].file).episodes) | {e.file for e in group})
 
-    Mirrors the plan's Task 7 group rule; switch to ``markers.audio.season.season_group`` once that lands.
-    """
-    folder = os.path.dirname(group[0].file)
-    on_disk = {
-        path
-        for path in (os.path.join(folder, name) for name in os.listdir(folder))
-        if os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS
-        and not is_extra(path)
-        and ids_from_path(path).is_episode
-        and os.path.isfile(path)
-    }
-    return sorted(on_disk | {e.file for e in group})
+
+class _SeasonStep:
+    """The app's season step over one season's fingerprints, recording the pairs it skips."""
+
+    def __init__(self, season: str, fps: dict[str, np.ndarray], report: ReproductionReport) -> None:
+        self._season, self._fps, self._report = season, fps, report
+        self._runs: dict[tuple[str, str], list[Run]] = {}
+        self.files = sorted(f for f, points in fps.items() if len(points))
+
+    def runs_between(self, first: str, second: str) -> list[Run]:
+        if (first, second) not in self._runs:
+            a, b = self._fps[first], self._fps[second]
+            runs = pair_runs(a, b)
+            if holds_no_intro(a, b):  # what markers.audio.season.season_pair_runs leaves out
+                short = [r for r in runs if r.a_end_s - r.a_start_s <= MAX_INTRO_S]
+                self._report.skipped_pairs.append(
+                    {"season": self._season, "a": first, "b": second, "intro_length_runs": len(short)}
+                )
+                runs = []
+            self._runs[(first, second)] = runs
+        return self._runs[(first, second)]
+
+    def answer(self, episode: EvalEpisode) -> tuple | None:
+        if episode.file not in self.files or len(self.files) < 2:
+            return None
+        guarded = season_intro(episode.file, self.files, self._fps, self.runs_between)
+        if guarded is None:
+            unguarded = intro_for(file_hits(episode.file, self.files, self.runs_between), len(self.files) - 1)
+            if unguarded is not None:
+                verdict = judge_intro(unguarded[:2], episode.truth_intro) if episode.truth_intro else None
+                self._report.silence_dropped.append(
+                    {"season": self._season, "file": episode.file, "segment": tuple(unguarded), "verdict": verdict}
+                )
+        return _as_tuple(guarded)
 
 
 def reproduce(
@@ -96,6 +146,7 @@ def reproduce(
         files = _season_folder_episodes(group) if full_folder else [e.file for e in group]
         fps = {f: points(f) for f in files}
         port = {f: _as_tuple(seg) for f, seg in season_intros(fps).items()}
+        step = _SeasonStep(season, fps, report)
         if with_reference:
             reference = fp3_reference.analyse_points(fps, sorted(fps))
             for f in sorted(fps):
@@ -107,6 +158,8 @@ def reproduce(
             got = port[e.file]
             if _drifted(e.v3_segment, got):
                 report.drift.append({"season": season, "file": e.file, "stored": e.v3_segment, "now": got})
+            answer = step.answer(e)
             if e.truth_intro is not None:
-                report.tally.add(judge_intro(got[:2] if got else None, e.truth_intro))
+                report.matcher_tally.add(judge_intro(got[:2] if got else None, e.truth_intro))
+                report.tally.add(judge_intro(answer[:2] if answer else None, e.truth_intro))
     return report

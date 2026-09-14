@@ -3,6 +3,7 @@
 import itertools
 import math
 import random
+from dataclasses import replace
 
 import pytest
 
@@ -11,6 +12,8 @@ from media_preview_generator.markers.decide import (
     DecisionStatus,
     TypeDecision,
     decide,
+    intro_chapter_length_ms,
+    intro_chapter_limit_ms,
     sanity_problem,
     shortened_by,
 )
@@ -591,14 +594,15 @@ class TestAgreement:
         assert d.proposed is None
         assert d.reason == "sources agree: theintrodb, skipdb, season_audio"
 
-    @pytest.mark.parametrize("partner", [S.CREDITS_TEXT, S.SERVER_MARKERS])
-    def test_agreeing_pair_without_a_bridge_decides(self, partner):
-        cands = [intro(S.SEASON_AUDIO, 60_000, 100_000), intro(partner, 60_000, 100_000, "plex-1")]
+    # Season audio with a server's own markers alone doesn't decide (ruling G3): TestSeasonAudioSources.
+    @pytest.mark.parametrize(("first", "partner"), [(S.SEASON_AUDIO, S.CREDITS_TEXT), (S.SKIPDB, S.SERVER_MARKERS)])
+    def test_agreeing_pair_without_a_bridge_decides(self, first, partner):
+        cands = [intro(first, 60_000, 100_000), intro(partner, 60_000, 100_000, "plex-1")]
         d = decide(cands, ctx(), {})[T.INTRO]
         assert d.status is DecisionStatus.DECIDED
-        assert d.marker == Marker(T.INTRO, 60_000, 100_000, ("season_audio", partner.value))
+        assert d.marker == Marker(T.INTRO, 60_000, 100_000, (first.value, partner.value))
         assert d.proposed is None
-        assert d.reason == f"sources agree: season_audio, {partner.value}"
+        assert d.reason == f"sources agree: {first.value}, {partner.value}"
 
     @pytest.mark.parametrize(
         ("partner", "proposed_by", "groups"),
@@ -687,7 +691,7 @@ class TestAgreement:
         cands = [
             intro(S.THEINTRODB, 60_000, 90_000),
             intro(S.SKIPDB, 60_000, 90_000),
-            intro(S.SEASON_AUDIO, 120_000, 150_000),
+            intro(S.CREDITS_TEXT, 120_000, 150_000),
             intro(S.SERVER_MARKERS, 120_000, 150_000, "plex-1"),
         ]
         d = decide(cands, ctx(), {})[T.INTRO]
@@ -900,11 +904,17 @@ class TestSingleSource:
     @pytest.mark.parametrize(
         ("cands", "medium"),
         [
-            # the source checks this file's cut itself: SkipDB answers only a duration match, local detectors read
+            # the source checks this file's cut itself: SkipDB answers only a duration match, credit text reads
             # the file
             ([intro(S.SKIPDB, 127_000, 157_000)], DecisionStatus.DECIDED),
-            ([intro(S.SEASON_AUDIO, 127_000, 157_000)], DecisionStatus.DECIDED),
             ([intro(S.CREDITS_TEXT, 127_000, 157_000)], DecisionStatus.DECIDED),
+            # season audio (same season or the previous season's hint) only agrees in phase 2 (owner, 2026-09-14)
+            ([intro(S.SEASON_AUDIO, 127_000, 157_000)], DecisionStatus.NEEDS_REVIEW),
+            ([intro(S.SEASON_AUDIO_PREVIOUS, 127_000, 157_000)], DecisionStatus.NEEDS_REVIEW),
+            (
+                [intro(S.SEASON_AUDIO, 127_000, 157_000), intro(S.SEASON_AUDIO_PREVIOUS, 127_500, 157_200)],
+                DecisionStatus.NEEDS_REVIEW,
+            ),
             # chapters are rule 3, the same at both levels
             ([intro(S.CHAPTERS, 127_000, 157_000)], DecisionStatus.DECIDED),
             # IntroDB takes no duration and TheIntroDB answers its closest stored cut: agreement only
@@ -1693,13 +1703,18 @@ _REF_SOURCES = list(S)
 # Rule 7: markers already on servers (an importer plugin's copy included) confirm and may shorten, never decide alone;
 # they only move the checked edge of an already decided marker toward a shorter skip.
 _REF_SERVER = (S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED)
-# Rule 6: at "Medium" these only agree -- they don't check this file's cut.
-_REF_AGREEMENT_ONLY = (*_REF_SERVER, S.INTRODB, S.THEINTRODB)
+# Rule 6: at "Medium" these only agree -- they don't check this file's cut, or (season audio, owner 2026-09-14) are
+# not trusted alone yet.
+_REF_AGREEMENT_ONLY = (*_REF_SERVER, S.INTRODB, S.THEINTRODB, S.SEASON_AUDIO, S.SEASON_AUDIO_PREVIOUS)
+_REF_LONG_INTRO_CHAPTER = "Intro chapter is much longer than the rest of the season's"
 
 
 def _ref_group(source):
     # Rule 8: IntroDB, TheIntroDB and an importer plugin's copy on a server are one crowd source.
-    return "introdb/theintrodb" if source in (S.INTRODB, S.THEINTRODB, S.SERVER_MARKERS_IMPORTED) else source.value
+    if source in (S.INTRODB, S.THEINTRODB, S.SERVER_MARKERS_IMPORTED):
+        return "introdb/theintrodb"
+    # The previous season's audio is the same method on the same show as this season's.
+    return "season_audio" if source is S.SEASON_AUDIO_PREVIOUS else source.value
 
 
 def _ref_end(c, duration):
@@ -1782,7 +1797,11 @@ def _ref_agreeing_sets(cands, x):
     maximal = [m for m in cliques if not any(not m >> k & 1 and neighbours[k] & m == m for k in range(n))]
     sets = [[cands[i] for i in range(n) if m >> i & 1] for m in maximal]
     sets = [
-        s for s in sets if len({_ref_group(c.source) for c in s}) >= 2 and any(c.source not in _REF_SERVER for c in s)
+        s
+        for s in sets
+        if len({_ref_group(c.source) for c in s}) >= 2
+        # ruling G3: season audio and markers already on servers never agree on their own
+        and any(c.source not in (*_REF_SERVER, S.SEASON_AUDIO, S.SEASON_AUDIO_PREVIOUS) for c in s)
     ]
     return sorted(sets, key=lambda s: min(_ref_value(c, d) for c in s))
 
@@ -1834,7 +1853,12 @@ def _ref_decide_type(mtype, cands, x):
             if abs(_ref_marker_value(marker) - _ref_marker_value(result)) > tol:
                 return review(result, "chapters contradicted by agreeing sources: " + ", ".join(marker.decided_by))
         backing = [c for c in others if abs(_ref_value(c, d) - _ref_marker_value(result)) <= tol]
-        if len({_ref_group(c.source) for c in backing}) >= 2:
+        # Finding F1: an intro chapter far longer than the season's other intro chapters needs one agreeing source.
+        limit = x.intro_chapter_limit_ms
+        suspect = mtype is T.INTRO and limit is not None and result.end_ms - result.start_ms > limit
+        if suspect and not [c for c in backing if c.source not in _REF_SERVER]:
+            return review(result, _REF_LONG_INTRO_CHAPTER)
+        if len({_ref_group(c.source) for c in backing}) >= (1 if suspect else 2):
             chapter = result
             everyone = {S.CHAPTERS, *(c.source for c in backing)}
             shorter, other = _ref_shorter(mtype, _ref_marker_value(chapter), backing, x, everyone)
@@ -1843,6 +1867,9 @@ def _ref_decide_type(mtype, cands, x):
                 if not _ref_is_sane(Candidate(mtype, shorter.start_ms, shorter.end_ms, S.CHAPTERS), x):
                     return review(chapter, "chapters and agreeing sources disagree on the other edge")
                 result = Marker(mtype, shorter.start_ms, shorter.end_ms, shorter.decided_by)
+            elif suspect:
+                credited = sorted(everyone, key=lambda s: _ref_source_rank(s, x))
+                result = Marker(mtype, chapter.start_ms, chapter.end_ms, tuple(s.value for s in credited))
     elif agreeing_sets:
         composed = [_ref_compose(members, mtype, x) for members in agreeing_sets]
         values = [_ref_marker_value(marker) for marker, _ in composed]
@@ -1979,6 +2006,7 @@ _EVERY_REASON = (
     "shortened to the server's own marker",
     "intro and recap overlap",
     "preview overlaps credits",
+    _REF_LONG_INTRO_CHAPTER,
 )
 
 
@@ -2004,10 +2032,11 @@ def _random_candidates(rng, mtype, duration, anchor):
     first = anchor + step * rng.randint(-4, 4)
     centres = [first + step * offset for offset in offsets]
     if rng.random() < 0.25:
-        # One source (or the IntroDB pair) only: what "medium" decides on. The local detectors come up twice as often:
-        # besides chapters they're the only sources that may decide credits and previews alone.
+        # One source (or the IntroDB pair) only: what "medium" decides on. The sources that may decide alone come up
+        # more often: credit text three times (besides chapters the only one for credits and previews), SkipDB twice
+        # (intros and recaps). Season audio only agrees in phase 2.
         crowd = [S.THEINTRODB, S.INTRODB, S.SERVER_MARKERS_IMPORTED]
-        alone = [*_NON_CHAPTER_SOURCES, S.CHAPTERS, S.SEASON_AUDIO, S.CREDITS_TEXT]
+        alone = [*_NON_CHAPTER_SOURCES, S.CHAPTERS, S.CREDITS_TEXT, S.CREDITS_TEXT, S.SKIPDB]
         sources = rng.choice((crowd, [rng.choice(alone)]))
         count, chapter_count = rng.randint(1, 4), 0
     else:
@@ -2064,6 +2093,10 @@ def _random_file(rng):
         elif roll < 0.08:
             wrong_type = T.CREDITS if t is T.INTRO else T.INTRO
             locked[t] = Marker(wrong_type, start, start + 40_000, ("user",))
+    # The season's intro-chapter limit lands inside the 2-60 s spread of generated intro lengths half of the time. Drawn
+    # last, so every other draw of a seed stays what it was before the limit existed.
+    if rng.random() < 0.5:
+        x = replace(x, intro_chapter_limit_ms=rng.choice((20_000, 35_000, 50_000)))
     return cands, x, locked
 
 
@@ -2090,3 +2123,225 @@ class TestMatchesReference:
             seen.update(_reason_kind(dec.reason) for dec in got.values())
         # A generator that stopped reaching a rule would make this test pass vacuously.
         assert seen == set(_EVERY_REASON)
+
+
+class TestSeasonAudioSources:
+    """Spec §5.3/§5.5 and the owner decision of 2026-09-14: season audio never decides alone in phase 2, whether it
+    matched this season or is the previous season's hint, and the two are one independent source."""
+
+    DUR = 1_321_472
+    ORDER = ("chapters", "theintrodb", "introdb", "skipdb", "season_audio", "season_audio_previous", "credits_text",
+             "server_markers", "server_markers_imported")  # fmt: skip
+
+    def _ctx(self, publish_when):
+        return DecisionContext(self.DUR, False, publish_when, frozenset({MarkerType.INTRO}), self.ORDER)
+
+    @pytest.mark.parametrize("publish_when", ["high", "medium"])
+    @pytest.mark.parametrize(("source", "origin"), [(S.SEASON_AUDIO, "10/10"), (S.SEASON_AUDIO_PREVIOUS, "4/4")])
+    def test_season_audio_alone_never_decides(self, publish_when, source, origin):
+        c = [Candidate(MarkerType.INTRO, 126_000, 157_000, source, 1.0, origin)]
+        d = decide(c, self._ctx(publish_when), {})[MarkerType.INTRO]
+        assert (d.status, d.reason) == (DecisionStatus.NEEDS_REVIEW, "sources don't agree yet")
+        assert d.proposed == Marker(MarkerType.INTRO, 126_000, 157_000, (source.value,))
+
+    @pytest.mark.parametrize("publish_when", ["high", "medium"])
+    def test_hint_and_same_season_audio_are_one_source(self, publish_when):
+        c = [
+            Candidate(MarkerType.INTRO, 126_000, 157_000, Source.SEASON_AUDIO_PREVIOUS, 1.0, "4/4"),
+            Candidate(MarkerType.INTRO, 126_500, 157_500, Source.SEASON_AUDIO, 1.0, "1/1"),
+        ]
+        assert decide(c, self._ctx(publish_when), {})[MarkerType.INTRO].status is DecisionStatus.NEEDS_REVIEW
+
+    def test_hint_confirmed_by_an_independent_source_decides_at_high(self):
+        c = [
+            Candidate(MarkerType.INTRO, 126_000, 157_000, Source.SEASON_AUDIO_PREVIOUS, 1.0, "4/4"),
+            Candidate(MarkerType.INTRO, 127_000, 158_800, Source.SKIPDB, 0.9),
+        ]
+        d = decide(c, self._ctx("high"), {})[MarkerType.INTRO]
+        assert d.status is DecisionStatus.DECIDED
+        assert d.marker.decided_by == ("skipdb", "season_audio_previous")
+        # The agreed end comes from the first agreeing source in the user's order (SkipDB), the start is the later one.
+        assert (d.marker.start_ms, d.marker.end_ms) == (127_000, 158_800)
+
+    @pytest.mark.parametrize("publish_when", ["high", "medium"])
+    @pytest.mark.parametrize(
+        ("audio", "server"),
+        [
+            (S.SEASON_AUDIO, S.SERVER_MARKERS),
+            (S.SEASON_AUDIO_PREVIOUS, S.SERVER_MARKERS),
+            (S.SEASON_AUDIO, S.SERVER_MARKERS_IMPORTED),
+        ],
+        ids=["audio-and-server", "hint-and-server", "audio-and-importer-copy"],
+    )
+    def test_season_audio_and_markers_on_servers_alone_need_review(self, publish_when, audio, server):
+        # Ruling G3: a server's own intro detection matches audio across episodes too, so they aren't independent.
+        c = [
+            Candidate(MarkerType.INTRO, 126_000, 157_000, audio, 1.0, "9/9"),
+            Candidate(MarkerType.INTRO, 125_000, 158_000, server, 1.0, "plex-1"),
+        ]
+        d = decide(c, self._ctx(publish_when), {})[MarkerType.INTRO]
+        assert (d.status, d.marker) == (DecisionStatus.NEEDS_REVIEW, None)
+
+    def test_season_audio_and_markers_on_servers_publish_once_an_outside_source_agrees(self):
+        c = [
+            Candidate(MarkerType.INTRO, 126_000, 157_000, Source.SEASON_AUDIO, 1.0, "9/9"),
+            Candidate(MarkerType.INTRO, 125_000, 158_000, Source.SERVER_MARKERS, 1.0, "plex-1"),
+            Candidate(MarkerType.INTRO, 124_000, 156_000, Source.THEINTRODB),
+        ]
+        d = decide(c, self._ctx("high"), {})[MarkerType.INTRO]
+        assert d.status is DecisionStatus.DECIDED
+        assert d.marker == Marker(MarkerType.INTRO, 126_000, 156_000, ("theintrodb", "season_audio", "server_markers"))
+
+    @pytest.mark.parametrize("server", [S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED])
+    def test_theintrodb_and_markers_on_servers_are_unchanged(self, server):
+        c = [
+            Candidate(MarkerType.INTRO, 124_000, 156_000, Source.THEINTRODB),
+            Candidate(MarkerType.INTRO, 125_000, 158_000, server, 1.0, "plex-1"),
+        ]
+        d = decide(c, self._ctx("high"), {})[MarkerType.INTRO]
+        expected = DecisionStatus.NEEDS_REVIEW if server is S.SERVER_MARKERS_IMPORTED else DecisionStatus.DECIDED
+        assert d.status is expected  # an importer plugin's copy is TheIntroDB's own data (rule 8)
+
+    def test_same_season_audio_confirmed_by_an_agreement_only_source_decides_at_high(self):
+        c = [
+            Candidate(MarkerType.INTRO, 126_000, 157_000, Source.SEASON_AUDIO, 1.0, "7/9"),
+            Candidate(MarkerType.INTRO, 125_000, 160_000, Source.INTRODB),
+        ]
+        d = decide(c, self._ctx("high"), {})[MarkerType.INTRO]
+        assert d.status is DecisionStatus.DECIDED
+        assert (d.marker.start_ms, d.marker.end_ms, d.marker.decided_by) == (
+            126_000,
+            160_000,
+            ("introdb", "season_audio"),
+        )
+
+
+class TestSeasonIntroChapterLimit:
+    """Finding F1 (phase-1 scale run): an intro chapter far longer than the season's other intro chapters is story, not
+    an intro, so it needs an agreeing source."""
+
+    REASON = "Intro chapter is much longer than the rest of the season's"
+
+    @pytest.mark.parametrize(
+        ("others", "limit"),
+        [
+            ((), None),
+            ((14_000,), None),  # one other episode isn't a season's habit
+            ((14_000, 14_000), 44_000),  # median + 30 s is the larger bound for short intros
+            ((13_000, 14_000, 15_000), 44_000),
+            ((60_000, 70_000, 80_000), 140_000),  # twice the median is the larger bound for long intros
+            ((3_000, 6_931, 7_000, 86_545), 36_965),  # an even count takes the mean of the middle two (6_965.5)
+        ],
+    )
+    def test_limit_needs_two_other_episodes(self, others, limit):
+        assert intro_chapter_limit_ms(others) == limit
+
+    def test_the_chosen_intro_chapter_length_uses_the_decision_rules(self):
+        chapters = [
+            intro(S.CHAPTERS, 60_000, 90_000),
+            intro(S.CHAPTERS, 5_000, 30_000),  # the first intro chapter is the one decided
+            intro(S.CHAPTERS, 0, 480_000),  # an 8-minute "Intro" fails sanity and never counts
+            credits(S.CHAPTERS, 1_290_000),
+            intro(S.SKIPDB, 1_000, 100_000),
+        ]
+        assert intro_chapter_length_ms(chapters, DUR) == 25_000
+        assert intro_chapter_length_ms([intro(S.CHAPTERS, 0, None)], SHORT_DUR) is None
+        assert intro_chapter_length_ms([], DUR) is None
+
+    @pytest.mark.parametrize(
+        ("length", "others"),
+        [
+            (88_000, (13_000, 14_000, 15_000)),  # Mr. Robot S04E01: 88 s against 14 s
+            (125_834, (3_000, 6_931, 7_000, 86_545)),  # Reservation Dogs S01E05: 126 s of story
+            (86_545, (3_000, 6_931, 7_000, 125_834)),  # Reservation Dogs S01E06: 87 s of story
+        ],
+        ids=["mr-robot-s04e01", "reservation-dogs-s01e05", "reservation-dogs-s01e06"],
+    )
+    @pytest.mark.parametrize("publish_when", ["high", "medium"])
+    def test_flagged_cells_need_review_alone(self, length, others, publish_when):
+        chapter = intro(S.CHAPTERS, 30_000, 30_000 + length, "Intro")
+        limit = intro_chapter_limit_ms(others)
+        d = decide(
+            [chapter], ctx(publish_when, types=(T.INTRO,)) if limit is None else _limited(publish_when, limit), {}
+        )
+        assert (d[T.INTRO].status, d[T.INTRO].reason) == (DecisionStatus.NEEDS_REVIEW, self.REASON)
+        assert d[T.INTRO].proposed == Marker(T.INTRO, 30_000, 30_000 + length, ("chapters",))
+
+    def test_a_chapter_exactly_at_the_limit_is_not_flagged(self):
+        d = decide([intro(S.CHAPTERS, 30_000, 74_000)], _limited("high", 44_000), {})[T.INTRO]
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "chapters")
+        d = decide([intro(S.CHAPTERS, 30_000, 74_001)], _limited("high", 44_000), {})[T.INTRO]
+        assert d.status is DecisionStatus.NEEDS_REVIEW
+
+    def test_no_limit_means_no_check(self):
+        d = decide([intro(S.CHAPTERS, 30_000, 118_000)], ctx(types=(T.INTRO,)), {})[T.INTRO]
+        assert (d.status, d.marker) == (DecisionStatus.DECIDED, Marker(T.INTRO, 30_000, 118_000, ("chapters",)))
+
+    @pytest.mark.parametrize(
+        ("other", "expected"),
+        [
+            # an online source agreeing on the end publishes; its later start shortens the suspect chapter
+            (intro(S.SKIPDB, 100_000, 118_500), Marker(T.INTRO, 100_000, 118_000, ("chapters", "skipdb"))),
+            # an agreeing source with an earlier start still confirms; the chapter keeps its own start
+            (intro(S.INTRODB, 10_000, 116_000), Marker(T.INTRO, 30_000, 118_000, ("chapters", "introdb"))),
+            # season audio counts as agreement too
+            (intro(S.SEASON_AUDIO, 101_000, 117_000), Marker(T.INTRO, 101_000, 118_000, ("chapters", "season_audio"))),
+            # a server marker may still shorten the skip once another source confirms
+            (
+                [intro(S.SKIPDB, 90_000, 118_500), intro(S.SERVER_MARKERS, 99_000, 119_000, "plex-1")],
+                Marker(T.INTRO, 99_000, 118_000, ("chapters", "skipdb", "server_markers")),
+            ),
+        ],
+        ids=["skipdb-later-start", "introdb-earlier-start", "season-audio", "skipdb-and-server-markers"],
+    )
+    @pytest.mark.parametrize("publish_when", ["high", "medium"])
+    def test_a_flagged_chapter_with_an_agreeing_source_publishes(self, other, expected, publish_when):
+        cands = [intro(S.CHAPTERS, 30_000, 118_000, "Intro"), *(other if isinstance(other, list) else [other])]
+        for order in (cands, cands[::-1]):
+            d = decide(order, _limited(publish_when, 44_000), {})[T.INTRO]
+            assert (d.status, d.marker, d.reason) == (DecisionStatus.DECIDED, expected, "chapters")
+
+    @pytest.mark.parametrize(
+        "servers",
+        [
+            [intro(S.SERVER_MARKERS, 99_000, 119_000, "plex-1")],
+            [intro(S.SERVER_MARKERS_IMPORTED, 99_000, 119_000, "jf-1")],
+            [
+                intro(S.SERVER_MARKERS, 99_000, 119_000, "plex-1"),
+                intro(S.SERVER_MARKERS_IMPORTED, 98_000, 117_000, "jf-1"),
+            ],
+        ],
+        ids=["server", "importer-copy", "both"],
+    )
+    def test_a_flagged_chapter_confirmed_only_by_markers_on_servers_needs_review(self, servers):
+        # Rule 7: a chapter that markers already on servers alone confirm still counts as chapters alone.
+        d = decide([intro(S.CHAPTERS, 30_000, 118_000, "Intro"), *servers], _limited("medium", 44_000), {})[T.INTRO]
+        assert (d.status, d.reason) == (DecisionStatus.NEEDS_REVIEW, self.REASON)
+        assert d.proposed == Marker(T.INTRO, 30_000, 118_000, ("chapters",))
+
+    def test_a_flagged_chapter_with_a_source_that_disagrees_needs_review(self):
+        cands = [intro(S.CHAPTERS, 30_000, 118_000, "Intro"), intro(S.SKIPDB, 90_000, 124_000)]
+        d = decide(cands, _limited("medium", 44_000), {})[T.INTRO]
+        assert (d.status, d.reason) == (DecisionStatus.NEEDS_REVIEW, self.REASON)
+
+    def test_a_flagged_chapter_backed_by_a_start_that_leaves_too_little_goes_to_review(self):
+        cands = [intro(S.CHAPTERS, 30_000, 118_000, "Intro"), intro(S.SKIPDB, 116_000, 120_000)]
+        d = decide(cands, _limited("high", 44_000), {})[T.INTRO]
+        assert (d.status, d.reason) == (
+            DecisionStatus.NEEDS_REVIEW,
+            "chapters and agreeing sources disagree on the other edge",
+        )
+
+    def test_only_intro_chapters_are_checked(self):
+        recap = Candidate(T.RECAP, 0, 100_000, S.CHAPTERS, origin="Recap")
+        out = decide([recap], DecisionContext(DUR, False, "high", frozenset({T.RECAP}), ORDER, 20_000), {})
+        assert (out[T.RECAP].status, out[T.RECAP].reason) == (DecisionStatus.DECIDED, "chapters")
+
+    def test_a_lock_still_wins(self):
+        lock = Marker(T.INTRO, 30_000, 118_000, ("user",))
+        d = decide([intro(S.CHAPTERS, 30_000, 118_000)], _limited("high", 44_000), {T.INTRO: lock})[T.INTRO]
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "locked by user")
+
+
+def _limited(publish_when, limit):
+    return DecisionContext(DUR, False, publish_when, frozenset({T.INTRO}), ORDER, limit)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from media_preview_generator.markers.audio import POINT_S
 from tools.markers_eval import fp3_reference
@@ -91,3 +92,50 @@ def test_full_folder_matches_every_episode_file_in_the_folder_not_just_the_eval_
     # Stored answers came from the 2-file group (support 1); the whole folder gives 3 supporting episodes.
     assert [d["stored"][2] for d in full.drift] == [1, 1] and [d["now"][2] for d in full.drift] == [3, 3]
     assert (full.seasons, full.episodes) == (1, 2)
+
+
+def test_the_gate_judges_the_season_step_and_reports_what_the_silence_guard_dropped():
+    from media_preview_generator.markers.audio.season import SILENCE_POINT
+
+    rng = np.random.default_rng(8)
+    fps = {}
+    for e, at in ((1, 200), (2, 450), (3, 700)):
+        body = rng.integers(0, 2**32, size=2_000, dtype=np.uint64).astype("<u4")
+        body[at : at + 200] = SILENCE_POINT  # a shared 25 s silence and nothing else in common
+        fps[f"/eval/Show/Season 01/Show - S01E{e:02d}.mkv"] = body
+    episodes = [EvalEpisode("/eval/Show/Season 01", f, (10.0, 40.0), None, None) for f in sorted(fps)]
+    report = reproduce(episodes, points=fps.__getitem__)
+    assert report.port_vs_reference == []
+    assert report.matcher_tally.as_dict() == {"useful": 0, "wrong": 3, "missed": 0}
+    assert report.tally.as_dict() == {"useful": 0, "wrong": 0, "missed": 3}
+    assert [(d["file"], d["verdict"]) for d in report.silence_dropped] == [(f, "wrong") for f in sorted(fps)]
+
+
+def test_a_skipped_pair_is_reported_with_the_intro_length_runs_the_matcher_finds(monkeypatch):
+    from tools.markers_eval import intros
+
+    fps = _fps(6)
+    monkeypatch.setattr(intros, "holds_no_intro", lambda a, b: True)
+    report = reproduce(_episodes(fps), points=fps.__getitem__)
+    files = sorted(fps)
+    assert [(p["a"], p["b"]) for p in report.skipped_pairs] == [(files[0], files[1]), (files[0], files[2]),
+                                                                (files[1], files[2])]  # fmt: skip
+    assert all(p["intro_length_runs"] >= 1 for p in report.skipped_pairs)
+    assert report.matcher_tally.as_dict()["useful"] == 3 and report.tally.as_dict()["missed"] == 3
+
+
+@pytest.mark.parametrize(
+    ("skipped", "dropped", "passed"),
+    [
+        ([], [], True),
+        ([{"intro_length_runs": 0}], [{"verdict": "wrong"}, {"verdict": None}], True),
+        ([{"intro_length_runs": 1}], [], False),  # skipping lost something the matcher could find
+        ([], [{"verdict": "useful"}], False),  # the silence guard lost a useful answer
+    ],
+)
+def test_the_gate_refuses_skipped_pairs_with_runs_and_useful_answers_the_guard_dropped(skipped, dropped, passed):
+    from tools.markers_eval.intros import SPEC_V3, ReproductionReport
+    from tools.markers_eval.score import Tally
+
+    report = ReproductionReport(tally=Tally(*SPEC_V3), skipped_pairs=skipped, silence_dropped=dropped)
+    assert report.passed is passed

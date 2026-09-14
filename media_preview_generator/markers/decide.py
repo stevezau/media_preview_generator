@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable
+import statistics
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from itertools import combinations
@@ -23,6 +24,12 @@ MAX_INTRO_MS = 300_000
 MOVIE_CREDITS_MAX_FROM_END_MS = 900_000
 INTRO_RECAP_MAX_OVERLAP_MS = 5_000
 PREVIEW_CREDITS_MAX_OVERLAP_MS = 10_000
+# Finding F1 (phase-1 scale run): streaming releases can label story "Intro" (Reservation Dogs S01E05: 126 s against
+# the season's 3-11 s). With at least this many other episodes of the season carrying an intro chapter, one lasting
+# more than max(2 x their median, median + 30 s) needs an agreeing source.
+SEASON_INTRO_CHAPTERS_MIN_OTHERS = 2
+SEASON_INTRO_CHAPTER_MIN_MARGIN_MS = 30_000
+LONG_INTRO_CHAPTER_REASON = "Intro chapter is much longer than the rest of the season's"
 # IntroDB data looks partly seeded from other sources (spec §5.5), so IntroDB and TheIntroDB are always one
 # independence group -- never two votes, whether or not they agree with each other. Markers an intro-DB importer
 # plugin wrote on a Jellyfin/Emby server are that crowd data again.
@@ -31,10 +38,21 @@ _INDEPENDENCE_GROUP = {
     Source.INTRODB: _INTRODB_GROUP,
     Source.THEINTRODB: _INTRODB_GROUP,
     Source.SERVER_MARKERS_IMPORTED: _INTRODB_GROUP,
+    # The previous season's audio is the same method on the same show: never a second opinion for season audio.
+    Source.SEASON_AUDIO_PREVIOUS: Source.SEASON_AUDIO.value,
 }
 # At "Medium" a lone source publishes only when it checks this file's cut itself (rule 6): IntroDB takes no duration,
-# TheIntroDB answers the closest cut it has, and markers already on servers never decide alone (rule 7).
-_AGREEMENT_ONLY = SERVER_SOURCES | {Source.INTRODB, Source.THEINTRODB}
+# TheIntroDB answers the closest cut it has, and markers already on servers never decide alone (rule 7). Season audio
+# only agrees in phase 2 (owner, 2026-09-14: 13 wrong of 104 answered alone), and the previous season's is a hint.
+_AGREEMENT_ONLY = SERVER_SOURCES | {
+    Source.INTRODB,
+    Source.THEINTRODB,
+    Source.SEASON_AUDIO,
+    Source.SEASON_AUDIO_PREVIOUS,
+}
+# Season audio doesn't confirm markers already on a server on its own: a server's own intro detection matches audio across
+# episodes too (ruling G3, precision first). Agreement needs a source outside these.
+_AUDIO_OR_SERVER = SERVER_SOURCES | {Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}
 _START_SEGMENTS = (MarkerType.INTRO, MarkerType.RECAP)
 SHORTENED_NOTE = "shortened to the server's own marker"
 _SHORTENED_RE = re.compile(r"; start shortened to the server's own marker(?: \(([^)]*)\))?$")
@@ -52,13 +70,19 @@ class DecisionStatus(str, Enum):
 
 @dataclass(frozen=True)
 class DecisionContext:
-    """Per-file inputs to the rules."""
+    """Per-file inputs to the rules.
+
+    Attributes:
+        intro_chapter_limit_ms: The season's limit on an intro chapter deciding alone (:func:`intro_chapter_limit_ms`
+            of the other episodes); None when the season can't tell.
+    """
 
     duration_ms: int
     is_movie: bool
     publish_when: str
     enabled_types: frozenset[MarkerType]
     source_order: tuple[str, ...]
+    intro_chapter_limit_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -213,7 +237,8 @@ def _review(mtype: MarkerType, proposed: Marker | None, reason: str) -> TypeDeci
 
 def _agreeing_cliques(candidates: list[Candidate], mtype: MarkerType, ctx: DecisionContext) -> list[list[Candidate]]:
     """Every maximal set of mutually agreeing candidates that spans >= 2 independent groups and holds a candidate
-    that may supply times (not a server marker).
+    that is neither a server marker nor season audio (so it may supply times, and season audio and a server's own
+    detection never decide together).
 
     Agreement compares exactly one number per candidate (end for intro/recap, start for
     credits/preview) against a fixed tolerance, so every maximal agreeing set is a contiguous
@@ -237,7 +262,7 @@ def _agreeing_cliques(candidates: list[Candidate], mtype: MarkerType, ctx: Decis
             continue
         last_hi = hi
         window = by_value[lo : hi + 1]
-        if len({_group(c.source) for c in window}) >= 2 and any(c.source not in SERVER_SOURCES for c in window):
+        if len({_group(c.source) for c in window}) >= 2 and any(c.source not in _AUDIO_OR_SERVER for c in window):
             cliques.append(sorted(window, key=rank))
     return cliques
 
@@ -322,6 +347,44 @@ def _chapter_choice_key(c: Candidate, duration_ms: int) -> tuple[int, int]:
     return start, resolve_end_ms(c, duration_ms)
 
 
+def intro_chapter_length_ms(candidates: Iterable[Candidate], duration_ms: int) -> int | None:
+    """How long the intro chapter the rules would decide from lasts (one episode's input to the season check).
+
+    Args:
+        candidates: The episode's evidence (only its sane intro chapters count).
+        duration_ms: The episode's duration.
+
+    Returns:
+        The chosen intro chapter's length, or None when the episode has no sane intro chapter.
+    """
+    sanity = DecisionContext(duration_ms, False, "high", frozenset({MarkerType.INTRO}), ())
+    chapters = [
+        c
+        for c in candidates
+        if c.source is Source.CHAPTERS and c.type is MarkerType.INTRO and sanity_problem(c, sanity) is None
+    ]
+    if not chapters:
+        return None
+    chosen = min(chapters, key=lambda c: _chapter_choice_key(c, duration_ms))
+    return resolve_end_ms(chosen, duration_ms) - chosen.start_ms
+
+
+def intro_chapter_limit_ms(other_lengths_ms: Sequence[int]) -> int | None:
+    """The longest intro chapter that may still decide alone, from the season's other intro chapters (finding F1).
+
+    Args:
+        other_lengths_ms: :func:`intro_chapter_length_ms` of every other episode of the season that has one.
+
+    Returns:
+        ``max(2 x median, median + 30 s)`` rounded down (lengths are whole ms, so "longer than" is unchanged), or None
+        with fewer than two other episodes.
+    """
+    if len(other_lengths_ms) < SEASON_INTRO_CHAPTERS_MIN_OTHERS:
+        return None
+    median = statistics.median(other_lengths_ms)
+    return math.floor(max(2 * median, median + SEASON_INTRO_CHAPTER_MIN_MARGIN_MS))
+
+
 def _decide_from_chapters(
     mtype: MarkerType, chapters: list[Candidate], others: list[Candidate], ctx: DecisionContext
 ) -> TypeDecision:
@@ -331,6 +394,10 @@ def _decide_from_chapters(
     unchecked edge across those agreeing candidates (server markers included: they may shorten the
     skip) is safer than the chapter's own, it replaces the chapter's; decided_by then adds every
     agreeing source. A replacement that fails sanity sends the type to review.
+
+    An intro chapter longer than the season's limit (``ctx.intro_chapter_limit_ms``) needs one agreeing group instead
+    of none, and not markers already on a server (a chapter they alone confirm still counts as chapters alone, rule
+    7); the agreeing candidates then shorten the skip the same way and are always credited.
     """
     chosen = min(chapters, key=lambda c: _chapter_choice_key(c, ctx.duration_ms))
     chapter_marker = _own_marker(chosen, ctx)
@@ -344,18 +411,25 @@ def _decide_from_chapters(
 
     marker = chapter_marker
     agreeing = [c for c in others if abs(_agree_value(c, ctx.duration_ms) - chapter_value) <= tol]
-    if len({_group(c.source) for c in agreeing}) >= 2:
+    limit = ctx.intro_chapter_limit_ms
+    suspect = (
+        mtype is MarkerType.INTRO and limit is not None and chapter_marker.end_ms - chapter_marker.start_ms > limit
+    )
+    if suspect and all(c.source in SERVER_SOURCES for c in agreeing):
+        return _review(mtype, chapter_marker, LONG_INTRO_CHAPTER_REASON)
+    if len({_group(c.source) for c in agreeing}) >= (1 if suspect else 2):
         other_edge, _ = _safer_other_edge(mtype, agreeing, ctx)
         if mtype in _START_SEGMENTS:
             safer = other_edge > chapter_marker.start_ms
         else:
             safer = other_edge < chapter_marker.end_ms
+        sources = {Source.CHAPTERS, *(c.source for c in agreeing)}
         if safer:
-            marker = _composed_marker(
-                mtype, chapter_value, other_edge, {Source.CHAPTERS, *(c.source for c in agreeing)}, ctx
-            )
+            marker = _composed_marker(mtype, chapter_value, other_edge, sources, ctx)
             if not _marker_is_sane(marker, ctx):
                 return _review(mtype, chapter_marker, "chapters and agreeing sources disagree on the other edge")
+        elif suspect:  # an intro: the chapter keeps its own start
+            marker = _composed_marker(mtype, chapter_value, chapter_marker.start_ms, sources, ctx)
     return TypeDecision(mtype, DecisionStatus.DECIDED, marker, None, "chapters")
 
 

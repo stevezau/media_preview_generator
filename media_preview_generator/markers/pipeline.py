@@ -31,7 +31,13 @@ from ..servers.base import ServerConfig, ServerType
 from ..servers.ownership import OwnershipMatch
 from ..servers.registry import server_config_from_dict
 from ..web.settings_manager import get_settings_manager
-from .decide import DecisionContext, DecisionStatus, TypeDecision, decide
+from .audio.season import season_audio_spec, season_intro_chapter_limits
+from .decide import (
+    DecisionContext,
+    DecisionStatus,
+    TypeDecision,
+    decide,
+)
 from .external_ids import ids_from_path, ids_from_server_dict, is_extra, merge_ids
 from .locks import KeyedLocks as _KeyedLocks
 from .models import SERVER_SOURCES, Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
@@ -324,6 +330,29 @@ def build_clients(settings: GlobalMarkersSettings) -> dict[str, Any]:
     return clients
 
 
+def default_local_detectors(settings: GlobalMarkersSettings, config: Any) -> tuple[LocalDetectorSpec, ...]:
+    """The local detectors a job uses: season audio when its source is on and an ffmpeg with chromaprint exists.
+
+    Args:
+        settings: Global detection settings.
+        config: The job's ``Config`` (its ``ffmpeg_path``).
+
+    Returns:
+        The detector specs, in no particular order (the pipeline runs them at their source's place).
+    """
+    detectors: list[LocalDetectorSpec] = []
+    if settings.source_enabled(Source.SEASON_AUDIO.value):
+        spec = season_audio_spec(getattr(config, "ffmpeg_path", None))
+        if spec is None:
+            logger.warning(
+                "Season audio matching is on, but no ffmpeg with chromaprint was found; TV intros come from the other "
+                "sources only"
+            )
+        else:
+            detectors.append(spec)
+    return tuple(detectors)
+
+
 def build_context(
     *, registry: Any, config: Any, priority: int | Callable[[], int], force: bool = False
 ) -> PipelineContext:
@@ -348,6 +377,7 @@ def build_context(
         ffprobe=ffprobe_path_for(getattr(config, "ffmpeg_path", None)),
         force=force,
         clients=build_clients(settings),
+        local_detectors=default_local_detectors(settings, config),
     )
 
 
@@ -436,22 +466,40 @@ def _needs_lookup(ctx: PipelineContext, rec: FileRecord, source: Source, refresh
     return all(r.type is None for r in rows) and ctx.now() - fetched > NO_DATA_RETRY
 
 
+# Sources without a switch of their own, each ranked right after the source whose switch they ride on.
+_RIDERS = {
+    Source.SERVER_MARKERS.value: Source.SERVER_MARKERS_IMPORTED.value,
+    Source.SEASON_AUDIO.value: Source.SEASON_AUDIO_PREVIOUS.value,
+}
+
+
 def _decision_order(settings: GlobalMarkersSettings) -> tuple[str, ...]:
-    """Enabled sources in the user's order; importer-plugin copies ride on the server-markers switch, ranked after it."""
+    """Enabled sources in the user's order; importer-plugin copies ride on the server-markers switch and the
+    previous-season hint on the season-audio switch, each ranked right after its switch."""
     order: list[str] = []
     for source_id in settings.ordered_enabled_sources():
         order.append(source_id)
-        if source_id == Source.SERVER_MARKERS.value:
-            order.append(Source.SERVER_MARKERS_IMPORTED.value)
+        if source_id in _RIDERS:
+            order.append(_RIDERS[source_id])
     return tuple(order)
 
 
-def _decide(ctx: PipelineContext, rec: FileRecord, types: frozenset[MarkerType]) -> dict[MarkerType, TypeDecision]:
-    """Decide from everything stored for the enabled sources, so a forced and a normal run always agree."""
+def _decide(
+    ctx: PipelineContext,
+    rec: FileRecord,
+    types: frozenset[MarkerType],
+    intro_chapter_limit: int | None = None,
+) -> dict[MarkerType, TypeDecision]:
+    """Decide from everything stored for the enabled sources, so a forced and a normal run always agree.
+
+    ``intro_chapter_limit`` is the season's limit on an intro chapter deciding alone (``season_intro_chapter_limits``).
+    """
     order = _decision_order(ctx.settings)
     enabled = set(order)
     candidates = [c for c in ctx.store.get_evidence(rec.id) if c.source.value in enabled]
-    dctx = DecisionContext(rec.duration_ms or 0, rec.is_movie, ctx.settings.publish_when, types, order)
+    dctx = DecisionContext(
+        rec.duration_ms or 0, rec.is_movie, ctx.settings.publish_when, types, order, intro_chapter_limit
+    )
     # A lock always wins (spec §5.5 rule 1); what respect_locks=False should change is for the phase 4 editor.
     return decide(candidates, dctx, ctx.store.get_locked(rec.id))
 
@@ -1143,6 +1191,31 @@ def _summary(
     return text
 
 
+def _request_season_chapter_followups(ctx: PipelineContext, sibling_limits: dict[str, int | None]) -> None:
+    """Ask again for siblings decided with a season intro-chapter limit that has changed since (finding F1).
+
+    State, not events: every season step compares each sibling's stored limit with the one it would get now, so a
+    change is noticed whichever episode runs next, after a worker handoff, a restart, a deleted or replaced episode, or
+    a member another episode's step probed. A sibling is asked again only when the new limit changes its intro
+    decision. One never decided is left alone (its own run sees the whole group), and so is one changed on disk since
+    its record (its own run reads it again).
+    """
+    stale = []
+    for path, limit in sibling_limits.items():
+        sibling = ctx.store.get_file(path)
+        if sibling is None or _identity_changed(sibling):
+            continue
+        stored = ctx.store.get_decisions(sibling.id).get(MarkerType.INTRO)
+        if stored is None or ctx.store.get_intro_chapter_limit(sibling.id) == (True, limit):
+            continue
+        types = _enabled_types(ctx.settings, ids_from_path(path))
+        decision = _decide(ctx, sibling, types, limit)[MarkerType.INTRO]
+        if _decisions_changed(ctx.store, sibling.id, {MarkerType.INTRO: decision}, stored.settings_fingerprint):
+            stale.append(path)
+    if stale:
+        ctx.request_followups(stale)
+
+
 def _attempt(
     item: ProcessableItem,
     ctx: PipelineContext,
@@ -1204,13 +1277,20 @@ def _attempt(
         return ItemOutcome(FileOutcome.FAILED.value, "Couldn't read the file's duration")
 
     types = _enabled_types(ctx.settings, ids)
+    # Season step for chapters (finding F1): an intro chapter far longer than the season's others needs a second source.
+    # Siblings are compared before any detector can hand this file to a worker.
+    intro_limit = None
+    if MarkerType.INTRO in types and ctx.settings.source_enabled(Source.CHAPTERS.value):
+        phase("Comparing the season's intro chapters…")
+        intro_limit, sibling_limits = season_intro_chapter_limits(ctx, path)
+        _request_season_chapter_followups(ctx, sibling_limits)
     # A normal run stops asking once stored answers decide everything beyond chapters alone (answers from an older
     # parser, reader or detector version are still asked again; ``_detector_pending`` says when a detector runs); a
     # forced run asks every source and runs every detector once, so no stale answer is left behind. A server never
     # asked for this file is still read once everything is decided: its own markers can shorten decided credits
     # (spec §5.5 rule 7); once we publish to a server its markers are never read again.
     gather_all = ctx.force
-    decisions = _decide(ctx, rec, types)
+    decisions = _decide(ctx, rec, types, intro_limit)
     lookup_ids: MediaIds | None = None
     budget_exhausted_labels: set[str] = set()
     for source_id in ctx.settings.ordered_enabled_sources():
@@ -1264,12 +1344,14 @@ def _attempt(
                 )
         _mark_refreshed(ctx, path, source)
         if not gather_all:
-            decisions = _decide(ctx, rec, types)
+            decisions = _decide(ctx, rec, types, intro_limit)
 
-    decisions = _decide(ctx, rec, types)
+    decisions = _decide(ctx, rec, types, intro_limit)
     fingerprint = ctx.settings.detection_fingerprint()
     if _decisions_changed(ctx.store, rec.id, decisions, fingerprint):
         ctx.store.save_decisions(rec.id, decisions, settings_fingerprint=fingerprint)
+    if ctx.store.get_intro_chapter_limit(rec.id) != (True, intro_limit):
+        ctx.store.set_intro_chapter_limit(rec.id, intro_limit)
     markers = ctx.store.get_markers(rec.id)
     needs_review = any(decisions[t].status is DecisionStatus.NEEDS_REVIEW for t in types)
     if _identity_changed(rec):

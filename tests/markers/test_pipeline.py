@@ -4093,6 +4093,7 @@ class TestHandlersAndContext:
             patch.object(pipeline, "get_marker_store", return_value=store),
             patch.object(pipeline, "ffprobe_path_for", return_value="/x/ffprobe") as ffprobe_for,
             patch.object(pipeline, "build_clients", return_value={"introdb": "client"}) as build,
+            patch("media_preview_generator.markers.audio.season.chromaprint_ffmpeg", return_value=None),
         ):
             ctx = pipeline.build_context(registry=registry, config=config, priority=3, force=True)
         ffprobe_for.assert_called_once_with("/usr/lib/jellyfin-ffmpeg/ffmpeg")
@@ -4109,6 +4110,30 @@ class TestHandlersAndContext:
             ctx = pipeline.build_context(registry=registry, config=config, priority=lambda: live["priority"])
         live["priority"] = 1
         assert ctx.priority() == 1
+
+    def test_build_context_registers_season_audio_when_chromaprint_is_found(self, store):
+        settings = load_global({})
+        config = MagicMock(ffmpeg_path="/usr/local/bin/ffmpeg")
+        with (
+            patch.object(pipeline, "get_global_settings", return_value=settings),
+            patch.object(pipeline, "get_marker_store", return_value=store),
+            patch.object(pipeline, "build_clients", return_value={}),
+            patch(
+                "media_preview_generator.markers.audio.season.chromaprint_ffmpeg",
+                return_value="/usr/lib/jellyfin-ffmpeg/ffmpeg",
+            ) as found,
+        ):
+            ctx = pipeline.build_context(registry=MagicMock(), config=config, priority=3)
+        assert [s.source for s in ctx.local_detectors] == [Source.SEASON_AUDIO]
+        assert all(call.args == ("/usr/local/bin/ffmpeg",) for call in found.call_args_list)
+
+    def test_decision_order_ranks_each_rider_right_after_its_switch(self):
+        raw = {"sources": [{"id": "server_markers"}, {"id": "season_audio"}, {"id": "chapters"}]}
+        order = pipeline._decision_order(load_global(validate_global(raw, None)[0]))
+        assert order[:5] == ("server_markers", "server_markers_imported", "season_audio", "season_audio_previous",
+                             "chapters")  # fmt: skip
+        off = {"sources": [{"id": "season_audio", "enabled": False}]}
+        assert "season_audio_previous" not in pipeline._decision_order(load_global(validate_global(off, None)[0]))
 
 
 W, U, R, S, A, F, N = (

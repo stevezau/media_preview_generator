@@ -50,3 +50,49 @@ Runtime:
 - Cold cache: 251 s for the 124 eval files and 96 s for the 34 extra folder files, with 2 ffmpeg at once, `nice -n 19`,
   on a busy host (load about 16–20).
 - Warm cache: the gate takes 17 s (eval lists) or 24 s (full folder), including the pure-Python reference.
+
+## Season step gate (Task 7)
+
+- Date: 2026-09-15, on `storage`, with the same fingerprint cache.
+- Code: `feat/markers-detection` at `f4799a9` plus Task 7 (after its review fixes). The harness now takes each
+  season's files from the app's `season_group` (the folder's episodes with the same season number in their names, at
+  most the 40 nearest) and judges the app's season step (`markers/audio/season.py`): the v3 matcher, a silence
+  guard, and pairs skipped because they provably hold no intro.
+
+**Result: passed, unchanged in both modes.**
+
+| Mode | Season step: useful / wrong / missed | Matcher alone | Port vs reference | Drift | Skipped pairs | Silence dropped |
+|---|---|---|---|---|---|---|
+| Eval lists | **91 / 13 / 14** | 91 / 13 / 14 | 0 | 0 | 0 | 0 |
+| Full folder | **91 / 10 / 17** | 91 / 10 / 17 | 0 | 26 (the same 26 as Task 6) | 0 | 0 |
+
+**Silence guard.** chromaprint gives silence one constant value, so two episodes' shared quiet can match like an
+intro. The guard drops an intro whose points are more than half silence, counting every point the matcher would take
+for the silence value (within ±2 of it, or at most 6 bits different). Swept on both modes, same counts in each:
+
+| Guard drops an intro above this silence share | Useful answers lost | Wrong answers dropped |
+|---|---|---|
+| 0 % | 36 | 5 |
+| 5 % | 5 | 0 |
+| 10 %, 12 %, 14 %, 15 % | 4 | 0 |
+| 25 %, **50 % (chosen)**, 75 % | 0 | 0 |
+
+The most silent useful intro holds 17.5 % silence by that count (14.3 % counting only the exact value; Revenant S01).
+No wrong answer holds more than 2.1 %, so the guard changes nothing here; the synthetic tests cover the shared-silence
+case.
+
+**Degenerate openings.** Matching two silent 900 s openings takes the matcher about 1.25 s per pair (about 7 minutes
+for a 26-episode season). The season step skips a pair only when a proof shows the matcher can find no run of 120 s or
+less in it (one constant value with at most short interruptions in both openings); a fuzz of 100,918 near-constant
+pairs found no counterexample (4,368 accepted). Any other pair with more than 2,000,000 value matches (about 60 ms)
+is matched exactly on a worker instead of a checking thread. On this set no pair comes near: the most value matches
+of any same-season pair is 3,893, and the most silent opening is 0.8 % silence. A skipped silent 26-episode season
+now takes 4 ms.
+
+A plain match-count or silence-share limit was not used: 250 s of the same constant in both openings, a few seconds
+apart, then a shared 40 s intro, has millions of value matches (and a 90 %-silent pair can be built the same way), yet
+the matcher finds the intro.
+
+**Pipeline run.** The real pipeline, store and season audio detector ran on the eval lists through symlinked season
+folders, reading fingerprints from the cache: all 124 stored season audio candidates equal the port's segments, each
+file was fingerprinted once, and every season's later episodes (100 checks) matched on the checking thread.

@@ -28,6 +28,9 @@ class Source(str, Enum):
     # Markers on a Jellyfin/Emby server that has an intro-DB importer plugin: a copy of crowd data, not a second opinion.
     SERVER_MARKERS_IMPORTED = "server_markers_imported"
     USER = "user"
+    # A season's only episode matched against the previous season's cached fingerprints (spec §5.3): a hint that
+    # needs a second source. Last in the enum so the order tie-break of the other sources doesn't move.
+    SEASON_AUDIO_PREVIOUS = "season_audio_previous"
 
 
 # Markers already on a server: agreement evidence that may shorten a skip, never a sole source (spec §5.5 rule 7).

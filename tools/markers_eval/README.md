@@ -16,13 +16,16 @@ paths. Summaries go to `docs/design/intro-credits/evidence/eval/phase2-harness.m
 
 Runs the app's v3 matcher (`markers/audio/matcher.py`) and the pure-Python reference
 (`fp3_reference.py`) on the 118-episode intro eval (`evidence/eval/eval_results_v3.json`). The fingerprints come from
-the app's own ffmpeg command. It checks three things:
+the app's own ffmpeg command. It checks these things:
 
 - The port must return exactly what the reference returns for every episode.
-- The useful / wrong / missed tally must be at least spec §5.3's 91 / 13 / 14. "Useful" means the end is within 5 s
-  and the start within 15 s of the chapter truth.
-- Drift lists the answers that differ from the stored v3 segments by more than two points. It is reported, but it
-  doesn't fail the gate.
+- The app's season step (`markers/audio/season.py`: the matcher, the silence guard, and pairs it skips because they
+  provably hold no intro) must score at least spec §5.3's 91 / 13 / 14 useful / wrong / missed. "Useful" means the
+  end is within 5 s and the start within 15 s of the chapter truth. `matcher_tally` is the matcher alone.
+- No skipped pair may hold a run of 120 s or less in the matcher's answer (`skipped_pairs`), and the silence guard may
+  not drop an answer that was useful (`silence_dropped`).
+- Drift lists the matcher answers that differ from the stored v3 segments by more than two points. It is reported, but
+  it doesn't fail the gate.
 
 ```bash
 cd /home/data/workspace/plex_generate_vid_previews
@@ -33,9 +36,9 @@ nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval reproduce --ffmpeg 
 Exit 0 means the gate passed. `--json` writes the details, which hold file paths, so keep that file local (the
 evidence folder ignores `*.json`).
 
-- `--full-folder`: matches every episode file in each season folder, which is what the app does. The default matches
-  the eval's own file lists, at most 8 files per season, which is how §5.3 was measured. In this mode, drift also
-  counts the answers that the larger group changed.
+- `--full-folder`: matches every episode file in each season folder (`season_group`, the app's rule), which is what
+  the app does. The default matches the eval's own file lists, at most 8 files per season, which is how §5.3 was
+  measured. In this mode, drift also counts the answers that the larger group changed.
 - `--no-reference`: skips the slow reference.
 - `--cache DIR`: overrides the cache folder.
 

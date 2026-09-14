@@ -149,6 +149,12 @@ _SCHEMA = (
         signature TEXT NOT NULL,
         run_at TEXT NOT NULL,
         PRIMARY KEY (file_id, source))""",
+    # The season's limit on an intro chapter deciding alone that a file's last decisions used (NULL: none), so a later
+    # run of any episode of the season can tell which siblings were decided with a limit that has since changed.
+    """CREATE TABLE IF NOT EXISTS intro_chapter_limits (
+        file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+        limit_ms INTEGER,
+        decided_at TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS source_usage (
         source TEXT NOT NULL,
         day TEXT NOT NULL,
@@ -415,6 +421,7 @@ class MarkerStore:
                         "server_kinds",
                         "publish_basis",
                         "detector_runs",
+                        "intro_chapter_limits",
                     ):
                         conn.execute(f"DELETE FROM {table} WHERE file_id=?", (file_id,))
                     conn.execute("DELETE FROM season_pairs WHERE file_a=? OR file_b=?", (file_id, file_id))
@@ -453,6 +460,52 @@ class MarkerStore:
             ).fetchall()
         return [self._file(r) for r in rows]
 
+    def record_member(
+        self,
+        identity: FileIdentity,
+        *,
+        duration_ms: int,
+        season_key: str,
+        chapters: list[Candidate],
+        chapter_version: int,
+    ) -> FileRecord | None:
+        """Record a file another file's season step probed, with its chapters, in one transaction.
+
+        A file the store never saw is added. A known file is refreshed only while its row still has the identity that
+        was probed: the season step never changes another file's identity, which only that file's own run (holding its
+        path lock) may do.
+
+        Args:
+            identity: The identity the file had when it was probed.
+            duration_ms: Its duration.
+            season_key: The season folder, kept when the row already has one.
+            chapters: Its chapter candidates.
+            chapter_version: The chapter rules version that made them.
+
+        Returns:
+            The record, or None when the row has another identity now.
+        """
+        now = self._now()
+        with self._tx() as conn:
+            row = conn.execute("SELECT * FROM files WHERE canonical_path=?", (identity.canonical_path,)).fetchone()
+            if row is None:
+                file_id = conn.execute(
+                    "INSERT INTO files (canonical_path, size, mtime_ns, duration_ms, season_key, is_movie, updated_at) "
+                    "VALUES (?,?,?,?,?,0,?)",
+                    (identity.canonical_path, identity.size, identity.mtime_ns, duration_ms, season_key, now),
+                ).lastrowid
+            elif (row["size"], row["mtime_ns"]) != (identity.size, identity.mtime_ns):
+                return None
+            else:
+                file_id = row["id"]
+                conn.execute(
+                    "UPDATE files SET duration_ms=?, season_key=COALESCE(season_key, ?), updated_at=? WHERE id=?",
+                    (duration_ms, season_key, now, file_id),
+                )
+            self._write_evidence(conn, file_id, Source.CHAPTERS, chapters, "", "", chapter_version, (), now)
+            new_row = conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
+        return self._file(new_row)
+
     def replace_evidence(
         self,
         file_id: int,
@@ -483,39 +536,54 @@ class MarkerStore:
         """
         now = self._now()
         with self._tx() as conn:
-            for replaced in dict.fromkeys((source, *also_replaces)):
-                for table in ("evidence", "evidence_versions"):
-                    conn.execute(
-                        f"DELETE FROM {table} WHERE file_id=? AND source=? AND origin=?",
-                        (file_id, replaced.value, origin),
-                    )
-            if version is not None:
+            self._write_evidence(conn, file_id, source, candidates, origin, detail, version, also_replaces, now)
+
+    @staticmethod
+    def _write_evidence(
+        conn: sqlite3.Connection,
+        file_id: int,
+        source: Source,
+        candidates: list[Candidate],
+        origin: str,
+        detail: str,
+        version: int | None,
+        also_replaces: Iterable[Source],
+        now: str,
+    ) -> None:
+        """:meth:`replace_evidence` inside an open transaction."""
+        for replaced in dict.fromkeys((source, *also_replaces)):
+            for table in ("evidence", "evidence_versions"):
                 conn.execute(
-                    "INSERT INTO evidence_versions (file_id, source, origin, version) VALUES (?,?,?,?)",
-                    (file_id, source.value, origin, version),
+                    f"DELETE FROM {table} WHERE file_id=? AND source=? AND origin=?",
+                    (file_id, replaced.value, origin),
                 )
-            if not candidates:
-                conn.execute(
-                    "INSERT INTO evidence (file_id, source, origin, detail, fetched_at) VALUES (?,?,?,?,?)",
-                    (file_id, source.value, origin, detail, now),
-                )
-            for c in candidates:
-                conn.execute(
-                    "INSERT INTO evidence (file_id, source, origin, label, type, start_ms, end_ms, confidence, "
-                    "detail, fetched_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        file_id,
-                        source.value,
-                        origin,
-                        c.origin,
-                        c.type.value,
-                        c.start_ms,
-                        c.end_ms,
-                        c.confidence,
-                        detail,
-                        now,
-                    ),
-                )
+        if version is not None:
+            conn.execute(
+                "INSERT INTO evidence_versions (file_id, source, origin, version) VALUES (?,?,?,?)",
+                (file_id, source.value, origin, version),
+            )
+        if not candidates:
+            conn.execute(
+                "INSERT INTO evidence (file_id, source, origin, detail, fetched_at) VALUES (?,?,?,?,?)",
+                (file_id, source.value, origin, detail, now),
+            )
+        for c in candidates:
+            conn.execute(
+                "INSERT INTO evidence (file_id, source, origin, label, type, start_ms, end_ms, confidence, "
+                "detail, fetched_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    file_id,
+                    source.value,
+                    origin,
+                    c.origin,
+                    c.type.value,
+                    c.start_ms,
+                    c.end_ms,
+                    c.confidence,
+                    detail,
+                    now,
+                ),
+            )
 
     def evidence_version(self, file_id: int, source: Source, origin: str = "") -> int | None:
         """The version one lookup's stored evidence was made with (None = never stored, or stored without one)."""
@@ -804,18 +872,37 @@ class MarkerStore:
         return None if r is None else [tuple(run) for run in json.loads(r["runs_json"])]
 
     def set_season_pair(
-        self, file_a: int, file_b: int, matcher_version: int, runs: list[tuple[float, float, float, float]]
+        self,
+        file_a: int,
+        file_b: int,
+        matcher_version: int,
+        runs: list[tuple[float, float, float, float]],
+        *,
+        identity_a: tuple[int, int],
+        identity_b: tuple[int, int],
     ) -> bool:
         """Cache matcher runs between two files.
 
+        Args:
+            file_a: The matcher's first file.
+            file_b: The second file.
+            matcher_version: The version the runs are valid for.
+            runs: The runs.
+            identity_a: ``(size, mtime_ns)`` of the first file as it was matched.
+            identity_b: The same for the second file.
+
         Returns:
-            False (nothing stored) when either file's fingerprint is gone: one of them changed while matching.
+            False (nothing stored) when either file's row has another identity now or its fingerprint is gone: one of
+            them was replaced while the season was matched.
         """
         with self._tx() as conn:
-            have = conn.execute(
-                "SELECT COUNT(*) FROM fingerprints WHERE file_id IN (?, ?) AND window='intro'", (file_a, file_b)
-            ).fetchone()[0]
-            if have != 2:
+            rows = conn.execute(
+                "SELECT f.id, f.size, f.mtime_ns FROM files f JOIN fingerprints p ON p.file_id = f.id "
+                "AND p.window='intro' WHERE f.id IN (?, ?)",
+                (file_a, file_b),
+            ).fetchall()
+            matched = {file_a: tuple(identity_a), file_b: tuple(identity_b)}
+            if len(rows) != 2 or any((r["size"], r["mtime_ns"]) != matched[r["id"]] for r in rows):
                 return False
             conn.execute(
                 "INSERT OR REPLACE INTO season_pairs (file_a, file_b, matcher_version, runs_json) VALUES (?,?,?,?)",
@@ -837,6 +924,24 @@ class MarkerStore:
             conn.execute(
                 "INSERT OR REPLACE INTO detector_runs (file_id, source, signature, run_at) VALUES (?,?,?,?)",
                 (file_id, source.value, signature, self._now()),
+            )
+
+    def get_intro_chapter_limit(self, file_id: int) -> tuple[bool, int | None]:
+        """The season intro-chapter limit a file's last decisions used.
+
+        Returns:
+            ``(stored, limit_ms)``: whether one was stored, and the limit (None: no limit applied).
+        """
+        with self._lock:
+            r = self._conn.execute("SELECT limit_ms FROM intro_chapter_limits WHERE file_id=?", (file_id,)).fetchone()
+        return (False, None) if r is None else (True, r["limit_ms"])
+
+    def set_intro_chapter_limit(self, file_id: int, limit_ms: int | None) -> None:
+        """Record the season intro-chapter limit a file's decisions were just made with."""
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO intro_chapter_limits (file_id, limit_ms, decided_at) VALUES (?,?,?)",
+                (file_id, limit_ms, self._now()),
             )
 
     def get_item_publish_state(self, server_id: str, item_id: str) -> ItemPublishStateRow | None:
