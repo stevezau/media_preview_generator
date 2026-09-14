@@ -3,8 +3,10 @@
 owners → identity → kind → evidence in the user's source order (a normal run stops once every enabled type is
 decided by more than chapters alone; a forced re-detect asks every source) → decide from everything stored → store →
 publish to each owner. ``check_item`` runs on the dispatcher's checking threads (no worker slot); it returns
-None only when a registered local detector (season audio, credit text) could still decide something, which sends the
-item to a GPU/CPU worker where ``process_item`` runs the same steps plus the detectors.
+None only when a registered local detector that needs a worker has to run (a type it can decide is undecided and its
+answer is due, or its stored answer is from another version), which sends the item to a GPU/CPU worker where
+``process_item`` runs the same steps plus the detectors. A detector that needs no worker runs right there, unless
+another detector that has to run at the same source needs one: detectors at one source go to the worker together.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ import os
 import stat
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -103,19 +105,40 @@ def _no_phase(_text: str) -> None:
     return None
 
 
+class DetectorUnavailableError(Exception):
+    """A local detector couldn't answer this time (its tool failed, the job was cancelled). Nothing is stored for it,
+    so the next run asks it again."""
+
+
 @dataclass(frozen=True)
 class LocalDetectorSpec:
-    """A detector that needs a worker slot (phase 2: season audio; phase 3: credit text).
+    """A detector that reads the file itself (phase 2: season audio; phase 3: credit text).
 
     Attributes:
-        source: The evidence source it fills (its place in the user's source order).
+        source: The source whose place in the user's order the detector runs at.
         types: Marker types it can decide.
-        detect: ``detect(file, *, ctx, gpu, gpu_device_path, phase_callback, cancel_check, pause_check)``.
+        detect: ``detect(file, *, ctx, gpu, gpu_device_path, phase_callback, cancel_check, pause_check)``; raises
+            ``DetectorUnavailableError`` when it can't answer this time.
+        stores: Sources its candidates are stored under, each candidate under its own ``source``; empty = ``source``.
+        version: Stored with its answer; an answer from another version is asked again, even for decided types.
+        due: ``due(file, ctx)``: whether a stored answer of this version is out of date anyway (None: never).
+        needs_worker: ``needs_worker(file, ctx)``: whether it needs a GPU/CPU worker now (None: always). One that
+            doesn't runs on the checking thread, unless another detector that has to run at the same source needs a
+            worker: then they all run on the worker.
     """
 
     source: Source
     types: frozenset[MarkerType]
     detect: LocalDetector
+    stores: frozenset[Source] = frozenset()
+    version: int = 1
+    due: Callable[[FileRecord, PipelineContext], bool] | None = None
+    needs_worker: Callable[[FileRecord, PipelineContext], bool] | None = None
+
+    @property
+    def stored_sources(self) -> frozenset[Source]:
+        """The sources this detector's answers are stored under."""
+        return self.stores or frozenset({self.source})
 
 
 def live_server_config(server_id: str) -> ServerConfig | None:
@@ -149,7 +172,7 @@ class PipelineContext:
             and run every local detector, without stopping early. Publishing still skips servers that already show
             the result.
         clients: Online client per source id (``build_clients``).
-        local_detectors: Detectors that need a worker slot.
+        local_detectors: Detectors that read the file itself (on a worker unless their ``needs_worker`` says not).
         now: Current UTC time (tests use a fake clock).
         capability_ttl_s: How long a server's capability answer is reused.
         live_config: A server's saved config right now (None once it was removed). The registry is a snapshot from
@@ -171,12 +194,35 @@ class PipelineContext:
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
     _capability_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    # Paths whose evidence a forced run already refreshed, so the worker stage doesn't ask the sources twice.
-    _refreshed: set[str] = field(default_factory=set, repr=False)
+    # (path, source) pairs a forced run already refreshed, so the worker stage doesn't ask those sources twice and
+    # still refreshes the sources after the detector that handed the item to a worker.
+    _refreshed: set[tuple[str, Source]] = field(default_factory=set, repr=False)
     # Per server id: its intro-DB importer plugin ("" = none), or None when its plugin list couldn't be read.
     _importers: dict[str, str | None] = field(default_factory=dict, repr=False)
     _importer_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
     _importer_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _followups: set[str] = field(default_factory=set, repr=False)
+    _followups_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def request_followups(self, paths: Iterable[str]) -> None:
+        """Ask the job to run these files again after it finishes (their decision may change with this job's work).
+
+        Args:
+            paths: Local paths of the files.
+        """
+        with self._followups_guard:
+            self._followups.update(paths)
+
+    def take_followups(self) -> list[str]:
+        """The requested files, sorted, and forget them.
+
+        Returns:
+            Every path requested since the last call, sorted.
+        """
+        with self._followups_guard:
+            taken = sorted(self._followups)
+            self._followups.clear()
+        return taken
 
 
 @dataclass(frozen=True)
@@ -442,14 +488,108 @@ def _only_confirming_chapters(decisions: dict[MarkerType, TypeDecision], types: 
 
 
 def _stale_evidence(ctx: PipelineContext, rec: FileRecord, source: Source) -> bool:
-    """Whether stored evidence of ``source`` was made by an older parser or server reader, so it is derived again."""
+    """Whether stored evidence of ``source`` was made by an older parser, server reader or local detector version, so
+    it is derived again."""
     if source in _ONLINE_LABELS:
         stored = ctx.store.evidence_fetched_at(rec.id, source) is not None
         return stored and ctx.store.evidence_version(rec.id, source) != PARSER_VERSIONS[source]
     if source is Source.SERVER_MARKERS:
         reads = {(r.source, r.origin) for r in ctx.store.evidence_rows(rec.id) if r.source in SERVER_SOURCES}
         return any(ctx.store.evidence_version(rec.id, s, origin) != READER_VERSION for s, origin in reads)
-    return False
+    return any(_answer_from_another_version(ctx, rec, spec) for spec in ctx.local_detectors if spec.source is source)
+
+
+def _refreshing(ctx: PipelineContext, path: str, source: Source) -> bool:
+    """Whether a forced run still has to ask ``source`` again for this file."""
+    return ctx.force and (path, source) not in ctx._refreshed
+
+
+def _mark_refreshed(ctx: PipelineContext, path: str, source: Source) -> None:
+    if ctx.force:
+        ctx._refreshed.add((path, source))
+
+
+def _answer_from_another_version(ctx: PipelineContext, rec: FileRecord, spec: LocalDetectorSpec) -> bool:
+    """Whether the detector stored an answer (under any of its sources) with a version other than its own."""
+    return any(
+        ctx.store.evidence_fetched_at(rec.id, source) is not None
+        and ctx.store.evidence_version(rec.id, source) != spec.version
+        for source in spec.stored_sources
+    )
+
+
+def _detector_due(ctx: PipelineContext, rec: FileRecord, spec: LocalDetectorSpec) -> bool:
+    """Whether a detector's stored answer is missing, from another version, or out of date by its own ``due``."""
+    if any(ctx.store.evidence_version(rec.id, source) != spec.version for source in spec.stored_sources):
+        return True
+    return bool(spec.due and spec.due(rec, ctx))
+
+
+def _detector_pending(
+    ctx: PipelineContext,
+    rec: FileRecord,
+    spec: LocalDetectorSpec,
+    decisions: dict[MarkerType, TypeDecision],
+    types: frozenset[MarkerType],
+    *,
+    refresh: bool,
+) -> bool:
+    """Whether a detector has to run at its source now.
+
+    A forced run runs it once per file, and again (on the worker after the checking thread ran it) only when its answer
+    is due. A normal run runs it when its stored answer is from another version, even for decided types (like an older
+    parser's answer), or when a type it can decide is still undecided and its answer is due.
+    """
+    wanted = spec.types & types
+    if not wanted:
+        return False
+    if refresh or _answer_from_another_version(ctx, rec, spec):
+        return True
+    undecided = ctx.force or any(decisions[t].status is not DecisionStatus.DECIDED for t in wanted)
+    return undecided and _detector_due(ctx, rec, spec)
+
+
+def _needs_worker(ctx: PipelineContext, rec: FileRecord, spec: LocalDetectorSpec) -> bool:
+    return spec.needs_worker is None or spec.needs_worker(rec, ctx)
+
+
+def _run_detector(
+    ctx: PipelineContext,
+    rec: FileRecord,
+    spec: LocalDetectorSpec,
+    *,
+    gpu: str | None,
+    gpu_device_path: str | None,
+    phase: Callable[[str], None],
+    cancel_check: Callable[[], bool] | None,
+    pause_check: Callable[[], bool] | None,
+) -> None:
+    """Run one detector and store its answer under each of its sources with its version.
+
+    Anything but ``DetectorUnavailableError`` propagates, so a GPU error reaches the worker's CPU fallback.
+    """
+    try:
+        found = list(
+            spec.detect(
+                rec,
+                ctx=ctx,
+                gpu=gpu,
+                gpu_device_path=gpu_device_path,
+                phase_callback=phase,
+                cancel_check=cancel_check,
+                pause_check=pause_check,
+            )
+        )
+    except DetectorUnavailableError as exc:
+        logger.info(
+            "{} had no answer for {} this time: {}", spec.source.value, os.path.basename(rec.canonical_path), exc
+        )
+        return
+    stray = [c for c in found if c.source not in spec.stored_sources]
+    if stray:
+        logger.warning("{} returned candidates for sources it doesn't store: {}", spec.source.value, stray)
+    for source in sorted(spec.stored_sources, key=lambda s: s.value):
+        ctx.store.replace_evidence(rec.id, source, [c for c in found if c.source is source], version=spec.version)
 
 
 def _lookup(client: Any, source: Source, ids: MediaIds, rec: FileRecord, ctx: PipelineContext, cancel_check) -> None:
@@ -910,12 +1050,12 @@ def _attempt(
     if not stat.S_ISREG(st.st_mode):
         return ItemOutcome(FileOutcome.FILE_NOT_FOUND.value, "File not found on disk")
 
-    refresh = ctx.force and path not in ctx._refreshed
+    refresh_probe = _refreshing(ctx, path, Source.CHAPTERS)
     existing = ctx.store.get_file(path)
     unchanged = existing is not None and (existing.size, existing.mtime_ns) == (st.st_size, st.st_mtime_ns)
     probe = None
     stale_rules = unchanged and ctx.store.evidence_version(existing.id, Source.CHAPTERS) != CHAPTER_RULES_VERSION
-    if refresh or not unchanged or not existing.duration_ms or stale_rules:
+    if refresh_probe or not unchanged or not existing.duration_ms or stale_rules:
         phase("Reading chapters…")
         try:
             probe = probe_media(path, ffprobe=ctx.ffprobe)
@@ -937,18 +1077,20 @@ def _attempt(
         ctx.store.set_server_kind(rec.id, confirmed_kind)
     if probe is not None:
         ctx.store.replace_evidence(rec.id, Source.CHAPTERS, chapter_candidates(probe), version=CHAPTER_RULES_VERSION)
+    _mark_refreshed(ctx, path, Source.CHAPTERS)
     if not rec.duration_ms:
         return ItemOutcome(FileOutcome.FAILED.value, "Couldn't read the file's duration")
 
     types = _enabled_types(ctx.settings, ids)
     # A normal run stops asking once stored answers decide everything beyond chapters alone (answers from an older
-    # parser or reader are still asked again); a forced run asks every source (and hands every detector source to a
-    # worker) so no stale answer is left behind.
+    # parser, reader or detector version are still asked again; ``_detector_pending`` says when a detector runs); a
+    # forced run asks every source and runs every detector once, so no stale answer is left behind.
     gather_all = ctx.force
     decisions = _decide(ctx, rec, types)
     lookup_ids: MediaIds | None = None
     for source_id in ctx.settings.ordered_enabled_sources():
         source = Source(source_id)
+        refresh = _refreshing(ctx, path, source)
         if not gather_all and _all_decided(decisions, types) and not _stale_evidence(ctx, rec, source):
             continue
         if cancelled():
@@ -973,28 +1115,24 @@ def _attempt(
             pending = [
                 spec
                 for spec in ctx.local_detectors
-                if spec.source is source
-                and any(gather_all or decisions[t].status is not DecisionStatus.DECIDED for t in spec.types & types)
+                if spec.source is source and _detector_pending(ctx, rec, spec, decisions, types, refresh=refresh)
             ]
-            if pending and not local:
-                if refresh:
-                    ctx._refreshed.add(path)
-                return None
+            if not local and any(_needs_worker(ctx, rec, spec) for spec in pending):
+                return None  # sources already refreshed stay marked; the worker refreshes the rest
             for spec in pending:
-                found = spec.detect(
+                _run_detector(
+                    ctx,
                     rec,
-                    ctx=ctx,
+                    spec,
                     gpu=gpu,
                     gpu_device_path=gpu_device_path,
-                    phase_callback=phase,
+                    phase=phase,
                     cancel_check=cancel_check,
                     pause_check=pause_check,
                 )
-                ctx.store.replace_evidence(rec.id, source, list(found))
+        _mark_refreshed(ctx, path, source)
         if not gather_all:
             decisions = _decide(ctx, rec, types)
-    if refresh:
-        ctx._refreshed.add(path)
 
     decisions = _decide(ctx, rec, types)
     fingerprint = ctx.settings.detection_fingerprint()
@@ -1066,7 +1204,9 @@ def check_item(
         cancel_check: True once the job is cancelled.
 
     Returns:
-        The item's outcome, or None when a local detector could still decide something (send it to a worker).
+        The item's outcome, or None when a local detector that needs a worker has to run (send it to a worker). A
+        detector that doesn't need one runs here, unless another detector that has to run at the same source needs a
+        worker.
     """
     return _run(item, ctx, local=False, cancel_check=cancel_check)
 
