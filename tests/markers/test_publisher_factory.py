@@ -66,3 +66,24 @@ def test_plex_without_confirmation_stays_disabled():
         create_autospec(PlexServer, instance=True), _cfg(ServerType.PLEX, {"enabled": True, "library_ids": None})
     )
     assert pub._settings.enabled is False
+
+
+@pytest.mark.parametrize(
+    ("stype", "cls"),
+    [
+        (ServerType.PLEX, PlexMarkerPublisher),
+        (ServerType.JELLYFIN, JellyfinMarkerPublisher),
+        (ServerType.EMBY, type(None)),
+    ],
+)
+def test_settings_override_replaces_the_stored_block(stype, cls):
+    from media_preview_generator.markers.settings import ServerMarkersSettings
+
+    override = ServerMarkersSettings(True, ("9",), "preview", "keep_plex")
+    stored_off = {"enabled": False, "library_ids": None}
+    pub = publisher_for(
+        create_autospec(_SERVER_CLASS[stype], instance=True), _cfg(stype, stored_off), settings=override
+    )
+    assert type(pub) is cls
+    if pub is not None:
+        assert pub._settings is override

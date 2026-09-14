@@ -75,3 +75,9 @@ def _reset_marker_singletons():
         pass
     else:
         reset_limiters()
+    try:
+        from media_preview_generator.markers.inspect import clear_capability_cache
+    except ImportError:
+        pass
+    else:
+        clear_capability_cache()

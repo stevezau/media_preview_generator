@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import os
+from typing import Any
+
 from flask import jsonify, request
+from loguru import logger
 
 from ..auth import api_token_required
-from ..jobs import PRIORITY_FROM_LABEL, PRIORITY_LABELS, PRIORITY_LOW
+from ..jobs import PRIORITY_FROM_LABEL, PRIORITY_HIGH, PRIORITY_LABELS, PRIORITY_LOW
 from . import api
 from ._helpers import MEDIA_ROOT, _param_to_bool, _safe_resolve_within
+from .api_bif import _validate_path_under_any_server
 from .api_jobs import _config_unwritable_response
+
+_ONLINE_SOURCE_IDS = ("theintrodb", "introdb", "skipdb")
+_AUTH_SECRET_KEYS = ("token", "api_key", "password", "access_token")
+_MASK = "****"
 
 
 def _parse_job_priority(raw: object) -> int | None:
@@ -89,3 +98,195 @@ def create_marker_job():
         force=_param_to_bool(data.get("force"), False),
     )
     return jsonify(job.to_dict()), 201
+
+
+def _registry() -> Any:
+    from ...servers import ServerRegistry
+    from ..settings_manager import get_settings_manager
+
+    return ServerRegistry.from_settings(list(get_settings_manager().get("media_servers") or []), legacy_config=None)
+
+
+def _without_secrets(value: Any, registry: Any) -> Any:
+    """``value`` with every configured server credential replaced by ``****`` (error text can echo a request)."""
+    secrets = sorted(
+        {
+            str(cfg.auth.get(key))
+            for cfg in registry.configs()
+            for key in _AUTH_SECRET_KEYS
+            if isinstance(cfg.auth, dict) and cfg.auth.get(key)
+        },
+        key=len,
+        reverse=True,
+    )
+
+    def scrub(v: Any) -> Any:
+        if isinstance(v, str):
+            for secret in secrets:
+                v = v.replace(secret, _MASK)
+            return v
+        if isinstance(v, dict):
+            return {k: scrub(x) for k, x in v.items()}
+        if isinstance(v, list | tuple):
+            return [scrub(x) for x in v]
+        return v
+
+    return scrub(value) if secrets else value
+
+
+def _library_roots(registry: Any) -> list[str]:
+    """Local folders of every library on every enabled server, whatever the library's preview opt-in."""
+    from ...servers.ownership import apply_path_mappings
+
+    roots: list[str] = []
+    for cfg in registry.configs():
+        if not cfg.enabled:
+            continue
+        for lib in cfg.libraries:
+            for remote in lib.remote_paths:
+                if (remote or "").strip():
+                    roots.extend(r for r in apply_path_mappings(remote, cfg.path_mappings or []) if (r or "").strip())
+    return roots
+
+
+def _library_file(path: object, registry: Any) -> str | None:
+    """A file inside a server library (and the media root), normalised; None for anything else."""
+    if not isinstance(path, str) or not path.strip():
+        return None
+    safe = _validate_path_under_any_server(path, _library_roots(registry))
+    if safe is None or not os.path.isfile(safe) or _safe_resolve_within(safe, MEDIA_ROOT) is None:
+        return None
+    return safe
+
+
+def _server_off_response(cfg: Any) -> tuple[Any, int]:
+    message = f"{cfg.name or 'This server'} is disabled. Re-enable it on the Servers page first."
+    return jsonify({"ok": False, "error": message}), 409
+
+
+@api.route("/markers/servers/<server_id>/status", methods=["GET"])
+@api_token_required
+def marker_server_status(server_id: str):
+    """Intro & Credits status for a server's Edit dialog.
+
+    Returns:
+        200 with ``markers.inspect.server_status_payload`` (capability checked as if Intro & Credits were on, state
+        ``unknown`` when the check failed; a server turned off on the Servers page isn't contacted), 404 for an unknown
+        server, 500 with a JSON error when the status can't be built.
+    """
+    from ...markers import inspect
+
+    registry = _registry()
+    cfg = registry.get_config(server_id)
+    if cfg is None:
+        return jsonify({"error": "server not found"}), 404
+    try:
+        payload = inspect.server_status_payload(registry.get(server_id), cfg)
+    except Exception as exc:
+        logger.warning("Intro & Credits status for {} failed: {}", cfg.name, type(exc).__name__)
+        return jsonify({"error": "Couldn't check this server's Intro & Credits status"}), 500
+    return jsonify(_without_secrets(payload, registry))
+
+
+@api.route("/markers/sources/usage", methods=["GET"])
+@api_token_required
+def marker_source_usage():
+    """Today's (UTC) lookups per online source; TheIntroDB's limit and remaining come from its response headers.
+
+    Returns:
+        200 with ``{source_id: {"day", "used", "limit", "remaining", "has_key"}}``. The TheIntroDB key itself is
+        never returned, only whether one is stored.
+    """
+    from ...markers.settings import get_global_settings
+    from ...markers.sources.ratelimit import get_limiter
+    from ...markers.store import get_marker_store
+
+    settings = get_global_settings()
+    store = get_marker_store()
+    out = {}
+    for source_id in _ONLINE_SOURCE_IDS:
+        live = get_limiter(source_id).usage()
+        day = live["day"]
+        # The limiter counts this process's requests; the stored row survives a restart earlier in the day.
+        stored = store.source_usage(source_id, day) or {}
+        source = settings.source(source_id)
+        out[source_id] = {
+            "day": day,
+            "used": max(live.get("used") or 0, stored.get("used") or 0),
+            "limit": live["limit"] if live.get("limit") is not None else stored.get("limit"),
+            "remaining": live["remaining"] if live.get("remaining") is not None else stored.get("remaining"),
+            "has_key": bool(source_id == "theintrodb" and source is not None and source.api_key),
+        }
+    return jsonify(out)
+
+
+@api.route("/markers/item", methods=["GET"])
+@api_token_required
+def marker_item():
+    """Inspector data for one file, by ``path`` or by ``server_id`` + ``item_id``.
+
+    Returns:
+        200 with ``markers.inspect.item_payload`` (a server whose state can't be read gets a degraded row); 400 when the
+        path isn't a file inside a server library or the query is incomplete; 404 for an unknown server or an item
+        with no file here; 409 when the server is off; 500 with a JSON error when the file's data can't be built.
+    """
+    from ...markers import inspect
+    from ...markers.store import get_marker_store
+
+    registry = _registry()
+    path = request.args.get("path")
+    if not path:
+        server_id, item_id = request.args.get("server_id"), request.args.get("item_id")
+        if not server_id or not item_id:
+            return jsonify({"error": "Give path, or server_id and item_id"}), 400
+        cfg = registry.get_config(server_id)
+        server = registry.get(server_id)
+        if cfg is None or server is None:
+            return jsonify({"error": "server not found"}), 404
+        if not cfg.enabled:
+            return _server_off_response(cfg)
+        path = inspect.resolve_local_path(server, cfg, item_id)
+        if not path:
+            return jsonify({"error": "No file on this app's disk for that item"}), 404
+    safe = _library_file(path, registry)
+    if safe is None:
+        return jsonify({"error": "Path is not a file inside any server library"}), 400
+    try:
+        payload = inspect.item_payload(safe, registry=registry, store=get_marker_store())
+    except Exception as exc:
+        # One server's failure only degrades its row; this is the file-level part (e.g. markers.db unreadable).
+        logger.warning("Inspector data for a file failed: {}", type(exc).__name__)
+        return jsonify({"error": "Couldn't build the Intro & Credits data for this file"}), 500
+    return jsonify(_without_secrets(payload, registry))
+
+
+@api.route("/markers/item/redetect", methods=["POST"])
+@api_token_required
+def marker_item_redetect():
+    """Run Intro & Credits again for one file, asking every source again.
+
+    Body: ``{"path"}``.
+
+    Returns:
+        202 with ``{"job_id"}`` (a HIGH priority, forced, single-file job); 400 when the path isn't a file inside a
+        server library; 503 when the config directory isn't writable.
+    """
+    from ...markers.triggers import create_intro_credits_job
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "The request body must be a JSON object with a path"}), 400
+    safe = _library_file(data.get("path"), _registry())
+    if safe is None:
+        return jsonify({"error": "Path is not a file inside any server library"}), 400
+    blocked = _config_unwritable_response()
+    if blocked is not None:
+        return blocked
+    job = create_intro_credits_job(
+        library_name=f"Intro & Credits: {os.path.basename(safe)}",
+        priority=PRIORITY_HIGH,
+        source="inspector",
+        file_paths=[safe],
+        force=True,
+    )
+    return jsonify({"job_id": job.id}), 202
