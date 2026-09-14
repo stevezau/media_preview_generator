@@ -5,17 +5,24 @@
 #
 #   ./up.sh            create any missing container
 #   ./up.sh recreate   stop+remove and create all (volumes kept)
+#   docker rm -f mlab-jellyfin && ./up.sh   recreate one server (volumes kept)
 #
 # Plex: unclaimed = no Plex Pass = markers are NOT served. To test Plex end to end, get a claim token from
 # https://plex.tv/claim (valid 4 min) and run: PLEX_CLAIM=claim-xxxx ./up.sh recreate
 set -euo pipefail
 
-readonly HERE="$(cd "$(dirname "$0")" && pwd)"
+readonly HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MV=(-v "/data_16tb2/TV Shows/Rick and Morty (2013) {tvdb-275274}/Season 01:/media/tv/Rick and Morty (2013)/Season 01:ro"
     -v "/data_16tb/TV Shows/South Park (1997) {tvdb-75897}/Season 01:/media/tv/South Park (1997)/Season 01:ro"
     -v "/data_16tb/Movies/Toy Story (1995) {tmdb-862}:/media/movies/Toy Story (1995):ro"
     -v "/data_16tb/Movies/Up (2009) {tmdb-14160}:/media/movies/Up (2009):ro"
-    -v "${HERE}/synth:/media/synth:ro")
+    -v "${HERE}/synth/Synth Show (2020):/media/synth/Synth Show (2020):ro"
+    -v "${HERE}/synth/Synth Chapters (2021):/media/synth-chapters/Synth Chapters (2021):ro")
+# Synth folders are mounted one show at a time: synth/_staging (files a test adds later) must stay invisible, and each
+# show belongs to one library only (synth = Synth Show, synth-chapters = synth_chapters.sh output).
+# app.sh sources this list (MLAB_MOUNTS_ONLY=1) so the app sees every file at the servers' paths.
+# MLAB_MOUNTS_ONLY=1 works only when sourced (`return`); run directly, it is not set.
+[[ "${MLAB_MOUNTS_ONLY:-}" == "1" ]] && return 0
 
 if [[ "${1:-}" == "recreate" ]]; then
     for c in mlab-emby mlab-jellyfin mlab-jf12 mlab-plex; do
