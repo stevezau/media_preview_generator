@@ -622,13 +622,19 @@ first time you turn it on for a Plex server:
   ones already in its database.
 - If Plex's own detection re-analyzes an item, it can replace our markers with its own. The next Intro & Credits job
   that checks the file notices (see [Checking the servers still show them](#checking-the-servers-still-show-them)):
-  with **"If Plex re-detects and replaces our markers" → "Put ours back"** (the default) it writes ours again; with
+  with **"When Plex has its own markers" → "Use ours"** (the default) it writes ours again; with
   **"Keep Plex's"** it leaves Plex's markers of that type, and the file's row says so, e.g. **"Keeping Plex's
   credits"** or **"1 marker(s); keeping Plex's credits"**. This is decided per type: Plex's intro can be kept while
   our credits are still written. Once kept, no job touches Plex's markers of that type — not a forced **Re-detect**,
   not a run after a failed or skipped attempt, not another version of the item — until you switch the server to
-  **Put ours back** (the next job writes ours) or Plex no longer has markers of that type (then ours are written
+  **Use ours** (the next job writes ours) or Plex no longer has markers of that type (then ours are written
   again). Markers that are simply gone are written again either way.
+- With **"Keep Plex's"**, markers Plex already shows of a type this app has no record of writing on that item are
+  kept too, unless they already match ours: Plex's own markers from before Intro & Credits was turned on, markers
+  Plex filled in after this app removed its own (for example while an item's versions disagreed), and markers on an
+  item after the app's Intro & Credits data was reset or the Plex server was removed and added again (the app can't
+  tell those from Plex's own). What's kept is remembered per Plex item in the app's `markers.db`; after such a reset
+  it is worked out again from what Plex shows.
 - Tested against Plex 1.43. If a future Plex update changes the database's shape, the app stops writing and shows a
   message rather than guessing.
 
@@ -733,7 +739,7 @@ A file's row for one server (the job's Files panel, the Inspector) can also say:
 |---|---|---|
 | **Waiting**: "Can't reach Plex to confirm Plex Pass" | Plex answered its database checks but not the Plex Pass check, usually while restarting | Nothing; the file is retried (up to your retry count), and the next file checks Plex again |
 | **Waiting**: "Not in this server's library yet" | The server hasn't scanned the file in yet | Nothing; the file is retried |
-| **Up to date**: "Keeping Plex's intro" (or credits, or both; also added to other rows, e.g. "1 marker(s); keeping Plex's credits") | Plex's own detection replaced ours of that type and this Plex server is set to **Keep Plex's** | Switch it to **Put ours back** if you want ours; the next job that checks the file writes them |
+| **Up to date**: "Keeping Plex's intro" (or credits, or both; also added to other rows, e.g. "1 marker(s); keeping Plex's credits") | This Plex server is set to **Keep Plex's**, and Plex shows its own markers of that type (its detection replaced ours, or they were there before this app had a record of the item) | Switch it to **Use ours** if you want ours; the next job that checks the file writes them |
 | **Skipped**: "This server was removed" | The server was deleted while the job ran | Nothing |
 | **Skipped**: "This server is turned off on the Servers page" | The server was disabled while the job ran | Turn it back on, then run the library or Re-detect the file |
 | **Skipped**: "Intro & Credits is off for this server" | The switch was turned off (or the Plex confirmation revoked) while the job ran | Turn it back on; the job's next file already checks again |

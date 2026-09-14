@@ -803,10 +803,11 @@ class MarkerStore:
         """Whether our markers are (or may still be) on this server item, from any file's publish.
 
         Plex shows one marker set per item across all its versions, and its markers can't be told apart from ours, so
-        a version that was never published itself must still not read them back as a second opinion.
+        a version that was never published itself must still not read them back as a second opinion. An item whose
+        types are all kept as Plex's own counts too: a kept type can still hold a marker of ours.
         """
         row = self.get_item_publish_state(server_id, item_id)
-        return bool(row and row.markers)
+        return bool(row and (row.markers or row.kept_types))
 
     def set_publish_basis(self, file_id: int, server_id: str, *, decided_hash: str, item_version: int) -> None:
         """Remember what a file's publish to a server was based on (cleared when the file changes)."""

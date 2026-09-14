@@ -715,13 +715,13 @@
                         </div>
 
                         <div class="markers-opt d-none" id="markersPlexRedetectGroup">
-                            <div class="fw-semibold small">If Plex re-detects and replaces our markers
+                            <div class="fw-semibold small">When Plex has its own markers
                                 <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                        title="Plex's own detection (for example Analyze on an item) can replace our markers in its database. 'Put ours back': the next Intro &amp; Credits job that checks the file writes ours again. 'Keep Plex's': Plex's markers of that type stay, on every later job, until you switch back or Plex removes them."><i class="bi bi-info-circle"></i></button>
+                                        title="Plex can show intro and credits markers of its own, from its detection (for example Analyze on an item). Before we publish: 'Use ours' writes ours over them; 'Keep Plex's' leaves them and writes ours only for the types Plex has none of. After we publish, Plex's detection can replace ours: 'Use ours' writes ours again on the next Intro &amp; Credits job that checks the file; 'Keep Plex's' keeps Plex's until you switch to 'Use ours' or Plex removes them."><i class="bi bi-info-circle"></i></button>
                             </div>
-                            <div class="btn-group btn-group-sm" role="group" aria-label="If Plex re-detects and replaces our markers">
+                            <div class="btn-group btn-group-sm" role="group" aria-label="When Plex has its own markers">
                                 <input type="radio" class="btn-check" name="markersPlexRedetect" id="markersRedetectRestore" value="restore" autocomplete="off">
-                                <label class="btn btn-outline-secondary" for="markersRedetectRestore">Put ours back</label>
+                                <label class="btn btn-outline-secondary" for="markersRedetectRestore">Use ours</label>
                                 <input type="radio" class="btn-check" name="markersPlexRedetect" id="markersRedetectKeep" value="keep_plex" autocomplete="off">
                                 <label class="btn btn-outline-secondary" for="markersRedetectKeep">Keep Plex's</label>
                             </div>

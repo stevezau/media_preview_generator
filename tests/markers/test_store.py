@@ -794,6 +794,11 @@ def test_item_publish_state_matrix(store):
     assert (row.markers, row.status) == ((), "written") and row.version > failed_version
     assert store.published_to_item("plex-1", "42") is False
 
+    # Every type Plex keeps as its own (keepplex re-review LOW-5): still an item this app published to, so its markers
+    # (possibly ours beside Plex's) are never read back as a second opinion.
+    store.set_item_publish_state("plex-1", "42", [], "written", kept_types={T.INTRO})
+    assert store.published_to_item("plex-1", "42") is True
+
 
 def test_item_publish_state_version_follows_what_the_server_shows_not_who_decided(store):
     # Two versions that agree on the times but were decided by different sources (or one is locked) leave the item

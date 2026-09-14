@@ -1350,18 +1350,66 @@ class TestKeepPlexs:
         assert (ours, pub.last_kept_types) == ([INTRO], frozenset())
         assert _served(db) == [(T.INTRO, 11_000, 37_000)]
 
-    def test_a_first_publish_replaces_plexs_rows_even_when_keeping(self, tmp_path):
+    @pytest.mark.parametrize(
+        ("redetect", "native", "own_previous", "ours", "kept", "served_intro"),
+        [
+            # Nothing of ours recorded: Plex's intro is kept (it may be Plex's own, or ours before markers.db was reset).
+            ("keep_plex", (990, 29_306), None, [], {T.INTRO}, (990, 29_306)),
+            ("restore", (990, 29_306), None, [INTRO], frozenset(), (11_000, 37_000)),
+            # Rows that already show the decision are ours.
+            ("keep_plex", (11_000, 37_000), None, [INTRO], frozenset(), (11_000, 37_000)),
+            # Rows that show what this file published on its item before a merge are ours too.
+            (
+                "keep_plex",
+                (5_000, 9_000),
+                [Marker(T.INTRO, 5_000, 9_000, ("a",))],
+                [INTRO],
+                frozenset(),
+                (11_000, 37_000),
+            ),
+        ],
+        ids=["keep-plexs", "restore-plexs", "keep-already-ours", "keep-ours-before-a-merge"],
+    )
+    def test_a_first_publish_onto_plexs_rows_follows_the_setting(
+        self, tmp_path, redetect, native, own_previous, ours, kept, served_intro
+    ):
         folder = tmp_path / "Plex Media Server"
-        db = _make_db(folder, parts=(("/data/tv/S01E01.mkv", encode_extra_data({"pv:intros": NATIVE_INTROS})),))
-        _insert_taggings(db, (7, 563, 0, "intro", 990, 29_306, INTRO_ROW_EXTRA))
+        db = _make_db(folder)
+        _insert_taggings(db, (7, 563, 0, "intro", *native, INTRO_ROW_EXTRA))
+        pub = _publisher(tmp_path, folder, redetect=redetect)
+        assert (_write_one(pub, [INTRO], own_previous=own_previous), pub.last_kept_types) == (ours, kept)
+        assert _served(db) == [(T.INTRO, *served_intro)]
+
+    def test_plexs_rows_of_a_type_we_dont_show_are_left_alone_and_not_recorded_as_kept(self, tmp_path):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder)
+        _insert_taggings(db, (7, 563, 0, "credits", 1_182_721, 1_212_721, CREDITS_ROW_EXTRA))
         pub = _publisher(tmp_path, folder, redetect="keep_plex")
         assert (_write_one(pub, [INTRO]), pub.last_kept_types) == ([INTRO], frozenset())
-        assert _served(db) == [(T.INTRO, 11_000, 37_000)]
+        assert _served(db) == [(T.INTRO, 11_000, 37_000), (T.CREDITS, 1_184_721, 1_210_721)]
 
-    @pytest.mark.parametrize(("redetect", "kept"), [("keep_plex", {T.INTRO}), ("restore", frozenset())])
-    def test_nothing_to_write_keeps_or_releases_by_the_setting(self, tmp_path, redetect, kept):
+    def test_a_plex_row_matching_our_decision_isnt_newly_kept_when_the_record_is_stale(self, tmp_path):
+        # The record says the old intro while Plex already shows the new one (recording failed after the COMMIT).
         folder = tmp_path / "Plex Media Server"
-        _make_db(folder)
+        db = _make_db(folder)
+        pub = _publisher(tmp_path, folder, redetect="keep_plex")
+        _write_one(pub, [INTRO])
+        newer = Marker(T.INTRO, 12_000, 40_000, ("a",))
+        _write_one(pub, [newer], previous=[INTRO])
+        assert (_write_one(pub, [newer], previous=[INTRO]), pub.last_kept_types) == ([newer], frozenset())
+        assert _served(db) == [(T.INTRO, 12_000, 40_000)]
+
+    @pytest.mark.parametrize(
+        ("redetect", "rows", "kept"),
+        [("keep_plex", True, {T.INTRO}), ("keep_plex", False, frozenset()), ("restore", True, frozenset())],
+        ids=["keep-rows", "keep-no-rows", "restore"],
+    )
+    def test_nothing_to_write_still_reads_the_rows_of_a_kept_type(self, tmp_path, redetect, rows, kept):
+        # keepplex re-review LOW-1: no early return while a type is kept, so one Plex no longer shows is released.
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder)
+        if rows:
+            _insert_taggings(db, (7, 563, 0, "intro", 990, 29_306, INTRO_ROW_EXTRA))
         pub = _publisher(tmp_path, folder, redetect=redetect)
         ours = pub.write(
             "7", [], previous=[], duration_ms=DUR, canonical_path="/data/tv/S01E01.mkv", kept_types={T.INTRO}

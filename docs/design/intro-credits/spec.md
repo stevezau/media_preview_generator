@@ -398,7 +398,9 @@ server shows of what we last left there: Plex's `taggings` rows under the same l
 - Warn when Plex's own detection is on (it can force-overwrite). Before a file is reported up to date, the job reads
   the item's rows back: gone → written again; replaced by Plex's own → written again (`on_plex_redetect=restore`) or
   kept per type (`keep_plex`): the publisher leaves that type's rows and `pv:` key alone on every write path until
-  the setting is `restore` or Plex has no rows of the type (`item_publish_state` kept types).
+  the setting is `restore` or Plex has no rows of the type (`item_publish_state` kept types). Under `keep_plex` a
+  decided type's rows become kept when they are neither what the write would show nor what the item record (or the
+  moved file's own record) says is ours, so rows on an item with no record of the type are kept rather than replaced.
 
 **JellyfinMarkerPublisher**
 - Extend **Media Preview Bridge** (`jellyfin-plugin/`, route prefix `MediaPreviewBridge`, today `Ping`,
@@ -487,7 +489,7 @@ Show a mockup and confirm wording before building each screen.
    - Switch "Send intro & credits markers to this server".
    - Libraries with checkboxes (sports-type unchecked by default).
    - Status block. Plex: write method (database), Plex Pass state, DB location + local-disk check, Plex's own
-     detection on/off, "If Plex re-detects: put ours back / keep Plex's". Jellyfin/Emby: plugin name, installed vs
+     detection on/off, "When Plex has its own markers: Use ours / Keep Plex's". Jellyfin/Emby: plugin name, installed vs
      required version, Install/Update button, which marker types the server can show.
    - Plex only: turning it on asks the database-write confirmation (once per Plex server; stores
      `db_write_confirmed_at`): no API exists; tested on Plex 1.43, stops if the DB looks different; must be same
@@ -785,3 +787,13 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   come only from sent-file jobs, keep the retry count across the chain, never queue another verify, and don't retry
   a missing file. The Inspector ignores another Jellyfin provider's segments beside ours and counts Plex versions as
   `Media` entries without `proxyType`.
+- 2026-09-14 · Keep Plex's re-review (§6.3), from the scoped re-review of 2073f3d: under `keep_plex`, a decided type's
+  Plex rows are kept whenever they aren't provably ours (not what the write would show, not the item record, not the
+  moved file's record), which replaces "a first publish replaces Plex's rows" on keep_plex servers and covers a type
+  we removed ourselves before Plex filled it and a lost kept state (markers.db reset, re-added server, new item id);
+  rows equal to what the write would show are ours (a record lost after Plex's COMMIT). `write` no longer returns
+  before reading the rows while a type is kept, so a kept type Plex dropped is released even with nothing to write.
+  `published_to_item` counts an item whose types are all kept.
+- 2026-09-14 · Owner approved the keep_plex semantics (Plex's own markers are kept whenever Plex has them). The Plex
+  setting is renamed "When Plex has its own markers": "Use ours" (`restore`) / "Keep Plex's" (`keep_plex`); stored
+  values unchanged. Its tooltip covers both before and after we publish.

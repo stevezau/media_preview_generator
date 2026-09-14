@@ -8,6 +8,7 @@ Jellyfin (autospec'd server) publishers.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -927,6 +928,7 @@ class TestJellyfinReadBackVerify:
 # --- on a server set to keep them, no path deletes Plex's rows of that type.
 
 PLEX_INTRO = ("intro", 60_000, 90_000)
+INTRO_Y = (200_000, 230_000)
 
 
 def _native_intro(item: PlexItem, start: int = 60_000, end: int = 90_000) -> None:
@@ -1104,14 +1106,125 @@ class TestKeepPlexsPerType:
         assert _outcomes(out) == ["published"]
         assert item.served() == [SHOWN_INTRO] and item.kept() == set()
 
-    def test_a_first_publish_replaces_plexs_own_rows_whatever_the_setting(self, plex_item):
-        # We never wrote an intro there: a decided type replaces whatever Plex had (unchanged rule).
+    @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
+    def test_plexs_own_rows_on_a_first_publish_follow_the_setting(self, plex_item, setting):
+        # Nothing of ours is recorded for the intro, so Plex's intro can't be told from one we lost track of (a
+        # markers.db reset, a re-added server): "Keep Plex's" keeps it (keepplex re-review LOW-3).
         item = plex_item(versions=("1080p",))
-        item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
+        item.cfg.markers["plex"]["on_plex_redetect"] = setting
         _native_intro(item)
         item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        out = item.run("1080p")
+        assert _outcomes(out) == ["published"]
+        self._expect(item, setting)
+        assert out.publisher_rows[0]["message"] == (
+            "1 marker(s); keeping Plex's intro" if setting == "keep_plex" else "2 marker(s)"
+        )
+
+    def test_rows_that_already_show_our_decision_on_a_first_publish_are_ours(self, plex_item):
+        item = plex_item(versions=("1080p",))
+        item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
+        _native_intro(item, *INTRO_X)
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
         assert _outcomes(item.run("1080p")) == ["published"]
-        assert item.served() == [SHOWN_INTRO, SHOWN_CREDITS] and item.kept() == set()
+        assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.kept() == set()
+
+    def test_a_kept_type_plex_dropped_is_released_while_the_versions_disagree(self, plex_item):
+        # keepplex re-review P1: nothing of ours was recorded and the versions disagreed, so write returned before
+        # reading Plex's rows and carried the kept intro forward.
+        item = plex_item(versions=("1080p", "2160p"))
+        item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
+        for version in ("1080p", "2160p"):
+            item.chapters[item.paths[version]] = chapters(intro=INTRO_X)
+        for version in ("1080p", "2160p", "1080p"):
+            item.run(version)
+        _native_intro(item)
+        assert item.run("2160p").publisher_rows[0]["message"] == "Keeping Plex's intro"
+        item._sql(("DELETE FROM taggings WHERE metadata_item_id=7 AND text='intro'",))  # Plex dropped its intro
+        item.chapters[item.paths["2160p"]] = chapters(intro=INTRO_Y)
+        item.touch("2160p", 77)
+
+        outs = [item.run("2160p"), item.run("1080p"), item.run("1080p")]
+
+        assert _outcomes(*outs) == ["waiting"] * 3
+        assert {o.publisher_rows[0]["message"] for o in outs} == {
+            "Waiting for this item's other versions to agree on: intro"
+        }
+        assert item.served() == [] and item.kept() == set()
+
+    def test_plex_filling_a_type_we_removed_ourselves_is_kept(self, plex_item):
+        # keepplex re-review P2: our intro went when the versions stopped agreeing, then Plex's own detection filled
+        # the gap; the next agreement mustn't delete Plex's intro.
+        item = plex_item(versions=("1080p", "2160p"))
+        item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
+        for version in ("1080p", "2160p"):
+            item.chapters[item.paths[version]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        for version in ("1080p", "2160p", "1080p"):
+            item.run(version)
+        item.chapters[item.paths["2160p"]] = chapters(intro=INTRO_Y, credits=CREDITS_AT)
+        item.touch("2160p", 77)
+        assert _outcomes(item.run("2160p")) == ["waiting"] and item.served() == [SHOWN_CREDITS]
+        _native_intro(item)
+        item.run("1080p")
+        item.chapters[item.paths["2160p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        item.touch("2160p", 99)
+
+        out = item.run("2160p")
+
+        assert item.served() == [PLEX_INTRO, SHOWN_CREDITS] and item.kept() == {"intro"}
+        assert (_outcomes(out), out.publisher_rows[0]["message"]) == (["up_to_date"], "Keeping Plex's intro")
+
+    @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
+    def test_kept_is_found_again_after_markers_db_is_reset(self, plex_item, tmp_path, setting):
+        # keepplex re-review P3: a reset markers.db (or a re-added server, or a new Plex item id) forgets the kept
+        # intro; Plex's intro still differs from our decision, so it is kept again rather than deleted.
+        item = _published_then_replaced(plex_item, setting)
+        item.run("1080p")
+        item.store.close()
+        item.store = MarkerStore(str(tmp_path / "fresh-markers.db"))
+        item.run("1080p")
+        self._expect(item, setting)
+
+    def test_our_own_new_rows_arent_taken_for_plexs_when_their_record_was_lost(self, plex_item, monkeypatch):
+        # keepplex re-review P4: Plex committed our new intro but recording it failed; the rows equal what the next
+        # run would write, so they are ours.
+        item = plex_item(versions=("1080p",))
+        item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        item.run("1080p")
+        real = MarkerStore.set_item_publish_state
+        failures = []
+
+        def fails_once(store, server_id, item_id, markers, status, **kwargs):
+            if status == "written" and not failures:
+                failures.append(item_id)
+                raise sqlite3.OperationalError("disk I/O error")
+            return real(store, server_id, item_id, markers, status, **kwargs)
+
+        monkeypatch.setattr(MarkerStore, "set_item_publish_state", fails_once)
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_Y, credits=CREDITS_AT)
+        item.touch("1080p", 55)
+        with contextlib.suppress(sqlite3.OperationalError):
+            item.run("1080p")
+        assert failures and item.served()[0] == ("intro", *INTRO_Y) and item.recorded()[0] == SHOWN_INTRO
+
+        out = item.run("1080p")
+
+        assert (_outcomes(out), out.publisher_rows[0]["message"]) == (["up_to_date"], "Up to date")
+        assert item.served() == item.recorded() == [("intro", *INTRO_Y), SHOWN_CREDITS] and item.kept() == set()
+
+    def test_an_item_whose_types_are_all_kept_isnt_read_back_as_a_second_opinion(self, plex_item):
+        # keepplex re-review P5: a forced run reads server markers only for items this app never published to.
+        item = plex_item(versions=("1080p",))
+        item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X)
+        item.run("1080p")
+        _native_intro(item)
+        item.run("1080p")
+        assert (item.recorded(), item.kept()) == ([], {"intro"})
+        before = item.server.get_markers.call_count
+        item.run("1080p", force=True)
+        assert item.server.get_markers.call_count == before
 
     def test_kept_types_keep_the_parts_own_key(self, plex_item):
         # Plex rebuilds its rows from the part's pv: keys when it re-detects: a kept type's key isn't ours to change.

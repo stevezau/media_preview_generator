@@ -249,16 +249,27 @@ class TestPlexTab:
         expect(block).not_to_contain_text("✓ Active")
         expect(block).to_contain_text("✓ local disk")
 
-    def test_redetect_tooltip_says_what_happens_today(self, authed_page: Page, app_url: str) -> None:
+    def test_plex_markers_setting_is_named_and_explained_before_and_after_we_publish(
+        self, authed_page: Page, app_url: str
+    ) -> None:
         server = _plex_server()
         _mock_server_page(authed_page, server, _status(server, "ready", "", _plex_ready_details()))
         _open_tab(authed_page, app_url, server)
-        icon = authed_page.locator("#markersPlexRedetectGroup .info-icon")
+        group = authed_page.locator("#markersPlexRedetectGroup")
+        expect(group.locator(".fw-semibold")).to_have_text("When Plex has its own markers")
+        expect(group.locator("[role='group']")).to_have_attribute("aria-label", "When Plex has its own markers")
+        expect(group.locator("label[for='markersRedetectRestore']")).to_have_text("Use ours")
+        expect(group.locator("label[for='markersRedetectKeep']")).to_have_text("Keep Plex's")
+        expect(group.locator("#markersRedetectRestore")).to_have_attribute("value", "restore")
+        expect(group.locator("#markersRedetectKeep")).to_have_attribute("value", "keep_plex")
+        icon = group.locator(".info-icon")
         tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
         assert tooltip == (
-            "Plex's own detection (for example Analyze on an item) can replace our markers in its database. 'Put ours "
-            "back': the next Intro & Credits job that checks the file writes ours again. 'Keep Plex's': Plex's markers "
-            "of that type stay, on every later job, until you switch back or Plex removes them."
+            "Plex can show intro and credits markers of its own, from its detection (for example Analyze on an item). "
+            "Before we publish: 'Use ours' writes ours over them; 'Keep Plex's' leaves them and writes ours only for "
+            "the types Plex has none of. After we publish, Plex's detection can replace ours: 'Use ours' writes ours "
+            "again on the next Intro & Credits job that checks the file; 'Keep Plex's' keeps Plex's until you switch "
+            "to 'Use ours' or Plex removes them."
         )
 
     def test_flip_then_cancel_unticks_switch_and_sends_nothing(self, authed_page: Page, app_url: str) -> None:

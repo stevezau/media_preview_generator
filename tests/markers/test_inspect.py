@@ -940,6 +940,49 @@ def test_plex_markers_replaced_by_plex_follow_on_plex_redetect(
     assert (row["plan"], row["plan_reason"]) == (plan, reason)
 
 
+@pytest.mark.parametrize(
+    ("redetect", "credits_decided", "recorded", "shown", "plan", "reason"),
+    [
+        # No record of ours on the item (a first publish, a reset markers.db): Plex's differing intro is kept.
+        ("keep_plex", True, None, [PLEX_INTRO, CREDITS], "keeps_plex", "Keeping Plex's intro"),
+        ("restore", True, None, [PLEX_INTRO, CREDITS], "will_replace", ""),
+        # We removed our intro ourselves (the record lost it), then Plex filled it.
+        ("keep_plex", True, [CREDITS], [PLEX_INTRO, CREDITS], "keeps_plex", "Keeping Plex's intro"),
+        # The record is stale but Plex already shows our decision: ours, not Plex's.
+        ("keep_plex", True, [PLEX_INTRO, CREDITS], [INTRO, CREDITS], "up_to_date", ""),
+        # Plex still shows what we left and the decision changed since: ours, so the job replaces it.
+        ("keep_plex", True, [PLEX_INTRO, CREDITS], [PLEX_INTRO, CREDITS], "will_replace", ""),
+        # Credits aren't decided any more and Plex replaced ours: the job leaves Plex's credits alone.
+        ("keep_plex", False, [INTRO, CREDITS], [INTRO, PLEX_CREDITS], "up_to_date", ""),
+    ],
+    ids=[
+        "keep-no-record",
+        "restore-no-record",
+        "keep-after-our-removal",
+        "keep-stale-record",
+        "keep-decision-changed",
+        "keep-undecided-type-replaced",
+    ],
+)
+def test_plex_markers_we_have_no_record_of_follow_on_plex_redetect(
+    store, factory, redetect, credits_decided, recorded, shown, plan, reason
+):
+    decisions = {
+        T.INTRO: _decided(INTRO),
+        T.CREDITS: _decided(CREDITS) if credits_decided else _none(T.CREDITS),
+        T.RECAP: _none(T.RECAP),
+        T.PREVIEW: _none(T.PREVIEW),
+    }
+    rec = _known_file(store, decisions)
+    if recorded is not None:
+        _published(store, rec, "plex", "rk-1", recorded)  # no basis: the file publishes again on its next run
+    registry = _registry(server_config("plex", ServerType.PLEX, markers=_plex_markers(enabled=True, redetect=redetect)))
+    registry.get("plex").resolve_remote_path_to_item_id.return_value = "rk-1"
+    registry.get("plex").get_markers.return_value = _plex_rows(*shown, final_credits=False)
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
+    assert (row["plan"], row["plan_reason"]) == (plan, reason)
+
+
 def test_keep_plex_holds_on_every_path_not_only_an_unchanged_file(store, factory):
     # A forced run, a skipped or failed attempt, or another version's publish all go through the publisher's keep rule.
     rec = _known_file(store)

@@ -400,19 +400,28 @@ def _matching(shown: list[dict], expected: list[dict], duration_ms: int, server_
 
 
 def _kept_on_plex(
-    current: list[dict], ours: tuple[Marker, ...], recorded: frozenset[MarkerType], duration_ms: int
+    current: list[dict],
+    wanted: list[Marker],
+    ours: tuple[Marker, ...],
+    recorded: frozenset[MarkerType],
+    duration_ms: int,
 ) -> frozenset[MarkerType]:
     """The types a Plex server set to "Keep Plex's" leaves as its own on the next run (``plex_db._kept_types``).
 
-    Kept on an earlier run, or ours replaced by Plex's own markers since, while Plex still shows markers of the type.
+    Kept on an earlier run, or a decided (or recorded) type Plex shows markers of that are neither what we'd write nor
+    what we left there, while Plex still shows markers of the type. A recorded type no longer decided whose markers
+    aren't ours is left alone by the job, so it is left out here too.
     """
     kept = set()
     for mtype in MarkerType:
         now = [c for c in current if c["type"] == mtype.value]
         if not now:
             continue
+        want = [_marker_dict(m) for m in wanted if m.type is mtype]
         mine = [_marker_dict(m) for m in ours if m.type is mtype]
-        if mtype in recorded or (mine and not _same(now, mine, duration_ms, ServerType.PLEX)):
+        # _same never matches an empty list against shown markers.
+        provably_ours = _same(now, want, duration_ms, ServerType.PLEX) or _same(now, mine, duration_ms, ServerType.PLEX)
+        if mtype in recorded or ((want or mine) and not provably_ours):
             kept.add(mtype)
     return frozenset(kept)
 
@@ -453,7 +462,9 @@ def _plan(
     if not wanted:
         return ("will_remove", "") if ours else ("nothing_to_publish", "")
     kept = (
-        _kept_on_plex(current, ours, recorded_kept, duration_ms) if keep_plex and current is not None else frozenset()
+        _kept_on_plex(current, wanted, ours, recorded_kept, duration_ms)
+        if keep_plex and current is not None
+        else frozenset()
     )
     note = kept_note(kept, wanted)
     if waiting_on_versions:

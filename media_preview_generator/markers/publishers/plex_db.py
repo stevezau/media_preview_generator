@@ -463,13 +463,21 @@ def _nothing_to_write(plan: _Plan) -> bool:
 
 
 def _kept_types(
-    rows: list[_TaggingRow], prior: list[Marker], kept_before: frozenset[MarkerType], keep_plex: bool
+    rows: list[_TaggingRow],
+    wanted: list[Marker],
+    prior: list[Marker],
+    own_prior: list[Marker],
+    kept_before: frozenset[MarkerType],
+    keep_plex: bool,
 ) -> frozenset[MarkerType]:
     """The types whose rows on the item are Plex's own and must stay ("Keep Plex's", ``on_plex_redetect``).
 
-    A type becomes kept once Plex shows other rows of it where ours were (its own detection replaced them); it stays
-    kept, whatever gets written for the item, until Plex has no rows of it left or the server is set to restore ours.
-    A type we never wrote isn't kept: a first publish replaces what Plex had, as without the setting.
+    A type this write would show becomes kept when Plex has rows of it that aren't provably ours: not what we'd write,
+    not what we left there (``prior``), not what the calling file left on its item before a merge (``own_prior``).
+    That covers Plex's own detection replacing ours, filling a type we removed, and markers already on an item we have
+    no record of (a first publish, a reset markers.db, a re-added server): those can't be told from Plex's. Rows that
+    already show what we'd write are treated as ours. A kept type stays kept, whatever gets written for the item,
+    until Plex has no rows of it left or the server is set to restore ours.
     """
     if not keep_plex:
         return frozenset()
@@ -482,8 +490,9 @@ def _kept_types(
         )
         if not current:
             continue
-        ours_before = _served_of(prior, mtype)
-        if mtype in kept_before or (ours_before and current != ours_before):
+        would_show = _served_of(wanted, mtype)
+        provably_ours = (would_show, _served_of(prior, mtype), _served_of(own_prior, mtype))
+        if mtype in kept_before or (would_show and current not in provably_ours):
             kept.add(mtype)
     return frozenset(kept)
 
@@ -823,7 +832,7 @@ class PlexMarkerPublisher(MarkerPublisher):
                 (rating_key, tag_id),
             )
         ]
-        kept_types = _kept_types(rows, prior, kept_before, keep_plex)
+        kept_types = _kept_types(rows, wanted, prior, own_prior, kept_before, keep_plex)
         # Plex's rows of a kept type, and the pv: key it rebuilds them from, are left exactly as they are.
         wanted = [m for m in wanted if m.type not in kept_types]
         prior = [m for m in prior if m.type not in kept_types]
@@ -978,7 +987,8 @@ class PlexMarkerPublisher(MarkerPublisher):
         # previous=None: nothing on the item is provably ours, so nothing is removed.
         prior = self.project(previous) if previous is not None else []
         own_prior = self.project(own_previous or [])
-        if not wanted and not prior and not own_prior:
+        # A kept type is read again even with nothing to write: it is released once Plex has no rows of it.
+        if not wanted and not prior and not own_prior and not self.last_kept_types:
             return []
         rating_key = _rating_key(item_id)
         deadline = time.monotonic() + BUSY_TIMEOUT_S
@@ -995,7 +1005,7 @@ class PlexMarkerPublisher(MarkerPublisher):
                 raise ItemNotFoundError(f"Plex item {rating_key} not found in the database")
             # With no Plex connection or lock held: the sibling lookups take markers.db's lock.
             desired = self._desired(parts, wanted, canonical_path, prior)
-            if not desired and not prior and not own_prior:
+            if not desired and not prior and not own_prior and not self.last_kept_types:
                 return []
             calling = {p.id for p in parts if canonical_path in self._local_candidates(p.file)}
             # Plan on a read-only snapshot first: a write that changes nothing never takes Plex's write lock. A real
