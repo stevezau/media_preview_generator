@@ -126,6 +126,23 @@ _SCHEMA = (
         file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
         kind TEXT NOT NULL,
         confirmed_at TEXT NOT NULL)""",
+    # Runs the v3 matcher found between two fingerprinted files. file_a is the matcher's first argument: the matcher
+    # isn't symmetric, and the season step always pairs two files the same way round (Task 7).
+    """CREATE TABLE IF NOT EXISTS season_pairs (
+        file_a INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        file_b INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        matcher_version INTEGER NOT NULL,
+        runs_json TEXT NOT NULL,
+        PRIMARY KEY (file_a, file_b))""",
+    "CREATE INDEX IF NOT EXISTS idx_season_pairs_b ON season_pairs(file_b)",
+    # What a local detector's last answer for a file was based on (season audio: the season's fingerprinted files), so
+    # it runs again only when that changes.
+    """CREATE TABLE IF NOT EXISTS detector_runs (
+        file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        source TEXT NOT NULL,
+        signature TEXT NOT NULL,
+        run_at TEXT NOT NULL,
+        PRIMARY KEY (file_id, source))""",
     """CREATE TABLE IF NOT EXISTS source_usage (
         source TEXT NOT NULL,
         day TEXT NOT NULL,
@@ -206,6 +223,18 @@ class PublishStateRow:
     status: str
     message: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class StoredFingerprint:
+    """A cached chromaprint fingerprint (raw little-endian uint32 points; empty for a file without audio)."""
+
+    file_id: int
+    window: str
+    start_s: float
+    length_s: float
+    algorithm: int
+    points: bytes
 
 
 class MarkerStore:
@@ -338,13 +367,13 @@ class MarkerStore:
     ) -> FileRecord:
         """Insert or refresh a file; a size/mtime change invalidates derived data (locked markers survive).
 
-        A changed identity clears evidence (and its versions), fingerprints, decisions, the server kind and every
-        server's ``publish_basis``, so the next run offers the markers to every server again even when an in-place
-        replacement (e.g. a Tdarr transcode) lands on identical times: the Jellyfin plugin serves nothing for a file
-        whose size changed until it is sent again, and its publisher sends it when the stored size differs.
-        ``publish_state`` keeps ``markers_json``/``status`` so that publish still knows what to replace.
-        ``duration_ms=None`` on a changed identity stores NULL, since the old duration can no longer be trusted; on
-        an unchanged identity it keeps the previous value.
+        A changed identity clears evidence (and its versions), fingerprints, decisions, the server kind, season pairs,
+        detector runs and every server's ``publish_basis``, so the next run offers the markers to every server again
+        even when an in-place replacement (e.g. a Tdarr transcode) lands on identical times: the Jellyfin plugin
+        serves nothing for a file whose size changed until it is sent again, and its publisher sends it when the
+        stored size differs. ``publish_state`` keeps ``markers_json``/``status`` so that publish still knows what to
+        replace. ``duration_ms=None`` on a changed identity stores NULL, since the old duration can no longer be
+        trusted; on an unchanged identity it keeps the previous value.
 
         Returns:
             The record.
@@ -377,8 +406,10 @@ class MarkerStore:
                         "decisions",
                         "server_kinds",
                         "publish_basis",
+                        "detector_runs",
                     ):
                         conn.execute(f"DELETE FROM {table} WHERE file_id=?", (file_id,))
+                    conn.execute("DELETE FROM season_pairs WHERE file_a=? OR file_b=?", (file_id, file_id))
                     conn.execute("DELETE FROM markers WHERE file_id=? AND locked=0", (file_id,))
                     conn.execute(
                         "UPDATE files SET size=?, mtime_ns=?, duration_ms=?, season_key=?, is_movie=?, updated_at=? "
@@ -711,6 +742,94 @@ class MarkerStore:
         with self._lock:
             row = self._conn.execute("SELECT kind FROM server_kinds WHERE file_id=?", (file_id,)).fetchone()
         return row["kind"] if row else None
+
+    def set_fingerprint(
+        self,
+        file_id: int,
+        *,
+        size: int,
+        mtime_ns: int,
+        window: str,
+        start_s: float,
+        length_s: float,
+        algorithm: int,
+        points: bytes,
+    ) -> bool:
+        """Store a fingerprint computed from the file with identity ``(size, mtime_ns)``.
+
+        Returns:
+            False (nothing stored) when the file's row has another identity now: the file was replaced while ffmpeg
+            ran, and its own next run fingerprints the new file.
+        """
+        with self._tx() as conn:
+            row = conn.execute("SELECT size, mtime_ns FROM files WHERE id=?", (file_id,)).fetchone()
+            if row is None or (row["size"], row["mtime_ns"]) != (size, mtime_ns):
+                return False
+            conn.execute(
+                "INSERT OR REPLACE INTO fingerprints (file_id, window, start_s, length_s, algorithm, points) "
+                "VALUES (?,?,?,?,?,?)",
+                (file_id, window, start_s, length_s, algorithm, points),
+            )
+        return True
+
+    def get_fingerprint(self, file_id: int, window: str) -> StoredFingerprint | None:
+        """The cached fingerprint of a file, or None when it was never fingerprinted (or changed since)."""
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT * FROM fingerprints WHERE file_id=? AND window=?", (file_id, window)
+            ).fetchone()
+        if r is None:
+            return None
+        return StoredFingerprint(
+            r["file_id"], r["window"], r["start_s"], r["length_s"], r["algorithm"], bytes(r["points"])
+        )
+
+    def get_season_pair(
+        self, file_a: int, file_b: int, matcher_version: int
+    ) -> list[tuple[float, float, float, float]] | None:
+        """Cached matcher runs between two files (``file_a`` was the matcher's first argument); None when not computed."""
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT runs_json FROM season_pairs WHERE file_a=? AND file_b=? AND matcher_version=?",
+                (file_a, file_b, matcher_version),
+            ).fetchone()
+        return None if r is None else [tuple(run) for run in json.loads(r["runs_json"])]
+
+    def set_season_pair(
+        self, file_a: int, file_b: int, matcher_version: int, runs: list[tuple[float, float, float, float]]
+    ) -> bool:
+        """Cache matcher runs between two files.
+
+        Returns:
+            False (nothing stored) when either file's fingerprint is gone: one of them changed while matching.
+        """
+        with self._tx() as conn:
+            have = conn.execute(
+                "SELECT COUNT(*) FROM fingerprints WHERE file_id IN (?, ?) AND window='intro'", (file_a, file_b)
+            ).fetchone()[0]
+            if have != 2:
+                return False
+            conn.execute(
+                "INSERT OR REPLACE INTO season_pairs (file_a, file_b, matcher_version, runs_json) VALUES (?,?,?,?)",
+                (file_a, file_b, matcher_version, json.dumps([list(run) for run in runs])),
+            )
+        return True
+
+    def get_detector_run(self, file_id: int, source: Source) -> str | None:
+        """The signature a local detector's stored answer for a file was based on, or None."""
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT signature FROM detector_runs WHERE file_id=? AND source=?", (file_id, source.value)
+            ).fetchone()
+        return r["signature"] if r else None
+
+    def set_detector_run(self, file_id: int, source: Source, signature: str) -> None:
+        """Record what a local detector's answer for a file was based on."""
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO detector_runs (file_id, source, signature, run_at) VALUES (?,?,?,?)",
+                (file_id, source.value, signature, self._now()),
+            )
 
     def get_item_publish_state(self, server_id: str, item_id: str) -> ItemPublishStateRow | None:
         """What this app last left on a server item, or None when it never published there."""

@@ -52,6 +52,8 @@ dependencies = [
     # 10x10 tile sheets (Jellyfin 10.9+ native trickplay format).
     # >=12.2.0 covers CVE-2026-25990 and CVE-2026-40192.
     "pillow>=12.2.0,<14",
+    # numpy vectorises the season intro matcher (markers/audio/matcher.py); imported only by Intro & Credits.
+    "numpy>=2.0,<3",
 ]
 
 [project.optional-dependencies]

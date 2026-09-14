@@ -13,8 +13,7 @@ import os
 import stat
 import threading
 import time
-from collections.abc import Callable, Hashable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -30,6 +29,7 @@ from ..servers.registry import server_config_from_dict
 from ..web.settings_manager import get_settings_manager
 from .decide import DecisionContext, DecisionStatus, TypeDecision, decide
 from .external_ids import ids_from_path, ids_from_server_dict, is_extra, merge_ids
+from .locks import KeyedLocks as _KeyedLocks
 from .models import SERVER_SOURCES, Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
 from .outcomes import (
     EXTRAS_NOT_CHECKED,
@@ -186,38 +186,6 @@ class _Owning:
     server: Any
     config: ServerConfig
     matches: tuple[OwnershipMatch, ...]
-
-
-class _KeyedLocks:
-    """One lock per key, kept only while a run holds or waits for it. One process serves the app (a single gunicorn
-    worker), so these locks are enough.
-
-    Lock order, never taken the other way round: a path's lock (the whole run on one file), then an item's lock (one
-    server item's publish), then Plex's database lock (inside the publisher), then markers.db's own lock (every store
-    call). The Plex publisher reads sibling decisions from markers.db before it takes its database lock.
-    """
-
-    def __init__(self, lock_factory: Callable[[], Any] = threading.Lock) -> None:
-        self._lock_factory = lock_factory
-        self._guard = threading.Lock()
-        self._locks: dict[Hashable, list] = {}  # key → [lock, runs holding or waiting]
-
-    @contextmanager
-    def hold(self, key: Hashable) -> Iterator[None]:
-        """Hold ``key``'s lock for the duration of the block."""
-        with self._guard:
-            entry = self._locks.get(key)
-            if entry is None:
-                entry = self._locks[key] = [self._lock_factory(), 0]
-            entry[1] += 1
-        try:
-            with entry[0]:
-                yield
-        finally:
-            with self._guard:
-                entry[1] -= 1
-                if entry[1] == 0:
-                    del self._locks[key]
 
 
 # Two jobs on the same file (a backfill and a webhook after a replacement) take turns, so an answer gathered for the
