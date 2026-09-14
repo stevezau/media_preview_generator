@@ -9,7 +9,7 @@ real library file paths), `lab/*_truth.txt`, `credits/spot.txt`, `credits/framec
 
 | Folder | What | Key files |
 |---|---|---|
-| `lab/` | Throwaway servers on `storage` + clients | `up.sh` (bring-up), `env` (tokens), `jf_client.py`, `emby_client.py` (API + Playwright skip-button checks), `plexdb.sh` (Plex SQLite in the lab container), `plex_inject.py` (Plex `extra_data` builder), `phase1_matrix.py` + `scale_score.py` (phase 1 matrix and scale run; results in `phase1-results.md`), `py_write.py` (stock-sqlite write proof), `synth/` (VP9/Opus episodes — Playwright Chromium has no H.264) |
+| `lab/` | Throwaway servers on `storage` + clients | `up.sh` (bring-up), `env` (tokens), `jf_client.py`, `emby_client.py` (API + Playwright skip-button checks), `emby_plugin_check.py` (Emby plugin check table → `phase2-results.md`), `plexdb.sh` (Plex SQLite in the lab container), `plex_inject.py` (Plex `extra_data` builder), `phase1_matrix.py` + `scale_score.py` (phase 1 matrix and scale run; results in `phase1-results.md`), `py_write.py` (stock-sqlite write proof), `synth/` (VP9/Opus episodes — Playwright Chromium has no H.264) |
 | `plugins/` | Prototype plugins proven in the lab | `jellyfin-10.11/` (net9), `jellyfin-12.0/` (net10), `emby-4.10/` (+ `embylibs/` reference DLLs copied from the Emby container `/system/`), `built/` DLLs |
 | `plex-provider-redirect/` | Plex `MetadataProviderUrl` redirect test (not honoured) | `proxy.py`, `log.jsonl`, `pms_marker_strings.txt` |
 | `online/` | TheIntroDB / IntroDB / SkipDB accuracy on 43 verified cases | `cases.json`, `query.py`, `online_results.json`, `skipdb-dump.json` (30 MB snapshot — don't commit) |
@@ -31,7 +31,8 @@ set -a; . ./env; set +a
 
 | Server | URL | Notes |
 |---|---|---|
-| Emby 4.10 | http://127.0.0.1:18096 | Lab plugin `MarkersLabEmby` installed; markers on Rick and Morty S01 + Synth Show |
+| Emby 4.10 | http://127.0.0.1:18096 | `emby/embyserver:4.10.0.40`; Media Preview Bridge for Emby (4.10 build) installed. The prototype `MarkersLabEmby` was removed (backup `lab/synth/_backup/`); its old markers stay on Rick and Morty S01 + Synth Show |
+| Emby 4.9 | http://127.0.0.1:18099 | `emby/embyserver:4.9.1.90`; Media Preview Bridge for Emby (4.9 build); Synth Chapters library; `EMBY49_TOKEN` / `EMBY49_UID` |
 | Jellyfin 10.11 | http://127.0.0.1:18097 | Lab plugin `MarkersLab` installed; `JF_ITEM` has Intro + Outro segments |
 | Jellyfin 12.0 | http://127.0.0.1:18098 | net10 build of the lab plugin; `JF12_ITEM` |
 | Plex (latest) | http://127.0.0.1:32402 | **Unclaimed → no Plex Pass → markers not served.** For Plex end-to-end tests ask the owner for a https://plex.tv/claim token (valid 4 min), then `PLEX_CLAIM=… ./up.sh recreate`; remove from the owner's account afterwards |

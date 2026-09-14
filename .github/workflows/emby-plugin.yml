@@ -1,0 +1,86 @@
+name: Emby Plugin — build and release
+
+on:
+  push:
+    tags:
+      - "emby-plugin-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build and attach to (e.g. emby-plugin-v1.0.0.0). The build uses that tag's commit."
+        required: true
+
+# One job builds both Emby ABIs and attaches both DLLs to one release, so two "create release" calls never race.
+permissions:
+  contents: write
+
+concurrency:
+  group: emby-plugin
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    name: Build for Emby 4.9 and 4.10
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: ver
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^emby-plugin-v([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::Tag must look like emby-plugin-vX.Y.Z.W"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+
+      # A manual run builds the tag it names, never the branch it was started from; checkout fails if the tag doesn't exist.
+      - name: Checkout the tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.ver.outputs.tag }}
+
+      - name: Check the build is the tag
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "$(git rev-parse "refs/tags/${TAG}^{commit}")" ]]; then
+            echo "::error::Checked-out commit is not ${TAG}"
+            exit 1
+          fi
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Build
+        working-directory: emby-plugin
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # 4.9 and 4.10 plugins aren't interchangeable, so each ABI gets its own DLL name.
+          for abi in 4.9 4.10; do
+            dotnet build -c Release -p:EmbyAbi="$abi" -p:Version="$VERSION" -o "out/$abi"
+            cp "out/$abi/MediaPreviewBridge.Emby.dll" "dist/MediaPreviewBridge.Emby-$abi.dll"
+          done
+
+      - name: Create / update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: "Media Preview Bridge for Emby ${{ steps.ver.outputs.version }}"
+          body: |
+            Emby plugin DLLs: `MediaPreviewBridge.Emby-4.10.dll` for Emby 4.10, `MediaPreviewBridge.Emby-4.9.dll` for Emby 4.9.
+
+            Install: copy the DLL for your Emby version into Emby's `plugins` folder (`/config/plugins` in the official
+            container), rename it to `MediaPreviewBridge.Emby.dll`, and restart Emby.
+          files: |
+            emby-plugin/dist/MediaPreviewBridge.Emby-4.9.dll
+            emby-plugin/dist/MediaPreviewBridge.Emby-4.10.dll
+          fail_on_unmatched_files: true

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Throwaway Plex / Emby / Jellyfin 10.11 / Jellyfin 12.0 lab on `storage`, real library mounted READ-ONLY.
+# Throwaway Plex / Emby 4.10 + 4.9 / Jellyfin 10.11 / Jellyfin 12.0 lab on `storage`, real library mounted READ-ONLY.
 # State lives in docker volumes (mlab_*), so containers can be recreated without losing setup.
 # Tokens/ids for these servers: ./env (chmod 600, never commit). Ports bind to 127.0.0.1 only.
 #
@@ -34,7 +34,7 @@ fi
 [[ "${MLAB_MOUNTS_ONLY:-}" == "1" ]] && return 0
 
 if [[ "${1:-}" == "recreate" ]]; then
-    for c in mlab-emby mlab-jellyfin mlab-jf12 mlab-plex; do
+    for c in mlab-emby mlab-emby49 mlab-jellyfin mlab-jf12 mlab-plex; do
         docker rm -f "$c" >/dev/null 2>&1 || true
     done
 fi
@@ -43,7 +43,9 @@ docker network create mlab >/dev/null 2>&1 || true
 exists() { docker container inspect "$1" >/dev/null 2>&1; }
 
 exists mlab-emby || docker run -d --name mlab-emby --network mlab -e UID=1000 -e GID=1000 \
-    -p 127.0.0.1:18096:8096 -v mlab_emby_config:/config "${MV[@]}" emby/embyserver:latest
+    -p 127.0.0.1:18096:8096 -v mlab_emby_config:/config "${MV[@]}" emby/embyserver:4.10.0.40
+exists mlab-emby49 || docker run -d --name mlab-emby49 --network mlab -e UID=1000 -e GID=1000 \
+    -p 127.0.0.1:18099:8096 -v mlab_emby49_config:/config "${MV[@]}" emby/embyserver:4.9.1.90
 exists mlab-jellyfin || docker run -d --name mlab-jellyfin --network mlab --user 1000:1000 \
     -p 127.0.0.1:18097:8096 -v mlab_jf_config:/config -v mlab_jf_cache:/cache "${MV[@]}" "${MV_SCALE[@]}" jellyfin/jellyfin:10.11
 exists mlab-jf12 || docker run -d --name mlab-jf12 --network mlab --user 1000:1000 \

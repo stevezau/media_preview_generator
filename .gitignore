@@ -90,3 +90,8 @@ docs/design/intro-credits/evidence/**/*.jsonl
 docs/design/intro-credits/evidence/lab/*_truth.txt
 docs/design/intro-credits/evidence/credits/spot.txt
 docs/design/intro-credits/evidence/credits/framechecks/
+
+# Emby plugin build output (`dotnet build` locally and in CI)
+emby-plugin/bin/
+emby-plugin/obj/
+emby-plugin/out/

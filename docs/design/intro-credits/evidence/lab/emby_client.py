@@ -13,11 +13,13 @@ async def main():
         await pg.get_by_role("button", name="Play", exact=True).first.click(timeout=15000)
         await pg.wait_for_timeout(10000)
         await pg.evaluate("() => { const v=document.querySelector('video'); if (v) v.currentTime = 22; }")
-        found=False; txt=""
+        found=False; labels=[]
         for i in range(20):
             await pg.wait_for_timeout(1000)
-            txt = await pg.evaluate("() => Array.from(document.querySelectorAll('button')).filter(b=>b.offsetParent!==null).map(b=>(b.innerText||b.title||'').trim()).filter(Boolean).join(' | ')")
-            if "Skip" in txt or "Intro" in txt: found=True; break
+            labels = await pg.evaluate("() => Array.from(document.querySelectorAll('button')).filter(b=>b.offsetParent!==null).map(b=>(b.innerText||b.title||'').trim()).filter(Boolean)")
+            # The exact button label: a substring match on "Skip" or "Intro" could pass on another control or title.
+            if "Skip Intro" in labels: found=True; break
+        txt = " | ".join(labels)
         await pg.screenshot(path=OUT)
         t = await pg.evaluate("() => { const v=document.querySelector('video'); return v ? v.currentTime : -1 }")
         print("skip found:", found, "| t:", round(t,1), "| visible buttons:", txt[:400])

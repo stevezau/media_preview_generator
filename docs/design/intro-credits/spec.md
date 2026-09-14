@@ -839,3 +839,13 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   is written once to record them; that write takes no write lock while the item is as recorded. Jellyfin records no
   files (item ids are per version). An item whose parts are all deleted or in Plex's trash waits as "not in library"
   with "Plex has no live files for this item".
+- 2026-09-15 · Emby Bridge plugin (§3.3, §6.3; phase 2 Task 4). The plugin only ever removes marker rows equal to what
+  it stored for the item: Emby's own intro detection and other plugins' rows are left, mirroring the owner's Plex rule.
+  POST takes `ReplaceOwn` (default false): true replaces rows of a type we write that aren't ours (the app sends it for
+  "Use ours"), false keeps them and adds ours only for types with no rows. DELETE with nothing stored changes nothing.
+  A corrupt or cut-off store file reads as empty (a file not ending in `}` is refused before parsing: Emby's JSON
+  reader otherwise accepted 28 of 204 cut-off lengths of a real file, 10 with a broken credits start), and every read
+  failure answers 200/500 JSON. The store records the item's path and file size; a mismatch at item update removes our
+  rows (a replaced file keeps its item id). A daily sweep deletes store files of removed items (Emby reports only the
+  series when a show folder is deleted). Owner decision R1: Emby always gets a decided credits start, even when the
+  credits end before the file does (Emby's player then skips to the end of the file).
