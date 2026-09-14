@@ -176,6 +176,30 @@ def apply_inverse_path_mappings(local_path: str, mappings: list[dict[str, Any]])
     return candidates
 
 
+def webhook_path_candidates(path: str, configs: list[ServerConfig]) -> list[str]:
+    """Every local form a webhook path can take on this app's disk: the path itself, then each server's translations.
+
+    Two namespaces arrive from webhooks and each needs its own translator: Sonarr/Radarr/Tdarr send their own view
+    (``/data/...``), mapped by the ``webhook_prefixes`` of any server's mappings; a Plex/Emby/Jellyfin ``library.new``
+    webhook resolves the file through the server's API, so it arrives in that server's view (``/mnt/Media/...``),
+    mapped like a library's ``remote_paths`` (issue #254). No disk access.
+
+    Args:
+        path: The path as the sender reported it.
+        configs: Server configs in registry order.
+
+    Returns:
+        Distinct candidates, the raw path first, then per server its webhook-prefix and path-mapping translations.
+    """
+    candidates: list[str] = [path]
+    for cfg in configs:
+        for translate in (apply_webhook_prefixes, apply_path_mappings):
+            for translated in translate(path, cfg.path_mappings or []):
+                if translated not in candidates:
+                    candidates.append(translated)
+    return candidates
+
+
 def server_owns_path(
     canonical_path: str,
     server: ServerConfig,

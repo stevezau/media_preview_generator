@@ -193,6 +193,23 @@ def test_file_inside_the_media_root_is_accepted(client, created, media, monkeypa
     assert created[0]["library_name"] == "Intro & Credits: 1 file"
 
 
+@pytest.mark.parametrize(
+    ("url", "csrf_exempt"),
+    [
+        ("/api/markers/jobs", True),  # token API, exempt like POST /api/jobs
+        ("/api/markers/item/redetect", False),  # browser-only: proves CSRF is really on in this test
+    ],
+)
+def test_token_scripts_can_create_marker_jobs_with_csrf_protection_on(app, created, url, csrf_exempt):
+    # The app ships with WTF_CSRF_CHECK_DEFAULT off, so this turns checking on to test the exemption list itself.
+    app.config.update(WTF_CSRF_ENABLED=True, WTF_CSRF_CHECK_DEFAULT=True)
+    resp = app.test_client().post(url, json={"libraries": []}, headers=_api_headers())
+    body = resp.get_data(as_text=True)
+    assert ("CSRF" not in body) is csrf_exempt, (resp.status_code, body[:200])
+    if url == "/api/markers/jobs":
+        assert resp.status_code == 201 and len(created) == 1
+
+
 def test_requires_authentication(app, created):
     resp = app.test_client().post("/api/markers/jobs", json={}, headers={"Content-Type": "application/json"})
     assert resp.status_code == 401

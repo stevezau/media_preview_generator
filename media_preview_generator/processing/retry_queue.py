@@ -31,6 +31,8 @@ What remains:
 
 from __future__ import annotations
 
+from typing import Any
+
 #: Backoff schedule in seconds for each attempt (1-indexed:
 #: ``BACKOFF_SCHEDULE[0]`` is the delay before attempt #2). Five entries
 #: → up to five retries before giving up. Total wall time is ~83 minutes,
@@ -67,3 +69,31 @@ PENDING_PUBLISHER_STATUSES: frozenset[str] = frozenset(
         "skipped_not_in_library",
     }
 )
+
+
+def _clamped_int(settings: Any, key: str, default: int, low: int, high: int) -> int:
+    try:
+        value = int(settings.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, value))
+
+
+def retry_policy(settings: Any) -> tuple[int, int]:
+    """The global retry policy: how many retries, and the base delay that scales :data:`BACKOFF_SCHEDULE`.
+
+    The keys are named for webhooks (where the settings used to live) but apply to every job type; the bounds match
+    Settings → Processing → Job Execution. Webhook preview jobs and Intro & Credits retries both read it here so the
+    clamps can't drift apart.
+
+    Args:
+        settings: The settings manager (anything with ``get(key, default)``).
+
+    Returns:
+        ``(webhook_retry_count, webhook_retry_delay)``: count clamped to 0-10 (default 3), delay to 10-300 seconds
+        (default 30); a value that isn't a number falls back to its default.
+    """
+    return (
+        _clamped_int(settings, "webhook_retry_count", 3, 0, 10),
+        _clamped_int(settings, "webhook_retry_delay", 30, 10, 300),
+    )

@@ -444,6 +444,24 @@ def test_redetect_creates_a_forced_high_priority_single_file_job(client, servers
     ]
 
 
+def test_redetect_clicked_again_while_queued_returns_the_same_job(client, servers, media, tmp_path, monkeypatch):
+    from media_preview_generator.markers import triggers
+    from media_preview_generator.web.jobs import JobManager
+
+    jm = JobManager(config_dir=str(tmp_path / "jobs"))
+    monkeypatch.setattr(triggers, "get_job_manager", lambda: jm)
+    monkeypatch.setattr(triggers, "start_intro_credits_job_async", lambda job_id: None)
+    body = {"path": str(media / "tv" / "Show" / "S01E01.mkv")}
+
+    first = client.post("/api/markers/item/redetect", json=body, headers=_api_headers())
+    second = client.post("/api/markers/item/redetect", json=body, headers=_api_headers())
+
+    assert (first.status_code, second.status_code) == (202, 202)
+    assert second.get_json() == first.get_json()
+    (job,) = jm.get_all_jobs()
+    assert job.id == first.get_json()["job_id"] and job.priority == 1
+
+
 @pytest.mark.parametrize(
     "body",
     [

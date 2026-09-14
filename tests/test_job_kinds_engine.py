@@ -497,6 +497,62 @@ def test_failed_check_thread_start_releases_slots_and_keeps_the_item():
     dispatcher.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("carried", "expected_total", "expected_outcome"),
+    [
+        (
+            {"markers_needs_review": 2, "markers_published": 1},
+            4,
+            {"markers_published": 2, "markers_needs_review": 2, "failed": 0},
+        ),
+        (None, 1, {"markers_published": 1, "markers_needs_review": 0, "failed": 0}),
+        ({}, 1, {"markers_published": 1, "markers_needs_review": 0, "failed": 0}),
+    ],
+    ids=["revived", "none", "empty"],
+)
+def test_counts_carried_from_before_a_restart_show_in_live_progress_and_the_result(
+    carried, expected_total, expected_outcome
+):
+    # A revived job's "x/y" and breakdown must not jump when it completes.
+    pool = WorkerPool(cpu_workers=0, gpu_workers=0, selected_gpus=[])
+    dispatcher = JobDispatcher(pool)
+    handlers = KindHandlers(
+        check_fn=lambda item, *, cancel_check: ItemOutcome("markers_published"),
+        process_fn=MagicMock(),
+        outcome_keys=KEYS,
+    )
+    progress, live_outcomes = [], []
+    jm = MagicMock()
+    jm.set_job_outcome.side_effect = lambda job_id, outcome: live_outcomes.append((job_id, dict(outcome)))
+    with (
+        patch("media_preview_generator.web.jobs.get_job_manager", return_value=jm),
+        patch("media_preview_generator.processing.generator._notify_file_result"),
+    ):
+        tracker = dispatcher.submit_items(
+            "jc",
+            _items("/m/c1.mkv"),
+            _config(),
+            MagicMock(),
+            kind="intro_credits",
+            handlers=handlers,
+            callbacks={
+                "progress_callback": lambda cur, total, msg, percent_override=None: progress.append((cur, total))
+            },
+            carried_outcome=carried,
+        )
+        assert tracker.wait(timeout=10)
+    assert progress[-1] == (expected_total, expected_total)
+    assert live_outcomes[-1] == ("jc", expected_outcome)
+    assert tracker.get_result() == {
+        "completed": expected_total,
+        "failed": 0,
+        "total": expected_total,
+        "cancelled": False,
+        "outcome": expected_outcome,
+    }
+    dispatcher.shutdown()
+
+
 def test_pool_loop_ignores_non_preview_outcome_keys():
     """Shared-pool workers can carry Intro & Credits keys; the pool's own loop must not KeyError on them."""
     pool = WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[])

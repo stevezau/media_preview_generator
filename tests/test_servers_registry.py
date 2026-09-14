@@ -17,6 +17,24 @@ from media_preview_generator.servers import (
 
 
 class TestServerConfigFromDict:
+    @pytest.mark.parametrize(
+        ("markers", "expected"),
+        [
+            ({"enabled": True, "library_ids": ["1"]}, {"enabled": True, "library_ids": ["1"]}),
+            (None, {}),
+            (True, {}),
+            (1, {}),
+            ("on", {}),
+            ([["enabled", True]], {}),  # dict() would accept pairs; still not a markers block
+        ],
+        ids=["dict", "missing", "bool", "int", "str", "pairs"],
+    )
+    def test_hand_edited_markers_value_never_breaks_the_registry(self, markers, expected):
+        entry = {"id": "s1", "type": "jellyfin", "name": "JF", "enabled": True, "url": "http://x", "markers": markers}
+        assert server_config_from_dict(entry).markers == expected
+        # One bad server entry must not fail every preview job and webhook.
+        assert ServerRegistry.from_settings([entry]).get_config("s1").markers == expected
+
     def test_minimal_entry(self):
         cfg = server_config_from_dict({"id": "s1", "type": "plex", "name": "Plex", "enabled": True, "url": "http://x"})
         assert cfg.id == "s1"

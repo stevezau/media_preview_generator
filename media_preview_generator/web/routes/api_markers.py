@@ -9,7 +9,7 @@ from flask import jsonify, request
 from loguru import logger
 
 from ..auth import api_token_required
-from ..jobs import PRIORITY_FROM_LABEL, PRIORITY_HIGH, PRIORITY_LABELS, PRIORITY_LOW
+from ..jobs import PRIORITY_FROM_LABEL, PRIORITY_LABELS, PRIORITY_LOW
 from . import api
 from ._helpers import MEDIA_ROOT, _param_to_bool, _safe_resolve_within
 from .api_bif import _validate_path_under_any_server
@@ -268,10 +268,11 @@ def marker_item_redetect():
     Body: ``{"path"}``.
 
     Returns:
-        202 with ``{"job_id"}`` (a HIGH priority, forced, single-file job); 400 when the path isn't a file inside a
-        server library; 503 when the config directory isn't writable.
+        202 with ``{"job_id"}`` (a HIGH priority, forced, single-file job; this file's re-detect still queued or
+        running when there is one); 400 when the path isn't a file inside a server library; 503 when the config
+        directory isn't writable.
     """
-    from ...markers.triggers import create_intro_credits_job
+    from ...markers.triggers import submit_redetect
 
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
@@ -282,11 +283,4 @@ def marker_item_redetect():
     blocked = _config_unwritable_response()
     if blocked is not None:
         return blocked
-    job = create_intro_credits_job(
-        library_name=f"Intro & Credits: {os.path.basename(safe)}",
-        priority=PRIORITY_HIGH,
-        source="inspector",
-        file_paths=[safe],
-        force=True,
-    )
-    return jsonify({"job_id": job.id}), 202
+    return jsonify({"job_id": submit_redetect(safe)}), 202

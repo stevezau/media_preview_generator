@@ -1433,8 +1433,9 @@ def _migrate_to_v15(sm) -> list:
     The feature is off until enabled per server, so this migration is purely additive: it seeds
     ``markers`` (global detection settings) when absent, and adds a disabled ``markers`` block to
     any ``media_servers`` entry that doesn't already have one (e.g. added by an earlier partial
-    upgrade or hand-edited settings.json). No ``_USER_FACING_NOTES[15]`` entry — nothing changed for
-    the user to see; Intro & Credits stays off everywhere until they turn it on.
+    upgrade or hand-edited settings.json). No ``_USER_FACING_NOTES[15]`` entry: no extra note, but the
+    standard "Settings migrated" card still appears when this returns notes; Intro & Credits stays off
+    everywhere until they turn it on.
 
     Idempotent — a re-run against an already-migrated install returns no notes.
     """

@@ -233,6 +233,46 @@ class TestFindOwningServers:
         assert [m.server_id for m in matches] == ["plex-a"]
 
 
+class TestWebhookPathCandidates:
+    """The local forms of a sender (Sonarr) or server path, shared by webhook resolution and Intro & Credits triggers."""
+
+    def test_raw_path_first_then_each_servers_translations_deduped_in_order(self):
+        from media_preview_generator.servers.ownership import webhook_path_candidates
+
+        plex = _server(
+            server_id="plex",
+            path_mappings=[
+                {"remote_prefix": "/plexmedia", "local_prefix": "/media", "webhook_prefixes": ["/data"]},
+                {"remote_prefix": "/plexmedia", "local_prefix": "/media2", "webhook_prefixes": ["/data"]},
+            ],
+        )
+        jf = _server(
+            server_id="jf",
+            path_mappings=[
+                {"remote_prefix": "/data", "local_prefix": "/jf-local"},
+                {"remote_prefix": "/x", "local_prefix": "/media", "webhook_prefixes": ["/data"]},
+            ],
+        )
+        assert webhook_path_candidates("/data/tv/a.mkv", [plex, jf]) == [
+            "/data/tv/a.mkv",
+            "/media/tv/a.mkv",
+            "/media2/tv/a.mkv",
+            "/jf-local/tv/a.mkv",
+        ]
+
+    def test_server_view_path_is_translated_with_path_mappings(self):
+        from media_preview_generator.servers.ownership import webhook_path_candidates
+
+        jf = _server(path_mappings=[{"remote_prefix": "/jfmedia", "local_prefix": "/media"}])
+        assert webhook_path_candidates("/jfmedia/tv/a.mkv", [jf]) == ["/jfmedia/tv/a.mkv", "/media/tv/a.mkv"]
+
+    @pytest.mark.parametrize("servers", [[], [_server()]], ids=["no-servers", "no-mappings"])
+    def test_untranslatable_path_is_its_only_candidate(self, servers):
+        from media_preview_generator.servers.ownership import webhook_path_candidates
+
+        assert webhook_path_candidates("/data/tv/a.mkv", servers) == ["/data/tv/a.mkv"]
+
+
 class TestFindLibraryMatches:
     """Intro & Credits ownership: every covering library, whatever the preview opt-in says."""
 

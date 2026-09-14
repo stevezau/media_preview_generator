@@ -722,6 +722,8 @@ def create_app(config_dir: str | None = None) -> Flask:
         "api.delete_job",
         "api.clear_jobs",
         "api.get_job_stats",
+        # Intro & Credits jobs — @api_token_required, the token API for starting them
+        "api.create_marker_job",
         # Schedules — @api_token_required
         "api.get_schedules",
         "api.get_schedule",
@@ -876,8 +878,8 @@ def create_app(config_dir: str | None = None) -> Flask:
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         return response
 
-    # Auto-requeue jobs that were interrupted by the server restart. Runs before the scheduler starts: a tick
-    # fired right away (a missed run) would otherwise find a leftover Intro & Credits job and skip.
+    # Auto-requeue jobs that were interrupted by the server restart. Kept ahead of schedule ticks; leftover Intro &
+    # Credits jobs that aren't revived are settled by fail_unrevived_interrupted_jobs, so no tick skips on them.
     _requeue_interrupted_on_startup(config_dir)
 
     # Start scheduler

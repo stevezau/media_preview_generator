@@ -364,6 +364,51 @@ class TestWebhookFollowUp:
         triggers.submit_webhook_follow_up(preview_job_id="p", paths=paths, source="custom")
         assert create.call_args.kwargs["library_name"] == "Intro & Credits · 2 files"
 
+    def test_follow_up_for_a_markers_only_library_reaches_the_pipeline_with_its_owner(
+        self, settings, tmp_path, monkeypatch
+    ):
+        # Previews off on "Anime", Intro & Credits on; Sonarr's /data view maps to this app's <tmp>/media.
+        from types import SimpleNamespace
+
+        from media_preview_generator.markers import job_runner, pipeline
+        from media_preview_generator.servers.registry import ServerRegistry
+        from media_preview_generator.web.jobs import JobManager
+
+        episode = tmp_path / "media" / "anime" / "Show" / "Show - S01E01.mkv"
+        episode.parent.mkdir(parents=True)
+        episode.write_bytes(b"x")
+        settings["media_servers"] = [
+            _server(
+                "jf-1",
+                "jellyfin",
+                libraries=[{"id": "a", "name": "Anime", "remote_paths": ["/jfmedia/anime"], "enabled": False}],
+                path_mappings=[
+                    {
+                        "remote_prefix": "/jfmedia",
+                        "local_prefix": str(tmp_path / "media"),
+                        "webhook_prefixes": ["/data"],
+                    }
+                ],
+            )
+        ]
+        jm = JobManager(config_dir=str(tmp_path / "config"))
+        monkeypatch.setattr(triggers, "get_job_manager", lambda: jm)
+        preview = jm.create_job(library_name="Show S01E01", config={"webhook_paths": ["/data/anime/Show/x.mkv"]})
+
+        with patch.object(triggers, "start_intro_credits_job_async"):
+            job_id = triggers.submit_webhook_follow_up(
+                preview_job_id=preview.id, paths=["/data/anime/Show/Show - S01E01.mkv"], source="sonarr"
+            )
+        assert job_id is not None
+
+        registry = ServerRegistry.from_settings(settings["media_servers"])
+        items, _warnings = job_runner.build_items(jm.get_job(job_id).config, registry=registry)
+        owning = pipeline._owning_servers(items[0], SimpleNamespace(registry=registry))
+        owners = pipeline._marker_owners(owning, items[0].canonical_path)
+
+        assert items[0].canonical_path == str(episode)
+        assert [owner.config.id for owner in owners] == ["jf-1"]
+
     def test_two_webhooks_for_the_same_file_at_once_queue_one_follow_up(self, settings, tmp_path, monkeypatch):
         from media_preview_generator.web.jobs import JobManager
 
@@ -395,3 +440,101 @@ class TestWebhookFollowUp:
                 t.join(timeout=5)
         assert len(results) == 2 and results.count(None) == 1
         assert len([j for j in jm.get_all_jobs() if j.kind == JOB_KIND_INTRO_CREDITS]) == 1
+
+
+class TestRedetect:
+    """Inspector re-detect: one forced HIGH job per file while one is queued or running."""
+
+    PATH = "/media/tv/Show/S01E01.mkv"
+
+    @pytest.fixture
+    def jm(self, tmp_path, monkeypatch):
+        from media_preview_generator.web.jobs import JobManager
+
+        jm = JobManager(config_dir=str(tmp_path))
+        monkeypatch.setattr(triggers, "get_job_manager", lambda: jm)
+        with patch.object(triggers, "start_intro_credits_job_async"):
+            yield jm
+
+    def _ic_jobs(self, jm):
+        return [j for j in jm.get_all_jobs() if j.kind == JOB_KIND_INTRO_CREDITS]
+
+    def test_first_request_creates_a_forced_high_priority_single_file_job(self, jm):
+        job_id = triggers.submit_redetect(self.PATH)
+        (job,) = self._ic_jobs(jm)
+        assert job.id == job_id
+        assert job.priority == 1
+        assert job.library_name == "Intro & Credits: S01E01.mkv"
+        assert job.config["file_paths"] == [self.PATH]
+        assert job.config["force"] is True and job.config["source"] == "inspector"
+
+    @pytest.mark.parametrize("state", ["pending", "running", "paused"])
+    def test_request_while_one_is_queued_or_running_reuses_it(self, jm, state):
+        first = triggers.submit_redetect(self.PATH)
+        if state != "pending":
+            jm.start_job(first)
+        if state == "paused":
+            jm.request_pause(first)
+        assert triggers.submit_redetect(self.PATH) == first
+        assert len(self._ic_jobs(jm)) == 1
+
+    @pytest.mark.parametrize("end", ["complete", "fail", "cancel"])
+    def test_request_after_the_last_one_ended_creates_a_new_job(self, jm, end):
+        first = triggers.submit_redetect(self.PATH)
+        jm.start_job(first)
+        {
+            "complete": lambda: jm.complete_job(first),
+            "fail": lambda: jm.complete_job(first, error="boom"),
+            "cancel": lambda: jm.cancel_job(first),
+        }[end]()
+        second = triggers.submit_redetect(self.PATH)
+        assert second != first
+        assert len(self._ic_jobs(jm)) == 2
+
+    @pytest.mark.parametrize(
+        "other",
+        [
+            {"source": "inspector", "file_paths": ["/media/tv/Show/S01E02.mkv"], "force": True},  # another file
+            {"source": "sonarr", "file_paths": [PATH], "force": False, "follows_job_id": "p"},  # webhook follow-up
+            {"source": "manual", "file_paths": [PATH], "force": True},  # API job, maybe Low priority
+            {"source": "inspector", "file_paths": [PATH], "force": False},
+            {"source": "inspector", "file_paths": [PATH, "/media/tv/Show/S01E02.mkv"], "force": True},
+        ],
+        ids=["other-file", "webhook-follow-up", "not-inspector", "inspector-not-forced", "several-files"],
+    )
+    def test_other_queued_jobs_listing_the_file_are_not_reused(self, jm, other):
+        existing = jm.create_job(
+            library_name="x", kind=JOB_KIND_INTRO_CREDITS, config={"kind": JOB_KIND_INTRO_CREDITS, **other}
+        )
+        job_id = triggers.submit_redetect(self.PATH)
+        assert job_id != existing.id
+        assert jm.get_job(job_id).config["file_paths"] == [self.PATH]
+
+    def test_preview_job_is_never_reused(self, jm):
+        preview = jm.create_job(
+            library_name="x", config={"source": "inspector", "file_paths": [self.PATH], "force": True}
+        )
+        assert triggers.submit_redetect(self.PATH) != preview.id
+
+    def test_double_click_creates_one_job(self, jm, monkeypatch):
+        real_create_job = jm.create_job
+
+        def slow_create_job(**kwargs):
+            threading.Event().wait(0.05)  # widen the check-then-create window
+            return real_create_job(**kwargs)
+
+        monkeypatch.setattr(jm, "create_job", slow_create_job)
+        start = threading.Barrier(2)
+        results = []
+
+        def click():
+            start.wait()
+            results.append(triggers.submit_redetect(self.PATH))
+
+        threads = [threading.Thread(target=click) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+        assert len(results) == 2 and results[0] == results[1]
+        assert len(self._ic_jobs(jm)) == 1

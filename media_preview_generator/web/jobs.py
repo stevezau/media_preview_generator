@@ -1778,7 +1778,7 @@ class JobManager:
 
         Args:
             job_id: Job identifier.
-            outcome: Dict mapping ProcessingResult values to counts.
+            outcome: Dict mapping outcome key strings (ProcessingResult values or a job kind's outcome keys) to counts.
 
         """
         with self._lock:
@@ -2225,7 +2225,8 @@ class JobManager:
         Args:
             job_id: Job identifier.
             file_path: Absolute path of the media file processed.
-            outcome: ProcessingResult value string (e.g. "generated", "failed").
+            outcome: Outcome key string: a ProcessingResult value (e.g. "generated", "failed") or a job kind's
+                outcome key (e.g. "markers_published").
             reason: Human-readable detail (skip/failure reason).
             worker: Worker display name (e.g. "GPU Worker 1 (NVIDIA TITAN RTX)").
             servers: Per-publisher attribution list (D9). Each entry is the

@@ -76,6 +76,9 @@ def server_config_from_dict(data: dict[str, Any]) -> ServerConfig:
 
     identity_raw = data.get("server_identity")
     server_identity = str(identity_raw) if identity_raw else None
+    # A hand-edited non-object markers value reads as "Intro & Credits off" rather than failing the whole registry.
+    markers_raw = data.get("markers")
+    markers = dict(markers_raw) if isinstance(markers_raw, dict) else {}
 
     return ServerConfig(
         id=str(data.get("id") or ""),
@@ -91,7 +94,7 @@ def server_config_from_dict(data: dict[str, Any]) -> ServerConfig:
         exclude_paths=list(data.get("exclude_paths") or []),
         output=dict(data.get("output") or {}),
         server_identity=server_identity,
-        markers=dict(data.get("markers") or {}),
+        markers=markers,
     )
 
 

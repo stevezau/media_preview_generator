@@ -19,6 +19,7 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request
 from loguru import logger
 
+from ..processing.retry_queue import retry_policy
 from .auth import api_token_required, validate_token
 from .jobs import get_job_manager, incoming_job_priority
 from .settings_manager import get_settings_manager
@@ -464,11 +465,7 @@ def create_vendor_webhook_job(
     )
 
     settings = get_settings_manager()
-    # Global retry policy — key name is historical (these used to live on
-    # the webhook settings panel), but the values now apply to every job
-    # type. UI surface: Settings → Processing → Job Execution.
-    retry_count = max(0, min(10, int(settings.get("webhook_retry_count", 3))))
-    retry_delay = max(10, min(300, int(settings.get("webhook_retry_delay", 30))))
+    retry_count, retry_delay = retry_policy(settings)
 
     overrides: dict[str, object] = {
         "sort_by": "newest",
@@ -1160,10 +1157,7 @@ def _execute_webhook_job(debounce_key: str) -> None:
             raw_libs = plex_view.get("selected_libraries") or settings.get("selected_libraries", [])
             if isinstance(raw_libs, list):
                 selected_libraries = [str(name).strip() for name in raw_libs if str(name).strip()]
-        # Global retry policy — key name is historical; see settings.html
-        # "Job Execution" sub-section. Values apply to every job type.
-        retry_count = max(0, min(10, int(settings.get("webhook_retry_count", 3))))
-        retry_delay = max(10, min(300, int(settings.get("webhook_retry_delay", 30))))
+        retry_count, retry_delay = retry_policy(settings)
 
         # NOTE: dedup entries were already written by
         # ``_check_and_record_dedup`` inside ``_schedule_webhook_job`` at

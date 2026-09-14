@@ -23,7 +23,13 @@ class TestBuildItems:
         other = tmp_path / "tv" / "Another" / "Season 01"
         other.mkdir(parents=True)
         (other / "S01E01.mkv").write_bytes(b"x")
-        reg = FakeRegistry({"jf-1": server_config("jf-1", ServerType.JELLYFIN)})
+        reg = FakeRegistry(
+            {
+                "jf-1": server_config(
+                    "jf-1", ServerType.JELLYFIN, libraries=[Library("1", "TV", (str(tmp_path / "tv"),), enabled=False)]
+                )
+            }
+        )
         cfg = {
             "file_paths": [str(season), str(season / "S01E01.mkv"), str(other / "S01E01.mkv")],
             "webhook_item_id_hints": {str(other / "S01E01.mkv"): {"jf-1": "abc"}},
@@ -42,7 +48,11 @@ class TestBuildItems:
         assert [i.title for i in items] == ["S01E01.mkv", "S01E01.mkv", "S01E02.mkv"]
         assert warnings == []
         assert all(c.kwargs.get("log_resolution") is False for c in resolve.call_args_list)
-        assert all(c.args[1] == reg.configs() for c in resolve.call_args_list)
+        # Resolved against every library: the preview opt-in plays no part in Intro & Credits ownership.
+        for c in resolve.call_args_list:
+            assert [(cfg.id, [(lib.id, lib.enabled) for lib in cfg.libraries]) for cfg in c.args[1]] == [
+                ("jf-1", [("1", True)])
+            ]
 
     def test_file_paths_are_resolved_to_the_canonical_local_path(self):
         reg = FakeRegistry({"jf-1": server_config("jf-1", ServerType.JELLYFIN)})
@@ -194,6 +204,40 @@ class TestBuildItems:
         assert items == []
         assert len(warnings) == 1 and expected_warning in warnings[0]
 
+    @pytest.mark.parametrize("previews_on", [True, False], ids=["previews-on", "previews-off"])
+    @pytest.mark.parametrize("sender_view", [True, False], ids=["sender-path", "local-path"])
+    def test_file_paths_resolve_to_the_local_file_whatever_the_library_preview_setting(
+        self, tmp_path, previews_on, sender_view
+    ):
+        # Jellyfin "Anime": Intro & Credits on, previews on or off; Sonarr sends /data/..., the app reads <tmp>/media.
+        from media_preview_generator.markers.ownership import marker_matches
+        from media_preview_generator.servers.base import ServerConfig
+
+        episode = tmp_path / "media" / "anime" / "Show" / "Show - S01E01.mkv"
+        episode.parent.mkdir(parents=True)
+        episode.write_bytes(b"x")
+        cfg = ServerConfig(
+            id="jf-1",
+            type=ServerType.JELLYFIN,
+            name="JF",
+            enabled=True,
+            url="http://jf",
+            auth={},
+            libraries=[Library("a", "Anime", ("/jfmedia/anime",), enabled=previews_on)],
+            path_mappings=[
+                {"remote_prefix": "/jfmedia", "local_prefix": str(tmp_path / "media"), "webhook_prefixes": ["/data"]}
+            ],
+            markers={"enabled": True, "library_ids": None},
+        )
+        reg = FakeRegistry({"jf-1": cfg})
+        raw = "/data/anime/Show/Show - S01E01.mkv" if sender_view else str(episode)
+
+        items, warnings = job_runner.build_items({"file_paths": [raw]}, registry=reg)
+
+        assert [i.canonical_path for i in items] == [str(episode)]
+        assert list(marker_matches(items[0].canonical_path, reg.configs())) == ["jf-1"]
+        assert warnings == []
+
     def test_enumerated_duplicates_keep_the_first_item(self):
         reg = FakeRegistry({"jf-1": server_config("jf-1", ServerType.JELLYFIN)})
         first = ProcessableItem("/media/tv/S/a.mkv", "jf-1", {"jf-1": "x"})
@@ -289,6 +333,7 @@ class TestRun:
         assert kwargs["config"] is env.config and kwargs["registry"] is env.registry
         assert kwargs["kind"] == JOB_KIND_INTRO_CREDITS and kwargs["handlers"] is env.handlers
         assert kwargs["priority"] == 3
+        assert kwargs["carried_outcome"] == {}
         assert set(kwargs["callbacks"]) == {"progress_callback", "worker_callback", "cancel_check", "pause_check"}
         env.kind_handlers.assert_called_once_with(env.ctx)
         ctx_kwargs = env.build_context.call_args.kwargs
@@ -310,6 +355,41 @@ class TestRun:
     def test_no_warnings_completes_cleanly(self, env):
         self._run()
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
+
+    @pytest.mark.parametrize(
+        ("outcome", "warnings", "expected"),
+        [
+            ({"markers_published": 2, "failed": 0}, [], {"warning": None}),
+            ({"markers_published": 2, "failed": 0}, ["Couldn't list X"], {"warning": "Couldn't list X"}),
+            ({"markers_published": 2, "markers_none": 1, "failed": 1}, [], {"warning": "1 file(s) failed"}),
+            (
+                {"markers_up_to_date": 1, "failed": 2},
+                ["Couldn't list X"],
+                {"warning": "2 file(s) failed | Couldn't list X"},
+            ),
+            ({"markers_published": 0, "failed": 3}, [], {"error": "All 3 file(s) failed — see the Files panel"}),
+            (
+                {"markers_published": 0, "failed": 3},
+                ["Couldn't list X"],
+                {"error": "All 3 file(s) failed — see the Files panel | Couldn't list X"},
+            ),
+            ({"markers_published": 0, "failed": 0}, [], {"warning": None}),
+        ],
+        ids=[
+            "none-failed",
+            "none-failed-warnings",
+            "some-failed",
+            "some-failed-warnings",
+            "all-failed",
+            "all-failed-warnings",
+            "nothing-counted",
+        ],
+    )
+    def test_completion_is_red_when_every_file_failed_and_amber_when_some_did(self, env, outcome, warnings, expected):
+        env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "outcome": outcome}
+        self._run([_item("/m/a.mkv"), _item("/m/b.mkv"), _item("/m/c.mkv")], warnings)
+        env.jm.complete_job.assert_called_once_with("j1", **expected)
+        env.jm.set_job_outcome.assert_called_once_with("j1", outcome)
 
     def test_pipeline_priority_follows_live_priority_changes(self, env):
         self._run()
@@ -593,6 +673,85 @@ class TestRun:
         env.dispatcher.submit_items.assert_called_once()
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
 
+    @pytest.fixture
+    def pending_preview(self, env, monkeypatch):
+        """A PENDING preview job the follow-up waits for; ``state`` drives its thread and the global pause per poll."""
+        from media_preview_generator.web.jobs import JobStatus
+
+        env.job.config = {"follows_job_id": "prev-1"}
+        preview = MagicMock(status=JobStatus.PENDING, progress=SimpleNamespace(retry_eta=None))
+        env.jm.get_job.side_effect = lambda jid: preview if jid == "prev-1" else env.job
+        state = {"sleeps": 0, "script": lambda n: None}
+
+        def fake_sleep(_seconds):
+            state["sleeps"] += 1
+            if state["sleeps"] > 1000:
+                raise AssertionError("still waiting for the preview job")
+            env.gate.acquire.assert_not_called()
+            state["script"](state["sleeps"])
+
+        monkeypatch.setattr(job_runner, "time", SimpleNamespace(sleep=fake_sleep))
+        yield SimpleNamespace(preview=preview, state=state)
+        with job_runner._inflight_lock:
+            job_runner._inflight_jobs.discard("prev-1")
+
+    def test_follow_up_of_a_pending_preview_job_no_thread_will_run_starts_after_a_grace_period(
+        self, env, pending_preview
+    ):
+        # Too old to be revived after a restart: nothing will ever finish it.
+        self._run()
+        assert pending_preview.state["sleeps"] == job_runner._ORPHAN_GRACE_POLLS
+        env.dispatcher.submit_items.assert_called_once()
+        assert any("isn't queued to run" in c.args[1] for c in env.jm.add_log.call_args_list)
+
+    def test_follow_up_keeps_waiting_for_a_pending_preview_job_that_has_a_thread(self, env, pending_preview):
+        from media_preview_generator.web.jobs import JobStatus
+
+        with job_runner._inflight_lock:
+            job_runner._inflight_jobs.add("prev-1")  # waiting for a slot
+        limit = job_runner._ORPHAN_GRACE_POLLS * 3
+
+        def script(n):
+            if n == limit:
+                pending_preview.preview.status = JobStatus.COMPLETED
+
+        pending_preview.state["script"] = script
+        self._run()
+        assert pending_preview.state["sleeps"] == limit
+        assert not any("isn't queued to run" in c.args[1] for c in env.jm.add_log.call_args_list)
+
+    def test_grace_period_restarts_when_the_preview_job_gets_a_thread_again(self, env, pending_preview):
+        grace = job_runner._ORPHAN_GRACE_POLLS
+
+        def script(n):
+            with job_runner._inflight_lock:
+                if n == grace - 1:
+                    job_runner._inflight_jobs.add("prev-1")  # the pending drain started it
+                elif n == grace:
+                    job_runner._inflight_jobs.discard("prev-1")  # ...and it went back to pending
+
+        pending_preview.state["script"] = script
+        self._run()
+        assert pending_preview.state["sleeps"] == 2 * grace
+        env.dispatcher.submit_items.assert_called_once()
+
+    def test_follow_up_waits_through_a_global_pause_for_a_pending_preview_job(self, env, pending_preview):
+        from media_preview_generator.web.jobs import JobStatus
+
+        # Paused processing leaves new jobs pending without a thread; resuming starts them in order.
+        env.sm.processing_paused = False
+        limit = job_runner._ORPHAN_GRACE_POLLS * 3
+
+        def script(n):
+            env.sm.processing_paused = n < limit
+            if n == limit:
+                pending_preview.preview.status = JobStatus.COMPLETED
+
+        pending_preview.state["script"] = script
+        self._run()
+        assert pending_preview.state["sleeps"] == limit
+        assert not any("isn't queued to run" in c.args[1] for c in env.jm.add_log.call_args_list)
+
     def test_follow_up_of_a_deleted_preview_job_starts_straight_away(self, env):
         env.job.config = {"follows_job_id": "gone"}
         env.jm.get_job.side_effect = lambda jid: None if jid == "gone" else env.job
@@ -717,9 +876,26 @@ class TestRun:
     def test_crash_marks_job_failed_and_releases_gate(self, env):
         with patch.object(job_runner, "build_items", side_effect=RuntimeError("enumeration exploded")):
             job_runner.run_intro_credits_job("j1")
-        assert "enumeration exploded" in env.jm.complete_job.call_args.kwargs["error"]
+        env.jm.complete_job.assert_called_once_with("j1", error="RuntimeError: enumeration exploded")
         env.gate.release.assert_called_once_with(3)
         env.jm.clear_pause_flag.assert_called_once_with("j1")
+        env.dispatcher.cancel_job.assert_not_called()  # nothing was submitted
+
+    def test_crash_after_submitting_stops_the_jobs_remaining_checks(self, env):
+        # Without this the tracker keeps publishing files for a job already marked failed, with no slot held.
+        order = []
+        env.tracker.wait.side_effect = RuntimeError("wait exploded")
+        env.dispatcher.cancel_job.side_effect = lambda jid: order.append(("cancel", jid))
+        env.jm.complete_job.side_effect = lambda jid, **kw: order.append(("complete", jid, kw))
+        self._run()
+        assert order == [("cancel", "j1"), ("complete", "j1", {"error": "RuntimeError: wait exploded"})]
+        env.gate.release.assert_called_once_with(3)
+
+    def test_crash_while_stopping_the_tracker_still_marks_the_job_failed(self, env):
+        env.tracker.wait.side_effect = RuntimeError("wait exploded")
+        env.dispatcher.cancel_job.side_effect = RuntimeError("dispatcher gone")
+        self._run()
+        env.jm.complete_job.assert_called_once_with("j1", error="RuntimeError: wait exploded")
 
 
 ALL_OUTCOMES = [
@@ -770,8 +946,11 @@ class TestRestart:
         with patch.object(job_runner, "build_items", return_value=(items, [])):
             job_runner.run_intro_credits_job("j1")
         env.jm.get_file_results.assert_called_once_with("j1")
-        assert env.dispatcher.submit_items.call_args.kwargs["items"] == [failed, replaced, store_reset, new]
-        env.jm.set_job_outcome.assert_called_once_with("j1", {"markers_published": 2})
+        kwargs = env.dispatcher.submit_items.call_args.kwargs
+        assert kwargs["items"] == [failed, replaced, store_reset, new]
+        # The tracker counts them from the start (live "x/y" and breakdown); its result already includes them.
+        assert kwargs["carried_outcome"] == {"markers_published": 1}
+        env.jm.set_job_outcome.assert_called_once_with("j1", {"markers_published": 1})
 
     @pytest.mark.parametrize(("outcome", "skipped"), ALL_OUTCOMES)
     def test_only_settled_outcomes_are_skipped(self, env, finished, outcome, skipped):
@@ -1031,7 +1210,7 @@ class TestLibraryRetry:
         self._run(paths)
         assert retry_env.create.call_args.kwargs["file_paths"] == paths[:500]
         logs = [c.args[1] for c in env.jm.add_log.call_args_list]
-        assert "INFO - 1 more files the server hasn't indexed yet will be tried on the next run" in logs
+        assert "INFO - 1 more files not in a server's library yet will be tried on the next run" in logs
 
     def test_exactly_500_files_are_all_retried(self, env, retry_env):
         paths = [f"/m/{i:04d}.mkv" for i in range(500)]
@@ -1067,6 +1246,58 @@ class TestLibraryRetry:
         retry_env.results.append(("/m/a.mkv", "markers_waiting", rows))
         self._run(["/m/a.mkv"])
         retry_env.create.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("source", "file_paths", "retried"),
+        [
+            ("sonarr", ["/data/tv/a.mkv"], True),  # the import is still copying over NFS: preview retries it too
+            ("jellyfin", ["/data/tv/a.mkv"], True),
+            ("retry", ["/data/tv/a.mkv"], True),
+            ("manual", ["/data/tv/a.mkv"], False),  # the user picked a file that isn't there; say so, don't retry
+            ("inspector", ["/data/tv/a.mkv"], False),
+            ("schedule", [], False),  # a library listing only names files the server already has
+            ("manual", [], False),
+        ],
+    )
+    def test_file_not_on_disk_yet_is_retried_only_for_webhook_paths(self, env, retry_env, source, file_paths, retried):
+        env.job.config = {"libraries": [], "file_paths": file_paths, "source": source}
+        retry_env.results.append(("/m/a.mkv", "skipped_file_not_found", []))
+        self._run(["/m/a.mkv"])
+        if retried:
+            retry_env.create.assert_called_once_with(
+                library_name="Retry: Rick and Morty S01 · 2 files",
+                priority=3,
+                source=source,
+                file_paths=["/m/a.mkv"],
+                retry_attempt=1,
+                retry_delay_s=60,
+            )
+            logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+            assert any("not on disk yet" in line and "retry 1 of 3" in line for line in logs), logs
+        else:
+            retry_env.create.assert_not_called()
+
+    def test_files_not_on_disk_and_not_indexed_share_one_retry(self, env, retry_env):
+        retry_env.results += [
+            ("/m/b.mkv", "skipped_file_not_found", []),
+            ("/m/a.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]),
+            ("/m/c.mkv", "markers_published", [_row("markers_written", "2 marker(s)")]),
+        ]
+        self._run(["/m/a.mkv", "/m/b.mkv", "/m/c.mkv"])
+        retry_env.create.assert_called_once()
+        assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a.mkv", "/m/b.mkv"]
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        assert any(
+            line.startswith("INFO - 2 file(s) not on disk or not in a server's library yet; retry 1") for line in logs
+        )
+
+    def test_file_still_not_on_disk_after_the_last_retry_is_left_for_the_next_run(self, env, retry_env):
+        env.job.config["retry_attempt"] = 3
+        retry_env.results.append(("/m/a.mkv", "skipped_file_not_found", []))
+        self._run(["/m/a.mkv"])
+        retry_env.create.assert_not_called()
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        assert any(line.startswith("WARNING - 1 file(s) still not on disk after 3 retries") for line in logs), logs
 
     def test_stable_reason_code_is_recognised_whatever_the_message(self, env, retry_env):
         retry_env.results.append(

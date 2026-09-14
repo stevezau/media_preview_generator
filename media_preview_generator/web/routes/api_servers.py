@@ -9,6 +9,7 @@ alongside in :mod:`api_server_auth`.
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import uuid
@@ -416,15 +417,23 @@ def _validate_server_payload(
         data.get("health_dismissals") if "health_dismissals" in data else base.get("health_dismissals", [])
     )
 
+    from ...markers.settings import default_server_markers
     from ...markers.settings import validate_server as _validate_markers
 
+    stored_markers = base.get("markers")
     if "markers" in data:
-        markers_raw = _merge_markers_update(base.get("markers"), data.get("markers"))
+        markers_block, err = _validate_markers(_merge_markers_update(stored_markers, data.get("markers")), type_value)
+        if err:
+            return None, err
+    elif isinstance(stored_markers, dict):
+        # Carried forward as stored, without re-validating: the Servers UI never sends markers, and a block that no
+        # longer validates (hand-edited, or a later rule) must not block its URL/auth/library edits. Readers fall back
+        # to Intro & Credits off for an invalid block (markers.settings.load_server).
+        markers_block = copy.deepcopy(stored_markers)
     else:
-        markers_raw = base.get("markers")
-    markers_block, err = _validate_markers(markers_raw, type_value)
-    if err:
-        return None, err
+        if stored_markers is not None:
+            logger.warning("Server {!r} had an unreadable Intro & Credits block; saved with Intro & Credits off", name)
+        markers_block = default_server_markers(type_value)
 
     err = _validate_path_mappings(path_mappings or [])
     if err:

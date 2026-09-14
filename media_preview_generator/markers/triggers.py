@@ -10,9 +10,9 @@ from loguru import logger
 
 from ..job_kinds import JOB_KIND_INTRO_CREDITS
 from ..servers.base import ServerConfig
-from ..servers.ownership import apply_path_mappings, apply_webhook_prefixes
+from ..servers.ownership import webhook_path_candidates
 from ..servers.registry import UnsupportedServerTypeError, server_config_from_dict
-from ..web.jobs import PRIORITY_NORMAL, Job, get_job_manager
+from ..web.jobs import PRIORITY_HIGH, PRIORITY_NORMAL, Job, get_job_manager
 from ..web.settings_manager import get_settings_manager
 from .job_runner import start_intro_credits_job_async
 from .ownership import marker_matches
@@ -20,6 +20,9 @@ from .settings import load_server
 
 # Serialises "is this file already queued?" with the job creation, so two webhooks for one import queue one job.
 _follow_up_lock = threading.Lock()
+# Same for Inspector re-detect, so a double-click queues one job.
+_redetect_lock = threading.Lock()
+_REDETECT_SOURCE = "inspector"
 
 
 def _utcnow() -> datetime:
@@ -52,13 +55,8 @@ def _server_configs() -> list[ServerConfig]:
 
 
 def _local_candidates(path: str, configs: list[ServerConfig]) -> set[str]:
-    # Same translations as orchestrator._resolve_webhook_path_to_canonical, without its on-disk check: a sender
-    # (Sonarr) or server path can reach this app's disk through any server's mappings.
-    candidates = {path}
-    for cfg in configs:
-        for translate in (apply_webhook_prefixes, apply_path_mappings):
-            candidates.update(translate(path, cfg.path_mappings or []))
-    return candidates
+    # The candidates orchestrator._resolve_webhook_path_to_canonical tries, without its on-disk check.
+    return set(webhook_path_candidates(path, configs))
 
 
 def marker_owned_paths(paths: list[str]) -> list[str]:
@@ -207,5 +205,39 @@ def submit_webhook_follow_up(
             file_paths=fresh,
             follows_job_id=preview_job_id,
             item_id_hints=hints or None,
+        )
+    return job.id
+
+
+def submit_redetect(path: str) -> str:
+    """Queue an Inspector re-detect for one file: a forced single-file job at HIGH that asks every source again.
+
+    While this file's previous re-detect is still queued or running, that job is returned instead: a second forced
+    job would spend the online sources' budget twice and hold a HIGH slot that incoming webhook previews need.
+
+    Args:
+        path: The file's local path, already validated by the caller.
+
+    Returns:
+        The id of the new or the reused job.
+    """
+    jm = get_job_manager()
+    with _redetect_lock:
+        for job in [*jm.get_pending_jobs(), *jm.get_running_jobs()]:
+            cfg = job.config or {}
+            if (
+                job.kind == JOB_KIND_INTRO_CREDITS
+                and cfg.get("source") == _REDETECT_SOURCE
+                and cfg.get("force")
+                and list(cfg.get("file_paths") or []) == [path]
+            ):
+                logger.info("Re-detect for {} is already queued as job {}", os.path.basename(path), job.id[:8])
+                return job.id
+        job = create_intro_credits_job(
+            library_name=f"Intro & Credits: {os.path.basename(path)}",
+            priority=PRIORITY_HIGH,
+            source=_REDETECT_SOURCE,
+            file_paths=[path],
+            force=True,
         )
     return job.id

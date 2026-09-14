@@ -405,6 +405,45 @@ _SAVE_SETTINGS_INT_FIELDS = (
 _SAVE_SETTINGS_BOOL_FIELDS = ("plex_verify_ssl", "webhook_enabled", "auto_requeue_on_restart")
 
 
+def _merge_sources_update(stored: list[dict], posted: list) -> list:
+    """Posted source entries over the stored ones, matched by id.
+
+    A list naming every stored source sets their order (the Settings page sends them all); a shorter list updates the
+    named sources where they are. A list with an entry that isn't an object is left for ``validate_global`` to reject.
+    """
+    if not all(isinstance(entry, dict) for entry in posted):
+        return posted
+    stored_by_id = {entry.get("id"): entry for entry in stored}
+    posted_by_id = {entry.get("id"): entry for entry in posted}
+    if set(stored_by_id) <= set(posted_by_id):
+        return [{**stored_by_id.get(entry.get("id"), {}), **entry} for entry in posted]
+    merged = [{**entry, **posted_by_id.get(entry.get("id"), {})} for entry in stored]
+    return merged + [entry for entry in posted if entry.get("id") not in stored_by_id]
+
+
+def _merge_global_markers_update(stored: object, posted: object) -> object:
+    """Deep-merge a posted global ``markers`` block over the stored one, like the per-server block on PUT.
+
+    Without it a partial save (``{"publish_when": "medium"}``) resets detection, locks and the sources (their order
+    and switches) to the defaults, which also changes the detection fingerprint, so files are decided again.
+
+    Args:
+        stored: The stored block normalised by ``validate_global``, or None when there's none (or it's invalid).
+        posted: The posted block.
+
+    Returns:
+        The merged block, or ``posted`` unchanged when either side isn't an object (validation handles it).
+    """
+    if not isinstance(posted, dict) or not isinstance(stored, dict):
+        return posted
+    merged = {**stored, **posted}
+    if isinstance(stored.get("detect"), dict) and isinstance(posted.get("detect"), dict):
+        merged["detect"] = {**stored["detect"], **posted["detect"]}
+    if isinstance(stored.get("sources"), list) and isinstance(posted.get("sources"), list):
+        merged["sources"] = _merge_sources_update(stored["sources"], posted["sources"])
+    return merged
+
+
 def _validate_and_coerce_settings_updates(
     data: dict, existing_markers: object = None
 ) -> tuple[dict | None, tuple | None]:
@@ -448,7 +487,10 @@ def _validate_and_coerce_settings_updates(
     if "markers" in updates:
         from ...markers.settings import validate_global
 
-        block, err = validate_global(updates["markers"], existing_markers)
+        # Merged over the stored block as readers see it: a stored block that doesn't validate reads as the defaults.
+        stored_block, _stored_err = validate_global(existing_markers, existing_markers)
+        merged = _merge_global_markers_update(stored_block, updates["markers"])
+        block, err = validate_global(merged, existing_markers)
         if err:
             return None, (jsonify({"error": err}), 400)
         updates["markers"] = block

@@ -50,6 +50,8 @@ class JobTracker:
         priority: Dispatch priority (1=high, 2=normal, 3=low).
         kind: Job kind (previews or intro_credits).
         handlers: Per-kind check/process functions; None keeps the previews flow.
+        carried_outcome: Outcome counts of files the job finished before a restart revived it. They count as done
+            from the start, so the live "x/y", the breakdown and the result include them.
     """
 
     def __init__(
@@ -64,6 +66,7 @@ class JobTracker:
         priority: int = PRIORITY_NORMAL,
         kind: str = JOB_KIND_PREVIEWS,
         handlers: KindHandlers | None = None,
+        carried_outcome: dict[str, int] | None = None,
     ):
         """Initialize tracker for a single job."""
         self.job_id = job_id
@@ -96,6 +99,10 @@ class JobTracker:
             self.outcome_counts: dict[str, int] = {key: 0 for key in handlers.outcome_keys}
         else:
             self.outcome_counts = {r.value: 0 for r in ProcessingResult}
+        for key, count in (carried_outcome or {}).items():
+            self.outcome_counts[key] = self.outcome_counts.get(key, 0) + count
+            self.successful += count
+            self.total_items += count
         # D12 — per-server aggregate (one entry per server_id) so the Job
         # views render a fixed-size summary regardless of file count.
         # Per-file × per-server detail lives in the Files-panel JSONL via
@@ -493,6 +500,7 @@ class JobDispatcher:
         priority: int = PRIORITY_NORMAL,
         kind: str = JOB_KIND_PREVIEWS,
         handlers: KindHandlers | None = None,
+        carried_outcome: dict[str, int] | None = None,
     ) -> JobTracker:
         """Submit items for a job to the shared dispatch queue.
 
@@ -508,6 +516,7 @@ class JobDispatcher:
             priority: Dispatch priority (1=high, 2=normal, 3=low).
             kind: Job kind (previews or intro_credits).
             handlers: Per-kind check/process functions; None keeps the previews flow.
+            carried_outcome: Outcome counts of files finished before a restart (see :class:`JobTracker`).
 
         Returns:
             JobTracker that callers can wait() on for completion.
@@ -523,6 +532,7 @@ class JobDispatcher:
             priority=priority,
             kind=kind,
             handlers=handlers,
+            carried_outcome=carried_outcome,
         )
         # Wire the in-flight fraction getter so JobTracker.record_completion
         # emits the same percent the dispatcher's periodic _emit_progress_updates

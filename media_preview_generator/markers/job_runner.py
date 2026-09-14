@@ -18,7 +18,7 @@ from ..jobs.dispatcher import get_or_create_dispatcher
 from ..jobs.orchestrator import _build_multi_server_registry
 from ..jobs.worker import is_job_thread_for, register_job_thread, unregister_job_thread
 from ..processing.generator import clear_failures, failure_scope, set_file_result_callback
-from ..processing.retry_queue import BACKOFF_SCHEDULE
+from ..processing.retry_queue import BACKOFF_SCHEDULE, retry_policy
 from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig
 from ..web.job_gate import format_wait_message, get_job_gate
@@ -31,9 +31,14 @@ from .pipeline import build_context, kind_handlers
 from .settings import load_server
 
 _POLL_S = 1.0
+# Polls a PENDING preview job may go without a thread before its follow-up stops waiting for it. Covers the moment
+# between two starts of the pending drain or the restart requeue; a job not revived after a restart never gets one.
+_ORPHAN_GRACE_POLLS = 30
 # Largest retry job; a bigger backlog of unindexed files (a new library) waits for the next run instead.
 MAX_RETRY_FILES = 500
 _FINISHED = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED})
+# Job sources where the user chose the files (API/Start job dialog, Inspector re-detect).
+_USER_PICKED_SOURCES = frozenset({"manual", "inspector"})
 
 
 def _utcnow() -> datetime:
@@ -69,33 +74,30 @@ def retry_delay_s(attempt: int, retry_delay: int) -> int:
     return max(1, int(BACKOFF_SCHEDULE[min(attempt - 1, len(BACKOFF_SCHEDULE) - 1)] * scale))
 
 
-def _retry_policy() -> tuple[int, int]:
-    # Same settings and bounds as the webhook preview retries (web/webhooks.py).
-    settings = get_settings_manager()
-    try:
-        count = max(0, min(10, int(settings.get("webhook_retry_count", 3))))
-    except (TypeError, ValueError):
-        count = 3
-    try:
-        delay = max(10, min(300, int(settings.get("webhook_retry_delay", 30))))
-    except (TypeError, ValueError):
-        delay = 30
-    return count, delay
+def _retry_reason(not_indexed: int, not_on_disk: int) -> str:
+    if not_on_disk and not not_indexed:
+        return "not on disk yet"
+    if not_indexed and not not_on_disk:
+        return "not in a server's library yet"
+    return "not on disk or not in a server's library yet"
 
 
-def _queue_library_retry(job, cfg: dict, paths: list[str]) -> None:
-    """Create the delayed retry job for files a server hadn't indexed yet, up to ``webhook_retry_count`` retries.
+def _queue_retry(job, cfg: dict, not_indexed: set[str], not_on_disk: set[str]) -> None:
+    """Create the delayed retry job for files a server hadn't indexed yet or that weren't on disk yet.
 
-    Never raises: the job that found the files has already completed.
+    Up to ``webhook_retry_count`` retries, one job for both kinds of file. Never raises: the job that found the files
+    has already completed.
     """
     jm = get_job_manager()
+    paths = sorted(not_indexed | not_on_disk)
+    reason = _retry_reason(len(not_indexed), len(not_on_disk))
     try:
         attempt = int(cfg.get("retry_attempt") or 0) + 1
-        count, delay_setting = _retry_policy()
+        count, delay_setting = retry_policy(get_settings_manager())
         if attempt > count:
             jm.add_log(
                 job.id,
-                f"WARNING - {len(paths)} file(s) still aren't in a server's library after {count} retr"
+                f"WARNING - {len(paths)} file(s) still {reason.removesuffix(' yet')} after {count} retr"
                 f"{'y' if count == 1 else 'ies'}; the next run for these files will try again",
             )
             return
@@ -104,8 +106,7 @@ def _queue_library_retry(job, cfg: dict, paths: list[str]) -> None:
         if len(paths) > MAX_RETRY_FILES:
             jm.add_log(
                 job.id,
-                f"INFO - {len(paths) - MAX_RETRY_FILES} more files the server hasn't indexed yet will be tried on "
-                "the next run",
+                f"INFO - {len(paths) - MAX_RETRY_FILES} more files {reason} will be tried on the next run",
             )
             paths = paths[:MAX_RETRY_FILES]
         delay = retry_delay_s(attempt, delay_setting)
@@ -120,11 +121,10 @@ def _queue_library_retry(job, cfg: dict, paths: list[str]) -> None:
         )
         jm.add_log(
             job.id,
-            f"INFO - {len(paths)} file(s) aren't in a server's library yet; retry {attempt} of {count} "
-            f"in {delay}s (job {retry.id[:8]})",
+            f"INFO - {len(paths)} file(s) {reason}; retry {attempt} of {count} in {delay}s (job {retry.id[:8]})",
         )
     except Exception:
-        logger.exception("Could not queue the retry for files job {} found waiting for a server", job.id)
+        logger.exception("Could not queue the retry for files job {} found waiting", job.id)
 
 
 def _wait_for_retry_time(job_id: str, cfg: dict, cancel_check: Callable[[], bool]) -> bool:
@@ -189,7 +189,9 @@ def build_items(
     items: list[ProcessableItem] = []
     file_paths = [str(p).strip() for p in (job_config.get("file_paths") or []) if str(p).strip()]
     if file_paths:
-        configs = list(registry.configs())
+        # Intro & Credits ownership ignores the preview opt-in (markers/ownership.py), so the local path is picked among
+        # every library; with preview-enabled libraries only, a markers-only library's sender path would stay unmapped.
+        configs = [_all_libraries_listed(cfg) for cfg in registry.configs()]
         mappings = [m for cfg in configs for m in (cfg.path_mappings or [])]
         hints = job_config.get("webhook_item_id_hints") or {}
         for raw in _expand_directory_to_media_files(file_paths, mappings):
@@ -258,6 +260,11 @@ def build_items(
     return list(unique.values()), warnings
 
 
+def _in_flight(job_id: str) -> bool:
+    with _inflight_lock:
+        return job_id in _inflight_jobs
+
+
 def _wait_for_preceding_job(job_id: str, follows_job_id: str | None, cancel_check: Callable[[], bool]) -> bool:
     """Hold a webhook follow-up until its preview job has finished.
 
@@ -265,7 +272,9 @@ def _wait_for_preceding_job(job_id: str, follows_job_id: str | None, cancel_chec
     (which does less work before the gate) would take the slot first and run before the previews for the same
     files. Runs before the gate, so waiting costs no slot. A preview job counting down to a retry
     (PENDING with ``progress.retry_eta``) counts as finished: its backoff can run for over an hour; files a server
-    hasn't indexed yet get their own retry job (``_queue_library_retry``).
+    hasn't indexed yet, or not on disk yet, get their own retry job (``_queue_retry``). A PENDING preview job with no
+    thread to run it (too old to be revived after a restart) counts as finished after ``_ORPHAN_GRACE_POLLS``; while
+    processing is paused it doesn't, as resuming starts it.
 
     Returns:
         False if the job was cancelled while waiting.
@@ -274,6 +283,7 @@ def _wait_for_preceding_job(job_id: str, follows_job_id: str | None, cancel_chec
         return True
     jm = get_job_manager()
     announced = False
+    polls_without_thread = 0
     while True:
         if cancel_check():
             return False
@@ -283,6 +293,17 @@ def _wait_for_preceding_job(job_id: str, follows_job_id: str | None, cancel_chec
         progress = getattr(preceding, "progress", None)
         if preceding.status is JobStatus.PENDING and progress is not None and progress.retry_eta:
             return True
+        if (
+            preceding.status is JobStatus.PENDING
+            and not get_settings_manager().processing_paused
+            and not _in_flight(follows_job_id)
+        ):
+            polls_without_thread += 1
+            if polls_without_thread > _ORPHAN_GRACE_POLLS:
+                jm.add_log(job_id, "INFO - The preview job for these files isn't queued to run; starting without it")
+                return True
+        else:
+            polls_without_thread = 0
         if not announced:
             jm.update_progress(
                 job_id,
@@ -385,6 +406,17 @@ def _skip_finished_before_restart(
     return remaining, dict(carried)
 
 
+def _complete(jm, job_id: str, outcome: dict[str, int], warnings: list[str]) -> None:
+    """Complete the job: failed (red) when every counted file failed, a warning (amber) when some did or on warnings."""
+    failed = outcome.get(FileOutcome.FAILED.value, 0)
+    succeeded = sum(count for key, count in outcome.items() if key != FileOutcome.FAILED.value)
+    if failed and not succeeded:
+        jm.complete_job(job_id, error=" | ".join([f"All {failed} file(s) failed — see the Files panel", *warnings]))
+        return
+    parts = ([f"{failed} file(s) failed"] if failed else []) + warnings
+    jm.complete_job(job_id, warning=" | ".join(parts) or None)
+
+
 def _wait_releasing_slot_while_paused(
     tracker,
     *,
@@ -450,6 +482,7 @@ def run_intro_credits_job(job_id: str) -> None:
     # settle at the admitted value.
     slot = {"held": False, "priority": job.priority}
     cfg = dict(job.config or {})
+    dispatcher = None
 
     def cancel_check() -> bool:
         return jm.is_cancellation_requested(job_id)
@@ -547,14 +580,21 @@ def run_intro_credits_job(job_id: str) -> None:
                 items, carried = _skip_finished_before_restart(jm, job_id, items, ctx.store)
                 if not items:
                     jm.set_job_outcome(job_id, carried)
-                    jm.complete_job(job_id, warning=" | ".join(warnings) if warnings else None)
+                    _complete(jm, job_id, carried, warnings)
                     return
-                waiting_for_library: set[str] = set()
+                not_indexed: set[str] = set()
+                not_on_disk: set[str] = set()
+                # Webhook paths (and their retries) can arrive before the file is visible here (an import still
+                # copying over NFS); the preview job retries those too. A file the user picked, or a library
+                # listing, that isn't on disk won't appear by waiting.
+                retries_missing_files = bool(cfg.get("file_paths")) and cfg.get("source") not in _USER_PICKED_SOURCES
 
                 def on_file_result(file_path, outcome, reason, worker, servers=None):
                     # Any server that hasn't indexed the file yet, even when another server was written.
                     if any(waits_for_library(row) for row in servers or []):
-                        waiting_for_library.add(file_path)
+                        not_indexed.add(file_path)
+                    elif retries_missing_files and outcome == FileOutcome.FILE_NOT_FOUND.value:
+                        not_on_disk.add(file_path)
                     jm.record_file_result(job_id, file_path, outcome, reason, worker, servers=servers)
 
                 set_file_result_callback(on_file_result, job_id=job_id)
@@ -579,6 +619,7 @@ def run_intro_credits_job(job_id: str) -> None:
                     priority=live_priority(),
                     kind=JOB_KIND_INTRO_CREDITS,
                     handlers=kind_handlers(ctx),
+                    carried_outcome=carried,
                 )
                 # The priority route skips the dispatcher while this job has no tracker yet; a change that landed
                 # between reading the priority and registering the tracker would otherwise be lost.
@@ -596,20 +637,24 @@ def run_intro_credits_job(job_id: str) -> None:
                     ),
                 )
                 result = tracker.get_result()
-                outcome = dict(result["outcome"])
-                for key, count in carried.items():
-                    outcome[key] = outcome.get(key, 0) + count
+                outcome = dict(result["outcome"])  # includes the carried counts
                 jm.set_job_outcome(job_id, outcome)
                 if result["cancelled"] or cancel_check():
                     jm.cancel_job(job_id)
                     return
-                jm.complete_job(job_id, warning=" | ".join(warnings) if warnings else None)
-                if waiting_for_library:
-                    _queue_library_retry(job, cfg, sorted(waiting_for_library))
+                _complete(jm, job_id, outcome, warnings)
+                if not_indexed or not_on_disk:
+                    _queue_retry(job, cfg, not_indexed, not_on_disk)
             finally:
                 clear_failures()
     except Exception as exc:
         logger.exception("Intro & Credits job {} failed", job_id)
+        if dispatcher is not None:
+            # Its checks would otherwise go on publishing for a failed job, without a slot or Files-panel rows.
+            try:
+                dispatcher.cancel_job(job_id)
+            except Exception as cancel_exc:
+                logger.warning("Could not stop the remaining files of Intro & Credits job {}: {}", job_id, cancel_exc)
         try:
             jm.complete_job(job_id, error=f"{type(exc).__name__}: {exc}")
         except Exception as complete_exc:

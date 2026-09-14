@@ -309,3 +309,42 @@ class TestWebhookJobsUseIncomingPriority:
         assert job.priority == expected, (
             f"recreated batch job must carry incoming_job_priority={configured!r} as {expected}; got {job.priority}"
         )
+
+
+class TestWebhookJobsUseTheGlobalRetryPolicy:
+    """Both webhook paths hand the job the clamped retry policy (``retry_queue.retry_policy``), shared with the
+    Intro & Credits retries so the bounds can't drift apart."""
+
+    CASES = [
+        ({}, (3, 30)),
+        ({"webhook_retry_count": 5, "webhook_retry_delay": 120}, (5, 120)),
+        ({"webhook_retry_count": 99, "webhook_retry_delay": 1}, (10, 10)),
+        ({"webhook_retry_count": "junk", "webhook_retry_delay": "later"}, (3, 30)),  # hand-edited settings.json
+    ]
+    IDS = ["defaults", "in-range", "clamped", "unreadable"]
+
+    @staticmethod
+    def _configure(values):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        for key, value in values.items():
+            get_settings_manager().set(key, value)
+
+    @staticmethod
+    def _retry(overrides):
+        return overrides["webhook_retry_count"], overrides["webhook_retry_delay"]
+
+    @pytest.mark.parametrize(("values", "expected"), CASES, ids=IDS)
+    def test_vendor_webhook_job(self, values, expected, captured_overrides):
+        self._configure(values)
+        with patch("media_preview_generator.web.webhooks._check_and_record_dedup", return_value=None):
+            create_vendor_webhook_job(
+                source="jellyfin", title="Test", canonical_path="/data/Movies/Q (2024)/Q (2024).mkv", server_id=None
+            )
+        assert self._retry(captured_overrides[-1]["overrides"]) == expected
+
+    @pytest.mark.parametrize(("values", "expected"), CASES, ids=IDS)
+    def test_debounced_webhook_job(self, values, expected, captured_overrides):
+        self._configure(values)
+        TestWebhookJobsUseIncomingPriority._fire_debounced("sonarr", "/data/TV Shows/Q/Season 01/Q - S01E01.mkv")
+        assert self._retry(captured_overrides[-1]["overrides"]) == expected
