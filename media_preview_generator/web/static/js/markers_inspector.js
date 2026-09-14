@@ -165,6 +165,15 @@
         return { row: row, label: label, track: track };
     }
 
+    // Spec §5.5 rule 7: a server's own marker moved a decided credits/preview start later.
+    function shortenedNote(type, shortened) {
+        const edge = `${TYPE_LABELS[type].toLowerCase()} start`;
+        const servers = shortened.servers || [];
+        if (servers.length === 1) return `Shortened to ${servers[0]}'s own ${edge}`;
+        if (!servers.length) return `Shortened to a server's own ${edge}`;
+        return `Shortened to the servers' own ${edge} (${servers.join(', ')})`;
+    }
+
     function note(track, text) {
         track.appendChild(el('span', 'mk-lane-note', text));
     }
@@ -272,6 +281,8 @@
             const d = (payload.decisions || {})[type] || {};
             if (d.status === 'needs_review' && d.reason) {
                 zoom.appendChild(el('div', 'mk-window-note small text-muted', `${TYPE_LABELS[type]} needs review: ${d.reason}`));
+            } else if (d.status === 'decided' && d.shortened_by) {
+                zoom.appendChild(el('div', 'mk-window-note small text-muted', shortenedNote(type, d.shortened_by)));
             }
         });
         scroll.appendChild(zoom);

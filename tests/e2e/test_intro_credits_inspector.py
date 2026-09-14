@@ -28,6 +28,7 @@ def _decision(status: str | None, marker: tuple[str, int, int] | None = None, **
     return {
         "status": status,
         "reason": extra.get("reason", ""),
+        "shortened_by": extra.get("shortened_by"),
         "marker": (
             {
                 "type": marker[0],
@@ -372,6 +373,8 @@ class TestIntroCreditsTab:
         expect(_server_card(page, "jf-1").locator(".mk-plan")).to_have_text("Will add")
         expect(_server_card(page, "jf-1")).not_to_contain_text("All versions")
         expect(_server_card(page, "emby-1")).to_contain_text("Emby has no “credits end”")
+        # Nothing was shortened to a server's own marker: no note under either window.
+        expect(page.locator(".mk-window-note")).to_have_count(0)
 
     @pytest.mark.parametrize(("count", "shown"), [(2, True), (1, False), (None, False)], ids=["two", "one", "unknown"])
     def test_shared_marker_set_note_only_for_a_plex_item_with_several_versions(
@@ -401,6 +404,32 @@ class TestIntroCreditsTab:
         expect(page.locator(".mk-window").nth(1)).to_contain_text("Sources disagree by more than 10 s")
         # Nothing is decided for credits, so no credits lane can disagree with it.
         expect(_lane(page, "ending", "TheIntroDB")).not_to_have_class(re.compile(r"\blane-disagree\b"))
+
+    @pytest.mark.parametrize(
+        ("servers", "line"),
+        [
+            (["Lab Plex"], "Shortened to Lab Plex's own credits start"),
+            (["Lab Plex", "Jellyfin"], "Shortened to the servers' own credits start (Lab Plex, Jellyfin)"),
+        ],
+        ids=["one-server", "two-servers"],
+    )
+    def test_credits_shortened_to_a_servers_own_marker_say_so_under_the_ending(
+        self, authed_page: Page, app_url: str, servers: list, line: str
+    ) -> None:
+        payload = south_park()
+        credits = payload["decisions"]["credits"]
+        credits["reason"] = "chapters; start shortened to the server's own marker (plex-1)"
+        credits["shortened_by"] = {"servers": servers}
+        credits["marker"]["decided_by"] = ["chapters", "server_markers"]
+        inspector = _Inspector(authed_page, app_url, payload)
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        note = page.locator('.mk-window[data-window="ending"] .mk-window-note')
+        expect(note).to_have_count(1)
+        expect(note).to_have_text(line)
+        expect(page.locator('.mk-window[data-window="opening"] .mk-window-note')).to_have_count(0)
+        expect(page.locator(".mk-chips")).to_contain_text("Credits 21:39 →")
 
     def test_movie_shows_only_the_ending_window(self, authed_page: Page, app_url: str) -> None:
         inspector = _Inspector(authed_page, app_url, movie())

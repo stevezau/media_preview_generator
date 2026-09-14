@@ -536,7 +536,8 @@ def test_unknown_file_lists_every_owning_server(store, factory):
     assert payload["duration_ms"] is None and payload["is_movie"] is None
     assert payload["evidence"] == []
     assert payload["decisions"] == {
-        t.value: {"status": None, "reason": "", "marker": None, "proposed": None} for t in MarkerType
+        t.value: {"status": None, "reason": "", "marker": None, "proposed": None, "shortened_by": None}
+        for t in MarkerType
     }
     assert payload["servers"] == [
         {
@@ -627,6 +628,40 @@ def test_missing_client_is_not_listed(store, factory):
     assert inspect.item_payload(PATH, registry=registry, store=store)["servers"] == []
 
 
+@pytest.mark.parametrize(
+    ("status", "reason", "expected"),
+    [
+        (
+            DecisionStatus.DECIDED,
+            "chapters; start shortened to the server's own marker (plex)",
+            {"servers": ["PLEX"]},
+        ),
+        # a server that has since been removed keeps its id
+        (
+            DecisionStatus.DECIDED,
+            "sources agree: skipdb, introdb; start shortened to the server's own marker (gone, plex)",
+            {"servers": ["gone", "PLEX"]},
+        ),
+        (DecisionStatus.DECIDED, "chapters", None),
+        # not published: the shortened marker failed sanity
+        (DecisionStatus.NEEDS_REVIEW, "start shortened to the server's own marker (plex) fails sanity checks", None),
+    ],
+    ids=["one-server", "removed-server", "not-shortened", "needs-review"],
+)
+def test_decisions_name_the_servers_whose_own_markers_shortened_them(store, factory, status, reason, expected):
+    rec = _known_file(store)
+    marker = CREDITS if status is DecisionStatus.DECIDED else None
+    proposed = None if marker else CREDITS
+    store.save_decisions(
+        rec.id, {T.CREDITS: TypeDecision(T.CREDITS, status, marker, proposed, reason)}, settings_fingerprint="f"
+    )
+    registry = _registry(server_config("plex", ServerType.PLEX))
+    payload = inspect.item_payload(PATH, registry=registry, store=store)
+    assert payload["decisions"]["credits"]["reason"] == reason
+    assert payload["decisions"]["credits"]["shortened_by"] == expected
+    assert payload["decisions"]["intro"]["shortened_by"] is None
+
+
 def test_known_file_decisions_and_evidence(store, factory):
     rec = _known_file(store)
     store.save_decisions(
@@ -653,6 +688,7 @@ def test_known_file_decisions_and_evidence(store, factory):
                 "locked": False,
             },
             "proposed": None,
+            "shortened_by": None,
         },
         "credits": {
             "status": "decided",
@@ -665,14 +701,22 @@ def test_known_file_decisions_and_evidence(store, factory):
                 "locked": False,
             },
             "proposed": None,
+            "shortened_by": None,
         },
         "recap": {
             "status": "needs_review",
             "reason": "disagree",
             "marker": None,
             "proposed": {"start_ms": 1_000, "end_ms": 8_000},
+            "shortened_by": None,
         },
-        "preview": {"status": "disabled", "reason": "not detected", "marker": None, "proposed": None},
+        "preview": {
+            "status": "disabled",
+            "reason": "not detected",
+            "marker": None,
+            "proposed": None,
+            "shortened_by": None,
+        },
     }
     assert payload["evidence"] == [
         {

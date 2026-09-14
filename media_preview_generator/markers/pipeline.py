@@ -1,7 +1,9 @@
 """Intro & Credits per-file pipeline (spec §6.2).
 
-owners → identity → kind → evidence in the user's source order (a normal run stops once every enabled type is
-decided by more than chapters alone; a forced re-detect asks every source) → decide from everything stored → store →
+owners → identity → kind → evidence in the user's source order (a normal run stops asking once every enabled type is
+decided by more than chapters alone, but still reads a server never asked for the file; a forced re-detect asks every
+source) →
+decide from everything stored → store →
 publish to each owner. ``check_item`` runs on the dispatcher's checking threads (no worker slot); it returns
 None only when a registered local detector that needs a worker has to run (a type it can decide is undecided and its
 answer is due, or its stored answer is from another version), which sends the item to a GPU/CPU worker where
@@ -67,7 +69,7 @@ from .sources.ratelimit import PRIORITY_LOW, RESET_TIME_LABEL
 from .sources.server_markers import READER_VERSION, imported_detail, importer_plugin, read_server_markers
 from .sources.skipdb import SkipDbClient
 from .sources.theintrodb import TheIntroDbClient
-from .store import FileRecord, ItemPublishStateRow, MarkerStore, get_marker_store
+from .store import EvidenceRow, FileRecord, ItemPublishStateRow, MarkerStore, get_marker_store
 
 NO_DATA_RETRY = timedelta(days=14)
 # Servers detect their own markers on a schedule (Plex overnight), so "none there" is asked again a day later.
@@ -81,12 +83,14 @@ PARSER_VERSIONS = {
     Source.SKIPDB: skipdb.PARSER_VERSION,
 }
 _STORED_LOOKUPS = ("ok", "no_data")
+_CHAPTERS_AND_SERVERS = frozenset({Source.CHAPTERS.value, *(s.value for s in SERVER_SOURCES)})
 # Plex and Emby can't tell our markers from their own, and Plex shows one marker set per item across its versions, so
 # their markers are never read back from an item we published to. Jellyfin's reader leaves ours out itself.
 _ITEM_WIDE_MARKERS = frozenset({ServerType.PLEX, ServerType.EMBY})
 # Servers where a plugin can import a crowd skip database into the server's own markers; Plex detects its own.
 _IMPORTER_PLUGIN_SERVERS = frozenset({ServerType.JELLYFIN, ServerType.EMBY})
 PLUGINS_UNKNOWN_DETAIL = "Couldn't read this server's plugins, so its markers aren't used"
+UNUSABLE_SERVER_MARKERS_DETAIL = "Couldn't read this server's markers, or they may describe another cut"
 _CANCELLED = "cancelled by user"
 # A ready Plex whose Plex Pass didn't answer (usually restarting): files within this long share the answer instead of
 # each running the whole check (lock probe, Plex's HTTP connect with its retries, schema and library scans).
@@ -478,8 +482,14 @@ def _decisions_changed(
 
 
 def _decided_beyond_chapters(decision: TypeDecision) -> bool:
-    """Decided, and not by chapters alone: two agreeing sources may still veto a chapter (spec §5.5 rule 3)."""
-    return decision.status is DecisionStatus.DECIDED and decision.marker.decided_by != (Source.CHAPTERS.value,)
+    """Decided, and not by chapters alone: two agreeing sources may still veto a chapter (spec §5.5 rule 3).
+
+    A chapter that markers already on servers shortened or confirmed is still chapters alone: server markers never
+    decide on their own (rule 7).
+    """
+    if decision.status is not DecisionStatus.DECIDED:
+        return False
+    return not set(decision.marker.decided_by) <= _CHAPTERS_AND_SERVERS
 
 
 def _all_decided(decisions: dict[MarkerType, TypeDecision], types: frozenset[MarkerType]) -> bool:
@@ -682,13 +692,26 @@ def _importer_plugin(ctx: PipelineContext, owner: _Owning) -> tuple[bool, str | 
     return found is not None, found or None
 
 
-def _read_server_markers(ctx: PipelineContext, rec: FileRecord, servers: _ItemServers, refresh: bool) -> None:
+def _read_server_markers(
+    ctx: PipelineContext, rec: FileRecord, servers: _ItemServers, refresh: bool, *, first_read_only: bool
+) -> None:
+    """Store each owning server's current markers for the file as evidence, when they are due.
+
+    Args:
+        ctx: The job's context.
+        rec: The file.
+        servers: The file's owning servers and their item ids.
+        refresh: A forced run: read every server we never published to.
+        first_read_only: Every wanted type is already decided, so only a server never asked for this file (or asked by
+            an older reader) is read -- its own markers can still shorten decided credits (spec §5.5 rule 7). An empty
+            or unusable answer isn't asked again on such a run.
+    """
     for owner in servers.owning:
         cfg = owner.config
         published = ctx.store.get_publish_state(rec.id, cfg.id)
         if published and published.markers:
             continue  # what's there now is (partly) ours: never a second opinion
-        if not refresh and not _server_markers_due(ctx, rec, cfg.id):
+        if not refresh and not _server_markers_due(ctx, rec, cfg.id, first_read_only=first_read_only):
             continue
         item_id = servers.item_id(owner)
         if not item_id:
@@ -701,10 +724,20 @@ def _read_server_markers(ctx: PipelineContext, rec: FileRecord, servers: _ItemSe
         except Exception as exc:
             logger.debug("Reading markers on {} failed for {}: {}", cfg.name, rec.canonical_path, exc)
             found = None
-        if found is not None and item_wide and ctx.store.published_to_item(cfg.id, item_id):
-            found = None  # another version of this item was published while the read was out: it may show ours
         if found is None:
+            if not _server_rows(ctx, rec, cfg.id):
+                # Remembered, so a run with everything decided doesn't ask again; a run still missing evidence does.
+                ctx.store.replace_evidence(
+                    rec.id,
+                    Source.SERVER_MARKERS,
+                    [],
+                    origin=cfg.id,
+                    detail=UNUSABLE_SERVER_MARKERS_DETAIL,
+                    version=READER_VERSION,
+                )
             continue
+        if item_wide and ctx.store.published_to_item(cfg.id, item_id):
+            continue  # another version of this item was published while the read was out: it may show ours
         source, detail = Source.SERVER_MARKERS, ""
         if found and cfg.type in _IMPORTER_PLUGIN_SERVERS:
             readable, importer = _importer_plugin(ctx, owner)
@@ -725,10 +758,18 @@ def _read_server_markers(ctx: PipelineContext, rec: FileRecord, servers: _ItemSe
         )
 
 
-def _server_markers_due(ctx: PipelineContext, rec: FileRecord, server_id: str) -> bool:
-    rows = [r for r in ctx.store.evidence_rows(rec.id) if r.source in SERVER_SOURCES and r.origin == server_id]
+def _server_rows(ctx: PipelineContext, rec: FileRecord, server_id: str) -> list[EvidenceRow]:
+    return [r for r in ctx.store.evidence_rows(rec.id) if r.source in SERVER_SOURCES and r.origin == server_id]
+
+
+def _server_markers_due(ctx: PipelineContext, rec: FileRecord, server_id: str, *, first_read_only: bool) -> bool:
+    rows = _server_rows(ctx, rec, server_id)
     if not rows or ctx.store.evidence_version(rec.id, rows[0].source, server_id) != READER_VERSION:
         return True
+    if first_read_only:
+        return False
+    if any(r.detail == UNUSABLE_SERVER_MARKERS_DETAIL for r in rows):
+        return True  # unreadable or another cut last time: asked again on every run that still needs evidence
     fetched = max(datetime.fromisoformat(r.fetched_at) for r in rows)
     return all(r.type is None for r in rows) and ctx.now() - fetched > EMPTY_SERVER_MARKERS_RETRY
 
@@ -1165,7 +1206,9 @@ def _attempt(
     types = _enabled_types(ctx.settings, ids)
     # A normal run stops asking once stored answers decide everything beyond chapters alone (answers from an older
     # parser, reader or detector version are still asked again; ``_detector_pending`` says when a detector runs); a
-    # forced run asks every source and runs every detector once, so no stale answer is left behind.
+    # forced run asks every source and runs every detector once, so no stale answer is left behind. A server never
+    # asked for this file is still read once everything is decided: its own markers can shorten decided credits
+    # (spec §5.5 rule 7); once we publish to a server its markers are never read again.
     gather_all = ctx.force
     decisions = _decide(ctx, rec, types)
     lookup_ids: MediaIds | None = None
@@ -1173,7 +1216,12 @@ def _attempt(
     for source_id in ctx.settings.ordered_enabled_sources():
         source = Source(source_id)
         refresh = _refreshing(ctx, path, source)
-        if not gather_all and _all_decided(decisions, types) and not _stale_evidence(ctx, rec, source):
+        if (
+            not gather_all
+            and source is not Source.SERVER_MARKERS
+            and _all_decided(decisions, types)
+            and not _stale_evidence(ctx, rec, source)
+        ):
             continue
         if cancelled():
             return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
@@ -1193,7 +1241,8 @@ def _attempt(
                     budget_exhausted_labels.add(_ONLINE_LABELS[source])
         elif source is Source.SERVER_MARKERS:
             phase("Reading markers already on servers…")
-            _read_server_markers(ctx, rec, servers, refresh)
+            first_read_only = not gather_all and _all_decided(decisions, types)
+            _read_server_markers(ctx, rec, servers, refresh, first_read_only=first_read_only)
         else:
             pending = [
                 spec

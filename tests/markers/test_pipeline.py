@@ -1029,7 +1029,27 @@ class TestEvidenceAndDecisions:
         _run(_ctx(store, reg, clients=clients, settings_raw=raw), media, {"plex-1": plex})
         assert plex.write.call_args.args[1] == [Marker(T.INTRO, 127_000, 157_000, ("skipdb",))]
         assert [len(c.calls) for c in clients.values()] == [0, 0, 1]
-        reg.get("plex-1").get_markers.assert_not_called()
+        # The server is still read before the first publish: its own marker could shorten the decided skip (rule 7).
+        reg.get("plex-1").get_markers.assert_called_once_with("item-plex-1")
+
+    def test_a_server_read_after_everything_is_decided_shortens_agreed_credits(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        plex_server = reg.get("plex-1")
+        plex_server.get_markers.return_value = [
+            {"type": "credits", "start_ms": 1_255_500, "end_ms": DUR, "final": True}
+        ]
+        plex_server.get_part_durations.return_value = [DUR]
+        clients = _clients(
+            introdb=LookupResult("ok", (Candidate(T.CREDITS, 1_239_000, None, Source.INTRODB),)),
+            skipdb=LookupResult("ok", (Candidate(T.CREDITS, 1_241_000, None, Source.SKIPDB),)),
+        )
+        plex = ready_publisher()
+        _run(_ctx(store, reg, clients=clients, settings_raw=CREDITS_DEFAULTS), media, {"plex-1": plex})
+        shortened = Marker(T.CREDITS, 1_255_500, DUR, ("introdb", "skipdb", "server_markers"))
+        assert plex.write.call_args.args == ("item-plex-1", [shortened])
+        decision = store.get_decisions(store.get_file(media).id)[T.CREDITS]
+        assert decision.reason == "sources agree: introdb, skipdb; start shortened to the server's own marker (plex-1)"
+        plex_server.get_markers.assert_called_once_with("item-plex-1")
 
     def test_chapters_alone_keep_the_search_open_so_agreeing_sources_veto_them_on_the_first_run(self, store, media):
         # Audit B S1: the generic "Intro" chapter is the cold open (0-95 s); the theme sits in an unnamed chapter
@@ -1710,6 +1730,136 @@ class TestServerMarkersFromVendors:
         ]
         plex_server.get_markers.assert_called_once_with("item-plex-1")
         plex_server.get_part_durations.assert_called_once_with("item-plex-1")
+
+    @pytest.mark.parametrize(
+        ("stype", "durations", "ours", "shortened"),
+        [
+            (ServerType.PLEX, [DUR], False, True),
+            (ServerType.PLEX, [DUR, DUR - 60_000], False, False),  # another cut of the item: not evidence
+            (ServerType.JELLYFIN, None, False, True),
+            (ServerType.JELLYFIN, None, True, False),  # the segment is the one our Bridge plugin serves
+        ],
+        ids=["plex-own", "plex-other-cut", "jellyfin-own", "jellyfin-ours"],
+    )
+    def test_the_servers_own_credits_shorten_an_early_end_credits_chapter(
+        self, store, media, stype, durations, ours, shortened
+    ):
+        # Lab scale run, Avatar (2009) / Innerspace (1987): "End Credits" chapters start on the last story shots, and
+        # the server's own credits start later, on the roll.
+        reg = _registry(media, stype)
+        sid = f"{stype.value}-1"
+        server = reg.get(sid)
+        if stype is ServerType.PLEX:
+            server.get_markers.return_value = [{"type": "credits", "start_ms": 1_255_500, "end_ms": DUR, "final": True}]
+            server.get_part_durations.return_value = durations
+        else:
+            server.get_media_segments.return_value = [
+                {"Type": "Outro", "StartTicks": _ticks(1_255_500), "EndTicks": _ticks(DUR)}
+            ]
+            if ours:
+                server.get_bridge_markers.return_value = [
+                    {"type": "Outro", "startTicks": _ticks(1_255_500), "endTicks": _ticks(DUR)}
+                ]
+        pub = ready_publisher() if stype is ServerType.PLEX else ready_publisher("jellyfin_bridge")
+        chapters = (Chapter(0, 1_239_000, "Chapter 1"), Chapter(1_239_000, None, "End Credits"))
+        _run(_ctx(store, reg, settings_raw=CREDITS_DEFAULTS), media, {sid: pub}, probe=_probe(chapters))
+        decision = store.get_decisions(store.get_file(media).id)[T.CREDITS]
+        if shortened:
+            expected = Marker(T.CREDITS, 1_255_500, DUR, ("chapters", "server_markers"))
+            assert decision.reason == f"chapters; start shortened to the server's own marker ({sid})"
+        else:
+            expected = Marker(T.CREDITS, 1_239_000, DUR, ("chapters",))
+            assert decision.reason == "chapters"
+        assert pub.write.call_args.args == (f"item-{sid}", [expected])
+
+    @pytest.mark.parametrize(
+        ("setup", "marker"),
+        [
+            # Plex's own credits start 16.5 s after the chapter: the start moves
+            (
+                "plex-shortens",
+                Marker(T.CREDITS, 1_255_500, DUR, ("chapters", "server_markers")),
+            ),
+            # Plex's own credits and an importer plugin's copy on Jellyfin both agree with the chapter: two groups give
+            # the chapter an earlier end, still credited to chapters and server markers only
+            (
+                "plex-and-imported-copy",
+                Marker(T.CREDITS, 1_239_000, 1_290_000, ("chapters", "server_markers", "server_markers_imported")),
+            ),
+        ],
+    )
+    def test_chapters_backed_only_by_server_markers_keep_the_search_open(self, tmp_path, media, setup, marker):
+        # Server markers never decide alone, so chapters + server markers still count as chapters alone: the free
+        # sources are asked again when their "no data" answer is due, TheIntroDB isn't spent on it at Low.
+        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
+        if setup == "plex-shortens":
+            reg = _registry(media, ServerType.PLEX)
+            plex_rows = [{"type": "credits", "start_ms": 1_255_500, "end_ms": DUR, "final": True}]
+        else:
+            reg = _registry(media, ServerType.PLEX, ServerType.JELLYFIN)
+            reg.configs_by_id["jellyfin-1"].markers["enabled"] = False
+            jellyfin = reg.get("jellyfin-1")
+            jellyfin.get_plugin_names.return_value = ["IntroDB"]
+            jellyfin.get_media_segments.return_value = [
+                {"Type": "Outro", "StartTicks": _ticks(1_240_000), "EndTicks": _ticks(1_290_000)}
+            ]
+            plex_rows = [{"type": "credits", "start_ms": 1_241_000, "end_ms": 1_300_000, "final": False}]
+        reg.get("plex-1").get_markers.return_value = plex_rows
+        reg.get("plex-1").get_part_durations.return_value = [DUR]
+        clients = _clients()
+        raw = {"sources": [{"id": "theintrodb", "enabled": True}], "detect": {"intro": False, "credits": True}}
+        chapters = (Chapter(0, 1_239_000, "Chapter 1"), Chapter(1_239_000, None, "End Credits"))
+        for _ in range(2):
+            ctx = _ctx(store, reg, clients=clients, settings_raw=raw, now=lambda: clock["t"])
+            ctx.priority = lambda: 3
+            _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe(chapters))
+            assert store.get_markers(store.get_file(media).id)[T.CREDITS] == marker
+            clock["t"] += pipeline.NO_DATA_RETRY + timedelta(seconds=1)
+        assert (len(clients["introdb"].calls), len(clients["skipdb"].calls)) == (2, 2)
+        assert clients["theintrodb"].calls == []
+        store.close()
+
+    @pytest.mark.parametrize("case", ["plex-cant-publish", "other-cut-item", "published-server"])
+    def test_with_everything_decided_a_server_is_read_only_the_first_time(self, tmp_path, media, case):
+        # Credits decided by IntroDB + SkipDB before the servers come up. Runs two days apart, so the empty-answer
+        # retry (1 day) would be due every time: a decided file reads each server once, whatever it answered.
+        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
+        types = (ServerType.PLEX,) if case != "other-cut-item" else (ServerType.PLEX, ServerType.JELLYFIN)
+        reg = _registry(media, *types)
+        plex_server = reg.get("plex-1")
+        plex = ready_publisher()
+        publishers = {"plex-1": plex}
+        if case == "plex-cant-publish":
+            plex.capability.return_value = CapabilityReport(Capability.NEEDS_LOCAL_DB, "Plex's database isn't local")
+        elif case == "other-cut-item":
+            # Plex only lends evidence here; its item has a second version 60 s shorter, so its markers aren't used.
+            reg.configs_by_id["plex-1"].markers["enabled"] = False
+            plex_server.get_markers.return_value = [
+                {"type": "credits", "start_ms": 1_255_500, "end_ms": DUR, "final": True}
+            ]
+            plex_server.get_part_durations.return_value = [DUR, DUR - 60_000]
+            publishers = {"jellyfin-1": ready_publisher("jellyfin_bridge")}
+        clients = _clients(
+            introdb=LookupResult("ok", (Candidate(T.CREDITS, 1_239_000, None, Source.INTRODB),)),
+            skipdb=LookupResult("ok", (Candidate(T.CREDITS, 1_241_000, None, Source.SKIPDB),)),
+        )
+        reads = []
+        for _ in range(4):
+            before = plex_server.get_markers.call_count
+            ctx = _ctx(store, reg, clients=clients, settings_raw=CREDITS_DEFAULTS, now=lambda: clock["t"])
+            _run(ctx, media, publishers)
+            reads.append(plex_server.get_markers.call_count - before)
+            decision = store.get_decisions(store.get_file(media).id)[T.CREDITS]
+            assert decision.status is DecisionStatus.DECIDED
+            clock["t"] += timedelta(days=2)
+        assert reads == [1, 0, 0, 0]
+        if case == "published-server":
+            plex.write.assert_called_once()
+        else:
+            plex.write.assert_not_called()
+        store.close()
 
     @pytest.mark.parametrize(
         ("stype", "durations", "expected"),

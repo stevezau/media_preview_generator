@@ -581,16 +581,20 @@ drag-to-reorder:
   different (then the file goes to **Needs review**); without chapters, two independent sources must agree.
 - **Medium** — also accepts a single source, but only one that checks *your* file's own cut: chapters, or a SkipDB
   exact/shifted match. A single IntroDB or TheIntroDB answer never publishes alone, because neither knows which cut
-  of the file you have.
+  of the file you have. A lone SkipDB answer publishes intros and recaps only — its credits often start minutes
+  before the real credit roll, so they still need a second source to agree.
 
 Markers already on a Plex/Jellyfin/Emby server only ever *confirm* another source — they never publish on their own,
 and they can only **shorten** a skip (a later intro start, an earlier credits end), never lengthen one. That's
 deliberate: a crowd-sourced answer that runs to the very end of the file must never swallow a scene after the
-credits that the server's own marker correctly stops before. A Jellyfin or Emby server's markers imported by its own
-intro-database plugin (e.g. an AniSkip-style importer) don't count as an independent second opinion — they join the
-online-database group instead of adding a vote of their own. Plex and Emby keep one marker set per item, so when an
-item has another version whose length differs from this file's by more than 2 seconds (or the lengths can't be
-read), that server's markers aren't used for this file at all.
+credits that the server's own marker correctly stops before. Once credits are decided, a server's own detected
+markers can also move the credits start later — when none of them already covers the decided start and one starts
+more than 10 seconds later — so an "End Credits" chapter placed on the last shot of the story doesn't skip that shot;
+the Inspector then says "Shortened to Plex's own credits start". Intro ends are never moved this way. A Jellyfin or
+Emby server's markers imported by its own intro-database plugin (e.g. an AniSkip-style importer) never do that and
+don't count as an independent second opinion — they join the online-database group instead of adding a vote of their
+own. Plex and Emby keep one marker set per item, so when an item has another version whose length differs from this
+file's by more than 2 seconds (or the lengths can't be read), that server's markers aren't used for this file at all.
 
 **"Never overwrite my edits"** (on by default) means a marker you lock always wins over detection. In this release
 the Inspector only shows markers and offers **Re-detect**; adjusting and locking markers there comes in a later

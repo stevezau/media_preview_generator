@@ -33,6 +33,7 @@ owner's Demon Slayer S03E05 and Rick and Morty S01 files (ffprobe / stat). No sc
 | `s12_stale_chapter_rules.py` | MED-4 | Chapters stored by an older rule set, then a normal run |
 | `s13_plex_item_wide_markers_other_version.py` | MED-2 | Plex's item-wide intro from the WEB version read for the Blu-ray version |
 | `online43_decide.py` | MED-3, LOW-6 (reverted) | The 43 verified online cases through `decide()` at three settings |
+| `scale_replay_s1.py` | Scale run F2, F3 | `decide()` of two checkouts on the lab scale run's stored evidence with prod Plex's markers injected (reads the git-ignored `lab/results/scale/`) |
 
 `harness.py` is the shared setup. The fix lane adapted a few scripts so they run on both the audited commit and the
 fixed code: `s3` sets the importer plugin, `s13` sets the item's two part durations (the WEB cut is modeled 81 s
@@ -60,3 +61,10 @@ Full output in `out/before/` and `out/after/`.
 LOW-6 (the agreed edge taken as the safer agreeing value instead of source order) was tried in this lane and reverted
 by the controller: it published Daredevil S03E02 (TheIntroDB on) 238.0-299.6 s against a 287.7 s truth by removing a
 conflict, and flipped chapter vetoes. The table above is the code without it.
+
+## Scale-run fix S1 (F2, F3)
+
+`scale_replay_s1.py run before` on a `git archive ec0b684` export and `run after` on the fix, then `compare before
+after`; per-file output stays in `lab/results/scale/replay-s1-*.json`. The other scripts' output is unchanged except
+`online43` with TheIntroDB on at Medium: credits 1 ok / 5 early / 2 late / 30 review → 1 ok / 0 early / 1 late / 36
+review (the six lone SkipDB credits now need a second source), the same as High.

@@ -16,6 +16,7 @@ from loguru import logger
 
 from ..servers.base import ServerConfig, ServerType
 from ..servers.ownership import OwnershipMatch, apply_path_mappings
+from .decide import DecisionStatus, shortened_by
 from .models import Marker, MarkerType
 from .outcomes import kept_note, with_kept_note
 from .ownership import allowed_matches, owning_servers
@@ -584,6 +585,18 @@ def _degraded_row(cfg: ServerConfig, exc: Exception) -> dict:
     }
 
 
+def _shortened_by(decision: Any, registry: Any) -> dict | None:
+    """The servers whose own markers shortened a decided credits/preview start (spec §5.5 rule 7), by name."""
+    server_ids = shortened_by(decision.reason) if decision.status is DecisionStatus.DECIDED else None
+    if server_ids is None:
+        return None
+    names = []
+    for server_id in server_ids:
+        cfg = registry.get_config(server_id)
+        names.append(cfg.name if cfg is not None and cfg.name else server_id)
+    return {"servers": names}
+
+
 def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> dict:
     """Decisions, evidence and per-server state for one file (the Inspector's Intro & Credits tab).
 
@@ -593,7 +606,8 @@ def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> d
         store: The markers store.
 
     Returns:
-        ``known``, ``canonical_path``, ``duration_ms``, ``is_movie``, ``decisions`` by type, ``evidence`` rows (empty
+        ``known``, ``canonical_path``, ``duration_ms``, ``is_movie``, ``decisions`` by type (``shortened_by``:
+        ``{"servers": [names]}`` when the servers' own markers shortened a decided credits/preview start, else None), ``evidence`` rows (empty
         lookups have ``type`` None) and one row per owning server with what it shows now (read live; None when that
         failed), what is ours there, this file's last publish (``publish_status``, ``publish_message``), the server
         item's last publish (``item_status``; another version of a shared Plex item may have written or failed
@@ -628,6 +642,7 @@ def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> d
                 if d and d.proposed_start_ms is not None
                 else None
             ),
+            "shortened_by": _shortened_by(d, registry) if d else None,
         }
     if rec:
         payload["evidence"] = [

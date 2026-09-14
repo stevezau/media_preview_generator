@@ -12,6 +12,7 @@ from media_preview_generator.markers.decide import (
     TypeDecision,
     decide,
     sanity_problem,
+    shortened_by,
 )
 from media_preview_generator.markers.models import Candidate, Marker, MarkerType, Source
 
@@ -535,16 +536,17 @@ class TestAgreement:
     def test_credits_time_must_come_from_a_confirmed_candidate(self):
         # TheIntroDB's own start (1251s) is 15s from the nearest independent source (Plex, 1266s)
         # -- outside the 10s tolerance -- so it must not win just because it has the highest
-        # source precedence.
+        # source precedence. IntroDB's credits end at 1280s, so neither server start is far enough
+        # inside the skip to shorten it (rule 7) and the start stays the one the sources decided.
         cands = [
             credits(S.THEINTRODB, 1_251_000),
-            credits(S.INTRODB, 1_257_000),
+            credits(S.INTRODB, 1_257_000, 1_280_000),
             credits(S.SERVER_MARKERS, 1_266_000, origin="plex-1"),
             credits(S.SERVER_MARKERS, 1_272_000, origin="jellyfin-1"),
         ]
         d = decide(cands, ctx(), {})[T.CREDITS]
         assert d.status is DecisionStatus.DECIDED
-        assert (d.marker.start_ms, d.marker.end_ms) == (1_257_000, DUR)
+        assert (d.marker.start_ms, d.marker.end_ms) == (1_257_000, 1_280_000)
         assert d.marker.decided_by == ("introdb", "server_markers")
 
     def test_intro_time_must_come_from_a_confirmed_candidate(self):
@@ -989,16 +991,18 @@ class TestMediumContradiction:
         ("longer", "shorter"),
         [
             (intro(S.SKIPDB, 10_000, 100_000), intro(S.SKIPDB, 80_000, 100_000)),
-            (credits(S.SKIPDB, 1_300_000), credits(S.SKIPDB, 1_300_000, 1_310_000)),
+            # SkipDB never decides credits alone (rule 6), so a local detector stands in for the credits row
+            (credits(S.CREDITS_TEXT, 1_300_000), credits(S.CREDITS_TEXT, 1_300_000, 1_310_000)),
         ],
     )
     def test_same_source_pair_at_medium_publishes_the_safer_other_edge(self, longer, shorter, reverse):
         cands = [shorter, longer] if reverse else [longer, shorter]
         d = decide(cands, ctx("medium", types=(longer.type,)), {})[longer.type]
+        name = longer.source.value
         assert d.status is DecisionStatus.DECIDED
-        assert d.marker == Marker(shorter.type, shorter.start_ms, shorter.end_ms, ("skipdb",))
+        assert d.marker == Marker(shorter.type, shorter.start_ms, shorter.end_ms, (name,))
         assert d.proposed is None
-        assert d.reason == "single source (skipdb)"
+        assert d.reason == f"single source ({name})"
 
     @pytest.mark.parametrize("reverse", [False, True])
     @pytest.mark.parametrize(
@@ -1028,10 +1032,10 @@ class TestMediumContradiction:
             ),
             (
                 [
-                    Candidate(T.CREDITS, 1_300_000, None, S.SKIPDB),
-                    Candidate(T.CREDITS, 1_302_000, 1_310_000, S.SKIPDB, 0.5),
+                    Candidate(T.CREDITS, 1_300_000, None, S.CREDITS_TEXT),
+                    Candidate(T.CREDITS, 1_302_000, 1_310_000, S.CREDITS_TEXT, 0.5),
                 ],
-                Marker(T.CREDITS, 1_300_000, 1_310_000, ("skipdb",)),
+                Marker(T.CREDITS, 1_300_000, 1_310_000, ("credits_text",)),
             ),
         ],
     )
@@ -1040,7 +1044,7 @@ class TestMediumContradiction:
             d = decide(order, ctx("medium", types=(marker.type,)), {})[marker.type]
             assert d.status is DecisionStatus.DECIDED
             assert (d.marker, d.proposed) == (marker, None)
-            assert d.reason == "single source (skipdb)"
+            assert d.reason == f"single source ({marker.decided_by[0]})"
 
     def test_medium_composed_marker_failing_sanity_needs_review(self):
         # the other answer's later start (98s) with the first's end (100s) leaves a 2s segment
@@ -1062,6 +1066,356 @@ class TestMediumContradiction:
         cands = [intro(S.THEINTRODB, 10_000, 40_000), intro(S.SKIPDB, 100_000, 130_000)]
         d = decide(cands, ctx("high"), {})[T.INTRO]
         assert d.status is DecisionStatus.NEEDS_REVIEW and d.marker is None
+
+
+class TestMediumSkipDbAlone:
+    """Rule 6: at "Medium" SkipDB alone may decide an intro or recap, never credits or a preview (lab scale run: every
+    lone SkipDB credits answer started early, Battlestar Galactica S04E05 by 6.7 min)."""
+
+    @pytest.mark.parametrize(
+        ("cand", "medium"),
+        [
+            (intro(S.SKIPDB, 127_000, 157_000), DecisionStatus.DECIDED),
+            (Candidate(T.RECAP, 20_000, 60_000, S.SKIPDB), DecisionStatus.DECIDED),
+            (credits(S.SKIPDB, 1_239_000, 1_300_000), DecisionStatus.NEEDS_REVIEW),
+            (Candidate(T.PREVIEW, 1_290_000, 1_310_000, S.SKIPDB), DecisionStatus.NEEDS_REVIEW),
+        ],
+        ids=["intro", "recap", "credits", "preview"],
+    )
+    def test_skipdb_alone_decides_only_intros_and_recaps_at_medium(self, cand, medium):
+        own = Marker(cand.type, cand.start_ms, cand.end_ms, ("skipdb",))
+        for publish_when, expected in (("high", DecisionStatus.NEEDS_REVIEW), ("medium", medium)):
+            d = decide([cand], ctx(publish_when, types=(cand.type,)), {})[cand.type]
+            assert d.status is expected, publish_when
+            if expected is DecisionStatus.DECIDED:
+                assert (d.marker, d.proposed, d.reason) == (own, None, "single source (skipdb)")
+            else:
+                assert (d.marker, d.proposed, d.reason) == (None, own, "sources don't agree yet")
+
+    def test_skipdb_credits_still_decide_with_an_agreeing_independent_source_at_medium(self):
+        cands = [credits(S.SKIPDB, 1_239_000), credits(S.CREDITS_TEXT, 1_243_000, 1_300_000)]
+        for order in (cands, cands[::-1]):
+            d = decide(order, ctx("medium"), {})[T.CREDITS]
+            assert d.status is DecisionStatus.DECIDED
+            assert d.marker == Marker(T.CREDITS, 1_239_000, 1_300_000, ("skipdb", "credits_text"))
+
+
+def _permutations(cands):
+    return [list(p) for p in itertools.permutations(cands)]
+
+
+class TestServerMarkersShortenTheDecidedEdge:
+    """Rule 7: once credits or a preview are decided, the servers' own markers pull the start later, toward a shorter
+    skip. Intros and recaps never move (lab scale run frame check: every intro end was already right)."""
+
+    PLEX_CREDITS = credits(S.SERVER_MARKERS, 1_255_500, None, "plex-1")  # 16.5 s after 1_239_000
+
+    @pytest.mark.parametrize(
+        ("decided", "server", "marker", "reason"),
+        [
+            # Avatar (2009): the "End Credits" chapter starts on the last story shot; Plex's own credits start 16.5 s
+            # later, on the roll
+            (
+                [credits(S.CHAPTERS, 5_500_000)],
+                credits(S.SERVER_MARKERS, 5_516_500, None, "plex-1"),
+                Marker(T.CREDITS, 5_516_500, MOVIE_DUR, ("chapters", "server_markers")),
+                "chapters; start shortened to the server's own marker (plex-1)",
+            ),
+            (
+                [credits(S.CHAPTERS, 1_239_000)],
+                PLEX_CREDITS,
+                Marker(T.CREDITS, 1_255_500, DUR, ("chapters", "server_markers")),
+                "chapters; start shortened to the server's own marker (plex-1)",
+            ),
+            (
+                [credits(S.THEINTRODB, 1_239_000), credits(S.SKIPDB, 1_241_000)],
+                PLEX_CREDITS,
+                Marker(T.CREDITS, 1_255_500, DUR, ("theintrodb", "skipdb", "server_markers")),
+                "sources agree: theintrodb, skipdb; start shortened to the server's own marker (plex-1)",
+            ),
+            # a Jellyfin server's own preview segment starts 15 s after a "Preview" chapter
+            (
+                [Candidate(T.PREVIEW, 1_280_000, None, S.CHAPTERS)],
+                Candidate(T.PREVIEW, 1_295_000, None, S.SERVER_MARKERS, origin="jf-1"),
+                Marker(T.PREVIEW, 1_295_000, DUR, ("chapters", "server_markers")),
+                "chapters; start shortened to the server's own marker (jf-1)",
+            ),
+        ],
+        ids=["movie-chapter-credits", "chapter-credits", "agreed-credits", "chapter-preview"],
+    )
+    def test_the_start_moves_to_the_servers_own_marker(self, decided, server, marker, reason):
+        movie = decided[0].start_ms >= 5_000_000
+        x = ctx(is_movie=movie, duration=MOVIE_DUR if movie else DUR, types=(marker.type,))
+        for order in _permutations([*decided, server]):
+            d = decide(order, x, {})[marker.type]
+            assert d.status is DecisionStatus.DECIDED
+            assert (d.marker, d.proposed, d.reason) == (marker, None, reason)
+        assert shortened_by(d.reason) == (server.origin,)
+        # Without the server's marker the same sources decide the longer skip.
+        d = decide(decided, x, {})[marker.type]
+        assert d.status is DecisionStatus.DECIDED
+        assert d.marker.start_ms < marker.start_ms
+        assert "server_markers" not in d.marker.decided_by
+
+    @pytest.mark.parametrize(
+        ("decided", "servers", "marker", "reason"),
+        [
+            # Plex's intro ends 7 s before the chapter's (it stops partway through the opening)
+            (
+                [intro(S.CHAPTERS, 126_771, 157_000)],
+                [intro(S.SERVER_MARKERS, 127_000, 150_000, "plex-1")],
+                Marker(T.INTRO, 126_771, 157_000, ("chapters",)),
+                "chapters",
+            ),
+            (
+                [intro(S.THEINTRODB, 126_000, 157_000), intro(S.SKIPDB, 126_500, 158_000)],
+                [
+                    intro(S.SERVER_MARKERS, 127_000, 150_000, "plex-1"),
+                    intro(S.SERVER_MARKERS, 127_000, 146_000, "jf-1"),
+                ],
+                Marker(T.INTRO, 126_500, 157_000, ("theintrodb", "skipdb")),
+                "sources agree: theintrodb, skipdb",
+            ),
+            (
+                [Candidate(T.RECAP, 20_000, 60_000, S.CHAPTERS)],
+                [Candidate(T.RECAP, 20_000, 45_000, S.SERVER_MARKERS, origin="jf-1")],
+                Marker(T.RECAP, 20_000, 60_000, ("chapters",)),
+                "chapters",
+            ),
+        ],
+        ids=["chapter-intro", "agreed-intro-two-servers", "chapter-recap"],
+    )
+    def test_an_intro_or_recap_is_never_shortened_by_an_earlier_server_end(self, decided, servers, marker, reason):
+        x = ctx(types=(marker.type,))
+        for order in _permutations([*decided, *servers]):
+            d = decide(order, x, {})[marker.type]
+            assert d.status is DecisionStatus.DECIDED
+            assert (d.marker, d.proposed, d.reason) == (marker, None, reason)
+
+    @pytest.mark.parametrize(
+        ("server_start", "shortened"),
+        [
+            (1_249_000, False),  # exactly the 10 s tolerance after the start
+            (1_249_001, True),
+            (1_290_000, False),  # exactly 10 s before the end: the skip would all but vanish
+            (1_289_999, True),
+            (1_230_000, False),  # an earlier start would lengthen the skip
+            (1_200_000, False),
+            (1_310_000, False),  # starts after the decided credits end
+        ],
+    )
+    def test_credits_bounds(self, server_start, shortened):
+        chapter = credits(S.CHAPTERS, 1_239_000, 1_300_000)
+        server = credits(S.SERVER_MARKERS, server_start, None, "plex-1")
+        d = decide([chapter, server], ctx(), {})[T.CREDITS]
+        assert d.status is DecisionStatus.DECIDED
+        if shortened:
+            assert d.marker == Marker(T.CREDITS, server_start, 1_300_000, ("chapters", "server_markers"))
+            assert d.reason == "chapters; start shortened to the server's own marker (plex-1)"
+        else:
+            assert (d.marker, d.reason) == (Marker(T.CREDITS, 1_239_000, 1_300_000, ("chapters",)), "chapters")
+
+    @pytest.mark.parametrize(
+        ("servers", "marker", "reason"),
+        [
+            # the latest start wins, whichever server it came from
+            (
+                [
+                    credits(S.SERVER_MARKERS, 1_255_000, None, "plex-1"),
+                    credits(S.SERVER_MARKERS, 1_262_000, None, "jf-1"),
+                ],
+                Marker(T.CREDITS, 1_262_000, DUR, ("chapters", "server_markers")),
+                "chapters; start shortened to the server's own marker (jf-1)",
+            ),
+            (
+                [
+                    credits(S.SERVER_MARKERS, 1_262_000, None, "plex-1"),
+                    credits(S.SERVER_MARKERS, 1_262_000, None, "jf-1"),
+                ],
+                Marker(T.CREDITS, 1_262_000, DUR, ("chapters", "server_markers")),
+                "chapters; start shortened to the server's own marker (jf-1, plex-1)",
+            ),
+            # servers that split their credits: each offers its first piece inside the skip, the latest offer wins
+            # (the latest piece overall, 1290 s, would skip Jellyfin's gap)
+            (
+                [
+                    credits(S.SERVER_MARKERS, 1_255_000, 1_275_000, "plex-1"),
+                    credits(S.SERVER_MARKERS, 1_280_000, None, "plex-1"),
+                    credits(S.SERVER_MARKERS, 1_262_000, 1_285_000, "jf-1"),
+                    credits(S.SERVER_MARKERS, 1_290_000, None, "jf-1"),
+                ],
+                Marker(T.CREDITS, 1_262_000, DUR, ("chapters", "server_markers")),
+                "chapters; start shortened to the server's own marker (jf-1)",
+            ),
+            # a server whose own credits agree with the decided start blocks it, whatever another server says
+            (
+                [
+                    credits(S.SERVER_MARKERS, 1_242_000, None, "plex-1"),
+                    credits(S.SERVER_MARKERS, 1_262_000, None, "jf-1"),
+                ],
+                Marker(T.CREDITS, 1_239_000, DUR, ("chapters",)),
+                "chapters",
+            ),
+            # an open-ended own marker (Emby's CreditsStart, Plex's final credits) that started 19 s before the decided
+            # start covers it: that server says the credits are running, so another server's later start is ignored
+            (
+                [
+                    credits(S.SERVER_MARKERS, 1_220_000, None, "emby-1"),
+                    credits(S.SERVER_MARKERS, 1_262_000, None, "plex-1"),
+                ],
+                Marker(T.CREDITS, 1_239_000, DUR, ("chapters",)),
+                "chapters",
+            ),
+            # an importer plugin's copy is crowd data, not checked against this cut: it never shortens
+            (
+                [credits(S.SERVER_MARKERS_IMPORTED, 1_265_000, None, "jf-1")],
+                Marker(T.CREDITS, 1_239_000, DUR, ("chapters",)),
+                "chapters",
+            ),
+            (
+                [
+                    credits(S.SERVER_MARKERS, 1_252_000, None, "plex-1"),
+                    credits(S.SERVER_MARKERS_IMPORTED, 1_265_000, None, "jf-1"),
+                ],
+                Marker(T.CREDITS, 1_252_000, DUR, ("chapters", "server_markers")),
+                "chapters; start shortened to the server's own marker (plex-1)",
+            ),
+        ],
+        ids=[
+            "latest-start",
+            "tied-start",
+            "split-credits-latest-first-piece",
+            "one-server-agrees",
+            "open-ended-own-marker-covers",
+            "imported-credits-never",
+            "imported-beside-own",
+        ],
+    )
+    def test_several_servers_give_the_shortest_skip_whatever_the_order(self, servers, marker, reason):
+        for order in _permutations([credits(S.CHAPTERS, 1_239_000), *servers]):
+            d = decide(order, ctx(), {})[marker.type]
+            assert d.status is DecisionStatus.DECIDED
+            assert (d.marker, d.proposed, d.reason) == (marker, None, reason)
+
+    # Avengers Infinity War's shape in a 100-minute movie: Plex splits its credits around a gap (a non-final piece,
+    # then the final 12 s), and the chapter's credits run to the end of the file.
+    AVENGERS_PLEX = (
+        credits(S.SERVER_MARKERS, 5_293_500, 5_897_500, "plex-1"),
+        credits(S.SERVER_MARKERS, 5_987_500, None, "plex-1"),
+    )
+
+    @pytest.mark.parametrize(
+        ("chapter_start", "plex", "start", "reason"),
+        [
+            # Plex's first piece starts 4.5 s after the chapter: Plex agrees the credits have begun
+            (5_289_000, AVENGERS_PLEX, 5_289_000, "chapters"),
+            # the chapter starts 33.5 s before Plex's first piece: that piece, not the final 12 s, is the new start
+            (
+                5_260_000,
+                AVENGERS_PLEX,
+                5_293_500,
+                "chapters; start shortened to the server's own marker (plex-1)",
+            ),
+            # a piece that covers the chapter's start blocks it
+            (
+                5_289_000,
+                (credits(S.SERVER_MARKERS, 5_250_000, 5_897_500, "plex-1"), AVENGERS_PLEX[1]),
+                5_289_000,
+                "chapters",
+            ),
+        ],
+        ids=["first-piece-agrees", "first-piece-later", "piece-covers-start"],
+    )
+    def test_a_server_that_splits_its_credits_never_pulls_the_start_to_its_last_piece(
+        self, chapter_start, plex, start, reason
+    ):
+        x = ctx(is_movie=True, duration=MOVIE_DUR)
+        for order in _permutations([credits(S.CHAPTERS, chapter_start), *plex]):
+            d = decide(order, x, {})[T.CREDITS]
+            assert d.status is DecisionStatus.DECIDED
+            by = ("chapters",) if start == chapter_start else ("chapters", "server_markers")
+            assert (d.marker, d.reason) == (Marker(T.CREDITS, start, MOVIE_DUR, by), reason)
+
+    # Review repro: a "Preview" chapter overlapping decided credits by more than 10 s is held back by rule 10.
+    PREVIEW_CHAPTER = Candidate(T.PREVIEW, 7_111_998, 7_500_000, S.CHAPTERS)
+    CREDITS_CHAPTER = credits(S.CHAPTERS, 7_177_449, 7_238_398)
+
+    @pytest.mark.parametrize(
+        ("preview", "server", "credits_marker"),
+        [
+            # the Jellyfin preview segment would pull the preview start past the credits end
+            (
+                PREVIEW_CHAPTER,
+                Candidate(T.PREVIEW, 7_387_142, None, S.SERVER_MARKERS, origin="jf-1"),
+                Marker(T.CREDITS, 7_177_449, 7_238_398, ("chapters",)),
+            ),
+            # Plex's own credits would pull the credits start to 5 s before a shorter preview ends
+            (
+                Candidate(T.PREVIEW, 7_111_998, 7_200_000, S.CHAPTERS),
+                credits(S.SERVER_MARKERS, 7_195_000, None, "plex-1"),
+                Marker(T.CREDITS, 7_195_000, 7_238_398, ("chapters", "server_markers")),
+            ),
+        ],
+        ids=["preview-clamp", "credits-clamp"],
+    )
+    def test_shortening_never_publishes_a_preview_the_overlap_check_held_back(self, preview, server, credits_marker):
+        x = ctx(is_movie=True, duration=7_500_000, types=(T.CREDITS, T.PREVIEW))
+        for order in _permutations([preview, self.CREDITS_CHAPTER, server]):
+            got = decide(order, x, {})
+            assert got[T.PREVIEW].status is DecisionStatus.NEEDS_REVIEW
+            assert got[T.PREVIEW].marker is None
+            assert got[T.PREVIEW].proposed == Marker(T.PREVIEW, preview.start_ms, preview.end_ms, ("chapters",))
+            assert got[T.PREVIEW].reason == "preview overlaps credits"
+            assert (got[T.CREDITS].status, got[T.CREDITS].marker) == (DecisionStatus.DECIDED, credits_marker)
+
+    def test_contradiction_guard_judges_the_edge_the_sources_decided(self):
+        # TheIntroDB and SkipDB agree on 1239 s; Plex's 1257 s shortens it. Judged after shortening, the two
+        # sources would be an agreeing pair outside the tolerance of their own result.
+        cands = [
+            credits(S.THEINTRODB, 1_239_000),
+            credits(S.SKIPDB, 1_245_000),
+            credits(S.SERVER_MARKERS, 1_257_000, None, "plex-1"),
+        ]
+        for order in _permutations(cands):
+            d = decide(order, ctx(), {})[T.CREDITS]
+            assert d.status is DecisionStatus.DECIDED
+            assert d.marker == Marker(T.CREDITS, 1_257_000, DUR, ("theintrodb", "skipdb", "server_markers"))
+
+    def test_a_shortened_marker_failing_sanity_needs_review(self, monkeypatch):
+        # Unreachable today (shortened credits keep > 10 s, sanity asks >= 3 s), so the minimum is raised to reach it.
+        monkeypatch.setattr("media_preview_generator.markers.decide.MIN_SEGMENT_MS", 12_000)
+        chapter = credits(S.CHAPTERS, 1_250_000, 1_300_000)
+        server = credits(S.SERVER_MARKERS, 1_289_000, None, "plex-1")  # 31 s to the end of the file: sane itself
+        d = decide([chapter, server], ctx(), {})[T.CREDITS]
+        assert d.status is DecisionStatus.NEEDS_REVIEW
+        assert d.marker is None
+        assert d.proposed == Marker(T.CREDITS, 1_250_000, 1_300_000, ("chapters",))
+        assert d.reason == "start shortened to the server's own marker (plex-1) fails sanity checks"
+
+    def test_a_locked_marker_is_never_shortened(self):
+        lock = Marker(T.CREDITS, 1_239_000, DUR, ("user",), locked=True)
+        d = decide([self.PLEX_CREDITS, credits(S.CHAPTERS, 1_239_000)], ctx(), {T.CREDITS: lock})[T.CREDITS]
+        assert (d.status, d.marker, d.reason) == (DecisionStatus.DECIDED, lock, "locked by user")
+
+    def test_a_server_marker_of_another_type_changes_nothing(self):
+        cands = [credits(S.CHAPTERS, 1_239_000), Candidate(T.PREVIEW, 1_255_500, 1_300_000, S.SERVER_MARKERS)]
+        d = decide(cands, ctx(types=(T.CREDITS, T.PREVIEW)), {})[T.CREDITS]
+        assert (d.marker, d.reason) == (Marker(T.CREDITS, 1_239_000, DUR, ("chapters",)), "chapters")
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("chapters; start shortened to the server's own marker (plex-1)", ("plex-1",)),
+        ("sources agree: theintrodb, skipdb; start shortened to the server's own marker (a, b)", ("a", "b")),
+        ("chapters; start shortened to the server's own marker", ()),
+        ("chapters", None),
+        ("start shortened to the server's own marker (plex-1) fails sanity checks", None),
+        ("", None),
+    ],
+)
+def test_shortened_by_reads_back_the_reason_decide_writes(reason, expected):
+    assert shortened_by(reason) == expected
 
 
 class TestSanity:
@@ -1336,8 +1690,8 @@ class TestAgreementSearch:
 # and no decide.py helpers.
 _REF_START_TYPES = (T.INTRO, T.RECAP)
 _REF_SOURCES = list(S)
-# Rule 7: markers already on servers (an importer plugin's copy included) confirm and may shorten, never set the
-# checked edge or decide alone.
+# Rule 7: markers already on servers (an importer plugin's copy included) confirm and may shorten, never decide alone;
+# they only move the checked edge of an already decided marker toward a shorter skip.
 _REF_SERVER = (S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED)
 # Rule 6: at "Medium" these only agree -- they don't check this file's cut.
 _REF_AGREEMENT_ONLY = (*_REF_SERVER, S.INTRODB, S.THEINTRODB)
@@ -1506,7 +1860,12 @@ def _ref_decide_type(mtype, cands, x):
     else:
         groups = sorted({_ref_group(c.source) for c in sane})
         ranked = sorted(sane, key=lambda c: _ref_rank(c, x))
-        proposal = next((c for c in ranked if c.source not in _REF_AGREEMENT_ONLY), None)
+
+        def may_decide_alone(c):
+            # SkipDB alone: intros and recaps only
+            return c.source not in _REF_AGREEMENT_ONLY and (mtype in _REF_START_TYPES or c.source is not S.SKIPDB)
+
+        proposal = next((c for c in ranked if may_decide_alone(c)), None)
         if x.publish_when != "medium" or proposal is None or len(groups) > 1:
             disagree = any(
                 _ref_group(a.source) != _ref_group(b.source) and not _ref_agree(a, b, d)
@@ -1532,7 +1891,36 @@ def _ref_decide_type(mtype, cands, x):
     }
     if contradicting:
         return review(result, "agreeing sources contradict the result: " + ", ".join(sorted(contradicting)))
+
     return TypeDecision(mtype, DecisionStatus.DECIDED, result, None, reason)
+
+
+def _ref_shorten(decision, cands, x):
+    """Rule 7, run on decisions that are still decided after the overlap checks: a credits/preview start moves later
+    to a server's own detection. Any own marker covering or agreeing with the start blocks it; each server offers its
+    first start inside the skip, the latest offer wins."""
+    mtype, result, d = decision.type, decision.marker, x.duration_ms
+    tol = _ref_tolerance(mtype)
+    if mtype in _REF_START_TYPES or result.locked:
+        return decision
+    own = [c for c in cands if c.type is mtype and _ref_is_sane(c, x) and c.source is S.SERVER_MARKERS]
+    if any(c.start_ms <= result.start_ms <= _ref_end(c, d) or abs(c.start_ms - result.start_ms) <= tol for c in own):
+        return decision
+    offers = {}
+    for c in own:
+        if result.start_ms + tol < c.start_ms < result.end_ms - tol:
+            offers[c.origin] = min(c.start_ms, offers.get(c.origin, c.start_ms))
+    if not offers:
+        return decision
+    start = max(offers.values())
+    credited = {S(v) for v in result.decided_by} | {S.SERVER_MARKERS}
+    decided_by = tuple(s.value for s in sorted(credited, key=lambda s: _ref_source_rank(s, x)))
+    origins = sorted(o for o, v in offers.items() if v == start and o)
+    note = "start shortened to the server's own marker" + (f" ({', '.join(origins)})" if origins else "")
+    if not _ref_is_sane(Candidate(mtype, start, result.end_ms, S.CHAPTERS), x):
+        return TypeDecision(mtype, DecisionStatus.NEEDS_REVIEW, None, result, f"{note} fails sanity checks")
+    shortened = Marker(mtype, start, result.end_ms, decided_by)
+    return TypeDecision(mtype, DecisionStatus.DECIDED, shortened, None, f"{decision.reason}; {note}")
 
 
 def _ref_overlap(a, b):
@@ -1567,7 +1955,8 @@ def _ref_decide(cands, x, locked):
     if T.PREVIEW in decided and T.CREDITS in decided and _ref_overlap(decided[T.PREVIEW], decided[T.CREDITS]) > 10_000:
         if not decided[T.PREVIEW].locked:
             out[T.PREVIEW] = demote(out[T.PREVIEW], "preview overlaps credits")
-    return out
+    # Rule 7 runs last, on what is still decided.
+    return {t: _ref_shorten(o, cands, x) if o.status is DecisionStatus.DECIDED else o for t, o in out.items()}
 
 
 _EVERY_REASON = (
@@ -1587,6 +1976,7 @@ _EVERY_REASON = (
     "source disagrees with itself",
     "sources disagree",
     "sources don't agree yet",
+    "shortened to the server's own marker",
     "intro and recap overlap",
     "preview overlaps credits",
 )
@@ -1614,9 +2004,11 @@ def _random_candidates(rng, mtype, duration, anchor):
     first = anchor + step * rng.randint(-4, 4)
     centres = [first + step * offset for offset in offsets]
     if rng.random() < 0.25:
-        # One source (or the IntroDB pair) only: what "medium" decides on.
+        # One source (or the IntroDB pair) only: what "medium" decides on. The local detectors come up twice as often:
+        # besides chapters they're the only sources that may decide credits and previews alone.
         crowd = [S.THEINTRODB, S.INTRODB, S.SERVER_MARKERS_IMPORTED]
-        sources = rng.choice((crowd, [rng.choice([*_NON_CHAPTER_SOURCES, S.CHAPTERS])]))
+        alone = [*_NON_CHAPTER_SOURCES, S.CHAPTERS, S.SEASON_AUDIO, S.CREDITS_TEXT]
+        sources = rng.choice((crowd, [rng.choice(alone)]))
         count, chapter_count = rng.randint(1, 4), 0
     else:
         sources, count, chapter_count = _NON_CHAPTER_SOURCES, rng.randint(2, 7), rng.choice((0, 0, 1, 2))

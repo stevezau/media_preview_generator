@@ -1,5 +1,5 @@
 """Decision rules (spec §5.5): locks, sanity bounds, chapters, agreeing independent sources, a single source at
-"Medium", and the cross-type overlap checks.
+"Medium", the cross-type overlap checks, and then shortening credits/previews to the servers' own markers.
 
 Every result depends only on the set of candidates, never on the order they arrive in.
 """
@@ -7,6 +7,7 @@ Every result depends only on the set of candidates, never on the order they arri
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -35,6 +36,8 @@ _INDEPENDENCE_GROUP = {
 # TheIntroDB answers the closest cut it has, and markers already on servers never decide alone (rule 7).
 _AGREEMENT_ONLY = SERVER_SOURCES | {Source.INTRODB, Source.THEINTRODB}
 _START_SEGMENTS = (MarkerType.INTRO, MarkerType.RECAP)
+SHORTENED_NOTE = "shortened to the server's own marker"
+_SHORTENED_RE = re.compile(r"; start shortened to the server's own marker(?: \(([^)]*)\))?$")
 _ENUM_ORDER = {source: i for i, source in enumerate(Source)}
 
 
@@ -373,9 +376,21 @@ def _decide_from_cliques(mtype: MarkerType, cliques: list[list[Candidate]], ctx:
     return TypeDecision(mtype, DecisionStatus.DECIDED, marker, None, "sources agree: " + ", ".join(marker.decided_by))
 
 
+def _may_decide_alone(candidate: Candidate) -> bool:
+    """Whether a candidate's source checks this file's cut well enough to publish alone at "Medium" (rule 6).
+
+    SkipDB's duration match holds for intros and recaps, not for credits or previews: on the lab scale run every lone
+    SkipDB credits answer started early, some by minutes (Battlestar Galactica S04E05: 6.7 min of story).
+    """
+    if candidate.source in _AGREEMENT_ONLY:
+        return False
+    return candidate.type in _START_SEGMENTS or candidate.source is not Source.SKIPDB
+
+
 def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: DecisionContext) -> TypeDecision:
     """No two independent sources agree. Only "medium" may publish, and only a lone, self-consistent group that
-    checks this file's cut itself (not IntroDB/TheIntroDB, not markers already on servers).
+    checks this file's cut itself (not IntroDB/TheIntroDB, not markers already on servers, and SkipDB only for an
+    intro or recap).
 
     A second independent group here (server markers included) contradicts the first unless both are
     server markers (a server's own and an importer plugin's copy, which never form a cluster); a group
@@ -385,7 +400,7 @@ def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: De
     """
     ranked = sorted(sane, key=_sort_key(ctx))
     groups = sorted({_group(c.source) for c in sane})
-    proposal = next((c for c in ranked if c.source not in _AGREEMENT_ONLY), None)
+    proposal = next((c for c in ranked if _may_decide_alone(c)), None)
     if ctx.publish_when == "medium" and proposal is not None and len(groups) == 1:
         if not all(_agree(a, b, ctx.duration_ms) for a, b in combinations(sane, 2)):
             return _review(mtype, _own_marker(proposal, ctx), "source disagrees with itself")
@@ -402,9 +417,13 @@ def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: De
     return _review(mtype, _own_marker(ranked[0], ctx), reason)
 
 
+def _sane_of_type(mtype: MarkerType, candidates: list[Candidate], ctx: DecisionContext) -> list[Candidate]:
+    return [c for c in candidates if c.type is mtype and sanity_problem(c, ctx) is None]
+
+
 def _decide_type(mtype: MarkerType, candidates: list[Candidate], ctx: DecisionContext) -> TypeDecision:
     of_type = [c for c in candidates if c.type is mtype]
-    sane = [c for c in of_type if sanity_problem(c, ctx) is None]
+    sane = _sane_of_type(mtype, candidates, ctx)
     if not sane:
         reason = "no evidence" if not of_type else f"{len(of_type)} candidate(s) failed sanity checks"
         return TypeDecision(mtype, DecisionStatus.NO_EVIDENCE, None, None, reason)
@@ -429,6 +448,70 @@ def _decide_type(mtype: MarkerType, candidates: list[Candidate], ctx: DecisionCo
             reason = f"agreeing sources contradict the result: {', '.join(contradicting)}"
             return _review(mtype, decision.marker, reason)
     return decision
+
+
+def _shorten_to_server_markers(decision: TypeDecision, sane: list[Candidate], ctx: DecisionContext) -> TypeDecision:
+    """Move a decided credits/preview start later to the servers' own detection when it gives a shorter skip (rule 7).
+
+    Intros and recaps are never moved: on the lab scale run every checked intro end was already right, and Plex's own
+    intro ended partway through the opening. Only ``server_markers`` count: an importer plugin's copy isn't checked
+    against this file's cut. When any server's own marker covers the decided start or starts within the tolerance of
+    it, that server says the credits are already running there, so nothing moves. Otherwise each server offers its
+    first start more than the tolerance after the decided start and more than the tolerance before the decided end --
+    so a server that splits its credits into pieces can't pull the start to its last piece -- and the latest offer
+    wins. Our own markers and another cut's never reach here: the pipeline doesn't store them as evidence. Runs last,
+    after the contradiction guard and the overlap checks have judged the unshortened markers, so it can only shorten a
+    decided marker and never turn Needs review into decided.
+
+    Args:
+        decision: A decided, unlocked type.
+        sane: The type's candidates that passed :func:`sanity_problem`.
+        ctx: The file's context.
+
+    Returns:
+        The decision unchanged, the shortened marker with ``server_markers`` added to decided_by, or Needs review
+        (the unshortened marker proposed) when the shortened marker fails sanity.
+    """
+    marker = decision.marker
+    mtype = decision.type
+    if mtype in _START_SEGMENTS:
+        return decision
+    tol = _tolerance_ms(mtype)
+    own = [c for c in sane if c.source is Source.SERVER_MARKERS]
+    if any(
+        c.start_ms <= marker.start_ms <= resolve_end_ms(c, ctx.duration_ms) or abs(c.start_ms - marker.start_ms) <= tol
+        for c in own
+    ):
+        return decision
+    first_start: dict[str, int] = {}
+    for c in own:
+        if marker.start_ms + tol < c.start_ms < marker.end_ms - tol:
+            first_start[c.origin] = min(c.start_ms, first_start.get(c.origin, c.start_ms))
+    if not first_start:
+        return decision
+    start = max(first_start.values())
+    sources = {Source(s) for s in marker.decided_by} | {Source.SERVER_MARKERS}
+    shortened = _composed_marker(mtype, start, marker.end_ms, sources, ctx)
+    servers = sorted(origin for origin, value in first_start.items() if value == start and origin)
+    note = f"start {SHORTENED_NOTE}" + (f" ({', '.join(servers)})" if servers else "")
+    if not _marker_is_sane(shortened, ctx):
+        return _review(mtype, marker, f"{note} fails sanity checks")
+    return replace(decision, marker=shortened, reason=f"{decision.reason}; {note}")
+
+
+def shortened_by(reason: str) -> tuple[str, ...] | None:
+    """Read back which servers' own markers shortened a decided credits/preview start (rule 7).
+
+    Args:
+        reason: A decision's reason.
+
+    Returns:
+        The server ids (empty when the reason names none), or None when the marker wasn't shortened.
+    """
+    found = _SHORTENED_RE.search(reason or "")
+    if found is None:
+        return None
+    return tuple(found.group(1).split(", ")) if found.group(1) else ()
 
 
 def _overlap_ms(a: Marker, b: Marker) -> int:
@@ -494,4 +577,7 @@ def decide(
             out[mtype] = _decide_type(mtype, candidates, ctx)
 
     _apply_overlap_demotions(out)
+    for mtype, decision in out.items():
+        if decision.status is DecisionStatus.DECIDED and not decision.marker.locked:
+            out[mtype] = _shorten_to_server_markers(decision, _sane_of_type(mtype, candidates, ctx), ctx)
     return out

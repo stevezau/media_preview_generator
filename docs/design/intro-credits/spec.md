@@ -313,17 +313,28 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    agrees with both sides can't hide a contradiction. Another chapter of the same type counts as one side of such a
    pair; a chapter within tolerance of two groups that disagree with each other is still accepted.
 6. A single source is accepted only at the **"Medium"** publish setting, only when that source checks the file's
-   cut itself — chapters, or SkipDB `exact`/`shifted` matches (IntroDB and TheIntroDB return an answer whatever the
-   file's length, so alone they never decide) — and only when no sane candidate from another independent source
-   (markers already on a server included) contradicts it and every pair of the source's own candidates agrees; its
-   other edge takes the safer value across those candidates.
+   cut itself — chapters, or SkipDB `exact`/`shifted` matches for an intro or recap (IntroDB and TheIntroDB return an
+   answer whatever the file's length, so alone they never decide; SkipDB alone never decides credits or a preview,
+   which need an agreeing independent source as at High) — and only when no sane candidate from another independent
+   source (markers already on a server included) contradicts it and every pair of the source's own candidates agrees;
+   its other edge takes the safer value across those candidates.
 7. Markers already on a server count as agreement evidence, never as a sole source, and never supply the published
    times on their own. When a server marker agrees, it may **shorten** the composed skip (a later intro/recap start,
    an earlier credits/preview end) but never lengthen it — so a crowd answer running to the end of the file can't
    swallow a post-credits scene that the server's own marker stops before. Markers from several servers count as one
    source. A Plex/Emby item's markers are not used for a file whose item has another version with a duration more
    than 2 s different (one set per item describes one cut). Markers on a Jellyfin/Emby server that has an
-   intro-database importer plugin join the crowd group of rule 8.
+   intro-database importer plugin join the crowd group of rule 8. Once credits or a preview are decided (any path but
+   a lock), a server's own detection markers of that type (never an importer plugin's, never ours or another cut's)
+   may also move the **start** later. If any of them covers the decided start or starts within 10 s of it, the server
+   says the credits are already running there and nothing moves. Otherwise each server offers its first start more
+   than 10 s after the decided start and more than 10 s before the decided end, and the latest offer wins — so a
+   server that splits its credits into pieces can't pull the start to its last piece. `decided_by` adds
+   `server_markers`; the reason (and the Inspector) names the server(s). A shortened marker failing sanity sends the
+   type to "Needs review" with the unshortened marker proposed. This runs last, after rule 5's contradiction check and
+   rules 9–10 have judged the unshortened markers, and only on types still decided, so it can shorten a marker but
+   never turn "Needs review" into a published one. Intro and recap ends are never moved this way. A chapter decision
+   shortened or confirmed only by server markers still counts as chapters alone for the evidence search.
 8. Online sources are independent of each other only if they don't copy each other: IntroDB data looks partly seeded
    from others — IntroDB + TheIntroDB always count as one source, and so do server markers written by an importer of
    those databases. SkipDB intro starts also match TheIntroDB's to ≤ 44 ms on the Daredevil S03 episodes both cover
@@ -365,7 +376,7 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
 2. **Owners.** `find_owning_servers(canonical_path)` → keep owners with `markers.enabled` and the item's library in
    `library_ids`. No enabled owner → nothing is detected.
 3. **Ensure markers for the file.** Fresh `markers` for (size, mtime) → reuse ("detected once, reused"). Otherwise
-   gather evidence in §1 order, stop early when §5.5 is satisfied by more than chapters alone (a chapter decision keeps asking so rule 3 can veto it), decide, store. Stored chapter and online evidence carries its rules or parser version; a file whose stored version is older is probed or asked again on the next run.
+   gather evidence in §1 order, stop early when §5.5 is satisfied by more than chapters alone (a chapter decision keeps asking so rule 3 can veto it; a server never asked for the file, and not yet published to, is still read once, since rule 7 lets its own markers shorten decided credits; an empty or unusable answer isn't asked again while everything stays decided), decide, store. Stored chapter and online evidence carries its rules or parser version; a file whose stored version is older is probed or asked again on the next run.
 4. **Season step.** Intros need siblings: fingerprint missing episodes in the season folder, re-decide episodes without
    an intro; if the season has only one episode, use the previous season's cached fingerprints (§5.3).
 5. **Publish.** For each enabled owner, its `MarkerPublisher` writes the decided set; unchanged `markers_hash` → skip.
@@ -800,6 +811,25 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
 - 2026-09-14 · Owner approved the keep_plex semantics (Plex's own markers are kept whenever Plex has them). The Plex
   setting is renamed "When Plex has its own markers": "Use ours" (`restore`) / "Keep Plex's" (`keep_plex`); stored
   values unchanged. Its tooltip covers both before and after we publish.
+- 2026-09-14 · Lab scale run F3 (§5.5 rule 6): at "Medium" SkipDB `exact`/`shifted` alone decides intros and recaps
+  only, never credits or previews. Offline replay of the scale run: all 25 lone SkipDB credits that Medium added
+  started more than 3 s before prod Plex's (frame-checked: Battlestar Galactica S04E02 4.4 min early, S04E05 6.7 min,
+  The Office S02 12 s); after the change all 25 are Needs review. Evidence: `evidence/audit-phase1/scale_replay_s1.py`.
+- 2026-09-14 · Lab scale run F2 (§5.5 rule 7, §6.2 step 3): after credits or a preview are decided, a server's own
+  detection markers may move the start later. Avatar (2009) and Innerspace (1987) "End Credits" chapters start on the
+  last story shots; prod Plex's credits are served 18.5 s and 25.6 s later and are right. First cut ("latest start
+  across all server markers") pulled Avengers Infinity War's credits to Plex's last 12 s piece, so the rule is per
+  server: any own marker covering the decided start or starting within 10 s of it blocks it; otherwise each server
+  offers its first start inside the skip and the latest offer wins; importer-plugin markers never shorten. Frame
+  check (lab scale run, 16 shortened credits, 5 shortened intros): 4 of 16 old credits starts skipped story (Avatar,
+  Innerspace, Congo; Rocky Aur Rani Kii Prem Kahaani by a 5 min epilogue) and no shortened start did (0 unsafe; 12
+  were later than needed, since Plex's credits start at the plain text crawl); all 5 old intro ends were right and
+  Plex's intro ends partway through the opening, so intros and recaps are not shortened. Replay with prod Plex's
+  markers: 40 credits shortened (39 chapter decisions), 0 intros, nothing else, nothing without server markers. The
+  shortening runs after the overlap checks (rules 9–10) and only on types still decided, so a preview they held back
+  stays in review. With everything decided, the pipeline still reads a server never asked for the file (not one
+  already answered, empty, unreadable or another cut), and a chapter decision backed only by server markers keeps the
+  evidence search open. The Inspector says e.g. "Shortened to Plex's own credits start" under the ending.
 - 2026-09-15 · Plex version drift in read-back (§6.3), from the parked multi-version limit (a version added to a Plex
   item after publishing, never decided here, left our markers showing for a cut nobody checked): every Plex write
   records the item's version files (optimized copies left out) with the item record, without bumping its version.
