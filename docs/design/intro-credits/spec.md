@@ -397,7 +397,8 @@ server shows of what we last left there: Plex's `taggings` rows under the same l
 - Never write `tags`; never run integrity checks with stock SQLite (custom tokenizer).
 - Warn when Plex's own detection is on (it can force-overwrite). Before a file is reported up to date, the job reads
   the item's rows back: gone → written again; replaced by Plex's own → written again (`on_plex_redetect=restore`) or
-  left and reported "kept" (`keep_plex`).
+  kept per type (`keep_plex`): the publisher leaves that type's rows and `pv:` key alone on every write path until
+  the setting is `restore` or Plex has no rows of the type (`item_publish_state` kept types).
 
 **JellyfinMarkerPublisher**
 - Extend **Media Preview Bridge** (`jellyfin-plugin/`, route prefix `MediaPreviewBridge`, today `Ping`,
@@ -774,3 +775,13 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   Needs review even when its agreed types were published. Retries and verify jobs still read the per-server rows.
   Extras (`external_ids.is_extra`: a Plex extra suffix, or an extras folder as the parent) are skipped before any
   probe, owner or item lookup ("Extras aren't checked for markers"), from folders, webhooks and library listings.
+- 2026-09-14 · Read-back review fixes (§6.3, §6.4), from the read-back deep review: "Keep Plex's" is per type and
+  persistent, enforced in the Plex publisher's write (`kept_types` recorded with the item record): once Plex's rows
+  replace ours of a type, no path (skipped/failed/waiting rows, multi-version waits, forced runs, Re-detect, sibling
+  versions) deletes them until the server is set to restore or Plex has no rows of that type; other types are still
+  written; a first publish still replaces Plex's rows. Rows and the Inspector name the kept types ("Keeping Plex's
+  credits"). Jellyfin skips the POST for an unchanged set only when the plugin's stored file size matches the file on
+  disk. A Plex Pass unknown answer is reused for 5 s; read-back failures raise one job warning per server; verify jobs
+  come only from sent-file jobs, keep the retry count across the chain, never queue another verify, and don't retry
+  a missing file. The Inspector ignores another Jellyfin provider's segments beside ours and counts Plex versions as
+  `Media` entries without `proxyType`.

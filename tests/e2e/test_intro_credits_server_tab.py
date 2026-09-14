@@ -258,7 +258,7 @@ class TestPlexTab:
         assert tooltip == (
             "Plex's own detection (for example Analyze on an item) can replace our markers in its database. 'Put ours "
             "back': the next Intro & Credits job that checks the file writes ours again. 'Keep Plex's': Plex's markers "
-            "stay until this file's own decision changes."
+            "of that type stay, on every later job, until you switch back or Plex removes them."
         )
 
     def test_flip_then_cancel_unticks_switch_and_sends_nothing(self, authed_page: Page, app_url: str) -> None:

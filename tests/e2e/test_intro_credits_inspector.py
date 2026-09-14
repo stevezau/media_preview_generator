@@ -169,7 +169,7 @@ def every_plan() -> dict:
             "plex",
             "keeps_plex",
             [_marker("intro", 11_000, 37_000), _marker("credits", 1_250_000, 1_280_000)],
-            plan_reason="Plex's own markers are kept (Keep Plex's)",
+            plan_reason="Keeping Plex's credits",
             version_count=1,
         ),
         _server(
@@ -549,7 +549,7 @@ class TestIntroCreditsTab:
         expected = {
             "s-add": ("Will add", ["Intro 0:11–0:37 · Credits 21:39–end"]),
             "s-replace": ("Will replace", ["Intro 1:16–1:52 → 0:11–0:37", "All versions of this item share"]),
-            "s-keep": ("Keeps Plex's", ["Plex's own markers are kept (Keep Plex's)"]),
+            "s-keep": ("Keeps Plex's", ["Keeping Plex's credits"]),
             "s-remove": ("Will remove", ["Removes Intro 0:11–0:37"]),
             "s-same": ("Up to date", ["Intro 0:11–0:37 · Credits 21:39–end"]),
             "s-wait": ("Waiting", ["versions don't agree yet", "Not in this server's library yet"]),

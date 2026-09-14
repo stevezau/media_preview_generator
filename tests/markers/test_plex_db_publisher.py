@@ -23,6 +23,7 @@ from media_preview_generator.markers.publishers.base import (
     ItemNotFoundError,
     MarkerPublisher,
     PublishError,
+    Shown,
 )
 from media_preview_generator.markers.publishers.plex_db import (
     PlexMarkerPublisher,
@@ -151,6 +152,7 @@ def _publisher(
     mountinfo_lines="",
     mountinfo_path=None,
     settings_provider=None,
+    redetect="restore",
 ):
     server = MagicMock()
     server.get_server_status.return_value = (
@@ -167,7 +169,7 @@ def _publisher(
         output={"plex_config_folder": str(folder)},
         path_mappings=mappings or [],
     )
-    settings = ServerMarkersSettings(enabled, None, confirmed, "restore")
+    settings = ServerMarkersSettings(enabled, None, confirmed, redetect)
     return PlexMarkerPublisher(
         server,
         cfg,
@@ -1277,6 +1279,106 @@ class TestNoOp:
         _write_one(_publisher(tmp_path, folder), [INTRO, CREDITS_FINAL])
         assert _rows(db, "SELECT text, [index] FROM taggings ORDER BY [index]") == [("credits", 0), ("intro", 1)]
         assert _rows(db, "SELECT extra_data FROM media_parts") == [(encode_extra_data(payloads),)]
+
+
+class TestKeepPlexs:
+    """``on_plex_redetect`` per type: a type Plex re-detected over ours stays Plex's while the server keeps them."""
+
+    NATIVE_INTRO = (T.INTRO, 990, 29_306)
+
+    @staticmethod
+    def _plex_redetects_the_intro(db) -> None:
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute("DELETE FROM taggings WHERE text='intro'")
+            conn.commit()
+        finally:
+            conn.close()
+        _insert_taggings(db, (7, 563, 1, "intro", 990, 29_306, INTRO_ROW_EXTRA))
+        _set_part_extra(db, 1, encode_extra_data({"pv:credits": CREDITS_FINAL_PAYLOAD, "pv:intros": NATIVE_INTROS}))
+
+    @pytest.mark.parametrize("redetect", ["keep_plex", "restore"])
+    def test_a_type_plex_replaced_is_kept_only_when_set_to_keep(self, tmp_path, sql_log, redetect):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder)
+        pub = _publisher(tmp_path, folder, redetect=redetect)
+        _write_one(pub, [INTRO, CREDITS_FINAL])
+        self._plex_redetects_the_intro(db)
+        sql_log.clear()
+
+        ours = _write_one(pub, [INTRO, CREDITS_FINAL], previous=[INTRO, CREDITS_FINAL])
+
+        if redetect == "keep_plex":
+            assert (ours, pub.last_kept_types, pub.last_write_changed) == ([CREDITS_FINAL], {T.INTRO}, False)
+            assert _served(db) == [self.NATIVE_INTRO, (T.CREDITS, 1_299_000, DUR)]
+            assert not [sql for sql in sql_log if sql.startswith("BEGIN")]  # not even the write lock
+            assert json.loads(_rows(db, "SELECT extra_data FROM media_parts")[0][0])["pv:intros"] == NATIVE_INTROS
+        else:
+            assert (ours, pub.last_kept_types, pub.last_write_changed) == ([INTRO, CREDITS_FINAL], frozenset(), True)
+            assert _served(db) == [(T.INTRO, 11_000, 37_000), (T.CREDITS, 1_299_000, DUR)]
+
+    @pytest.mark.parametrize("redetect", ["keep_plex", "restore"])
+    def test_a_kept_type_stays_plexs_without_our_record_of_it(self, tmp_path, redetect):
+        # Later runs: the item record no longer lists the kept intro, only kept_types says it is Plex's.
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder)
+        pub = _publisher(tmp_path, folder, redetect=redetect)
+        _write_one(pub, [CREDITS_FINAL])
+        self._plex_redetects_the_intro(db)
+
+        ours = pub.write(
+            "7",
+            [INTRO, CREDITS_FINAL],
+            previous=[CREDITS_FINAL],
+            duration_ms=DUR,
+            canonical_path="/data/tv/S01E01.mkv",
+            kept_types=frozenset({T.INTRO}),
+        )
+
+        kept = redetect == "keep_plex"
+        assert ours == ([CREDITS_FINAL] if kept else [INTRO, CREDITS_FINAL])
+        assert pub.last_kept_types == ({T.INTRO} if kept else frozenset())
+        assert _served(db)[0] == (self.NATIVE_INTRO if kept else (T.INTRO, 11_000, 37_000))
+
+    def test_kept_ends_once_plex_has_no_rows_of_the_type(self, tmp_path):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder)
+        pub = _publisher(tmp_path, folder, redetect="keep_plex")
+        ours = pub.write(
+            "7", [INTRO], previous=[], duration_ms=DUR, canonical_path="/data/tv/S01E01.mkv", kept_types={T.INTRO}
+        )
+        assert (ours, pub.last_kept_types) == ([INTRO], frozenset())
+        assert _served(db) == [(T.INTRO, 11_000, 37_000)]
+
+    def test_a_first_publish_replaces_plexs_rows_even_when_keeping(self, tmp_path):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=(("/data/tv/S01E01.mkv", encode_extra_data({"pv:intros": NATIVE_INTROS})),))
+        _insert_taggings(db, (7, 563, 0, "intro", 990, 29_306, INTRO_ROW_EXTRA))
+        pub = _publisher(tmp_path, folder, redetect="keep_plex")
+        assert (_write_one(pub, [INTRO]), pub.last_kept_types) == ([INTRO], frozenset())
+        assert _served(db) == [(T.INTRO, 11_000, 37_000)]
+
+    @pytest.mark.parametrize(("redetect", "kept"), [("keep_plex", {T.INTRO}), ("restore", frozenset())])
+    def test_nothing_to_write_keeps_or_releases_by_the_setting(self, tmp_path, redetect, kept):
+        folder = tmp_path / "Plex Media Server"
+        _make_db(folder)
+        pub = _publisher(tmp_path, folder, redetect=redetect)
+        ours = pub.write(
+            "7", [], previous=[], duration_ms=DUR, canonical_path="/data/tv/S01E01.mkv", kept_types={T.INTRO}
+        )
+        assert (ours, pub.last_kept_types, pub.last_write_changed) == ([], kept, False)
+
+    def test_read_back_reports_a_kept_type_plex_no_longer_shows(self, tmp_path):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder)
+        pub = _publisher(tmp_path, folder, redetect="keep_plex")
+        _write_one(pub, [CREDITS_FINAL])
+        assert pub.shows("7", [CREDITS_FINAL], kept_types=frozenset({T.INTRO})) is Shown.MISSING
+        assert pub.shows("7", [], kept_types=frozenset({T.INTRO})) is Shown.MISSING
+        self._plex_redetects_the_intro(db)
+        assert pub.shows("7", [CREDITS_FINAL], kept_types=frozenset({T.INTRO})) is Shown.OURS
+        assert pub.shows("7", [], kept_types=frozenset({T.INTRO})) is Shown.OURS
+        assert pub.shows("7", [INTRO, CREDITS_FINAL]) is Shown.REPLACED
 
 
 class TestOptimizedVersions:

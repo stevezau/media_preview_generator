@@ -117,6 +117,10 @@ def _preview_job() -> dict:
     )
 
 
+# Runs the dashboard's 1 s countdown ticker once and reads the element straight after, before any re-render.
+_TICK_AND_READ = "(selector) => { _updateElapsedTimers(); return document.querySelector(selector).textContent.trim(); }"
+
+
 def _markers_job(job_id: str = "7c1f09aa-0000-4000-8000-000000000002", **overrides) -> dict:
     base = {
         "library_name": "Intro & Credits · Rick and Morty S01",
@@ -492,11 +496,63 @@ class TestQueueRows:
             },
             progress={"percent": 0, "outcome": None, "retry_eta": eta, "retry_wait_total": 600},
         )
-        page = dashboard([verify])
+        soon = json.loads(json.dumps(verify))
+        soon["id"] = "bbbbbbbb-0000-4000-8000-000000000006"
+        soon_eta = (datetime.now(timezone.utc) + timedelta(seconds=45)).isoformat()
+        soon["config"]["retry_not_before"] = soon_eta
+        soon["progress"]["retry_eta"] = soon_eta
+        page = dashboard([verify, soon])
         row = page.locator(f"#job-row-{verify['id']}")
         expect(row).to_contain_text("Verify: Rick and Morty S01", timeout=5000)
         expect(row).not_to_contain_text("Intro & Credits · Rick")
         expect(row.locator(".markers-retry-chip")).to_have_count(0)
+        # The owner's wording for a delayed check: minutes from 90 s up (rounded), seconds below.
+        expect(row.locator("[data-scheduled-at]")).to_have_text("Checking again in 10 min")
+        expect(page.locator(f"#job-row-{soon['id']} [data-scheduled-at]")).to_have_text(
+            re.compile(r"^Checking again in 4\d s$")
+        )
+        # The 1 s ticker rewrites the countdown between renders with the same words (read once, no retrying).
+        ticked = page.evaluate(_TICK_AND_READ, f"#job-row-{soon['id']} [data-scheduled-at]")
+        assert re.fullmatch(r"Checking again in [34]\d s", ticked), ticked
+        expect(row).not_to_contain_text("Retry starting")
+
+    def test_running_verify_card_checks_again_without_the_retry_wording(self, dashboard) -> None:
+        eta = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+        waiting = {"percent": 0, "outcome": None, "retry_eta": eta, "retry_wait_total": 600}
+        verify = _markers_job(
+            "bbbbbbbb-0000-4000-8000-000000000007",
+            library_name="Verify: Intro & Credits · Rick and Morty S01",
+            status="running",
+            completed_at=None,
+            publishers=[],
+            config={"kind": "intro_credits", "source": "sonarr", "file_paths": ["/a.mkv"], "verify": True},
+            progress=dict(waiting),
+        )
+        retry = _markers_job(
+            "bbbbbbbb-0000-4000-8000-000000000008",
+            library_name="Retry: Intro & Credits · Rick and Morty S01",
+            status="running",
+            completed_at=None,
+            publishers=[],
+            config={"kind": "intro_credits", "source": "sonarr", "file_paths": ["/a.mkv"], "retry_attempt": 1},
+            progress=dict(waiting),
+        )
+        page = dashboard([verify, retry])
+        card = page.locator(f"#active-job-{verify['id']}")
+        expect(card).to_be_visible(timeout=5000)
+        expect(card.locator(".retry-countdown-label")).to_have_text("Checking again in 10 min")
+        expect(card).to_contain_text("Waiting to check again")
+        expect(card).not_to_contain_text("Backing off after a failure")
+        expect(card).not_to_contain_text("Waiting to retry")
+        expect(card.locator(".markers-retry-chip")).to_have_count(0)
+        ticked = page.evaluate(_TICK_AND_READ, f"#active-job-{verify['id']} .retry-countdown-label")
+        assert ticked == "Checking again in 10 min", ticked
+        retry_card = page.locator(f"#active-job-{retry['id']}")
+        expect(retry_card.locator(".retry-countdown-label")).to_have_text("Next attempt in 10 min")
+        ticked = page.evaluate(_TICK_AND_READ, f"#active-job-{retry['id']} .retry-countdown-label")
+        assert ticked == "Next attempt in 10 min", ticked
+        expect(retry_card).to_contain_text("Backing off after a failure — will try again automatically.")
+        expect(retry_card).to_contain_text("Waiting to retry")
 
 
 def _files_response(files: list[dict]) -> dict:

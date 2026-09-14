@@ -55,6 +55,7 @@ class FakeRegistry:
             server.get_chapter_markers.return_value = []
             # One version per item and no plugins, unless a test says otherwise.
             server.get_part_durations.return_value = []
+            server.get_version_count.return_value = None
             server.get_media_source_durations.return_value = []
             server.get_plugin_names.return_value = []
             self.servers_by_id[sid] = server
@@ -105,6 +106,7 @@ def ready_publisher(name="plex_db", types=("intro", "credits"), *, atomic_writes
     pub.succeed = succeed
     pub.write.side_effect = pub.succeed
     pub.last_write_changed = True
+    pub.last_kept_types = frozenset()
     pub.shows.return_value = Shown.OURS
     return pub
 
@@ -132,7 +134,9 @@ class FakePlexItems:
     def publisher(self, sibling_markers, name="plex_db"):
         pub = ready_publisher(name, atomic_writes=True)
 
-        def write(item_id, markers, *, previous, duration_ms, canonical_path, own_previous=None):
+        def write(
+            item_id, markers, *, previous, duration_ms, canonical_path, own_previous=None, kept_types=frozenset()
+        ):
             self.calls.append(
                 {
                     "item_id": item_id,
@@ -174,7 +178,7 @@ class FakePlexItems:
             pub.last_write_changed = self.served(item_id) != before or bool(own_previous)
             return sorted(desired, key=lambda m: (m.start_ms, m.type.value))
 
-        def shows(item_id, ours):
+        def shows(item_id, ours, *, kept_types=frozenset()):
             served: dict = {}
             for mtype, start, end in self.served(item_id):
                 served.setdefault(mtype, []).append((start, end))

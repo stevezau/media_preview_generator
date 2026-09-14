@@ -107,6 +107,13 @@ _SCHEMA = (
         version INTEGER NOT NULL,
         updated_at TEXT NOT NULL,
         PRIMARY KEY (server_id, item_id))""",
+    # Marker types a server's own detection replaced on an item whose server is set to keep them ("Keep Plex's").
+    # A separate table so a markers.db from before it only gains the table.
+    """CREATE TABLE IF NOT EXISTS item_kept_types (
+        server_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        PRIMARY KEY (server_id, item_id, type))""",
     # What a file's last publish to a server was based on: its decided set and the item row version it saw.
     """CREATE TABLE IF NOT EXISTS publish_basis (
         file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -185,6 +192,8 @@ class ItemPublishStateRow:
     status: str
     version: int
     updated_at: str
+    # Types the server's own markers replaced and are kept there (Plex "Keep Plex's"); never ours in ``markers``.
+    kept_types: frozenset[MarkerType] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -330,9 +339,10 @@ class MarkerStore:
         """Insert or refresh a file; a size/mtime change invalidates derived data (locked markers survive).
 
         A changed identity clears evidence (and its versions), fingerprints, decisions, the server kind and every
-        server's ``publish_basis``, so the next run re-writes even when an in-place replacement (e.g. a Tdarr
-        transcode) lands on identical times -- some servers (Jellyfin) drop segments outright when a file's mtime
-        changes. ``publish_state`` keeps ``markers_json``/``status`` so that publish still knows what to replace.
+        server's ``publish_basis``, so the next run offers the markers to every server again even when an in-place
+        replacement (e.g. a Tdarr transcode) lands on identical times: the Jellyfin plugin serves nothing for a file
+        whose size changed until it is sent again, and its publisher sends it when the stored size differs.
+        ``publish_state`` keeps ``markers_json``/``status`` so that publish still knows what to replace.
         ``duration_ms=None`` on a changed identity stores NULL, since the old duration can no longer be trusted; on
         an unchanged identity it keeps the previous value.
 
@@ -708,8 +718,9 @@ class MarkerStore:
             r = self._conn.execute(
                 "SELECT * FROM item_publish_state WHERE server_id=? AND item_id=?", (server_id, item_id)
             ).fetchone()
-        if r is None:
-            return None
+            if r is None:
+                return None
+            kept = self._kept_types(self._conn, server_id, item_id)
         return ItemPublishStateRow(
             r["server_id"],
             r["item_id"],
@@ -717,9 +728,25 @@ class MarkerStore:
             r["status"],
             r["version"],
             r["updated_at"],
+            kept,
         )
 
-    def set_item_publish_state(self, server_id: str, item_id: str, markers: list[Marker] | None, status: str) -> int:
+    @staticmethod
+    def _kept_types(conn: sqlite3.Connection, server_id: str, item_id: str) -> frozenset[MarkerType]:
+        rows = conn.execute(
+            "SELECT type FROM item_kept_types WHERE server_id=? AND item_id=?", (server_id, item_id)
+        ).fetchall()
+        return frozenset(MarkerType(r["type"]) for r in rows)
+
+    def set_item_publish_state(
+        self,
+        server_id: str,
+        item_id: str,
+        markers: list[Marker] | None,
+        status: str,
+        *,
+        kept_types: Iterable[MarkerType] | None = None,
+    ) -> int:
         """Record what is ours on a server item after a publish attempt.
 
         ``version`` goes up only when the status or what the server shows changes: markers compare by (type, start,
@@ -733,6 +760,8 @@ class MarkerStore:
             markers: Ours on the item now (sorted by start when stored); None keeps the markers recorded before (a
                 failed write), or none for a new row.
             status: ``written`` or ``failed``.
+            kept_types: Types whose rows on the item are the server's own and kept there; None keeps the recorded
+                ones. A change bumps the version like a change of markers.
 
         Returns:
             The row's version.
@@ -747,10 +776,13 @@ class MarkerStore:
                 markers_json = row["markers_json"] if row else "[]"
             else:
                 markers_json = self._markers_to_json(sorted(markers, key=lambda m: (m.start_ms, m.type.value)))
+            kept_before = self._kept_types(conn, server_id, item_id)
+            kept = kept_before if kept_types is None else frozenset(kept_types)
             if (
                 row is not None
                 and row["status"] == status
                 and self._shown(row["markers_json"]) == self._shown(markers_json)
+                and kept == kept_before
             ):
                 return int(row["version"])
             version = int(row["version"]) + 1 if row else 1
@@ -759,6 +791,12 @@ class MarkerStore:
                 "updated_at) VALUES (?,?,?,?,?,?)",
                 (server_id, item_id, markers_json, status, version, now),
             )
+            if kept != kept_before:
+                conn.execute("DELETE FROM item_kept_types WHERE server_id=? AND item_id=?", (server_id, item_id))
+                conn.executemany(
+                    "INSERT INTO item_kept_types (server_id, item_id, type) VALUES (?,?,?)",
+                    [(server_id, item_id, mtype.value) for mtype in sorted(kept, key=lambda t: t.value)],
+                )
         return version
 
     def published_to_item(self, server_id: str, item_id: str) -> bool:

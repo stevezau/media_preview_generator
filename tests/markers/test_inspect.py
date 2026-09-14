@@ -488,9 +488,11 @@ def _known_file(store, decisions=None):
     return rec
 
 
-def _published(store, rec, server_id, item_id, ours, *, basis_for=None, status="written", message="2 marker(s)"):
+def _published(
+    store, rec, server_id, item_id, ours, *, basis_for=None, status="written", message="2 marker(s)", kept=None
+):
     store.set_publish_state(rec.id, server_id, item_id=item_id, markers=list(ours), status=status, message=message)
-    version = store.set_item_publish_state(server_id, item_id, list(ours), "written")
+    version = store.set_item_publish_state(server_id, item_id, list(ours), "written", kept_types=kept)
     if basis_for is not None:
         store.set_publish_basis(
             rec.id, server_id, decided_hash=MarkerStore.markers_hash(basis_for), item_version=version
@@ -551,7 +553,7 @@ def test_unknown_file_lists_every_owning_server(store, factory):
             "item_status": None,
             "plan": "nothing_to_publish",
             "plan_reason": "",
-            "version_count": 0,  # the fake Plex item has no parts
+            "version_count": None,  # the fake Plex doesn't say
             "error": None,
         },
         {
@@ -887,30 +889,50 @@ def test_a_credits_end_that_differs_is_not_up_to_date(store, factory, stype, dec
     assert _row(inspect.item_payload(PATH, registry=registry, store=store), sid)["plan"] == plan
 
 
+PLEX_CREDITS = Marker(T.CREDITS, 1_250_000, 1_280_000, ())
+PLEX_INTRO = Marker(T.INTRO, 60_000, 90_000, ())
+
+
 @pytest.mark.parametrize(
-    ("redetect", "shown", "plan", "reason"),
+    ("redetect", "ours", "kept", "shown", "plan", "reason"),
     [
+        ("keep_plex", [INTRO, CREDITS], None, [INTRO, PLEX_CREDITS], "keeps_plex", "Keeping Plex's credits"),
+        ("restore", [INTRO, CREDITS], None, [INTRO, PLEX_CREDITS], "will_replace", ""),
+        # Gone, not replaced: nothing of Plex's to keep, so ours are written again.
+        ("keep_plex", [INTRO, CREDITS], None, [INTRO], "will_replace", ""),
+        ("keep_plex", [INTRO, CREDITS], None, [INTRO, CREDITS], "up_to_date", ""),
+        # Plex's intro replaced ours and a rescan dropped the credits: the credits go back, the intro stays Plex's.
+        ("keep_plex", [INTRO, CREDITS], None, [PLEX_INTRO], "will_add", "Keeping Plex's intro"),
         (
             "keep_plex",
-            [Marker(T.INTRO, 11_000, 37_000, ()), Marker(T.CREDITS, 1_250_000, 1_280_000, ())],
+            [INTRO, CREDITS],
+            None,
+            [PLEX_INTRO, PLEX_CREDITS],
             "keeps_plex",
-            "Plex's own markers are kept (Keep Plex's)",
+            "Keeping Plex's intro and credits",
         ),
-        (
-            "restore",
-            [Marker(T.INTRO, 11_000, 37_000, ()), Marker(T.CREDITS, 1_250_000, 1_280_000, ())],
-            "will_replace",
-            "",
-        ),
-        # Gone, not replaced: nothing of Plex's to keep, so ours are written again.
-        ("keep_plex", [Marker(T.INTRO, 11_000, 37_000, ())], "will_replace", ""),
-        ("keep_plex", [INTRO, CREDITS], "up_to_date", ""),
+        # Kept on an earlier run: the item record holds only the intro.
+        ("keep_plex", [INTRO], {T.CREDITS}, [INTRO, PLEX_CREDITS], "keeps_plex", "Keeping Plex's credits"),
+        ("keep_plex", [INTRO], {T.CREDITS}, [INTRO], "will_replace", ""),  # Plex dropped its credits: ours go back
+        ("restore", [INTRO], {T.CREDITS}, [INTRO, PLEX_CREDITS], "will_replace", ""),  # switched to restore
     ],
-    ids=["keep-replaced", "restore-replaced", "keep-missing", "keep-ours-shown"],
+    ids=[
+        "keep-replaced",
+        "restore-replaced",
+        "keep-missing",
+        "keep-ours-shown",
+        "keep-mixed",
+        "keep-both",
+        "keep-recorded",
+        "keep-recorded-gone",
+        "restore-recorded",
+    ],
 )
-def test_plex_markers_replaced_by_plex_follow_on_plex_redetect(store, factory, redetect, shown, plan, reason):
+def test_plex_markers_replaced_by_plex_follow_on_plex_redetect(
+    store, factory, redetect, ours, kept, shown, plan, reason
+):
     rec = _known_file(store)
-    _published(store, rec, "plex", "rk-1", [INTRO, CREDITS], basis_for=[INTRO, CREDITS])
+    _published(store, rec, "plex", "rk-1", ours, basis_for=[INTRO, CREDITS], kept=kept)
     markers = _plex_markers(enabled=True, redetect=redetect)
     registry = _registry(server_config("plex", ServerType.PLEX, markers=markers))
     registry.get("plex").get_markers.return_value = _plex_rows(*shown, final_credits=False)
@@ -918,44 +940,56 @@ def test_plex_markers_replaced_by_plex_follow_on_plex_redetect(store, factory, r
     assert (row["plan"], row["plan_reason"]) == (plan, reason)
 
 
-def test_keep_plex_after_this_files_decision_changed_is_a_replace(store, factory):
-    # The next job writes a changed decision whatever the setting: "Keep Plex's" only stops restoring the same one.
+def test_keep_plex_holds_on_every_path_not_only_an_unchanged_file(store, factory):
+    # A forced run, a skipped or failed attempt, or another version's publish all go through the publisher's keep rule.
     rec = _known_file(store)
     _published(store, rec, "plex", "rk-1", [INTRO, CREDITS], basis_for=[INTRO])
     registry = _registry(
         server_config("plex", ServerType.PLEX, markers=_plex_markers(enabled=True, redetect="keep_plex"))
     )
-    registry.get("plex").get_markers.return_value = _plex_rows(
-        INTRO, Marker(T.CREDITS, 1_250_000, 1_280_000, ()), final_credits=False
+    registry.get("plex").get_markers.return_value = _plex_rows(INTRO, PLEX_CREDITS, final_credits=False)
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
+    assert (row["plan"], row["plan_reason"]) == ("keeps_plex", "Keeping Plex's credits")
+
+
+def test_plex_waiting_on_versions_leaves_out_the_kept_types(store, factory):
+    rec = _known_file(store)
+    registry = _registry(
+        server_config("plex", ServerType.PLEX, markers=_plex_markers(enabled=True, redetect="keep_plex"))
     )
-    assert _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")["plan"] == "will_replace"
+    registry.get("plex").get_markers.return_value = _plex_rows(PLEX_INTRO)
+    _published(store, rec, "plex", "rk-1", [], basis_for=[INTRO, CREDITS], status="waiting", kept={T.INTRO})
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
+    assert (row["plan"], row["plan_reason"]) == ("waiting", "versions don't agree yet; keeping Plex's intro")
 
 
 @pytest.mark.parametrize(
-    ("stype", "known_item", "durations", "count"),
+    ("stype", "known_item", "versions", "count"),
     [
-        (ServerType.PLEX, True, [DURATION], 1),
-        (ServerType.PLEX, True, [DURATION, DURATION - 60_000], 2),
+        (ServerType.PLEX, True, 1, 1),
+        (ServerType.PLEX, True, 2, 2),
         (ServerType.PLEX, True, None, None),  # Plex didn't answer
-        (ServerType.PLEX, False, [DURATION, DURATION], None),  # no item: nothing to ask
-        (ServerType.JELLYFIN, True, [DURATION, DURATION], None),  # one item per version: never asked
+        (ServerType.PLEX, False, 2, None),  # no item: nothing to ask
+        (ServerType.JELLYFIN, True, 2, None),  # one item per version: never asked
     ],
     ids=["plex-one", "plex-two", "plex-unreadable", "plex-no-item", "jellyfin"],
 )
-def test_plex_row_carries_the_items_version_count(store, factory, stype, known_item, durations, count):
+def test_plex_row_carries_the_items_version_count(store, factory, stype, known_item, versions, count):
+    # Versions, not parts: a stacked file or an optimized copy isn't another version (PlexServer.get_version_count).
     _known_file(store)
     sid = stype.value
     registry = _registry(server_config(sid, stype))
     server = registry.get(sid)
-    server.get_part_durations.return_value = durations
+    server.get_version_count.return_value = versions
     if not known_item:
         server.resolve_remote_path_to_item_id.return_value = None
     row = _row(inspect.item_payload(PATH, registry=registry, store=store), sid)
     assert row["version_count"] == count
     if stype is ServerType.PLEX and known_item:
-        server.get_part_durations.assert_called_once_with(f"item-{sid}")
+        server.get_version_count.assert_called_once_with(f"item-{sid}")
     else:
-        server.get_part_durations.assert_not_called()
+        server.get_version_count.assert_not_called()
+    server.get_part_durations.assert_not_called()
 
 
 def test_capability_check_that_raises_reads_as_unknown_in_the_inspector(store, monkeypatch):
@@ -1033,6 +1067,25 @@ def test_nothing_decided_removes_what_is_ours(store, factory, ours, plan):
     registry = _registry(server_config("plex", ServerType.PLEX))
     registry.get("plex").get_markers.return_value = _plex_rows(*ours)
     assert _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")["plan"] == plan
+
+
+@pytest.mark.parametrize(
+    ("shown", "plan"),
+    [
+        ([INTRO, CREDITS, Marker(T.INTRO, 1_000, 9_000, ())], "up_to_date"),
+        ([INTRO, CREDITS, Marker(T.CREDITS, 1_000_000, 1_100_000, ())], "up_to_date"),
+        ([Marker(T.INTRO, 1_000, 9_000, ()), CREDITS], "will_replace"),  # ours isn't served: the job sends it
+        ([CREDITS], "will_replace"),
+    ],
+    ids=["other-intro", "other-credits", "only-others-intro", "intro-missing"],
+)
+def test_jellyfin_another_providers_segment_beside_ours_is_up_to_date(store, factory, shown, plan):
+    # Jellyfin serves every provider's segments side by side; the job reads ours as shown (compare_shown).
+    rec = _known_file(store)
+    _published(store, rec, "jf", "jf-item", [INTRO, CREDITS], basis_for=[INTRO, CREDITS])
+    registry = _registry(server_config("jf", ServerType.JELLYFIN))
+    registry.get("jf").get_media_segments.return_value = _jf_rows(*shown)
+    assert _row(inspect.item_payload(PATH, registry=registry, store=store), "jf")["plan"] == plan
 
 
 @pytest.mark.parametrize(

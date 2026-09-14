@@ -898,3 +898,47 @@ def test_server_kind_goes_with_a_removed_file_row(store):
     new = store.upsert_file(_ident("/m/New.mkv"), duration_ms=1, season_key=None, is_movie=True)
     assert new.id == rec.id
     assert store.get_server_kind(new.id) is None
+
+
+def test_item_publish_state_remembers_the_types_plex_keeps(tmp_path):
+    # "Keep Plex's": once Plex's own detection replaced our marker of a type, that type stays Plex's on every path
+    # until the server is switched back to restore or Plex's rows for it go away.
+    path = str(tmp_path / "kept.db")
+    store = MarkerStore(path)
+    credits = Marker(T.CREDITS, 9000, 12000, ("chapters",))
+    try:
+        version = store.set_item_publish_state("plex-1", "42", [credits], "written", kept_types={T.INTRO})
+        row = store.get_item_publish_state("plex-1", "42")
+        assert (row.markers, row.kept_types) == ((credits,), frozenset({T.INTRO}))
+        # Not given: what was kept stays (a failed write, or a caller that doesn't know).
+        assert store.set_item_publish_state("plex-1", "42", [credits], "written") == version
+        store.set_item_publish_state("plex-1", "42", None, "failed")
+        assert store.get_item_publish_state("plex-1", "42").kept_types == frozenset({T.INTRO})
+        failed = store.get_item_publish_state("plex-1", "42").version
+        # A change in what is kept is a change on the item: siblings must look again.
+        released = store.set_item_publish_state("plex-1", "42", [credits], "failed", kept_types=())
+        assert released == failed + 1 and store.get_item_publish_state("plex-1", "42").kept_types == frozenset()
+        store.set_item_publish_state("plex-1", "42", [credits], "written", kept_types={T.CREDITS, T.INTRO})
+        assert store.get_item_publish_state("plex-1", "43") is None
+        assert store.get_item_publish_state("plex-2", "42") is None
+    finally:
+        store.close()
+    reopened = MarkerStore(path)
+    try:
+        assert reopened.get_item_publish_state("plex-1", "42").kept_types == frozenset({T.INTRO, T.CREDITS})
+    finally:
+        reopened.close()
+
+
+def test_a_store_made_before_kept_types_opens_with_nothing_kept(tmp_path):
+    path = str(tmp_path / "old.db")
+    store = MarkerStore(path)
+    store.set_item_publish_state("plex-1", "42", [Marker(T.INTRO, 1, 5000, ("chapters",))], "written")
+    store._conn.execute("DROP TABLE item_kept_types")
+    store.close()
+    reopened = MarkerStore(path)
+    try:
+        row = reopened.get_item_publish_state("plex-1", "42")
+        assert row.kept_types == frozenset() and len(row.markers) == 1
+    finally:
+        reopened.close()

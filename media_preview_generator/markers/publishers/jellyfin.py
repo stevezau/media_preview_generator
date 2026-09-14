@@ -151,17 +151,20 @@ class JellyfinMarkerPublisher(MarkerPublisher):
         duration_ms: int | None,
         canonical_path: str,
         own_previous: list[Marker] | None = None,
+        kept_types: frozenset[MarkerType] = frozenset(),
     ) -> list[Marker]:
         """Replace the plugin's markers for the item and confirm Jellyfin serves them.
 
         An empty set deletes them instead, when something was published before or that is unknown (``previous`` None).
-        When ``previous`` already is this set and Jellyfin still serves all of it, nothing is sent.
+        When ``previous`` already is this set, the plugin holds it for this very file (its stored size is the size on
+        disk now) and Jellyfin still serves all of it, nothing is sent.
 
         Writes are not atomic (``atomic_writes`` False): a ``PublishError`` from the confirmation comes after the POST.
         The unconfirmed markers are then deleted (best effort); if that DELETE fails too, the plugin store keeps them
         until the next write for the item, so after a failure callers pass ``previous=None`` and write again.
 
         ``own_previous`` is ignored: Jellyfin item ids are per version, so no other file's markers share the item.
+        ``kept_types`` is ignored: Jellyfin serves every provider's segments side by side, so nothing is kept instead.
 
         Returns:
             The markers that are ours on this item now: ``project(markers)``, or ``[]`` after a delete or when there
@@ -175,8 +178,10 @@ class JellyfinMarkerPublisher(MarkerPublisher):
         self.last_write_changed = False
         wanted = self.project(markers)
         if wanted and previous is not None and _times(self.project(previous)) == _times(wanted):
-            # A forced run or a restore check: POST only when Jellyfin no longer serves what the plugin was given.
-            if self.shows(item_id, wanted) is Shown.OURS:
+            # A forced run, a restore check or a replaced file with the same markers. /MediaSegments is Jellyfin's
+            # copy of the provider's last answer and still lists ours for a replaced file, while the plugin, holding
+            # the old file's size, serves nothing once Jellyfin refreshes it: a POST stores the new size.
+            if self._plugin_holds_this_file(item_id, canonical_path) and self.shows(item_id, wanted) is Shown.OURS:
                 return wanted
         try:
             if not wanted:
@@ -203,12 +208,21 @@ class JellyfinMarkerPublisher(MarkerPublisher):
         logger.info("Jellyfin {}: stored {} marker(s) for item {}", self._config.name, len(wanted), item_id)
         return wanted
 
-    def shows(self, item_id: str, ours: list[Marker]) -> Shown | None:
+    def _plugin_holds_this_file(self, item_id: str, canonical_path: str) -> bool:
+        """Whether the plugin's markers for the item were stored for the file on disk now (same size, not stale)."""
+        size = _file_size(canonical_path)
+        state = self._server.get_bridge_marker_state(item_id)
+        return size is not None and state is not None and not state["stale"] and state["fileSize"] == size
+
+    def shows(
+        self, item_id: str, ours: list[Marker], *, kept_types: frozenset[MarkerType] = frozenset()
+    ) -> Shown | None:
         """Read core ``/MediaSegments`` for the item: what Jellyfin serves from every provider.
 
         Args:
             item_id: Jellyfin item id.
             ours: What this app last left on the item.
+            kept_types: Ignored (see ``write``).
 
         Returns:
             Whether Jellyfin still serves each of ``ours`` (another provider's segments may sit alongside); None when

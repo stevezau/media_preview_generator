@@ -1851,6 +1851,47 @@ class TestPlexMarkerHelpers:
         assert plex_server_under_test.get_part_durations("/library/metadata/777") == [1_444_574, 1_384_574, None]
         assert conn.query.call_args.args[0] == "/library/metadata/777"
 
+    @pytest.mark.parametrize(
+        ("media", "count"),
+        [
+            # A stacked version (two parts) is one version.
+            ('<Media id="1"><Part id="11" file="/tv/cd1.mkv"/><Part id="12" file="/tv/cd2.mkv"/></Media>', 1),
+            # Plex's "Optimize" copy of a version isn't another version.
+            (
+                '<Media id="1"><Part id="11" file="/tv/bd.mkv"/></Media>'
+                '<Media id="2" proxyType="42"><Part id="21" file="/tv/Plex Versions/Optimized for TV/bd.mp4"/></Media>',
+                1,
+            ),
+            (
+                '<Media id="1"><Part id="11" file="/tv/bd.mkv"/></Media>'
+                '<Media id="2"><Part id="21" file="/tv/web.mkv"/></Media>',
+                2,
+            ),
+        ],
+        ids=["stacked", "optimized-copy", "two-versions"],
+    )
+    def test_get_version_count_counts_versions_not_parts_or_optimized_copies(
+        self, plex_server_under_test, media, count
+    ):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = ET.fromstring(
+            f'<MediaContainer><Video ratingKey="777">{media}</Video></MediaContainer>'
+        )
+        assert plex_server_under_test.get_version_count("/library/metadata/777") == count
+        assert conn.query.call_args.args[0] == "/library/metadata/777"
+
+    def test_get_version_count_returns_none_when_plex_fails_or_has_no_item(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = RuntimeError("down")
+        assert plex_server_under_test.get_version_count("7") is None
+        conn.query.side_effect = None
+        conn.query.return_value = ET.fromstring("<MediaContainer/>")
+        assert plex_server_under_test.get_version_count("7") is None
+
     def test_get_part_durations_returns_none_when_plex_fails_or_has_no_item(self, plex_server_under_test):
         import xml.etree.ElementTree as ET
 

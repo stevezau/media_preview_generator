@@ -449,15 +449,43 @@ class _Plan(NamedTuple):
     inserts: list[tuple[int, str, int, int, str]]  # (index, text, time_offset, end_time_offset, extra_data)
     reindex: list[tuple[int, int]]  # (index, taggings id)
     part_updates: list[tuple[str, int]]  # (extra_data, media_parts id)
+    ours: list[Marker]  # the desired markers the item shows as ours after the write (kept types left out)
+    kept_types: frozenset[MarkerType]  # types whose rows are Plex's own and stay untouched
 
     @property
     def is_noop(self) -> bool:
         return not (self.replaced_texts or self.reindex or self.part_updates)
 
 
-def _nothing_to_write(plan: _Plan, wanted: list[Marker]) -> bool:
-    # With nothing to add, kept rows are only renumbered around rows we actually remove.
-    return plan.is_noop or not (wanted or plan.replaced_texts or plan.part_updates)
+def _nothing_to_write(plan: _Plan) -> bool:
+    # With nothing of ours to show, other rows (Plex's own) are only renumbered around rows we actually remove.
+    return plan.is_noop or not (plan.ours or plan.replaced_texts or plan.part_updates)
+
+
+def _kept_types(
+    rows: list[_TaggingRow], prior: list[Marker], kept_before: frozenset[MarkerType], keep_plex: bool
+) -> frozenset[MarkerType]:
+    """The types whose rows on the item are Plex's own and must stay ("Keep Plex's", ``on_plex_redetect``).
+
+    A type becomes kept once Plex shows other rows of it where ours were (its own detection replaced them); it stays
+    kept, whatever gets written for the item, until Plex has no rows of it left or the server is set to restore ours.
+    A type we never wrote isn't kept: a first publish replaces what Plex had, as without the setting.
+    """
+    if not keep_plex:
+        return frozenset()
+    kept = set()
+    for mtype, text in _TYPE_TEXT.items():
+        current = sorted(
+            _served_times(mtype, r.time_offset, r.end_time_offset, _row_is_final(r.extra_data))
+            for r in rows
+            if r.text == text
+        )
+        if not current:
+            continue
+        ours_before = _served_of(prior, mtype)
+        if mtype in kept_before or (ours_before and current != ours_before):
+            kept.add(mtype)
+    return frozenset(kept)
 
 
 class PlexMarkerPublisher(MarkerPublisher):
@@ -554,8 +582,9 @@ class PlexMarkerPublisher(MarkerPublisher):
 
     @staticmethod
     def _check_library_marker_versions(conn: sqlite3.Connection) -> None:
-        # Two LIKE scans of media_parts: run from capability() (cached per job), never per write. Each write still
-        # validates the parts it touches in merge_part_extra_data. Newest rows first: a new format shows up there.
+        # Two LIKE scans of media_parts: run from capability() (cached per job, for a few seconds only while Plex Pass
+        # doesn't answer), never per write. Each write still validates the parts it touches in merge_part_extra_data.
+        # Newest rows first: a new format shows up there.
         for key in _PART_KEY.values():
             rows = conn.execute(
                 "SELECT extra_data FROM media_parts WHERE extra_data LIKE ? ORDER BY id DESC LIMIT 50",
@@ -605,6 +634,9 @@ class PlexMarkerPublisher(MarkerPublisher):
             paths.append(folder)
         return paths
 
+    def _live_settings(self) -> ServerMarkersSettings:
+        return self._settings_provider() if self._settings_provider is not None else self._settings
+
     def _local_checks(self, *, deadline: float) -> CapabilityReport:
         """Settings (read live when a ``settings_provider`` was given), database files and the shared lock: everything
         that needs no Plex connection.
@@ -616,7 +648,7 @@ class PlexMarkerPublisher(MarkerPublisher):
             READY when all pass. A missing lock holder is reported as UNREACHABLE with ``details["lock_holder"]``
             False, so ``capability()`` can tell "Plex stopped" from "different file".
         """
-        settings = self._settings_provider() if self._settings_provider is not None else self._settings
+        settings = self._live_settings()
         if not settings.enabled:
             return CapabilityReport(Capability.DISABLED, "Intro & Credits is off for this server")
         if not settings.db_write_confirmed_at:
@@ -780,6 +812,8 @@ class PlexMarkerPublisher(MarkerPublisher):
         duration_ms: int | None,
         own_prior: list[Marker],
         calling_part_ids: set[int],
+        kept_before: frozenset[MarkerType],
+        keep_plex: bool,
     ) -> _Plan:
         rows = [
             _TaggingRow(*row)
@@ -789,6 +823,10 @@ class PlexMarkerPublisher(MarkerPublisher):
                 (rating_key, tag_id),
             )
         ]
+        kept_types = _kept_types(rows, prior, kept_before, keep_plex)
+        # Plex's rows of a kept type, and the pv: key it rebuilds them from, are left exactly as they are.
+        wanted = [m for m in wanted if m.type not in kept_types]
+        prior = [m for m in prior if m.type not in kept_types]
         wanted_types = {m.type for m in wanted}
         replaced: set[str] = set()
         for mtype in wanted_types:
@@ -834,7 +872,14 @@ class PlexMarkerPublisher(MarkerPublisher):
                 extra = merge_part_extra_data(extra, [], own_types, duration_ms, previous=own_prior)
             if not _same_extra_data(extra, part.extra_data):
                 part_updates.append((extra, part.id))
-        return _Plan(replaced_texts=sorted(replaced), inserts=inserts, reindex=reindex, part_updates=part_updates)
+        return _Plan(
+            replaced_texts=sorted(replaced),
+            inserts=inserts,
+            reindex=reindex,
+            part_updates=part_updates,
+            ours=wanted,
+            kept_types=kept_types,
+        )
 
     def _write_item(
         self,
@@ -846,8 +891,14 @@ class PlexMarkerPublisher(MarkerPublisher):
         duration_ms: int | None,
         own_prior: list[Marker],
         calling_part_ids: set[int],
-    ) -> bool:
-        """Write one item in one transaction; False when everything already matched."""
+        kept_before: frozenset[MarkerType],
+        keep_plex: bool,
+    ) -> tuple[bool, _Plan]:
+        """Write one item in one transaction.
+
+        Returns:
+            Whether anything changed (False when everything already matched), and the plan made under the lock.
+        """
         # BEGIN IMMEDIATE can wait the rest of the call's deadline — exactly while Plex is writing, often to this item.
         # Everything we merge is re-read after it, or Plex's fresh extra_data keys would be overwritten from a stale read.
         conn.execute("BEGIN IMMEDIATE")
@@ -857,10 +908,22 @@ class PlexMarkerPublisher(MarkerPublisher):
             fresh = self._item_parts(conn, rating_key)
             if not _same_files(fresh, parts):
                 raise PublishError("Plex changed this item's files while we were writing; trying again on the next run")
-            plan = self._plan(conn, rating_key, tag_id, fresh, wanted, prior, duration_ms, own_prior, calling_part_ids)
-            if _nothing_to_write(plan, wanted):
+            plan = self._plan(
+                conn,
+                rating_key,
+                tag_id,
+                fresh,
+                wanted,
+                prior,
+                duration_ms,
+                own_prior,
+                calling_part_ids,
+                kept_before,
+                keep_plex,
+            )
+            if _nothing_to_write(plan):
                 conn.execute("ROLLBACK")
-                return False
+                return False, plan
             if plan.replaced_texts:
                 placeholders = ",".join("?" * len(plan.replaced_texts))
                 conn.execute(
@@ -877,7 +940,7 @@ class PlexMarkerPublisher(MarkerPublisher):
             conn.executemany("UPDATE taggings SET [index]=? WHERE id=?", plan.reindex)
             conn.executemany("UPDATE media_parts SET extra_data=? WHERE id=?", plan.part_updates)
             conn.execute("COMMIT")
-            return True
+            return True, plan
         except BaseException:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
@@ -892,19 +955,25 @@ class PlexMarkerPublisher(MarkerPublisher):
         duration_ms: int | None,
         canonical_path: str,
         own_previous: list[Marker] | None = None,
+        kept_types: frozenset[MarkerType] = frozenset(),
     ) -> list[Marker]:
         """Make this item show its desired marker set (see ``_desired``) in ``taggings`` and every part's ``extra_data``.
 
         Types of ours that are no longer desired are removed only where they still serve exactly ``previous``; Plex's
-        own rows of those types stay. A desired type replaces whatever rows the item has of that type.
+        own rows of those types stay. A desired type replaces whatever rows the item has of that type, except a type
+        kept as Plex's own while the server is set to "Keep Plex's" (see ``_kept_types``).
 
         Returns:
-            The desired set now on the item (see ``MarkerPublisher.write``).
+            The desired set now on the item, kept types left out (see ``MarkerPublisher.write``).
 
         Raises:
             PublishError: Nothing was written (one transaction; see ``MarkerPublisher.write``).
         """
         self.last_write_changed = False
+        keep_plex = self._live_settings().on_plex_redetect == "keep_plex"
+        kept_before = frozenset(kept_types)
+        # Until the item's rows are read, what was kept stays kept (or is released by the setting).
+        self.last_kept_types = kept_before if keep_plex else frozenset()
         wanted = self.project(markers)
         # previous=None: nothing on the item is provably ours, so nothing is removed.
         prior = self.project(previous) if previous is not None else []
@@ -937,25 +1006,52 @@ class PlexMarkerPublisher(MarkerPublisher):
                 if same_files:
                     tag_id = self._marker_tag_id(conn)
                     plan = self._plan(
-                        conn, rating_key, tag_id, snapshot, desired, prior, duration_ms, own_prior, calling
+                        conn,
+                        rating_key,
+                        tag_id,
+                        snapshot,
+                        desired,
+                        prior,
+                        duration_ms,
+                        own_prior,
+                        calling,
+                        kept_before,
+                        keep_plex,
                     )
-            if same_files and _nothing_to_write(plan, desired):
-                return desired
-            with self._database(read_only=False, deadline=deadline) as conn:
-                changed = self._write_item(conn, rating_key, parts, desired, prior, duration_ms, own_prior, calling)
+            if same_files and _nothing_to_write(plan):
+                changed = False
+            else:
+                with self._database(read_only=False, deadline=deadline) as conn:
+                    changed, plan = self._write_item(
+                        conn, rating_key, parts, desired, prior, duration_ms, own_prior, calling, kept_before, keep_plex
+                    )
         except sqlite3.Error as exc:
             raise publish_error_from_sqlite(exc) from exc
+        newly_kept = plan.kept_types - kept_before
+        if newly_kept:
+            logger.info(
+                "Plex {}: item {} shows Plex's own {} instead of ours; keeping them (Keep Plex's)",
+                self._config.name,
+                rating_key,
+                " and ".join(t.value for t in MarkerType if t in newly_kept),
+            )
         if changed:
-            logger.info("Plex {}: item {} now shows {} marker(s) of ours", self._config.name, rating_key, len(desired))
+            logger.info(
+                "Plex {}: item {} now shows {} marker(s) of ours", self._config.name, rating_key, len(plan.ours)
+            )
         self.last_write_changed = changed
-        return desired
+        self.last_kept_types = plan.kept_types
+        return plan.ours
 
-    def shows(self, item_id: str, ours: list[Marker]) -> Shown | None:
+    def shows(
+        self, item_id: str, ours: list[Marker], *, kept_types: frozenset[MarkerType] = frozenset()
+    ) -> Shown | None:
         """Read the item's marker rows from Plex's database (the same lock proof and read-only connection as a write).
 
         Args:
             item_id: Plex rating key.
             ours: What this app last left on the item.
+            kept_types: Types kept as Plex's own; one without any rows left is MISSING (ours may go back).
 
         Returns:
             How Plex's rows of our types compare with ``ours``; None when the database couldn't be read.
@@ -987,4 +1083,6 @@ class PlexMarkerPublisher(MarkerPublisher):
             ]
             for mtype, name in _TYPE_TEXT.items()
         }
+        if any(not served.get(mtype) for mtype in kept_types):
+            return Shown.MISSING
         return compare_shown(self.project(ours), served, others_alongside=False)

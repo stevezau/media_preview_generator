@@ -2042,8 +2042,9 @@ function updateJobQueue(force) {
             progressCell = `<span class="text-warning small" data-webhook-fire-at="${escapeHtml(webhookFireAt)}"><i class="bi bi-hourglass-split me-1"></i>${label}</span>`;
         } else if (isWaitingRetryRow) {
             const remaining = Math.max(0, Math.ceil((new Date(countdownTarget).getTime() - Date.now()) / 1000));
-            const label = remaining > 0 ? `Retry starting ${_formatCountdown(remaining)}` : 'Starting...';
-            progressCell = `<span class="text-warning small" data-scheduled-at="${escapeHtml(countdownTarget)}"><i class="bi bi-hourglass-split me-1"></i>${label}</span>`;
+            const waitWord = _countdownWord(job, 'Retry starting');
+            const label = remaining > 0 ? `${waitWord} ${_formatCountdown(remaining)}` : 'Starting...';
+            progressCell = `<span class="text-warning small" data-scheduled-at="${escapeHtml(countdownTarget)}" data-countdown-label="${escapeHtmlAttr(waitWord)}"><i class="bi bi-hourglass-split me-1"></i>${label}</span>`;
         } else {
             // Color the bar by status — blue (primary) is reserved for
             // running. Completed/failed/cancelled get the matching outcome
@@ -2264,7 +2265,8 @@ function updateActiveJobs(runningJobs, force) {
             const note = _markersPauseNote(markersPause);
             statusBadge = `<span class="badge bg-warning text-dark"${note ? ` title="${escapeHtmlAttr(note)}"` : ''}>Paused</span>`;
         } else if (isRetryWaiting) {
-            statusBadge = '<span class="badge bg-warning text-dark"><i class="bi bi-hourglass-split me-1"></i>Waiting to retry</span>';
+            const waitText = _isMarkersVerifyJob(job) ? 'Waiting to check again' : 'Waiting to retry';
+            statusBadge = `<span class="badge bg-warning text-dark"><i class="bi bi-hourglass-split me-1"></i>${waitText}</span>`;
         } else {
             statusBadge = '<span class="badge bg-primary pulse">Running</span>';
         }
@@ -2327,18 +2329,23 @@ function updateActiveJobs(runningJobs, force) {
             const totalSec = retryWaitTotal && retryWaitTotal > 0 ? retryWaitTotal : 30;
             const remaining = Math.max(0, Math.ceil((new Date(retryEta).getTime() - Date.now()) / 1000));
             const fillPct = Math.max(0, Math.min(100, ((totalSec - remaining) / totalSec) * 100)).toFixed(1);
+            const waitWord = _countdownWord(job, 'Next attempt');
+            // A verify job isn't recovering from a failure: it checks replaced files again once servers had time to rescan.
+            const waitNote = _isMarkersVerifyJob(job)
+                ? 'Servers often rescan a replaced file after its markers are sent.'
+                : 'Backing off after a failure — will try again automatically.';
             progressBlock = `
             <div class="progress retry-countdown-bar" style="height: 24px;"
-                 data-retry-eta="${escapeHtml(retryEta)}" data-retry-wait-total="${totalSec}">
+                 data-retry-eta="${escapeHtml(retryEta)}" data-retry-wait-total="${totalSec}" data-countdown-label="${escapeHtmlAttr(waitWord)}">
                 <div class="progress-bar bg-warning text-dark progress-bar-striped progress-bar-animated"
                      role="progressbar" style="width: ${fillPct}%"
                      id="activeJobProgress-${jid}">
-                    <span class="retry-countdown-label">Next attempt ${_formatCountdown(remaining)}</span>
+                    <span class="retry-countdown-label">${waitWord} ${_formatCountdown(remaining)}</span>
                 </div>
             </div>
             <div class="d-flex justify-content-between mt-1 small">
                 <span class="text-warning" id="activeJobItem-${jid}">
-                    <i class="bi bi-hourglass-split me-1"></i>Backing off after a failure — will try again automatically.
+                    <i class="bi bi-hourglass-split me-1"></i>${waitNote}
                 </span>
                 <span class="text-muted" id="activeJobItems-${jid}">${retryAttempt > 0 ? `Attempt ${retryAttempt}${maxRetries ? ` of ${maxRetries}` : ''}` : ''}</span>
             </div>`;
@@ -3790,6 +3797,16 @@ function formatRelativeTime(dateStr) {
     return `<span class="text-nowrap" title="${escapeHtml(abs)}">${label}</span>`;
 }
 
+// A delayed Intro & Credits verify job checks replaced files again; it isn't a retry of a failure.
+function _isMarkersVerifyJob(job) {
+    return _isMarkersJob(job) && !!(job.config && job.config.verify);
+}
+
+// The words before a retry-wait countdown: "Checking again" for a verify job, the retry wording otherwise.
+function _countdownWord(job, retryWord) {
+    return _isMarkersVerifyJob(job) ? 'Checking again' : retryWord;
+}
+
 // Retry countdowns: "in 45 s" below 90 seconds, then rounded minutes ("in 5 min").
 function _formatCountdown(seconds) {
     return seconds >= 90 ? `in ${Math.round(seconds / 60)} min` : `in ${seconds} s`;
@@ -3814,7 +3831,8 @@ function _updateElapsedTimers() {
         var scheduled = new Date(el.getAttribute('data-scheduled-at')).getTime();
         var remaining = Math.max(0, Math.ceil((scheduled - Date.now()) / 1000));
         if (remaining > 0) {
-            el.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Retry starting ' + _formatCountdown(remaining);
+            var word = el.getAttribute('data-countdown-label') || 'Retry starting';
+            el.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>' + escapeHtml(word) + ' ' + _formatCountdown(remaining);
         } else {
             el.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Starting...';
         }
@@ -3846,7 +3864,8 @@ function _updateElapsedTimers() {
             bar.style.width = fill.toFixed(1) + '%';
             var label = bar.querySelector('.retry-countdown-label');
             if (label) {
-                label.textContent = remaining > 0 ? 'Next attempt ' + _formatCountdown(remaining) : 'Starting…';
+                var word = wrap.getAttribute('data-countdown-label') || 'Next attempt';
+                label.textContent = remaining > 0 ? word + ' ' + _formatCountdown(remaining) : 'Starting…';
             }
         }
     });

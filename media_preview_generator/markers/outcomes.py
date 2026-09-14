@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from enum import Enum
+
+from .models import Marker, MarkerType
 
 
 class FileOutcome(str, Enum):
@@ -85,11 +88,31 @@ RETRY_REASON_CODES = frozenset({NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN})
 
 # Skipped-file message for trailers and other extras (``external_ids.is_extra``).
 EXTRAS_NOT_CHECKED = "Extras aren't checked for markers"
-# Row message when Plex's own detection replaced ours and the server is set to "Keep Plex's".
-KEPT_PLEX_MARKERS = "Plex's own markers are kept (Keep Plex's)"
+
+
+def kept_note(kept_types: Iterable[MarkerType], wanted: Iterable[Marker]) -> str:
+    """Row and Inspector wording for the decided types a Plex server keeps as its own ("Keep Plex's").
+
+    Returns:
+        "keeping Plex's credits" (or "intro and credits"); "" when none of ``wanted`` is kept.
+    """
+    kept, wanted_types = set(kept_types), {m.type for m in wanted}
+    names = [t.value for t in MarkerType if t in kept and t in wanted_types]
+    return f"keeping Plex's {' and '.join(names)}" if names else ""
+
+
+def with_kept_note(message: str, note: str) -> str:
+    """``message; note``, or the note alone (capitalised) without a message."""
+    if not note:
+        return message
+    return f"{message}; {note}" if message else note[0].upper() + note[1:]
+
+
 # Row key on a written or up-to-date row of a replaced file: servers often rescan a replaced file after the job, so
 # the job checks it again later (``job_runner._queue_verify``).
 VERIFY_LATER = "verify_later"
+# Row key on an up-to-date row whose server couldn't be read back: the job warns how many files it couldn't check.
+READ_BACK_FAILED = "read_back_failed"
 
 
 # publish_state.status persisted per (file, server) for the rows that record an attempt.

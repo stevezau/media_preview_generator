@@ -2256,6 +2256,30 @@ class PlexServer(MediaServer):
             durations.append(int(raw) if raw and raw.isdigit() else None)
         return durations
 
+    def get_version_count(self, item_id: str) -> int | None:
+        """How many versions an item has: its ``Media`` nodes, leaving out Plex's optimized copies.
+
+        A stacked version has several parts but is one version; an "Optimize" copy carries ``proxyType``.
+
+        Args:
+            item_id: Rating key or metadata key.
+
+        Returns:
+            The number of versions, or None on error or when Plex has no such item.
+        """
+        from ..plex_client import retry_plex_call
+
+        bare_id = str(item_id or "").strip().rsplit("/", 1)[-1]
+        try:
+            root = retry_plex_call(self._connect().query, f"/library/metadata/{bare_id}")
+        except Exception as exc:
+            logger.debug("Plex version read failed for {}: {}", bare_id, exc)
+            return None
+        node = next(iter(root), None) if root is not None else None
+        if node is None:
+            return None
+        return sum(1 for media in node.findall("Media") if not media.get("proxyType"))
+
     def parse_webhook(self, payload: dict[str, Any] | bytes, headers: dict[str, str]) -> WebhookEvent | None:
         """Normalise a Plex webhook payload to a :class:`WebhookEvent`.
 

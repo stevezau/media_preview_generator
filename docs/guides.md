@@ -623,8 +623,12 @@ first time you turn it on for a Plex server:
 - If Plex's own detection re-analyzes an item, it can replace our markers with its own. The next Intro & Credits job
   that checks the file notices (see [Checking the servers still show them](#checking-the-servers-still-show-them)):
   with **"If Plex re-detects and replaces our markers" → "Put ours back"** (the default) it writes ours again; with
-  **"Keep Plex's"** it leaves Plex's markers and the file's row says **"Plex's own markers are kept (Keep Plex's)"**
-  until the file's own decision changes. Markers that are simply gone are written again either way.
+  **"Keep Plex's"** it leaves Plex's markers of that type, and the file's row says so, e.g. **"Keeping Plex's
+  credits"** or **"1 marker(s); keeping Plex's credits"**. This is decided per type: Plex's intro can be kept while
+  our credits are still written. Once kept, no job touches Plex's markers of that type — not a forced **Re-detect**,
+  not a run after a failed or skipped attempt, not another version of the item — until you switch the server to
+  **Put ours back** (the next job writes ours) or Plex no longer has markers of that type (then ours are written
+  again). Markers that are simply gone are written again either way.
 - Tested against Plex 1.43. If a future Plex update changes the database's shape, the app stops writing and shows a
   message rather than guessing.
 
@@ -653,19 +657,30 @@ A server can lose or change our markers without this app doing anything: Plex's 
 server that rescans a replaced file can drop them. So before a job reports a file **Up to date** on a server, it
 reads back what that server shows — Plex's marker rows for the item in its database (read-only, with the same
 same-machine checks as a write), Jellyfin's served segments (one request) — and writes ours again when they're gone
-or different. If that read fails, the file stays **Up to date** for this run.
+or different. If that read fails, the file stays **Up to date** for this run, and the job finishes with a warning such as
+**"Couldn't check what 3 file(s) show on Home Plex"**.
 
 **Markers written** always means the job changed what the server shows (a forced **Re-detect** that restores lost
 markers included); **Up to date** means the server already showed exactly this.
 
-After a job publishes to a file that was replaced (same path, new file), servers often rescan it shortly after. The
-job therefore queues one **Verify: …** job for those files, which waits three times the first retry delay (at least
-10 minutes) and then checks them again the same way. It follows **Settings → Retry policy** (none when the retry
-count is 0), holds at most 500 files, and never queues another verify.
+After a webhook job (or its retry) publishes to a file that was replaced (same path, new file), servers often rescan
+it shortly after. The job therefore queues one **Verify: …** job for those files, which waits three times the first
+retry delay (at least 10 minutes; its queue row reads **"Checking again in 10 min"**) and then checks them again the
+same way. It follows **Settings → Retry policy** (none when the retry count is 0) and holds at most 500 files (the job
+log says how many more wait for the next run). A verify job, and any retry it queues, never queues another verify;
+its retries count on from the retries already used, and a file gone from disk by then isn't retried. Library runs
+and files you picked yourself don't queue one: their replaced files may have changed long ago.
+
+For Jellyfin, a replaced file whose markers are unchanged is always sent again when the plugin still holds the old
+file's size: the plugin serves nothing for a file whose size changed, even while Jellyfin still lists the old
+segments.
 
 In the Inspector, a server whose markers differ from ours shows **Will replace** or **Will add**, or **Keeps
-Plex's** when Plex's own detection replaced them and that Plex server is set to keep them. The note "All versions
-of this item share one set of markers" appears only on a Plex item with more than one version.
+Plex's** when Plex's own detection replaced them and that Plex server is set to keep them; the reason names the kept
+types ("Keeping Plex's credits"), also next to **Will add** when another type is still written. Another Jellyfin
+provider's segments next to ours don't count as a difference. The note "All versions of this item share one set of
+markers" appears only on a Plex item with more than one version (a stacked file or a Plex optimized copy isn't a
+version).
 
 ### Turning it off, or revoking the Plex confirmation
 
@@ -718,7 +733,7 @@ A file's row for one server (the job's Files panel, the Inspector) can also say:
 |---|---|---|
 | **Waiting**: "Can't reach Plex to confirm Plex Pass" | Plex answered its database checks but not the Plex Pass check, usually while restarting | Nothing; the file is retried (up to your retry count), and the next file checks Plex again |
 | **Waiting**: "Not in this server's library yet" | The server hasn't scanned the file in yet | Nothing; the file is retried |
-| **Up to date**: "Plex's own markers are kept (Keep Plex's)" | Plex's own detection replaced ours and this Plex server is set to **Keep Plex's** | Switch it to **Put ours back** if you want ours; the next job that checks the file writes them |
+| **Up to date**: "Keeping Plex's intro" (or credits, or both; also added to other rows, e.g. "1 marker(s); keeping Plex's credits") | Plex's own detection replaced ours of that type and this Plex server is set to **Keep Plex's** | Switch it to **Put ours back** if you want ours; the next job that checks the file writes them |
 | **Skipped**: "This server was removed" | The server was deleted while the job ran | Nothing |
 | **Skipped**: "This server is turned off on the Servers page" | The server was disabled while the job ran | Turn it back on, then run the library or Re-detect the file |
 | **Skipped**: "Intro & Credits is off for this server" | The switch was turned off (or the Plex confirmation revoked) while the job ran | Turn it back on; the job's next file already checks again |

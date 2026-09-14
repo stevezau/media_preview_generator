@@ -175,6 +175,46 @@ def test_write_posts_all_types_in_ticks_with_file_size(tmp_path):
     server.delete_bridge_markers.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("plugin_state", "posts"),
+    [
+        ({"segments": [INTRO], "fileSize": 4321, "stale": False}, False),
+        # A replaced file (Tdarr transcode) with the same markers: the plugin still holds the old size and serves
+        # nothing once Jellyfin sees the new file, whatever /MediaSegments still lists.
+        ({"segments": [INTRO], "fileSize": 100, "stale": False}, True),
+        ({"segments": [INTRO], "fileSize": 4321, "stale": True}, True),
+        ({"segments": [INTRO], "fileSize": None, "stale": False}, True),  # stored without a size
+        (None, True),  # the plugin didn't answer
+    ],
+    ids=["same-file", "replaced-file", "stale", "no-size", "unreadable"],
+)
+def test_same_markers_are_sent_again_unless_the_plugin_holds_this_files_size(tmp_path, plugin_state, posts):
+    server = _server()
+    server.put_bridge_markers.return_value = _resp(200, {"stored": 1})
+    server.get_media_segments.return_value = _core(INTRO)  # Jellyfin still lists ours either way
+    server.get_bridge_marker_state.return_value = plugin_state
+    path = _media(tmp_path)
+    pub = _pub(server)
+
+    ours = pub.write("abc", [INTRO_MARKER], previous=[INTRO_MARKER], duration_ms=1_321_472, canonical_path=path)
+
+    assert (ours, pub.last_write_changed) == ([INTRO_MARKER], posts)
+    server.get_bridge_marker_state.assert_called_once_with("abc")
+    if posts:
+        server.put_bridge_markers.assert_called_once_with("abc", [INTRO], file_size=4321)
+    else:
+        server.put_bridge_markers.assert_not_called()
+
+
+def test_same_markers_for_a_file_that_cant_be_statted_are_sent_again():
+    server = _server()
+    server.put_bridge_markers.return_value = _resp(200, {"stored": 1})
+    server.get_media_segments.return_value = _core(INTRO)
+    server.get_bridge_marker_state.return_value = {"segments": [INTRO], "fileSize": None, "stale": False}
+    _pub(server).write("abc", [INTRO_MARKER], previous=[INTRO_MARKER], duration_ms=None, canonical_path=MISSING)
+    server.put_bridge_markers.assert_called_once_with("abc", [INTRO], file_size=None)
+
+
 def test_write_omits_file_size_when_file_cannot_be_statted():
     server = _server()
     server.put_bridge_markers.return_value = _resp(200, {"stored": 1})

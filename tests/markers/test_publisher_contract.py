@@ -13,7 +13,7 @@ import os
 import sqlite3
 import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock, create_autospec, patch
+from unittest.mock import ANY, MagicMock, create_autospec, patch
 
 import pytest
 
@@ -111,14 +111,22 @@ def jellyfin(tmp_path):
     cfg = _config("jellyfin-1", ServerType.JELLYFIN, str(tmp_path / "media"))
     server = create_autospec(JellyfinServer, instance=True)
     stored: list[dict] = []
+    stored_size: list[int | None] = [None]
 
     def put(item_id, segments, *, file_size=None):
         stored[:] = segments
+        stored_size[0] = file_size
         return _resp(200)
 
     def delete(item_id):
         stored.clear()
+        stored_size[0] = None
         return _resp(204)
+
+    def state(item_id):
+        # The plugin marks what it stores stale once the file on disk has another size, and serves nothing then.
+        size = stored_size[0]
+        return {"segments": list(stored), "fileSize": size, "stale": size is not None and size != os.path.getsize(path)}
 
     server.put_bridge_markers.side_effect = put
     server.delete_bridge_markers.side_effect = delete
@@ -126,7 +134,7 @@ def jellyfin(tmp_path):
         {"Id": f"s{i}", "ItemId": item_id, "Type": s["type"], "StartTicks": s["startTicks"], "EndTicks": s["endTicks"]}
         for i, s in enumerate(stored)
     ]
-    server.get_bridge_marker_state.return_value = {"segments": [], "fileSize": None, "stale": False}
+    server.get_bridge_marker_state.side_effect = state
     server.get_bridge_markers.side_effect = lambda item_id: list(stored)
 
     def shown():
@@ -316,10 +324,10 @@ class PlexItem:
         commit_guard = threading.Lock()
 
         def counting_write_item(publisher, *args, **kwargs):
-            changed = real_write_item(publisher, *args, **kwargs)
+            changed, plan = real_write_item(publisher, *args, **kwargs)
             with commit_guard:
-                self.commits += int(bool(changed))
-            return changed
+                self.commits += int(changed)
+            return changed, plan
 
         # Patched once for the whole test: runs on several threads must not patch and unpatch over each other.
         monkeypatch.setattr(plex_db, "shm_lock_held_elsewhere", lambda _db, **_kw: True)
@@ -380,6 +388,10 @@ class PlexItem:
 
     def served(self, item: int = 7) -> list[tuple[str, int, int]]:
         return [(mtype.value, start, end) for mtype, start, end in _plex_served(self.db, item)]
+
+    def kept(self, item: int = 7) -> set[str] | None:
+        row = self.store.get_item_publish_state("plex-1", str(item))
+        return None if row is None else {t.value for t in row.kept_types}
 
     def recorded(self, item: int = 7) -> list[tuple[str, int, int]] | None:
         row = self.store.get_item_publish_state("plex-1", str(item))
@@ -671,6 +683,14 @@ def test_compare_shown_matrix(served, others_alongside, shown):
 # --- shows what this app left there (lab: Plex re-detection and rescans wiped markers while jobs said up to date).
 
 
+# Plex numbers an item's marker rows by text, then start, whenever it adds its own (see _plan).
+PLEX_NUMBERING = (
+    "UPDATE taggings SET [index]=(SELECT n FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY text, time_offset, "
+    "end_time_offset) - 1 AS n FROM taggings WHERE metadata_item_id=7) AS r WHERE r.id=taggings.id) "
+    "WHERE metadata_item_id=7",
+)
+
+
 def _plex_native_credits(item: PlexItem, start: int, end: int) -> None:
     """What Plex's own credits detection leaves: our credits rows gone, one of its own (no pv: keys) in their place."""
     item._sql(
@@ -680,6 +700,7 @@ def _plex_native_credits(item: PlexItem, start: int, end: int) -> None:
             "created_at, extra_data) VALUES (7, 563, 9, 'credits', ?, ?, '', 0, '')",
             (start, end),
         ),
+        PLEX_NUMBERING,
     )
 
 
@@ -702,7 +723,7 @@ class TestReadBackVerify:
         ("setting", "outcome", "served_credits", "message"),
         [
             ("restore", "published", SHOWN_CREDITS, "2 marker(s)"),
-            ("keep_plex", "up_to_date", ("credits", 1_282_000, 1_300_000), "Plex's own markers are kept (Keep Plex's)"),
+            ("keep_plex", "up_to_date", ("credits", 1_282_000, 1_300_000), "Keeping Plex's credits"),
         ],
         ids=["restore", "keep_plex"],
     )
@@ -718,9 +739,14 @@ class TestReadBackVerify:
         outs = [item.run("1080p"), item.run("1080p")]
 
         assert _outcomes(*outs) == [outcome, "up_to_date"]
-        assert outs[0].publisher_rows[0]["message"] == message
+        assert [o.publisher_rows[0]["message"] for o in outs] == [
+            message,
+            "Up to date" if setting == "restore" else message,
+        ]
         assert item.served() == [SHOWN_INTRO, served_credits]
-        assert item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS]  # still what this app last left there
+        # Kept credits are Plex's, not ours: the item record holds only the intro and remembers the kept type.
+        assert item.recorded() == ([SHOWN_INTRO, SHOWN_CREDITS] if setting == "restore" else [SHOWN_INTRO])
+        assert item.kept() == (set() if setting == "restore" else {"credits"})
         assert item.commits == (2 if setting == "restore" else 1)
 
     @pytest.mark.parametrize(("setting", "outcome"), [("restore", "published"), ("keep_plex", "up_to_date")])
@@ -734,7 +760,8 @@ class TestReadBackVerify:
             (
                 "INSERT INTO taggings (metadata_item_id, tag_id, [index], text, time_offset, end_time_offset, "
                 "thumb_url, created_at, extra_data) VALUES (7, 563, 9, 'credits', 600000, 660000, '', 0, '')",
-            )
+            ),
+            PLEX_NUMBERING,
         )
         assert _outcomes(item.run("1080p")) == [outcome]
         expected = (
@@ -743,6 +770,8 @@ class TestReadBackVerify:
             else [SHOWN_INTRO, ("credits", 602_000, 658_000), SHOWN_CREDITS]
         )
         assert sorted(item.served(), key=lambda s: s[1]) == sorted(expected, key=lambda s: s[1])
+        # Kept per type: the credits rows (Plex's, and ours beside it) are left alone; the intro stays ours.
+        assert item.kept() == ({"credits"} if setting == "keep_plex" else set())
 
     def test_keep_plex_still_restores_markers_that_are_simply_gone(self, plex_item):
         item = plex_item(versions=("1080p",))
@@ -751,7 +780,7 @@ class TestReadBackVerify:
         item.run("1080p")
         item._sql(("DELETE FROM taggings WHERE metadata_item_id=7 AND text='credits'",))
         assert _outcomes(item.run("1080p")) == ["published"]
-        assert item.served() == [SHOWN_INTRO, SHOWN_CREDITS]
+        assert item.served() == [SHOWN_INTRO, SHOWN_CREDITS] and item.kept() == set()
 
     def test_plex_read_failure_keeps_up_to_date_and_writes_nothing(self, plex_item, monkeypatch):
         item = plex_item(versions=("1080p",))
@@ -776,9 +805,9 @@ class TestReadBackVerify:
         real = plex_db._nothing_to_write
         calls = []
 
-        def stale_snapshot(plan, wanted):
+        def stale_snapshot(plan):
             calls.append(plan)
-            return False if len(calls) == 1 else real(plan, wanted)
+            return False if len(calls) == 1 else real(plan)
 
         monkeypatch.setattr(plex_db, "_nothing_to_write", stale_snapshot)
         assert _outcomes(item.run("1080p", force=True)) == ["up_to_date"]
@@ -842,7 +871,7 @@ class TestJellyfinReadBackVerify:
     def test_forced_run_posts_unless_jellyfin_is_known_to_serve_ours(self, jellyfin, jf_run, first_read):
         jf_run()
         served = jellyfin.server.get_media_segments.side_effect
-        jellyfin.server.delete_bridge_markers("abc")
+        # The plugin still holds ours for this file; only Jellyfin's own list differs (or can't be read).
         answers = []
 
         def segments(item_id):
@@ -857,6 +886,23 @@ class TestJellyfinReadBackVerify:
         jellyfin.server.put_bridge_markers.reset_mock()
         assert jf_run(force=True).outcome_key == "markers_published"
         assert jellyfin.server.put_bridge_markers.call_count == 1 and jellyfin.shown() == jellyfin.both
+
+    def test_a_replaced_file_with_the_same_markers_sends_the_new_file_size(self, jellyfin, jf_run):
+        # Review probe C: a Tdarr in-place transcode keeps the chapters; Jellyfin still lists the old segments.
+        jf_run()
+        assert jellyfin.server.put_bridge_markers.call_args.kwargs == {"file_size": 100}
+        with open(jellyfin.path, "wb") as fh:
+            fh.write(b"y" * 250)
+        os.utime(jellyfin.path, ns=(9, 9))
+        jellyfin.server.put_bridge_markers.reset_mock()
+
+        out = jf_run()
+
+        jellyfin.server.put_bridge_markers.assert_called_once_with("abc", ANY, file_size=250)
+        assert (out.outcome_key, out.publisher_rows[0]["message"]) == ("markers_published", "2 marker(s)")
+        jellyfin.server.put_bridge_markers.reset_mock()
+        assert jf_run(force=True).outcome_key == "markers_up_to_date"  # the plugin now holds this file's size
+        jellyfin.server.put_bridge_markers.assert_not_called()
 
     def test_read_failure_keeps_up_to_date_without_writing(self, jellyfin, jf_run):
         jf_run()
@@ -875,3 +921,212 @@ class TestJellyfinReadBackVerify:
         jellyfin.server.delete_bridge_markers("abc")
         assert jf_run(force=True).outcome_key == "markers_published"
         assert jellyfin.shown() == jellyfin.both and jellyfin.server.put_bridge_markers.call_count == 1
+
+
+# --- "Keep Plex's" per type (read-back review HIGH-1/MED-1): once Plex's own detection replaced our marker of a type
+# --- on a server set to keep them, no path deletes Plex's rows of that type.
+
+PLEX_INTRO = ("intro", 60_000, 90_000)
+
+
+def _native_intro(item: PlexItem, start: int = 60_000, end: int = 90_000) -> None:
+    """Plex's own intro detection: our intro row gone, one of its own in its place."""
+    item._sql(
+        ("DELETE FROM taggings WHERE metadata_item_id=7 AND text='intro'",),
+        (
+            "INSERT INTO taggings (metadata_item_id, tag_id, [index], text, time_offset, end_time_offset, thumb_url, "
+            "created_at, extra_data) VALUES (7, 563, 0, 'intro', ?, ?, '', 0, '')",
+            (start, end),
+        ),
+        PLEX_NUMBERING,
+    )
+
+
+def _published_then_replaced(plex_item, setting: str, versions=("1080p",)) -> PlexItem:
+    item = plex_item(versions=versions)
+    item.cfg.markers["plex"]["on_plex_redetect"] = setting
+    for version in versions:
+        item.chapters[item.paths[version]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    for version in versions:
+        item.run(version)
+    assert item.served() == [SHOWN_INTRO, SHOWN_CREDITS]
+    _native_intro(item)
+    return item
+
+
+def _plex_restarting(item: PlexItem, monkeypatch) -> None:
+    monkeypatch.setattr(plex_db, "shm_lock_held_elsewhere", lambda _db, **_kw: False)
+    item.server.get_server_status.return_value = None
+
+
+def _plex_back(item: PlexItem, monkeypatch) -> None:
+    monkeypatch.setattr(plex_db, "shm_lock_held_elsewhere", lambda _db, **_kw: True)
+    item.server.get_server_status.return_value = {"plex_pass": True, "version": PLEX_VERSION}
+
+
+class TestKeepPlexsPerType:
+    @staticmethod
+    def _expect(item: PlexItem, setting: str) -> None:
+        if setting == "keep_plex":
+            assert item.served() == [PLEX_INTRO, SHOWN_CREDITS]
+            assert item.recorded() == [SHOWN_CREDITS] and item.kept() == {"intro"}
+        else:
+            assert item.served() == [SHOWN_INTRO, SHOWN_CREDITS]
+            assert item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.kept() == set()
+
+    @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
+    def test_kept_after_plex_restarted_during_a_job_and_skipped_the_file(self, plex_item, monkeypatch, setting):
+        # Review probe F: the SKIPPED row clears the file's basis, so the next run goes straight to the write.
+        item = _published_then_replaced(plex_item, setting)
+        first = item.run("1080p")
+        _plex_restarting(item, monkeypatch)
+        assert _outcomes(item.run("1080p")) == ["skipped"]
+        _plex_back(item, monkeypatch)
+        last = item.run("1080p")
+        self._expect(item, setting)
+        if setting == "keep_plex":
+            assert [o.publisher_rows[0]["message"] for o in (first, last)] == ["Keeping Plex's intro"] * 2
+            assert _outcomes(first, last) == ["up_to_date", "up_to_date"] and item.commits == 1
+        else:
+            assert _outcomes(first, last) == ["published", "up_to_date"] and item.commits == 2
+
+    @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
+    def test_kept_after_a_failed_write_while_plex_filled_in_its_own_intro(self, plex_item, monkeypatch, setting):
+        # Review probe E: a rescan wiped the item, the write failed (Plex busy), then Plex's own detection ran.
+        item = plex_item(versions=("1080p",))
+        item.cfg.markers["plex"]["on_plex_redetect"] = setting
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        item.run("1080p")
+        item._sql(("DELETE FROM taggings WHERE metadata_item_id=7",))
+        real_database = plex_db.PlexMarkerPublisher._database
+
+        def busy(publisher, *, read_only, deadline):
+            if not read_only:
+                raise PublishError("Plex is busy", state=Capability.UNREACHABLE)
+            return real_database(publisher, read_only=read_only, deadline=deadline)
+
+        with patch.object(plex_db.PlexMarkerPublisher, "_database", busy):
+            assert _outcomes(item.run("1080p")) == ["failed"]
+        _native_intro(item)
+        out = item.run("1080p")
+        self._expect(item, setting)
+        assert _outcomes(out) == ["published"]  # the wiped credits come back either way
+        expected = "1 marker(s); keeping Plex's intro" if setting == "keep_plex" else "2 marker(s)"
+        assert out.publisher_rows[0]["message"] == expected
+
+    @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
+    def test_kept_after_a_plex_pass_waiting_row(self, plex_item, setting):
+        item = _published_then_replaced(plex_item, setting)
+        item.server.get_server_status.return_value = {"plex_pass": None, "version": PLEX_VERSION}
+        assert _outcomes(item.run("1080p")) == ["waiting"]
+        item.server.get_server_status.return_value = {"plex_pass": True, "version": PLEX_VERSION}
+        item.run("1080p")
+        self._expect(item, setting)
+
+    @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
+    def test_forced_run_and_re_detect_respect_the_setting(self, plex_item, setting):
+        # Review probe D: the Inspector's Re-detect is a forced single-file run.
+        item = _published_then_replaced(plex_item, setting)
+        out = item.run("1080p", force=True)
+        self._expect(item, setting)
+        assert item.run("1080p", force=True).publisher_rows[0]["message"] == (
+            "Keeping Plex's intro" if setting == "keep_plex" else "Up to date"
+        )
+        assert _outcomes(out) == (["up_to_date"] if setting == "keep_plex" else ["published"])
+
+    @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
+    def test_a_version_still_waiting_on_another_type_respects_the_setting(self, plex_item, setting):
+        # Review probe A: 2160p has no credits chapter, so 1080p's row stays WAITING and never takes the read-back.
+        item = plex_item(versions=("1080p", "2160p"))
+        item.cfg.markers["plex"]["on_plex_redetect"] = setting
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        item.chapters[item.paths["2160p"]] = chapters(intro=INTRO_X)
+        outs = [item.run("1080p"), item.run("2160p"), item.run("1080p")]
+        assert _outcomes(*outs) == ["waiting", "published", "waiting"] and item.served() == [SHOWN_INTRO]
+        _native_intro(item)
+        o2160, o1080 = item.run("2160p"), item.run("1080p")
+        if setting == "keep_plex":
+            assert item.served() == [PLEX_INTRO] and item.kept() == {"intro"} and item.recorded() == []
+            assert o1080.publisher_rows[0]["message"] == (
+                "Waiting for this item's other versions to agree on: credits; keeping Plex's intro"
+            )
+        else:
+            assert item.served() == [SHOWN_INTRO] and item.kept() == set()
+            assert _outcomes(o2160, o1080) == ["published", "waiting"]
+
+    @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
+    def test_a_sibling_versions_publish_doesnt_undo_the_setting(self, plex_item, setting):
+        item = _published_then_replaced(plex_item, setting, versions=("1080p", "2160p"))
+        item.run("1080p")  # the item record changes (kept, or restored): 2160p's basis no longer matches
+        item.run("2160p")
+        item.run("1080p", force=True)
+        self._expect(item, setting)
+
+    def test_mixed_replaced_and_wiped_restores_the_wiped_type(self, plex_item):
+        # Review probe B: Plex's intro replaced ours and a rescan dropped the credits rows.
+        item = _published_then_replaced(plex_item, "keep_plex")
+        item._sql(("DELETE FROM taggings WHERE metadata_item_id=7 AND text='credits'",))
+        outs = [item.run("1080p") for _ in range(3)]
+        assert _outcomes(*outs) == ["published", "up_to_date", "up_to_date"]
+        assert outs[0].publisher_rows[0]["message"] == "1 marker(s); keeping Plex's intro"
+        assert item.served() == [PLEX_INTRO, SHOWN_CREDITS] and item.kept() == {"intro"}
+        assert item.commits == 2
+
+    def test_switching_to_restore_puts_ours_back_on_the_next_run(self, plex_item):
+        item = _published_then_replaced(plex_item, "keep_plex")
+        item.run("1080p")
+        assert item.kept() == {"intro"}
+        item.cfg.markers["plex"]["on_plex_redetect"] = "restore"
+        out = item.run("1080p")
+        assert _outcomes(out) == ["published"] and out.publisher_rows[0]["message"] == "2 marker(s)"
+        assert item.served() == [SHOWN_INTRO, SHOWN_CREDITS] and item.kept() == set()
+
+    def test_kept_ends_when_plexs_own_rows_go_away(self, plex_item):
+        item = _published_then_replaced(plex_item, "keep_plex")
+        item.run("1080p")
+        item._sql(("DELETE FROM taggings WHERE metadata_item_id=7 AND text='intro'",))  # Plex dropped its intro
+        out = item.run("1080p")
+        assert _outcomes(out) == ["published"]
+        assert item.served() == [SHOWN_INTRO, SHOWN_CREDITS] and item.kept() == set()
+        assert item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS]
+
+    def test_kept_ends_when_plexs_rows_go_away_with_nothing_else_of_ours_there(self, plex_item):
+        # The intro was the only marker: the item record holds nothing of ours, only the kept type.
+        item = plex_item(versions=("1080p",))
+        item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X)
+        item.run("1080p")
+        _native_intro(item)
+        assert item.run("1080p").publisher_rows[0]["message"] == "Keeping Plex's intro"
+        assert (item.recorded(), item.kept()) == ([], {"intro"})
+        item._sql(("DELETE FROM taggings WHERE metadata_item_id=7 AND text='intro'",))
+        out = item.run("1080p")
+        assert _outcomes(out) == ["published"]
+        assert item.served() == [SHOWN_INTRO] and item.kept() == set()
+
+    def test_a_first_publish_replaces_plexs_own_rows_whatever_the_setting(self, plex_item):
+        # We never wrote an intro there: a decided type replaces whatever Plex had (unchanged rule).
+        item = plex_item(versions=("1080p",))
+        item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
+        _native_intro(item)
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        assert _outcomes(item.run("1080p")) == ["published"]
+        assert item.served() == [SHOWN_INTRO, SHOWN_CREDITS] and item.kept() == set()
+
+    def test_kept_types_keep_the_parts_own_key(self, plex_item):
+        # Plex rebuilds its rows from the part's pv: keys when it re-detects: a kept type's key isn't ours to change.
+        item = _published_then_replaced(plex_item, "keep_plex")
+        plex_own = json.dumps(
+            {
+                "MediaPartMarkersArray": {
+                    "attributeName": "intros",
+                    "version": plex_db.INTRO_JSON_VERSION,
+                    "MediaPartMarker": [{"startTimeOffset": 60_000, "endTimeOffset": 90_000}],
+                }
+            }
+        )
+        item._sql(("UPDATE media_parts SET extra_data=? WHERE id=1", (json.dumps({"pv:intros": plex_own}),)))
+        item.run("1080p")
+        assert item.part_types() == {os.path.basename(item.paths["1080p"]): ["pv:credits", "pv:intros"]}
+        (extra,) = _rows(item.db, "SELECT extra_data FROM media_parts WHERE id=1")[0]
+        assert json.loads(extra)["pv:intros"] == plex_own

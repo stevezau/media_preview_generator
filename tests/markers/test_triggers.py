@@ -223,6 +223,28 @@ class TestCreateIntroCreditsJob:
             "retry_not_before": "2026-09-14T10:10:00+00:00",
         }
 
+    @pytest.mark.parametrize(
+        ("kwargs", "stored"),
+        [
+            ({"retry_attempt": 2, "verify_chain": True}, {"retry_attempt": 2, "verify_chain": True}),
+            ({"retry_attempt": 2, "verify_chain": False}, {"retry_attempt": 2}),
+            ({"verify": True, "chain_attempt": 2}, {"verify": True, "chain_attempt": 2}),
+            ({"verify": True, "chain_attempt": 0}, {"verify": True}),
+        ],
+        ids=["retry-in-verify-chain", "retry", "verify-after-retries", "verify"],
+    )
+    def test_verify_chain_fields_are_stored_only_when_set(self, monkeypatch, kwargs, stored):
+        jm = MagicMock()
+        jm.create_job.return_value = MagicMock(id="job-1")
+        monkeypatch.setattr(triggers, "get_job_manager", lambda: jm)
+        with patch.object(triggers, "start_intro_credits_job_async"):
+            triggers.create_intro_credits_job(
+                library_name="a", priority=2, source="sonarr", file_paths=["/m/a.mkv"], retry_delay_s=60, **kwargs
+            )
+        config = jm.create_job.call_args.kwargs["config"]
+        chain_keys = {"retry_attempt", "verify", "verify_chain", "chain_attempt"}
+        assert {k: v for k, v in config.items() if k in chain_keys} == stored
+
     def test_created_job_row_is_an_intro_credits_job(self, tmp_path, monkeypatch):
         from media_preview_generator.web.jobs import JobManager
 

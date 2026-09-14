@@ -301,7 +301,7 @@ Credits tab**.
 | `library_ids` | array of strings \| `null` | `null` | `null` = every library except sports-type ones (name matched, whole word "sport"/"sports" — no vendor exposes an actual sports library kind). An explicit list is taken literally, including a deliberate sports library. |
 | `plex` | object | *(Plex servers only)* | Absent on Emby/Jellyfin entries. |
 | `plex.db_write_confirmed_at` | ISO-8601 timestamp \| `null` | `null` | Set once the one-time "Send intro & credits markers to Plex?" confirmation is accepted. Clearing it while `enabled` stays `true` in the same request is rejected (400) — send `enabled: false` in the same PUT to revoke. |
-| `plex.on_plex_redetect` | `"restore"` \| `"keep_plex"` | `"restore"` | What a job does when it finds Plex's own detection replaced our markers on an item whose decision hasn't changed: `restore` writes ours again, `keep_plex` leaves Plex's (row message "Plex's own markers are kept (Keep Plex's)"). Markers that are gone are written again either way, and a changed decision is always written. |
+| `plex.on_plex_redetect` | `"restore"` \| `"keep_plex"` | `"restore"` | What a job does when Plex's own detection replaced our markers of a type on an item: `restore` writes ours again; `keep_plex` keeps Plex's markers of that type on every later run (forced ones included) until the setting is switched to `restore` or Plex has none of that type left (row message e.g. "Keeping Plex's credits", or "1 marker(s); keeping Plex's credits"). Decided per type, and remembered per server item in `markers.db`. Markers that are gone are written again either way. |
 
 ### Job kind `intro_credits`
 
@@ -320,16 +320,20 @@ column) holds:
 | `force` | bool | Re-detect files already decided, asking every source again. |
 | `webhook_item_id_hints` | `{path: {server_id: item_id}}` | Item ids a vendor webhook already supplied, so the job skips a lookup. |
 | `retry_attempt` | int | Present only on a retry job: which retry this is (1-based). |
+| `verify_chain` | bool | Present only on a retry queued by a verify job or by another retry in its chain: it queues no verify job. |
+| `chain_attempt` | int | Present only on a verify job queued by a retry: the retries already used, so the verify job's own retry goes on counting. |
 | `retry_delay` | int | Present only on a retry or verify job: seconds waited before it took a slot. |
 | `retry_not_before` | ISO-8601 timestamp | Present only on a retry or verify job: the due time (survives a restart without waiting again in full). |
-| `verify` | bool | Present only on a verify job: the delayed check of files published after they were replaced. It queues no further verify job. |
+| `verify` | bool | Present only on a verify job: the delayed check of files published after they were replaced. It queues no further verify job, and doesn't retry a file gone from disk. |
 
 Retries (files not yet on disk, not yet in a server's library, or on a Plex whose Plex Pass check didn't answer)
 reuse the webhook preview-retry backoff (`webhook_retry_count` / `webhook_retry_delay`) and cap at **500 files** per
 retry job — a bigger backlog waits for the next run. A retry job's `file_paths` are the paths the job was given (a
 webhook's own paths, not the first mapped disk's), with their `webhook_item_id_hints`. A job that publishes to
 replaced files also queues one verify job (`verify: true`, named "Verify: …") for them, due after three times the
-first retry delay (at least 600 s); none when `webhook_retry_count` is 0.
+first retry delay (at least 600 s); none when `webhook_retry_count` is 0. Only jobs for sent files (webhooks and
+retries, not `manual`/`inspector` or library runs) queue one. A job whose read-back of a server failed completes with
+the warning "Couldn't check what N file(s) show on <server>".
 
 ### Outcome keys
 
@@ -407,7 +411,8 @@ Servers page isn't contacted (`capability.state` is `disabled`).
 `evidence` rows, and `servers` (one row per owning server: `current` markers as read live, `published` markers that
 are ours, `plan` — `will_add` / `will_replace` / `will_remove` / `up_to_date` / `waiting` / `keeps_plex` (Plex's own
 detection replaced ours and `on_plex_redetect` is `keep_plex`) / `not_enabled` / `nothing_to_publish` / `unknown` —
-with `plan_reason`, and `version_count`: a Plex item's number of versions, which share one marker set (`null` for
+with `plan_reason` (names the types Plex keeps, e.g. "Keeping Plex's credits", on any plan), and `version_count`: a
+Plex item's number of versions (`Media` entries other than optimized copies), which share one marker set (`null` for
 other servers or when it can't be read); a server whose state can't be read gets a degraded row with `error` set
 instead of failing the whole response). `400` when the path isn't a file inside a server library, the
 query is incomplete, or `item_id` isn't shaped like an id that server's type uses (a Plex rating key is digits

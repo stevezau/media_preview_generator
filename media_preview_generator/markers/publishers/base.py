@@ -105,13 +105,18 @@ class MarkerPublisher(ABC):
     # Set by every successful ``write``: whether it changed what the server shows. A publisher is built for one file's
     # publish to one server, so the flag always belongs to the caller's last write.
     last_write_changed: bool = True
+    # Set by every successful ``write``: the types whose markers on the item are the server's own and stay there
+    # untouched ("Keep Plex's"); the caller records them and passes them back as ``kept_types``. Empty elsewhere.
+    last_kept_types: frozenset[MarkerType] = frozenset()
 
     @abstractmethod
     def capability(self) -> CapabilityReport:
         """Check whether this server can receive markers."""
 
     @abstractmethod
-    def shows(self, item_id: str, ours: list[Marker]) -> Shown | None:
+    def shows(
+        self, item_id: str, ours: list[Marker], *, kept_types: frozenset[MarkerType] = frozenset()
+    ) -> Shown | None:
         """Read what the server item shows for the types of ``ours`` (what this app last left there).
 
         Read-only and cheap: asked before a file is reported up to date, so a server that re-detected or rescanned
@@ -119,7 +124,9 @@ class MarkerPublisher(ABC):
 
         Args:
             item_id: Server item id.
-            ours: What this app last left on the item (non-empty).
+            ours: What this app last left on the item.
+            kept_types: Types whose server markers were kept last time (``last_kept_types``); one the server no
+                longer shows at all is reported MISSING, so ours can go back.
 
         Returns:
             How the server's markers compare with ``ours``; None when they couldn't be read.
@@ -135,6 +142,7 @@ class MarkerPublisher(ABC):
         duration_ms: int | None,
         canonical_path: str,
         own_previous: list[Marker] | None = None,
+        kept_types: frozenset[MarkerType] = frozenset(),
     ) -> list[Marker]:
         """Make the server item show the calling file's decided ``markers``, as far as the server allows.
 
@@ -150,11 +158,15 @@ class MarkerPublisher(ABC):
             own_previous: What the calling file last published when that was to a different item (the server merged
                 or split items since). Publishers whose files carry their own copy of the markers (Plex's part
                 ``extra_data``) remove that copy where it still serves exactly these; others ignore it.
+            kept_types: The types the last write kept as the server's own (recorded ``last_kept_types``). Servers that
+                can't tell our markers from their own (Plex) never touch those while the server is set to keep them;
+                others ignore it.
 
         Returns:
             The markers that are ours on the server item after the call, sorted by start (empty when none are).
             A server with one marker set per item (Plex) can return fewer types than ``markers``: those its other
-            versions haven't decided the same way. ``last_write_changed`` says whether the call changed the server.
+            versions haven't decided the same way, or kept as its own. ``last_write_changed`` says whether the call
+            changed the server; ``last_kept_types`` which types are the server's own and left alone.
 
         Raises:
             PublishError: The write failed. With ``atomic_writes`` nothing changed; otherwise the server may hold a

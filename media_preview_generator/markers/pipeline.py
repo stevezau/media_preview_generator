@@ -33,15 +33,17 @@ from .external_ids import ids_from_path, ids_from_server_dict, is_extra, merge_i
 from .models import SERVER_SOURCES, Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
 from .outcomes import (
     EXTRAS_NOT_CHECKED,
-    KEPT_PLEX_MARKERS,
     NOT_IN_LIBRARY,
     OUTCOME_KEYS,
     PLEX_PASS_UNKNOWN,
+    READ_BACK_FAILED,
     STATE_BY_STATUS,
     VERIFY_LATER,
     FileOutcome,
     ServerStatus,
     file_outcome,
+    kept_note,
+    with_kept_note,
 )
 from .ownership import marker_matches, owning_servers
 from .probe import ProbeError, ffprobe_path_for, probe_media
@@ -84,6 +86,9 @@ _ITEM_WIDE_MARKERS = frozenset({ServerType.PLEX, ServerType.EMBY})
 _IMPORTER_PLUGIN_SERVERS = frozenset({ServerType.JELLYFIN, ServerType.EMBY})
 PLUGINS_UNKNOWN_DETAIL = "Couldn't read this server's plugins, so its markers aren't used"
 _CANCELLED = "cancelled by user"
+# A ready Plex whose Plex Pass didn't answer (usually restarting): files within this long share the answer instead of
+# each running the whole check (lock probe, Plex's HTTP connect with its retries, schema and library scans).
+PLEX_PASS_UNKNOWN_TTL_S = 5.0
 # Answers read from the saved settings alone: cheap, and wrong the moment the user saves, so never reused.
 _SETTINGS_ANSWERS = frozenset({Capability.DISABLED, Capability.NEEDS_CONFIRMATION})
 
@@ -587,20 +592,34 @@ def _row(
     return row
 
 
+def _plex_pass_unknown(report: CapabilityReport) -> bool:
+    return "plex_pass" in report.details and report.details["plex_pass"] is None
+
+
+def _still_fresh(ctx: PipelineContext, cached: tuple[float, CapabilityReport] | None) -> bool:
+    if cached is None:
+        return False
+    ttl = ctx.capability_ttl_s
+    if _plex_pass_unknown(cached[1]):
+        ttl = min(ttl, PLEX_PASS_UNKNOWN_TTL_S)
+    return time.monotonic() - cached[0] < ttl
+
+
 def _capability(ctx: PipelineContext, cfg: ServerConfig, publisher: MarkerPublisher) -> CapabilityReport:
     """Per-server capability, cached for ``capability_ttl_s``; one fetch per server even when every check thread misses.
 
     An off or unconfirmed answer isn't cached: Plex reads it from the saved settings, and switching Intro & Credits
-    back on must reach the job's next file, not one 5 minutes later.
+    back on must reach the job's next file, not one 5 minutes later. A ready Plex whose Plex Pass didn't answer is
+    reused for ``PLEX_PASS_UNKNOWN_TTL_S`` only.
     """
     cached = ctx._capabilities.get(cfg.id)
-    if cached and time.monotonic() - cached[0] < ctx.capability_ttl_s:
+    if _still_fresh(ctx, cached):
         return cached[1]
     with ctx._capability_guard:
         lock = ctx._capability_locks.setdefault(cfg.id, threading.Lock())
     with lock:
         cached = ctx._capabilities.get(cfg.id)
-        if cached and time.monotonic() - cached[0] < ctx.capability_ttl_s:
+        if _still_fresh(ctx, cached):
             return cached[1]
         report = publisher.capability()
         if report.state not in _SETTINGS_ANSWERS:
@@ -649,12 +668,16 @@ def _consent_problem(ctx: PipelineContext, cfg: ServerConfig, path: str) -> str 
     return None
 
 
-def _shown_on_server(publisher: MarkerPublisher, cfg: ServerConfig, item_id: str, ours: list[Marker]) -> Shown | None:
-    """What the server shows of ``ours`` now; None when nothing of ours is there to check or it couldn't be read."""
-    if not ours:
-        return None
+def _shown_on_server(
+    publisher: MarkerPublisher, cfg: ServerConfig, item_id: str, ours: list[Marker], kept_types: frozenset[MarkerType]
+) -> Shown | None:
+    """What the server shows of ``ours`` (and of the types it keeps as its own) now.
+
+    Returns:
+        None when it couldn't be read.
+    """
     try:
-        return publisher.shows(item_id, ours)
+        return publisher.shows(item_id, ours, kept_types=kept_types)
     except Exception as exc:
         # A transient read problem mustn't fail or rewrite a file whose records say it is up to date.
         logger.debug("Couldn't read back the markers on {} for item {}: {}", cfg.name, item_id, type(exc).__name__)
@@ -724,10 +747,9 @@ def _publish_to(
         return _not_written(ServerStatus.FAILED, message, name=publisher.name)
     if not report.ready:
         return _not_written(ServerStatus.SKIPPED, report.message or report.state.value, name=publisher.name)
-    if "plex_pass" in report.details and report.details["plex_pass"] is None:
-        # Plex serves no markers without a Pass (spec §6.3). Usually Plex is restarting: the next file asks again and
-        # the job retries this one.
-        ctx._capabilities.pop(cfg.id, None)
+    if _plex_pass_unknown(report):
+        # Plex serves no markers without a Pass (spec §6.3). Usually Plex is restarting: a file a few seconds later
+        # asks again and the job retries this one.
         return _not_written(
             ServerStatus.WAITING,
             "Can't reach Plex to confirm Plex Pass",
@@ -760,10 +782,11 @@ def _publish_to(
             and basis == (decided_hash, item_version)
         )
 
-    def _up_to_date() -> dict:
+    def _up_to_date(kept_types: frozenset[MarkerType]) -> dict:
         if needs_review and not wanted:
             return _row(cfg, publisher.name, ServerStatus.NEEDS_REVIEW, "Sources don't agree yet", path)
-        return _row(cfg, publisher.name, ServerStatus.UP_TO_DATE, "Up to date", path)
+        message = with_kept_note("", kept_note(kept_types, wanted)) or "Up to date"
+        return _row(cfg, publisher.name, ServerStatus.UP_TO_DATE, message, path)
 
     # Held from reading what is ours on the item until the result is recorded (lock order: see _KeyedLocks).
     with _ITEM_LOCKS.hold((cfg.id, item_id)):
@@ -784,18 +807,21 @@ def _publish_to(
         # decided) or removed without this file's decision or the item row changing.
         if not ctx.force and item_row is not None and _unchanged(item_row.version):
             # Our records can't see the server: its own detection, or a rescan of the file, can drop or replace ours.
-            shown = _shown_on_server(publisher, cfg, item_id, list(item_row.markers))
-            if shown in (None, Shown.OURS):
-                return _up_to_date()
-            keep_plex = cfg.type is ServerType.PLEX and _live_markers_settings(ctx, cfg).on_plex_redetect == "keep_plex"
-            if shown is Shown.REPLACED and keep_plex:
-                logger.info("{} replaced this app's markers on item {} with its own; keeping them", cfg.name, item_id)
-                return _row(cfg, publisher.name, ServerStatus.UP_TO_DATE, KEPT_PLEX_MARKERS, path)
+            # Whether a type is kept as the server's own (Keep Plex's) is the publisher's call, so any difference
+            # goes through its write; so does a kept type once the server is set to restore ours.
+            if not item_row.markers and not item_row.kept_types:
+                return _up_to_date(item_row.kept_types)  # nothing of ours there to look for
+            shown = _shown_on_server(publisher, cfg, item_id, list(item_row.markers), item_row.kept_types)
+            if shown is None:
+                return {**_up_to_date(item_row.kept_types), READ_BACK_FAILED: True}
+            released = bool(item_row.kept_types) and _live_markers_settings(ctx, cfg).on_plex_redetect != "keep_plex"
+            if shown is Shown.OURS and not released:
+                return _up_to_date(item_row.kept_types)
             logger.info(
-                "{} no longer shows this app's markers on item {} ({}); writing them again",
+                "{} item {}: {}; publishing again",
                 cfg.name,
                 item_id,
-                shown.value,
+                "set to restore this app's markers" if shown is Shown.OURS else f"markers {shown.value} since last run",
             )
         previous = _previous_on_item(item_row, publisher)
         if not wanted and previous == [] and own_previous is None:
@@ -816,6 +842,7 @@ def _publish_to(
                     own_previous=own_previous,
                     duration_ms=rec.duration_ms,
                     canonical_path=path,
+                    kept_types=item_row.kept_types if item_row is not None else frozenset(),
                 ),
                 key=lambda m: (m.start_ms, m.type.value),
             )
@@ -841,20 +868,28 @@ def _publish_to(
             return _not_written(ServerStatus.FAILED, message, name=publisher.name, item_id=attempted_item)
 
         changed = publisher.last_write_changed
-        version = store.set_item_publish_state(cfg.id, item_id, ours, "written")
+        kept = publisher.last_kept_types
+        version = store.set_item_publish_state(cfg.id, item_id, ours, "written", kept_types=kept)
         if not changed and _unchanged(version):
-            return _up_to_date()  # a forced run whose write changed nothing
+            return _up_to_date(kept)  # a forced run whose write changed nothing
         store.set_publish_basis(rec.id, cfg.id, decided_hash=decided_hash, item_version=version)
-        shown_types = {m.type for m in ours}
+        note = kept_note(kept, wanted)
+        shown_types = {m.type for m in ours} | kept
         waiting_for = [m.type.value for m in wanted if m.type not in shown_types]
         if waiting_for:
             # Plex shows a type only when every version of the item is decided and agrees on it.
-            message = f"Waiting for this item's other versions to agree on: {', '.join(waiting_for)}"
+            message = with_kept_note(
+                f"Waiting for this item's other versions to agree on: {', '.join(waiting_for)}", note
+            )
             return _finish(ServerStatus.WAITING, message, name=publisher.name, item_id=item_id, published=ours)
-        message = f"{len(ours)} marker(s)" if ours else "Cleared our markers from this server"
+        if ours:
+            message = f"{len(ours)} marker(s)"
+        else:
+            message = "Cleared our markers from this server" if changed or not note else ""
+        message = with_kept_note(message, note)
         written = _finish(ServerStatus.WRITTEN, message, name=publisher.name, item_id=item_id, published=ours)
         # Recorded either way, but only a write that changed the server says so: it already showed this.
-        return written if changed else _up_to_date()
+        return written if changed else _up_to_date(kept)
 
 
 def _clock(ms: int) -> str:

@@ -92,6 +92,8 @@ def create_intro_credits_job(
     retry_attempt: int = 0,
     retry_delay_s: int = 0,
     verify: bool = False,
+    verify_chain: bool = False,
+    chain_attempt: int = 0,
 ) -> Job:
     """Create and start an Intro & Credits job.
 
@@ -110,6 +112,8 @@ def create_intro_credits_job(
             is (1-based).
         retry_delay_s: For a retry or a verify job: seconds to wait before it takes a slot.
         verify: A later check of files published after they were replaced (``job_runner._queue_verify``).
+        verify_chain: For a retry that follows a verify job (directly or through other retries): it queues no verify.
+        chain_attempt: For a verify job: the retries its chain already used, so a retry it queues goes on counting.
 
     Returns:
         The created job.
@@ -125,6 +129,10 @@ def create_intro_credits_job(
     }
     if verify:
         config["verify"] = True
+    if chain_attempt:
+        config["chain_attempt"] = int(chain_attempt)
+    if verify_chain:
+        config["verify_chain"] = True
     if retry_attempt:
         config["retry_attempt"] = int(retry_attempt)
     if retry_attempt or verify:

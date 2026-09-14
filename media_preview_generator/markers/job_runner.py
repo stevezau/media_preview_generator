@@ -25,7 +25,15 @@ from ..web.job_gate import format_wait_message, get_job_gate
 from ..web.jobs import JobStatus, WorkerStatus, get_job_manager
 from ..web.routes.job_runner import _build_selected_gpus, _format_eta, _inflight_jobs, _inflight_lock
 from ..web.settings_manager import get_settings_manager
-from .outcomes import NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN, RETRY_REASON_CODES, VERIFY_LATER, FileOutcome, ServerStatus
+from .outcomes import (
+    NOT_IN_LIBRARY,
+    PLEX_PASS_UNKNOWN,
+    READ_BACK_FAILED,
+    RETRY_REASON_CODES,
+    VERIFY_LATER,
+    FileOutcome,
+    ServerStatus,
+)
 from .ownership import marker_libraries
 from .pipeline import build_context, kind_handlers
 from .settings import load_server
@@ -96,7 +104,8 @@ def _retry_reason(waiting: dict[str, set[str]]) -> str:
 def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dict[str, str]) -> None:
     """Create the delayed retry job for files that weren't on disk yet or that a server could take later.
 
-    Up to ``webhook_retry_count`` retries, one job for every reason. The retry gets each file as its sender gave it
+    Up to ``webhook_retry_count`` retries, one job for every reason; a verify job's retries go on counting from the
+    retries its chain used before it, and never queue another verify. The retry gets each file as its sender gave it
     (with that path's item id hints), like the preview retries: a file not on disk yet was given the first mapped
     disk's path, and only the sender's path is resolved again against every disk. Never raises: the job that found
     the files has already completed.
@@ -111,7 +120,7 @@ def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dic
     paths = _sent_paths({path for files in waiting.values() for path in files}, sender_paths)
     reason = _retry_reason(waiting)
     try:
-        attempt = int(cfg.get("retry_attempt") or 0) + 1
+        attempt = int(cfg.get("retry_attempt") or cfg.get("chain_attempt") or 0) + 1
         count, delay_setting = retry_policy(get_settings_manager())
         if attempt > count:
             jm.add_log(
@@ -129,7 +138,7 @@ def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dic
             )
             paths = paths[:MAX_RETRY_FILES]
         delay = retry_delay_s(attempt, delay_setting)
-        base_name = (job.library_name or "Intro & Credits").removeprefix("Retry: ")
+        base_name = (job.library_name or "Intro & Credits").removeprefix("Retry: ").removeprefix("Verify: ")
         retry = create_intro_credits_job(
             library_name=f"Retry: {base_name}",
             priority=job.priority,
@@ -138,6 +147,7 @@ def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dic
             item_id_hints=_hints_for(cfg, paths) or None,
             retry_attempt=attempt,
             retry_delay_s=delay,
+            verify_chain=bool(cfg.get("verify") or cfg.get("verify_chain")),
         )
         jm.add_log(
             job.id,
@@ -177,7 +187,14 @@ def _queue_verify(job, cfg: dict, files: set[str], sender_paths: dict[str, str])
             return
         from .triggers import create_intro_credits_job
 
-        paths = _sent_paths(files, sender_paths)[:MAX_RETRY_FILES]
+        sent = _sent_paths(files, sender_paths)
+        paths = sent[:MAX_RETRY_FILES]
+        if len(sent) > len(paths):
+            jm.add_log(
+                job.id,
+                f"INFO - {len(sent) - len(paths)} more replaced file(s) aren't checked again later; the next run for "
+                "them checks them",
+            )
         delay = max(MIN_VERIFY_DELAY_S, retry_delay_s(1, delay_setting) * VERIFY_DELAY_FACTOR)
         base_name = (job.library_name or "Intro & Credits").removeprefix("Retry: ").removeprefix("Verify: ")
         check = create_intro_credits_job(
@@ -188,6 +205,7 @@ def _queue_verify(job, cfg: dict, files: set[str], sender_paths: dict[str, str])
             item_id_hints=_hints_for(cfg, paths) or None,
             retry_delay_s=delay,
             verify=True,
+            chain_attempt=int(cfg.get("retry_attempt") or 0),
         )
         jm.add_log(job.id, f"INFO - {len(paths)} replaced file(s) are checked again in {delay}s (job {check.id[:8]})")
     except Exception:
@@ -660,10 +678,15 @@ def run_intro_credits_job(job_id: str) -> None:
                     return
                 waiting: dict[str, set[str]] = {}
                 replaced: set[str] = set()
+                unchecked: dict[str, set[str]] = {}
                 # Webhook paths (and their retries) can arrive before the file is visible here (an import still
                 # copying over NFS); the preview job retries those too. A file the user picked, or a library
-                # listing, that isn't on disk won't appear by waiting.
-                retries_missing_files = bool(cfg.get("file_paths")) and cfg.get("source") not in _USER_PICKED_SOURCES
+                # listing, that isn't on disk won't appear by waiting; a verify job's file was there already.
+                sent_files = bool(cfg.get("file_paths")) and cfg.get("source") not in _USER_PICKED_SOURCES
+                retries_missing_files = sent_files and not cfg.get("verify")
+                # Only files just sent were just replaced: a listing's replaced file may have changed days ago, and
+                # servers rescanned it long since. A verify chain checks once.
+                checks_replaced_later = sent_files and not (cfg.get("verify") or cfg.get("verify_chain"))
 
                 def on_file_result(file_path, outcome, reason, worker, servers=None):
                     # Any server that can take the file later, even when another server was written.
@@ -674,6 +697,10 @@ def run_intro_credits_job(job_id: str) -> None:
                         waiting.setdefault(NOT_ON_DISK, set()).add(file_path)
                     if any(isinstance(row, dict) and row.get(VERIFY_LATER) for row in servers or []):
                         replaced.add(file_path)
+                    for row in servers or []:
+                        if isinstance(row, dict) and row.get(READ_BACK_FAILED):
+                            name = str(row.get("server_name") or row.get("server_id") or "a server")
+                            unchecked.setdefault(name, set()).add(file_path)
                     jm.record_file_result(job_id, file_path, outcome, reason, worker, servers=servers)
 
                 set_file_result_callback(on_file_result, job_id=job_id)
@@ -721,10 +748,15 @@ def run_intro_credits_job(job_id: str) -> None:
                 if result["cancelled"] or cancel_check():
                     jm.cancel_job(job_id)
                     return
-                _complete(jm, job_id, outcome, warnings)
+                # Those files stay "Up to date": a read failure mustn't rewrite them, but it mustn't go unseen either.
+                unchecked_warnings = [
+                    f"Couldn't check what {len(files)} file(s) show on {name}"
+                    for name, files in sorted(unchecked.items())
+                ]
+                _complete(jm, job_id, outcome, [*warnings, *unchecked_warnings])
                 if waiting:
                     _queue_retry(job, cfg, waiting, sender_paths)
-                if replaced and not cfg.get("verify"):
+                if replaced and checks_replaced_later:
                     _queue_verify(job, cfg, replaced, sender_paths)
             finally:
                 clear_failures()

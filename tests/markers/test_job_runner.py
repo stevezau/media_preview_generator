@@ -1184,6 +1184,7 @@ class TestLibraryRetry:
             item_id_hints=None,
             retry_attempt=expected_attempt,
             retry_delay_s=expected_delay,
+            verify_chain=False,
         )
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
         assert any("retry" in c.args[1].lower() for c in env.jm.add_log.call_args_list)
@@ -1287,6 +1288,7 @@ class TestLibraryRetry:
                 item_id_hints=None,
                 retry_attempt=1,
                 retry_delay_s=60,
+                verify_chain=False,
             )
             logs = [c.args[1] for c in env.jm.add_log.call_args_list]
             assert any("not on disk yet" in line and "retry 1 of 3" in line for line in logs), logs
@@ -1431,6 +1433,7 @@ class TestVerifyReplacedFilesLater:
             item_id_hints={"/data/tv/a.mkv": {"jf-1": "abc"}},
             retry_delay_s=delay,
             verify=True,
+            chain_attempt=0,
         )
         logs = [c.args[1] for c in env.jm.add_log.call_args_list]
         assert f"INFO - 2 replaced file(s) are checked again in {delay}s (job job-1)" in logs, logs
@@ -1440,10 +1443,80 @@ class TestVerifyReplacedFilesLater:
         self._run(verify_env)
         verify_env.create.assert_not_called()
 
-    def test_a_verify_job_never_queues_another(self, env, verify_env):
-        env.job.config["verify"] = True
+    @pytest.mark.parametrize(
+        "chain", [{"verify": True}, {"verify_chain": True, "retry_attempt": 2}], ids=["verify", "its-retry"]
+    )
+    def test_a_verify_job_and_its_retries_never_queue_another(self, env, verify_env, chain):
+        env.job.config.update(chain)
         verify_env.results.append(("/m/a.mkv", "markers_published", [self.WRITTEN_LATER]))
         self._run(verify_env)
+        verify_env.create.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("source", "file_paths", "verified"),
+        [
+            ("sonarr", ["/data/tv/a.mkv"], True),
+            ("retry", ["/data/tv/a.mkv"], True),
+            # A listing's "replaced" file may have changed days ago; the servers have long since rescanned it.
+            ("schedule", [], False),
+            ("manual", [], False),
+            ("manual", ["/data/tv/a.mkv"], False),
+            ("inspector", ["/data/tv/a.mkv"], False),
+        ],
+    )
+    def test_only_sent_files_are_checked_again_later(self, env, verify_env, source, file_paths, verified):
+        env.job.config = {"libraries": [], "file_paths": file_paths, "source": source}
+        verify_env.results.append(("/m/a.mkv", "markers_published", [self.WRITTEN_LATER]))
+        self._run(verify_env, ["/m/a.mkv"])
+        assert verify_env.create.call_count == int(verified)
+
+    @pytest.mark.parametrize(("attempt_done", "chain_attempt"), [(None, 0), (2, 2)])
+    def test_the_verify_carries_the_retries_already_used(self, env, verify_env, attempt_done, chain_attempt):
+        if attempt_done is not None:
+            env.job.config["retry_attempt"] = attempt_done
+        verify_env.results.append(("/m/a.mkv", "markers_published", [self.WRITTEN_LATER]))
+        self._run(verify_env, ["/m/a.mkv"])
+        assert verify_env.create.call_args.kwargs["chain_attempt"] == chain_attempt
+
+    @pytest.mark.parametrize(("chain_attempt", "attempt", "delay"), [(None, 1, 60), (1, 2, 120), (2, 3, 300)])
+    def test_a_retry_from_a_verify_job_goes_on_counting(self, env, verify_env, chain_attempt, attempt, delay):
+        env.job.library_name = "Verify: Show - S01E01.mkv"
+        env.job.config.update({"verify": True, **({"chain_attempt": chain_attempt} if chain_attempt else {})})
+        verify_env.results.append(("/m/a.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]))
+        self._run(verify_env, ["/m/a.mkv"])
+        verify_env.create.assert_called_once_with(
+            library_name="Retry: Show - S01E01.mkv",
+            priority=3,
+            source="sonarr",
+            file_paths=["/data/tv/a.mkv"],
+            item_id_hints={"/data/tv/a.mkv": {"jf-1": "abc"}},
+            retry_attempt=attempt,
+            retry_delay_s=delay,
+            verify_chain=True,
+        )
+
+    def test_a_retry_of_a_retry_in_a_verify_chain_stays_in_the_chain(self, env, verify_env):
+        env.job.library_name = "Retry: Show - S01E01.mkv"
+        env.job.config.update({"verify_chain": True, "retry_attempt": 1})
+        verify_env.results.append(("/m/a.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]))
+        self._run(verify_env, ["/m/a.mkv"])
+        kwargs = verify_env.create.call_args.kwargs
+        assert (kwargs["library_name"], kwargs["retry_attempt"], kwargs["verify_chain"]) == (
+            "Retry: Show - S01E01.mkv",
+            2,
+            True,
+        )
+
+    def test_a_retry_from_a_verify_job_stops_at_the_retry_count(self, env, verify_env):
+        env.job.config.update({"verify": True, "chain_attempt": 3})
+        verify_env.results.append(("/m/a.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]))
+        self._run(verify_env, ["/m/a.mkv"])
+        verify_env.create.assert_not_called()
+
+    def test_a_verify_job_doesnt_retry_a_file_gone_from_disk(self, env, verify_env):
+        env.job.config["verify"] = True
+        verify_env.results.append(("/m/a.mkv", "skipped_file_not_found", []))
+        self._run(verify_env, ["/m/a.mkv"])
         verify_env.create.assert_not_called()
 
     def test_retries_turned_off_turn_the_verify_off_too(self, env, verify_env):
@@ -1460,18 +1533,55 @@ class TestVerifyReplacedFilesLater:
         assert [c.kwargs.get("verify", False) for c in verify_env.create.call_args_list] == [False, True]
         assert all(c.kwargs["file_paths"] == ["/data/tv/a.mkv"] for c in verify_env.create.call_args_list)
 
-    def test_the_verify_takes_at_most_500_files(self, env, verify_env):
+    def test_the_verify_takes_at_most_500_files_and_says_so(self, env, verify_env):
         paths = [f"/m/{i:04d}.mkv" for i in range(501)]
         verify_env.sent = {}
         verify_env.results += [(p, "markers_published", [self.WRITTEN_LATER]) for p in paths]
         self._run(verify_env, paths)
         assert verify_env.create.call_args.kwargs["file_paths"] == paths[:500]
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        assert "INFO - 1 more replaced file(s) aren't checked again later; the next run for them checks them" in logs
 
     def test_a_cancelled_job_queues_no_verify(self, env, verify_env):
         verify_env.results.append(("/m/a.mkv", "markers_published", [self.WRITTEN_LATER]))
         env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "cancelled": True}
         self._run(verify_env)
         verify_env.create.assert_not_called()
+
+
+class TestReadBackFailures:
+    """Files left "Up to date" because a server's markers couldn't be read back make the job say so (LOW-2)."""
+
+    def test_the_job_warns_per_server_how_many_files_it_couldnt_check(self, env, monkeypatch):
+        unread = {"status": "markers_up_to_date", "message": "Up to date", "read_back_failed": True}
+        results = [
+            ("/m/a.mkv", [{**unread, "server_id": "plex-1", "server_name": "Home Plex"}]),
+            (
+                "/m/b.mkv",
+                [
+                    {**unread, "server_id": "plex-1", "server_name": "Home Plex"},
+                    {**unread, "server_id": "jf-1", "server_name": "Home Jellyfin"},
+                ],
+            ),
+            ("/m/c.mkv", [{"server_id": "plex-1", "server_name": "Home Plex", "status": "markers_up_to_date"}]),
+        ]
+        set_cb = MagicMock()
+        monkeypatch.setattr(job_runner, "set_file_result_callback", set_cb)
+
+        def during_wait(timeout=None):
+            for path, rows in results:
+                set_cb.call_args_list[0].args[0](path, "markers_up_to_date", "", "Lookup", servers=rows)
+            return True
+
+        env.tracker.wait.side_effect = during_wait
+        items = [_item(p) for p, _rows in results]
+        with patch.object(job_runner, "build_items", return_value=(items, ["Couldn't list X"], {})):
+            job_runner.run_intro_credits_job("j1")
+        env.jm.complete_job.assert_called_once_with(
+            "j1",
+            warning="Couldn't list X | Couldn't check what 1 file(s) show on Home Jellyfin | "
+            "Couldn't check what 2 file(s) show on Home Plex",
+        )
 
 
 class TestRetryCarriesTheSenderPath:
@@ -1555,6 +1665,7 @@ class TestRetryCarriesTheSenderPath:
             item_id_hints={self.RAW: hints} if hints else None,
             retry_attempt=1,
             retry_delay_s=60,
+            verify_chain=False,
         )
 
         # Sonarr's copy lands on the second disk before the retry runs: the retry reads it there.

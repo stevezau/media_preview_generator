@@ -17,7 +17,7 @@ from loguru import logger
 from ..servers.base import ServerConfig, ServerType
 from ..servers.ownership import OwnershipMatch, apply_path_mappings
 from .models import Marker, MarkerType
-from .outcomes import KEPT_PLEX_MARKERS
+from .outcomes import kept_note, with_kept_note
 from .ownership import allowed_matches, owning_servers
 from .publishers.base import Capability
 from .publishers.factory import publisher_for
@@ -355,12 +355,10 @@ def _version_count(server: Any, cfg: ServerConfig, item_id: str | None) -> int |
     if cfg.type is not ServerType.PLEX or not item_id:
         return None
     try:
-        durations = server.get_part_durations(item_id)
+        return server.get_version_count(item_id)
     except Exception as exc:
         logger.debug("Reading the versions of item {} on {} failed: {}", item_id, cfg.name, type(exc).__name__)
         return None
-    # One part per version: stacked multi-part files aren't published to (the Plex publisher refuses them).
-    return None if durations is None else len(durations)
 
 
 def _same_end(shown_end: int | None, wanted_end: int, duration_ms: int, server_type: ServerType) -> bool:
@@ -388,13 +386,35 @@ def _same(current: list[dict], wanted: list[dict], duration_ms: int, server_type
     return True
 
 
-def _replaced_on_server(shown: list[dict], ours: tuple[Marker, ...], duration_ms: int, server_type: ServerType) -> bool:
-    """Whether the server shows another marker of one of our types where ours should be (its own re-detection)."""
-    for mtype in dict.fromkeys(m.type for m in ours):
-        now = [c for c in shown if c["type"] == mtype.value]
-        if now and not _same(now, [_marker_dict(m) for m in ours if m.type is mtype], duration_ms, server_type):
-            return True
-    return False
+def _matching(shown: list[dict], expected: list[dict], duration_ms: int, server_type: ServerType) -> list[dict] | None:
+    """The shown markers that match ``expected`` one for one; None when one of ``expected`` isn't shown."""
+    pool = list(shown)
+    matched = []
+    for want in expected:
+        found = next((c for c in pool if _same([c], [want], duration_ms, server_type)), None)
+        if found is None:
+            return None
+        pool.remove(found)
+        matched.append(found)
+    return matched
+
+
+def _kept_on_plex(
+    current: list[dict], ours: tuple[Marker, ...], recorded: frozenset[MarkerType], duration_ms: int
+) -> frozenset[MarkerType]:
+    """The types a Plex server set to "Keep Plex's" leaves as its own on the next run (``plex_db._kept_types``).
+
+    Kept on an earlier run, or ours replaced by Plex's own markers since, while Plex still shows markers of the type.
+    """
+    kept = set()
+    for mtype in MarkerType:
+        now = [c for c in current if c["type"] == mtype.value]
+        if not now:
+            continue
+        mine = [_marker_dict(m) for m in ours if m.type is mtype]
+        if mtype in recorded or (mine and not _same(now, mine, duration_ms, ServerType.PLEX)):
+            kept.add(mtype)
+    return frozenset(kept)
 
 
 def _expected(
@@ -425,24 +445,39 @@ def _plan(
     current: list[dict] | None,
     waiting_on_versions: bool,
     duration_ms: int,
-    keeps_plex_markers: bool = False,
+    keep_plex: bool = False,
+    recorded_kept: frozenset[MarkerType] = frozenset(),
 ) -> tuple[str, str]:
     if off_reason:
         return "not_enabled", off_reason
     if not wanted:
         return ("will_remove", "") if ours else ("nothing_to_publish", "")
+    kept = (
+        _kept_on_plex(current, ours, recorded_kept, duration_ms) if keep_plex and current is not None else frozenset()
+    )
+    note = kept_note(kept, wanted)
     if waiting_on_versions:
-        return "waiting", VERSIONS_DISAGREE_REASON
+        return "waiting", with_kept_note(VERSIONS_DISAGREE_REASON, note)
     if current is None:
         return "unknown", ""
+    # Plex's own markers of a kept type stay whatever this file decided: compare only the other types.
+    wanted = [m for m in wanted if m.type not in kept]
+    ours = tuple(m for m in ours if m.type not in kept)
     # Only the types we manage here: Plex keeps its own marker of a type we didn't decide.
     managed = {m.type.value for m in wanted} | {m.type.value for m in ours}
     shown = [c for c in current if c["type"] in managed]
-    if _same(shown, _expected(server_type, wanted, ours, shown, duration_ms), duration_ms, server_type):
-        return "up_to_date", ""
-    if keeps_plex_markers and _replaced_on_server(shown, ours, duration_ms, server_type):
-        return "keeps_plex", KEPT_PLEX_MARKERS
-    return ("will_replace", "") if shown else ("will_add", "")
+    expected = _expected(server_type, wanted, ours, shown, duration_ms)
+    if server_type is ServerType.JELLYFIN:
+        # Jellyfin serves every provider's segments side by side: another provider's beside ours changes nothing
+        # (the job reads ours as shown and sends nothing).
+        matched = _matching(shown, expected, duration_ms, server_type)
+        if matched is not None:
+            shown = matched
+    # Compared within _SAME_TOLERANCE_MS where a job compares Plex's rows exactly: a Plex marker within a second of
+    # ours reads "Up to date" here while the job counts it as Plex's. Plex's own detection doesn't land that close.
+    if _same(shown, expected, duration_ms, server_type):
+        return ("keeps_plex", with_kept_note("", note)) if note else ("up_to_date", "")
+    return ("will_replace" if shown else "will_add"), with_kept_note("", note)
 
 
 def _server_row(
@@ -476,10 +511,11 @@ def _server_row(
     )
     # Plex shows one set per item: a type this file decided but the item doesn't show after this file's last publish
     # waits for the item's other versions to agree.
+    # Kept types are Plex's own, not missing from ours.
     waiting_on_versions = bool(
         cfg.type is ServerType.PLEX
         and published_unchanged
-        and {m.type for m in wanted} - {m.type for m in item_state.markers}
+        and {m.type for m in wanted} - {m.type for m in item_state.markers} - item_state.kept_types
     )
     current = _current(server, cfg, item_id, can_show)
     plan, reason = _plan(
@@ -490,10 +526,9 @@ def _server_row(
         current=current,
         waiting_on_versions=waiting_on_versions,
         duration_ms=(rec.duration_ms or 0) if rec else 0,
-        # A normal job leaves Plex's own re-detected markers alone for an unchanged decision ("Keep Plex's").
-        keeps_plex_markers=cfg.type is ServerType.PLEX
-        and settings.on_plex_redetect == "keep_plex"
-        and published_unchanged,
+        # Every job leaves Plex's own re-detected markers alone, type by type ("Keep Plex's").
+        keep_plex=cfg.type is ServerType.PLEX and settings.on_plex_redetect == "keep_plex",
+        recorded_kept=item_state.kept_types if item_state is not None else frozenset(),
     )
     return {
         "server_id": cfg.id,
@@ -552,7 +587,8 @@ def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> d
         failed), what is ours there, this file's last publish (``publish_status``, ``publish_message``), the server
         item's last publish (``item_status``; another version of a shared Plex item may have written or failed
         since), and the ``plan``: ``will_add``, ``will_replace``, ``will_remove``, ``up_to_date``, ``waiting`` (Plex
-        versions disagree), ``keeps_plex`` (Plex's own detection replaced ours and the server is set to keep them),
+        versions disagree), ``keeps_plex`` (Plex's own detection replaced ours and the server is set to keep them;
+        ``plan_reason`` names the kept types, also on other plans),
         ``not_enabled``, ``nothing_to_publish``, or ``unknown`` (the server's markers couldn't be read, or its row
         failed: then ``error`` says why), with ``plan_reason``, and ``version_count`` (a Plex item's versions, which
         share one marker set; None for other servers or when it couldn't be read).
