@@ -37,11 +37,20 @@ class ServerStatus(str, Enum):
 def file_outcome(statuses: set[str], *, needs_review: bool) -> FileOutcome:
     """Fold one file's per-server statuses into its job outcome.
 
-    Precedence, first match wins: any server written → published; any server failed → failed (so a broken write is
-    never hidden behind another server's up-to-date row); any up to date → up to date; any waiting (the server hasn't
-    indexed the file yet, or the item's other versions don't agree yet) → waiting; sources disagree → needs review;
-    any server with nothing to publish (or no rows) → no markers; every server skipped (no publisher, plugin missing)
-    → skipped.
+    The file shows what still needs something, most urgent first, so a finished server never hides an unfinished one.
+    First match wins:
+
+    1. Any server failed → failed: a broken write or check, even when another server took the markers.
+    2. The sources don't agree on an enabled marker type → needs review: only the user settles it, even when the
+       agreed types were written or are up to date.
+    3. Any server waiting (it hasn't indexed the file yet, Plex Pass is unconfirmed, or the item's other versions
+       don't agree yet) → waiting, even when another server was written or is up to date.
+    4. Any server written → published.
+    5. Any server up to date → up to date.
+    6. Any server with nothing to publish, or no rows → no markers.
+    7. Every server skipped (no publisher, plugin missing, turned off) → skipped.
+
+    Retry and verify jobs are queued from the per-server rows, not from this outcome.
 
     Args:
         statuses: ``ServerStatus`` values of the file's rows.
@@ -50,16 +59,17 @@ def file_outcome(statuses: set[str], *, needs_review: bool) -> FileOutcome:
     Returns:
         The file outcome counted on the job.
     """
+    if ServerStatus.FAILED.value in statuses:
+        return FileOutcome.FAILED
+    if needs_review:
+        return FileOutcome.NEEDS_REVIEW
     for status, outcome in (
-        (ServerStatus.WRITTEN, FileOutcome.PUBLISHED),
-        (ServerStatus.FAILED, FileOutcome.FAILED),
-        (ServerStatus.UP_TO_DATE, FileOutcome.UP_TO_DATE),
         (ServerStatus.WAITING, FileOutcome.WAITING),
+        (ServerStatus.WRITTEN, FileOutcome.PUBLISHED),
+        (ServerStatus.UP_TO_DATE, FileOutcome.UP_TO_DATE),
     ):
         if status.value in statuses:
             return outcome
-    if needs_review:
-        return FileOutcome.NEEDS_REVIEW
     if ServerStatus.NONE.value in statuses or not statuses:
         return FileOutcome.NO_MARKERS
     return FileOutcome.SKIPPED
@@ -73,6 +83,8 @@ PLEX_PASS_UNKNOWN = "plex_pass_unknown"
 RETRY_REASON_CODES = frozenset({NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN})
 
 
+# Skipped-file message for trailers and other extras (``external_ids.is_extra``).
+EXTRAS_NOT_CHECKED = "Extras aren't checked for markers"
 # Row message when Plex's own detection replaced ours and the server is set to "Keep Plex's".
 KEPT_PLEX_MARKERS = "Plex's own markers are kept (Keep Plex's)"
 # Row key on a written or up-to-date row of a replaced file: servers often rescan a replaced file after the job, so

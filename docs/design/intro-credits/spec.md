@@ -766,3 +766,11 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   queues one delayed verify job (first webhook retry delay × 3, at least 10 min, retry cap and switch; verify jobs
   queue no further verify). The Inspector compares credits ends properly (Plex's final flag, Emby's missing end) and
   plans `keeps_plex` for a kept replacement.
+- 2026-09-14 · Job outcomes (§6.2 item 7), from lab finding 6 (a file said "Up to date" while Plex waited for its
+  versions or Jellyfin 12.0 hadn't indexed it; movie trailers in folder jobs waited and queued retries): a file's
+  outcome shows what still needs something, first match wins — failed, needs review, waiting, written, up to date,
+  no markers, skipped. A failed or waiting server is never hidden behind a written or up-to-date one (this replaces
+  the 2026-09-13 "failed unless another server was written"), and a file with any marker type in review counts as
+  Needs review even when its agreed types were published. Retries and verify jobs still read the per-server rows.
+  Extras (`external_ids.is_extra`: a Plex extra suffix, or an extras folder as the parent) are skipped before any
+  probe, owner or item lookup ("Extras aren't checked for markers"), from folders, webhooks and library listings.

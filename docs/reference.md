@@ -340,18 +340,25 @@ Per-file outcomes (`markers.outcomes.FileOutcome`, shown in the job's Files pane
 | `markers_published` | Markers written | The job changed what at least one server shows (a forced restore included) |
 | `markers_up_to_date` | Up to date | Every enabled server already showed these markers (read back before saying so) |
 | `markers_waiting` | Waiting | A server hasn't indexed the file yet, Plex didn't answer its Plex Pass check, or a Plex item's versions don't yet agree |
-| `markers_needs_review` | Needs review | Sources don't agree yet, so nothing was sent |
+| `markers_needs_review` | Needs review | Sources don't agree on at least one marker yet, so that marker wasn't sent (others may have been) |
 | `markers_none` | No markers found | No source found an intro or credits for this file |
 | `markers_no_owners` | No server with Intro & Credits on | No enabled server with Intro & Credits on holds this file |
 | `skipped_file_not_found` | Not Found | File not found on disk |
-| `markers_skipped` | Skipped | Every server that owns this file can't take markers right now (see the [capability states](guides.md#troubleshooting-intro--credits) — a plugin missing, Plex not ready, etc.) |
+| `markers_skipped` | Skipped | Every server that owns this file can't take markers right now (see the [capability states](guides.md#troubleshooting-intro--credits) — a plugin missing, Plex not ready, etc.), or the file is a trailer or other extra (reason "Extras aren't checked for markers") |
 | `failed` | Failed | Processing failed |
 
 Per-server row statuses (`markers.outcomes.ServerStatus`) use the same `markers_written` / `markers_up_to_date` /
 `markers_needs_review` / `markers_skipped` / `markers_waiting` / `failed` keys, plus `markers_none` (nothing to
-publish on that server). A file's overall outcome folds its per-server rows by precedence: any server written →
-published; any failed → failed; any up to date → up to date; any waiting → waiting; otherwise needs review, no
-markers, or skipped.
+publish on that server). A file's overall outcome shows what still needs something, first match wins: any server
+failed → failed; any marker in review → needs review; any server waiting → waiting; any written → published; any up
+to date → up to date; any with nothing to publish → no markers; otherwise skipped. So one server that is still
+waiting (or failed) is never hidden behind another server that was written or is up to date. Retries and verify jobs
+read the per-server rows, not this outcome.
+
+Extras are never checked: a file with a Plex extra suffix (`-trailer`, `-featurette`, `-behindthescenes`,
+`-deleted`, `-interview`, `-scene`, `-short`, `-other`, `-sample`) or directly inside an extras folder (`Trailers`,
+`Featurettes`, `Extras`, `Behind The Scenes`, `Deleted Scenes`, `Interviews`, `Scenes`, `Shorts`, `Other`, `Samples`)
+is `markers_skipped` before it is probed or looked up, whether it came from a folder, a webhook or a library listing.
 
 ### Intro & Credits Endpoints
 

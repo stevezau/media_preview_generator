@@ -31,6 +31,7 @@ from media_preview_generator.markers.store import MarkerStore
 from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.servers.base import Library, ServerType
 from tests.markers.fakes import FakeClient, FakePlexItems, FakeRegistry, ready_publisher, server_config
+from tests.markers.test_external_ids import EXTRA_SUFFIXES, EXTRAS_FOLDERS
 
 T = MarkerType
 DUR = 1_321_472
@@ -328,6 +329,73 @@ class TestItemIdLookupScope:
         out, _ = _run(_ctx(store, reg), media, {"plex-1": publisher}, probe=_probe(CHAPTERS_BOTH))
         assert _rows(out)["plex-1"]["status"] == ServerStatus.WRITTEN.value
         assert publisher.write.call_args.args == ("42", [INTRO_CH, CREDITS_CH])
+
+
+EXTRA_SHAPES = [
+    *(f"Toy Story (1995) {{tmdb-862}}/Toy Story (1995)-{suffix}.mkv" for suffix in EXTRA_SUFFIXES),
+    *(f"Toy Story (1995) {{tmdb-862}}/{folder}/Making Of.mkv" for folder in EXTRAS_FOLDERS),
+    "Rick and Morty (2013) {tvdb-275274}/Season 01/Extras/Rick and Morty (2013) - S01E01 - Animatic.mkv",
+]
+
+
+class TestExtras:
+    """Trailers and other extras are never checked: no server has them as items, so they would wait and retry forever."""
+
+    def _extra(self, tmp_path, shape):
+        path = tmp_path / "media" / "movies" / shape
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x" * 100)
+        return str(path)
+
+    @pytest.mark.parametrize("stage", ["check", "process"])
+    @pytest.mark.parametrize("shape", EXTRA_SHAPES)
+    def test_an_extra_is_skipped_before_any_probe_owner_lookup_or_publish(self, store, tmp_path, shape, stage):
+        path = self._extra(tmp_path, shape)
+        reg = _registry(path, ServerType.PLEX, ServerType.JELLYFIN)
+        for sid in ("plex-1", "jellyfin-1"):
+            reg.get(sid).resolve_remote_path_to_item_id.return_value = None  # like a real server: not an item
+        clients = _clients()
+        pubs = {"plex-1": ready_publisher(), "jellyfin-1": ready_publisher("jellyfin_bridge")}
+        with patch.object(pipeline, "owning_servers") as owners:
+            out, probe = _run(_ctx(store, reg, clients=clients), path, pubs, probe=_probe(CHAPTERS_BOTH), stage=stage)
+        assert (out.outcome_key, out.message) == (FileOutcome.SKIPPED.value, "Extras aren't checked for markers")
+        assert not out.publisher_rows
+        owners.assert_not_called()
+        probe.assert_not_called()
+        assert [c.calls for c in clients.values()] == [[], [], []]
+        for sid, pub in pubs.items():
+            pub.capability.assert_not_called()
+            pub.write.assert_not_called()
+            reg.get(sid).resolve_remote_path_to_item_id.assert_not_called()
+        assert store.get_file(path) is None
+
+    def test_the_episode_next_to_extras_is_still_published(self, store, media):
+        season = os.path.dirname(media)
+        trailer = os.path.join(season, "Rick and Morty (2013) - S01E01 - Pilot-trailer.mkv")
+        featurette = os.path.join(season, "Featurettes", "Rick and Morty (2013) - S01E01 - Pilot.mkv")
+        os.makedirs(os.path.dirname(featurette))
+        for extra in (trailer, featurette):
+            with open(extra, "wb") as f:
+                f.write(b"x" * 100)
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+        ctx = _ctx(store, reg)
+        outcomes = {}
+        with (
+            patch.object(pipeline, "probe_media", return_value=_probe(CHAPTERS_BOTH)) as probe,
+            patch.object(pipeline, "publisher_for", side_effect=lambda server, cfg, **kw: plex),
+        ):
+            for path in (trailer, media, featurette):
+                outcomes[path] = check_item(_item(path), ctx=ctx).outcome_key
+        assert outcomes == {
+            trailer: FileOutcome.SKIPPED.value,
+            media: FileOutcome.PUBLISHED.value,
+            featurette: FileOutcome.SKIPPED.value,
+        }
+        assert [c.args[0] for c in probe.call_args_list] == [media]
+        assert plex.write.call_args_list[0].args == ("item-plex-1", [INTRO_CH, CREDITS_CH])
+        assert plex.write.call_args_list[0].kwargs["canonical_path"] == media
+        assert plex.write.call_count == 1
 
 
 class TestIdentityAndProbe:
@@ -849,7 +917,9 @@ class TestEvidenceAndDecisions:
         expected = [m for m, cell in ((INTRO_CH, intro), (CREDITS_CH, credits)) if cell == "decided"]
         needs_review = "review" in (intro, credits)
         if expected:
-            status, outcome = ServerStatus.WRITTEN, FileOutcome.PUBLISHED
+            # A type the sources don't agree on outranks the one written: only the user settles it.
+            status = ServerStatus.WRITTEN
+            outcome = FileOutcome.NEEDS_REVIEW if needs_review else FileOutcome.PUBLISHED
             assert plex.write.call_args.args == ("item-plex-1", expected)
         else:
             plex.write.assert_not_called()
@@ -1913,7 +1983,13 @@ class TestPublishFanOut:
         # Only "the server hasn't indexed the file yet" carries a code: the job retries those files later.
         assert rows["plex-1"].get("reason_code", "absent") == (reason_code or "absent")
         assert "reason_code" not in rows["jellyfin-1"]
-        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        # A server still waiting or failed shows on the file; a skipped one leaves it published.
+        expected_outcome = {
+            ServerStatus.SKIPPED: FileOutcome.PUBLISHED,
+            ServerStatus.WAITING: FileOutcome.WAITING,
+            ServerStatus.FAILED: FileOutcome.FAILED,
+        }
+        assert out.outcome_key == expected_outcome[status].value
         state = _state(store, media, "plex-1")
         expected_state = {
             ServerStatus.SKIPPED: "skipped",
@@ -3002,11 +3078,16 @@ class TestPlexItems:
         out_a = self._check(store, reg, items, a, CHAPTERS_CREDITS_ONLY, clients=review)
         assert items.calls[-1]["previous"] == [INTRO_CH]
         assert items.served("42") == []  # our intro is gone; B still disagrees on credits
-        assert out_a.outcome_key == FileOutcome.WAITING.value
+        # The intros in review outrank the Plex row on each file.
+        assert out_a.publisher_rows[0]["status"] == ServerStatus.WAITING.value
+        assert out_a.outcome_key == FileOutcome.NEEDS_REVIEW.value
         out_b = self._check(store, reg, items, b, CHAPTERS_CREDITS_ONLY, clients=review)
-        assert out_b.outcome_key == FileOutcome.PUBLISHED.value
+        assert out_b.publisher_rows[0]["status"] == ServerStatus.WRITTEN.value
+        assert out_b.outcome_key == FileOutcome.NEEDS_REVIEW.value
         out_a = self._check(store, reg, items, a, clients=review)
-        assert out_a.outcome_key == FileOutcome.UP_TO_DATE.value  # B's publish already shows A's credits
+        # B's publish already shows A's credits.
+        assert out_a.publisher_rows[0]["status"] == ServerStatus.UP_TO_DATE.value
+        assert out_a.outcome_key == FileOutcome.NEEDS_REVIEW.value
         assert items.served("42") == [SERVED_CREDITS]
         assert store.get_item_publish_state("plex-1", "42").markers == (CREDITS_CH,)
 
@@ -3591,39 +3672,49 @@ W, U, R, S, A, F, N = (
 @pytest.mark.parametrize(
     ("statuses", "needs_review", "expected"),
     [
-        # Every pair of per-server statuses for two owners (NEEDS_REVIEW rows only exist when needs_review is True).
+        # Every status alone and every pair for two owners, sources agreeing (NEEDS_REVIEW rows need needs_review).
         ({W}, False, FileOutcome.PUBLISHED),
+        ({U}, False, FileOutcome.UP_TO_DATE),
+        ({S}, False, FileOutcome.SKIPPED),
+        ({A}, False, FileOutcome.WAITING),
+        ({F}, False, FileOutcome.FAILED),
+        ({N}, False, FileOutcome.NO_MARKERS),
+        (set(), False, FileOutcome.NO_MARKERS),
         ({W, U}, False, FileOutcome.PUBLISHED),
         ({W, S}, False, FileOutcome.PUBLISHED),
-        ({W, A}, False, FileOutcome.PUBLISHED),
-        ({W, F}, False, FileOutcome.PUBLISHED),
+        ({W, A}, False, FileOutcome.WAITING),  # Jellyfin written, Jellyfin 12.0 hasn't indexed the file (lab row 8 A)
+        ({W, F}, False, FileOutcome.FAILED),  # a broken write isn't hidden behind the server that took it
         ({W, N}, False, FileOutcome.PUBLISHED),
-        ({U}, False, FileOutcome.UP_TO_DATE),
         ({U, S}, False, FileOutcome.UP_TO_DATE),
-        ({U, A}, False, FileOutcome.UP_TO_DATE),
+        ({U, A}, False, FileOutcome.WAITING),  # Jellyfins up to date, Plex waiting for the versions (lab row 8 B1)
         ({U, F}, False, FileOutcome.FAILED),
         ({U, N}, False, FileOutcome.UP_TO_DATE),
-        ({S}, False, FileOutcome.SKIPPED),
         ({S, A}, False, FileOutcome.WAITING),
         ({S, F}, False, FileOutcome.FAILED),
         ({S, N}, False, FileOutcome.NO_MARKERS),
-        ({A}, False, FileOutcome.WAITING),
         ({A, F}, False, FileOutcome.FAILED),
         ({A, N}, False, FileOutcome.WAITING),
-        ({F}, False, FileOutcome.FAILED),
         ({F, N}, False, FileOutcome.FAILED),
-        ({N}, False, FileOutcome.NO_MARKERS),
-        (set(), False, FileOutcome.NO_MARKERS),
+        # Three owners: one waiting or failed server still decides the file.
+        ({W, U, A}, False, FileOutcome.WAITING),
+        ({W, A, F}, False, FileOutcome.FAILED),
+        ({U, S, N}, False, FileOutcome.UP_TO_DATE),
+        # A marker type the sources don't agree on: every status alone and with a needs-review row.
         ({R}, True, FileOutcome.NEEDS_REVIEW),
-        ({R, W}, True, FileOutcome.PUBLISHED),
-        ({R, U}, True, FileOutcome.UP_TO_DATE),
+        ({R, W}, True, FileOutcome.NEEDS_REVIEW),
+        ({R, U}, True, FileOutcome.NEEDS_REVIEW),
         ({R, S}, True, FileOutcome.NEEDS_REVIEW),
-        ({R, A}, True, FileOutcome.WAITING),
+        ({R, A}, True, FileOutcome.NEEDS_REVIEW),
         ({R, F}, True, FileOutcome.FAILED),
         ({R, N}, True, FileOutcome.NEEDS_REVIEW),
+        ({W}, True, FileOutcome.NEEDS_REVIEW),  # intro written, credits need review
+        ({U}, True, FileOutcome.NEEDS_REVIEW),
         ({S}, True, FileOutcome.NEEDS_REVIEW),
+        ({A}, True, FileOutcome.NEEDS_REVIEW),
+        ({F}, True, FileOutcome.FAILED),
         ({N}, True, FileOutcome.NEEDS_REVIEW),
-        ({A}, True, FileOutcome.WAITING),
+        (set(), True, FileOutcome.NEEDS_REVIEW),
+        ({W, A}, True, FileOutcome.NEEDS_REVIEW),
     ],
 )
 def test_file_outcome_precedence(statuses, needs_review, expected):

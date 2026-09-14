@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from media_preview_generator.markers.external_ids import ids_from_path, ids_from_server_dict, merge_ids
+from media_preview_generator.markers.external_ids import ids_from_path, ids_from_server_dict, is_extra, merge_ids
 from media_preview_generator.markers.models import MediaIds
 
 
@@ -367,6 +367,74 @@ class TestExtrasExcluded:
         # match against the whole folder name, not a substring/contains check.
         path = "/m/TV/Scenes from a Marriage (1973) {tvdb-1}/Season 01/Scenes from a Marriage - S01E01.mkv"
         assert ids_from_path(path) == MediaIds("episode", tvdb="1", season=1, episode=1)
+
+
+EXTRA_SUFFIXES = (
+    "trailer",
+    "featurette",
+    "behindthescenes",
+    "deleted",
+    "interview",
+    "scene",
+    "short",
+    "other",
+    "sample",
+)
+EXTRAS_FOLDERS = (
+    "Trailers",
+    "Featurettes",
+    "Extras",
+    "Behind The Scenes",
+    "Deleted Scenes",
+    "Interviews",
+    "Scenes",
+    "Shorts",
+    "Other",
+    "Samples",
+)
+
+
+class TestIsExtra:
+    """The one extras check Intro & Credits jobs skip files by (the same one that withholds ids)."""
+
+    @pytest.mark.parametrize("suffix", EXTRA_SUFFIXES)
+    def test_every_extra_suffix_is_an_extra(self, suffix):
+        assert is_extra(f"/m/Movies/Toy Story (1995) {{tmdb-862}}/Toy Story (1995)-{suffix}.mkv") is True
+        assert is_extra(f"/m/Movies/Toy Story (1995) {{tmdb-862}}/Toy Story (1995)-{suffix.upper()}.mkv") is True
+
+    @pytest.mark.parametrize("folder", EXTRAS_FOLDERS)
+    def test_a_file_directly_in_an_extras_folder_is_an_extra(self, folder):
+        assert is_extra(f"/m/Movies/Toy Story (1995) {{tmdb-862}}/{folder}/Making Of.mkv") is True
+        assert is_extra(f"/m/TV/Show {{tvdb-1}}/Season 01/{folder}/Show - S01E01.mkv") is True
+
+    def test_an_extras_folder_in_a_windows_path(self):
+        assert is_extra("D:\\Movies\\Toy Story (1995)\\Trailers\\Teaser.mkv") is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/m/TV/Rick and Morty (2013) {tvdb-275274}/Season 01/Rick and Morty (2013) - S01E01 - Pilot.mkv",
+            "/m/Movies/Toy Story (1995) {tmdb-862}/Toy Story (1995).mkv",
+            "/m/TV/Trailer Park Boys {tvdb-1}/Season 01/Trailer Park Boys - S01E01.mkv",
+            "/m/TV/Show {tvdb-1}/Season 01/Show - S01E05 - The Trailer.mkv",
+            "/m/TV/Show {tvdb-1}/Season 01/Show - S01E05 - Pre-Deleted World.mkv",
+            "/m/TV/Scenes from a Marriage (1973) {tvdb-1}/Season 01/Scenes from a Marriage - S01E01.mkv",
+            "/media/Other/Movies/Movie (2020) {tmdb-1}/Movie (2020).mkv",  # only the parent folder counts
+            "",
+        ],
+        ids=[
+            "episode",
+            "movie",
+            "trailer-in-title",
+            "trailer-episode-title",
+            "deleted-mid-title",
+            "scenes-show",
+            "other-ancestor",
+            "empty",
+        ],
+    )
+    def test_features_and_episodes_are_not_extras(self, path):
+        assert is_extra(path) is False
 
 
 class TestIdsFromServerDict:

@@ -1,5 +1,6 @@
 """Intro & Credits jobs end to end on the real JobManager, JobGate and dispatcher (fake servers and publishers)."""
 
+import os
 import threading
 import time
 from datetime import datetime, timedelta
@@ -13,7 +14,7 @@ from media_preview_generator.jobs.dispatcher import reset_dispatcher
 from media_preview_generator.markers import job_runner, pipeline, triggers
 from media_preview_generator.markers.pipeline import PipelineContext
 from media_preview_generator.markers.probe import Chapter, MediaProbe
-from media_preview_generator.markers.publishers.base import ItemNotFoundError
+from media_preview_generator.markers.publishers.base import ItemNotFoundError, PublishError
 from media_preview_generator.markers.settings import load_global, validate_global
 from media_preview_generator.markers.store import MarkerStore
 from media_preview_generator.processing.types import ProcessableItem
@@ -21,6 +22,7 @@ from media_preview_generator.servers.base import ServerType
 from media_preview_generator.web.job_gate import JobGate
 from media_preview_generator.web.jobs import JobManager, JobStatus
 from tests.markers.fakes import FakeRegistry, ready_publisher, server_config
+from tests.markers.test_external_ids import EXTRA_SUFFIXES, EXTRAS_FOLDERS
 
 DURATION = 1_321_472
 CHAPTERS = (
@@ -178,7 +180,7 @@ class TestRetryThroughThePipeline:
                 library_name="x", priority=2, source="sonarr", file_paths=[setup.path]
             ).id
             job_runner.run_intro_credits_job(first)
-            assert _outcome(engine.jm, first) == {"markers_published": 1}  # Plex written, Jellyfin waiting
+            assert _outcome(engine.jm, first) == {"markers_waiting": 1}  # Plex written, Jellyfin waiting
             retries = self._retries(engine.jm)
             assert len(retries) == 1
             registry.get("jf-1").resolve_remote_path_to_item_id.return_value = "item-jf-1"
@@ -186,6 +188,91 @@ class TestRetryThroughThePipeline:
         assert publishers["plex-1"].write.call_count == 1
         assert publishers["jf-1"].write.call_count == 1
         assert [c.args[0] for c in publishers["jf-1"].write.call_args_list] == ["item-jf-1"]
+
+    def test_a_failed_server_on_the_file_still_retries_the_server_that_hasnt_indexed_it(self, engine, setup):
+        registry, publishers = setup.make([("plex-1", ServerType.PLEX), ("jf-1", ServerType.JELLYFIN)])
+        registry.get("jf-1").resolve_remote_path_to_item_id.return_value = None
+        publishers["plex-1"].write.side_effect = PublishError("database is locked")
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            first = triggers.create_intro_credits_job(
+                library_name="x", priority=2, source="sonarr", file_paths=[setup.path]
+            ).id
+            job_runner.run_intro_credits_job(first)
+        assert _outcome(engine.jm, first) == {"failed": 1}
+        [row] = engine.jm.get_file_results(first)
+        assert {s["id"]: s["status"] for s in row["servers"]} == {"plex-1": "failed", "jf-1": "markers_waiting"}
+        retries = self._retries(engine.jm)
+        assert [r.config["file_paths"] for r in retries] == [[setup.path]]
+
+    def _with_extras(self, episode):
+        """Every extra shape next to the episode; the server lists only the episode as an item, like a real one."""
+        season = os.path.dirname(episode)
+        extras = [os.path.join(season, f"Rick and Morty (2013) - S01E01 - Pilot-{s}.mkv") for s in EXTRA_SUFFIXES]
+        extras += [os.path.join(season, folder, "Making Of.mkv") for folder in EXTRAS_FOLDERS]
+        for path in extras:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(b"x" * 100)
+        return extras
+
+    def _assert_only_the_episode_was_checked(self, engine, job_id, episode, extras, publisher, server):
+        assert engine.jm.get_job(job_id).status is JobStatus.COMPLETED
+        assert _outcome(engine.jm, job_id) == {"markers_published": 1, "markers_skipped": len(extras)}
+        rows = {r["file"]: r for r in engine.jm.get_file_results(job_id)}
+        assert set(rows) == {episode, *extras}
+        for path in extras:
+            assert (rows[path]["outcome"], rows[path]["reason"]) == (
+                "markers_skipped",
+                "Extras aren't checked for markers",
+            )
+            assert not rows[path].get("servers")
+        assert rows[episode]["outcome"] == "markers_published"
+        assert [c.kwargs["canonical_path"] for c in publisher.write.call_args_list] == [episode]
+        assert [c.args[0] for c in server.resolve_remote_path_to_item_id.call_args_list] == [episode]
+        assert [j.id for j in engine.jm.get_all_jobs()] == [job_id]  # no retry, no verify
+
+    @pytest.mark.parametrize("source", ["manual", "radarr"])
+    def test_a_folder_job_skips_its_extras_and_queues_no_retry_for_them(self, engine, setup, source):
+        registry, publishers = setup.make([("jf-1", ServerType.JELLYFIN)])
+        server = registry.get("jf-1")
+        server.resolve_remote_path_to_item_id.side_effect = lambda path, **kw: (
+            "item-jf-1" if path == setup.path else None
+        )
+        extras = self._with_extras(setup.path)
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            job = triggers.create_intro_credits_job(
+                library_name="Season 01", priority=2, source=source, file_paths=[os.path.dirname(setup.path)]
+            ).id
+            job_runner.run_intro_credits_job(job)
+        self._assert_only_the_episode_was_checked(engine, job, setup.path, extras, publishers["jf-1"], server)
+
+    def test_a_library_job_skips_the_extras_the_listing_returns(self, engine, setup, monkeypatch):
+        from media_preview_generator.jobs import orchestrator
+
+        registry, publishers = setup.make([("jf-1", ServerType.JELLYFIN)])
+        server = registry.get("jf-1")
+        server.resolve_remote_path_to_item_id.side_effect = lambda path, **kw: (
+            "item-jf-1" if path == setup.path else None
+        )
+        extras = self._with_extras(setup.path)
+        listed = [setup.path, *extras]
+        enumerate_items = MagicMock(
+            side_effect=lambda candidates, **kw: ([(candidates[0], ProcessableItem(p, "jf-1")) for p in listed], [])
+        )
+        monkeypatch.setattr(orchestrator, "_enumerate_items_for_servers", enumerate_items)
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            job = triggers.create_intro_credits_job(
+                library_name="TV Shows",
+                priority=3,
+                source="schedule",
+                libraries=[{"server_id": "jf-1", "library_id": "1"}],
+            ).id
+            job_runner.run_intro_credits_job(job)
+        assert [cfg.id for cfg in enumerate_items.call_args.args[0]] == ["jf-1"]
+        self._assert_only_the_episode_was_checked(engine, job, setup.path, extras, publishers["jf-1"], server)
 
 
 @pytest.mark.real_job_async

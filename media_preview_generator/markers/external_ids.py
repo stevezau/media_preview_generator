@@ -60,10 +60,31 @@ def _ids_in(text: str) -> dict[str, str]:
     return found
 
 
+def _path_parts(canonical_path: str) -> list[str]:
+    return [p for p in canonical_path.replace("\\", "/").split("/") if p]
+
+
 def _is_extra(stem: str, folders: list[str]) -> bool:
     if _EXTRA_SUFFIX_RE.search(stem):
         return True
     return any(folder.strip().lower() in _EXTRAS_FOLDER_NAMES for folder in folders[-1:])
+
+
+def is_extra(canonical_path: str) -> bool:
+    """Whether a file is Plex-style extra content rather than an episode or a feature.
+
+    Extras are recognised by a filename suffix (``-trailer``, ``-featurette``, ``-behindthescenes``, ``-deleted``,
+    ``-interview``, ``-scene``, ``-short``, ``-other``, ``-sample``) or by an extras folder name (``Trailers``,
+    ``Extras``, ``Deleted Scenes``, ...) as the file's immediate parent.
+
+    Args:
+        canonical_path: The file's path (``/`` or ``\\`` separators).
+
+    Returns:
+        True for an extra.
+    """
+    parts = _path_parts(canonical_path)
+    return bool(parts) and _is_extra(os.path.splitext(parts[-1])[0], parts[:-1])
 
 
 def ids_from_path(canonical_path: str) -> MediaIds:
@@ -84,7 +105,7 @@ def ids_from_path(canonical_path: str) -> MediaIds:
     filename suffix, or an extras name as the immediate parent folder) never get ids — they
     aren't the primary feature/episode file the online sources describe.
     """
-    parts = [p for p in canonical_path.replace("\\", "/").split("/") if p]
+    parts = _path_parts(canonical_path)
     if not parts:
         return MediaIds()
     filename = parts[-1]

@@ -29,9 +29,10 @@ from ..servers.ownership import OwnershipMatch
 from ..servers.registry import server_config_from_dict
 from ..web.settings_manager import get_settings_manager
 from .decide import DecisionContext, DecisionStatus, TypeDecision, decide
-from .external_ids import ids_from_path, ids_from_server_dict, merge_ids
+from .external_ids import ids_from_path, ids_from_server_dict, is_extra, merge_ids
 from .models import SERVER_SOURCES, Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
 from .outcomes import (
+    EXTRAS_NOT_CHECKED,
     KEPT_PLEX_MARKERS,
     NOT_IN_LIBRARY,
     OUTCOME_KEYS,
@@ -1027,6 +1028,10 @@ def _run(
 ) -> ItemOutcome | None:
     if cancel_check and cancel_check():
         return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
+    if is_extra(item.canonical_path):
+        # No source describes a trailer or featurette and no server lists one as an item, so checking it would only
+        # wait (and queue retries) for an item that never comes. Folder jobs and library listings both contain them.
+        return ItemOutcome(FileOutcome.SKIPPED.value, EXTRAS_NOT_CHECKED)
     for _ in range(MAX_ATTEMPTS):
         try:
             with _PATH_LOCKS.hold(item.canonical_path):

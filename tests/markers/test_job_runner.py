@@ -1227,17 +1227,24 @@ class TestLibraryRetry:
         assert retry_env.create.call_args.kwargs["file_paths"] == paths
         assert not any("more files" in c.args[1] for c in env.jm.add_log.call_args_list)
 
-    def test_a_server_that_has_the_file_and_one_that_hasnt_indexed_it_yet_still_retries(self, env, retry_env):
-        # The file counts as published (Plex written) but Jellyfin would never get its markers otherwise.
-        retry_env.results.append(
-            (
-                "/m/a.mkv",
-                "markers_published",
-                [_row("markers_written", "2 marker(s)", sid="plex-1"), NOT_IN_LIBRARY_ROW],
-            )
-        )
+    @pytest.mark.parametrize(
+        ("outcome", "other_row"),
+        [
+            ("markers_waiting", _row("markers_written", "2 marker(s)", sid="plex-1")),
+            ("markers_needs_review", _row("markers_up_to_date", "Up to date", sid="plex-1")),
+            ("failed", _row("failed", "boom", sid="plex-1")),
+        ],
+        ids=["waiting", "needs-review", "failed"],
+    )
+    def test_a_server_that_hasnt_indexed_the_file_retries_whatever_the_file_outcome(
+        self, env, retry_env, outcome, other_row
+    ):
+        # The retry reads the rows: Jellyfin would never get its markers if a file outcome decided it.
+        retry_env.results.append(("/m/a.mkv", outcome, [other_row, NOT_IN_LIBRARY_ROW]))
         self._run(["/m/a.mkv"])
+        retry_env.create.assert_called_once()
         assert retry_env.create.call_args.kwargs["file_paths"] == ["/m/a.mkv"]
+        assert retry_env.create.call_args.kwargs["retry_attempt"] == 1
 
     @pytest.mark.parametrize(
         "rows",

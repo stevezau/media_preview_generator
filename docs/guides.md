@@ -602,9 +602,10 @@ shown or returned by the API, and never logged.
 
 ### Needs review
 
-When the sources don't clear the bar above — nothing agrees, or two credible answers disagree — the file shows
-**Needs review** and nothing is sent to any server. Nothing is guessed. Adding markers by hand in the Inspector comes
-in a later update; for now, **Re-detect** in the Inspector asks every source again.
+When the sources don't clear the bar above for a marker — nothing agrees, or two credible answers disagree — that
+marker isn't sent to any server and the file shows **Needs review**, even when its other markers were sent. Nothing
+is guessed. Adding markers by hand in the Inspector comes in a later update; for now, **Re-detect** in the Inspector
+asks every source again.
 
 ### Plex: writing straight into Plex's database
 
@@ -732,7 +733,11 @@ Per-file job outcomes use plainer labels in the job queue and Files panel: **Mar
 what a server shows), **Up to date** (every server already showed this),
 **Needs review**, **Waiting** (a server hasn't indexed the file yet, Plex didn't answer its Plex Pass check, or the
 item's versions don't agree yet), **Skipped** (the server can't take markers right now, or a setting changed while
-the job ran — see the tables above for why), **No markers found**, and **No server with Intro & Credits on**.
+the job ran — see the tables above for why — or the file is a trailer or other extra: "Extras aren't checked for
+markers"), **No markers found**, and **No server with Intro & Credits on**. When a file's servers end differently,
+the file shows the one that still needs something: **Failed**, then **Needs review**, then **Waiting**, then
+**Markers written**, then **Up to date**. A file written to Plex but still waiting on Jellyfin shows **Waiting**;
+each server's own result is on the file's row.
 
 > [!NOTE]
 > Rolling back to a version before Intro & Credits existed needs an extra step — see

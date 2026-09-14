@@ -1541,10 +1541,10 @@ const STATUS_META = {
     markers_published:      { label: 'Markers written', cls: 'bg-success', tip: 'The job changed what at least one server shows' },
     markers_written:        { label: 'Markers written', cls: 'bg-success', tip: 'Markers were written to this server' },
     markers_up_to_date:     { label: 'Up to date', cls: 'bg-secondary', tip: 'The server already shows these markers' },
-    markers_needs_review:   { label: 'Needs review', cls: 'bg-warning text-dark', tip: 'The sources don\'t agree yet, so nothing was sent' },
+    markers_needs_review:   { label: 'Needs review', cls: 'bg-warning text-dark', tip: 'The sources don\'t agree on a marker yet, so it wasn\'t sent' },
     markers_none:           { label: 'No markers found', cls: 'bg-secondary', tip: 'No source found an intro or credits for this file' },
     markers_no_owners:      { label: 'No server with Intro & Credits on', cls: 'bg-secondary', tip: 'No server with Intro & Credits turned on has this file' },
-    markers_skipped:        { label: 'Skipped', cls: 'bg-secondary', tip: 'The server can\'t take markers right now (for example, a plugin is missing)' },
+    markers_skipped:        { label: 'Skipped', cls: 'bg-secondary', tip: 'The server can\'t take markers right now (for example, a plugin is missing), or the file is a trailer or other extra' },
     markers_waiting:        { label: 'Waiting', cls: 'bg-info text-dark', tip: 'The server hasn\'t added the file yet, or the item\'s versions don\'t agree yet' },
 };
 
