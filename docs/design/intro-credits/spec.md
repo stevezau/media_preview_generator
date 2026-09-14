@@ -700,3 +700,8 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   is decided and agrees within 2 s), removes only rows that serve exactly what we last left on that item, and returns
   what is ours afterwards; markers.db keeps that per item. A newly added, not-yet-decided version hides that item's
   markers until it is decided (precision first).
+- 2026-09-14 · Job triggers (§6.4), from Task 12 deep review: a webhook follow-up takes the preview job's priority when
+  that is lower than Normal (Low incoming jobs still let previews drain first); files the server hasn't indexed yet get
+  delayed retry follow-ups on the webhook retry schedule (this also covers servers with markers on and previews off);
+  Intro & Credits jobs interrupted by a restart and not resumed are marked failed so schedules and follow-ups aren't
+  blocked.

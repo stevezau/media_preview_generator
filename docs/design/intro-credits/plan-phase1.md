@@ -4357,6 +4357,11 @@ rate/usage headers in `evidence/lab/phase1-results.md`; if the owner has a TheIn
 ---
 ## Task 8: Publisher base, network-filesystem check, Plex database publisher
 
+> **Superseded in part (2026-09-14, Task 8/11 reviews).** Plex publishing is per server item, not per file:
+> `WaitingForVersionsError` no longer exists, `write()` returns the markers that are ours on the item, publishers have
+> `atomic_writes`, `write()` takes `own_previous`, and `markers.db` has `item_publish_state`. The code blocks below that
+> mention the old contract are historical; the binding design is `plex-item-publishing.md` in this folder.
+
 Spec §3.1 (every row matters), §6.3 PlexMarkerPublisher, §13 items 2, 3, 6. The DB write is the riskiest code in the
 feature: every SQL statement's parameters are asserted in tests, `tags` is never written, and each failure mode maps
 to a capability state the UI can explain.
@@ -5932,6 +5937,11 @@ releases happen at merge, spec §11).
 
 ## Task 10: Jellyfin publisher + "markers already on servers" readers
 
+> **Superseded in part (2026-09-14, Task 8/11 reviews).** Plex publishing is per server item, not per file:
+> `WaitingForVersionsError` no longer exists, `write()` returns the markers that are ours on the item, publishers have
+> `atomic_writes`, `write()` takes `own_previous`, and `markers.db` has `item_publish_state`. The code blocks below that
+> mention the old contract are historical; the binding design is `plex-item-publishing.md` in this folder.
+
 Spec §5.5 item 5, §6.3. Server markers are agreement evidence only, and only read before we have published to that
 server (after that the server shows our own markers).
 
@@ -6460,6 +6470,11 @@ def publisher_for(server, config, *, sibling_markers=None) -> MarkerPublisher | 
 
 ---
 ## Task 11: Pipeline (`check_item` / `process_item`) and outcomes
+
+> **Superseded in part (2026-09-14, Task 8/11 reviews).** Plex publishing is per server item, not per file:
+> `WaitingForVersionsError` no longer exists, `write()` returns the markers that are ours on the item, publishers have
+> `atomic_writes`, `write()` takes `own_previous`, and `markers.db` has `item_publish_state`. The code blocks below that
+> mention the old contract are historical; the binding design is `plex-item-publishing.md` in this folder.
 
 Spec §6.2 steps 2–7, §6.4 items 3–4, design artifact "How it works per file". One function family runs in both
 stages; the check stage returns None only when a registered local detector could still decide an undecided type
