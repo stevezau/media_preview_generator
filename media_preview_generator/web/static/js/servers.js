@@ -1303,6 +1303,7 @@
             const tabMap = {
                 general: 'edit-tab-general',
                 health: 'edit-tab-health',
+                markers: 'edit-tab-markers',
             };
             const paneId = tabMap[openTab] || 'edit-tab-general';
             const activeTab = document.querySelector(`#editServerModal [data-bs-target="#${paneId}"]`);
@@ -1346,6 +1347,7 @@
         renderEditLibraries(server.libraries || []);
         renderEditPathMappings(server.path_mappings || []);
         renderEditExcludePaths(server.exclude_paths || []);
+        if (window.loadMarkersTab) window.loadMarkersTab(server);
         $('#editServerResult').className = 'd-none';
         $('#editServerResult').innerHTML = '';
 
@@ -1623,6 +1625,18 @@
                 jellyfin_config_folder: ($('#editJellyfinConfigFolder').value || '').trim(),
             };
         }
+
+        // Plex: turning Intro & Credits on needs the database-write confirmation (asked when the switch was
+        // flipped; asked again here in case that was dismissed).
+        if (window.markersNeedsPlexConfirmation && window.markersNeedsPlexConfirmation(server)) {
+            const confirmed = await window.confirmPlexMarkers(server);
+            if (!confirmed) {
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = orig;
+                return;
+            }
+        }
+        if (window.readMarkersFromForm) payload.markers = window.readMarkersFromForm(server);
 
         const r = await api('PUT', `/api/servers/${encodeURIComponent(server.id)}`, payload);
         saveBtn.disabled = false;
@@ -3396,6 +3410,8 @@
     window.MPGShared.validateLocalPathInput = _validateLocalPathInput;
     window.MPGShared.debouncedValidatePath = _debouncedValidatePath;
     window.MPGShared.addPathMappingRow = addPathMappingRow;
+    // Quote-safe (attribute values too); markers_server_tab.js renders with it.
+    window.MPGShared.escapeHtml = escapeHtml;
     // Used by the /setup wizard's vendor picker to enter the inlined
     // connection form at "step-connect" without going through #step-type
     // (which only exists in the modal).

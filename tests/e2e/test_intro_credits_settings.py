@@ -1,0 +1,325 @@
+"""E2E: Settings → "Intro & Credits" (shared detection settings).
+
+``GET /api/settings`` is mocked with a ``markers`` block and every autosave ``POST /api/settings`` is captured, so each
+test asserts the ``markers`` block the page sends. ``/api/markers/sources/usage`` is mocked for the TheIntroDB usage
+line.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import time
+from collections.abc import Callable
+
+import pytest
+from playwright.sync_api import Page, Route, expect
+
+from ._mocks import mock_settings_backups, mock_setup_status, mock_system_status
+
+SOURCE_ORDER = ["chapters", "theintrodb", "introdb", "skipdb", "season_audio", "credits_text", "server_markers"]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _complete_setup(complete_setup) -> None:
+    return complete_setup
+
+
+def _default_markers() -> dict:
+    return {
+        "detect": {"intro": True, "credits": True, "recap": False},
+        "publish_when": "high",
+        "respect_locks": True,
+        "sources": [
+            {"id": "chapters", "enabled": True},
+            {"id": "theintrodb", "enabled": False, "api_key": ""},
+            {"id": "introdb", "enabled": True},
+            {"id": "skipdb", "enabled": True},
+            {"id": "season_audio", "enabled": True},
+            {"id": "credits_text", "enabled": True},
+            {"id": "server_markers", "enabled": True},
+        ],
+    }
+
+
+def _settings_body(markers: dict) -> dict:
+    return {
+        "cpu_threads": 1,
+        "thumbnail_interval": 10,
+        "thumbnail_quality": 4,
+        "tonemap_algorithm": "hable",
+        "log_level": "INFO",
+        "log_rotation_size": "10 MB",
+        "log_retention_count": 5,
+        "job_history_days": 31,
+        "gpu_config": [],
+        "path_mappings": [],
+        "exclude_paths": [],
+        "media_servers": [],
+        "plex_verify_ssl": True,
+        "markers": markers,
+    }
+
+
+def _mock_settings(page: Page, body: dict) -> list[dict]:
+    """GET returns ``body``; every POST body is captured.
+
+    One handler for both methods: ``mock_settings_get`` + ``capture_settings_save`` each ``continue_()`` the other
+    method to the real backend, so registering both would serve the real settings for GET.
+    """
+    captured: list[dict] = []
+
+    def handler(route: Route) -> None:
+        if route.request.method == "POST":
+            captured.append(route.request.post_data_json or {})
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"success": True}))
+        else:
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+    page.route("**/api/settings", handler)
+    return captured
+
+
+def _mock_usage(page: Page, body: object, status: int = 200) -> None:
+    def handler(route: Route) -> None:
+        route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
+
+    page.route("**/api/markers/sources/usage", handler)
+
+
+def _open_settings(page: Page, app_url: str, markers: dict, usage: object | None = None, usage_status: int = 200):
+    captured = _mock_settings(page, _settings_body(markers))
+    mock_setup_status(page, complete=True, plex_authenticated=True)
+    mock_system_status(page)
+    mock_settings_backups(page)
+    _mock_usage(
+        page,
+        usage
+        if usage is not None
+        else {"theintrodb": {"day": "2026-09-14", "used": 83, "limit": 500, "has_key": False}},
+        usage_status,
+    )
+    page.goto(f"{app_url}/settings")
+    page.wait_for_load_state("domcontentloaded")
+    expect(page.locator("#section-markers")).to_be_visible(timeout=5000)
+    # loadSettings() fills job history and Intro & Credits in one synchronous pass, so this value showing means the
+    # mocked markers block is applied too (clicking earlier would race the load and be undone by it).
+    expect(page.locator("#jobHistoryDays")).to_have_value("31", timeout=5000)
+    return captured
+
+
+def _wait_for_post(page: Page, captured: list[dict], predicate: Callable[[dict], bool], timeout_s: float = 8.0) -> dict:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        for body in reversed(captured):
+            if "markers" in body and predicate(body["markers"]):
+                return body["markers"]
+        page.wait_for_timeout(100)
+    raise AssertionError(
+        f"no POST /api/settings matched; last markers sent: {[b.get('markers') for b in captured][-1:]}"
+    )
+
+
+def _source_ids(page: Page) -> list[str]:
+    return page.locator("#markersSourceList .markers-source").evaluate_all("els => els.map((el) => el.dataset.id)")
+
+
+@pytest.mark.e2e
+class TestIntroCreditsSettings:
+    def test_defaults_render(self, authed_page: Page, app_url: str) -> None:
+        _open_settings(authed_page, app_url, _default_markers())
+        expect(authed_page.locator('a[href="#section-markers"]')).to_be_visible()
+        expect(authed_page.locator("#markersDetectIntro")).to_be_checked()
+        expect(authed_page.locator("#markersDetectCredits")).to_be_checked()
+        expect(authed_page.locator("#markersDetectRecap")).not_to_be_checked()
+        expect(authed_page.locator("#markersPublishHigh")).to_be_checked()
+        expect(authed_page.locator("#markersPublishMedium")).not_to_be_checked()
+        expect(authed_page.locator("#markersRespectLocks")).to_be_checked()
+        assert _source_ids(authed_page) == SOURCE_ORDER
+        theintrodb = authed_page.locator("#markersSourceList .markers-source[data-id='theintrodb']")
+        expect(theintrodb.locator(".markers-source-enabled")).not_to_be_checked()
+        expect(authed_page.locator("#markersTheIntroDbKey")).to_have_attribute("type", "password")
+        expect(authed_page.locator("#markersTheIntroDbKey")).to_have_attribute("placeholder", "(optional)")
+        # Every source row explains itself.
+        expect(authed_page.locator("#markersSourceList .markers-source .info-icon")).to_have_count(7)
+        expect(authed_page.locator("#markersSourceList")).to_contain_text("Second opinion, never copied as-is")
+
+    @pytest.mark.parametrize("source_id", ["season_audio", "credits_text"])
+    def test_coming_soon_sources_are_disabled_with_badge(self, authed_page: Page, app_url: str, source_id: str) -> None:
+        _open_settings(authed_page, app_url, _default_markers())
+        row = authed_page.locator(f"#markersSourceList .markers-source[data-id='{source_id}']")
+        expect(row.locator(".markers-source-enabled")).to_be_disabled()
+        expect(row.locator(".markers-source-soon-badge")).to_be_visible()
+        expect(row.locator(".markers-source-soon-badge")).to_have_text("Coming soon")
+        # Sources that work today stay switchable.
+        expect(
+            authed_page.locator("#markersSourceList .markers-source[data-id='skipdb'] .markers-source-enabled")
+        ).to_be_enabled()
+
+    def test_coming_soon_sources_round_trip_their_stored_values(self, authed_page: Page, app_url: str) -> None:
+        markers = _default_markers()
+        by_id = {s["id"]: s for s in markers["sources"]}
+        by_id["season_audio"]["enabled"] = False
+        by_id["credits_text"]["enabled"] = True
+        # Stored order puts the two coming-soon sources first.
+        markers["sources"] = [by_id["credits_text"], by_id["season_audio"]] + [
+            s for s in markers["sources"] if s["id"] not in ("credits_text", "season_audio")
+        ]
+        captured = _open_settings(authed_page, app_url, markers)
+        expect(
+            authed_page.locator("#markersSourceList .markers-source[data-id='season_audio'] .markers-source-enabled")
+        ).not_to_be_checked()
+
+        authed_page.locator("label[for='markersDetectRecap']").click()
+        sent = _wait_for_post(authed_page, captured, lambda m: m["detect"]["recap"] is True)
+        assert sent["sources"] == markers["sources"]
+
+    def test_publish_when_tooltip_describes_high_and_medium(self, authed_page: Page, app_url: str) -> None:
+        _open_settings(authed_page, app_url, _default_markers())
+        icon = authed_page.locator("#markersPublishWhenLabel + .info-icon")
+        # Bootstrap moves ``title`` into ``data-bs-original-title`` once the tooltip is initialised.
+        tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
+        assert tooltip == (
+            "High: needs two independent sources that agree (chapters count as one). Medium: also accepts a single "
+            "source that checks your file's length itself — chapters, or SkipDB. A single IntroDB or TheIntroDB "
+            "answer never publishes on its own, because those don't know which cut you have. Anything else shows as "
+            "Needs review."
+        )
+
+    def test_stored_order_and_values_render(self, authed_page: Page, app_url: str) -> None:
+        markers = _default_markers()
+        markers["publish_when"] = "medium"
+        markers["respect_locks"] = False
+        markers["detect"]["intro"] = False
+        markers["sources"] = [markers["sources"][3], *markers["sources"][:3], *markers["sources"][4:]]
+        _open_settings(authed_page, app_url, markers)
+        expect(authed_page.locator("#markersPublishMedium")).to_be_checked(timeout=5000)
+        expect(authed_page.locator("#markersRespectLocks")).not_to_be_checked()
+        expect(authed_page.locator("#markersDetectIntro")).not_to_be_checked()
+        assert _source_ids(authed_page) == ["skipdb", "chapters", "theintrodb", "introdb", *SOURCE_ORDER[4:]]
+
+    def test_toggle_recaps_sends_only_that_change(self, authed_page: Page, app_url: str) -> None:
+        captured = _open_settings(authed_page, app_url, _default_markers())
+        expect(authed_page.locator("#markersDetectRecap")).not_to_be_checked(timeout=5000)
+        authed_page.locator("label[for='markersDetectRecap']").click()
+
+        sent = _wait_for_post(authed_page, captured, lambda m: m["detect"]["recap"] is True)
+        expected = _default_markers()
+        expected["detect"]["recap"] = True
+        assert sent == expected
+
+    def test_publish_when_and_locks_are_sent(self, authed_page: Page, app_url: str) -> None:
+        captured = _open_settings(authed_page, app_url, _default_markers())
+        expect(authed_page.locator("#markersPublishHigh")).to_be_checked(timeout=5000)
+        authed_page.locator("label[for='markersPublishMedium']").click()
+        _wait_for_post(authed_page, captured, lambda m: m["publish_when"] == "medium")
+        authed_page.locator("label[for='markersRespectLocks']").click()
+        sent = _wait_for_post(authed_page, captured, lambda m: m["respect_locks"] is False)
+        assert sent["publish_when"] == "medium"
+
+    def test_move_skipdb_to_top_with_up_button(self, authed_page: Page, app_url: str) -> None:
+        captured = _open_settings(authed_page, app_url, _default_markers())
+        up = authed_page.locator("#markersSourceList .markers-source[data-id='skipdb'] .markers-source-up")
+        for _ in range(3):
+            up.click()
+        assert _source_ids(authed_page)[0] == "skipdb"
+
+        sent = _wait_for_post(authed_page, captured, lambda m: m["sources"][0]["id"] == "skipdb")
+        assert sorted(s["id"] for s in sent["sources"]) == sorted(SOURCE_ORDER)
+        assert [s["id"] for s in sent["sources"]] == ["skipdb", "chapters", "theintrodb", "introdb", *SOURCE_ORDER[4:]]
+        # Moving keeps each source's own switch.
+        assert {s["id"]: s["enabled"] for s in sent["sources"]}["theintrodb"] is False
+
+    def test_top_up_and_bottom_down_buttons_are_disabled(self, authed_page: Page, app_url: str) -> None:
+        _open_settings(authed_page, app_url, _default_markers())
+        expect(
+            authed_page.locator("#markersSourceList .markers-source[data-id='chapters'] .markers-source-up")
+        ).to_be_disabled()
+        expect(
+            authed_page.locator("#markersSourceList .markers-source[data-id='server_markers'] .markers-source-down")
+        ).to_be_disabled()
+
+    def test_drag_and_drop_reorders_and_saves(self, authed_page: Page, app_url: str) -> None:
+        # Tall enough that the whole list is on screen: a drag can't target a row scrolled out of view.
+        authed_page.set_viewport_size({"width": 1280, "height": 1400})
+        captured = _open_settings(authed_page, app_url, _default_markers())
+        authed_page.locator("#markersSourceList").scroll_into_view_if_needed()
+        source = authed_page.locator(
+            "#markersSourceList .markers-source[data-id='server_markers'] .markers-source-grip"
+        )
+        target = authed_page.locator("#markersSourceList .markers-source[data-id='chapters']")
+        source.drag_to(target, target_position={"x": 20, "y": 2})
+        sent = _wait_for_post(authed_page, captured, lambda m: m["sources"][0]["id"] == "server_markers")
+        assert [s["id"] for s in sent["sources"]] == ["server_markers", *SOURCE_ORDER[:-1]]
+
+    def test_masked_key_round_trips_as_mask(self, authed_page: Page, app_url: str) -> None:
+        markers = _default_markers()
+        markers["sources"][1] = {"id": "theintrodb", "enabled": True, "api_key": "****"}
+        captured = _open_settings(authed_page, app_url, markers)
+        key = authed_page.locator("#markersTheIntroDbKey")
+        expect(key).to_have_attribute("placeholder", "****", timeout=5000)
+        expect(key).to_have_value("")
+
+        authed_page.locator("label[for='markersDetectRecap']").click()
+        sent = _wait_for_post(authed_page, captured, lambda m: m["detect"]["recap"] is True)
+        theintrodb = next(s for s in sent["sources"] if s["id"] == "theintrodb")
+        assert theintrodb == {"id": "theintrodb", "enabled": True, "api_key": "****"}
+
+    def test_typed_key_is_sent_and_clear_key_sends_empty(self, authed_page: Page, app_url: str) -> None:
+        markers = _default_markers()
+        markers["sources"][1] = {"id": "theintrodb", "enabled": True, "api_key": "****"}
+        captured = _open_settings(authed_page, app_url, markers)
+        key = authed_page.locator("#markersTheIntroDbKey")
+        expect(key).to_have_attribute("placeholder", "****", timeout=5000)
+
+        key.fill("my-new-key-123")
+        key.blur()
+        _wait_for_post(
+            authed_page,
+            captured,
+            lambda m: next(s for s in m["sources"] if s["id"] == "theintrodb")["api_key"] == "my-new-key-123",
+        )
+
+        authed_page.locator("#markersTheIntroDbClearKey").click()
+        sent = _wait_for_post(
+            authed_page, captured, lambda m: next(s for s in m["sources"] if s["id"] == "theintrodb")["api_key"] == ""
+        )
+        assert next(s for s in sent["sources"] if s["id"] == "theintrodb")["enabled"] is True
+        expect(key).to_have_value("")
+        expect(key).to_have_attribute("placeholder", "(optional)")
+
+    def test_usage_line_shows_todays_lookups(self, authed_page: Page, app_url: str) -> None:
+        _open_settings(authed_page, app_url, _default_markers())
+        expect(authed_page.locator("#markersTheIntroDbUsage")).to_have_text(
+            "83 of today's lookups used · limit set by TheIntroDB", timeout=5000
+        )
+
+    def test_usage_line_unknown_shows_dash(self, authed_page: Page, app_url: str) -> None:
+        _open_settings(authed_page, app_url, _default_markers(), usage={"error": "boom"}, usage_status=500)
+        expect(authed_page.locator("#markersTheIntroDbUsage")).to_have_text("—", timeout=5000)
+
+    def test_keyboard_move_down_with_enter(self, authed_page: Page, app_url: str) -> None:
+        captured = _open_settings(authed_page, app_url, _default_markers())
+        down = authed_page.locator("#markersSourceList .markers-source[data-id='chapters'] .markers-source-down")
+        down.focus()
+        authed_page.keyboard.press("Enter")
+        assert _source_ids(authed_page)[:2] == ["theintrodb", "chapters"]
+        # Focus stays on the moved row's button so repeated presses keep moving it.
+        authed_page.keyboard.press("Enter")
+        assert _source_ids(authed_page)[:3] == ["theintrodb", "introdb", "chapters"]
+        sent = _wait_for_post(authed_page, captured, lambda m: m["sources"][2]["id"] == "chapters")
+        assert [s["id"] for s in sent["sources"]] == ["theintrodb", "introdb", "chapters", *SOURCE_ORDER[3:]]
+
+    def test_missing_markers_block_falls_back_to_defaults(self, authed_page: Page, app_url: str) -> None:
+        body = _settings_body(copy.deepcopy(_default_markers()))
+        body.pop("markers")
+        _mock_settings(authed_page, body)
+        mock_setup_status(authed_page, complete=True, plex_authenticated=True)
+        mock_system_status(authed_page)
+        mock_settings_backups(authed_page)
+        _mock_usage(authed_page, {})
+        authed_page.goto(f"{app_url}/settings")
+        expect(authed_page.locator("#jobHistoryDays")).to_have_value("31", timeout=5000)
+        expect(authed_page.locator("#markersDetectIntro")).to_be_checked()
+        expect(authed_page.locator("#markersPublishHigh")).to_be_checked()
+        assert _source_ids(authed_page) == SOURCE_ORDER

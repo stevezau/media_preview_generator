@@ -137,3 +137,57 @@ class TestSettingsSaveAndReloadPersists:
         backend_real_page.reload()
         backend_real_page.wait_for_load_state("domcontentloaded")
         expect(backend_real_page.locator("#logLevel")).to_have_value("DEBUG", timeout=5000)
+
+    def test_intro_credits_publish_rule_and_source_order_persist_across_reload(
+        self,
+        backend_real_page: Page,
+        backend_real_app: tuple[str, str],
+    ) -> None:
+        """Settings → Intro & Credits: Publish when = Medium and a reordered source list survive a reload.
+
+        Drives the real ``POST /api/settings`` (``markers.settings.validate_global``) and the real GET that masks the
+        TheIntroDB key, so a regression anywhere between the form and settings.json shows up after the reload.
+        """
+        app_url, config_dir = backend_real_app
+
+        backend_real_page.goto(f"{app_url}/settings")
+        backend_real_page.wait_for_load_state("domcontentloaded")
+        expect(backend_real_page.locator("#markersPublishHigh")).to_be_checked(timeout=5000)
+
+        backend_real_page.locator("label[for='markersPublishMedium']").click()
+        backend_real_page.locator("#markersSourceList .markers-source[data-id='skipdb'] .markers-source-up").click()
+
+        settings_path = Path(config_dir) / "settings.json"
+        expected_order = [
+            "chapters",
+            "theintrodb",
+            "skipdb",
+            "introdb",
+            "season_audio",
+            "credits_text",
+            "server_markers",
+        ]
+        on_disk: dict = {}
+        for _ in range(40):
+            if settings_path.exists():
+                try:
+                    on_disk = json.loads(settings_path.read_text()).get("markers") or {}
+                except (json.JSONDecodeError, OSError):
+                    on_disk = {}
+                if on_disk.get("publish_when") == "medium" and [s["id"] for s in on_disk.get("sources", [])] == (
+                    expected_order
+                ):
+                    break
+            backend_real_page.wait_for_timeout(200)
+        else:
+            raise AssertionError(
+                f"Intro & Credits settings not persisted to {settings_path}; markers on disk: {on_disk}"
+            )
+
+        backend_real_page.reload()
+        backend_real_page.wait_for_load_state("domcontentloaded")
+        expect(backend_real_page.locator("#markersPublishMedium")).to_be_checked(timeout=5000)
+        order = backend_real_page.locator("#markersSourceList .markers-source").evaluate_all(
+            "els => els.map((el) => el.dataset.id)"
+        )
+        assert order == expected_order
