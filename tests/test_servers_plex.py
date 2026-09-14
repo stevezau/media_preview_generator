@@ -1705,3 +1705,120 @@ class TestGetExternalIds:
         ids = plex_server_under_test.get_external_ids("1")
         assert ids["season"] is None
         assert ids["episode"] is None
+
+
+class TestPlexMarkerHelpers:
+    @staticmethod
+    def _root(subscription):
+        import xml.etree.ElementTree as ET
+
+        return ET.fromstring(f'<MediaContainer myPlexSubscription="{subscription}" friendlyName="lab"/>')
+
+    def test_has_plex_pass_is_read_fresh_from_the_server_root(self, plex_server_under_test):
+        # plexapi's myPlexSubscription attribute is frozen at connect time; a claim or lapse must show up.
+        conn = plex_server_under_test._connect.return_value
+        conn.myPlexSubscription = True
+        conn.query.side_effect = [self._root("1"), self._root("0")]
+        assert plex_server_under_test.has_plex_pass() is True
+        assert plex_server_under_test.has_plex_pass() is False
+        assert [c.args[0] for c in conn.query.call_args_list] == ["/", "/"]
+
+    def test_server_status_reads_pass_and_version_from_one_root_query(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = ET.fromstring(
+            '<MediaContainer myPlexSubscription="1" version="1.43.4.10903-e5521bd8c" friendlyName="lab"/>'
+        )
+        assert plex_server_under_test.get_server_status() == {"plex_pass": True, "version": "1.43.4.10903-e5521bd8c"}
+        assert [c.args[0] for c in conn.query.call_args_list] == ["/"]
+
+    @pytest.mark.parametrize("failure", ["connect", "query", "empty"])
+    def test_server_status_unreachable(self, plex_server_under_test, failure):
+        if failure == "connect":
+            plex_server_under_test._connect.side_effect = RuntimeError("down")
+        elif failure == "query":
+            plex_server_under_test._connect.return_value.query.side_effect = RuntimeError("down")
+        else:
+            plex_server_under_test._connect.return_value.query.return_value = None
+        assert plex_server_under_test.get_server_status() is None
+
+    @pytest.mark.parametrize("failure", ["connect", "query", "empty"])
+    def test_has_plex_pass_unreachable(self, plex_server_under_test, failure):
+        if failure == "connect":
+            plex_server_under_test._connect.side_effect = RuntimeError("down")
+        elif failure == "query":
+            plex_server_under_test._connect.return_value.query.side_effect = RuntimeError("down")
+        else:
+            plex_server_under_test._connect.return_value.query.return_value = None
+        assert plex_server_under_test.has_plex_pass() is None
+
+    def test_get_markers_parses_served_markers(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        xml = ET.fromstring(
+            '<MediaContainer><Video ratingKey="7"><Marker type="intro" startTimeOffset="990" '
+            'endTimeOffset="29306"/><Marker type="credits" startTimeOffset="1156521" endTimeOffset="1186521"/>'
+            '<Marker type="credits" startTimeOffset="1294044" endTimeOffset="1322272" final="1"/>'
+            '<Marker type="bookmark" startTimeOffset="5" endTimeOffset="6"/></Video></MediaContainer>'
+        )
+        plex_server_under_test._connect.return_value.query.return_value = xml
+        assert plex_server_under_test.get_markers("7") == [
+            {"type": "intro", "start_ms": 990, "end_ms": 29306, "final": False},
+            {"type": "credits", "start_ms": 1156521, "end_ms": 1186521, "final": False},
+            {"type": "credits", "start_ms": 1294044, "end_ms": 1322272, "final": True},
+        ]
+        assert (
+            plex_server_under_test._connect.return_value.query.call_args.args[0]
+            == "/library/metadata/7?includeMarkers=1"
+        )
+
+    def test_get_markers_accepts_a_metadata_key(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = ET.fromstring('<MediaContainer><Video ratingKey="7"/></MediaContainer>')
+        assert plex_server_under_test.get_markers("/library/metadata/7") == []
+        assert conn.query.call_args.args[0] == "/library/metadata/7?includeMarkers=1"
+
+    def test_get_markers_returns_none_when_plex_fails_or_has_no_item(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = RuntimeError("down")
+        assert plex_server_under_test.get_markers("7") is None
+        conn.query.side_effect = None
+        conn.query.return_value = ET.fromstring("<MediaContainer/>")
+        assert plex_server_under_test.get_markers("7") is None
+
+    @staticmethod
+    def _prefs(**values):
+        import xml.etree.ElementTree as ET
+
+        settings = "".join(f'<Setting id="{k}" type="text" default="asap" value="{v}"/>' for k, v in values.items())
+        return ET.fromstring(f"<MediaContainer>{settings}</MediaContainer>")
+
+    def test_marker_detection_prefs_are_read_fresh(self, plex_server_under_test):
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = [
+            self._prefs(GenerateIntroMarkerBehavior="asap", GenerateCreditsMarkerBehavior="never"),
+            self._prefs(GenerateIntroMarkerBehavior="never", GenerateCreditsMarkerBehavior="scheduled"),
+        ]
+        assert plex_server_under_test.get_marker_detection_prefs() == {"intro": "asap", "credits": "never"}
+        assert plex_server_under_test.get_marker_detection_prefs() == {"intro": "never", "credits": "scheduled"}
+        assert [c.args[0] for c in conn.query.call_args_list] == ["/:/prefs", "/:/prefs"]
+
+    def test_marker_detection_prefs_hidden_pref_is_none(self, plex_server_under_test):
+        # Plex hides these prefs on servers without Plex Pass; plexapi's Settings.get raises NotFound for them.
+        from plexapi.exceptions import NotFound
+        from plexapi.settings import Settings
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = self._prefs(GenerateIntroMarkerBehavior="asap")
+        with pytest.raises(NotFound):
+            Settings(conn, conn.query.return_value).get("GenerateCreditsMarkerBehavior")
+        assert plex_server_under_test.get_marker_detection_prefs() == {"intro": "asap", "credits": None}
+
+    def test_marker_detection_prefs_unreachable(self, plex_server_under_test):
+        plex_server_under_test._connect.side_effect = RuntimeError("down")
+        assert plex_server_under_test.get_marker_detection_prefs() == {"intro": None, "credits": None}

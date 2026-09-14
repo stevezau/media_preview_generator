@@ -2158,6 +2158,76 @@ class PlexServer(MediaServer):
                 out[scheme] = value
         return out
 
+    def get_server_status(self) -> dict[str, Any] | None:
+        """Plex Pass and version, read fresh from ``GET /``; None when unreachable.
+
+        plexapi only reads ``myPlexSubscription`` and ``version`` when it connects, so its attributes would miss a
+        claim, a lapsed Pass or an upgrade until the app restarts.
+
+        Returns:
+            ``{"plex_pass": bool, "version": str | None}``, or None when Plex can't be reached.
+        """
+        try:
+            root = self._connect().query("/")
+        except Exception as exc:
+            logger.debug("Plex status check failed for {}: {}", self.name, exc)
+            return None
+        if root is None:
+            return None
+        return {"plex_pass": root.get("myPlexSubscription") in ("1", "true"), "version": root.get("version")}
+
+    def has_plex_pass(self) -> bool | None:
+        """Whether the server has an active Plex Pass (see ``get_server_status``); None when unreachable."""
+        status = self.get_server_status()
+        return None if status is None else status["plex_pass"]
+
+    def get_marker_detection_prefs(self) -> dict[str, str | None]:
+        """Plex's own intro/credits detection prefs, read fresh (Plex hides them on servers without Plex Pass)."""
+        from plexapi.exceptions import NotFound
+        from plexapi.settings import Settings
+
+        out: dict[str, str | None] = {"intro": None, "credits": None}
+        try:
+            conn = self._connect()
+            # A new Settings object: plexapi caches server.settings for the connection's lifetime.
+            settings = Settings(conn, conn.query(Settings.key))
+        except Exception as exc:
+            logger.debug("Plex marker prefs unavailable for {}: {}", self.name, exc)
+            return out
+        for key, pref in (("intro", "GenerateIntroMarkerBehavior"), ("credits", "GenerateCreditsMarkerBehavior")):
+            try:
+                out[key] = str(settings.get(pref).value)
+            except NotFound:
+                out[key] = None
+        return out
+
+    def get_markers(self, item_id: str) -> list[dict] | None:
+        """Intro/credits markers Plex serves for an item (``includeMarkers=1``); None on error."""
+        from ..plex_client import retry_plex_call
+
+        bare_id = str(item_id or "").strip().rsplit("/", 1)[-1]
+        try:
+            root = retry_plex_call(self._connect().query, f"/library/metadata/{bare_id}?includeMarkers=1")
+        except Exception as exc:
+            logger.debug("Plex marker read failed for {}: {}", bare_id, exc)
+            return None
+        node = next(iter(root), None) if root is not None else None
+        if node is None:
+            return None
+        out = []
+        for m in node.findall("Marker"):
+            if m.get("type") not in ("intro", "credits"):
+                continue
+            out.append(
+                {
+                    "type": m.get("type"),
+                    "start_ms": int(m.get("startTimeOffset") or 0),
+                    "end_ms": int(m.get("endTimeOffset") or 0),
+                    "final": m.get("final") in ("1", "true"),
+                }
+            )
+        return out
+
     def parse_webhook(self, payload: dict[str, Any] | bytes, headers: dict[str, str]) -> WebhookEvent | None:
         """Normalise a Plex webhook payload to a :class:`WebhookEvent`.
 

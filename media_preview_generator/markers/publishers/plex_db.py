@@ -1,0 +1,959 @@
+"""Plex publisher: direct writes into Plex's library database (spec §3.1, §6.3).
+
+Plex has no API for intro/credits markers. It serves markers from ``taggings`` rows on its single
+``tags(tag_type=12, tag='')`` row, and rebuilds those rows from ``media_parts.extra_data`` when it re-detects, so
+both places are written in one short transaction. Proven on PMS 1.43.4 in the lab; anything unexpected stops writes.
+
+SQLite is only safe to share when both processes lock the very same file, so every check and every write first
+proves that another process (Plex) holds the database open through the path this app sees.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import fcntl
+import json
+import os
+import sqlite3
+import struct
+import threading
+import time
+import urllib.parse
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, NamedTuple
+
+from loguru import logger
+
+from ...servers.ownership import apply_path_mappings
+from ..fs import filesystem_type, is_local_filesystem, is_network_filesystem
+from ..models import Marker, MarkerType
+from .base import (
+    Capability,
+    CapabilityReport,
+    ItemNotFoundError,
+    MarkerPublisher,
+    PublishError,
+)
+
+if TYPE_CHECKING:
+    from ...servers.base import ServerConfig
+    from ...servers.plex import PlexServer
+    from ..settings import ServerMarkersSettings
+
+MARKER_TAG_TYPE = 12
+# Plex serves credits starting 2 s later than stored and non-final credits ending 2 s earlier (spec §3.1).
+CREDITS_SERVE_SHIFT_MS = 2_000
+FINAL_TOLERANCE_MS = 2_000
+VERSION_AGREEMENT_MS = 2_000
+INTRO_JSON_VERSION = 5
+CREDITS_JSON_VERSION = 4
+# The longest one write() or read() waits for locks in total (this process's lock on the database, then Plex's write
+# lock) before giving up until the next run. capability() allows this twice: once for the lock probe, once for its
+# read-only checks after the Plex calls.
+BUSY_TIMEOUT_S = 30.0
+# SQLite's WAL "dead-man switch": every process with the database open holds a read lock on this byte of <db>-shm.
+_SHM_DMS_BYTE = 128
+_TYPE_TEXT = {MarkerType.INTRO: "intro", MarkerType.CREDITS: "credits"}
+_PART_KEY = {MarkerType.INTRO: "pv:intros", MarkerType.CREDITS: "pv:credits"}
+_WRITTEN_TABLES = ("taggings", "media_parts")
+_REQUIRED_COLUMNS = {
+    "tags": {"id", "tag", "tag_type"},
+    "taggings": {
+        "id",
+        "metadata_item_id",
+        "tag_id",
+        "index",
+        "text",
+        "time_offset",
+        "end_time_offset",
+        "thumb_url",
+        "created_at",
+        "extra_data",
+    },
+    "media_parts": {"id", "media_item_id", "file", "extra_data", "deleted_at"},
+    "media_items": {"id", "metadata_item_id", "deleted_at", "proxy_type"},
+    "metadata_items": {"id"},
+}
+# SQLite primary result codes (sqlite3.h): BUSY, LOCKED, PROTOCOL (a transient WAL race) / PERM, IOERR,
+# READONLY, CANTOPEN, AUTH, NOTADB / FULL / CORRUPT.
+_SQLITE_BUSY_CODES = frozenset({5, 6, 15})
+_SQLITE_ACCESS_CODES = frozenset({3, 8, 10, 14, 23, 26})
+_SQLITE_FULL = 13
+_SQLITE_CORRUPT = 11
+
+_path_locks: dict[object, threading.Lock] = {}
+_path_locks_guard = threading.Lock()
+# Per thread: lock keys of databases this thread has a connection open to (see shm_lock_held_elsewhere).
+_thread_state = threading.local()
+
+
+def plex_db_path(plex_config_folder: str) -> str:
+    """Library DB path under the "Plex Media Server" folder the app already uses for previews."""
+    return os.path.join(plex_config_folder, "Plug-in Support", "Databases", "com.plexapp.plugins.library.db")
+
+
+def _lock_key(db_path: str) -> object:
+    # The file's identity, so bind-mount aliases and symlinks share one lock; realpath when it can't be stat'ed.
+    try:
+        st = os.stat(db_path)
+    except OSError:
+        return os.path.realpath(db_path)
+    return (st.st_dev, st.st_ino)
+
+
+def _db_lock(db_path: str) -> threading.Lock:
+    """This process's lock for one database file.
+
+    Closing any descriptor on a file drops every POSIX lock the process holds on it, including the locks of our own
+    open SQLite connection. The lock probe opens and closes ``<db>-shm``, so it and every connection to the database
+    hold this lock for their whole life.
+    """
+    key = _lock_key(db_path)
+    with _path_locks_guard:
+        return _path_locks.setdefault(key, threading.Lock())
+
+
+@contextlib.contextmanager
+def _holding_db_lock(db_path: str, deadline: float) -> Iterator[None]:
+    lock = _db_lock(db_path)
+    if not lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        raise PublishError(
+            "Another Intro & Credits task is still using this Plex database; trying again on the next run",
+            state=Capability.UNREACHABLE,
+        )
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def shm_lock_held_elsewhere(db_path: str, *, deadline: float | None = None) -> bool:
+    """Whether another process has ``db_path`` open in WAL mode through this very file.
+
+    Takes this process's lock on the database, so it never runs while one of our connections to it is open.
+
+    Args:
+        db_path: The database file.
+        deadline: ``time.monotonic()`` value to stop waiting for that lock at (default: ``BUSY_TIMEOUT_S`` from now).
+
+    Returns:
+        True when some other process holds SQLite's dead-man-switch read lock on ``<db>-shm``.
+
+    Raises:
+        PublishError: UNREACHABLE when the lock wasn't free before the deadline.
+        RuntimeError: Called while this thread has a connection to the database open.
+    """
+    if _lock_key(db_path) in getattr(_thread_state, "open", set()):
+        raise RuntimeError("Lock probe inside an open connection to the same database would drop its locks")
+    with _holding_db_lock(db_path, time.monotonic() + BUSY_TIMEOUT_S if deadline is None else deadline):
+        return _shm_dms_locked_elsewhere(db_path)
+
+
+def _shm_dms_locked_elsewhere(db_path: str) -> bool:
+    try:
+        fd = os.open(f"{db_path}-shm", os.O_RDONLY | os.O_CLOEXEC)
+    except OSError:
+        return False
+    try:
+        request = struct.pack("hhqqi", fcntl.F_WRLCK, os.SEEK_SET, _SHM_DMS_BYTE, 1, 0)
+        lock_type = struct.unpack("hhqqi", fcntl.fcntl(fd, fcntl.F_GETLK, request))[0]
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    return lock_type != fcntl.F_UNLCK
+
+
+def publish_error_from_sqlite(exc: sqlite3.Error) -> PublishError:
+    """Map a SQLite failure to a ``PublishError`` whose state the UI can explain.
+
+    Args:
+        exc: The SQLite exception.
+
+    Returns:
+        UNREACHABLE for busy/locked, MISCONFIGURED for files we can't open or write, UNSUPPORTED_SCHEMA otherwise.
+    """
+    code = getattr(exc, "sqlite_errorcode", None)  # Python 3.11+
+    text = str(exc)
+    if isinstance(code, int):
+        primary = code & 0xFF
+        busy, full, damaged = primary in _SQLITE_BUSY_CODES, primary == _SQLITE_FULL, primary == _SQLITE_CORRUPT
+        access = primary in _SQLITE_ACCESS_CODES
+    else:
+        lowered = text.lower()
+        busy = any(w in lowered for w in ("locked", "busy", "locking protocol"))
+        full, damaged = "disk is full" in lowered, "malformed" in lowered
+        access = any(w in lowered for w in ("readonly", "unable to open", "permission", "not a database", "i/o"))
+    if busy:
+        return PublishError(
+            f"Plex is busy writing its database; trying again on the next run ({text})", state=Capability.UNREACHABLE
+        )
+    if full:
+        return PublishError(
+            f"Disk full: Plex's database can't take any writes ({text})", state=Capability.MISCONFIGURED
+        )
+    if damaged:
+        return PublishError(
+            f"Database damaged: Plex's database needs repairing before markers can be written ({text})",
+            state=Capability.MISCONFIGURED,
+        )
+    if access:
+        return PublishError(f"This app can't use Plex's database file ({text})", state=Capability.MISCONFIGURED)
+    return PublishError(
+        f"Plex's database returned an unexpected error; not writing markers ({text})",
+        state=Capability.UNSUPPORTED_SCHEMA,
+    )
+
+
+def _plex_quote(value: str) -> str:
+    # Matches Plex's own encoder: everything but alphanumerics and -_~ is %-escaped, including "." (verified
+    # byte-for-byte against all 355 extra_data rows of media_parts, media_items, metadata_items and taggings in
+    # the lab Plex 1.43.4 DB).
+    return urllib.parse.quote(value, safe="").replace(".", "%2E")
+
+
+def encode_extra_data(d: dict[str, str]) -> str:
+    """Serialise an extra_data dict the way Plex does: sorted keys, compact JSON, trailing ``url`` field."""
+    ordered = {k: d[k] for k in sorted(d) if k != "url"}
+    ordered["url"] = "&".join(f"{_plex_quote(k)}={_plex_quote(v)}" for k, v in ordered.items())
+    return json.dumps(ordered, separators=(",", ":"), ensure_ascii=False)
+
+
+def _is_final(marker: Marker, duration_ms: int | None) -> bool:
+    return marker.end_ms >= duration_ms - FINAL_TOLERANCE_MS
+
+
+def _stored_times(marker: Marker, duration_ms: int | None) -> tuple[int, int, bool]:
+    if marker.type is not MarkerType.CREDITS:
+        return marker.start_ms, marker.end_ms, False
+    if duration_ms is None or duration_ms <= 0:
+        # Without a duration every credits marker would look "final", and Plex would skip straight past the end.
+        raise PublishError("The file's duration is unknown, so credits markers can't be written to Plex")
+    final = _is_final(marker, duration_ms)
+    start = max(0, marker.start_ms - CREDITS_SERVE_SHIFT_MS)
+    end = marker.end_ms if final else marker.end_ms + CREDITS_SERVE_SHIFT_MS
+    return start, end, final
+
+
+def _tagging_extra(marker: Marker, final: bool) -> str:
+    if marker.type is MarkerType.INTRO:
+        return encode_extra_data({"pv:version": str(INTRO_JSON_VERSION)})
+    fields = {"pv:version": str(CREDITS_JSON_VERSION)}
+    if final:
+        fields["pv:final"] = "1"
+    return encode_extra_data(fields)
+
+
+def _served_times(mtype: MarkerType, start: int, end: int, final: bool) -> tuple[int, int]:
+    """What Plex serves for a stored marker: the inverse of ``_stored_times``, needing no file duration."""
+    if mtype is not MarkerType.CREDITS:
+        return start, end
+    return start + CREDITS_SERVE_SHIFT_MS, end if final else end - CREDITS_SERVE_SHIFT_MS
+
+
+def _row_is_final(extra_data: str | None) -> bool:
+    return '"pv:final":"1"' in (extra_data or "")
+
+
+def _served_of(markers: list[Marker] | tuple[Marker, ...], mtype: MarkerType) -> list[tuple[int, int]]:
+    return sorted((m.start_ms, m.end_ms) for m in markers if m.type is mtype)
+
+
+def _part_served(mtype: MarkerType, value: str | None) -> list[tuple[int, int]] | None:
+    """Served times in a stored ``pv:intros``/``pv:credits`` value, each entry with its own ``final``; None if unreadable."""
+    try:
+        entries = json.loads(value)["MediaPartMarkersArray"]["MediaPartMarker"]
+        return sorted(
+            _served_times(mtype, int(e["startTimeOffset"]), int(e["endTimeOffset"]), e.get("final") is True)
+            for e in entries
+        )
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def _stored_row(marker: Marker, duration_ms: int | None) -> tuple[int, int, str]:
+    """``(time_offset, end_time_offset, extra_data)`` of the taggings row we write for a marker."""
+    start, end, final = _stored_times(marker, duration_ms)
+    return start, end, _tagging_extra(marker, final)
+
+
+def _part_payload(mtype: MarkerType, markers: list[Marker], duration_ms: int | None) -> str:
+    """The ``pv:intros``/``pv:credits`` value we write for a type."""
+    entries = []
+    for m in markers:
+        start, end, final = _stored_times(m, duration_ms)
+        entry: dict[str, object] = {"startTimeOffset": start, "endTimeOffset": end}
+        if final:
+            entry["final"] = True
+        entries.append(entry)
+    payload = {
+        "MediaPartMarkersArray": {
+            "attributeName": "intros" if mtype is MarkerType.INTRO else "credits",
+            "version": INTRO_JSON_VERSION if mtype is MarkerType.INTRO else CREDITS_JSON_VERSION,
+            "MediaPartMarker": entries,
+        }
+    }
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def _check_marker_array(key: str, value: object) -> None:
+    """Raise unless a stored ``pv:intros``/``pv:credits`` value is the tested shape and version (empty = cleared)."""
+    if value == "":
+        return
+    attribute, version = ("intros", INTRO_JSON_VERSION) if key == "pv:intros" else ("credits", CREDITS_JSON_VERSION)
+    try:
+        arr = json.loads(value)["MediaPartMarkersArray"]
+        found_attribute, found_version = arr.get("attributeName"), arr.get("version")
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise PublishError(
+            f"Plex {key} data has an unknown shape; not writing markers.", state=Capability.UNSUPPORTED_SCHEMA
+        ) from exc
+    if found_attribute != attribute or found_version != version:
+        raise PublishError(
+            f"Plex stores {attribute} markers as {found_attribute} version {found_version} (tested: {version}); "
+            "not writing markers.",
+            state=Capability.UNSUPPORTED_SCHEMA,
+        )
+
+
+def merge_part_extra_data(
+    existing: str | None,
+    wanted: list[Marker],
+    managed: set[MarkerType],
+    duration_ms: int | None,
+    *,
+    previous: list[Marker] | tuple[Marker, ...] = (),
+) -> str:
+    """Rewrite ``pv:intros``/``pv:credits`` for managed types, keep every other key, rebuild ``url``.
+
+    Args:
+        existing: The part's current ``extra_data`` (None or empty for none).
+        wanted: Markers to show, in served times.
+        managed: Types we set or remove on this item.
+        duration_ms: File duration, for credits' "runs to the end" flag.
+        previous: Markers we published before. A managed type without wanted markers loses its key only while the
+            key still serves exactly these times (compared in served time, so a changed duration doesn't matter); a
+            value Plex re-detected since stays.
+
+    Returns:
+        The new ``extra_data`` string.
+
+    Raises:
+        PublishError: existing extra_data is not a JSON object of strings, or holds marker data of an untested
+            shape/version.
+    """
+    try:
+        d = json.loads(existing) if existing else {}
+    except ValueError as exc:
+        raise PublishError("Plex media_parts.extra_data is not JSON", state=Capability.UNSUPPORTED_SCHEMA) from exc
+    if not isinstance(d, dict):
+        raise PublishError("Plex media_parts.extra_data is not a JSON object", state=Capability.UNSUPPORTED_SCHEMA)
+    if any(not isinstance(v, str) for v in d.values()):
+        raise PublishError(
+            "Plex media_parts.extra_data holds a non-text value; not writing markers.",
+            state=Capability.UNSUPPORTED_SCHEMA,
+        )
+    for key in _PART_KEY.values():
+        if key in d:
+            _check_marker_array(key, d[key])
+    for mtype in (MarkerType.INTRO, MarkerType.CREDITS):
+        if mtype not in managed:
+            continue
+        key = _PART_KEY[mtype]
+        of_type = [m for m in wanted if m.type is mtype]
+        if of_type:
+            # A value that already serves these times stays byte for byte: a final flag stored from another
+            # version's runtime serves the same, and rewriting it would flip back on that version's next run.
+            if _part_served(mtype, d.get(key)) != _served_of(of_type, mtype):
+                d[key] = _part_payload(mtype, of_type, duration_ms)
+            continue
+        ours_before = [m for m in previous if m.type is mtype]
+        # Removing the key (not writing "") lets Plex's own non-forced detection analyse the part again (spec §14).
+        if ours_before and _part_served(mtype, d.get(key)) == _served_of(ours_before, mtype):
+            del d[key]
+    return encode_extra_data(d)
+
+
+def _rating_key(item_id: str) -> int:
+    bare = str(item_id or "").strip().rsplit("/", 1)[-1]
+    if not bare.isdigit():
+        raise ItemNotFoundError(f"{item_id!r} is not a Plex item id")
+    return int(bare)
+
+
+class _Part(NamedTuple):
+    id: int
+    media_item_id: int
+    file: str
+    extra_data: str | None
+    proxy_type: int | None
+
+
+def _versions_agree(mine: list[Marker], theirs: list[Marker]) -> bool:
+    if len(mine) != len(theirs):
+        return False
+    pairs = zip(sorted(mine, key=lambda m: m.start_ms), sorted(theirs, key=lambda m: m.start_ms), strict=True)
+    return all(
+        abs(a.start_ms - b.start_ms) <= VERSION_AGREEMENT_MS and abs(a.end_ms - b.end_ms) <= VERSION_AGREEMENT_MS
+        for a, b in pairs
+    )
+
+
+def _same_extra_data(a: str | None, b: str | None) -> bool:
+    """Same keys and values, ignoring encoding and the derived ``url`` field (no rewrite for a byte difference)."""
+    if a == b:
+        return True
+    try:
+        da, db = (json.loads(x) if x else {} for x in (a, b))
+    except ValueError:
+        return False
+    if not isinstance(da, dict) or not isinstance(db, dict):
+        return False
+    return {k: v for k, v in da.items() if k != "url"} == {k: v for k, v in db.items() if k != "url"}
+
+
+def _is_optimized_copy(part: _Part) -> bool:
+    # Plex's "Optimize" transcodes carry media_items.proxy_type and live under a "Plex Versions" folder. Both must hold:
+    # an unknown proxy_type on an ordinary file still takes part in the version agreement.
+    return bool(part.proxy_type) and "Plex Versions" in part.file.replace("\\", "/").split("/")
+
+
+def _same_files(a: list[_Part], b: list[_Part]) -> bool:
+    """The same parts, files and versions (extra_data aside)."""
+    return [p._replace(extra_data=None) for p in a] == [p._replace(extra_data=None) for p in b]
+
+
+class _TaggingRow(NamedTuple):
+    id: int
+    index: int
+    text: str
+    time_offset: int
+    end_time_offset: int
+    thumb_url: str | None
+    extra_data: str | None
+
+
+class _Plan(NamedTuple):
+    """What one write changes; empty lists mean nothing to do."""
+
+    replaced_texts: list[str]
+    inserts: list[tuple[int, str, int, int, str]]  # (index, text, time_offset, end_time_offset, extra_data)
+    reindex: list[tuple[int, int]]  # (index, taggings id)
+    part_updates: list[tuple[str, int]]  # (extra_data, media_parts id)
+
+    @property
+    def is_noop(self) -> bool:
+        return not (self.replaced_texts or self.reindex or self.part_updates)
+
+
+def _nothing_to_write(plan: _Plan, wanted: list[Marker]) -> bool:
+    # With nothing to add, kept rows are only renumbered around rows we actually remove.
+    return plan.is_noop or not (wanted or plan.replaced_texts or plan.part_updates)
+
+
+class PlexMarkerPublisher(MarkerPublisher):
+    """Writes markers into one Plex server's database."""
+
+    supported_types = frozenset({MarkerType.INTRO, MarkerType.CREDITS})
+    name = "plex_db"
+    atomic_writes = True  # one SQLite transaction per write
+
+    def __init__(
+        self,
+        server: PlexServer,
+        config: ServerConfig,
+        settings: ServerMarkersSettings,
+        *,
+        sibling_markers: Callable[[str], dict[MarkerType, Marker] | None] | None = None,
+        mountinfo_path: str = "/proc/self/mountinfo",
+    ) -> None:
+        """Create the publisher.
+
+        Args:
+            server: Live ``PlexServer`` client.
+            config: That server's ``ServerConfig``.
+            settings: That server's ``ServerMarkersSettings``.
+            sibling_markers: Looks up decided markers for another local file (multi-version items).
+            mountinfo_path: For tests.
+        """
+        self._server = server
+        self._config = config
+        self._settings = settings
+        self._sibling_markers = sibling_markers or (lambda _path: None)
+        self._mountinfo_path = mountinfo_path
+
+    def db_path(self) -> str | None:
+        """DB path, or None when the Plex config folder isn't set."""
+        folder = str((self._config.output or {}).get("plex_config_folder") or "").strip()
+        return plex_db_path(folder) if folder else None
+
+    def _connect(self, *, read_only: bool, timeout: float) -> sqlite3.Connection:
+        mode = "ro" if read_only else "rw"
+        # Quoted: SQLite reads "?", "#" and "%" in a file: URI as query, fragment and escapes, which would open a
+        # different path for folders named like "Plex #2". mode=rw never creates a missing file.
+        uri = f"file:{urllib.parse.quote(os.path.abspath(self.db_path() or ''))}?mode={mode}"
+        return sqlite3.connect(uri, uri=True, timeout=timeout, isolation_level=None)
+
+    @contextlib.contextmanager
+    def _database(self, *, read_only: bool, deadline: float) -> Iterator[sqlite3.Connection]:
+        """A connection that lives entirely under the database's process lock (see ``_db_lock``).
+
+        Raises:
+            PublishError: UNREACHABLE when the lock isn't free before ``deadline``; MISCONFIGURED without a folder.
+        """
+        db = self.db_path()
+        if not db:
+            raise PublishError("The Plex config folder isn't set", state=Capability.MISCONFIGURED)
+        key = _lock_key(db)
+        with _holding_db_lock(db, deadline):
+            # SQLite's own busy wait gets only what is left of the same deadline.
+            conn = self._connect(read_only=read_only, timeout=max(0.0, deadline - time.monotonic()))
+            open_keys = _thread_state.__dict__.setdefault("open", set())
+            open_keys.add(key)
+            try:
+                yield conn
+            finally:
+                open_keys.discard(key)
+                conn.close()
+
+    @staticmethod
+    def _check_schema(conn: sqlite3.Connection) -> None:
+        for table, required in _REQUIRED_COLUMNS.items():
+            cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}  # noqa: S608 - fixed table names
+            missing = required - cols
+            if missing:
+                raise PublishError(
+                    f"Plex database looks different from the tested version (table {table} lacks {sorted(missing)}); "
+                    "not writing markers.",
+                    state=Capability.UNSUPPORTED_SCHEMA,
+                )
+        triggers = conn.execute(
+            "SELECT name, tbl_name FROM sqlite_master WHERE type='trigger' AND tbl_name IN (?, ?) ORDER BY name",
+            _WRITTEN_TABLES,
+        ).fetchall()
+        if triggers:
+            found = ", ".join(f"{name} on {table}" for name, table in triggers)
+            raise PublishError(
+                f"Plex database has triggers on tables we write ({found}), unlike the tested version; "
+                "not writing markers.",
+                state=Capability.UNSUPPORTED_SCHEMA,
+            )
+
+    @staticmethod
+    def _check_library_marker_versions(conn: sqlite3.Connection) -> None:
+        # Two LIKE scans of media_parts: run from capability() (cached per job), never per write. Each write still
+        # validates the parts it touches in merge_part_extra_data. Newest rows first: a new format shows up there.
+        for key in _PART_KEY.values():
+            rows = conn.execute(
+                "SELECT extra_data FROM media_parts WHERE extra_data LIKE ? ORDER BY id DESC LIMIT 50",
+                (f'%"{key}":"{{%',),
+            ).fetchall()
+            for (extra,) in rows:
+                try:
+                    value = json.loads(extra)[key]
+                except (ValueError, KeyError, TypeError):
+                    continue
+                _check_marker_array(key, value)
+
+    @staticmethod
+    def _item_parts(conn: sqlite3.Connection, rating_key: int) -> list[_Part]:
+        rows = conn.execute(
+            "SELECT mp.id, mp.media_item_id, mp.file, mp.extra_data, mi.proxy_type FROM media_parts mp "
+            "JOIN media_items mi ON mi.id = mp.media_item_id "
+            "WHERE mi.metadata_item_id=? AND mp.deleted_at IS NULL AND mi.deleted_at IS NULL ORDER BY mp.id",
+            (rating_key,),
+        ).fetchall()
+        return [_Part(*row) for row in rows]
+
+    @staticmethod
+    def _marker_tag_id(conn: sqlite3.Connection) -> int:
+        rows = conn.execute(
+            "SELECT id FROM tags WHERE tag_type=? AND tag='' ORDER BY id LIMIT 2", (MARKER_TAG_TYPE,)
+        ).fetchall()
+        if not rows:
+            raise PublishError(
+                "Plex hasn't created its marker tag yet. Run Plex's own intro or credits detection once on any "
+                "item, then try again.",
+                state=Capability.NEEDS_PLEX_DETECTION_ONCE,
+            )
+        if len(rows) > 1:
+            raise PublishError(
+                "Plex's database has more than one marker tag row, so it's unclear which one Plex serves; "
+                "not writing markers.",
+                state=Capability.UNSUPPORTED_SCHEMA,
+            )
+        return int(rows[0][0])
+
+    @staticmethod
+    def _unwritable_paths(db: str) -> list[str]:
+        paths = [p for p in (db, f"{db}-wal", f"{db}-shm") if os.path.exists(p) and not os.access(p, os.W_OK)]
+        folder = os.path.dirname(db)
+        if not os.access(folder, os.W_OK | os.X_OK):
+            paths.append(folder)
+        return paths
+
+    def _local_checks(self, *, deadline: float) -> CapabilityReport:
+        """Settings, database files and the shared lock: everything that needs no Plex connection.
+
+        Args:
+            deadline: When to stop waiting for this process's lock on the database.
+
+        Returns:
+            READY when all pass. A missing lock holder is reported as UNREACHABLE with ``details["lock_holder"]``
+            False, so ``capability()`` can tell "Plex stopped" from "different file".
+        """
+        if not self._settings.enabled:
+            return CapabilityReport(Capability.DISABLED, "Intro & Credits is off for this server")
+        if not self._settings.db_write_confirmed_at:
+            return CapabilityReport(Capability.NEEDS_CONFIRMATION, "Confirm the Plex database write to turn this on")
+        db = self.db_path()
+        if not db or not os.path.isfile(db):
+            return CapabilityReport(
+                Capability.MISCONFIGURED, f"Plex database not found at {db or '(Plex config folder not set)'}"
+            )
+        # realpath: a symlinked config folder or DB file must be judged by where SQLite actually locks it.
+        fs_type = filesystem_type(os.path.realpath(db), mountinfo_path=self._mountinfo_path)
+        details: dict = {"db_path": db, "fs_type": fs_type}
+        if is_network_filesystem(fs_type):
+            return CapabilityReport(
+                Capability.NEEDS_LOCAL_DB,
+                f"Plex's database is on a network share ({fs_type}). The app must run on the same machine as Plex "
+                "to write markers; Plex stays read-only.",
+                details,
+            )
+        if not is_local_filesystem(fs_type):
+            return CapabilityReport(
+                Capability.NEEDS_LOCAL_DB,
+                f"Plex's database is on a filesystem this app doesn't recognise as a local disk ({fs_type or 'unknown'}); "
+                "Plex stays read-only.",
+                details,
+            )
+        unwritable = self._unwritable_paths(db)
+        if unwritable:
+            owner = "unknown"
+            with contextlib.suppress(OSError):
+                owner = str(os.stat(db).st_uid)
+            return CapabilityReport(
+                Capability.MISCONFIGURED,
+                f"This app (user {os.geteuid()}) can't write {', '.join(unwritable)}. Run it with the user that owns "
+                f"Plex's database (user {owner}).",
+                details,
+            )
+        try:
+            held = shm_lock_held_elsewhere(db, deadline=deadline)
+        except PublishError as exc:
+            return CapabilityReport(exc.state or Capability.UNREACHABLE, str(exc), details)
+        details["lock_holder"] = held
+        if not held:
+            return CapabilityReport(
+                Capability.UNREACHABLE,
+                "Plex doesn't have its database open through this folder right now (Plex is stopped, or this app "
+                "sees a different path to the file). Markers are only written while Plex is running.",
+                details,
+            )
+        return CapabilityReport(Capability.READY, "", details)
+
+    def capability(self) -> CapabilityReport:
+        """Check settings, DB location and lock sharing, Plex Pass, schema and the marker tag row."""
+        local = self._local_checks(deadline=time.monotonic() + BUSY_TIMEOUT_S)
+        if local.details.get("lock_holder") is False:
+            status = self._server.get_server_status()
+            if status is None:
+                return local
+            return CapabilityReport(
+                Capability.NEEDS_LOCAL_DB,
+                f"Plex is running, but not with the database file this app sees at {local.details['db_path']}. "
+                "Mount the exact folder Plex uses, on the same machine (on unRAID, the same /mnt/cache or /mnt/user "
+                "path Plex uses).",
+                {**local.details, "plex_pass": status.get("plex_pass"), "plex_version": status.get("version")},
+            )
+        if not local.ready:
+            return local
+        details = dict(local.details)
+        status = self._server.get_server_status()
+        plex_pass = None if status is None else status.get("plex_pass")
+        details["plex_pass"] = plex_pass
+        details["plex_version"] = None if status is None else status.get("version")
+        if plex_pass is False:
+            return CapabilityReport(
+                Capability.NEEDS_PASS, "This Plex server has no Plex Pass, so Plex won't show any markers.", details
+            )
+        details["detection"] = {"intro": None, "credits": None}
+        if plex_pass is not None:  # unreachable: don't wait on a second connection just for UI details
+            try:
+                details["detection"] = self._server.get_marker_detection_prefs()
+            except Exception as exc:
+                logger.debug("Plex {}: detection prefs unavailable: {}", self._config.name, exc)
+        try:
+            # A fresh deadline: the Plex calls above don't eat into the time allowed for the database lock.
+            with self._database(read_only=True, deadline=time.monotonic() + BUSY_TIMEOUT_S) as conn:
+                self._check_schema(conn)
+                self._check_library_marker_versions(conn)
+                self._marker_tag_id(conn)
+        except PublishError as exc:
+            return CapabilityReport(exc.state or Capability.MISCONFIGURED, str(exc), details)
+        except sqlite3.Error as exc:
+            error = publish_error_from_sqlite(exc)
+            return CapabilityReport(error.state or Capability.MISCONFIGURED, str(error), details)
+        return CapabilityReport(Capability.READY, "Written into this Plex server's database", details)
+
+    def read(self, item_id: str) -> list[Marker]:
+        """Our view of the item's intro/credits rows, converted to served times.
+
+        Raises:
+            PublishError: The database can't be read.
+        """
+        rating_key = _rating_key(item_id)
+        try:
+            with self._database(read_only=True, deadline=time.monotonic() + BUSY_TIMEOUT_S) as conn:
+                tag_id = self._marker_tag_id(conn)
+                rows = conn.execute(
+                    "SELECT text, time_offset, end_time_offset, extra_data FROM taggings WHERE metadata_item_id=? "
+                    "AND tag_id=? AND text IN ('intro','credits') ORDER BY time_offset",
+                    (rating_key, tag_id),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise publish_error_from_sqlite(exc) from exc
+        out = []
+        for text, start, end, extra in rows:
+            mtype = MarkerType.INTRO if text == "intro" else MarkerType.CREDITS
+            served_start, served_end = _served_times(mtype, int(start), int(end), _row_is_final(extra))
+            out.append(Marker(mtype, served_start, served_end, ("plex",)))
+        return out
+
+    def _local_candidates(self, plex_path: str) -> list[str]:
+        return apply_path_mappings(plex_path, list(self._config.path_mappings or [])) or [plex_path]
+
+    def _sibling_decision(self, plex_file: str) -> dict[MarkerType, Marker] | None:
+        # A multi-disk mapping yields several local candidates; only the one that exists has a decision.
+        for local in self._local_candidates(plex_file):
+            try:
+                decided = self._sibling_markers(local)
+            except Exception as exc:
+                # markers.db's errors are ours, not Plex's: no capability state, so Plex's status isn't touched.
+                raise PublishError(
+                    f"Couldn't look up the markers decided for another version of this item: {exc}"
+                ) from exc
+            if decided is not None:
+                return decided
+        return None
+
+    def _desired(
+        self, parts: list[_Part], markers: list[Marker], canonical_path: str, prior: list[Marker]
+    ) -> list[Marker]:
+        """The item's marker set: the markers of every type all versions decided alike.
+
+        Plex serves one marker set per item, across all its versions. A type is desired only when every version is
+        decided, has that type and agrees within ``VERSION_AGREEMENT_MS`` (spec §6.3). The times written are the
+        calling file's, unless what this app already left on the item (``prior``) agrees with every version too:
+        then that stays, so versions whose times differ slightly don't rewrite each other's markers on every run.
+
+        Raises:
+            PublishError: Stacked multi-part files.
+            ItemNotFoundError: None of the item's versions is our file.
+        """
+        media_items = [p.media_item_id for p in parts]
+        if len(set(media_items)) != len(media_items):
+            raise PublishError("Plex item uses stacked multi-part files; markers for those are not supported")
+        # Plex's optimized copies are transcodes we never decide: they share the item's markers but take no part in
+        # the agreement.
+        versions = [p for p in parts if not _is_optimized_copy(p)]
+        others = [p for p in versions if canonical_path not in self._local_candidates(p.file)]
+        if len(others) == len(versions):
+            # The markers were decided for a file this item doesn't hold: never write them onto another file.
+            raise ItemNotFoundError(
+                "This Plex item has no file matching this path (yet); check the server's path mappings"
+            )
+        # None = never decided, so no type is desired yet. {} = decided with no markers.
+        decisions = [self._sibling_decision(p.file) for p in others]
+        desired: list[Marker] = []
+        for mtype in (MarkerType.INTRO, MarkerType.CREDITS):
+            mine = [m for m in markers if m.type is mtype]
+            theirs = [None if d is None else [m for m in d.values() if m.type is mtype] for d in decisions]
+            if not mine or any(t is None or not _versions_agree(mine, t) for t in theirs):
+                continue
+            kept = [m for m in prior if m.type is mtype]
+            if kept and _versions_agree(kept, mine) and all(_versions_agree(kept, t) for t in theirs):
+                desired.extend(kept)
+            else:
+                desired.extend(mine)
+        return self.project(desired)
+
+    def _plan(
+        self,
+        conn: sqlite3.Connection,
+        rating_key: int,
+        tag_id: int,
+        parts: list[_Part],
+        wanted: list[Marker],
+        prior: list[Marker],
+        duration_ms: int | None,
+        own_prior: list[Marker],
+        calling_part_ids: set[int],
+    ) -> _Plan:
+        rows = [
+            _TaggingRow(*row)
+            for row in conn.execute(
+                "SELECT id, [index], text, time_offset, end_time_offset, thumb_url, extra_data FROM taggings "
+                "WHERE metadata_item_id=? AND tag_id=? ORDER BY [index], id",
+                (rating_key, tag_id),
+            )
+        ]
+        wanted_types = {m.type for m in wanted}
+        replaced: set[str] = set()
+        for mtype in wanted_types:
+            # Rows already serving exactly the wanted times stay as they are (see merge_part_extra_data for why).
+            text = _TYPE_TEXT[mtype]
+            current = sorted(
+                _served_times(mtype, r.time_offset, r.end_time_offset, _row_is_final(r.extra_data))
+                for r in rows
+                if r.text == text
+            )
+            if current != _served_of(wanted, mtype):
+                replaced.add(text)
+        for mtype in {m.type for m in prior} - wanted_types:
+            # A type we no longer show: its rows go only while they still serve exactly what we published. Compared
+            # in served time (each row with its own pv:final), so a file whose duration changed since still matches.
+            text = _TYPE_TEXT[mtype]
+            current = sorted(
+                _served_times(mtype, r.time_offset, r.end_time_offset, _row_is_final(r.extra_data))
+                for r in rows
+                if r.text == text
+            )
+            if current == _served_of(prior, mtype):
+                replaced.add(text)
+        ours = [(_TYPE_TEXT[m.type], *_stored_row(m, duration_ms)) for m in wanted if _TYPE_TEXT[m.type] in replaced]
+        kept = [r for r in rows if r.text not in replaced]
+        # Plex numbers all marker rows of an item by text, then start (every native row in the lab DB, PROOF P3).
+        entries = [(r.text, r.time_offset, r.end_time_offset, r) for r in kept] + [(*o[:3], o) for o in ours]
+        entries.sort(key=lambda e: (e[0], e[1], e[2]))
+        inserts, reindex = [], []
+        for index, (_text, _start, _end, entry) in enumerate(entries):
+            if isinstance(entry, _TaggingRow):
+                if entry.index != index:
+                    reindex.append((index, entry.id))
+            else:
+                inserts.append((index, *entry))
+        managed = wanted_types | {m.type for m in prior}
+        # Types the calling file published to the item it belonged to before a merge or split, not desired here.
+        own_types = {m.type for m in own_prior} - wanted_types
+        part_updates = []
+        for part in parts:
+            extra = merge_part_extra_data(part.extra_data, wanted, managed, duration_ms, previous=prior)
+            if own_types and part.id in calling_part_ids:
+                extra = merge_part_extra_data(extra, [], own_types, duration_ms, previous=own_prior)
+            if not _same_extra_data(extra, part.extra_data):
+                part_updates.append((extra, part.id))
+        return _Plan(replaced_texts=sorted(replaced), inserts=inserts, reindex=reindex, part_updates=part_updates)
+
+    def _write_item(
+        self,
+        conn: sqlite3.Connection,
+        rating_key: int,
+        parts: list[_Part],
+        wanted: list[Marker],
+        prior: list[Marker],
+        duration_ms: int | None,
+        own_prior: list[Marker],
+        calling_part_ids: set[int],
+    ) -> bool:
+        """Write one item in one transaction; False when everything already matched."""
+        # BEGIN IMMEDIATE can wait the rest of the call's deadline — exactly while Plex is writing, often to this item.
+        # Everything we merge is re-read after it, or Plex's fresh extra_data keys would be overwritten from a stale read.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._check_schema(conn)
+            tag_id = self._marker_tag_id(conn)
+            fresh = self._item_parts(conn, rating_key)
+            if not _same_files(fresh, parts):
+                raise PublishError("Plex changed this item's files while we were writing; trying again on the next run")
+            plan = self._plan(conn, rating_key, tag_id, fresh, wanted, prior, duration_ms, own_prior, calling_part_ids)
+            if _nothing_to_write(plan, wanted):
+                conn.execute("ROLLBACK")
+                return False
+            if plan.replaced_texts:
+                placeholders = ",".join("?" * len(plan.replaced_texts))
+                conn.execute(
+                    f"DELETE FROM taggings WHERE metadata_item_id=? AND tag_id=? AND text IN ({placeholders})",  # noqa: S608
+                    (rating_key, tag_id, *plan.replaced_texts),
+                )
+            created_at = int(time.time())
+            for index, text, start, end, extra in plan.inserts:
+                conn.execute(
+                    "INSERT INTO taggings (metadata_item_id, tag_id, [index], text, time_offset, end_time_offset, "
+                    "thumb_url, created_at, extra_data) VALUES (?,?,?,?,?,?,'',?,?)",
+                    (rating_key, tag_id, index, text, start, end, created_at, extra),
+                )
+            conn.executemany("UPDATE taggings SET [index]=? WHERE id=?", plan.reindex)
+            conn.executemany("UPDATE media_parts SET extra_data=? WHERE id=?", plan.part_updates)
+            conn.execute("COMMIT")
+            return True
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+
+    def write(
+        self,
+        item_id: str,
+        markers: list[Marker],
+        *,
+        previous: list[Marker] | None,
+        duration_ms: int | None,
+        canonical_path: str,
+        own_previous: list[Marker] | None = None,
+    ) -> list[Marker]:
+        """Make this item show its desired marker set (see ``_desired``) in ``taggings`` and every part's ``extra_data``.
+
+        Types of ours that are no longer desired are removed only where they still serve exactly ``previous``; Plex's
+        own rows of those types stay. A desired type replaces whatever rows the item has of that type.
+
+        Returns:
+            The desired set now on the item (see ``MarkerPublisher.write``).
+
+        Raises:
+            PublishError: Nothing was written (one transaction; see ``MarkerPublisher.write``).
+        """
+        wanted = self.project(markers)
+        # previous=None: nothing on the item is provably ours, so nothing is removed.
+        prior = self.project(previous) if previous is not None else []
+        own_prior = self.project(own_previous or [])
+        if not wanted and not prior and not own_prior:
+            return []
+        rating_key = _rating_key(item_id)
+        deadline = time.monotonic() + BUSY_TIMEOUT_S
+        # capability() is cached per job; these checks (lock probe included) guard every write on their own.
+        local = self._local_checks(deadline=deadline)
+        if not local.ready:
+            raise PublishError(local.message, state=local.state)
+        try:
+            with self._database(read_only=True, deadline=deadline) as conn:
+                self._check_schema(conn)
+                self._marker_tag_id(conn)
+                parts = self._item_parts(conn, rating_key)
+            if not parts:
+                raise ItemNotFoundError(f"Plex item {rating_key} not found in the database")
+            # With no Plex connection or lock held: the sibling lookups take markers.db's lock.
+            desired = self._desired(parts, wanted, canonical_path, prior)
+            if not desired and not prior and not own_prior:
+                return []
+            calling = {p.id for p in parts if canonical_path in self._local_candidates(p.file)}
+            # Plan on a read-only snapshot first: a write that changes nothing never takes Plex's write lock. A real
+            # change re-reads and re-plans under that lock in _write_item.
+            with self._database(read_only=True, deadline=deadline) as conn:
+                snapshot = self._item_parts(conn, rating_key)
+                same_files = _same_files(snapshot, parts)
+                if same_files:
+                    tag_id = self._marker_tag_id(conn)
+                    plan = self._plan(
+                        conn, rating_key, tag_id, snapshot, desired, prior, duration_ms, own_prior, calling
+                    )
+            if same_files and _nothing_to_write(plan, desired):
+                return desired
+            with self._database(read_only=False, deadline=deadline) as conn:
+                changed = self._write_item(conn, rating_key, parts, desired, prior, duration_ms, own_prior, calling)
+        except sqlite3.Error as exc:
+            raise publish_error_from_sqlite(exc) from exc
+        if changed:
+            logger.info("Plex {}: item {} now shows {} marker(s) of ours", self._config.name, rating_key, len(desired))
+        return desired
