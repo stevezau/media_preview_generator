@@ -333,7 +333,10 @@ webhook's own paths, not the first mapped disk's), with their `webhook_item_id_h
 replaced files also queues one verify job (`verify: true`, named "Verify: …") for them, due after three times the
 first retry delay (at least 600 s); none when `webhook_retry_count` is 0. Only jobs for sent files (webhooks and
 retries, not `manual`/`inspector` or library runs) queue one. A job whose read-back of a server failed completes with
-the warning "Couldn't check what N file(s) show on <server>".
+the warning "Couldn't check what N file(s) show on <server>". A job where an online source's daily budget ran out
+partway through completes with one warning per source that ran out (see `GET /api/markers/sources/usage` above for
+the same state in Settings), and doesn't queue a retry for those files — nothing was stored for the source, so the
+next scheduled or manual run for the same files asks it again on its own.
 
 ### Outcome keys
 
@@ -400,8 +403,12 @@ Servers page isn't contacted (`capability.state` is `disabled`).
 
 #### GET /api/markers/sources/usage
 
-**Response:** `200` with `{source_id: {day, used, limit, remaining, has_key}}` for `theintrodb`, `introdb` and
-`skipdb`. `has_key` is only meaningful for `theintrodb`; the key itself is never returned.
+**Response:** `200` with `{source_id: {day, used, limit, remaining, has_key, low_priority_exhausted, resets_at}}`
+for `theintrodb`, `introdb` and `skipdb`. `has_key` is only meaningful for `theintrodb`; the key itself is never
+returned. `low_priority_exhausted` is `true` once a full-library backfill (LOW priority) lookup against that source
+would be refused right now — no budget left, or only the share reserved for higher-priority jobs remains.
+`resets_at` is always the daily budget's day boundary in the user's words (`"00:00 UTC"`), never the source's own
+reset header (TheIntroDB's can't be trusted — see `ratelimit.py`).
 
 #### GET /api/markers/item
 

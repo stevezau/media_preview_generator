@@ -54,6 +54,18 @@ def http_session() -> requests.Session:
         return _session
 
 
+_BUDGET_EXHAUSTED_SUFFIX = f" {Acquire.BUDGET_EXHAUSTED.value}"
+
+
+def is_budget_exhausted(detail: str) -> bool:
+    """Whether an ``unavailable`` result's ``detail`` is a limiter refusal for a used-up daily budget.
+
+    ``paced_get_json`` writes this detail as ``f"{label} {acquired.value}"``, so a real budget refusal always ends
+    with ``" budget_exhausted"`` — distinct from a rate-window block, a cancellation, or an HTTP/network failure.
+    """
+    return detail.endswith(_BUDGET_EXHAUSTED_SUFFIX)
+
+
 def valid_imdb(value: str | None) -> bool:
     """Whether ``value`` is a usable IMDb title id (``tt`` + 7 or more digits)."""
     return bool(value) and _IMDB_RE.fullmatch(value) is not None

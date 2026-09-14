@@ -30,6 +30,10 @@ _WAIT_POLL_S = 0.5
 # Reset/Retry-After values this large are absolute Unix times, not delta-seconds: some APIs send X-RateLimit-Reset as
 # epoch seconds, and Retry-After may be an HTTP-date (RFC 9110). 1e9 s of delta would be 31 years.
 _EPOCH_THRESHOLD_S = 1_000_000_000
+# The daily budget always ends at the UTC day roll (see ``_roll_day``), never a source's own reset header — shown to
+# users so they know when a "daily limit reached" state will clear.
+RESET_TIME_LABEL = "00:00 UTC"
+DEFAULT_RESERVE_FRACTION = 0.2
 
 
 def _utc_day() -> str:
@@ -74,6 +78,28 @@ def _delay_s(value: str | None, wall_now: float) -> float | None:
     return max(0.0, number)
 
 
+def low_priority_exhausted(
+    *, limit: int | None, remaining: int | None, reserve_fraction: float = DEFAULT_RESERVE_FRACTION
+) -> bool:
+    """Whether a LOW-priority (backfill) lookup would be refused right now.
+
+    Mirrors the check in :meth:`SourceLimiter.acquire`: true once nothing at all is left, or once only the share
+    reserved for higher-priority jobs remains. Exposed standalone so the Settings API can answer this for a merged
+    (live + stored) usage snapshot without a live limiter instance.
+
+    Args:
+        limit: The source's daily limit, or None when never learned.
+        remaining: What the source last said remains today, or None when never learned.
+        reserve_fraction: Share of the daily limit LOW priority may not spend.
+
+    Returns:
+        False whenever ``remaining`` is unknown (nothing to be exhausted yet).
+    """
+    if remaining is None:
+        return False
+    return remaining <= 0 or (limit is not None and remaining <= reserve_fraction * limit)
+
+
 class SourceLimiter:
     """Paces one online source."""
 
@@ -82,7 +108,7 @@ class SourceLimiter:
         source_id: str,
         *,
         min_interval_s: float,
-        reserve_fraction: float = 0.2,
+        reserve_fraction: float = DEFAULT_RESERVE_FRACTION,
         failure_threshold: int = 5,
         circuit_open_s: float = 600.0,
         clock: Callable[[], float] = time.monotonic,
@@ -108,7 +134,9 @@ class SourceLimiter:
         """
         self.source_id = source_id
         self.min_interval_s = min_interval_s
-        self._reserve = reserve_fraction
+        # Public like min_interval_s: the Settings API mirrors low_priority_exhausted() on merged (live + stored)
+        # values and must use this source's actual share, not the module default, if one is ever set per source.
+        self.reserve_fraction = reserve_fraction
         self._failure_threshold = failure_threshold
         self._circuit_open_s = circuit_open_s
         self._clock = clock
@@ -181,7 +209,7 @@ class SourceLimiter:
                 if (
                     priority >= PRIORITY_LOW
                     and self._limit is not None
-                    and self._remaining <= self._reserve * self._limit
+                    and self._remaining <= self.reserve_fraction * self._limit
                 ):
                     return Acquire.BUDGET_EXHAUSTED
             deadline = now + max_wait_s
@@ -327,8 +355,9 @@ class SourceLimiter:
         """Snapshot for the Settings page.
 
         Returns:
-            ``{"day", "used", "limit", "remaining", "blocked_until_s"}``; limit/remaining are None until a response
-            carried them.
+            ``{"day", "used", "limit", "remaining", "blocked_until_s", "low_priority_exhausted", "resets_at"}``;
+            limit/remaining are None until a response carried them. ``resets_at`` is always the day boundary in the
+            user's words (``RESET_TIME_LABEL``): this source's own reset header can't be trusted (see ``_roll_day``).
         """
         with self._lock:
             self._roll_day()
@@ -339,6 +368,10 @@ class SourceLimiter:
                 "limit": self._limit,
                 "remaining": self._remaining,
                 "blocked_until_s": max(0.0, self._blocked_until - now),
+                "low_priority_exhausted": low_priority_exhausted(
+                    limit=self._limit, remaining=self._remaining, reserve_fraction=self.reserve_fraction
+                ),
+                "resets_at": RESET_TIME_LABEL,
             }
 
 

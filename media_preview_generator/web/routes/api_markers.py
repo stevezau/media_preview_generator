@@ -199,29 +199,39 @@ def marker_source_usage():
     """Today's (UTC) lookups per online source; TheIntroDB's limit and remaining come from its response headers.
 
     Returns:
-        200 with ``{source_id: {"day", "used", "limit", "remaining", "has_key"}}``. The TheIntroDB key itself is
-        never returned, only whether one is stored.
+        200 with ``{source_id: {"day", "used", "limit", "remaining", "has_key", "low_priority_exhausted",
+        "resets_at"}}``. ``low_priority_exhausted`` is true once a backfill (LOW priority) lookup would be refused
+        right now; ``resets_at`` is always the daily budget's day boundary in the user's words, never the source's
+        own (untrustworthy) reset header. The TheIntroDB key itself is never returned, only whether one is stored.
     """
     from ...markers.settings import get_global_settings
-    from ...markers.sources.ratelimit import get_limiter
+    from ...markers.sources.ratelimit import RESET_TIME_LABEL, get_limiter, low_priority_exhausted
     from ...markers.store import get_marker_store
 
     settings = get_global_settings()
     store = get_marker_store()
     out = {}
     for source_id in _ONLINE_SOURCE_IDS:
-        live = get_limiter(source_id).usage()
+        limiter = get_limiter(source_id)
+        live = limiter.usage()
         day = live["day"]
         # A limiter starts from today's stored row when it is created (after a restart); the stored row still counts
         # when that read-back failed.
         stored = store.source_usage(source_id, day) or {}
         source = settings.source(source_id)
+        limit = live["limit"] if live.get("limit") is not None else stored.get("limit")
+        remaining = live["remaining"] if live.get("remaining") is not None else stored.get("remaining")
         out[source_id] = {
             "day": day,
             "used": max(live.get("used") or 0, stored.get("used") or 0),
-            "limit": live["limit"] if live.get("limit") is not None else stored.get("limit"),
-            "remaining": live["remaining"] if live.get("remaining") is not None else stored.get("remaining"),
+            "limit": limit,
+            "remaining": remaining,
             "has_key": bool(source_id == "theintrodb" and source is not None and source.api_key),
+            # This source's own share, not the module default: mirrors what its live limiter would actually do.
+            "low_priority_exhausted": low_priority_exhausted(
+                limit=limit, remaining=remaining, reserve_fraction=limiter.reserve_fraction
+            ),
+            "resets_at": RESET_TIME_LABEL,
         }
     return jsonify(out)
 

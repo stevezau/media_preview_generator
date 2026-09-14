@@ -199,7 +199,15 @@ class TestDailyBudget:
         )
         c.t += 7200
         assert lim.acquire(priority=3) is Acquire.BUDGET_EXHAUSTED
-        assert lim.usage() == {"day": "2026-09-13", "used": 0, "limit": 500, "remaining": 100, "blocked_until_s": 0.0}
+        assert lim.usage() == {
+            "day": "2026-09-13",
+            "used": 0,
+            "limit": 500,
+            "remaining": 100,
+            "blocked_until_s": 0.0,
+            "low_priority_exhausted": True,  # 100 remaining is exactly the 20% reserve
+            "resets_at": ratelimit.RESET_TIME_LABEL,
+        }
         assert lim.acquire(priority=2) is Acquire.ALLOWED
         assert c.slept == []
 
@@ -210,7 +218,15 @@ class TestDailyBudget:
         lim.acquire(priority=2)
         lim.record(200, {"x-usagelimit-limit": "500", "x-usagelimit-remaining": "10"})
         day["v"] = "2026-09-14"
-        assert lim.usage() == {"day": "2026-09-14", "used": 0, "limit": 500, "remaining": None, "blocked_until_s": 0.0}
+        assert lim.usage() == {
+            "day": "2026-09-14",
+            "used": 0,
+            "limit": 500,
+            "remaining": None,
+            "blocked_until_s": 0.0,
+            "low_priority_exhausted": False,  # remaining unknown again after the roll: nothing to be exhausted yet
+            "resets_at": ratelimit.RESET_TIME_LABEL,
+        }
 
     def test_record_after_midnight_counts_toward_the_new_day(self):
         c = FakeClock()
@@ -230,6 +246,52 @@ class TestDailyBudget:
         assert seen[-1] == ("skipdb", "2026-09-14", 0, 500, 499)
         assert lim.acquire(priority=3) is Acquire.ALLOWED
         assert lim.usage()["remaining"] == 498
+
+
+class TestLowPriorityExhausted:
+    """``usage()["low_priority_exhausted"]`` and the standalone helper the Settings API reuses on merged values."""
+
+    def test_usage_flips_on_at_the_reserve_boundary(self):
+        c = FakeClock()
+        lim = _limiter(c)
+        lim.record(200, {"x-usagelimit-limit": "500", "x-usagelimit-remaining": "101"})
+        assert lim.usage()["low_priority_exhausted"] is False
+        lim.record(200, {"x-usagelimit-limit": "500", "x-usagelimit-remaining": "100"})
+        assert lim.usage()["low_priority_exhausted"] is True
+
+    def test_usage_is_exhausted_even_without_a_limit_once_remaining_hits_zero(self):
+        c = FakeClock()
+        lim = _limiter(c)
+        lim.record(200, {"x-usagelimit-remaining": "0"})
+        assert lim.usage()["low_priority_exhausted"] is True
+
+    def test_usage_resets_at_is_the_day_boundary_not_a_header(self):
+        c = FakeClock()
+        lim = _limiter(c)
+        # TheIntroDB sends x-usagelimit-reset as "0" while most of the budget remains (see _roll_day); the reported
+        # reset must never come from it.
+        lim.record(200, {"x-usagelimit-limit": "500", "x-usagelimit-remaining": "100", "x-usagelimit-reset": "0"})
+        assert lim.usage()["resets_at"] == ratelimit.RESET_TIME_LABEL == "00:00 UTC"
+
+    @pytest.mark.parametrize(
+        ("limit", "remaining", "expected"),
+        [
+            (None, None, False),  # never learned: nothing to be exhausted yet
+            (500, None, False),
+            (500, 101, False),
+            (500, 100, True),  # exactly the 20% reserve
+            (500, 0, True),
+            (500, -3, True),
+            (None, 0, True),  # remaining alone still means exhausted, limit or not
+        ],
+        ids=["unknown", "limit-only", "above-reserve", "at-reserve", "zero", "negative", "zero-no-limit"],
+    )
+    def test_standalone_helper_matches_usage(self, limit, remaining, expected):
+        assert ratelimit.low_priority_exhausted(limit=limit, remaining=remaining) is expected
+
+    def test_standalone_helper_honours_a_custom_reserve_fraction(self):
+        assert ratelimit.low_priority_exhausted(limit=500, remaining=250, reserve_fraction=0.5) is True
+        assert ratelimit.low_priority_exhausted(limit=500, remaining=251, reserve_fraction=0.5) is False
 
 
 class TestHeaderParsing:
@@ -603,7 +665,15 @@ class TestRefund:
         other.start()
         other.join(5)
         lim.refund()
-        assert lim.usage() == {"day": "2026-09-14", "used": 1, "limit": None, "remaining": None, "blocked_until_s": 0.0}
+        assert lim.usage() == {
+            "day": "2026-09-14",
+            "used": 1,
+            "limit": None,
+            "remaining": None,
+            "blocked_until_s": 0.0,
+            "low_priority_exhausted": False,
+            "resets_at": ratelimit.RESET_TIME_LABEL,
+        }
 
 
 class _SlowSpacingLimiter(SourceLimiter):
@@ -765,7 +835,15 @@ class TestRegistry:
         day = ratelimit._utc_day()
         get_marker_store().record_source_usage("theintrodb", day=day, used=80, limit=500, remaining=11)
         lim = get_limiter("theintrodb")
-        assert lim.usage() == {"day": day, "used": 80, "limit": 500, "remaining": 11, "blocked_until_s": 0.0}
+        assert lim.usage() == {
+            "day": day,
+            "used": 80,
+            "limit": 500,
+            "remaining": 11,
+            "blocked_until_s": 0.0,
+            "low_priority_exhausted": True,  # 11 <= the 20% reserve of 500
+            "resets_at": ratelimit.RESET_TIME_LABEL,
+        }
         assert lim.acquire(priority=ratelimit.PRIORITY_LOW) is Acquire.BUDGET_EXHAUSTED  # the 20% reserve holds
         assert lim.acquire(priority=2) is Acquire.ALLOWED
         lim.record(200, {"x-usagelimit-limit": "500", "x-usagelimit-remaining": "10"})

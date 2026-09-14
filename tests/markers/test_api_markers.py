@@ -171,8 +171,9 @@ def test_the_duplicate_install_plugin_route_is_gone(client, servers):
 
 
 class _Limiter:
-    def __init__(self, usage):
+    def __init__(self, usage, *, reserve_fraction=0.2):
         self._usage = usage
+        self.reserve_fraction = reserve_fraction
 
     def usage(self):
         return dict(self._usage)
@@ -210,15 +211,73 @@ def test_source_usage(client, limiters, loguru_caplog, stored_key, has_key):
 
     resp = _secret_free(client.get("/api/markers/sources/usage", headers=_api_headers()))
 
+    from media_preview_generator.markers.sources.ratelimit import RESET_TIME_LABEL
+
     assert resp.status_code == 200
     assert resp.get_json() == {
-        "theintrodb": {"day": "2026-09-14", "used": 40, "limit": 500, "remaining": 460, "has_key": has_key},
-        "introdb": {"day": "2026-09-14", "used": 12, "limit": 1000, "remaining": 988, "has_key": False},
-        "skipdb": {"day": "2026-09-14", "used": 0, "limit": None, "remaining": None, "has_key": False},
+        "theintrodb": {
+            "day": "2026-09-14",
+            "used": 40,
+            "limit": 500,
+            "remaining": 460,
+            "has_key": has_key,
+            "low_priority_exhausted": False,
+            "resets_at": RESET_TIME_LABEL,
+        },
+        "introdb": {
+            "day": "2026-09-14",
+            "used": 12,
+            "limit": 1000,
+            "remaining": 988,
+            "has_key": False,
+            "low_priority_exhausted": False,
+            "resets_at": RESET_TIME_LABEL,
+        },
+        "skipdb": {
+            "day": "2026-09-14",
+            "used": 0,
+            "limit": None,
+            "remaining": None,
+            "has_key": False,
+            "low_priority_exhausted": False,
+            "resets_at": RESET_TIME_LABEL,
+        },
     }
     assert SECRET_MASK not in resp.get_data(as_text=True)
     assert sorted(limiters) == ["introdb", "skipdb", "theintrodb"]
     assert TIDB_KEY not in loguru_caplog.text
+
+
+def test_source_usage_shows_low_priority_exhausted_from_the_merged_remaining(client, monkeypatch):
+    """The reserve check must use whichever of live/stored actually carried limit and remaining, not the live row alone."""
+    from media_preview_generator.markers.sources import ratelimit
+    from media_preview_generator.markers.store import get_marker_store
+
+    empty_usage = {"day": "2026-09-14", "used": 0, "limit": None, "remaining": None, "blocked_until_s": 0.0}
+    monkeypatch.setattr(ratelimit, "get_limiter", lambda source_id: _Limiter(empty_usage))
+    get_marker_store().record_source_usage("theintrodb", day="2026-09-14", used=461, limit=500, remaining=39)
+
+    resp = client.get("/api/markers/sources/usage", headers=_api_headers())
+
+    assert resp.status_code == 200
+    body = resp.get_json()["theintrodb"]
+    assert body["remaining"] == 39 and body["limit"] == 500
+    assert body["low_priority_exhausted"] is True
+    assert body["resets_at"] == ratelimit.RESET_TIME_LABEL
+
+
+def test_source_usage_honours_the_limiters_own_reserve_fraction_not_the_module_default(client, monkeypatch):
+    """A source with a bigger-than-default reserve must not be reported exhausted early by a hard-coded 20%."""
+    from media_preview_generator.markers.sources import ratelimit
+
+    usage = {"day": "2026-09-14", "used": 0, "limit": 500, "remaining": 150, "blocked_until_s": 0.0}
+    monkeypatch.setattr(ratelimit, "get_limiter", lambda source_id: _Limiter(usage, reserve_fraction=0.5))
+
+    resp = client.get("/api/markers/sources/usage", headers=_api_headers())
+
+    # 150 <= 0.5 * 500 (this source's own reserve) but > 0.2 * 500 (the module default) -- proves the fraction used
+    # came from the limiter, not a hard-coded constant.
+    assert resp.get_json()["theintrodb"]["low_priority_exhausted"] is True
 
 
 # --------------------------------------------------------------------------- item

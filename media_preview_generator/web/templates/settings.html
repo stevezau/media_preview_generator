@@ -1272,14 +1272,24 @@ function _wireMarkersSettings() {
     _refreshMarkersSourceControls();
 }
 
+// Shared by every online source's usage line (today only TheIntroDB shows one): once a LOW-priority lookup would be
+// refused, say so plainly instead of a number that would otherwise look like slow, ordinary usage.
+function _formatSourceUsageLine(usage, sourceName) {
+    if (!usage) return '—';
+    if (usage.low_priority_exhausted) {
+        return `Daily limit reached — lookups resume at ${usage.resets_at}`;
+    }
+    const used = usage.used;
+    return Number.isFinite(used) ? `${used} of today's lookups used · limit set by ${sourceName}` : '—';
+}
+
 async function loadMarkersUsage() {
     const line = document.getElementById('markersTheIntroDbUsage');
     try {
         const response = await fetch('/api/markers/sources/usage');
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        const used = data && data.theintrodb ? data.theintrodb.used : null;
-        line.textContent = Number.isFinite(used) ? `${used} of today's lookups used · limit set by TheIntroDB` : '—';
+        line.textContent = _formatSourceUsageLine(data && data.theintrodb, 'TheIntroDB');
     } catch (_error) {
         line.textContent = '—';
     }

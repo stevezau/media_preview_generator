@@ -62,8 +62,8 @@ from .settings import GlobalMarkersSettings, ServerMarkersSettings, get_global_s
 from .sources import introdb, skipdb, theintrodb
 from .sources.chapters import CHAPTER_RULES_VERSION, chapter_candidates
 from .sources.introdb import IntroDbClient
-from .sources.online import LookupResult
-from .sources.ratelimit import PRIORITY_LOW
+from .sources.online import LookupResult, is_budget_exhausted
+from .sources.ratelimit import PRIORITY_LOW, RESET_TIME_LABEL
 from .sources.server_markers import READER_VERSION, imported_detail, importer_plugin, read_server_markers
 from .sources.skipdb import SkipDbClient
 from .sources.theintrodb import TheIntroDbClient
@@ -203,6 +203,10 @@ class PipelineContext:
     _importer_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _followups: set[str] = field(default_factory=set, repr=False)
     _followups_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # Files this job's lookups skipped because a source's daily budget ran out, by source (job_runner turns this
+    # into a completion warning once the job finishes).
+    _budget_exhausted: dict[Source, int] = field(default_factory=dict, repr=False)
+    _budget_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def request_followups(self, paths: Iterable[str]) -> None:
         """Ask the job to run these files again after it finishes (their decision may change with this job's work).
@@ -592,19 +596,73 @@ def _run_detector(
         ctx.store.replace_evidence(rec.id, source, [c for c in found if c.source is source], version=spec.version)
 
 
-def _lookup(client: Any, source: Source, ids: MediaIds, rec: FileRecord, ctx: PipelineContext, cancel_check) -> None:
+def _note_budget_exhausted(ctx: PipelineContext, source: Source) -> None:
+    """Record that ``source``'s daily budget stopped one file's lookup this job.
+
+    Warns once per job per source, not once per file: a run-dry source can affect hundreds of files, and a line per
+    file would flood the log for no extra information (spec finding 4 raised this from DEBUG). Never logs the key.
+    """
+    with ctx._budget_lock:
+        first = source not in ctx._budget_exhausted
+        ctx._budget_exhausted[source] = ctx._budget_exhausted.get(source, 0) + 1
+    if first:
+        logger.warning(
+            "{}'s daily lookup budget ran out; checking remaining files without it until it resets",
+            _ONLINE_LABELS[source],
+        )
+
+
+def budget_exhausted_warnings(ctx: PipelineContext) -> list[str]:
+    """Job-completion warnings for online sources this job ran out of daily budget for.
+
+    Args:
+        ctx: The job's context, read after every file has run.
+
+    Returns:
+        One user-facing warning per source that ran out (empty when nothing did), e.g. "TheIntroDB's daily lookup
+        limit was reached: 39 files were checked without it. It resets at 00:00 UTC; run the library again after
+        that (or add a TheIntroDB API key for a higher limit)."
+    """
+    with ctx._budget_lock:
+        counts = dict(ctx._budget_exhausted)
+    warnings = []
+    for source in sorted(counts, key=lambda s: _ONLINE_LABELS[s]):
+        count = counts[source]
+        label = _ONLINE_LABELS[source]
+        file_word = "file" if count == 1 else "files"
+        verb = "was" if count == 1 else "were"
+        key_hint = " (or add a TheIntroDB API key for a higher limit)" if source is Source.THEINTRODB else ""
+        warnings.append(
+            f"{label}'s daily lookup limit was reached: {count} {file_word} {verb} checked without it. "
+            f"It resets at {RESET_TIME_LABEL}; run the library again after that{key_hint}."
+        )
+    return warnings
+
+
+def _lookup(client: Any, source: Source, ids: MediaIds, rec: FileRecord, ctx: PipelineContext, cancel_check) -> bool:
+    """Ask one online source and store what it found.
+
+    Returns:
+        Whether the source refused because its daily budget ran out (so the caller can note it on the file and the
+        job).
+    """
     try:
         result = client.lookup(ids, duration_ms=rec.duration_ms, priority=ctx.priority(), cancel_check=cancel_check)
     except Exception as exc:
         logger.warning("{} lookup failed for {}: {}", _ONLINE_LABELS[source], rec.canonical_path, type(exc).__name__)
-        return
+        return False
     if not isinstance(result, LookupResult) or result.status not in _STORED_LOOKUPS:
         # unavailable / not_applicable: nothing is stored, so the next run asks again.
-        logger.debug("{} lookup for {}: {}", _ONLINE_LABELS[source], rec.canonical_path, result)
-        return
+        exhausted = isinstance(result, LookupResult) and is_budget_exhausted(result.detail)
+        if exhausted:
+            _note_budget_exhausted(ctx, source)
+        else:
+            logger.debug("{} lookup for {}: {}", _ONLINE_LABELS[source], rec.canonical_path, result)
+        return exhausted
     ctx.store.replace_evidence(
         rec.id, source, list(result.candidates), detail=result.detail, version=PARSER_VERSIONS[source]
     )
+    return False
 
 
 def _importer_plugin(ctx: PipelineContext, owner: _Owning) -> tuple[bool, str | None]:
@@ -1005,7 +1063,9 @@ def _clock(ms: int) -> str:
     return f"{s // 60}:{s % 60:02d}"
 
 
-def _summary(decisions: dict[MarkerType, TypeDecision], types: frozenset[MarkerType]) -> str:
+def _summary(
+    decisions: dict[MarkerType, TypeDecision], types: frozenset[MarkerType], budget_exhausted: tuple[str, ...] = ()
+) -> str:
     parts = []
     for mtype in MarkerType:
         d = decisions[mtype]
@@ -1018,7 +1078,13 @@ def _summary(decisions: dict[MarkerType, TypeDecision], types: frozenset[MarkerT
             parts.append(f"{mtype.value} needs review")
         else:
             parts.append(f"{mtype.value}: none")
-    return "; ".join(parts) or "Nothing to detect for this file"
+    text = "; ".join(parts) or "Nothing to detect for this file"
+    # Only when this file's result could still change once the source is available again: everything already
+    # decided beyond chapters alone means asking it again would tell the user nothing new.
+    if budget_exhausted and not _all_decided(decisions, types):
+        note = "; ".join(f"{label} not checked (daily limit reached)" for label in budget_exhausted)
+        return f"{text}; {note}"
+    return text
 
 
 def _attempt(
@@ -1088,6 +1154,7 @@ def _attempt(
     gather_all = ctx.force
     decisions = _decide(ctx, rec, types)
     lookup_ids: MediaIds | None = None
+    budget_exhausted_labels: set[str] = set()
     for source_id in ctx.settings.ordered_enabled_sources():
         source = Source(source_id)
         refresh = _refreshing(ctx, path, source)
@@ -1107,7 +1174,8 @@ def _attempt(
             if lookups_allowed and client is not None and _needs_lookup(ctx, rec, source, refresh):
                 lookup_ids = lookup_ids or _lookup_ids(ids, servers)
                 phase(f"Looking up {_ONLINE_LABELS[source]}…")
-                _lookup(client, source, lookup_ids, rec, ctx, cancel_check)
+                if _lookup(client, source, lookup_ids, rec, ctx, cancel_check):
+                    budget_exhausted_labels.add(_ONLINE_LABELS[source])
         elif source is Source.SERVER_MARKERS:
             phase("Reading markers already on servers…")
             _read_server_markers(ctx, rec, servers, refresh)
@@ -1153,7 +1221,7 @@ def _attempt(
             row[VERIFY_LATER] = True
         rows.append(row)
     outcome = file_outcome({r["status"] for r in rows}, needs_review=needs_review)
-    return ItemOutcome(outcome.value, _summary(decisions, types), rows)
+    return ItemOutcome(outcome.value, _summary(decisions, types, tuple(sorted(budget_exhausted_labels))), rows)
 
 
 def _run(

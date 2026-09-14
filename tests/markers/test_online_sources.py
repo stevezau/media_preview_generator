@@ -781,3 +781,25 @@ class TestHttpSession:
 
     def test_lookup_result_defaults(self):
         assert online.LookupResult("no_data") == online.LookupResult("no_data", (), "")
+
+
+class TestIsBudgetExhausted:
+    """``is_budget_exhausted`` picks the daily-budget refusal out of every other ``unavailable`` detail."""
+
+    def test_true_for_a_limiter_budget_refusal(self):
+        assert online.is_budget_exhausted(f"TheIntroDB {Acquire.BUDGET_EXHAUSTED.value}") is True
+
+    @pytest.mark.parametrize(
+        "detail",
+        [
+            f"TheIntroDB {Acquire.BLOCKED.value}",
+            f"TheIntroDB {Acquire.CANCELLED.value}",
+            "TheIntroDB HTTP 503",
+            "TheIntroDB network error: ConnectionError",
+            "TheIntroDB returned an unexpected response",
+            "",
+        ],
+        ids=["blocked", "cancelled", "http-error", "network-error", "bad-response", "empty"],
+    )
+    def test_false_for_every_other_unavailable_detail(self, detail):
+        assert online.is_budget_exhausted(detail) is False

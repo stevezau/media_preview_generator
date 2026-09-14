@@ -299,6 +299,29 @@ class TestIntroCreditsSettings:
         _open_settings(authed_page, app_url, _default_markers(), usage={"error": "boom"}, usage_status=500)
         expect(authed_page.locator("#markersTheIntroDbUsage")).to_have_text("—", timeout=5000)
 
+    def test_usage_line_shows_daily_limit_reached_when_low_priority_is_exhausted(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        _open_settings(
+            authed_page,
+            app_url,
+            _default_markers(),
+            usage={
+                "theintrodb": {
+                    "day": "2026-09-14",
+                    "used": 500,
+                    "limit": 500,
+                    "remaining": 0,
+                    "has_key": False,
+                    "low_priority_exhausted": True,
+                    "resets_at": "00:00 UTC",
+                }
+            },
+        )
+        expect(authed_page.locator("#markersTheIntroDbUsage")).to_have_text(
+            "Daily limit reached — lookups resume at 00:00 UTC", timeout=5000
+        )
+
     def test_keyboard_move_down_with_enter(self, authed_page: Page, app_url: str) -> None:
         captured = _open_settings(authed_page, app_url, _default_markers())
         down = authed_page.locator("#markersSourceList .markers-source[data-id='chapters'] .markers-source-down")

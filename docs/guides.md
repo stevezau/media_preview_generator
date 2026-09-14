@@ -600,6 +600,11 @@ update.
 default, and pasting your own free key is optional and entirely up to you. The key is masked (`****`) everywhere it's
 shown or returned by the API, and never logged.
 
+TheIntroDB's usage line in Settings shows "N of today's lookups used · limit set by TheIntroDB" — once a library
+job's daily lookups (or the smaller share left for full-library backfills) run out, it switches to "Daily limit
+reached — lookups resume at 00:00 UTC" instead. See the troubleshooting table below for what a job or a file shows
+when this happens mid-run.
+
 ### Needs review
 
 When the sources don't clear the bar above for a marker — nothing agrees, or two credible answers disagree — that
@@ -749,6 +754,8 @@ A file's row for one server (the job's Files panel, the Inspector) can also say:
 | **Failed**: "Couldn't read this server's saved settings (…)" | `settings.json` couldn't be read just before the write, so nothing was written | Check the config volume and the log; the next run tries again |
 | Evidence detail: "Couldn't read this server's plugins, so its markers aren't used" | A Jellyfin/Emby server's plugin list couldn't be read, so its markers might be a crowd database's copy | Nothing; they're read again on a later run |
 | Evidence detail: "Markers on this server look imported from …; not used as a second opinion" | That server's markers came from an intro-database plugin, the same data as the online sources | Nothing; this is expected |
+| Job warning: "TheIntroDB's daily lookup limit was reached: N files were checked without it. It resets at 00:00 UTC; run the library again after that (or add a TheIntroDB API key for a higher limit)." | The source's daily budget (or the smaller share full-library backfills may spend) ran out partway through the job | Nothing to fix; run the library again after 00:00 UTC, or add your own TheIntroDB API key for a higher limit |
+| File reason ends with "…; TheIntroDB not checked (daily limit reached)" | This file's result could still change once the source is available again — a file every other source already decided doesn't get this note | Nothing; nothing was stored for this source, so the next scheduled or manual run for this file asks it again automatically |
 
 Per-file job outcomes use plainer labels in the job queue and Files panel: **Markers written** (the job changed
 what a server shows), **Up to date** (every server already showed this),

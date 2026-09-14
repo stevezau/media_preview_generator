@@ -1590,6 +1590,40 @@ class TestReadBackFailures:
         )
 
 
+class TestBudgetExhaustedCompletionWarning:
+    """The job's completion warning includes ``pipeline.budget_exhausted_warnings(ctx)`` (spec finding 4)."""
+
+    _TIDB_WARNING = (
+        "TheIntroDB's daily lookup limit was reached: 39 files were checked without it. "
+        "It resets at 00:00 UTC; run the library again after that (or add a TheIntroDB API key for a higher limit)."
+    )
+
+    def test_the_jobs_warning_includes_it(self, env, monkeypatch):
+        monkeypatch.setattr(job_runner, "budget_exhausted_warnings", lambda ctx: [self._TIDB_WARNING])
+        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
+            job_runner.run_intro_credits_job("j1")
+        env.jm.complete_job.assert_called_once_with("j1", warning=self._TIDB_WARNING)
+
+    def test_it_is_joined_after_build_items_warnings(self, env, monkeypatch):
+        monkeypatch.setattr(job_runner, "budget_exhausted_warnings", lambda ctx: [self._TIDB_WARNING])
+        with patch.object(job_runner, "build_items", return_value=([_item()], ["Couldn't list X"], {})):
+            job_runner.run_intro_credits_job("j1")
+        env.jm.complete_job.assert_called_once_with("j1", warning=f"Couldn't list X | {self._TIDB_WARNING}")
+
+    def test_it_is_asked_about_this_jobs_own_context(self, env, monkeypatch):
+        seen = []
+        monkeypatch.setattr(job_runner, "budget_exhausted_warnings", lambda ctx: seen.append(ctx) or [])
+        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
+            job_runner.run_intro_credits_job("j1")
+        assert seen == [env.ctx]
+
+    def test_no_warning_when_nothing_ran_out(self, env, monkeypatch):
+        monkeypatch.setattr(job_runner, "budget_exhausted_warnings", lambda ctx: [])
+        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
+            job_runner.run_intro_credits_job("j1")
+        env.jm.complete_job.assert_called_once_with("j1", warning=None)
+
+
 class TestRetryCarriesTheSenderPath:
     """A retry resolves the path the sender gave again, so it finds the disk the file landed on (pre-lab MED-1)."""
 

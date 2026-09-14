@@ -1276,6 +1276,134 @@ class TestOnlineLookups:
         plex.write.assert_not_called()
 
 
+# TheIntroDB's daily reserve, spent by other jobs, refuses this file's lookup exactly like a real
+# SourceLimiter.acquire() would (spec finding 4: this used to vanish into a DEBUG line with no trace on the file
+# or the job).
+TIDB_BUDGET_EXHAUSTED = LookupResult("unavailable", detail="TheIntroDB budget_exhausted")
+SKIPDB_BUDGET_EXHAUSTED = LookupResult("unavailable", detail="SkipDB budget_exhausted")
+INTRODB_BUDGET_EXHAUSTED = LookupResult("unavailable", detail="IntroDB budget_exhausted")
+
+
+class TestBudgetExhaustedFileNote:
+    def test_note_appears_when_the_result_could_still_change(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        clients = _clients(theintrodb=TIDB_BUDGET_EXHAUSTED)
+        out, _ = _run(_ctx(store, reg, clients=clients, settings_raw=INTRO_ONLY), media, {"plex-1": ready_publisher()})
+        assert out.message.endswith("; TheIntroDB not checked (daily limit reached)")
+
+    def test_note_omitted_once_other_sources_already_decided_it(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        raw = {
+            "sources": [
+                {"id": "theintrodb", "enabled": True},
+                {"id": "introdb", "enabled": True},
+                {"id": "skipdb", "enabled": True},
+            ],
+            "detect": {"intro": True, "credits": False},
+        }
+        clients = _clients(
+            theintrodb=TIDB_BUDGET_EXHAUSTED,
+            introdb=LookupResult("ok", (Candidate(T.INTRO, 128_000, 157_000, Source.INTRODB),)),
+            skipdb=LookupResult("ok", (Candidate(T.INTRO, 129_000, 157_800, Source.SKIPDB),)),
+        )
+        out, _ = _run(_ctx(store, reg, clients=clients, settings_raw=raw), media, {"plex-1": ready_publisher()})
+        assert "not checked" not in out.message
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+
+    def test_note_omitted_when_nothing_ran_out(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        out, _ = _run(_ctx(store, reg, settings_raw=INTRO_ONLY), media, {"plex-1": ready_publisher()})
+        assert "not checked" not in out.message
+
+    def test_no_answer_is_stored_so_the_next_run_asks_theintrodb_again(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        client = FakeClient(TIDB_BUDGET_EXHAUSTED)
+        clients = _clients(theintrodb=TIDB_BUDGET_EXHAUSTED)
+        clients["theintrodb"] = client
+        _run(_ctx(store, reg, clients=clients, settings_raw=INTRO_ONLY), media, {"plex-1": ready_publisher()})
+        assert store.evidence_fetched_at(store.get_file(media).id, Source.THEINTRODB) is None
+        assert len(client.calls) == 1
+        client.result = LookupResult("ok", (TIDB_INTRO,))
+        _run(_ctx(store, reg, clients=clients, settings_raw=INTRO_ONLY), media, {"plex-1": ready_publisher()})
+        assert len(client.calls) == 2  # nothing stored last time, so a normal run asks again (no retry needed)
+        assert store.evidence_fetched_at(store.get_file(media).id, Source.THEINTRODB) is not None
+
+
+class TestBudgetExhaustedJobWarning:
+    def test_no_warning_when_nothing_ran_out(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        ctx = _ctx(store, reg, settings_raw=INTRO_ONLY)  # default clients answer no_data, never budget_exhausted
+        _run(ctx, media, {"plex-1": ready_publisher()})
+        assert pipeline.budget_exhausted_warnings(ctx) == []
+
+    def test_singular_wording_for_one_file(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        clients = _clients(theintrodb=TIDB_BUDGET_EXHAUSTED)
+        ctx = _ctx(store, reg, clients=clients, settings_raw=INTRO_ONLY)
+        _run(ctx, media, {"plex-1": ready_publisher()})
+        assert pipeline.budget_exhausted_warnings(ctx) == [
+            "TheIntroDB's daily lookup limit was reached: 1 file was checked without it. "
+            "It resets at 00:00 UTC; run the library again after that "
+            "(or add a TheIntroDB API key for a higher limit)."
+        ]
+
+    def test_counts_every_file_this_job_across_calls(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        other1 = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E02 - Lawnmower Dog.mkv")
+        other2 = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E03 - Anatomy Park.mkv")
+        for p in (other1, other2):
+            open(p, "wb").write(b"y" * 10)
+        clients = _clients(theintrodb=TIDB_BUDGET_EXHAUSTED)
+        ctx = _ctx(store, reg, clients=clients, settings_raw=INTRO_ONLY)
+        for p in (media, other1, other2):
+            _run(ctx, p, {"plex-1": ready_publisher()})
+        assert pipeline.budget_exhausted_warnings(ctx) == [
+            "TheIntroDB's daily lookup limit was reached: 3 files were checked without it. "
+            "It resets at 00:00 UTC; run the library again after that "
+            "(or add a TheIntroDB API key for a higher limit)."
+        ]
+
+    def test_names_each_source_that_ran_out_and_only_theintrodb_gets_the_key_hint(self, store, media):
+        # All three online sources in the same job: only TheIntroDB has a key concept, so IntroDB and SkipDB (which
+        # take the identical no-hint branch) are both covered rather than assuming one stands in for the other.
+        reg = _registry(media, ServerType.PLEX)
+        raw = {
+            "sources": [
+                {"id": "theintrodb", "enabled": True},
+                {"id": "skipdb", "enabled": True},
+                {"id": "introdb", "enabled": True},
+            ],
+            "detect": {"intro": True, "credits": False},
+        }
+        clients = _clients(
+            theintrodb=TIDB_BUDGET_EXHAUSTED, skipdb=SKIPDB_BUDGET_EXHAUSTED, introdb=INTRODB_BUDGET_EXHAUSTED
+        )
+        ctx = _ctx(store, reg, clients=clients, settings_raw=raw)
+        _run(ctx, media, {"plex-1": ready_publisher()})
+        warnings = pipeline.budget_exhausted_warnings(ctx)
+        assert len(warnings) == 3
+        # Sorted by name: IntroDB, SkipDB, TheIntroDB.
+        assert warnings[0].startswith("IntroDB's daily lookup limit was reached: 1 file")
+        assert "API key" not in warnings[0]
+        assert warnings[1].startswith("SkipDB's daily lookup limit was reached: 1 file")
+        assert "API key" not in warnings[1]
+        assert warnings[2].startswith("TheIntroDB's daily lookup limit was reached: 1 file")
+        assert "add a TheIntroDB API key for a higher limit" in warnings[2]
+
+    def test_warns_once_per_job_per_source_not_per_file(self, store, media, loguru_caplog):
+        reg = _registry(media, ServerType.PLEX)
+        other = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E02 - Lawnmower Dog.mkv")
+        open(other, "wb").write(b"y" * 10)
+        clients = _clients(theintrodb=TIDB_BUDGET_EXHAUSTED)
+        ctx = _ctx(store, reg, clients=clients, settings_raw=INTRO_ONLY)
+        for p in (media, other):
+            _run(ctx, p, {"plex-1": ready_publisher()})
+        budget_lines = [r for r in loguru_caplog.records if "daily lookup budget ran out" in r.getMessage()]
+        assert len(budget_lines) == 1
+        assert budget_lines[0].levelname == "WARNING"
+        assert "TheIntroDB" in budget_lines[0].getMessage()
+
+
 def _ticks(ms):
     return ms * 10_000
 

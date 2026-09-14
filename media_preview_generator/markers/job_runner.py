@@ -35,7 +35,7 @@ from .outcomes import (
     ServerStatus,
 )
 from .ownership import marker_libraries
-from .pipeline import build_context, kind_handlers
+from .pipeline import budget_exhausted_warnings, build_context, kind_handlers
 from .settings import load_server
 
 _POLL_S = 1.0
@@ -755,7 +755,7 @@ def run_intro_credits_job(job_id: str) -> None:
                     f"Couldn't check what {len(files)} file(s) show on {name}"
                     for name, files in sorted(unchecked.items())
                 ]
-                _complete(jm, job_id, outcome, [*warnings, *unchecked_warnings])
+                _complete(jm, job_id, outcome, [*warnings, *unchecked_warnings, *budget_exhausted_warnings(ctx)])
                 if waiting:
                     _queue_retry(job, cfg, waiting, sender_paths)
                 if replaced and checks_replaced_later:
