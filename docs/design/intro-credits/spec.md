@@ -19,17 +19,18 @@ published to every server that has the file. Feature name in the UI: **"Intro & 
    https://claude.ai/code/artifact/65394c1a-e878-4fc2-985b-63bc4c307c5d (source: `evidence/design/index.html`).
 5. Memory notes: `intro-credits-markers-design`, `lab-servers-on-storage`, `design-doc-survives-clear`.
 
-**Status (2026-09-14).** Phase 1 (§12: store, chapters/online detection, Intro & Credits job type, Plex + Jellyfin
-publishers, per-server Edit tab, Settings section, Inspector tab, config migration, docs) is built, reviewed and on
-the branch — season audio matching and credits text detection are researched and speced (§5.3, §5.4) but not wired
-into a job yet ("Coming soon" in the UI); Emby publishing is still phase 2. A milestone whole-branch audit (audits
-A/B/C) found 3 HIGH / 10 MED across detection, jobs and publishing, fixed across three parallel lanes; §14 has the
-dated rulings. Build runs
-on PR #241, branch `feat/markers-detection` (dev merged in); spec + slimmed evidence + plans live on the branch in
+**Status (2026-09-15).** Phase 1 (§12: store, chapters/online detection, Intro & Credits job type, Plex + Jellyfin
+publishers, per-server Edit tab, Settings section, Inspector tab, config migration, docs) is built, audited and
+lab-proven: lab matrix 18/19 (row 11 unit-tested), `pr-241` image checked on the lab, and a scale run on 715 real files
+with 0 failures (`evidence/lab/phase1-results.md`). Its findings are fixed in §5.5 rules 6–7 and a warning when an online
+source's daily budget runs out (§14, 2026-09-14/15), or moved into phase 2 (the season chapter-intro check). **Phase 2 is in progress**
+(`plan-phase2.md`; the ledger in `.superpowers/sdd/plan-phase2/progress.md` says which tasks are done): the audio
+fingerprint store, the v3 matcher port, detector plumbing, API cassettes, the accuracy harness (reproduces §5.3
+exactly), Plex version drift and the Emby Bridge plugin are on the branch; the season audio detector and the Emby
+publisher are next. Build runs on PR #241, branch `feat/markers-detection`; spec, slimmed evidence and plans live in
 `docs/design/intro-credits/`. Local-only, gitignored files stay beside them: `evidence/lab/env` (tokens),
-`evidence/lab/synth/` (webm), `evidence/online/skipdb-dump.json`, `evidence/plugins/emby-4.10/embylibs/`. **Next
-step: the lab matrix (Task 19)** — proving every server write/serve/wipe behaviour end to end on the claimed lab
-servers, per §10.3 — then the PR.
+`evidence/lab/synth/` (webm), `evidence/lab/scale_mounts.sh` and `evidence/lab/results/` (real library paths),
+`evidence/online/skipdb-dump.json`, `evidence/plugins/emby-4.10/embylibs/`.
 
 **Working rules (owner's, non-negotiable).**
 - Prove server behaviour on the **lab servers on storage** (§10.3), never on the prod Plex on `plex`. Prod Plex DB:
@@ -849,3 +850,9 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   rows (a replaced file keeps its item id). A daily sweep deletes store files of removed items (Emby reports only the
   series when a show folder is deleted). Owner decision R1: Emby always gets a decided credits start, even when the
   credits end before the file does (Emby's player then skips to the end of the file).
+- 2026-09-15 · Lab scale run F4: TheIntroDB's daily budget ran out mid-backfill (low priority stops at the reserve)
+  and 39 files were checked without it, logged only at DEBUG. Jobs now complete with a warning naming each source that
+  ran out, how many files were checked without it and when lookups resume (00:00 UTC, the limiter's day boundary); an
+  undecided file's reason notes the skipped source; Settings shows "Daily limit reached — lookups resume at …"; the log
+  line is a WARNING once per source per job. No automatic retry: nothing is stored for a skipped lookup, so the next
+  run asks again.

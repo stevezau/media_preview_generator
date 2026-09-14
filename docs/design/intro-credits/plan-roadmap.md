@@ -119,8 +119,15 @@ Each phase ends usable, tested in the lab, and owner-reviewed. A detailed plan i
 
 ### Phase 1 — Store, chapters + online sources, Plex & Jellyfin, job kind, UI (plan: `plan-phase1.md`)
 Done when: chapter- and online-covered files get correct markers on lab Plex (claimed) and both lab Jellyfins,
-survive the spec §3 wipe matrix, the full pytest + e2e suites pass, the PR image builds, and the owner has seen it
-on one real show via the side-by-side `pr-241` container on `plex`.
+survive the spec §3 wipe matrix, the full pytest + e2e suites pass, the PR image builds, and a lab scale run on real
+library folders mounted read-only shows no failures (owner, 2026-09-14: no side-by-side on `plex`; the storage lab is
+the full test bed).
+
+**Status 2026-09-15: done.** Lab matrix 18/19 pass (row 11 unit-tested), PR image `pr-241` checked on the lab, scale
+run on 715 real files (0 failed; High: intros 253 right / 2 wrong of 262, credits 467 right / 2 early of 502; far more
+right than prod Plex's own markers on the same files). Of the scale run's findings, F2, F3 and F4 are fixed, F1 moved into
+phase 2 Task 7, and F5 (a late credits start on the end card after a post-credits scene) is safe as is: it skips
+less, never story. Evidence: `evidence/lab/phase1-results.md`.
 
 ### Phase 2 — Season audio intros, Emby, reconcile, Season view, eval harness (plan: `plan-phase2.md`)
 - `audio/fingerprint.py`: `ffmpeg -ss 0 -t W -i <file> -vn -ac 2 -f chromaprint -algorithm 1 -fp_format raw -`,
