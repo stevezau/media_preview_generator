@@ -709,3 +709,143 @@ def test_get_evidence_falls_back_to_lookup_key_when_label_is_empty(store):
     c = Candidate(T.INTRO, 1_000, 2_000, Source.SERVER_MARKERS, origin="")
     store.replace_evidence(rec.id, Source.SERVER_MARKERS, [c], origin="plex-1")
     assert store.get_evidence(rec.id)[0].origin == "plex-1"
+
+
+def test_item_publish_state_matrix(store):
+    # Plex serves one marker set per item across its versions, so what we last left there is kept per server item.
+    intro = Marker(T.INTRO, 1, 5000, ("chapters",))
+    credits = Marker(T.CREDITS, 9000, 12000, ("chapters",))
+    assert store.get_item_publish_state("plex-1", "42") is None
+    assert store.published_to_item("plex-1", "42") is False
+
+    store.set_item_publish_state("plex-1", "42", None, "failed")  # the first write failed: nothing of ours known
+    row = store.get_item_publish_state("plex-1", "42")
+    assert (row.markers, row.status) == ((), "failed")
+    assert store.published_to_item("plex-1", "42") is False
+
+    store.set_item_publish_state("plex-1", "42", [credits, intro], "written")
+    row = store.get_item_publish_state("plex-1", "42")
+    assert (row.server_id, row.item_id, row.markers, row.status) == ("plex-1", "42", (intro, credits), "written")
+    assert store.published_to_item("plex-1", "42") is True
+    assert store.published_to_item("plex-2", "42") is False
+    assert store.published_to_item("plex-1", "43") is False
+
+    written_version = row.version
+    store.set_item_publish_state("plex-1", "42", [intro, credits], "written")
+    assert store.get_item_publish_state("plex-1", "42").version == written_version  # nothing changed
+
+    store.set_item_publish_state("plex-1", "42", None, "failed")  # a later failure keeps what is still there
+    row = store.get_item_publish_state("plex-1", "42")
+    assert (row.markers, row.status) == ((intro, credits), "failed") and row.version > written_version
+    assert store.published_to_item("plex-1", "42") is True
+
+    failed_version = row.version
+    store.set_item_publish_state("plex-1", "42", [], "written")
+    row = store.get_item_publish_state("plex-1", "42")
+    assert (row.markers, row.status) == ((), "written") and row.version > failed_version
+    assert store.published_to_item("plex-1", "42") is False
+
+
+def test_item_publish_state_version_follows_what_the_server_shows_not_who_decided(store):
+    # Two versions that agree on the times but were decided by different sources (or one is locked) leave the item
+    # showing the same markers; a version bump there would make each version's next run write the item again.
+    intro = Marker(T.INTRO, 1000, 5000, ("chapters",))
+    store.set_item_publish_state("plex-1", "42", [intro], "written")
+    version = store.get_item_publish_state("plex-1", "42").version
+    for same_times in (
+        Marker(T.INTRO, 1000, 5000, ("theintrodb", "chapters")),
+        Marker(T.INTRO, 1000, 5000, ("user",), locked=True),
+    ):
+        assert store.set_item_publish_state("plex-1", "42", [same_times], "written") == version
+        assert store.get_item_publish_state("plex-1", "42").version == version
+    for moved in (
+        Marker(T.INTRO, 1001, 5000, ("chapters",)),
+        Marker(T.INTRO, 1001, 5001, ("chapters",)),
+        Marker(T.CREDITS, 1001, 5001, ("chapters",)),
+    ):
+        bumped = store.set_item_publish_state("plex-1", "42", [moved], "written")
+        assert bumped == version + 1 and store.get_item_publish_state("plex-1", "42").markers == (moved,)
+        version = bumped
+    assert (
+        store.set_item_publish_state("plex-1", "42", [Marker(T.CREDITS, 1001, 5001, ("x",))], "failed") == version + 1
+    )
+
+
+def test_item_publish_state_outlives_file_changes_and_file_rows(store):
+    # The rows describe the server item, not a file version: a replaced or removed file doesn't take our markers off.
+    rec = store.upsert_file(_ident("/m/Movie/A.mkv"), duration_ms=1, season_key=None, is_movie=True)
+    intro = Marker(T.INTRO, 1, 5000, ("chapters",))
+    store.set_item_publish_state("plex-1", "42", [intro], "written")
+    before = store.get_item_publish_state("plex-1", "42")
+    store.upsert_file(_ident("/m/Movie/A.mkv", size=999), duration_ms=None, season_key=None, is_movie=True)
+    assert store.get_item_publish_state("plex-1", "42") == before
+    with store._tx() as conn:
+        conn.execute("DELETE FROM files WHERE id=?", (rec.id,))
+    assert store.get_item_publish_state("plex-1", "42") == before
+    assert store.published_to_item("plex-1", "42") is True
+
+
+def test_publish_basis_is_per_file_and_server_and_goes_with_the_file_version(store):
+    rec = store.upsert_file(_ident("/m/Movie/A.mkv"), duration_ms=1, season_key=None, is_movie=True)
+    other = store.upsert_file(_ident("/m/Movie/B.mkv"), duration_ms=1, season_key=None, is_movie=True)
+    assert store.get_publish_basis(rec.id, "plex-1") is None
+    store.set_publish_basis(rec.id, "plex-1", decided_hash="abc", item_version=3)
+    store.set_publish_basis(rec.id, "jellyfin-1", decided_hash="def", item_version=1)
+    store.set_publish_basis(other.id, "plex-1", decided_hash="ghi", item_version=3)
+    store.set_publish_basis(rec.id, "plex-1", decided_hash="abc2", item_version=4)
+    assert store.get_publish_basis(rec.id, "plex-1") == ("abc2", 4)
+    assert store.get_publish_basis(rec.id, "jellyfin-1") == ("def", 1)
+    store.upsert_file(_ident("/m/Movie/A.mkv"), duration_ms=None, season_key=None, is_movie=True)
+    assert store.get_publish_basis(rec.id, "plex-1") == ("abc2", 4)  # unchanged file
+    store.upsert_file(_ident("/m/Movie/A.mkv", size=5), duration_ms=None, season_key=None, is_movie=True)
+    assert store.get_publish_basis(rec.id, "plex-1") is None  # a replaced file is published again
+    assert store.get_publish_basis(rec.id, "jellyfin-1") is None
+    assert store.get_publish_basis(other.id, "plex-1") == ("ghi", 3)
+    with store._tx() as conn:
+        conn.execute("DELETE FROM files WHERE id=?", (other.id,))
+    assert store.get_publish_basis(other.id, "plex-1") is None
+
+
+def test_server_kind_is_kept_while_the_file_is_unchanged_and_cleared_when_it_changes(store):
+    rec = store.upsert_file(_ident(), duration_ms=1, season_key=None, is_movie=True)
+    other = store.upsert_file(_ident("/m/Other.mkv"), duration_ms=1, season_key=None, is_movie=True)
+    assert store.get_server_kind(rec.id) is None
+    store.set_server_kind(rec.id, "episode")
+    store.set_server_kind(other.id, "movie")
+    store.set_server_kind(rec.id, "unknown")
+    assert store.get_server_kind(rec.id) == "unknown"
+    store.upsert_file(_ident(), duration_ms=None, season_key=None, is_movie=True)
+    assert store.get_server_kind(rec.id) == "unknown"  # same size + mtime
+    store.upsert_file(_ident(size=999), duration_ms=None, season_key=None, is_movie=True)
+    assert store.get_server_kind(rec.id) is None  # a replaced file is confirmed again
+    assert store.get_server_kind(other.id) == "movie"
+
+
+def test_server_kind_table_is_created_on_an_existing_database(tmp_path):
+    path = str(tmp_path / "markers.db")
+    raw = sqlite3.connect(path)
+    for stmt in store_mod._SCHEMA:
+        if "server_kinds" not in stmt:
+            raw.execute(stmt)
+    raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', ?)", (str(store_mod.SCHEMA_VERSION),))
+    raw.commit()
+    raw.close()
+    s = MarkerStore(path)
+    try:
+        rec = s.upsert_file(_ident(), duration_ms=1, season_key=None, is_movie=False)
+        s.set_server_kind(rec.id, "movie")
+        assert s.get_server_kind(rec.id) == "movie"
+    finally:
+        s.close()
+
+
+def test_server_kind_goes_with_a_removed_file_row(store):
+    # SQLite reuses the highest rowid after it is deleted: a new file must not inherit the removed file's kind.
+    rec = store.upsert_file(_ident("/m/Gone.mkv"), duration_ms=1, season_key=None, is_movie=False)
+    store.set_server_kind(rec.id, "episode")
+    with store._tx() as conn:
+        conn.execute("DELETE FROM files WHERE id=?", (rec.id,))
+    assert store.get_server_kind(rec.id) is None
+    new = store.upsert_file(_ident("/m/New.mkv"), duration_ms=1, season_key=None, is_movie=True)
+    assert new.id == rec.id
+    assert store.get_server_kind(new.id) is None

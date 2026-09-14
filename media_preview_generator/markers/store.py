@@ -88,6 +88,28 @@ _SCHEMA = (
         updated_at TEXT NOT NULL,
         verified_at TEXT,
         PRIMARY KEY (file_id, server_id))""",
+    # What this app last left on a server item, whichever file published it: Plex serves one marker set per item
+    # across all its versions. Not tied to a file row, so replacing or removing a file keeps it.
+    """CREATE TABLE IF NOT EXISTS item_publish_state (
+        server_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        markers_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (server_id, item_id))""",
+    # What a file's last publish to a server was based on: its decided set and the item row version it saw.
+    """CREATE TABLE IF NOT EXISTS publish_basis (
+        file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        server_id TEXT NOT NULL,
+        decided_hash TEXT NOT NULL,
+        item_version INTEGER NOT NULL,
+        PRIMARY KEY (file_id, server_id))""",
+    # The media server's own kind for a file (movie / episode / unknown), so it isn't asked again every run.
+    """CREATE TABLE IF NOT EXISTS server_kinds (
+        file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        confirmed_at TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS source_usage (
         source TEXT NOT NULL,
         day TEXT NOT NULL,
@@ -144,6 +166,18 @@ class DecisionRow:
     proposed_end_ms: int | None
     settings_fingerprint: str
     decided_at: str
+
+
+@dataclass(frozen=True)
+class ItemPublishStateRow:
+    """What this app last left on one server item (from any file)."""
+
+    server_id: str
+    item_id: str
+    markers: tuple[Marker, ...]
+    status: str
+    version: int
+    updated_at: str
 
 
 @dataclass(frozen=True)
@@ -324,7 +358,7 @@ class MarkerStore:
                 file_id, created = row["id"], False
                 changed = (row["size"], row["mtime_ns"]) != (identity.size, identity.mtime_ns)
                 if changed:
-                    for table in ("evidence", "fingerprints", "decisions"):
+                    for table in ("evidence", "fingerprints", "decisions", "server_kinds", "publish_basis"):
                         conn.execute(f"DELETE FROM {table} WHERE file_id=?", (file_id,))
                     conn.execute("DELETE FROM markers WHERE file_id=? AND locked=0", (file_id,))
                     conn.execute(
@@ -571,9 +605,7 @@ class MarkerStore:
                 verified_at = prev["verified_at"] if prev else None
             else:
                 markers_hash = self.markers_hash(markers)
-                markers_json = json.dumps(
-                    [[m.type.value, m.start_ms, m.end_ms, list(m.decided_by), m.locked] for m in markers]
-                )
+                markers_json = self._markers_to_json(markers)
                 verified_at = now if verified else None
             conn.execute(
                 "INSERT OR REPLACE INTO publish_state (file_id, server_id, item_id, markers_hash, markers_json, status, "
@@ -582,11 +614,23 @@ class MarkerStore:
             )
 
     @staticmethod
-    def _publish_row(r: sqlite3.Row) -> PublishStateRow:
-        markers = tuple(
+    def _markers_to_json(markers: Iterable[Marker]) -> str:
+        return json.dumps([[m.type.value, m.start_ms, m.end_ms, list(m.decided_by), m.locked] for m in markers])
+
+    @staticmethod
+    def _shown(markers_json: str) -> list[tuple[MarkerType, int, int]]:
+        return [(m.type, m.start_ms, m.end_ms) for m in MarkerStore._markers_from_json(markers_json)]
+
+    @staticmethod
+    def _markers_from_json(text: str | None) -> tuple[Marker, ...]:
+        return tuple(
             Marker(MarkerType(t), start, end, tuple(by), bool(locked))
-            for t, start, end, by, locked in json.loads(r["markers_json"] or "[]")
+            for t, start, end, by, locked in json.loads(text or "[]")
         )
+
+    @staticmethod
+    def _publish_row(r: sqlite3.Row) -> PublishStateRow:
+        markers = MarkerStore._markers_from_json(r["markers_json"])
         return PublishStateRow(
             r["server_id"],
             r["item_id"],
@@ -613,6 +657,115 @@ class MarkerStore:
                 "SELECT * FROM publish_state WHERE file_id=? ORDER BY server_id", (file_id,)
             ).fetchall()
         return [self._publish_row(r) for r in rows]
+
+    def set_server_kind(self, file_id: int, kind: str) -> None:
+        """Remember the kind an owning server reported for a file (cleared when the file changes).
+
+        Args:
+            file_id: The file.
+            kind: ``movie``, ``episode`` or ``unknown``.
+        """
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO server_kinds (file_id, kind, confirmed_at) VALUES (?,?,?)",
+                (file_id, kind, self._now()),
+            )
+
+    def get_server_kind(self, file_id: int) -> str | None:
+        """The kind a server reported for this version of the file, or None when none has."""
+        with self._lock:
+            row = self._conn.execute("SELECT kind FROM server_kinds WHERE file_id=?", (file_id,)).fetchone()
+        return row["kind"] if row else None
+
+    def get_item_publish_state(self, server_id: str, item_id: str) -> ItemPublishStateRow | None:
+        """What this app last left on a server item, or None when it never published there."""
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT * FROM item_publish_state WHERE server_id=? AND item_id=?", (server_id, item_id)
+            ).fetchone()
+        if r is None:
+            return None
+        return ItemPublishStateRow(
+            r["server_id"],
+            r["item_id"],
+            self._markers_from_json(r["markers_json"]),
+            r["status"],
+            r["version"],
+            r["updated_at"],
+        )
+
+    def set_item_publish_state(self, server_id: str, item_id: str, markers: list[Marker] | None, status: str) -> int:
+        """Record what is ours on a server item after a publish attempt.
+
+        ``version`` goes up only when the status or what the server shows changes: markers compare by (type, start,
+        end), so versions that agree on the times but were decided by different sources don't bump it for each other.
+        The version doesn't stop two versions that show different times from rewriting the item in turn; the Plex
+        publisher keeps the previous times when every version agrees with them.
+
+        Args:
+            server_id: The server.
+            item_id: The server's item id.
+            markers: Ours on the item now (sorted by start when stored); None keeps the markers recorded before (a
+                failed write), or none for a new row.
+            status: ``written`` or ``failed``.
+
+        Returns:
+            The row's version.
+        """
+        now = self._now()
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT markers_json, status, version FROM item_publish_state WHERE server_id=? AND item_id=?",
+                (server_id, item_id),
+            ).fetchone()
+            if markers is None:
+                markers_json = row["markers_json"] if row else "[]"
+            else:
+                markers_json = self._markers_to_json(sorted(markers, key=lambda m: (m.start_ms, m.type.value)))
+            if (
+                row is not None
+                and row["status"] == status
+                and self._shown(row["markers_json"]) == self._shown(markers_json)
+            ):
+                return int(row["version"])
+            version = int(row["version"]) + 1 if row else 1
+            conn.execute(
+                "INSERT OR REPLACE INTO item_publish_state (server_id, item_id, markers_json, status, version, "
+                "updated_at) VALUES (?,?,?,?,?,?)",
+                (server_id, item_id, markers_json, status, version, now),
+            )
+        return version
+
+    def published_to_item(self, server_id: str, item_id: str) -> bool:
+        """Whether our markers are (or may still be) on this server item, from any file's publish.
+
+        Plex shows one marker set per item across all its versions, and its markers can't be told apart from ours, so
+        a version that was never published itself must still not read them back as a second opinion.
+        """
+        row = self.get_item_publish_state(server_id, item_id)
+        return bool(row and row.markers)
+
+    def set_publish_basis(self, file_id: int, server_id: str, *, decided_hash: str, item_version: int) -> None:
+        """Remember what a file's publish to a server was based on (cleared when the file changes)."""
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO publish_basis (file_id, server_id, decided_hash, item_version) VALUES (?,?,?,?)",
+                (file_id, server_id, decided_hash, item_version),
+            )
+
+    def clear_publish_basis(self, file_id: int, server_id: str) -> None:
+        """Forget the basis after a publish attempt that didn't write, so the next run can't skip."""
+        with self._tx() as conn:
+            conn.execute("DELETE FROM publish_basis WHERE file_id=? AND server_id=?", (file_id, server_id))
+
+    def get_publish_basis(self, file_id: int, server_id: str) -> tuple[str, int] | None:
+        """``(decided_hash, item_version)`` of the file's last publish to the server, or None."""
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT decided_hash, item_version FROM publish_basis WHERE file_id=? AND server_id=?",
+                (file_id, server_id),
+            ).fetchone()
+        return (r["decided_hash"], int(r["item_version"])) if r else None
 
     def record_source_usage(
         self, source_id: str, *, day: str, used: int | None, limit: int | None, remaining: int | None

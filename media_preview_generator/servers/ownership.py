@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import unicodedata
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -195,7 +196,11 @@ def server_owns_path(
     """
     if not server.enabled:
         return None
+    return next(_library_matches(canonical_path, server, _enabled_libraries(server)), None)
 
+
+def _library_matches(canonical_path: str, server: ServerConfig, libraries: list[Library]) -> Iterator[OwnershipMatch]:
+    """Yield a match for each of ``libraries`` (in order) whose mapped folder covers ``canonical_path``."""
     # NFC-normalise the canonical path *before* splitting; the basename
     # may be the bit that differs (NFD vs NFC) when the parent dir is
     # ASCII but the filename has accented characters.
@@ -207,24 +212,49 @@ def server_owns_path(
     canonical_path = unicodedata.normalize("NFC", canonical_path).replace("\\", "/")
     norm_path = _normalize(os.path.dirname(canonical_path)) + os.path.basename(canonical_path)
 
-    for library in _enabled_libraries(server):
+    for library in libraries:
         for remote_path in library.remote_paths:
             # An empty/whitespace remote path would normalise to "/" and
             # match every absolute file path; reject those explicitly.
             if not (remote_path or "").strip():
                 continue
-            for local_candidate in apply_path_mappings(remote_path, server.path_mappings):
-                if not (local_candidate or "").strip():
-                    continue
-                local_prefix = _normalize(local_candidate)
-                if norm_path.startswith(local_prefix):
-                    return OwnershipMatch(
-                        server_id=server.id,
-                        library_id=library.id,
-                        library_name=library.name,
-                        local_prefix=local_candidate,
-                    )
-    return None
+            matched = next(
+                (
+                    local_candidate
+                    for local_candidate in apply_path_mappings(remote_path, server.path_mappings)
+                    if (local_candidate or "").strip() and norm_path.startswith(_normalize(local_candidate))
+                ),
+                None,
+            )
+            if matched is not None:
+                yield OwnershipMatch(
+                    server_id=server.id,
+                    library_id=library.id,
+                    library_name=library.name,
+                    local_prefix=matched,
+                )
+                break
+
+
+def find_library_matches(canonical_path: str, servers: list[ServerConfig]) -> list[OwnershipMatch]:
+    """Every library of every enabled server whose folder covers ``canonical_path``.
+
+    Unlike :func:`find_owning_servers` this ignores the preview opt-in (``Library.enabled``) and keeps every
+    matching library: Intro & Credits picks its own libraries per server (``markers.library_ids``), and a file in
+    overlapping libraries ("Movies" + "4K Movies") belongs to each of them.
+
+    Args:
+        canonical_path: Local path of the file.
+        servers: Server configs in registry order.
+
+    Returns:
+        Matches ordered by server, then by library.
+    """
+    matches: list[OwnershipMatch] = []
+    for server in servers:
+        if server.enabled:
+            matches.extend(_library_matches(canonical_path, server, list(server.libraries)))
+    return matches
 
 
 def find_owning_servers(
