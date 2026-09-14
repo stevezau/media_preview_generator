@@ -296,10 +296,11 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    other edge takes their safer value if it is safer (later intro/recap start, earlier credits/preview end).
 4. Otherwise accept when two independent sources agree: intro/recap **end** within 5 s; credits/preview **start**
    within 10 s. Every maximal set of mutually agreeing candidates is considered (a sliding window over the compared
-   times). Only candidates that agree with a different independent source may supply times: the agreed edge takes
-   the safer value across the agreeing non-server candidates (earliest intro/recap end, latest credits/preview start;
-   source order only breaks ties); the other edge takes the safer value across them (latest intro/recap start,
-   earliest credits/preview end). If the composed marker fails sanity → "Needs review".
+   times). Only candidates that agree with a different independent source may supply times: the agreed edge comes
+   from the first of them in source order; the other edge takes the safer value across them (latest intro/recap
+   start, earliest credits/preview end). If the composed marker fails sanity → "Needs review". (Taking the safest
+   agreed edge instead was tried in the phase-1 audit and rejected: it hid a contradiction and published a wrong
+   Daredevil S03E02 intro.)
 5. If two groups of agreeing sources would publish times that don't agree with each other → "Needs review". Before
    anything is published (chapters, agreement or "Medium"), any two agreeing candidates from different independent
    sources that are both outside the tolerance of the published time send it to "Needs review" — a third source that
@@ -358,7 +359,7 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
 2. **Owners.** `find_owning_servers(canonical_path)` → keep owners with `markers.enabled` and the item's library in
    `library_ids`. No enabled owner → nothing is detected.
 3. **Ensure markers for the file.** Fresh `markers` for (size, mtime) → reuse ("detected once, reused"). Otherwise
-   gather evidence in §1 order, stop early when §5.5 is satisfied by more than chapters alone (a chapter decision keeps asking so rule 3 can veto it), decide, store.
+   gather evidence in §1 order, stop early when §5.5 is satisfied by more than chapters alone (a chapter decision keeps asking so rule 3 can veto it), decide, store. Stored chapter and online evidence carries its rules or parser version; a file whose stored version is older is probed or asked again on the next run.
 4. **Season step.** Intros need siblings: fingerprint missing episodes in the season folder, re-decide episodes without
    an intro; if the season has only one episode, use the previous season's cached fingerprints (§5.3).
 5. **Publish.** For each enabled owner, its `MarkerPublisher` writes the decided set; unchanged `markers_hash` → skip.
@@ -721,6 +722,7 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   episodes; Plex's own markers were right); a chapter-only decision no longer ends the evidence search, so rule 3's
   veto runs in normal jobs (TheIntroDB skipped at Low priority when only confirming chapters); at Medium only chapters
   or SkipDB exact/shifted may decide alone (Demon Slayer S03E05 Blu-ray: a single IntroDB answer skipped 81 s of cold
-  open); server markers from importer plugins or another cut of the same item aren't independent evidence; the
-  agreed edge is the safer agreeing value; chapter rules and online parsers carry versions so stored evidence is
-  re-derived after a rules change. Evidence scripts: `evidence/audit-phase1/`.
+  open); server markers from importer plugins or another cut of the same item aren't independent evidence; chapter
+  rules and online parsers carry versions so stored evidence is re-derived after a rules change. Cost measured on the
+  43 verified online cases: with TheIntroDB on, Medium's correct credits drop from 22 to 1 (precision chosen over
+  coverage). Evidence scripts: `evidence/audit-phase1/`.
