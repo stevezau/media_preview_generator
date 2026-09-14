@@ -410,6 +410,7 @@ function updateScheduleList() {
         // the name so users can tell them apart from full-library scans.
         const cfg = schedule.config || {};
         const isRecentlyAdded = cfg.job_type === 'recently_added';
+        const isMarkers = cfg.job_type === 'intro_credits';
 
         // A null priority means "no pin". Rendering it as Normal would lie
         // about a Recently Added sweep, which inherits the global Incoming
@@ -418,14 +419,18 @@ function updateScheduleList() {
         const priIsDefault = rawPri === null || rawPri === undefined;
         const schedPriLabel = priIsDefault ? 'Default' : (PRIORITY_LABELS[rawPri] || 'Normal');
         const schedPriBadge = priIsDefault ? 'bg-secondary' : (PRIORITY_BADGE_CLASS[rawPri] || 'bg-primary');
-        const schedPriTitle = priIsDefault
-            ? (isRecentlyAdded
-                ? 'Follows Settings → Processing Options → Incoming job priority'
-                : 'Full-library scans run at Normal unless pinned')
-            : '';
-        const typeBadge = isRecentlyAdded
-            ? ' <span class="badge bg-primary bg-opacity-25 text-primary" title="Scans items added in the last ' + (cfg.lookback_hours || 1) + 'h"><i class="bi bi-arrow-repeat me-1"></i>Recently Added</span>'
-            : '';
+        let schedPriTitle = '';
+        if (priIsDefault) {
+            if (isMarkers) schedPriTitle = 'Intro & Credits checks run at Low unless pinned';
+            else if (isRecentlyAdded) schedPriTitle = 'Follows Settings → Processing Options → Incoming job priority';
+            else schedPriTitle = 'Full-library scans run at Normal unless pinned';
+        }
+        let typeBadge = '';
+        if (isRecentlyAdded) {
+            typeBadge = ' <span class="badge bg-primary bg-opacity-25 text-primary" title="Scans items added in the last ' + (cfg.lookback_hours || 1) + 'h"><i class="bi bi-arrow-repeat me-1"></i>Recently Added</span>';
+        } else if (isMarkers) {
+            typeBadge = ' <span class="badge text-bg-dark schedule-kind-badge" title="Checks the libraries for intro and credits markers">Intro &amp; Credits</span>';
+        }
 
         // D20 — show the optional stop-time inline next to the cron
         // summary so users can see at a glance which schedules pause

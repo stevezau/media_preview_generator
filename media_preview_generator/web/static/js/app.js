@@ -678,7 +678,10 @@ async function loadLibraries() {
     }
 }
 
-async function loadJobs() {
+// ``{force: true}`` re-renders even while the pointer is over the queue: after the user's own Pause/Resume click has
+// landed, the hover guard would otherwise keep the row stale until the pointer moves away.
+async function loadJobs(options) {
+    const force = !!(options && options.force === true);
     try {
         const data = await apiGet(`/api/jobs?page=${jobPage}&per_page=${jobPerPage}`);
         jobs = data.jobs || [];
@@ -689,7 +692,7 @@ async function loadJobs() {
         }
         const wasFirstLoad = !jobsLoadedOnce;
         jobsLoadedOnce = true;
-        updateJobQueue();
+        updateJobQueue(force);
         renderJobPagination();
 
         // Deep-link auto-open (Tier 3.15 of job-modal rebuild): if the
@@ -706,8 +709,9 @@ async function loadJobs() {
         // Job Queue table — surfacing them here lets the panel count
         // exceed ``max_concurrent_jobs``, which contradicts the cap
         // the user just configured.
-        const activeJobs = jobs.filter(j => j.status === 'running');
-        updateActiveJobs(activeJobs);
+        // An Intro & Credits job paused on its own is running but has handed its slot back, so it isn't active.
+        const activeJobs = jobs.filter(j => j.status === 'running' && _markersPauseState(j) !== 'own');
+        updateActiveJobs(activeJobs, force);
 
         // Replay any progress events that arrived before the DOM was ready.
         for (const jid of Object.keys(_pendingProgress)) {
@@ -820,8 +824,11 @@ async function loadJobStats() {
 async function loadProcessingState() {
     try {
         const data = await apiGet('/api/processing/state');
+        const changed = processingPaused !== !!data.paused;
         processingPaused = !!data.paused;
         renderGlobalPauseResume();
+        // Running Intro & Credits jobs show as held while Pause all is on; the first jobs render may predate this.
+        if (changed && jobsLoadedOnce) loadJobs();
     } catch (error) {
         console.error('Failed to load processing state:', error);
     }
@@ -1528,7 +1535,73 @@ const STATUS_META = {
     skipped_excluded:       { label: 'Excluded',      cls: 'bg-secondary', tip: 'Path matched an exclusion rule' },
     skipped_invalid_hash:   { label: 'Invalid Hash',  cls: 'bg-warning text-dark', tip: 'Could not compute the path hash' },
     unresolved_plex:        { label: 'Not In Plex',   cls: 'bg-danger', tip: 'Could not find this item in Plex after lookup' },
+
+    // Intro & Credits — file outcomes (markers.outcomes.FileOutcome) and per-server row statuses (ServerStatus).
+    // markers_up_to_date / _none / _skipped / _waiting are both, with one label each.
+    markers_published:      { label: 'Markers written', cls: 'bg-success', tip: 'Markers were sent to at least one server' },
+    markers_written:        { label: 'Markers written', cls: 'bg-success', tip: 'Markers were written to this server' },
+    markers_up_to_date:     { label: 'Up to date', cls: 'bg-secondary', tip: 'The server already shows these markers' },
+    markers_needs_review:   { label: 'Needs review', cls: 'bg-warning text-dark', tip: 'The sources don\'t agree yet, so nothing was sent' },
+    markers_none:           { label: 'No markers found', cls: 'bg-secondary', tip: 'No source found an intro or credits for this file' },
+    markers_no_owners:      { label: 'No server with Intro & Credits on', cls: 'bg-secondary', tip: 'No server with Intro & Credits turned on has this file' },
+    markers_skipped:        { label: 'Skipped', cls: 'bg-secondary', tip: 'The server can\'t take markers right now (for example, a plugin is missing)' },
+    markers_waiting:        { label: 'Waiting', cls: 'bg-info text-dark', tip: 'The server hasn\'t added the file yet, or the item\'s versions don\'t agree yet' },
 };
+
+const JOB_KIND_INTRO_CREDITS = 'intro_credits';
+// Waiting rows whose server hasn't indexed the file yet (markers.outcomes.NOT_IN_LIBRARY); a "Retry: …" job follows.
+const MARKERS_NOT_IN_LIBRARY = 'not_in_library';
+const MARKERS_NOT_IN_LIBRARY_LABEL = 'Not in the server\'s library yet — will retry';
+
+function _isMarkersJob(job) {
+    return !!job && job.kind === JOB_KIND_INTRO_CREDITS;
+}
+window._isMarkersJob = _isMarkersJob;
+
+// 'own' = paused on its own (it has handed its job slot back), 'all' = held by Pause all (keeps its slot), '' = neither.
+// Pause all doesn't set an Intro & Credits job's own flag, so the global flag is read here; a job paused before a
+// restart comes back running + paused without a slot, which reads as 'own' too.
+function _markersPauseState(job) {
+    if (!_isMarkersJob(job) || job.status !== 'running') return '';
+    if (job.paused) return 'own';
+    return processingPaused ? 'all' : '';
+}
+
+// Queue titles from the backend start with "Intro & Credits: " or "Intro & Credits · "; the kind badge says it already.
+function _markersDisplayName(name) {
+    const match = /^(Retry: )?Intro & Credits(?::| ·) (.+)$/.exec(name || '');
+    return match ? (match[1] || '') + match[2] : (name || '');
+}
+
+// A webhook's Intro & Credits job is listed directly under the preview job it follows when that job is on this page.
+function _orderFollowUps(list) {
+    const ids = new Set(list.map(function (j) { return String(j.id); }));
+    const leaderOf = function (job) {
+        const lead = _isMarkersJob(job) && job.config ? String(job.config.follows_job_id || '') : '';
+        return lead && lead !== String(job.id) && ids.has(lead) ? lead : '';
+    };
+    const followers = new Map();
+    for (const job of list) {
+        const lead = leaderOf(job);
+        if (lead) {
+            if (!followers.has(lead)) followers.set(lead, []);
+            followers.get(lead).push(job);
+        }
+    }
+    const ordered = [];
+    const placed = new Set();
+    const emit = function (job) {
+        const id = String(job.id);
+        if (placed.has(id)) return;
+        placed.add(id);
+        ordered.push(job);
+        (followers.get(id) || []).forEach(emit);
+    };
+    list.forEach(function (job) { if (!leaderOf(job)) emit(job); });
+    // Followers whose leaders follow each other (never expected) still render.
+    list.forEach(emit);
+    return ordered;
+}
 window.STATUS_META = STATUS_META;
 
 function _statusMeta(key) {
@@ -1564,7 +1637,7 @@ function _renderJobFileIssues(outcome) {
     // intentionally excluded here: they're shown per-server now.
     if (!outcome || typeof outcome !== 'object') return '';
     const keys = ['skipped_file_not_found', 'no_media_parts', 'skipped_excluded',
-                  'skipped_invalid_hash', 'skipped_not_indexed', 'failed'];
+                  'skipped_invalid_hash', 'skipped_not_indexed', 'markers_no_owners', 'failed'];
     return keys.map(function (k) {
         const n = outcome[k];
         if (!n || n <= 0) return '';
@@ -1589,6 +1662,7 @@ function _renderPublishersBlock(job) {
     const outcome = (job && job.progress && job.progress.outcome) || (job && job.outcome) || null;
     const fileIssues = _renderJobFileIssues(outcome);
     if (!rows.length && !fileIssues) return '';
+    const isMarkers = _isMarkersJob(job);
     const lines = rows.map(function (entry) {
         const stype = (entry.server_type || '').toLowerCase();
         const logo = _vendorLogo(stype, 12) || '';
@@ -1596,7 +1670,23 @@ function _renderPublishersBlock(job) {
         const counts = (entry && typeof entry.counts === 'object' && entry.counts) ? entry.counts : {};
         const fs = (entry && typeof entry.frame_sources === 'object' && entry.frame_sources) ? entry.frame_sources : null;
         const badgeSpecs = [];
-        if (fs) {
+        if (isMarkers) {
+            // Intro & Credits: no frame provenance; per-server marker statuses in a fixed order.
+            const order = ['markers_written', 'markers_up_to_date', 'markers_needs_review', 'markers_waiting',
+                           'markers_skipped', 'markers_none', 'failed'];
+            const present = Object.keys(counts).filter(function (k) { return counts[k] > 0; });
+            order.concat(present.filter(function (k) { return order.indexOf(k) === -1; }))
+                .forEach(function (status) {
+                    if (!(counts[status] > 0)) return;
+                    const m = _statusMeta(status);
+                    badgeSpecs.push({label: m.label, cls: m.cls, count: counts[status], tip: m.tip});
+                });
+            // A server skipped for one shared reason (plugin missing…) says why on the same badge.
+            const skipMessage = entry.messages && entry.messages.markers_skipped;
+            if (present.length === 1 && present[0] === 'markers_skipped' && typeof skipMessage === 'string' && skipMessage) {
+                badgeSpecs[0].suffix = skipMessage;
+            }
+        } else if (fs) {
             // Per-server breakdown by frame provenance: each server shows what
             // it actually did — freshly Generated (extracted), Reused (frames
             // cached from a sibling server, no second FFmpeg), or Already
@@ -1620,7 +1710,8 @@ function _renderPublishersBlock(job) {
         if (!badgeSpecs.length) return '';
         const badges = badgeSpecs.map(function (b) {
             const tip = b.tip ? ` title="${escapeHtmlAttr(b.tip)}"` : '';
-            return `<span class="badge ${b.cls}"${tip}>${escapeHtmlText(b.label)} × ${b.count}</span>`;
+            const suffix = b.suffix ? ` · ${escapeHtmlText(b.suffix)}` : '';
+            return `<span class="badge ${b.cls}"${tip}>${escapeHtmlText(b.label)} × ${b.count}${suffix}</span>`;
         }).join(' ');
         // Stack server-name pill, an arrow separator, and the per-status
         // badges with explicit gap-2 spacing so the visual hierarchy is
@@ -1724,9 +1815,39 @@ function _renderRetryChip(job) {
         + '</span>';
 }
 
+// "Retry: …" Intro & Credits jobs re-check files a server hadn't added to its library yet. Unlike preview retry
+// chains they are ordinary jobs, so the chip stays after they finish.
+function _renderMarkersRetryChip(job) {
+    const attempt = job.config && Number(job.config.retry_attempt);
+    if (!attempt || attempt < 1) return '';
+    return ' <span class="badge bg-warning text-dark markers-retry-chip" '
+        + 'title="Checks these files again: a server hadn\'t added them to its library yet">'
+        + '<i class="bi bi-arrow-clockwise me-1"></i>Retry ' + attempt + '</span>';
+}
+
+function _markersPauseNote(state) {
+    if (state === 'own') return 'Paused on its own and not using a job slot, so other jobs can run. Resume it to continue.';
+    if (state === 'all') return 'Held by Pause all processing. It continues when processing resumes.';
+    return '';
+}
+
+// Intro & Credits jobs pause on their own; preview jobs only have the global Pause Processing button.
+function _markersPauseButton(job) {
+    if (!_isMarkersJob(job) || job.status !== 'running') return '';
+    const jid = escapeHtml(job.id);
+    if (job.paused) {
+        return `<button class="btn btn-outline-success" onclick="resumeJob('${jid}')" title="Resume this job" aria-label="Resume job">
+                    <i class="bi bi-play-fill"></i>
+                </button>`;
+    }
+    return `<button class="btn btn-outline-warning" onclick="pauseJob('${jid}')" title="Pause this job" aria-label="Pause job">
+                    <i class="bi bi-pause-fill"></i>
+                </button>`;
+}
+
 let _jobQueueUpdatePending = false;
 
-function updateJobQueue() {
+function updateJobQueue(force) {
     const tbody = document.getElementById('jobQueue');
     // The Job Queue table only exists on the dashboard. SocketIO connect/job
     // events fire on every page, so bail when the target DOM is absent —
@@ -1750,7 +1871,7 @@ function updateJobQueue() {
     // pseudo-class is queryable via :is(...:hover) on tbody.matches);
     // we use a `querySelector(':hover')` that walks any descendant
     // currently hovered. Safe because we'll rebuild on the next tick.
-    if (tbody.matches(':hover') || tbody.querySelector(':hover')) {
+    if (force !== true && (tbody.matches(':hover') || tbody.querySelector(':hover'))) {
         _jobQueueUpdatePending = true;
         return;
     }
@@ -1788,8 +1909,13 @@ function updateJobQueue() {
         }
     }
 
-    for (const job of jobs) {
-        const statusBadge = getStatusBadge(job.status, job.paused, job.error, job.progress && job.progress.outcome);
+    for (const job of _orderFollowUps(jobs)) {
+        const isMarkers = _isMarkersJob(job);
+        const markersPause = _markersPauseState(job);
+        const statusBadge = getStatusBadge(
+            job.status, job.paused || markersPause === 'all', job.error, job.progress && job.progress.outcome,
+            _markersPauseNote(markersPause),
+        );
         const progress = job.progress.percent.toFixed(1);
         const created = formatRelativeTime(job.created_at);
         let actionButtons = '';
@@ -1839,7 +1965,8 @@ function updateJobQueue() {
                     <i class="bi bi-lightning-fill"></i>
                 </button>`
                 : '';
-            const retryNowBtn = isWaitingRetryRow
+            // Retry now drives the preview retry chains; an Intro & Credits retry job just waits out its delay.
+            const retryNowBtn = isWaitingRetryRow && !isMarkers
                 ? `<button class="btn btn-outline-warning" onclick="retryNowFromRow('${escapeHtml(job.id)}')" title="Skip the retry backoff — attempt now" aria-label="Retry now">
                     <i class="bi bi-arrow-clockwise"></i>
                 </button>`
@@ -1848,7 +1975,7 @@ function updateJobQueue() {
                 <button class="btn btn-outline-secondary" onclick="showLogsModal('${escapeHtml(job.id)}')" title="View logs" aria-label="View logs">
                     <i class="bi bi-file-text"></i>
                 </button>
-                ${fireWebhookBtn}${retryNowBtn}
+                ${fireWebhookBtn}${retryNowBtn}${_markersPauseButton(job)}
                 <button class="btn btn-outline-danger" onclick="cancelJob('${escapeHtml(job.id)}')" title="Cancel" aria-label="Cancel job">
                     <i class="bi bi-x-lg"></i>
                 </button>
@@ -1889,7 +2016,7 @@ function updateJobQueue() {
                    <i class="bi ${isFilesExpanded ? 'bi-chevron-up' : 'bi-chevron-down'}"></i>
                  </button>`
             : '';
-        const retryLabel = _renderRetryChip(job);
+        const retryLabel = isMarkers ? _renderMarkersRetryChip(job) : _renderRetryChip(job);
         const priorityCell = renderPriorityCell(job);
         const scheduledAt = job.config && job.config.scheduled_at;
         // Two paths land in retry-wait: pending jobs awaiting their first
@@ -1914,7 +2041,7 @@ function updateJobQueue() {
             progressCell = `<span class="text-warning small" data-webhook-fire-at="${escapeHtml(webhookFireAt)}"><i class="bi bi-hourglass-split me-1"></i>${label}</span>`;
         } else if (isWaitingRetryRow) {
             const remaining = Math.max(0, Math.ceil((new Date(countdownTarget).getTime() - Date.now()) / 1000));
-            const label = remaining > 0 ? `Retry starting in ${remaining}s` : 'Starting...';
+            const label = remaining > 0 ? `Retry starting ${_formatCountdown(remaining)}` : 'Starting...';
             progressCell = `<span class="text-warning small" data-scheduled-at="${escapeHtml(countdownTarget)}"><i class="bi bi-hourglass-split me-1"></i>${label}</span>`;
         } else {
             // Color the bar by status — blue (primary) is reserved for
@@ -1922,24 +2049,40 @@ function updateJobQueue() {
             // colour so the bar reinforces the status pill rather than
             // contradicting it (a 100% blue bar next to a green
             // "Completed" pill was confusing the eye).
-            const barClass = ({
+            // A paused Intro & Credits job does no work, so its bar doesn't animate.
+            const barClass = markersPause ? 'bg-warning' : (({
                 completed: 'bg-success',
                 failed: 'bg-danger',
                 cancelled: 'bg-secondary',
                 running: 'progress-bar-striped progress-bar-animated',
                 pending: 'bg-secondary',
-            })[job.status] || '';
+            })[job.status] || '');
             progressCell = `<div class="progress" data-status="${escapeHtml(job.status)}" style="height: 20px;">
                         <div class="progress-bar ${barClass}" role="progressbar"
                              style="width: ${progress}%">${progress}%</div>
                     </div>`;
         }
+        const followsId = isMarkers && job.config && job.config.follows_job_id
+            && jobs.some(function (j) { return String(j.id) === String(job.config.follows_job_id); })
+            ? String(job.config.follows_job_id)
+            : '';
+        const nameHtml = isMarkers
+            ? (followsId ? '<span class="text-muted job-follow-arrow" aria-hidden="true">↳</span>' : '')
+                + '<span class="badge text-bg-dark me-1 job-kind-badge">Intro &amp; Credits</span>'
+                + `<span class="fw-medium">${escapeHtml(_markersDisplayName(job.library_name)) || 'All Libraries'}</span>`
+                + (followsId
+                    ? `<span class="badge border text-body-secondary fw-normal job-follows" title="Runs after preview job ${escapeHtmlAttr(followsId.substring(0, 8))} finishes">follows ${escapeHtml(followsId.substring(0, 8))}</span>`
+                    : '')
+            : `<span class="fw-medium">${escapeHtml(job.library_name) || 'All Libraries'}</span>`;
+        const nameTitle = isMarkers && !libraryTitle && job.library_name
+            ? ` title="${escapeHtmlAttr(job.library_name)}"`
+            : libraryTitle;
         html += `
-            <tr id="job-row-${escapeHtml(job.id)}" class="job-row">
+            <tr id="job-row-${escapeHtml(job.id)}" class="job-row${followsId ? ' job-row-follow-up' : ''}">
                 <td class="d-none d-lg-table-cell text-muted small font-monospace align-middle"><code class="bg-transparent p-0">${escapeHtml(job.id.substring(0, 8))}</code></td>
-                <td class="align-middle"${libraryTitle}>
+                <td class="align-middle${followsId ? ' ps-4' : ''}"${nameTitle}>
                     <div class="d-flex align-items-center flex-wrap gap-2">
-                        <span class="fw-medium">${escapeHtml(job.library_name) || 'All Libraries'}</span>
+                        ${nameHtml}
                         ${_serverBadge(job)}${retryLabel}${filesToggleBtn}
                     </div>
                 </td>
@@ -2066,7 +2209,7 @@ function changeJobPerPage(value) {
     loadJobs();
 }
 
-function updateActiveJobs(runningJobs) {
+function updateActiveJobs(runningJobs, force) {
     const container = document.getElementById('activeJobsContainer');
     const countBadge = document.getElementById('activeJobsCount');
 
@@ -2077,7 +2220,7 @@ function updateActiveJobs(runningJobs) {
     // mousedown and mouseup — ate the click entirely. The hover
     // check defers the rebuild until the cursor moves out; pending
     // updates land on the next tick.
-    if (container && (container.matches(':hover') || container.querySelector(':hover'))) {
+    if (force !== true && container && (container.matches(':hover') || container.querySelector(':hover'))) {
         return;
     }
 
@@ -2105,16 +2248,20 @@ function updateActiveJobs(runningJobs) {
     let html = '';
     for (const job of runningJobs) {
         const jid = escapeHtml(job.id);
-        const isPaused = !!job.paused;
+        const markersPause = _markersPauseState(job);
+        const isPaused = !!job.paused || markersPause === 'all';
         const retryEta = job.progress && job.progress.retry_eta;
         const retryWaitTotal = job.progress && job.progress.retry_wait_total;
         // Worker has picked the job up but is sleeping out the retry
         // backoff — render this as its own state, not as "Running 0%."
         const isRetryWaiting = !isPaused && !!retryEta && new Date(retryEta).getTime() > Date.now() - 1500;
         const retryChip = _renderRetryChip(job);
+        const retryAttempt = (job.config && job.config.retry_attempt) || 0;
+        const maxRetries = job.config && job.config.max_retries;
         let statusBadge;
         if (isPaused) {
-            statusBadge = '<span class="badge bg-warning text-dark">Paused</span>';
+            const note = _markersPauseNote(markersPause);
+            statusBadge = `<span class="badge bg-warning text-dark"${note ? ` title="${escapeHtmlAttr(note)}"` : ''}>Paused</span>`;
         } else if (isRetryWaiting) {
             statusBadge = '<span class="badge bg-warning text-dark"><i class="bi bi-hourglass-split me-1"></i>Waiting to retry</span>';
         } else {
@@ -2168,6 +2315,11 @@ function updateActiveJobs(runningJobs) {
         if (isRetryWaiting && job.library_name && job.library_name.startsWith('Retry: ')) {
             libraryDisplay = escapeHtml(job.library_name.slice('Retry: '.length));
         }
+        if (_isMarkersJob(job)) {
+            libraryDisplay = '<span class="badge text-bg-dark me-1 job-kind-badge">Intro &amp; Credits</span>'
+                + (escapeHtml(_markersDisplayName(job.library_name)) || 'All Libraries')
+                + _renderMarkersRetryChip(job);
+        }
 
         let progressBlock;
         if (isRetryWaiting) {
@@ -2180,7 +2332,7 @@ function updateActiveJobs(runningJobs) {
                 <div class="progress-bar bg-warning text-dark progress-bar-striped progress-bar-animated"
                      role="progressbar" style="width: ${fillPct}%"
                      id="activeJobProgress-${jid}">
-                    <span class="retry-countdown-label">Next attempt in ${remaining}s</span>
+                    <span class="retry-countdown-label">Next attempt ${_formatCountdown(remaining)}</span>
                 </div>
             </div>
             <div class="d-flex justify-content-between mt-1 small">
@@ -2213,7 +2365,7 @@ function updateActiveJobs(runningJobs) {
                 <div class="btn-group btn-group-sm icon-btn-group flex-shrink-0" role="group">
                     <button class="btn btn-outline-info" onclick="showLogsModal('${jid}')" title="View Logs" aria-label="View logs">
                         <i class="bi bi-file-text"></i>
-                    </button>
+                    </button>${_markersPauseButton(job)}
                     <button class="btn btn-outline-danger" onclick="cancelJob('${jid}')" title="Cancel job" aria-label="Cancel job">
                         <i class="bi bi-x-lg"></i>
                     </button>
@@ -2292,7 +2444,10 @@ function updateJobProgress(jobId, progress, publishers) {
     if (publishers !== undefined) {
         const pubEl = document.getElementById('activeJobPublishers-' + jobId);
         if (pubEl) {
-            pubEl.innerHTML = _renderPublishersBlock({ publishers: publishers, outcome: progress.outcome });
+            const known = jobs.find(function (j) { return j.id === jobId; });
+            pubEl.innerHTML = _renderPublishersBlock({
+                publishers: publishers, outcome: progress.outcome, kind: known ? known.kind : undefined,
+            });
         }
     }
 
@@ -2679,6 +2834,14 @@ function showNewJobModal() {
     document.getElementById('jobLibraryAll').checked = true;
     const sortByEl = document.getElementById('jobSortBy');
     if (sortByEl) sortByEl.value = '';
+    // Back to Previews; the priority is only reset when the last open left it on the Intro & Credits default.
+    const wasMarkers = _jobKindIsMarkers();
+    const previewsKind = document.getElementById('jobKindPreviews');
+    if (previewsKind) previewsKind.checked = true;
+    const markersForce = document.getElementById('jobMarkersForce');
+    if (markersForce) markersForce.checked = false;
+    _showJobKindControls();
+    if (wasMarkers) document.getElementById('jobPriority').value = '2';
 
     // Always show all libraries grouped by server. The per-server scope
     // is sent explicitly via the data-server-id attribute the renderer
@@ -2782,7 +2945,9 @@ function _updateJobScopeBadge() {
     if (allCb && allCb.checked) {
         badge.innerHTML =
             '<span class="badge bg-secondary-subtle text-secondary-emphasis border">'
-            + '<i class="bi bi-globe2 me-1"></i>Scanning every enabled library across all servers'
+            + (_jobKindIsMarkers()
+                ? '<i class="bi bi-globe2 me-1"></i>Checking every library with Intro &amp; Credits turned on'
+                : '<i class="bi bi-globe2 me-1"></i>Scanning every enabled library across all servers')
             + '</span>';
         return;
     }
@@ -2800,19 +2965,46 @@ function _updateJobScopeBadge() {
         serverNames.add(sid);
         singleServerName = cb.dataset.serverName || sid;
     }
+    const verb = _jobKindIsMarkers() ? 'Checking' : 'Scanning';
     if (serverNames.size === 1) {
         badge.innerHTML =
             '<span class="badge bg-success-subtle text-success-emphasis border">'
-            + `<i class="bi bi-bullseye me-1"></i>Scanning → <strong>${escapeHtml(singleServerName)}</strong> only`
+            + `<i class="bi bi-bullseye me-1"></i>${verb} → <strong>${escapeHtml(singleServerName)}</strong> only`
             + '</span>';
     } else if (serverNames.size > 1) {
         badge.innerHTML =
             '<span class="badge bg-info-subtle text-info-emphasis border">'
-            + `<i class="bi bi-diagram-3 me-1"></i>Scanning → <strong>${serverNames.size} servers</strong> (cross-server fan-out)`
+            + `<i class="bi bi-diagram-3 me-1"></i>${verb} → <strong>${serverNames.size} servers</strong> (cross-server fan-out)`
             + '</span>';
     } else {
         badge.innerHTML = '';
     }
+}
+
+function _jobKindIsMarkers() {
+    const radio = document.getElementById('jobKindMarkers');
+    return !!(radio && radio.checked);
+}
+
+// Intro & Credits has no processing mode or order (every file is checked, season by season), a "re-check" switch
+// instead.
+function _showJobKindControls() {
+    const markers = _jobKindIsMarkers();
+    const toggle = function (id, hidden) {
+        const el = document.getElementById(id);
+        if (el) el.hidden = hidden;
+    };
+    toggle('jobProcessingModeGroup', markers);
+    toggle('jobSortByGroup', markers);
+    toggle('jobMarkersForceGroup', !markers);
+    _updateJobScopeBadge();
+}
+
+// Picking a job type also picks its default priority: Intro & Credits runs at Low, previews at Normal.
+function onJobKindChange() {
+    _showJobKindControls();
+    const priority = document.getElementById('jobPriority');
+    if (priority) priority.value = _jobKindIsMarkers() ? '3' : '2';
 }
 
 function toggleAllLibraries(checkbox) {
@@ -2840,7 +3032,68 @@ function setAllLibrariesChecked(checked) {
     _updateJobScopeBadge();
 }
 
+// Job title from the picked library names: one name, a short list, or a count when the list gets long.
+function _jobLibraryLabel(names, pickedCount) {
+    if (pickedCount === 1) return names[0] || 'Selected Library';
+    if (names.length !== pickedCount) return `${pickedCount} Libraries`;
+    const joined = names.join(', ');
+    return joined.length <= 60 ? joined : `${names.slice(0, 2).join(', ')} + ${names.length - 2} more`;
+}
+
+async function _submitNewJob(url, payload, successMessage) {
+    // Retry once on transient network errors ("Failed to fetch" from
+    // server congestion).
+    let lastError;
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            await apiPost(url, payload);
+
+            bootstrap.Modal.getInstance(document.getElementById('newJobModal')).hide();
+            loadJobs();
+            loadJobStats();
+            showToast('Job Started', successMessage, 'success');
+            return;  // success — exit
+        } catch (error) {
+            lastError = error;
+            if (attempt === 0 && error.message === 'Failed to fetch') {
+                // Brief pause before retry
+                await new Promise(r => setTimeout(r, 500));
+                continue;
+            }
+            break;
+        }
+    }
+    showToast('Error', 'Failed to start job: ' + lastError.message, 'danger');
+}
+
+// Intro & Credits: libraries go as server + library pairs, because library ids repeat across servers (Plex numbers
+// its libraries from "1" on every server). An empty list means every library with Intro & Credits turned on.
+async function _startMarkersJob() {
+    const allTicked = document.getElementById('jobLibraryAll').checked;
+    const ticked = allTicked ? [] : Array.from(document.querySelectorAll('.job-library-checkbox:checked'));
+    if (!allTicked && ticked.length === 0) {
+        showToast('Error', 'Please select at least one library', 'warning');
+        return;
+    }
+    const picked = ticked.map(cb => ({ server_id: cb.dataset.serverId || '', library_id: cb.value }));
+    const names = picked
+        .map(p => (libraries.find(l => String(l.id) === p.library_id && (l.server_id || '') === p.server_id) || {}).name)
+        .filter(Boolean);
+    const label = allTicked ? 'All Libraries' : _jobLibraryLabel(names, picked.length);
+    const payload = {
+        libraries: picked,
+        priority: parseInt(document.getElementById('jobPriority').value, 10) || 3,
+        force: document.getElementById('jobMarkersForce').checked,
+        library_name: `Intro & Credits: ${label}`,
+    };
+    await _submitNewJob('/api/markers/jobs', payload, 'Intro & Credits job has been started');
+}
+
 async function startNewJob() {
+    if (_jobKindIsMarkers()) {
+        await _startMarkersJob();
+        return;
+    }
     const allLibrariesCheckbox = document.getElementById('jobLibraryAll');
     const forceRegenerate = document.getElementById('jobRegenerateAll').checked;
 
@@ -2876,22 +3129,8 @@ async function startNewJob() {
         const pickedNames = selectedIdsLocal
             .map(id => (libraries.find(l => l.id === id) || {}).name)
             .filter(Boolean);
-        if (selectedIdsLocal.length === 1) {
-            libraryName = pickedNames[0] || 'Selected Library';
-        } else if (pickedNames.length === selectedIdsLocal.length) {
-            // Full names known — show them. If the joined string gets
-            // long (>60 chars), fall back to a count + first-two preview
-            // so the Jobs row doesn't become a novel.
-            const joined = pickedNames.join(', ');
-            if (joined.length <= 60) {
-                libraryName = joined;
-            } else {
-                libraryName = `${pickedNames.slice(0, 2).join(', ')} + ${pickedNames.length - 2} more`;
-            }
-        } else {
-            // Some name lookups missed (race with stale library cache).
-            libraryName = `${selectedIdsLocal.length} Libraries`;
-        }
+        // Some name lookups can miss (race with stale library cache): the label falls back to a count.
+        libraryName = _jobLibraryLabel(pickedNames, selectedIdsLocal.length);
     }
 
     const priority = parseInt(document.getElementById('jobPriority').value, 10) || 2;
@@ -2918,29 +3157,7 @@ async function startNewJob() {
         jobPayload.server_id = Array.from(selectedServerIds)[0];
     }
 
-    // Retry once on transient network errors ("Failed to fetch" from
-    // server congestion).
-    let lastError;
-    for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-            const result = await apiPost('/api/jobs', jobPayload);
-
-            bootstrap.Modal.getInstance(document.getElementById('newJobModal')).hide();
-            loadJobs();
-            loadJobStats();
-            showToast('Job Started', 'Processing job has been started', 'success');
-            return;  // success — exit
-        } catch (error) {
-            lastError = error;
-            if (attempt === 0 && error.message === 'Failed to fetch') {
-                // Brief pause before retry
-                await new Promise(r => setTimeout(r, 500));
-                continue;
-            }
-            break;
-        }
-    }
-    showToast('Error', 'Failed to start job: ' + lastError.message, 'danger');
+    await _submitNewJob('/api/jobs', jobPayload, 'Processing job has been started');
 }
 
 // ---------------------------------------------------------------------------
@@ -3282,11 +3499,16 @@ async function cancelJob(jobId) {
     }
 }
 
+// The server decides the scope by job kind: an Intro & Credits job pauses on its own, a preview job pauses all
+// processing (legacy). The message follows what actually happened.
 async function pauseJob(jobId) {
+    const markers = _isMarkersJob(jobs.find(j => j.id === jobId));
     try {
         await apiPost(`/api/jobs/${jobId}/pause`);
-        await loadJobs();
-        showToast('Paused', 'Job paused. Running tasks will finish before dispatch continues.', 'warning');
+        await loadJobs({ force: true });
+        showToast('Paused', markers
+            ? 'Job paused. Files already in progress finish; other jobs can use its slot until you resume it.'
+            : 'Job paused. Running tasks will finish before dispatch continues.', 'warning');
     } catch (error) {
         showToast('Error', 'Failed to pause job: ' + error.message, 'danger');
     }
@@ -3294,9 +3516,13 @@ async function pauseJob(jobId) {
 
 async function resumeJob(jobId) {
     try {
-        await apiPost(`/api/jobs/${jobId}/resume`);
-        await loadJobs();
-        showToast('Resumed', 'Job resumed', 'success');
+        const result = await apiPost(`/api/jobs/${jobId}/resume`);
+        await loadJobs({ force: true });
+        if (result && result.processing_paused === true) {
+            showToast('Resumed', 'Job resumed, but all processing is paused. It continues when you resume processing.', 'warning');
+        } else {
+            showToast('Resumed', 'Job resumed', 'success');
+        }
     } catch (error) {
         showToast('Error', 'Failed to resume job: ' + error.message, 'danger');
     }
@@ -3477,6 +3703,8 @@ function _buildOutcomeTooltip(outcome) {
     // D14 — pull labels from the unified STATUS_META so the tooltip
     // matches the file-outcome chip and the per-server pill.
     var keys = ['generated', 'skipped_bif_exists', 'skipped_not_indexed',
+                'markers_published', 'markers_up_to_date', 'markers_needs_review', 'markers_waiting',
+                'markers_skipped', 'markers_none', 'markers_no_owners',
                 'skipped_file_not_found', 'skipped_excluded',
                 'skipped_invalid_hash', 'failed', 'no_media_parts'];
     var lines = [];
@@ -3489,7 +3717,7 @@ function _buildOutcomeTooltip(outcome) {
     return lines.length > 0 ? lines.join('&#10;') : 'No items processed';
 }
 
-function getStatusBadge(status, paused, error, outcome) {
+function getStatusBadge(status, paused, error, outcome, pauseNote) {
     if (paused === undefined) paused = false;
     if (error === undefined) error = null;
     if (outcome === undefined) outcome = null;
@@ -3499,6 +3727,9 @@ function getStatusBadge(status, paused, error, outcome) {
         tooltipText = tooltipText
             ? tooltipText + '&#10;' + error
             : error;
+    }
+    if (pauseNote && status === 'running' && paused) {
+        tooltipText = escapeHtmlAttr(pauseNote) + (tooltipText ? '&#10;' + tooltipText : '');
     }
     var tooltipAttrs = tooltipText
         ? ' data-bs-toggle="tooltip" data-bs-placement="top" data-bs-html="false" title="' + tooltipText + '"'
@@ -3558,6 +3789,11 @@ function formatRelativeTime(dateStr) {
     return `<span class="text-nowrap" title="${escapeHtml(abs)}">${label}</span>`;
 }
 
+// Retry countdowns: "in 45 s" below 90 seconds, then rounded minutes ("in 5 min").
+function _formatCountdown(seconds) {
+    return seconds >= 90 ? `in ${Math.round(seconds / 60)} min` : `in ${seconds} s`;
+}
+
 function formatElapsed(startDateStr) {
     if (!startDateStr) return '';
     const elapsed = Math.max(0, Math.floor((Date.now() - new Date(startDateStr).getTime()) / 1000));
@@ -3577,7 +3813,7 @@ function _updateElapsedTimers() {
         var scheduled = new Date(el.getAttribute('data-scheduled-at')).getTime();
         var remaining = Math.max(0, Math.ceil((scheduled - Date.now()) / 1000));
         if (remaining > 0) {
-            el.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Retry starting in ' + remaining + 's';
+            el.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Retry starting ' + _formatCountdown(remaining);
         } else {
             el.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Starting...';
         }
@@ -3609,7 +3845,7 @@ function _updateElapsedTimers() {
             bar.style.width = fill.toFixed(1) + '%';
             var label = bar.querySelector('.retry-countdown-label');
             if (label) {
-                label.textContent = remaining > 0 ? 'Next attempt in ' + remaining + 's' : 'Starting…';
+                label.textContent = remaining > 0 ? 'Next attempt ' + _formatCountdown(remaining) : 'Starting…';
             }
         }
     });

@@ -41,9 +41,11 @@ function onScanModeChange() {
     }
     // Processing order only affects full-library scans — recently-added scans
     // touch a small, time-bounded set where shuffle is essentially a no-op.
+    // Intro & Credits checks every file of the chosen libraries (files already done are skipped), so it has no
+    // lookback and no order either.
     const sortByGroup = document.getElementById('scheduleSortByGroup');
     if (sortByGroup) {
-        sortByGroup.style.display = selected === 'recently_added' ? 'none' : '';
+        sortByGroup.style.display = selected === 'full_library' ? '' : 'none';
     }
     // When flipping to recently-added in "Add" mode with untouched defaults,
     // nudge the trigger type to Interval and pre-fill 15 minutes — that's
@@ -182,7 +184,9 @@ function showEditScheduleModal(scheduleId) {
 
     // Pre-fill scan mode + lookback from the schedule's config
     const cfg = schedule.config || {};
-    if (cfg.job_type === 'recently_added') {
+    if (cfg.job_type === 'intro_credits') {
+        document.getElementById('scanModeMarkers').checked = true;
+    } else if (cfg.job_type === 'recently_added') {
         document.getElementById('scanModeRecent').checked = true;
         const lookbackSelect = document.getElementById('scheduleLookback');
         const lookbackVal = String(cfg.lookback_hours || 1);
@@ -287,7 +291,7 @@ async function saveSchedule() {
     const scheduleConfig = { job_type: scanMode };
     if (scanMode === 'recently_added') {
         scheduleConfig.lookback_hours = parseFloat(document.getElementById('scheduleLookback').value) || 1;
-    } else {
+    } else if (scanMode === 'full_library') {
         // Processing order only applies to full-library scans
         const sortByEl = document.getElementById('scheduleSortBy');
         const sortBy = sortByEl ? sortByEl.value : '';

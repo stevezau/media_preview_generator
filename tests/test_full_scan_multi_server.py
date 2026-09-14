@@ -1635,6 +1635,50 @@ class TestFoldPublisherRowsIntoAggregate:
             "no_owners": 1,
             "published": 1,
         }
+        assert "messages" not in agg["p1"], "preview rows keep the aggregate's original shape"
+
+    def test_markers_skipped_rows_sharing_one_message_keep_it(self):
+        """A server skipped for one reason (plugin missing) shows that reason once on the job row."""
+        from media_preview_generator.jobs.orchestrator import fold_publisher_rows_into_aggregate
+
+        agg: dict[str, dict] = {}
+        row = {"server_id": "e1", "server_type": "emby", "status": "markers_skipped", "message": "Plugin missing"}
+        for _ in range(3):
+            fold_publisher_rows_into_aggregate(agg, [dict(row)])
+
+        assert agg["e1"]["counts"] == {"markers_skipped": 3}
+        assert agg["e1"]["messages"] == {"markers_skipped": "Plugin missing"}
+
+    def test_markers_skipped_rows_with_different_messages_record_no_message(self):
+        from media_preview_generator.jobs.orchestrator import fold_publisher_rows_into_aggregate
+
+        agg: dict[str, dict] = {}
+        fold_publisher_rows_into_aggregate(
+            agg,
+            [
+                {"server_id": "p1", "server_type": "plex", "status": "markers_skipped", "message": "Plex Pass needed"},
+                {"server_id": "p1", "server_type": "plex", "status": "markers_skipped", "message": "Database moved"},
+                {"server_id": "p1", "server_type": "plex", "status": "markers_skipped", "message": "Plex Pass needed"},
+            ],
+        )
+
+        assert agg["p1"]["messages"] == {"markers_skipped": None}
+
+    def test_other_markers_statuses_record_no_message(self):
+        """Failure text can carry exception detail; only the server-wide skip reason is summarised."""
+        from media_preview_generator.jobs.orchestrator import fold_publisher_rows_into_aggregate
+
+        agg: dict[str, dict] = {}
+        fold_publisher_rows_into_aggregate(
+            agg,
+            [
+                {"server_id": "p1", "server_type": "plex", "status": "markers_written", "message": "Written"},
+                {"server_id": "p1", "server_type": "plex", "status": "failed", "message": "OperationalError: locked"},
+                {"server_id": "p1", "server_type": "plex", "status": "markers_waiting", "message": "Not in library"},
+            ],
+        )
+
+        assert "messages" not in agg["p1"]
 
 
 class TestMergeChainPublishersBestPerPath:

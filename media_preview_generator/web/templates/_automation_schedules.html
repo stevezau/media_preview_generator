@@ -172,6 +172,13 @@
                                     <div class="small text-muted">Fast poll — only processes items added within the lookback window (works for Plex, Emby, and Jellyfin).</div>
                                 </label>
                             </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="scanMode" id="scanModeMarkers" value="intro_credits" onchange="onScanModeChange()">
+                                <label class="form-check-label" for="scanModeMarkers">
+                                    <strong>Intro &amp; Credits</strong>
+                                </label>
+                                <button type="button" class="info-icon ms-1" id="scanModeMarkersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Checks the chosen libraries for intro and credits markers. Files already done are skipped. Low priority unless you pick otherwise."><i class="bi bi-info-circle"></i></button>
+                            </div>
                         </div>
                     </div>
                     <div class="mb-3" id="scheduleLookbackGroup" style="display:none;">

@@ -292,6 +292,12 @@ _FRAME_PROVENANCE_STATUSES: frozenset[str] = frozenset(
     {"published", "published_pending_registration", "skipped_output_exists"}
 )
 
+# Statuses whose rows share one server-wide reason (Intro & Credits skips: plugin missing, Plex database not
+# writable). The aggregate keeps that reason once per server so the job row can say why, instead of every file row
+# repeating it. Failure text is left out: it can carry exception detail. Preview statuses aren't listed, so the
+# preview aggregate keeps its shape.
+_AGGREGATE_MESSAGE_STATUSES: frozenset[str] = frozenset({"markers_skipped"})
+
 
 def _best_publisher_status(statuses: list[str]) -> str:
     """Return the most informative status from a list of attempts.
@@ -385,6 +391,10 @@ def fold_publisher_rows_into_aggregate(aggregate: dict[str, dict], rows: list[di
         {server_id: {"server_id": ..., "server_name": ...,
                      "server_type": ..., "counts": {status: count}}}
 
+    plus ``frame_sources`` for preview publishes and ``messages``
+    (``{status: shared message or None}``) for the statuses in
+    ``_AGGREGATE_MESSAGE_STATUSES``.
+
     Mutates ``aggregate`` in place. Both job-dispatch paths (legacy
     WorkerPool dispatcher and the multi-server full-scan / webhook
     ThreadPoolExecutor) feed this so they cannot drift again — commit
@@ -419,6 +429,14 @@ def fold_publisher_rows_into_aggregate(aggregate: dict[str, dict], rows: list[di
                 entry["server_type"] = row["server_type"].lower()
         status = row.get("status") or "unknown"
         entry["counts"][status] = entry["counts"].get(status, 0) + 1
+        if status in _AGGREGATE_MESSAGE_STATUSES:
+            # None once two rows disagree: there is no single reason to show.
+            messages = entry.setdefault("messages", {})
+            message = row.get("message") or ""
+            if status not in messages:
+                messages[status] = message
+            elif messages[status] != message:
+                messages[status] = None
         # Per-server frame provenance, additive alongside the status counts so
         # existing consumers of ``counts`` are untouched. Lets the Job UI show
         # each server's "Generated (extracted) / Reused (cache_hit) / Already

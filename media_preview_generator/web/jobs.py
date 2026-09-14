@@ -2338,6 +2338,9 @@ class JobManager:
                 fs = s.get("frame_source") or ""
                 if fs and fs != "extracted":
                     entry["frame_source"] = fs
+                # Why a row is waiting (e.g. the server hasn't indexed the file yet); preview rows carry none.
+                if s.get("reason_code"):
+                    entry["reason_code"] = s["reason_code"]
                 slim.append(entry)
                 # First publisher with a .bif output wins. We surface this
                 # at the top level (not on each server entry) because the

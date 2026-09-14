@@ -546,6 +546,48 @@ class TestFileResultServerAttribution:
             {"id": "emby-1", "name": "Emby", "type": "emby", "status": "published", "frame_source": "cache_hit"},
         ]
 
+    def test_reason_code_kept_on_server_entry_when_the_row_has_one(self, config_dir):
+        """Intro & Credits waiting rows say *why* (the server hasn't indexed the file); the Files panel reads it."""
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Intro & Credits: Movies")
+
+        jm.record_file_result(
+            job.id,
+            "/media/foo.mkv",
+            "markers_waiting",
+            "intro 0:11–0:37 (chapters)",
+            "Intro & Credits",
+            servers=[
+                {
+                    "server_id": "plex-1",
+                    "server_name": "Plex",
+                    "server_type": "plex",
+                    "status": "markers_waiting",
+                    "message": "Not in this server's library yet",
+                    "reason_code": "not_in_library",
+                },
+                {
+                    "server_id": "jf-1",
+                    "server_name": "Jellyfin",
+                    "server_type": "jellyfin",
+                    "status": "markers_waiting",
+                    "message": "versions don't agree yet",
+                },
+            ],
+        )
+
+        assert jm.get_file_results(job.id)[0]["servers"] == [
+            {
+                "id": "plex-1",
+                "name": "Plex",
+                "type": "plex",
+                "status": "markers_waiting",
+                "reason_code": "not_in_library",
+            },
+            {"id": "jf-1", "name": "Jellyfin", "type": "jellyfin", "status": "markers_waiting"},
+        ]
+
     def test_reason_derived_from_publisher_message_when_blank(self, config_dir):
         """D8 — when the worker calls _persist with reason='', synthesise from publisher message."""
         os.makedirs(config_dir, exist_ok=True)

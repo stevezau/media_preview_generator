@@ -130,6 +130,9 @@ function _renderModalHeader(job) {
         + `>${escapeHtmlText(meta.label)}</span>`;
 
     const chips = [];
+    if (typeof _isMarkersJob === 'function' && _isMarkersJob(job)) {
+        chips.push('<span class="badge text-bg-dark job-kind-badge">Intro &amp; Credits</span>');
+    }
     if (cfg.source) {
         chips.push('<span class="badge bg-light text-dark border">'
             + '<i class="bi bi-' + _sourceIcon(cfg.source) + ' me-1"></i>'
@@ -499,7 +502,10 @@ function showLogsModal(jobId) {
     document.getElementById('fileResultsCount').textContent = '';
     document.getElementById('fileResultsSearch').value = '';
     var _ofSel = document.getElementById('fileOutcomeFilter');
-    if (_ofSel) _ofSel.value = '';
+    if (_ofSel) {
+        _ofSel.value = '';
+        _showFileOutcomesForKind(_ofSel, _job ? _job.kind : '');
+    }
     var pFooter = document.getElementById('filePaginationFooter');
     if (pFooter) pFooter.classList.add('d-none');
 
@@ -1465,6 +1471,16 @@ function _fileOutcomeMeta(key) {
     return { label: m.label, badge: m.cls };
 }
 
+// Each job kind has its own outcomes; options tagged with another kind are hidden (untagged ones are shared).
+function _showFileOutcomesForKind(select, kind) {
+    var current = kind === 'intro_credits' ? 'intro_credits' : 'previews';
+    Array.prototype.forEach.call(select.options, function (opt) {
+        var other = !!opt.dataset.kind && opt.dataset.kind !== current;
+        opt.hidden = other;
+        opt.disabled = other;
+    });
+}
+
 function onLogsTabActivated() {
     // Mirror onFilesTabActivated so the URL reflects whichever tab is
     // visible. Without this, the deep-link contract is asymmetric:
@@ -1537,6 +1553,9 @@ function renderFileResultsTable(files) {
     if (_fileListTruncated) label += ' \u2014 ' + _fileProcessedTotal.toLocaleString() + ' items processed';
     countEl.textContent = label;
 
+    // Intro & Credits pills name each server's status: several servers can end differently for one file.
+    var showServerStatus = typeof _isMarkersJob === 'function'
+        && _isMarkersJob(jobs.find(function (j) { return j.id === _logsModalJobId; }));
     var html = '';
     for (var i = 0; i < files.length; i++) {
         var f = files[i];
@@ -1549,7 +1568,7 @@ function renderFileResultsTable(files) {
         // D9 \u2014 per-server pills tell the user which server each file
         // landed on. For single-server installs it's one pill; for
         // multi-server fan-out it's one per target.
-        var serversHtml = _renderFileServerPills(f.servers || []);
+        var serversHtml = _renderFileServerPills(f.servers || [], showServerStatus);
         // D11 \u2014 for files that have a BIF on disk (generated this run
         // OR already existed), show a shortcut to /bif-viewer pre-loaded
         // with this file. Skipped/failed-with-no-output files don't get
@@ -1584,6 +1603,14 @@ function renderFileResultsTable(files) {
                 + ' title="Open in Preview Inspector"><i class="bi bi-eye"></i></a>';
         }
 
+        // A server that hasn't indexed the file yet gets its own line: a "Retry: …" job checks it again.
+        var waitingNotes = (f.servers || []).filter(function (s) {
+            return s && s.reason_code === MARKERS_NOT_IN_LIBRARY;
+        }).map(function (s) {
+            return '<div class="small text-warning-emphasis markers-not-in-library">'
+                + escapeHtml((s.name || 'Server') + ': ' + MARKERS_NOT_IN_LIBRARY_LABEL) + '</div>';
+        }).join('');
+
         html += '<tr>'
             + '<td style="max-width: 400px;">'
             +   '<div class="d-flex align-items-center">'
@@ -1593,7 +1620,7 @@ function renderFileResultsTable(files) {
             + '</td>'
             + '<td><span class="badge ' + meta.badge + '">' + meta.label + '</span></td>'
             + '<td>' + serversHtml + '</td>'
-            + '<td><small class="text-muted" title="' + reason + '">' + reason + '</small></td>'
+            + '<td>' + waitingNotes + '<small class="text-muted" title="' + reason + '">' + reason + '</small></td>'
             + '<td>' + workerBadge + '</td>'
             + '</tr>';
     }
@@ -1630,7 +1657,7 @@ var _FILE_SERVER_PALETTE = {
     emby:     'bg-success',
     jellyfin: 'bg-info text-dark',
 };
-function _renderFileServerPills(servers) {
+function _renderFileServerPills(servers, showStatus) {
     if (!servers || !servers.length) return '<small class="text-muted">&mdash;</small>';
     var html = '';
     for (var i = 0; i < servers.length; i++) {
@@ -1642,12 +1669,12 @@ function _renderFileServerPills(servers) {
         // Dim the pill (lower opacity) when the publisher didn't actually
         // publish \u2014 gives the user a one-glance "this server got it" vs
         // "this server skipped it" signal without needing a second column.
-        var dim = (status && status !== 'published') ? ' style="opacity:.55;"' : '';
+        var dim = (status && status !== 'published' && status !== 'markers_written') ? ' style="opacity:.55;"' : '';
         var meta = _fileOutcomeMeta(status);
-        var tip = meta.label || status || '';
+        var tip = s.reason_code === MARKERS_NOT_IN_LIBRARY ? MARKERS_NOT_IN_LIBRARY_LABEL : (meta.label || status || '');
         var title = tip ? (escapeHtmlAttr(label) + ' \u2014 ' + escapeHtmlAttr(tip)) : escapeHtmlAttr(label);
         html += '<span class="badge me-1 ' + cls + '"' + dim + ' title="' + title + '">'
-            + escapeHtml(label) + '</span>';
+            + escapeHtml(label) + (showStatus && status ? ' \u00b7 ' + escapeHtml(meta.label) : '') + '</span>';
     }
     return html;
 }

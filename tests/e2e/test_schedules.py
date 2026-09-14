@@ -208,3 +208,112 @@ class TestScheduleServerDropdownVendorBadges:
         assert "(PLEX)" in joined, f"PLEX badge missing: {option_texts}"
         assert "(EMBY)" in joined, f"EMBY badge missing: {option_texts}"
         assert "(JELLYFIN)" in joined, f"JELLYFIN badge missing: {option_texts}"
+
+
+_MARKERS_SCHEDULE = {
+    "id": "sch-ic",
+    "name": "Weekly Intro & Credits",
+    "enabled": True,
+    "trigger_type": "cron",
+    "trigger_value": "0 3 * * 6",
+    "library_id": None,
+    "library_ids": [],
+    "library_name": "All Libraries",
+    "server_id": None,
+    "priority": None,
+    "stop_time": "",
+    "config": {"job_type": "intro_credits"},
+    "next_run": None,
+}
+
+
+def _capture_schedule_writes(page: Page, schedules: list[dict]) -> list[tuple[str, dict]]:
+    """GET /api/schedules serves ``schedules``; POST and PUT bodies are captured as ``(method, body)``."""
+    captured: list[tuple[str, dict]] = []
+
+    def handler(route: Route) -> None:
+        method = route.request.method
+        if method in ("POST", "PUT"):
+            captured.append((method, route.request.post_data_json or {}))
+            _fulfill_json(route, {"id": "sch-ic", "enabled": True}, status=201 if method == "POST" else 200)
+        else:
+            _fulfill_json(route, {"schedules": schedules})
+
+    page.route("**/api/schedules", handler)
+    page.route("**/api/schedules/*", handler)
+    return captured
+
+
+def _save_schedule(page: Page, url_glob: str) -> None:
+    with page.expect_request(url_glob):
+        page.locator("#scheduleSubmitBtn").click()
+
+
+@pytest.mark.e2e
+class TestScheduleIntroCredits:
+    def test_intro_credits_mode_hides_lookback_and_order_and_saves_its_job_type(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        _seed_servers_for_schedule_modal(authed_page)
+        captured = _capture_schedule_writes(authed_page, [])
+        authed_page.goto(f"{app_url}/automation#schedules")
+        authed_page.wait_for_load_state("domcontentloaded")
+        authed_page.locator('button:has-text("Add Schedule")').first.click()
+        expect(authed_page.locator("#newScheduleForm")).to_be_visible(timeout=2000)
+        authed_page.locator("#scheduleName").fill("Weekly Intro & Credits")
+        # Recently added first, so switching away proves the lookback hides again.
+        authed_page.locator("#scanModeRecent").check()
+        expect(authed_page.locator("#scheduleLookbackGroup")).to_be_visible()
+
+        authed_page.locator("#scanModeMarkers").check()
+
+        expect(authed_page.locator("#scheduleLookbackGroup")).to_be_hidden()
+        expect(authed_page.locator("#scheduleSortByGroup")).to_be_hidden()
+        info = authed_page.locator("#scanModeMarkersInfo")
+        assert (info.get_attribute("data-bs-original-title") or info.get_attribute("title")) == (
+            "Checks the chosen libraries for intro and credits markers. Files already done are skipped. "
+            "Low priority unless you pick otherwise."
+        )
+        _save_schedule(authed_page, "**/api/schedules")
+
+        assert [method for method, _ in captured] == ["POST"]
+        body = captured[0][1]
+        assert body["config"] == {"job_type": "intro_credits"}
+        assert body["priority"] is None
+
+    def test_list_badge_and_edit_round_trip_keep_the_mode(self, authed_page: Page, app_url: str) -> None:
+        _seed_servers_for_schedule_modal(authed_page)
+        captured = _capture_schedule_writes(authed_page, [_MARKERS_SCHEDULE])
+        authed_page.goto(f"{app_url}/automation#schedules")
+        authed_page.wait_for_load_state("domcontentloaded")
+        row = authed_page.locator("#scheduleList tr", has_text="Weekly Intro & Credits")
+        expect(row.locator(".schedule-kind-badge")).to_have_text("Intro & Credits", timeout=3000)
+        assert "Low" in (row.locator(".priority-badge").get_attribute("title") or "")
+
+        row.locator('button[aria-label="Edit schedule"]').click()
+        expect(authed_page.locator("#newScheduleForm")).to_be_visible(timeout=2000)
+
+        expect(authed_page.locator("#scanModeMarkers")).to_be_checked()
+        expect(authed_page.locator("#scheduleLookbackGroup")).to_be_hidden()
+        expect(authed_page.locator("#scheduleSortByGroup")).to_be_hidden()
+        _save_schedule(authed_page, "**/api/schedules/sch-ic")
+
+        assert [method for method, _ in captured] == ["PUT"]
+        assert captured[0][1]["config"] == {"job_type": "intro_credits"}
+
+    def test_full_library_schedule_still_saves_its_sort_order(self, authed_page: Page, app_url: str) -> None:
+        _seed_servers_for_schedule_modal(authed_page)
+        captured = _capture_schedule_writes(authed_page, [])
+        authed_page.goto(f"{app_url}/automation#schedules")
+        authed_page.wait_for_load_state("domcontentloaded")
+        authed_page.locator('button:has-text("Add Schedule")').first.click()
+        expect(authed_page.locator("#newScheduleForm")).to_be_visible(timeout=2000)
+        authed_page.locator("#scheduleName").fill("Nightly")
+        authed_page.locator("#scanModeMarkers").check()
+        authed_page.locator("#scanModeFull").check()
+        expect(authed_page.locator("#scheduleSortByGroup")).to_be_visible()
+        authed_page.locator("#scheduleSortBy").select_option("random")
+
+        _save_schedule(authed_page, "**/api/schedules")
+
+        assert captured[0][1]["config"] == {"job_type": "full_library", "sort_by": "random"}
