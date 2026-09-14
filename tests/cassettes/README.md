@@ -67,6 +67,69 @@ A leaked token in a committed cassette is a credentials disclosure.
 - User-identifying paths if they reveal real media organisation. (Mostly
   fine for media metadata; concern is more around server identifiers.)
 
+## Markers (lab)
+
+`tests/test_servers_markers_vcr.py` pins Plex's marker read
+(`includeMarkers=1`) and the Media Preview Bridge markers routes plus
+Jellyfin's core `/MediaSegments`, recorded against the storage lab
+(`mlab-plex`, `mlab-jellyfin`) rather than the Docker-Compose test stack.
+
+Needs the phase-1 lab state in place first: plugins installed and the
+synth chapters show published to both servers (see
+`docs/design/intro-credits/evidence/lab/phase1-results.md`, run 2) —
+`/media/synth-chapters/Synth Chapters (2021)/Season 01/Synth Chapters
+(2021) - S01E01.webm` must be indexed on both.
+
+Re-record:
+
+```bash
+cd /home/data/workspace/plex_generate_vid_previews
+set -a; . docs/design/intro-credits/evidence/lab/env; set +a
+PLEX_URL=http://127.0.0.1:32402 JELLYFIN_URL=http://127.0.0.1:18097 JELLYFIN_TOKEN="$JF_TOKEN" \
+  /home/data/.venv/bin/python -m pytest --no-cov -n 0 tests/test_servers_markers_vcr.py --record-mode=once
+grep -rlE "$PLEX_TOKEN|$JF_TOKEN" tests/cassettes/test_servers_markers_vcr/ && echo "TOKEN LEAK — delete and fix scrubbing" || echo "clean"
+```
+
+Expected: `4 passed`, `clean`.
+
+**Known gotcha — `PLEX_URL`/`PLEX_TOKEN` don't reach the test under pytest.**
+`tests/conftest.py`'s session-scoped `_isolate_dotenv_from_tests` fixture
+unconditionally pops `PLEX_URL`/`PLEX_TOKEN` from `os.environ` before any
+test's fixtures run (it's cleaning up after `dotenv`, and doesn't check for
+a `real_plex_server` opt-out the way the other autouse fixtures do). A
+fixture that reads `os.environ.get("PLEX_URL", ...)` at test time — as
+`plex_lab` in this file does — always sees the fallback, even when the
+shell exported the real value, so `--record-mode=once` silently records
+nothing for Plex (no cassette file, no error) instead of hitting the lab.
+Jellyfin is unaffected — `JELLYFIN_URL`/`JELLYFIN_TOKEN` aren't in
+`_ENV_MIGRATION_MAP`.
+
+Workaround for the Plex leg only: temporarily comment out the pop (in
+`_isolate_dotenv_from_tests`, exclude `"PLEX_URL"`/`"PLEX_TOKEN"` from
+`keys_to_clean`), run the record command, then revert the conftest.py
+edit before running anything else or committing — `git diff
+tests/conftest.py` must be empty afterward. Don't commit a workaround
+that weakens the leak guard for the rest of the suite.
+
+**Cassette scrubbing needed a scrub-detector extension, not just a new
+prefix.** The generic `_scrub_response_body` "synthetic test-stack data"
+carve-out only recognised `/em-media/`, `/jf-media/`, `/media/Movies/Test
+`/`/media/TV` — any other path (including `/media/synth-chapters/`) hit
+the defensive fallback and collapsed `<Video>`/`<Directory>` elements and
+JSON `Items` arrays to placeholders, silently destroying the very
+`ratingKey` / segment data the cassette exists to pin (record-time
+in-process assertions still passed against the real, unscrubbed response;
+only the on-disk YAML was gutted). Fixed by adding
+`/media/synth-chapters/` — with the same `(?:/|")` bare-root handling as
+the existing `/media/Movies`/`/media/TV` entries — to both the XML
+`xml_synthetic` regex and the JSON `_SYNTHETIC_PREFIXES` tuple, and by
+adding a schema-based carve-out for Jellyfin's `/MediaSegments` `Items`
+(`Id`/`ItemId`/`Type`/`StartTicks`/`EndTicks` — no path, title, or other
+identifying field is even possible in that shape, so it's kept regardless
+of the `Path`-prefix check). If a future marker cassette collapses to an
+empty/placeholder body on replay while passing at record time, suspect
+this same class of gap for whatever new path or response shape it uses.
+
 ## Re-recording when a vendor API changes
 
 1. Delete the affected cassette file(s).
