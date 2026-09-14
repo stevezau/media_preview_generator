@@ -296,21 +296,31 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    other edge takes their safer value if it is safer (later intro/recap start, earlier credits/preview end).
 4. Otherwise accept when two independent sources agree: intro/recap **end** within 5 s; credits/preview **start**
    within 10 s. Every maximal set of mutually agreeing candidates is considered (a sliding window over the compared
-   times). Only candidates that agree with a different independent source may supply times: the agreed edge comes
-   from the first of them in source order; the other edge takes the safer value across them (latest intro/recap
-   start, earliest credits/preview end). If the composed marker fails sanity → "Needs review".
+   times). Only candidates that agree with a different independent source may supply times: the agreed edge takes
+   the safer value across the agreeing non-server candidates (earliest intro/recap end, latest credits/preview start;
+   source order only breaks ties); the other edge takes the safer value across them (latest intro/recap start,
+   earliest credits/preview end). If the composed marker fails sanity → "Needs review".
 5. If two groups of agreeing sources would publish times that don't agree with each other → "Needs review". Before
    anything is published (chapters, agreement or "Medium"), any two agreeing candidates from different independent
    sources that are both outside the tolerance of the published time send it to "Needs review" — a third source that
    agrees with both sides can't hide a contradiction. Another chapter of the same type counts as one side of such a
    pair; a chapter within tolerance of two groups that disagree with each other is still accepted.
-6. A single source is accepted only at the **"Medium"** publish setting, and only when no sane candidate from another
-   independent source (markers already on a server included) contradicts it and every pair of the source's own
-   candidates agrees; its other edge takes the safer value across those candidates.
+6. A single source is accepted only at the **"Medium"** publish setting, only when that source checks the file's
+   cut itself — chapters, or SkipDB `exact`/`shifted` matches (IntroDB and TheIntroDB return an answer whatever the
+   file's length, so alone they never decide) — and only when no sane candidate from another independent source
+   (markers already on a server included) contradicts it and every pair of the source's own candidates agrees; its
+   other edge takes the safer value across those candidates.
 7. Markers already on a server count as agreement evidence, never as a sole source, and never supply the published
-   times. Markers from several servers count as one source.
+   times on their own. When a server marker agrees, it may **shorten** the composed skip (a later intro/recap start,
+   an earlier credits/preview end) but never lengthen it — so a crowd answer running to the end of the file can't
+   swallow a post-credits scene that the server's own marker stops before. Markers from several servers count as one
+   source. A Plex/Emby item's markers are not used for a file whose item has another version with a duration more
+   than 2 s different (one set per item describes one cut). Markers on a Jellyfin/Emby server that has an
+   intro-database importer plugin join the crowd group of rule 8.
 8. Online sources are independent of each other only if they don't copy each other: IntroDB data looks partly seeded
-   from others — IntroDB + TheIntroDB always count as one source.
+   from others — IntroDB + TheIntroDB always count as one source, and so do server markers written by an importer of
+   those databases. SkipDB intro starts also match TheIntroDB's to ≤ 44 ms on the Daredevil S03 episodes both cover
+   (agreement is on intro ends, so they stay separate for now; re-measure before enabling TheIntroDB by default).
 9. A decided intro and recap overlapping by more than 5 s → both "Needs review".
 10. A decided preview overlapping decided credits by more than 10 s → the preview goes to "Needs review".
 11. No agreement → no marker; shown as **"Needs review"**. `decided_by`: agreement → the sources that agree with the
@@ -348,7 +358,7 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
 2. **Owners.** `find_owning_servers(canonical_path)` → keep owners with `markers.enabled` and the item's library in
    `library_ids`. No enabled owner → nothing is detected.
 3. **Ensure markers for the file.** Fresh `markers` for (size, mtime) → reuse ("detected once, reused"). Otherwise
-   gather evidence in §1 order, stop early when §5.5 is satisfied, decide, store.
+   gather evidence in §1 order, stop early when §5.5 is satisfied by more than chapters alone (a chapter decision keeps asking so rule 3 can veto it), decide, store.
 4. **Season step.** Intros need siblings: fingerprint missing episodes in the season folder, re-decide episodes without
    an intro; if the season has only one episode, use the previous season's cached fingerprints (§5.3).
 5. **Publish.** For each enabled owner, its `MarkerPublisher` writes the decided set; unchanged `markers_hash` → skip.
@@ -705,3 +715,11 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   delayed retry follow-ups on the webhook retry schedule (this also covers servers with markers on and previews off);
   Intro & Credits jobs interrupted by a restart and not resumed are marked failed so schedules and follow-ups aren't
   blocked.
+- 2026-09-14 · Milestone audit B (§5.5 rules 3–8, §6.2), reproduced on the owner's files: rule 7 lets an agreeing server
+  marker shorten a skip (Rick and Morty S01: crowd credits to end of file skipped the post-credits scene on 6 of 10
+  episodes; Plex's own markers were right); a chapter-only decision no longer ends the evidence search, so rule 3's
+  veto runs in normal jobs (TheIntroDB skipped at Low priority when only confirming chapters); at Medium only chapters
+  or SkipDB exact/shifted may decide alone (Demon Slayer S03E05 Blu-ray: a single IntroDB answer skipped 81 s of cold
+  open); server markers from importer plugins or another cut of the same item aren't independent evidence; the
+  agreed edge is the safer agreeing value; chapter rules and online parsers carry versions so stored evidence is
+  re-derived after a rules change. Evidence scripts: `evidence/audit-phase1/`.
