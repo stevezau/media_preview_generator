@@ -9114,7 +9114,7 @@ Spec §7.1. Layout and wording: design artifact section "Each server → Edit �
 - Test: `tests/e2e/test_intro_credits_server_tab.py`
 
 **Interfaces:**
-- Consumes: `GET /api/markers/servers/<id>/status`, `POST /api/markers/servers/<id>/install-plugin`, `PUT /api/servers/<id>`
+- Consumes: `GET /api/markers/servers/<id>/status`, `POST /api/servers/<id>/install-plugin` (existing route; Task 13 review ruling), `PUT /api/servers/<id>`
   with `markers` (Task 1).
 - Produces (window globals for servers.js): `loadMarkersTab(server)`, `readMarkersFromForm(server) -> object`,
   `markersNeedsPlexConfirmation(server) -> bool`, `confirmPlexMarkers() -> Promise<boolean>`.
@@ -9232,7 +9232,7 @@ if (window.readMarkersFromForm) payload.markers = readMarkersFromForm(server);
      "plex": {"db_write_confirmed_at": <ISO string>, "on_plex_redetect": "restore"}}`.
   4. Untick TV Shows → Save → `library_ids == ["<movies id>"]`; choose "Keep Plex's" → `on_plex_redetect == "keep_plex"`.
   5. Already-confirmed Plex server → flip on → no modal → PUT carries the stored confirmation.
-  6. Jellyfin NEEDS_PLUGIN → Install button → POST `/api/markers/servers/jf-1/install-plugin` captured.
+  6. Jellyfin NEEDS_PLUGIN → Install button → POST `/api/servers/jf-1/install-plugin` captured.
   7. Jellyfin PLUGIN_OUTDATED → "Update needed" + Update button; READY → version and "Intro · credits · recap · preview".
   8. Emby → "Not available yet"; saving still sends `markers.enabled` as toggled (no plex block).
   9. Plex NEEDS_LOCAL_DB → warning line with the message; confirmation modal says "network share ✕".
