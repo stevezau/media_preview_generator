@@ -58,6 +58,14 @@ _SCHEMA = (
         detail TEXT NOT NULL DEFAULT '',
         fetched_at TEXT NOT NULL)""",
     "CREATE INDEX IF NOT EXISTS idx_evidence_file ON evidence(file_id, source, origin)",
+    # The chapter rules / parser / reader version one lookup's evidence rows were made with: a different version in
+    # this build means the rows are derived again (an unchanged file is otherwise never probed or asked again).
+    """CREATE TABLE IF NOT EXISTS evidence_versions (
+        file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        source TEXT NOT NULL,
+        origin TEXT NOT NULL DEFAULT '',
+        version INTEGER NOT NULL,
+        PRIMARY KEY (file_id, source, origin))""",
     """CREATE TABLE IF NOT EXISTS markers (
         file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
         type TEXT NOT NULL,
@@ -77,6 +85,7 @@ _SCHEMA = (
         settings_fingerprint TEXT NOT NULL,
         decided_at TEXT NOT NULL,
         PRIMARY KEY (file_id, type))""",
+    # markers_hash and verified_at are no longer written (always NULL); the columns stay until a schema bump.
     """CREATE TABLE IF NOT EXISTS publish_state (
         file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
         server_id TEXT NOT NULL,
@@ -128,7 +137,7 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {}
 
 @dataclass(frozen=True)
 class FileRecord:
-    """A row of ``files`` plus whether the last upsert created or invalidated it."""
+    """A row of ``files``."""
 
     id: int
     canonical_path: str
@@ -137,8 +146,6 @@ class FileRecord:
     duration_ms: int | None
     season_key: str | None
     is_movie: bool
-    created: bool = False
-    changed: bool = False
 
 
 @dataclass(frozen=True)
@@ -186,12 +193,10 @@ class PublishStateRow:
 
     server_id: str
     item_id: str | None
-    markers_hash: str | None
     markers: tuple[Marker, ...]
     status: str
     message: str
     updated_at: str
-    verified_at: str | None
 
 
 class MarkerStore:
@@ -308,7 +313,7 @@ class MarkerStore:
             logger.warning("markers.db rollback failed: {}", exc)
 
     @staticmethod
-    def _file(row: sqlite3.Row, *, created: bool = False, changed: bool = False) -> FileRecord:
+    def _file(row: sqlite3.Row) -> FileRecord:
         return FileRecord(
             id=row["id"],
             canonical_path=row["canonical_path"],
@@ -317,8 +322,6 @@ class MarkerStore:
             duration_ms=row["duration_ms"],
             season_key=row["season_key"],
             is_movie=bool(row["is_movie"]),
-            created=created,
-            changed=changed,
         )
 
     def upsert_file(
@@ -326,15 +329,15 @@ class MarkerStore:
     ) -> FileRecord:
         """Insert or refresh a file; a size/mtime change invalidates derived data (locked markers survive).
 
-        A changed identity also clears every server's ``markers_hash``/``verified_at`` in ``publish_state``
-        (keeping ``markers_json``/``status`` so the next publish still knows what to replace) -- an in-place
-        replacement (e.g. a Tdarr transcode) landing on identical times must still be re-written, since some
-        servers (Jellyfin) drop segments outright when a file's mtime changes. ``duration_ms=None`` on a
-        changed identity stores NULL, since the old duration can no longer be trusted; on an unchanged
-        identity it keeps the previous value.
+        A changed identity clears evidence (and its versions), fingerprints, decisions, the server kind and every
+        server's ``publish_basis``, so the next run re-writes even when an in-place replacement (e.g. a Tdarr
+        transcode) lands on identical times -- some servers (Jellyfin) drop segments outright when a file's mtime
+        changes. ``publish_state`` keeps ``markers_json``/``status`` so that publish still knows what to replace.
+        ``duration_ms=None`` on a changed identity stores NULL, since the old duration can no longer be trusted; on
+        an unchanged identity it keeps the previous value.
 
         Returns:
-            The record, with ``created``/``changed`` describing what happened.
+            The record.
         """
         now = self._now()
         with self._tx() as conn:
@@ -353,17 +356,20 @@ class MarkerStore:
                         now,
                     ),
                 )
-                file_id, created, changed = cur.lastrowid, True, False
+                file_id = cur.lastrowid
             else:
-                file_id, created = row["id"], False
-                changed = (row["size"], row["mtime_ns"]) != (identity.size, identity.mtime_ns)
-                if changed:
-                    for table in ("evidence", "fingerprints", "decisions", "server_kinds", "publish_basis"):
+                file_id = row["id"]
+                if (row["size"], row["mtime_ns"]) != (identity.size, identity.mtime_ns):
+                    for table in (
+                        "evidence",
+                        "evidence_versions",
+                        "fingerprints",
+                        "decisions",
+                        "server_kinds",
+                        "publish_basis",
+                    ):
                         conn.execute(f"DELETE FROM {table} WHERE file_id=?", (file_id,))
                     conn.execute("DELETE FROM markers WHERE file_id=? AND locked=0", (file_id,))
-                    conn.execute(
-                        "UPDATE publish_state SET markers_hash=NULL, verified_at=NULL WHERE file_id=?", (file_id,)
-                    )
                     conn.execute(
                         "UPDATE files SET size=?, mtime_ns=?, duration_ms=?, season_key=?, is_movie=?, updated_at=? "
                         "WHERE id=?",
@@ -376,7 +382,7 @@ class MarkerStore:
                         (identity.size, identity.mtime_ns, duration_ms, season_key, int(is_movie), now, file_id),
                     )
             new_row = conn.execute("SELECT * FROM files WHERE id=?", (file_id,)).fetchone()
-        return self._file(new_row, created=created, changed=changed)
+        return self._file(new_row)
 
     def get_file(self, canonical_path: str) -> FileRecord | None:
         """Look a file up by canonical path."""
@@ -399,20 +405,46 @@ class MarkerStore:
         return [self._file(r) for r in rows]
 
     def replace_evidence(
-        self, file_id: int, source: Source, candidates: list[Candidate], *, origin: str = "", detail: str = ""
+        self,
+        file_id: int,
+        source: Source,
+        candidates: list[Candidate],
+        *,
+        origin: str = "",
+        detail: str = "",
+        version: int | None = None,
+        also_replaces: Iterable[Source] = (),
     ) -> None:
         """Replace one source's evidence under one lookup key. An empty list records "looked it up, nothing there".
 
         ``origin`` is the replace/lookup key (e.g. a server id) -- it alone scopes what this call deletes and
         re-inserts. Each candidate's own ``c.origin`` (e.g. a chapter title) is stored separately as ``label``
         and never affects scoping, so replacing chapters under the shared default key ("") always clears every
-        previous chapter candidate, however many different titles they carried.
+        previous chapter candidate, however many different titles they carried. Rows are stored under ``source``,
+        whatever each candidate's own source says.
+
+        Args:
+            file_id: The file.
+            source: The source the rows are stored under.
+            candidates: The answer's candidates.
+            origin: The lookup key.
+            detail: Shown with every row (the Inspector); never a secret.
+            version: The chapter rules / parser / reader version that made the answer (None: unknown).
+            also_replaces: Other sources whose rows and version under the same ``origin`` this answer replaces.
         """
         now = self._now()
         with self._tx() as conn:
-            conn.execute(
-                "DELETE FROM evidence WHERE file_id=? AND source=? AND origin=?", (file_id, source.value, origin)
-            )
+            for replaced in dict.fromkeys((source, *also_replaces)):
+                for table in ("evidence", "evidence_versions"):
+                    conn.execute(
+                        f"DELETE FROM {table} WHERE file_id=? AND source=? AND origin=?",
+                        (file_id, replaced.value, origin),
+                    )
+            if version is not None:
+                conn.execute(
+                    "INSERT INTO evidence_versions (file_id, source, origin, version) VALUES (?,?,?,?)",
+                    (file_id, source.value, origin, version),
+                )
             if not candidates:
                 conn.execute(
                     "INSERT INTO evidence (file_id, source, origin, detail, fetched_at) VALUES (?,?,?,?,?)",
@@ -435,6 +467,15 @@ class MarkerStore:
                         now,
                     ),
                 )
+
+    def evidence_version(self, file_id: int, source: Source, origin: str = "") -> int | None:
+        """The version one lookup's stored evidence was made with (None = never stored, or stored without one)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT version FROM evidence_versions WHERE file_id=? AND source=? AND origin=?",
+                (file_id, source.value, origin),
+            ).fetchone()
+        return int(row["version"]) if row else None
 
     def evidence_fetched_at(self, file_id: int, source: Source, origin: str = "") -> datetime | None:
         """When a source was last looked up for this file (None = never)."""
@@ -589,28 +630,21 @@ class MarkerStore:
         markers: list[Marker] | None,
         status: str,
         message: str = "",
-        verified: bool = False,
     ) -> None:
-        """Record a publish attempt. ``markers=None`` keeps the last successfully published set (and its
-        ``verified_at``) -- ``verified`` is ignored in that case, since there's nothing new to verify."""
+        """Record a publish attempt. ``markers=None`` keeps the last successfully published set."""
         now = self._now()
         with self._tx() as conn:
             if markers is None:
                 prev = conn.execute(
-                    "SELECT markers_hash, markers_json, verified_at FROM publish_state WHERE file_id=? AND server_id=?",
-                    (file_id, server_id),
+                    "SELECT markers_json FROM publish_state WHERE file_id=? AND server_id=?", (file_id, server_id)
                 ).fetchone()
-                markers_hash = prev["markers_hash"] if prev else None
                 markers_json = prev["markers_json"] if prev else "[]"
-                verified_at = prev["verified_at"] if prev else None
             else:
-                markers_hash = self.markers_hash(markers)
                 markers_json = self._markers_to_json(markers)
-                verified_at = now if verified else None
             conn.execute(
-                "INSERT OR REPLACE INTO publish_state (file_id, server_id, item_id, markers_hash, markers_json, status, "
-                "message, updated_at, verified_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                (file_id, server_id, item_id, markers_hash, markers_json, status, message, now, verified_at),
+                "INSERT OR REPLACE INTO publish_state (file_id, server_id, item_id, markers_json, status, message, "
+                "updated_at) VALUES (?,?,?,?,?,?,?)",
+                (file_id, server_id, item_id, markers_json, status, message, now),
             )
 
     @staticmethod
@@ -631,16 +665,7 @@ class MarkerStore:
     @staticmethod
     def _publish_row(r: sqlite3.Row) -> PublishStateRow:
         markers = MarkerStore._markers_from_json(r["markers_json"])
-        return PublishStateRow(
-            r["server_id"],
-            r["item_id"],
-            r["markers_hash"],
-            markers,
-            r["status"],
-            r["message"],
-            r["updated_at"],
-            r["verified_at"],
-        )
+        return PublishStateRow(r["server_id"], r["item_id"], markers, r["status"], r["message"], r["updated_at"])
 
     def get_publish_state(self, file_id: int, server_id: str) -> PublishStateRow | None:
         """Last publish record for one server."""

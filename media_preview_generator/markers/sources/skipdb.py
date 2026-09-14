@@ -19,6 +19,8 @@ from .ratelimit import SourceLimiter, get_limiter
 
 BASE_URL = "https://api.skipdb.tv/api/segments"
 _LABEL = "SkipDB"
+# Bump when parsing changes what a stored answer would hold, so files are asked again.
+PARSER_VERSION = 1
 _SEGMENT_KEYS = (
     ("intro", MarkerType.INTRO),
     ("recap", MarkerType.RECAP),

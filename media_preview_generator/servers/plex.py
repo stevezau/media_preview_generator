@@ -2230,6 +2230,32 @@ class PlexServer(MediaServer):
             )
         return out
 
+    def get_part_durations(self, item_id: str) -> list[int | None] | None:
+        """Duration of every part of every version of an item (Plex serves one marker set per item).
+
+        Args:
+            item_id: Rating key or metadata key.
+
+        Returns:
+            Milliseconds per ``Media/Part`` in Plex's order (None for a part without a duration), or None on error.
+        """
+        from ..plex_client import retry_plex_call
+
+        bare_id = str(item_id or "").strip().rsplit("/", 1)[-1]
+        try:
+            root = retry_plex_call(self._connect().query, f"/library/metadata/{bare_id}")
+        except Exception as exc:
+            logger.debug("Plex part read failed for {}: {}", bare_id, exc)
+            return None
+        node = next(iter(root), None) if root is not None else None
+        if node is None:
+            return None
+        durations: list[int | None] = []
+        for part in node.findall("Media/Part"):
+            raw = part.get("duration")
+            durations.append(int(raw) if raw and raw.isdigit() else None)
+        return durations
+
     def parse_webhook(self, payload: dict[str, Any] | bytes, headers: dict[str, str]) -> WebhookEvent | None:
         """Normalise a Plex webhook payload to a :class:`WebhookEvent`.
 

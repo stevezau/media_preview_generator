@@ -5,7 +5,7 @@ import dataclasses
 import pytest
 
 from media_preview_generator.markers.models import (
-    LOCAL_SOURCES,
+    SERVER_SOURCES,
     Candidate,
     FileIdentity,
     Marker,
@@ -24,16 +24,12 @@ class TestMediaIds:
         assert MediaIds().is_episode is False  # default kind is "unknown"
 
 
-class TestLocalSources:
-    def test_local_sources_are_exactly_chapters_season_audio_credits_text(self):
-        assert LOCAL_SOURCES == {Source.CHAPTERS, Source.SEASON_AUDIO, Source.CREDITS_TEXT}
+class TestServerSources:
+    def test_server_sources_are_a_servers_own_markers_and_an_importer_plugins_copy(self):
+        assert SERVER_SOURCES == {Source.SERVER_MARKERS, Source.SERVER_MARKERS_IMPORTED}
 
-    def test_online_and_server_sources_are_not_local(self):
-        assert Source.THEINTRODB not in LOCAL_SOURCES
-        assert Source.INTRODB not in LOCAL_SOURCES
-        assert Source.SKIPDB not in LOCAL_SOURCES
-        assert Source.SERVER_MARKERS not in LOCAL_SOURCES
-        assert Source.USER not in LOCAL_SOURCES
+    def test_the_imported_source_round_trips_by_value(self):
+        assert Source("server_markers_imported") is Source.SERVER_MARKERS_IMPORTED
 
 
 class TestValueObjectsAreFrozen:

@@ -1,0 +1,13 @@
+file chapters: [(0, 'Chapter 1'), (105272, 'Chapter 2'), (194986, 'Chapter 3'), (593051, 'Chapter 4'), (1291373, 'Chapter 5'), (1381046, 'Chapter 6')]
+medium, default sources (IntroDB on, TheIntroDB off)
+  outcome: markers_published | intro 0:24–1:54 (introdb); credits 21:30–23:00 (introdb) | rows: [('jf-1', 'markers_written', '2 marker(s)')]
+   credits: decided (single source (introdb))
+   intro: decided (single source (introdb))
+   PUBLISHED-SET credits 1290.2-1380.1 by ('introdb',)
+   PUBLISHED-SET intro 24.0-114.1 by ('introdb',)
+medium, TheIntroDB only
+  outcome: markers_published | intro 0:24–2:03 (theintrodb); credits 21:30–23:00 (theintrodb) | rows: [('jf-1', 'markers_written', '2 marker(s)')]
+   credits: decided (single source (theintrodb))
+   intro: decided (single source (theintrodb))
+   PUBLISHED-SET credits 1290.2-1380.1 by ('theintrodb',)
+   PUBLISHED-SET intro 24.9-123.2 by ('theintrodb',)

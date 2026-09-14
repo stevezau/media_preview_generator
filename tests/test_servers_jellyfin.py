@@ -3161,6 +3161,30 @@ class TestBridgeMarkers:
         assert server.get_media_segments("abc") is None
 
 
+class TestPluginNames:
+    """``get_plugin_names`` on Jellyfin (``GET /Plugins`` needs an administrator there)."""
+
+    def test_lists_the_installed_plugin_names(self, make_server):
+        server = make_server()
+        body = [{"Name": "Intro Skipper", "Version": "1.10.11.4"}, {"Name": "TheIntroDB", "Version": "1.1.0.1"}]
+        server._request = MagicMock(return_value=_bridge_resp(200, body))
+        assert server.get_plugin_names() == ["Intro Skipper", "TheIntroDB"]
+        server._request.assert_called_once_with("GET", "/Plugins", timeout=10)
+
+    @pytest.mark.parametrize(
+        ("side_effect", "resp"),
+        [
+            pytest.param(None, _bridge_resp(403, None, json_error=True), id="403-not-admin"),
+            pytest.param(None, _bridge_resp(503, None, json_error=True), id="503-starting"),
+            pytest.param(requests.ConnectionError("x"), None, id="unreachable"),
+        ],
+    )
+    def test_unknown_is_none(self, make_server, side_effect, resp):
+        server = make_server()
+        server._request = MagicMock(side_effect=side_effect, return_value=resp)
+        assert server.get_plugin_names() is None
+
+
 class TestBridgeAccess:
     """Markers capability input: whether our credentials may use the admin-only Bridge markers routes."""
 

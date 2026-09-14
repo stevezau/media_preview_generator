@@ -71,9 +71,10 @@ def test_failed_commit_is_rolled_back_and_the_next_write_works(store):
 
 def test_new_file_then_same_identity_is_not_changed(store):
     a = store.upsert_file(_ident(), duration_ms=1_320_000, season_key="/m/Show/Season 01", is_movie=False)
+    store.replace_evidence(a.id, Source.SKIPDB, [Candidate(T.CREDITS, 900_000, None, Source.SKIPDB)], version=2)
     b = store.upsert_file(_ident(), duration_ms=1_320_000, season_key="/m/Show/Season 01", is_movie=False)
-    assert a.created and not a.changed
-    assert b.id == a.id and not b.created and not b.changed
+    assert b.id == a.id
+    assert len(store.get_evidence(a.id)) == 1 and store.evidence_version(a.id, Source.SKIPDB) == 2
     assert store.get_file(_ident().canonical_path).duration_ms == 1_320_000
 
 
@@ -85,35 +86,38 @@ def test_normal_open_uses_wal(store):
 @pytest.mark.parametrize("change", [{"size": 101}, {"mtime_ns": 2}])
 def test_identity_change_invalidates_evidence_decisions_and_unlocked_markers(store, change):
     rec = store.upsert_file(_ident(), duration_ms=1_000_000, season_key=None, is_movie=True)
-    store.replace_evidence(rec.id, Source.SKIPDB, [Candidate(T.CREDITS, 900_000, None, Source.SKIPDB)])
+    store.replace_evidence(rec.id, Source.SKIPDB, [Candidate(T.CREDITS, 900_000, None, Source.SKIPDB)], version=1)
     store.save_decisions(rec.id, {T.CREDITS: _decided(T.CREDITS, 900_000, 1_000_000)}, settings_fingerprint="f")
     store.lock_marker(rec.id, Marker(T.INTRO, 1000, 30_000, ("user",), locked=True))
     published = [Marker(T.CREDITS, 900_000, 1_000_000, ("chapters",))]
-    store.set_publish_state(rec.id, "plex-1", item_id="7", markers=published, status="written", verified=True)
+    store.set_publish_state(rec.id, "plex-1", item_id="7", markers=published, status="written")
+    store.set_publish_basis(rec.id, "plex-1", decided_hash="h", item_version=1)
 
     # A second, untouched file must survive this file's invalidation unscathed -- catches a WHERE
     # clause dropped from any of the DELETE/UPDATE statements below.
     other = store.upsert_file(_ident("/m/other.mkv"), duration_ms=1_000_000, season_key=None, is_movie=True)
-    store.replace_evidence(other.id, Source.SKIPDB, [Candidate(T.CREDITS, 900_000, None, Source.SKIPDB)])
+    store.replace_evidence(other.id, Source.SKIPDB, [Candidate(T.CREDITS, 900_000, None, Source.SKIPDB)], version=1)
     store.save_decisions(other.id, {T.CREDITS: _decided(T.CREDITS, 900_000, 1_000_000)}, settings_fingerprint="f")
-    store.set_publish_state(other.id, "plex-1", item_id="9", markers=published, status="written", verified=True)
+    store.set_publish_state(other.id, "plex-1", item_id="9", markers=published, status="written")
+    store.set_publish_basis(other.id, "plex-1", decided_hash="h", item_version=1)
 
     new = store.upsert_file(_ident(**change), duration_ms=1_100_000, season_key=None, is_movie=True)
 
-    assert new.id == rec.id and new.changed and not new.created
+    assert new.id == rec.id
     assert store.get_evidence(rec.id) == []
+    assert store.evidence_version(rec.id, Source.SKIPDB) is None
     assert store.get_decisions(rec.id) == {}
     assert store.get_markers(rec.id) == {T.INTRO: Marker(T.INTRO, 1000, 30_000, ("user",), locked=True)}
     kept = store.get_publish_state(rec.id, "plex-1")  # markers/status kept, so the next publish knows what to
-    # replace; hash+verified_at cleared so an in-place rewrite landing on identical times still re-publishes.
+    # replace; the basis is cleared so an in-place rewrite landing on identical times still re-publishes.
     assert kept.markers == tuple(published) and kept.status == "written"
-    assert kept.markers_hash is None and kept.verified_at is None
+    assert store.get_publish_basis(rec.id, "plex-1") is None
     assert store.get_file_by_id(rec.id).duration_ms == 1_100_000
 
     assert len(store.get_evidence(other.id)) == 1
+    assert store.evidence_version(other.id, Source.SKIPDB) == 1
     assert T.CREDITS in store.get_decisions(other.id)
-    kept_other = store.get_publish_state(other.id, "plex-1")
-    assert kept_other.markers_hash == MarkerStore.markers_hash(published) and kept_other.verified_at is not None
+    assert store.get_publish_basis(other.id, "plex-1") == ("h", 1)
 
 
 def test_replace_evidence_is_scoped_to_source_and_origin(store):
@@ -186,18 +190,14 @@ def test_markers_hash_is_order_independent_and_sensitive_to_times(store):
 def test_publish_state_upsert_and_list(store):
     rec = store.upsert_file(_ident(), duration_ms=1, season_key=None, is_movie=False)
     first = [Marker(T.INTRO, 1, 5000, ("chapters",))]
-    store.set_publish_state(rec.id, "jf-1", item_id="abc", markers=first, status="written", verified=True)
-    verified_at_before = store.get_publish_state(rec.id, "jf-1").verified_at
-    assert verified_at_before is not None
+    store.set_publish_state(rec.id, "jf-1", item_id="abc", markers=first, status="written")
     store.set_publish_state(rec.id, "jf-1", item_id="abc", markers=None, status="failed", message="plugin missing")
     row = store.get_publish_state(rec.id, "jf-1")
     assert (row.status, row.message, row.markers) == ("failed", "plugin missing", tuple(first))
-    assert row.markers_hash == MarkerStore.markers_hash(first)
-    assert row.verified_at == verified_at_before  # markers=None keeps the previous verified_at too
     second = [Marker(T.INTRO, 2, 6000, ("chapters",))]
-    store.set_publish_state(rec.id, "jf-1", item_id="abc", markers=second, status="written", verified=True)
+    store.set_publish_state(rec.id, "jf-1", item_id="abc", markers=second, status="written")
     row = store.get_publish_state(rec.id, "jf-1")
-    assert (row.status, row.message, row.markers) == ("written", "", tuple(second)) and row.verified_at is not None
+    assert (row.status, row.message, row.markers) == ("written", "", tuple(second))
     assert [r.server_id for r in store.publish_states(rec.id)] == ["jf-1"]
     assert store.get_publish_state(rec.id, "other") is None
 
@@ -285,6 +285,59 @@ def test_identity_change_leaves_other_files_alone(store):
     assert (other_file.size, other_file.mtime_ns, other_file.duration_ms) == (100, 1, 1_000_000)
 
 
+def test_evidence_version_is_stored_per_lookup_and_goes_with_its_rows(store):
+    # Chapter rules and online parsers change; the version a lookup's rows were made with says whether to derive
+    # them again.
+    rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
+    other = store.upsert_file(_ident("/m/other.mkv"), duration_ms=1_320_000, season_key=None, is_movie=False)
+    chapter = Candidate(T.INTRO, 10_000, 30_000, Source.CHAPTERS, origin="Intro")
+    plex = Candidate(T.INTRO, 1_000, 30_000, Source.SERVER_MARKERS, origin="plex-1")
+    store.replace_evidence(rec.id, Source.CHAPTERS, [chapter], version=3)
+    store.replace_evidence(other.id, Source.CHAPTERS, [chapter], version=3)
+    store.replace_evidence(rec.id, Source.SERVER_MARKERS, [plex], origin="plex-1", version=1)
+    store.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1", version=2)
+    store.replace_evidence(rec.id, Source.SKIPDB, [], detail="")
+    assert store.evidence_version(rec.id, Source.CHAPTERS) == 3
+    assert store.evidence_version(rec.id, Source.SERVER_MARKERS, "plex-1") == 1
+    assert store.evidence_version(rec.id, Source.SERVER_MARKERS, "jf-1") == 2
+    assert store.evidence_version(rec.id, Source.SERVER_MARKERS) is None
+    assert store.evidence_version(rec.id, Source.SKIPDB) is None  # stored without a version
+
+    store.replace_evidence(rec.id, Source.CHAPTERS, [chapter], version=4)
+    assert store.evidence_version(rec.id, Source.CHAPTERS) == 4
+    store.replace_evidence(rec.id, Source.CHAPTERS, [chapter])
+    assert store.evidence_version(rec.id, Source.CHAPTERS) is None
+    assert store.evidence_version(other.id, Source.CHAPTERS) == 3
+
+
+def test_an_answer_can_replace_another_sources_rows_under_the_same_origin(store):
+    # A server read before an importer plugin was installed stored plain server markers; the next read of that server
+    # stores them as imported copies instead, and nothing of the old answer may be left behind.
+    rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
+    plex = Candidate(T.INTRO, 1_000, 30_000, Source.SERVER_MARKERS, origin="plex-1")
+    store.replace_evidence(rec.id, Source.SERVER_MARKERS, [plex], origin="plex-1", version=1)
+    store.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1", version=1)
+    copy = Candidate(T.INTRO, 24_046, 114_105, Source.SERVER_MARKERS_IMPORTED, origin="jf-1")
+    store.replace_evidence(
+        rec.id,
+        Source.SERVER_MARKERS_IMPORTED,
+        [copy],
+        origin="jf-1",
+        detail="imported",
+        version=2,
+        also_replaces=(Source.SERVER_MARKERS,),
+    )
+    assert store.get_evidence(rec.id) == [plex, copy]
+    assert [(r.source, r.origin, r.detail) for r in store.evidence_rows(rec.id)] == [
+        (Source.SERVER_MARKERS, "plex-1", ""),
+        (Source.SERVER_MARKERS_IMPORTED, "jf-1", "imported"),
+    ]
+    assert store.evidence_fetched_at(rec.id, Source.SERVER_MARKERS, "jf-1") is None
+    assert store.evidence_version(rec.id, Source.SERVER_MARKERS, "jf-1") is None
+    assert store.evidence_version(rec.id, Source.SERVER_MARKERS_IMPORTED, "jf-1") == 2
+    assert store.evidence_version(rec.id, Source.SERVER_MARKERS, "plex-1") == 1
+
+
 def test_evidence_scoping_by_source(store):
     """HIGH 2: a mutant dropping the source (or origin) filter from evidence_fetched_at's WHERE
     clause, or from replace_evidence's DELETE, must fail this test."""
@@ -348,14 +401,14 @@ def test_identity_change_with_unknown_duration_stores_null(store, change):
     """LOW: a changed identity with duration_ms=None must not COALESCE the stale old duration."""
     store.upsert_file(_ident(), duration_ms=1_000_000, season_key=None, is_movie=False)
     changed = store.upsert_file(_ident(**change), duration_ms=None, season_key=None, is_movie=False)
-    assert changed.changed and changed.duration_ms is None
+    assert changed.duration_ms is None
 
 
 def test_unchanged_identity_with_no_duration_keeps_previous_value(store):
     """LOW: an unchanged identity must still COALESCE, unlike the changed-identity case above."""
     store.upsert_file(_ident(), duration_ms=1_000_000, season_key=None, is_movie=False)
     same = store.upsert_file(_ident(), duration_ms=None, season_key=None, is_movie=False)
-    assert not same.changed and same.duration_ms == 1_000_000
+    assert same.duration_ms == 1_000_000
 
 
 def test_nested_tx_on_same_thread_raises_and_store_stays_usable(store):
@@ -414,14 +467,13 @@ def test_clock_is_used_for_every_written_timestamp(tmp_path):
             item_id="1",
             markers=[Marker(T.CREDITS, 900_000, 1_000_000, ("chapters",))],
             status="written",
-            verified=True,
         )
         s.record_source_usage("theintrodb", day="2026-09-13", used=1, limit=2, remaining=1)
 
         assert s.evidence_fetched_at(rec.id, Source.SKIPDB) == fixed
         assert s.get_decisions(rec.id)[T.CREDITS].decided_at == fixed.isoformat()
         pub = s.get_publish_state(rec.id, "plex-1")
-        assert pub.updated_at == fixed.isoformat() and pub.verified_at == fixed.isoformat()
+        assert pub.updated_at == fixed.isoformat()
         usage_row = s._conn.execute(
             "SELECT updated_at FROM source_usage WHERE source=? AND day=?", ("theintrodb", "2026-09-13")
         ).fetchone()
@@ -579,14 +631,14 @@ def test_decision_row_exposes_reason_and_decided_at(store):
     assert d.decided_at != ""
 
 
-def test_set_publish_state_ignores_verified_when_markers_is_none(store):
+def test_set_publish_state_leaves_the_retired_hash_columns_empty(store):
     rec = store.upsert_file(_ident(), duration_ms=1, season_key=None, is_movie=False)
     first = [Marker(T.INTRO, 1, 5000, ("chapters",))]
-    store.set_publish_state(rec.id, "jf-1", item_id="abc", markers=first, status="written", verified=False)
-    assert store.get_publish_state(rec.id, "jf-1").verified_at is None
-    store.set_publish_state(rec.id, "jf-1", item_id="abc", markers=None, status="failed", verified=True)
-    # verified=True is ignored when markers=None: no new set was actually verified.
-    assert store.get_publish_state(rec.id, "jf-1").verified_at is None
+    store.set_publish_state(rec.id, "jf-1", item_id="abc", markers=first, status="written")
+    store.set_publish_state(rec.id, "jf-1", item_id="abc", markers=None, status="failed")
+    with store._lock:
+        row = store._conn.execute("SELECT markers_hash, verified_at FROM publish_state").fetchone()
+    assert (row["markers_hash"], row["verified_at"]) == (None, None)
 
 
 def test_unchanged_upsert_on_one_file_does_not_touch_another_files_row(store):
@@ -595,7 +647,7 @@ def test_unchanged_upsert_on_one_file_does_not_touch_another_files_row(store):
     a = store.upsert_file(_ident("/m/a.mkv"), duration_ms=1_000_000, season_key=None, is_movie=False)
     b = store.upsert_file(_ident("/m/b.mkv"), duration_ms=2_000_000, season_key=None, is_movie=False)
     same = store.upsert_file(_ident("/m/a.mkv"), duration_ms=9_999_999, season_key=None, is_movie=False)
-    assert not same.changed and same.id == a.id
+    assert same.id == a.id
     assert store.get_file_by_id(a.id).duration_ms == 9_999_999
     assert store.get_file_by_id(b.id).duration_ms == 2_000_000
 
@@ -689,17 +741,14 @@ def test_migration_failure_leaves_version_and_schema_unchanged(tmp_path, monkeyp
         s.close()
 
 
-def test_publish_state_updated_at_uses_clock_even_when_not_verified(tmp_path):
+def test_publish_state_updated_at_uses_clock_when_markers_are_kept(tmp_path):
     fixed = datetime(2026, 9, 13, 12, 0, 0, tzinfo=timezone.utc)
     s = MarkerStore(str(tmp_path / "markers.db"), clock=lambda: fixed)
     try:
         rec = s.upsert_file(_ident(), duration_ms=1, season_key=None, is_movie=False)
-        s.set_publish_state(
-            rec.id, "plex-1", item_id="1", markers=[Marker(T.INTRO, 1, 2, ("x",))], status="written", verified=False
-        )
+        s.set_publish_state(rec.id, "plex-1", item_id="1", markers=None, status="failed")
         row = s.get_publish_state(rec.id, "plex-1")
         assert row.updated_at == fixed.isoformat()
-        assert row.verified_at is None
     finally:
         s.close()
 

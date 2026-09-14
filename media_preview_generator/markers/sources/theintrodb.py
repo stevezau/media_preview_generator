@@ -1,8 +1,10 @@
 """TheIntroDB v3 client (spec §4). Used without written permission — user key optional; must degrade gracefully.
 
 ``GET /v3/media?tmdb_id|tvdb_id|imdb_id&season&episode&duration_ms``: each segment type is an array (several entries
-are normal); ``start_ms: null`` means the start of the file and ``end_ms: null`` the end of the file. The API picks
-the release version closest to ``duration_ms``, so a lookup without the file's duration is never sent.
+are normal); ``start_ms: null`` means the start of the file and ``end_ms: null`` the end of the file. The API returns
+its closest stored version for ``duration_ms`` and never rejects a different cut (measured 2026-09-14: the same body
+for 1444574 ms and 2400000 ms), so its answers only count as agreement, never alone (spec §5.5 rule 6). A lookup
+without the file's duration is still never sent.
 """
 
 from __future__ import annotations
@@ -18,6 +20,8 @@ from .ratelimit import SourceLimiter, get_limiter
 
 BASE_URL = "https://api.theintrodb.org/v3/media"
 _LABEL = "TheIntroDB"
+# Bump when parsing changes what a stored answer would hold, so files are asked again.
+PARSER_VERSION = 1
 _SEGMENT_KEYS = (
     ("intro", MarkerType.INTRO),
     ("recap", MarkerType.RECAP),

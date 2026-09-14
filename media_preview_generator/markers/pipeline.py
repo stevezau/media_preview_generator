@@ -1,7 +1,8 @@
 """Intro & Credits per-file pipeline (spec §6.2).
 
 owners → identity → kind → evidence in the user's source order (a normal run stops once every enabled type is
-decided; a forced re-detect asks every source) → decide from everything stored → store → publish to each owner. ``check_item`` runs on the dispatcher's checking threads (no worker slot); it returns
+decided by more than chapters alone; a forced re-detect asks every source) → decide from everything stored → store →
+publish to each owner. ``check_item`` runs on the dispatcher's checking threads (no worker slot); it returns
 None only when a registered local detector (season audio, credit text) could still decide something, which sends the
 item to a GPU/CPU worker where ``process_item`` runs the same steps plus the detectors.
 """
@@ -24,14 +25,14 @@ from ..config.paths import is_path_excluded
 from ..job_kinds import ItemOutcome, KindHandlers
 from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig, ServerType
-from ..servers.ownership import OwnershipMatch, find_library_matches
+from ..servers.ownership import OwnershipMatch
 from ..servers.registry import server_config_from_dict
 from ..web.settings_manager import get_settings_manager
 from .decide import DecisionContext, DecisionStatus, TypeDecision, decide
 from .external_ids import ids_from_path, ids_from_server_dict, merge_ids
-from .models import Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
+from .models import SERVER_SOURCES, Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
 from .outcomes import NOT_IN_LIBRARY, OUTCOME_KEYS, STATE_BY_STATUS, FileOutcome, ServerStatus, file_outcome
-from .ownership import marker_matches
+from .ownership import marker_matches, owning_servers
 from .probe import ProbeError, ffprobe_path_for, probe_media
 from .publishers.base import (
     Capability,
@@ -42,10 +43,12 @@ from .publishers.base import (
 )
 from .publishers.factory import publisher_for
 from .settings import GlobalMarkersSettings, ServerMarkersSettings, get_global_settings, load_server
-from .sources.chapters import chapter_candidates
+from .sources import introdb, skipdb, theintrodb
+from .sources.chapters import CHAPTER_RULES_VERSION, chapter_candidates
 from .sources.introdb import IntroDbClient
 from .sources.online import LookupResult
-from .sources.server_markers import read_server_markers
+from .sources.ratelimit import PRIORITY_LOW
+from .sources.server_markers import READER_VERSION, imported_detail, importer_plugin, read_server_markers
 from .sources.skipdb import SkipDbClient
 from .sources.theintrodb import TheIntroDbClient
 from .store import FileRecord, ItemPublishStateRow, MarkerStore, get_marker_store
@@ -56,10 +59,18 @@ EMPTY_SERVER_MARKERS_RETRY = timedelta(days=1)
 # A file replaced while it is analysed is detected again from scratch; one that keeps changing is being written.
 MAX_ATTEMPTS = 3
 _ONLINE_LABELS = {Source.THEINTRODB: "TheIntroDB", Source.INTRODB: "IntroDB", Source.SKIPDB: "SkipDB"}
+PARSER_VERSIONS = {
+    Source.THEINTRODB: theintrodb.PARSER_VERSION,
+    Source.INTRODB: introdb.PARSER_VERSION,
+    Source.SKIPDB: skipdb.PARSER_VERSION,
+}
 _STORED_LOOKUPS = ("ok", "no_data")
 # Plex and Emby can't tell our markers from their own, and Plex shows one marker set per item across its versions, so
 # their markers are never read back from an item we published to. Jellyfin's reader leaves ours out itself.
 _ITEM_WIDE_MARKERS = frozenset({ServerType.PLEX, ServerType.EMBY})
+# Servers where a plugin can import a crowd skip database into the server's own markers; Plex detects its own.
+_IMPORTER_PLUGIN_SERVERS = frozenset({ServerType.JELLYFIN, ServerType.EMBY})
+PLUGINS_UNKNOWN_DETAIL = "Couldn't read this server's plugins, so its markers aren't used"
 _CANCELLED = "cancelled by user"
 
 LocalDetector = Callable[..., list[Candidate]]
@@ -143,6 +154,10 @@ class PipelineContext:
     _capability_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # Paths whose evidence a forced run already refreshed, so the worker stage doesn't ask the sources twice.
     _refreshed: set[str] = field(default_factory=set, repr=False)
+    # Per server id: its intro-DB importer plugin ("" = none), or None when its plugin list couldn't be read.
+    _importers: dict[str, str | None] = field(default_factory=dict, repr=False)
+    _importer_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
+    _importer_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 @dataclass(frozen=True)
@@ -303,31 +318,20 @@ def markers_for_path(store: MarkerStore, canonical_path: str) -> dict[MarkerType
         canonical_path: Local path of the other file.
 
     Returns:
-        Its markers by type (``{}`` = decided, nothing to show), or None when it was never decided.
+        Its markers by type (``{}`` = decided, nothing to show), or None when it was never decided or the file on disk
+        is no longer the one that was decided (replaced or gone).
     """
     rec = store.get_file(canonical_path)
-    if rec is None or not store.get_decisions(rec.id):
+    if rec is None or not store.get_decisions(rec.id) or _identity_changed(rec):
         return None
     return store.get_markers(rec.id)
 
 
 def _owning_servers(item: ProcessableItem, ctx: PipelineContext) -> list[_Owning]:
-    # Every covering library counts, whatever the preview opt-in says: Intro & Credits has its own library choice.
-    by_server: dict[str, list[OwnershipMatch]] = {}
-    for match in find_library_matches(item.canonical_path, ctx.registry.configs()):
-        by_server.setdefault(match.server_id, []).append(match)
-    out: list[_Owning] = []
-    for server_id, matches in by_server.items():
-        cfg = ctx.registry.get_config(server_id)
-        if cfg is None:  # find_library_matches already leaves out disabled servers
-            continue
-        if cfg.exclude_paths and is_path_excluded(item.canonical_path, cfg.exclude_paths):
-            continue
-        server = ctx.registry.get(cfg.id)
-        if server is None:
-            continue
-        out.append(_Owning(server, cfg, tuple(matches)))
-    return out
+    return [
+        _Owning(server, cfg, tuple(matches))
+        for cfg, server, matches in owning_servers(item.canonical_path, ctx.registry)
+    ]
 
 
 def _marker_owners(owning: list[_Owning], canonical_path: str) -> list[_Owning]:
@@ -385,15 +389,25 @@ def _enabled_types(settings: GlobalMarkersSettings, ids: MediaIds) -> frozenset[
 
 def _needs_lookup(ctx: PipelineContext, rec: FileRecord, source: Source, refresh: bool) -> bool:
     fetched = ctx.store.evidence_fetched_at(rec.id, source)
-    if fetched is None or refresh:
+    if fetched is None or refresh or ctx.store.evidence_version(rec.id, source) != PARSER_VERSIONS[source]:
         return True
     rows = [r for r in ctx.store.evidence_rows(rec.id) if r.source is source and r.origin == ""]
     return all(r.type is None for r in rows) and ctx.now() - fetched > NO_DATA_RETRY
 
 
+def _decision_order(settings: GlobalMarkersSettings) -> tuple[str, ...]:
+    """Enabled sources in the user's order; importer-plugin copies ride on the server-markers switch, ranked after it."""
+    order: list[str] = []
+    for source_id in settings.ordered_enabled_sources():
+        order.append(source_id)
+        if source_id == Source.SERVER_MARKERS.value:
+            order.append(Source.SERVER_MARKERS_IMPORTED.value)
+    return tuple(order)
+
+
 def _decide(ctx: PipelineContext, rec: FileRecord, types: frozenset[MarkerType]) -> dict[MarkerType, TypeDecision]:
     """Decide from everything stored for the enabled sources, so a forced and a normal run always agree."""
-    order = ctx.settings.ordered_enabled_sources()
+    order = _decision_order(ctx.settings)
     enabled = set(order)
     candidates = [c for c in ctx.store.get_evidence(rec.id) if c.source.value in enabled]
     dctx = DecisionContext(rec.duration_ms or 0, rec.is_movie, ctx.settings.publish_when, types, order)
@@ -426,8 +440,29 @@ def _decisions_changed(
     return False
 
 
+def _decided_beyond_chapters(decision: TypeDecision) -> bool:
+    """Decided, and not by chapters alone: two agreeing sources may still veto a chapter (spec §5.5 rule 3)."""
+    return decision.status is DecisionStatus.DECIDED and decision.marker.decided_by != (Source.CHAPTERS.value,)
+
+
 def _all_decided(decisions: dict[MarkerType, TypeDecision], types: frozenset[MarkerType]) -> bool:
-    return all(decisions[t].status is DecisionStatus.DECIDED for t in types)
+    return all(_decided_beyond_chapters(decisions[t]) for t in types)
+
+
+def _only_confirming_chapters(decisions: dict[MarkerType, TypeDecision], types: frozenset[MarkerType]) -> bool:
+    """Every type is decided and some only by chapters, so the search goes on only to let sources contradict them."""
+    return all(decisions[t].status is DecisionStatus.DECIDED for t in types) and not _all_decided(decisions, types)
+
+
+def _stale_evidence(ctx: PipelineContext, rec: FileRecord, source: Source) -> bool:
+    """Whether stored evidence of ``source`` was made by an older parser or server reader, so it is derived again."""
+    if source in _ONLINE_LABELS:
+        stored = ctx.store.evidence_fetched_at(rec.id, source) is not None
+        return stored and ctx.store.evidence_version(rec.id, source) != PARSER_VERSIONS[source]
+    if source is Source.SERVER_MARKERS:
+        reads = {(r.source, r.origin) for r in ctx.store.evidence_rows(rec.id) if r.source in SERVER_SOURCES}
+        return any(ctx.store.evidence_version(rec.id, s, origin) != READER_VERSION for s, origin in reads)
+    return False
 
 
 def _lookup(client: Any, source: Source, ids: MediaIds, rec: FileRecord, ctx: PipelineContext, cancel_check) -> None:
@@ -440,7 +475,26 @@ def _lookup(client: Any, source: Source, ids: MediaIds, rec: FileRecord, ctx: Pi
         # unavailable / not_applicable: nothing is stored, so the next run asks again.
         logger.debug("{} lookup for {}: {}", _ONLINE_LABELS[source], rec.canonical_path, result)
         return
-    ctx.store.replace_evidence(rec.id, source, list(result.candidates), detail=result.detail)
+    ctx.store.replace_evidence(
+        rec.id, source, list(result.candidates), detail=result.detail, version=PARSER_VERSIONS[source]
+    )
+
+
+def _importer_plugin(ctx: PipelineContext, owner: _Owning) -> tuple[bool, str | None]:
+    """Whether the server's plugin list could be read, and its intro-DB importer plugin; asked once per server per job."""
+    sid = owner.config.id
+    with ctx._importer_guard:
+        lock = ctx._importer_locks.setdefault(sid, threading.Lock())
+    with lock:
+        if sid not in ctx._importers:
+            try:
+                names = owner.server.get_plugin_names()
+            except Exception as exc:
+                logger.debug("Plugin list on {} failed: {}", owner.config.name, type(exc).__name__)
+                names = None
+            ctx._importers[sid] = None if names is None else (importer_plugin(names) or "")
+        found = ctx._importers[sid]
+    return found is not None, found or None
 
 
 def _read_server_markers(ctx: PipelineContext, rec: FileRecord, servers: _ItemServers, refresh: bool) -> None:
@@ -458,21 +512,39 @@ def _read_server_markers(ctx: PipelineContext, rec: FileRecord, servers: _ItemSe
         if item_wide and ctx.store.published_to_item(cfg.id, item_id):
             continue
         try:
-            found = read_server_markers(owner.server, cfg, item_id)
+            found = read_server_markers(owner.server, cfg, item_id, duration_ms=rec.duration_ms)
         except Exception as exc:
             logger.debug("Reading markers on {} failed for {}: {}", cfg.name, rec.canonical_path, exc)
             found = None
         if found is not None and item_wide and ctx.store.published_to_item(cfg.id, item_id):
             found = None  # another version of this item was published while the read was out: it may show ours
-        if found is not None:
-            ctx.store.replace_evidence(rec.id, Source.SERVER_MARKERS, list(found), origin=cfg.id)
+        if found is None:
+            continue
+        source, detail = Source.SERVER_MARKERS, ""
+        if found and cfg.type in _IMPORTER_PLUGIN_SERVERS:
+            readable, importer = _importer_plugin(ctx, owner)
+            if not readable:
+                # They may be a crowd database's copy: stored as "none there", so they don't count and are read again
+                # like an empty answer.
+                found, detail = [], PLUGINS_UNKNOWN_DETAIL
+            elif importer:
+                source, detail = Source.SERVER_MARKERS_IMPORTED, imported_detail(importer)
+        ctx.store.replace_evidence(
+            rec.id,
+            source,
+            list(found),
+            origin=cfg.id,
+            detail=detail,
+            version=READER_VERSION,
+            also_replaces=SERVER_SOURCES - {source},
+        )
 
 
 def _server_markers_due(ctx: PipelineContext, rec: FileRecord, server_id: str) -> bool:
-    fetched = ctx.store.evidence_fetched_at(rec.id, Source.SERVER_MARKERS, server_id)
-    if fetched is None:
+    rows = [r for r in ctx.store.evidence_rows(rec.id) if r.source in SERVER_SOURCES and r.origin == server_id]
+    if not rows or ctx.store.evidence_version(rec.id, rows[0].source, server_id) != READER_VERSION:
         return True
-    rows = [r for r in ctx.store.evidence_rows(rec.id) if r.source is Source.SERVER_MARKERS and r.origin == server_id]
+    fetched = max(datetime.fromisoformat(r.fetched_at) for r in rows)
     return all(r.type is None for r in rows) and ctx.now() - fetched > EMPTY_SERVER_MARKERS_RETRY
 
 
@@ -785,7 +857,8 @@ def _attempt(
     existing = ctx.store.get_file(path)
     unchanged = existing is not None and (existing.size, existing.mtime_ns) == (st.st_size, st.st_mtime_ns)
     probe = None
-    if refresh or not unchanged or not existing.duration_ms:
+    stale_rules = unchanged and ctx.store.evidence_version(existing.id, Source.CHAPTERS) != CHAPTER_RULES_VERSION
+    if refresh or not unchanged or not existing.duration_ms or stale_rules:
         phase("Reading chapters…")
         try:
             probe = probe_media(path, ffprobe=ctx.ffprobe)
@@ -806,24 +879,32 @@ def _attempt(
     if confirmed_kind is not None:
         ctx.store.set_server_kind(rec.id, confirmed_kind)
     if probe is not None:
-        ctx.store.replace_evidence(rec.id, Source.CHAPTERS, chapter_candidates(probe))
+        ctx.store.replace_evidence(rec.id, Source.CHAPTERS, chapter_candidates(probe), version=CHAPTER_RULES_VERSION)
     if not rec.duration_ms:
         return ItemOutcome(FileOutcome.FAILED.value, "Couldn't read the file's duration")
 
     types = _enabled_types(ctx.settings, ids)
-    # A normal run stops once stored answers decide everything; a forced run asks every source (and hands every
-    # detector source to a worker) so no stale answer is left behind.
+    # A normal run stops asking once stored answers decide everything beyond chapters alone (answers from an older
+    # parser or reader are still asked again); a forced run asks every source (and hands every detector source to a
+    # worker) so no stale answer is left behind.
     gather_all = ctx.force
     decisions = _decide(ctx, rec, types)
     lookup_ids: MediaIds | None = None
     for source_id in ctx.settings.ordered_enabled_sources():
-        if not gather_all and _all_decided(decisions, types):
-            break
+        source = Source(source_id)
+        if not gather_all and _all_decided(decisions, types) and not _stale_evidence(ctx, rec, source):
+            continue
         if cancelled():
             return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
-        source = Source(source_id)
         if source in _ONLINE_LABELS:
             client = ctx.clients.get(source_id)
+            if (
+                source is Source.THEINTRODB
+                and not gather_all
+                and ctx.priority() >= PRIORITY_LOW
+                and _only_confirming_chapters(decisions, types)
+            ):
+                continue  # the only daily-budgeted source is kept for files it could still decide
             if lookups_allowed and client is not None and _needs_lookup(ctx, rec, source, refresh):
                 lookup_ids = lookup_ids or _lookup_ids(ids, servers)
                 phase(f"Looking up {_ONLINE_LABELS[source]}…")

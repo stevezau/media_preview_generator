@@ -14,14 +14,14 @@ from typing import Any
 
 from loguru import logger
 
-from ..config.paths import is_path_excluded
 from ..servers.base import ServerConfig, ServerType
-from ..servers.ownership import OwnershipMatch, apply_path_mappings, find_library_matches
+from ..servers.ownership import OwnershipMatch, apply_path_mappings
 from .models import Marker, MarkerType
+from .ownership import allowed_matches, owning_servers
 from .publishers.base import Capability
 from .publishers.factory import publisher_for
 from .publishers.plex_db import SAME_HOST_PATH_ADVICE, versions_agree
-from .settings import ServerMarkersSettings, is_sports_library, library_allowed, load_server
+from .settings import ServerMarkersSettings, is_sports_library, load_server
 from .sources.server_markers import read_server_markers
 from .store import FileRecord, MarkerStore
 
@@ -286,29 +286,15 @@ def resolve_local_path(server: Any, config: ServerConfig, item_id: str) -> str |
 
 
 def _owners(canonical_path: str, registry: Any) -> Iterator[tuple[ServerConfig, Any, list[OwnershipMatch]]]:
-    # Same owners as the pipeline: every covering library whatever its preview opt-in, excluded paths left out.
-    by_server: dict[str, list[OwnershipMatch]] = {}
-    for match in find_library_matches(canonical_path, registry.configs()):
-        by_server.setdefault(match.server_id, []).append(match)
-    for server_id, matches in by_server.items():
-        cfg = registry.get_config(server_id)
-        if cfg is None or (cfg.exclude_paths and is_path_excluded(canonical_path, cfg.exclude_paths)):
-            continue
-        server = registry.get(server_id)
-        if server is not None:
-            yield cfg, server, matches
+    # The pipeline's owners: every covering library whatever its preview opt-in, excluded paths left out.
+    yield from owning_servers(canonical_path, registry)
 
 
 def _off_reason(cfg: ServerConfig, settings: ServerMarkersSettings, matches: list[OwnershipMatch]) -> str:
     if not settings.enabled:
         return SERVER_OFF_REASON
-    kinds = {lib.id: lib.kind for lib in cfg.libraries}
-    if any(
-        library_allowed(settings, library_id=m.library_id, library_name=m.library_name, kind=kinds.get(m.library_id))
-        for m in matches
-    ):
-        return ""
-    return LIBRARY_OFF_REASON
+    # The library rule marker_matches applies, on the matches already found.
+    return "" if allowed_matches(cfg, matches) else LIBRARY_OFF_REASON
 
 
 def _capability_state(server: Any, cfg: ServerConfig) -> str:

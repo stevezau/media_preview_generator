@@ -4,7 +4,8 @@ import pytest
 
 from media_preview_generator.markers import ownership
 from media_preview_generator.servers.base import Library, ServerType
-from tests.markers.fakes import server_config
+from media_preview_generator.servers.ownership import OwnershipMatch
+from tests.markers.fakes import FakeRegistry, server_config
 
 PLEX_OFF_UNCONFIRMED = {"enabled": True}  # Plex needs the database-write confirmation before markers are on
 TV = Library("tv", "TV Shows", ("/media/tv",))
@@ -159,3 +160,69 @@ class TestMarkerMatches:
             server_config("plex-1", ServerType.PLEX, libraries=[TV]),
         ]
         assert list(ownership.marker_matches(PATH, configs)) == ["jf-1", "plex-1"]
+
+
+class TestOwningServers:
+    """The servers whose libraries hold a file: where markers are read from and, when allowed, published to."""
+
+    def test_every_enabled_server_with_a_covering_library_whatever_its_markers_settings(self):
+        configs = {
+            "jf-1": server_config("jf-1", ServerType.JELLYFIN, libraries=[TV], markers={"enabled": False}),
+            "off-1": server_config("off-1", ServerType.EMBY, libraries=[TV], enabled=False),
+            "plex-1": server_config(
+                "plex-1",
+                ServerType.PLEX,
+                libraries=[
+                    Library("hd", "TV", ("/media/tv",), enabled=False),
+                    Library("4k", "4K", ("/media/tv/Show",)),
+                ],
+                markers=PLEX_OFF_UNCONFIRMED,
+            ),
+            "movies-1": server_config("movies-1", ServerType.EMBY, libraries=[Library("m", "M", ("/media/movies",))]),
+        }
+        registry = FakeRegistry(configs)
+        owners = ownership.owning_servers(PATH, registry)
+        assert [(cfg.id, server, [m.library_id for m in matches]) for cfg, server, matches in owners] == [
+            ("jf-1", registry.get("jf-1"), ["tv"]),
+            ("plex-1", registry.get("plex-1"), ["hd", "4k"]),
+        ]
+
+    @pytest.mark.parametrize("excluded", ["path", "regex"])
+    def test_an_excluded_path_has_no_owner_there(self, excluded):
+        rule = {"type": "path", "value": "/media/tv/Show"} if excluded == "path" else {"type": "regex", "value": "S01"}
+        registry = FakeRegistry(
+            {
+                "jf-1": server_config("jf-1", ServerType.JELLYFIN, libraries=[TV], exclude_paths=[rule]),
+                "plex-1": server_config("plex-1", ServerType.PLEX, libraries=[TV]),
+            }
+        )
+        assert [cfg.id for cfg, _server, _matches in ownership.owning_servers(PATH, registry)] == ["plex-1"]
+
+    def test_a_server_whose_client_could_not_be_built_is_not_an_owner(self):
+        registry = FakeRegistry({"jf-1": server_config("jf-1", ServerType.JELLYFIN, libraries=[TV])})
+        registry.servers_by_id["jf-1"] = None
+        assert ownership.owning_servers(PATH, registry) == []
+
+    def test_a_config_the_registry_no_longer_has_is_not_an_owner(self):
+        registry = FakeRegistry({"jf-1": server_config("jf-1", ServerType.JELLYFIN, libraries=[TV])})
+        registry.get_config = lambda sid: None
+        assert ownership.owning_servers(PATH, registry) == []
+
+
+class TestAllowedMatches:
+    @pytest.mark.parametrize(
+        ("markers", "library", "expected"),
+        [
+            ({"enabled": True, "library_ids": None}, TV, ["tv"]),
+            ({"enabled": False, "library_ids": None}, TV, []),
+            ({"enabled": True, "library_ids": ["other"]}, TV, []),
+            ({"enabled": True, "library_ids": None}, Library("tv", "Sports", ("/media/tv",)), []),
+            ({"enabled": True, "library_ids": ["tv"]}, Library("tv", "Sports", ("/media/tv",)), ["tv"]),
+        ],
+        ids=["on", "off", "not-selected", "sports", "sports-chosen"],
+    )
+    def test_the_same_rule_as_marker_matches(self, markers, library, expected):
+        cfg = server_config("jf-1", ServerType.JELLYFIN, markers=markers, libraries=[library])
+        match = OwnershipMatch("jf-1", library.id, library.name, "/media/tv")
+        assert [m.library_id for m in ownership.allowed_matches(cfg, [match])] == expected
+        assert _ids(ownership.marker_matches(PATH, [cfg])) == ({"jf-1": expected} if expected else {})

@@ -20,7 +20,16 @@ S = Source
 DUR = 1_320_000  # 22:00 episode
 SHORT_DUR = 240_000  # 4:00 episode -- big enough for a real intro, small enough that "near the end" is reachable
 MOVIE_DUR = 6_000_000  # 100:00 movie
-ORDER = ("chapters", "theintrodb", "introdb", "skipdb", "season_audio", "credits_text", "server_markers")
+ORDER = (
+    "chapters",
+    "theintrodb",
+    "introdb",
+    "skipdb",
+    "season_audio",
+    "credits_text",
+    "server_markers",
+    "server_markers_imported",
+)
 
 
 def ctx(publish_when="high", is_movie=False, duration=DUR, types=(T.INTRO, T.CREDITS), order=ORDER):
@@ -157,10 +166,16 @@ class TestChapters:
                 ],
                 Marker(T.INTRO, 80_000, 100_000, ("chapters", "skipdb", "server_markers")),
             ),
-            # a server marker's later start (90s) is never published
+            # a server marker's later start (90s) shortens the skip (rule 7: servers may shorten, never lengthen)
             (
                 10_000,
                 [intro(S.SERVER_MARKERS, 90_000, 100_000, "plex-1"), intro(S.SKIPDB, 80_000, 100_000)],
+                Marker(T.INTRO, 90_000, 100_000, ("chapters", "skipdb", "server_markers")),
+            ),
+            # a server marker's earlier start (30s) never lengthens it: SkipDB's 80s stays
+            (
+                10_000,
+                [intro(S.SERVER_MARKERS, 30_000, 100_000, "plex-1"), intro(S.SKIPDB, 80_000, 100_000)],
                 Marker(T.INTRO, 80_000, 100_000, ("chapters", "skipdb", "server_markers")),
             ),
             # season_audio agrees on the end without supplying the start; it is still credited
@@ -212,6 +227,27 @@ class TestChapters:
         assert d.status is DecisionStatus.DECIDED
         assert d.marker == Marker(T.CREDITS, 1_200_000, 1_290_000, ("chapters", "skipdb", "season_audio"))
         assert (d.proposed, d.reason) == (None, "chapters")
+
+    @pytest.mark.parametrize(
+        ("server_end", "end"),
+        [
+            # Plex's non-final credits end before the post-credits scene: the skip stops there
+            (1_230_000, 1_230_000),
+            # Plex's final credits run to the end: nothing to shorten, SkipDB's end stays
+            (None, 1_290_000),
+        ],
+    )
+    def test_an_agreeing_server_marker_can_end_chapter_credits_earlier(self, server_end, end):
+        cands = [
+            credits(S.CHAPTERS, 1_200_000),
+            credits(S.SKIPDB, 1_205_000, 1_290_000),
+            credits(S.SERVER_MARKERS, 1_201_000, server_end, "plex-1"),
+        ]
+        for order in (cands, cands[::-1]):
+            d = decide(order, ctx(), {})[T.CREDITS]
+            assert d.status is DecisionStatus.DECIDED
+            assert d.marker == Marker(T.CREDITS, 1_200_000, end, ("chapters", "skipdb", "server_markers"))
+            assert (d.proposed, d.reason) == (None, "chapters")
 
     def test_chapter_with_a_safer_edge_failing_sanity_needs_review(self):
         # the agreeing sources' latest start (98s) and the chapter's end (100s) leave a 2s segment
@@ -375,13 +411,16 @@ class TestAgreement:
     @pytest.mark.parametrize(
         ("a", "b", "expected", "start_ms"),
         [
-            # "a" always precedes "b" in ORDER, so a's own end (checked edge) wins; start
-            # (unchecked edge) is the later/safer of the two -- except a server marker, which is
-            # excluded from that safer-edge pool, leaving only a's own start.
+            # "a" always precedes "b" in ORDER, so a's own end (checked edge) wins; start (unchecked
+            # edge) is the later/safer of the two, a server marker's included: it may shorten the skip.
             (S.THEINTRODB, S.SKIPDB, DecisionStatus.DECIDED, 128_000),
             (S.THEINTRODB, S.SEASON_AUDIO, DecisionStatus.DECIDED, 128_000),
-            (S.SKIPDB, S.SERVER_MARKERS, DecisionStatus.DECIDED, 127_000),  # server markers may confirm, not supply
+            (S.SKIPDB, S.SERVER_MARKERS, DecisionStatus.DECIDED, 128_000),
             (S.THEINTRODB, S.INTRODB, DecisionStatus.NEEDS_REVIEW, None),  # dependent pair = one source
+            # an importer plugin's copy on a server is the crowd answer again
+            (S.INTRODB, S.SERVER_MARKERS_IMPORTED, DecisionStatus.NEEDS_REVIEW, None),
+            (S.THEINTRODB, S.SERVER_MARKERS_IMPORTED, DecisionStatus.NEEDS_REVIEW, None),
+            (S.SKIPDB, S.SERVER_MARKERS_IMPORTED, DecisionStatus.DECIDED, 128_000),
         ],
     )
     def test_intro_pairs(self, a, b, expected, start_ms):
@@ -395,7 +434,8 @@ class TestAgreement:
         else:
             assert d.marker is None
             assert d.proposed is not None
-            assert d.proposed.start_ms == 127_000  # theintrodb outranks introdb
+            assert d.proposed.start_ms == 127_000  # "a" outranks "b"
+            assert d.reason == "sources don't agree yet"
 
     def test_dependent_pair_plus_local_source_decides(self):
         cands = [
@@ -562,8 +602,13 @@ class TestAgreement:
         ("partner", "proposed_by", "groups"),
         [
             (S.CREDITS_TEXT, ("theintrodb", "skipdb", "season_audio", "credits_text"), "credits_text, season_audio"),
-            # a server marker never supplies an edge, and 8s from TheIntroDB it doesn't agree with it
-            (S.SERVER_MARKERS, ("theintrodb", "skipdb", "season_audio"), "season_audio, server_markers"),
+            # 8s from TheIntroDB the server marker doesn't agree with it, but it shares the published (safer) start,
+            # which server markers may supply (rule 7: they can shorten a skip), so it is credited
+            (
+                S.SERVER_MARKERS,
+                ("theintrodb", "skipdb", "season_audio", "server_markers"),
+                "season_audio, server_markers",
+            ),
         ],
     )
     def test_bridging_source_cannot_hide_an_agreeing_pair_that_contradicts_the_result(
@@ -785,93 +830,157 @@ class TestAgreement:
         assert (d.marker.start_ms, d.marker.end_ms) == (127_500, 157_500)  # theintrodb's own edges
         assert d.marker.decided_by == ("server_markers", "theintrodb")  # decided_by still follows the order
 
+    @pytest.mark.parametrize("reverse", [False, True])
+    @pytest.mark.parametrize(
+        ("crowd_end", "server_end", "marker"),
+        [
+            # R&M S01E07 shape: the crowd's credits run to the end of the file; Plex's non-final credits end 28s
+            # after they start, before the post-credits scene -- the agreeing server marker shortens the skip.
+            (None, 1_267_413, Marker(T.CREDITS, 1_239_000, 1_267_413, ("theintrodb", "server_markers"))),
+            # Plex's final credits run to the end as well: nothing shorter, the end of the file stays
+            (None, None, Marker(T.CREDITS, 1_239_000, DUR, ("theintrodb", "server_markers"))),
+            # a server marker that ends later never lengthens the crowd's skip
+            (1_280_000, None, Marker(T.CREDITS, 1_239_000, 1_280_000, ("theintrodb", "server_markers"))),
+        ],
+    )
+    def test_an_agreeing_server_marker_shortens_crowd_credits_but_never_lengthens_them(
+        self, crowd_end, server_end, marker, reverse
+    ):
+        # Plex's start (0.4s later) agrees, but the start is the checked edge and a server marker never supplies it.
+        cands = [credits(S.THEINTRODB, 1_239_000, crowd_end), credits(S.SERVER_MARKERS, 1_239_413, server_end, "p")]
+        d = decide(cands[:: -1 if reverse else 1], ctx(), {})[T.CREDITS]
+        assert d.status is DecisionStatus.DECIDED
+        assert (d.marker, d.proposed) == (marker, None)
+
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_an_agreeing_server_marker_gives_a_crowd_intro_over_a_cold_open_a_later_start(self, reverse):
+        cands = [intro(S.INTRODB, 0, 95_000), intro(S.SERVER_MARKERS, 62_000, 94_500, "plex-1")]
+        d = decide(cands[:: -1 if reverse else 1], ctx(), {})[T.INTRO]
+        assert d.marker == Marker(T.INTRO, 62_000, 95_000, ("introdb", "server_markers"))
+
+    def test_server_markers_alone_never_supply_both_edges(self):
+        # Plex and an imported copy agree, but neither is a source that may publish: review, with no crash on a
+        # cluster that has no non-server member.
+        cands = [
+            intro(S.SERVER_MARKERS, 62_000, 95_000, "plex-1"),
+            intro(S.SERVER_MARKERS_IMPORTED, 62_000, 95_500, "jellyfin-1"),
+        ]
+        for publish_when in ("high", "medium"):
+            d = decide(cands, ctx(publish_when), {})[T.INTRO]
+            assert d.status is DecisionStatus.NEEDS_REVIEW
+            assert d.marker is None
+            assert d.proposed == Marker(T.INTRO, 62_000, 95_000, ("server_markers",))
+            assert d.reason == "sources don't agree yet"
+
+    def test_an_imported_server_copy_does_not_confirm_its_crowd_source_but_plex_does(self):
+        cands = [
+            intro(S.INTRODB, 24_046, 114_105),
+            intro(S.SERVER_MARKERS_IMPORTED, 24_046, 114_105, "jellyfin-1"),
+            intro(S.SERVER_MARKERS, 30_000, 113_900, "plex-1"),
+        ]
+        d = decide(cands, ctx(), {})[T.INTRO]
+        assert d.status is DecisionStatus.DECIDED
+        assert d.marker == Marker(T.INTRO, 30_000, 114_105, ("introdb", "server_markers", "server_markers_imported"))
+
+    def test_plex_and_an_imported_copy_agreeing_against_a_chapter_send_it_to_review(self):
+        cands = [
+            intro(S.CHAPTERS, 105_272, 194_986),
+            intro(S.SERVER_MARKERS, 24_500, 113_900, "plex-1"),
+            intro(S.SERVER_MARKERS_IMPORTED, 24_046, 114_105, "jellyfin-1"),
+        ]
+        d = decide(cands, ctx(), {})[T.INTRO]
+        assert d.status is DecisionStatus.NEEDS_REVIEW
+        assert d.proposed == Marker(T.INTRO, 105_272, 194_986, ("chapters",))
+        assert d.reason == "agreeing sources contradict the result: introdb/theintrodb, server_markers"
+
 
 class TestSingleSource:
     @pytest.mark.parametrize(
-        ("publish_when", "expected"), [("high", DecisionStatus.NEEDS_REVIEW), ("medium", DecisionStatus.DECIDED)]
+        ("cands", "medium"),
+        [
+            # the source checks this file's cut itself: SkipDB answers only a duration match, local detectors read
+            # the file
+            ([intro(S.SKIPDB, 127_000, 157_000)], DecisionStatus.DECIDED),
+            ([intro(S.SEASON_AUDIO, 127_000, 157_000)], DecisionStatus.DECIDED),
+            ([intro(S.CREDITS_TEXT, 127_000, 157_000)], DecisionStatus.DECIDED),
+            # chapters are rule 3, the same at both levels
+            ([intro(S.CHAPTERS, 127_000, 157_000)], DecisionStatus.DECIDED),
+            # IntroDB takes no duration and TheIntroDB answers its closest stored cut: agreement only
+            ([intro(S.THEINTRODB, 127_000, 157_000)], DecisionStatus.NEEDS_REVIEW),
+            ([intro(S.INTRODB, 127_000, 157_000)], DecisionStatus.NEEDS_REVIEW),
+            ([intro(S.THEINTRODB, 127_000, 157_000), intro(S.INTRODB, 127_500, 157_200)], DecisionStatus.NEEDS_REVIEW),
+            # markers already on servers never decide alone
+            ([intro(S.SERVER_MARKERS, 127_000, 157_000, "plex-1")], DecisionStatus.NEEDS_REVIEW),
+            ([intro(S.SERVER_MARKERS_IMPORTED, 127_000, 157_000, "jf-1")], DecisionStatus.NEEDS_REVIEW),
+            (
+                [intro(S.INTRODB, 127_000, 157_000), intro(S.SERVER_MARKERS_IMPORTED, 127_000, 157_000, "jf-1")],
+                DecisionStatus.NEEDS_REVIEW,
+            ),
+        ],
     )
-    def test_single_online_source(self, publish_when, expected):
-        d = decide([intro(S.THEINTRODB, 127_000, 157_000)], ctx(publish_when), {})[T.INTRO]
-        assert d.status is expected
-        shown = d.marker if expected is DecisionStatus.DECIDED else d.proposed
-        assert shown is not None and shown.start_ms == 127_000
-        assert (d.marker is None) is (expected is DecisionStatus.NEEDS_REVIEW)
-
-    def test_server_markers_alone_never_decide_even_at_medium(self):
-        d = decide([intro(S.SERVER_MARKERS, 127_000, 157_000, "plex-1")], ctx("medium"), {})[T.INTRO]
-        assert d.status is DecisionStatus.NEEDS_REVIEW and d.marker is None
+    def test_single_source_matrix(self, cands, medium):
+        high = DecisionStatus.DECIDED if cands[0].source is S.CHAPTERS else DecisionStatus.NEEDS_REVIEW
+        for publish_when, expected in (("high", high), ("medium", medium)):
+            for order in (cands, cands[::-1]):
+                d = decide(order, ctx(publish_when), {})[T.INTRO]
+                assert d.status is expected, publish_when
+                shown = d.marker if expected is DecisionStatus.DECIDED else d.proposed
+                assert (shown.start_ms, shown.end_ms, shown.decided_by) == (127_000, 157_000, (cands[0].source.value,))
+                if expected is DecisionStatus.NEEDS_REVIEW:
+                    assert (d.marker, d.reason) == (None, "sources don't agree yet")
 
     def test_no_candidates(self):
         d = decide([], ctx(), {})[T.CREDITS]
         assert d.status is DecisionStatus.NO_EVIDENCE and d.marker is None and d.proposed is None
 
     def test_medium_single_candidate_failing_sanity_has_no_marker(self):
-        d = decide([intro(S.THEINTRODB, 10_000, 12_000)], ctx("medium"), {})[T.INTRO]  # 2s, too short
+        d = decide([intro(S.SKIPDB, 10_000, 12_000)], ctx("medium"), {})[T.INTRO]  # 2s, too short
         assert d.status is DecisionStatus.NO_EVIDENCE and d.marker is None
 
 
 class TestMediumContradiction:
     """Medium may decide a single source only when nothing else contradicts it."""
 
-    @pytest.mark.parametrize("other", [S.SKIPDB, S.SEASON_AUDIO, S.SERVER_MARKERS])
+    @pytest.mark.parametrize("other", [S.THEINTRODB, S.SEASON_AUDIO, S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED])
     def test_contradicting_independent_source_blocks_medium_single_source(self, other):
-        cands = [intro(S.THEINTRODB, 10_000, 40_000), intro(other, 100_000, 130_000, "plex-1")]
+        cands = [intro(S.SKIPDB, 10_000, 40_000), intro(other, 100_000, 130_000, "plex-1")]
         d = decide(cands, ctx("medium"), {})[T.INTRO]
         assert d.status is DecisionStatus.NEEDS_REVIEW
         assert d.marker is None
-        assert d.proposed == Marker(T.INTRO, 10_000, 40_000, ("theintrodb",))
-        assert d.reason == f"sources disagree: introdb/theintrodb, {other.value}"
+        first = min(cands, key=lambda c: ORDER.index(c.source.value))
+        assert d.proposed == Marker(T.INTRO, first.start_ms, first.end_ms, (first.source.value,))
+        crowd = other in (S.THEINTRODB, S.SERVER_MARKERS_IMPORTED)
+        groups = sorted({"skipdb", "introdb/theintrodb" if crowd else other.value})
+        assert d.reason == f"sources disagree: {', '.join(groups)}"
 
-    def test_agreeing_server_marker_still_decides_at_medium(self):
+    def test_agreeing_server_marker_decides_with_any_source(self):
+        # Two groups agree, so this is rule 4 at both levels, not the single-source rule.
         cands = [intro(S.THEINTRODB, 127_000, 157_000), intro(S.SERVER_MARKERS, 127_500, 157_200, "plex-1")]
-        d = decide(cands, ctx("medium"), {})[T.INTRO]
-        assert d.status is DecisionStatus.DECIDED
-        assert d.marker.decided_by == ("theintrodb", "server_markers")
-
-    def test_dependent_pair_agreeing_with_each_other_still_decides_at_medium(self):
-        # theintrodb and introdb count as one source, so their agreeing with each other is not
-        # "two independent sources" -- it's still the single-source rule, gated on medium.
-        cands = [intro(S.THEINTRODB, 10_000, 40_000), intro(S.INTRODB, 11_000, 41_000)]
-        d = decide(cands, ctx("medium"), {})[T.INTRO]
-        assert d.status is DecisionStatus.DECIDED
-        # end from TheIntroDB (it outranks IntroDB); start is the later, safer one, from IntroDB
-        assert d.marker == Marker(T.INTRO, 11_000, 40_000, ("theintrodb", "introdb"))
-        assert d.reason == "single source (theintrodb)"
-
-    def test_dependent_pair_disagreeing_with_each_other_does_not_decide_even_at_medium(self):
-        # A source that contradicts itself doesn't publish. theintrodb and introdb are one group,
-        # but if they don't even agree with each other, medium's single-source rule must not paper
-        # over that by picking whichever one outranks the other.
-        cands = [intro(S.THEINTRODB, 10_000, 40_000), intro(S.INTRODB, 300_000, 330_000)]
-        d = decide(cands, ctx("medium"), {})[T.INTRO]
-        assert d.status is DecisionStatus.NEEDS_REVIEW
-        assert d.marker is None
-        assert d.proposed is not None
-        assert (d.proposed.start_ms, d.proposed.end_ms) == (10_000, 40_000)
-        assert d.proposed.decided_by == ("theintrodb",)
-        assert "source disagrees with itself" in d.reason
+        for publish_when in ("high", "medium"):
+            d = decide(cands, ctx(publish_when), {})[T.INTRO]
+            assert d.status is DecisionStatus.DECIDED
+            assert d.marker == Marker(T.INTRO, 127_500, 157_000, ("theintrodb", "server_markers"))
 
     @pytest.mark.parametrize(
         ("low_end", "high_end", "expected", "reason"),
         [
-            (98_000, 102_000, DecisionStatus.DECIDED, "single source (theintrodb)"),
-            # each IntroDB end is within 5s of TheIntroDB's, but 8s from the other one
+            (98_000, 102_000, DecisionStatus.DECIDED, "single source (skipdb)"),
+            # each other SkipDB end is within 5s of the first's, but 8s from the other one
             (96_000, 104_000, DecisionStatus.NEEDS_REVIEW, "source disagrees with itself"),
         ],
     )
     def test_every_pair_of_a_single_sources_candidates_must_agree_at_medium(self, low_end, high_end, expected, reason):
         cands = [
-            intro(S.THEINTRODB, 60_000, 100_000),
-            intro(S.INTRODB, 60_000, low_end),
-            intro(S.INTRODB, 60_000, high_end),
+            Candidate(T.INTRO, 60_000, 100_000, S.SKIPDB, confidence=1.0),
+            Candidate(T.INTRO, 60_000, low_end, S.SKIPDB, confidence=0.5),
+            Candidate(T.INTRO, 60_000, high_end, S.SKIPDB, confidence=0.5),
         ]
         d = decide(cands, ctx("medium"), {})[T.INTRO]
-        own = Marker(T.INTRO, 60_000, 100_000, ("theintrodb",))
+        own = Marker(T.INTRO, 60_000, 100_000, ("skipdb",))
         assert d.status is expected
         assert d.reason == reason
         if expected is DecisionStatus.DECIDED:
-            # every candidate supplies the shared 60s start
-            assert (d.marker, d.proposed) == (Marker(T.INTRO, 60_000, 100_000, ("theintrodb", "introdb")), None)
+            assert (d.marker, d.proposed) == (own, None)
         else:
             assert (d.marker, d.proposed) == (None, own)
 
@@ -912,19 +1021,17 @@ class TestMediumContradiction:
     @pytest.mark.parametrize(
         ("cands", "marker"),
         [
-            # IntroDB says the intro starts 70s later: that later start wins, and IntroDB is credited
+            # the other answer says the intro starts 70s later: that later start wins
             (
-                [intro(S.THEINTRODB, 10_000, 100_000), intro(S.INTRODB, 80_000, 100_000)],
-                Marker(T.INTRO, 80_000, 100_000, ("theintrodb", "introdb")),
-            ),
-            # TheIntroDB's own start is already the later one: IntroDB supplies nothing and isn't credited
-            (
-                [intro(S.THEINTRODB, 80_000, 100_000), intro(S.INTRODB, 10_000, 100_000)],
-                Marker(T.INTRO, 80_000, 100_000, ("theintrodb",)),
+                [Candidate(T.INTRO, 10_000, 100_000, S.SKIPDB), Candidate(T.INTRO, 80_000, 100_000, S.SKIPDB, 0.5)],
+                Marker(T.INTRO, 80_000, 100_000, ("skipdb",)),
             ),
             (
-                [credits(S.THEINTRODB, 1_300_000), credits(S.INTRODB, 1_302_000, 1_310_000)],
-                Marker(T.CREDITS, 1_300_000, 1_310_000, ("theintrodb", "introdb")),
+                [
+                    Candidate(T.CREDITS, 1_300_000, None, S.SKIPDB),
+                    Candidate(T.CREDITS, 1_302_000, 1_310_000, S.SKIPDB, 0.5),
+                ],
+                Marker(T.CREDITS, 1_300_000, 1_310_000, ("skipdb",)),
             ),
         ],
     )
@@ -933,15 +1040,15 @@ class TestMediumContradiction:
             d = decide(order, ctx("medium", types=(marker.type,)), {})[marker.type]
             assert d.status is DecisionStatus.DECIDED
             assert (d.marker, d.proposed) == (marker, None)
-            assert d.reason == "single source (theintrodb)"
+            assert d.reason == "single source (skipdb)"
 
     def test_medium_composed_marker_failing_sanity_needs_review(self):
-        # IntroDB's later start (98s) with TheIntroDB's end (100s) leaves a 2s segment
-        cands = [intro(S.THEINTRODB, 60_000, 100_000), intro(S.INTRODB, 98_000, 101_000)]
+        # the other answer's later start (98s) with the first's end (100s) leaves a 2s segment
+        cands = [Candidate(T.INTRO, 60_000, 100_000, S.SKIPDB), Candidate(T.INTRO, 98_000, 101_000, S.SKIPDB, 0.5)]
         d = decide(cands, ctx("medium"), {})[T.INTRO]
         assert d.status is DecisionStatus.NEEDS_REVIEW
         assert d.marker is None
-        assert d.proposed == Marker(T.INTRO, 60_000, 100_000, ("theintrodb",))
+        assert d.proposed == Marker(T.INTRO, 60_000, 100_000, ("skipdb",))
         assert d.reason == "sources disagree on the other edge"
 
     def test_single_source_disagreeing_with_its_own_duplicate_does_not_decide_at_medium(self):
@@ -1229,10 +1336,16 @@ class TestAgreementSearch:
 # and no decide.py helpers.
 _REF_START_TYPES = (T.INTRO, T.RECAP)
 _REF_SOURCES = list(S)
+# Rule 7: markers already on servers (an importer plugin's copy included) confirm and may shorten, never set the
+# checked edge or decide alone.
+_REF_SERVER = (S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED)
+# Rule 6: at "Medium" these only agree -- they don't check this file's cut.
+_REF_AGREEMENT_ONLY = (*_REF_SERVER, S.INTRODB, S.THEINTRODB)
 
 
 def _ref_group(source):
-    return "introdb/theintrodb" if source in (S.INTRODB, S.THEINTRODB) else source.value
+    # Rule 8: IntroDB, TheIntroDB and an importer plugin's copy on a server are one crowd source.
+    return "introdb/theintrodb" if source in (S.INTRODB, S.THEINTRODB, S.SERVER_MARKERS_IMPORTED) else source.value
 
 
 def _ref_end(c, duration):
@@ -1314,7 +1427,9 @@ def _ref_agreeing_sets(cands, x):
     cliques = [m for m in range(1, 1 << n) if all(neighbours[i] & m == m for i in range(n) if m >> i & 1)]
     maximal = [m for m in cliques if not any(not m >> k & 1 and neighbours[k] & m == m for k in range(n))]
     sets = [[cands[i] for i in range(n) if m >> i & 1] for m in maximal]
-    sets = [s for s in sets if len({_ref_group(c.source) for c in s}) >= 2]
+    sets = [
+        s for s in sets if len({_ref_group(c.source) for c in s}) >= 2 and any(c.source not in _REF_SERVER for c in s)
+    ]
     return sorted(sets, key=lambda s: min(_ref_value(c, d) for c in s))
 
 
@@ -1323,14 +1438,16 @@ def _ref_compose(members, mtype, x):
     confirmed = [
         c for c in members if any(_ref_group(o.source) != _ref_group(c.source) and _ref_agree(c, o, d) for o in members)
     ]
-    suppliers = [c for c in confirmed if c.source is not S.SERVER_MARKERS]
+    suppliers = [c for c in confirmed if c.source not in _REF_SERVER]
+    # Checked edge: the best-ranked agreeing non-server candidate (source order first); other edge: the safer value of
+    # every confirmed candidate, server markers included (they may shorten the skip).
     winner = min(suppliers, key=lambda c: _ref_rank(c, x))
     if mtype in _REF_START_TYPES:
-        start, end = max(c.start_ms for c in suppliers), _ref_end(winner, d)
-        edge = [c for c in suppliers if c.start_ms == start]
+        start, end = max(c.start_ms for c in confirmed), _ref_end(winner, d)
+        edge = [c for c in confirmed if c.start_ms == start]
     else:
-        start, end = winner.start_ms, min(_ref_end(c, d) for c in suppliers)
-        edge = [c for c in suppliers if _ref_end(c, d) == end]
+        start, end = winner.start_ms, min(_ref_end(c, d) for c in confirmed)
+        edge = [c for c in confirmed if _ref_end(c, d) == end]
     credited = {winner.source, *(c.source for c in edge), *(c.source for c in confirmed if _ref_agree(winner, c, d))}
     decided_by = tuple(s.value for s in sorted(credited, key=lambda s: _ref_source_rank(s, x)))
     return Marker(mtype, start, end, decided_by), winner
@@ -1365,9 +1482,8 @@ def _ref_decide_type(mtype, cands, x):
         backing = [c for c in others if abs(_ref_value(c, d) - _ref_marker_value(result)) <= tol]
         if len({_ref_group(c.source) for c in backing}) >= 2:
             chapter = result
-            suppliers = [c for c in backing if c.source is not S.SERVER_MARKERS]
             everyone = {S.CHAPTERS, *(c.source for c in backing)}
-            shorter, other = _ref_shorter(mtype, _ref_marker_value(chapter), suppliers, x, everyone)
+            shorter, other = _ref_shorter(mtype, _ref_marker_value(chapter), backing, x, everyone)
             own_other = chapter.start_ms if mtype in _REF_START_TYPES else chapter.end_ms
             if (other > own_other) if mtype in _REF_START_TYPES else (other < own_other):
                 if not _ref_is_sane(Candidate(mtype, shorter.start_ms, shorter.end_ms, S.CHAPTERS), x):
@@ -1390,11 +1506,15 @@ def _ref_decide_type(mtype, cands, x):
     else:
         groups = sorted({_ref_group(c.source) for c in sane})
         ranked = sorted(sane, key=lambda c: _ref_rank(c, x))
-        proposal = next((c for c in ranked if c.source is not S.SERVER_MARKERS), None)
+        proposal = next((c for c in ranked if c.source not in _REF_AGREEMENT_ONLY), None)
         if x.publish_when != "medium" or proposal is None or len(groups) > 1:
+            disagree = any(
+                _ref_group(a.source) != _ref_group(b.source) and not _ref_agree(a, b, d)
+                for a, b in itertools.combinations(sane, 2)
+            )
             return review(
                 _ref_own_marker(ranked[0], x),
-                f"sources disagree: {', '.join(groups)}" if len(groups) > 1 else "sources don't agree yet",
+                f"sources disagree: {', '.join(groups)}" if disagree else "sources don't agree yet",
             )
         if not all(_ref_agree(a, b, d) for a, b in itertools.combinations(sane, 2)):
             return review(_ref_own_marker(proposal, x), "source disagrees with itself")
@@ -1495,7 +1615,8 @@ def _random_candidates(rng, mtype, duration, anchor):
     centres = [first + step * offset for offset in offsets]
     if rng.random() < 0.25:
         # One source (or the IntroDB pair) only: what "medium" decides on.
-        sources = rng.choice(([S.THEINTRODB, S.INTRODB], [rng.choice([*_NON_CHAPTER_SOURCES, S.CHAPTERS])]))
+        crowd = [S.THEINTRODB, S.INTRODB, S.SERVER_MARKERS_IMPORTED]
+        sources = rng.choice((crowd, [rng.choice([*_NON_CHAPTER_SOURCES, S.CHAPTERS])]))
         count, chapter_count = rng.randint(1, 4), 0
     else:
         sources, count, chapter_count = _NON_CHAPTER_SOURCES, rng.randint(2, 7), rng.choice((0, 0, 1, 2))

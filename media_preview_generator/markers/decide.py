@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from itertools import combinations
 
-from .models import Candidate, Marker, MarkerType, Source
+from .models import SERVER_SOURCES, Candidate, Marker, MarkerType, Source
 
 INTRO_END_TOLERANCE_MS = 5_000
 CREDITS_START_TOLERANCE_MS = 10_000
@@ -23,9 +23,17 @@ MOVIE_CREDITS_MAX_FROM_END_MS = 900_000
 INTRO_RECAP_MAX_OVERLAP_MS = 5_000
 PREVIEW_CREDITS_MAX_OVERLAP_MS = 10_000
 # IntroDB data looks partly seeded from other sources (spec §5.5), so IntroDB and TheIntroDB are always one
-# independence group -- never two votes, whether or not they agree with each other.
+# independence group -- never two votes, whether or not they agree with each other. Markers an intro-DB importer
+# plugin wrote on a Jellyfin/Emby server are that crowd data again.
 _INTRODB_GROUP = "introdb/theintrodb"
-_INDEPENDENCE_GROUP = {Source.INTRODB: _INTRODB_GROUP, Source.THEINTRODB: _INTRODB_GROUP}
+_INDEPENDENCE_GROUP = {
+    Source.INTRODB: _INTRODB_GROUP,
+    Source.THEINTRODB: _INTRODB_GROUP,
+    Source.SERVER_MARKERS_IMPORTED: _INTRODB_GROUP,
+}
+# At "Medium" a lone source publishes only when it checks this file's cut itself (rule 6): IntroDB takes no duration,
+# TheIntroDB answers the closest cut it has, and markers already on servers never decide alone (rule 7).
+_AGREEMENT_ONLY = SERVER_SOURCES | {Source.INTRODB, Source.THEINTRODB}
 _START_SEGMENTS = (MarkerType.INTRO, MarkerType.RECAP)
 _ENUM_ORDER = {source: i for i, source in enumerate(Source)}
 
@@ -201,14 +209,16 @@ def _review(mtype: MarkerType, proposed: Marker | None, reason: str) -> TypeDeci
 
 
 def _agreeing_cliques(candidates: list[Candidate], mtype: MarkerType, ctx: DecisionContext) -> list[list[Candidate]]:
-    """Every maximal set of mutually agreeing candidates that spans >= 2 independent groups.
+    """Every maximal set of mutually agreeing candidates that spans >= 2 independent groups and holds a candidate
+    that may supply times (not a server marker).
 
     Agreement compares exactly one number per candidate (end for intro/recap, start for
     credits/preview) against a fixed tolerance, so every maximal agreeing set is a contiguous
     window over candidates sorted by that number: sort, then for each left edge slide the right
     edge out as far as the tolerance allows. A window that doesn't reach further right than the
     last one is a subset of it and is skipped. The windows come back in ascending order of their
-    smallest compared value, each sorted best-first.
+    smallest compared value, each sorted best-first. A window of server markers alone (a server's
+    own and an importer plugin's copy) publishes nothing; the contradiction guard still counts it.
     """
     tol = _tolerance_ms(mtype)
     rank = _sort_key(ctx)
@@ -224,7 +234,7 @@ def _agreeing_cliques(candidates: list[Candidate], mtype: MarkerType, ctx: Decis
             continue
         last_hi = hi
         window = by_value[lo : hi + 1]
-        if len({_group(c.source) for c in window}) >= 2:
+        if len({_group(c.source) for c in window}) >= 2 and any(c.source not in SERVER_SOURCES for c in window):
             cliques.append(sorted(window, key=rank))
     return cliques
 
@@ -266,11 +276,12 @@ def _compose_cluster(cluster: list[Candidate], mtype: MarkerType, ctx: DecisionC
     """Build the marker a cluster of >= 2 independent groups would publish, and its time winner.
 
     Only confirming candidates (those agreeing with a member of a different independent group)
-    may supply times, and server markers never do. The checked edge comes from the best-ranked
-    of them; the unchecked edge is the safer value across all of them -- intro/recap start = the
-    latest start, credits/preview end = the earliest end (a missing/EOF end resolves to duration
-    first). A cluster always has a non-server confirming member, since its >= 2 groups can't all
-    be "server_markers".
+    may supply times. The checked edge comes from the best-ranked confirming non-server candidate
+    (source order first, see :func:`_sort_key`). The unchecked edge is the safer value across every confirming candidate, server markers
+    included -- intro/recap start = the latest start, credits/preview end = the earliest end (a
+    missing/EOF end resolves to duration first) -- so a server marker can shorten the skip but
+    never lengthen it or set the checked edge (spec §5.5 rule 7). :func:`_agreeing_cliques` only
+    returns clusters holding a non-server candidate, and every member of one confirms.
 
     decided_by names the winner, whichever candidate(s) supplied the unchecked edge, and every
     other confirming candidate that directly agrees with the winner, in source order.
@@ -280,9 +291,9 @@ def _compose_cluster(cluster: list[Candidate], mtype: MarkerType, ctx: DecisionC
         for c in cluster
         if any(_group(o.source) != _group(c.source) and _agree(c, o, ctx.duration_ms) for o in cluster)
     ]
-    confirmed_non_server = [c for c in confirmed if c.source is not Source.SERVER_MARKERS]
+    confirmed_non_server = [c for c in confirmed if c.source not in SERVER_SOURCES]
     winner = min(confirmed_non_server, key=_sort_key(ctx))
-    other_edge, edge_suppliers = _safer_other_edge(mtype, confirmed_non_server, ctx)
+    other_edge, edge_suppliers = _safer_other_edge(mtype, confirmed, ctx)
     agreeing_with_winner = [c for c in confirmed if _agree(winner, c, ctx.duration_ms)]
     sources = {c.source for c in [winner, *edge_suppliers, *agreeing_with_winner]}
     return _composed_marker(mtype, _agree_value(winner, ctx.duration_ms), other_edge, sources, ctx), winner
@@ -314,9 +325,9 @@ def _decide_from_chapters(
     """Accept the first intro/recap or last credits/preview chapter unless agreeing sources contradict it.
 
     When >= 2 independent non-chapter groups agree with the chapter's checked edge, and the safer
-    unchecked edge across those agreeing candidates (server markers agree but never supply it) is
-    safer than the chapter's own, it replaces the chapter's; decided_by then adds every agreeing
-    source. A replacement that fails sanity sends the type to review.
+    unchecked edge across those agreeing candidates (server markers included: they may shorten the
+    skip) is safer than the chapter's own, it replaces the chapter's; decided_by then adds every
+    agreeing source. A replacement that fails sanity sends the type to review.
     """
     chosen = min(chapters, key=lambda c: _chapter_choice_key(c, ctx.duration_ms))
     chapter_marker = _own_marker(chosen, ctx)
@@ -331,8 +342,7 @@ def _decide_from_chapters(
     marker = chapter_marker
     agreeing = [c for c in others if abs(_agree_value(c, ctx.duration_ms) - chapter_value) <= tol]
     if len({_group(c.source) for c in agreeing}) >= 2:
-        suppliers = [c for c in agreeing if c.source is not Source.SERVER_MARKERS]
-        other_edge, _ = _safer_other_edge(mtype, suppliers, ctx)
+        other_edge, _ = _safer_other_edge(mtype, agreeing, ctx)
         if mtype in _START_SEGMENTS:
             safer = other_edge > chapter_marker.start_ms
         else:
@@ -364,16 +374,18 @@ def _decide_from_cliques(mtype: MarkerType, cliques: list[list[Candidate]], ctx:
 
 
 def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: DecisionContext) -> TypeDecision:
-    """No two independent sources agree. Only "medium" may publish, and only a lone, self-consistent group.
+    """No two independent sources agree. Only "medium" may publish, and only a lone, self-consistent group that
+    checks this file's cut itself (not IntroDB/TheIntroDB, not markers already on servers).
 
-    A second independent group here (server markers included) never agreed with the first, so it
-    contradicts it; a group whose own candidates don't all agree pairwise contradicts itself. The
-    checked edge comes from the best-ranked candidate, the unchecked edge is the safer value across
-    the group's candidates, and decided_by names the sources that supplied either edge.
+    A second independent group here (server markers included) contradicts the first unless both are
+    server markers (a server's own and an importer plugin's copy, which never form a cluster); a group
+    whose own candidates don't all agree pairwise contradicts itself. The checked edge comes from the
+    best-ranked candidate, the unchecked edge is the safer value across the group's candidates, and
+    decided_by names the sources that supplied either edge.
     """
     ranked = sorted(sane, key=_sort_key(ctx))
     groups = sorted({_group(c.source) for c in sane})
-    proposal = next((c for c in ranked if c.source is not Source.SERVER_MARKERS), None)
+    proposal = next((c for c in ranked if c.source not in _AGREEMENT_ONLY), None)
     if ctx.publish_when == "medium" and proposal is not None and len(groups) == 1:
         if not all(_agree(a, b, ctx.duration_ms) for a, b in combinations(sane, 2)):
             return _review(mtype, _own_marker(proposal, ctx), "source disagrees with itself")
@@ -383,7 +395,10 @@ def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: De
         if not _marker_is_sane(marker, ctx):
             return _review(mtype, _own_marker(proposal, ctx), "sources disagree on the other edge")
         return TypeDecision(mtype, DecisionStatus.DECIDED, marker, None, f"single source ({proposal.source.value})")
-    reason = f"sources disagree: {', '.join(groups)}" if len(groups) > 1 else "sources don't agree yet"
+    disagree = any(
+        _group(a.source) != _group(b.source) and not _agree(a, b, ctx.duration_ms) for a, b in combinations(sane, 2)
+    )
+    reason = f"sources disagree: {', '.join(groups)}" if disagree else "sources don't agree yet"
     return _review(mtype, _own_marker(ranked[0], ctx), reason)
 
 

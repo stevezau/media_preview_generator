@@ -1,0 +1,9 @@
+file chapters: [(0, 'Chapter 1'), (105272, 'Chapter 2'), (194986, 'Chapter 3'), (593051, 'Chapter 4'), (1291373, 'Chapter 5'), (1381046, 'Chapter 6')]
+medium, default sources (IntroDB on, TheIntroDB off)
+  outcome: markers_needs_review | intro needs review; credits needs review | rows: [('jf-1', 'markers_needs_review', "Sources don't agree yet")]
+   credits: needs_review (sources don't agree yet)
+   intro: needs_review (sources don't agree yet)
+medium, TheIntroDB only
+  outcome: markers_needs_review | intro needs review; credits needs review | rows: [('jf-1', 'markers_needs_review', "Sources don't agree yet")]
+   credits: needs_review (sources don't agree yet)
+   intro: needs_review (sources don't agree yet)

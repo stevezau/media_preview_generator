@@ -2,7 +2,7 @@
 
 ``GET /segments?imdb_id&season&episode`` answers one object (or null) per type, with ``start_ms``/``end_ms`` always
 present (OpenAPI at https://api.introdb.app/openapi.json). The API takes no duration, so its answers can't be matched
-to this file's cut; the decision rules never publish them alone at the default level.
+to this file's cut; the decision rules never publish them alone, at any publish level.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ from .ratelimit import SourceLimiter, get_limiter
 
 BASE_URL = "https://api.introdb.app/segments"
 _LABEL = "IntroDB"
+# Bump when parsing changes what a stored answer would hold, so files are asked again.
+PARSER_VERSION = 1
 _SEGMENT_KEYS = (("intro", MarkerType.INTRO), ("recap", MarkerType.RECAP), ("outro", MarkerType.CREDITS))
 
 

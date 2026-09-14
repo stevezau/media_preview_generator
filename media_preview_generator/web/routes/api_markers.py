@@ -212,7 +212,8 @@ def marker_source_usage():
     for source_id in _ONLINE_SOURCE_IDS:
         live = get_limiter(source_id).usage()
         day = live["day"]
-        # The limiter counts this process's requests; the stored row survives a restart earlier in the day.
+        # A limiter starts from today's stored row when it is created (after a restart); the stored row still counts
+        # when that read-back failed.
         stored = store.source_usage(source_id, day) or {}
         source = settings.source(source_id)
         out[source_id] = {

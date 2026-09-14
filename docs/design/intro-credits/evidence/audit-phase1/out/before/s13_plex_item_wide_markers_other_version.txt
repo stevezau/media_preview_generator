@@ -1,0 +1,5 @@
+Blu-ray version (OP = chapter 2, 105.3-195.0 s):
+  outcome: markers_published | intro 0:24–1:54 (introdb, server_markers) | rows: [('plex-1', 'markers_skipped', 'Not supported for this server type yet'), ('jf-1', 'markers_written', '1 marker(s)')]
+   intro: decided (sources agree: introdb, server_markers)
+   PUBLISHED-SET intro 24.0-114.1 by ('introdb', 'server_markers')
+  written to Jellyfin: ('jf-bd', [(24046, 114105)])

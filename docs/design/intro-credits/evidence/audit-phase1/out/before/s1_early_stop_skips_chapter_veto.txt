@@ -1,0 +1,10 @@
+run force=False: introdb asked 0x, skipdb asked 0x (cumulative)
+  outcome: markers_published | intro 0:00–1:35 (chapters) | rows: [('jf-1', 'markers_written', '1 marker(s)')]
+   intro: decided (chapters)
+   PUBLISHED-SET intro 0.0-95.0 by ('chapters',)
+run force=True: introdb asked 1x, skipdb asked 1x (cumulative)
+  outcome: markers_published | intro needs review | rows: [('jf-1', 'markers_written', 'Cleared our markers from this server')]
+   intro: needs_review (chapters contradicted by agreeing sources: introdb, skipdb)
+run force=False: introdb asked 1x, skipdb asked 1x (cumulative)
+  outcome: markers_needs_review | intro needs review | rows: [('jf-1', 'markers_needs_review', "Sources don't agree yet")]
+   intro: needs_review (chapters contradicted by agreeing sources: introdb, skipdb)

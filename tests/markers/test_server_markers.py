@@ -7,7 +7,11 @@ from unittest.mock import MagicMock, create_autospec
 import pytest
 
 from media_preview_generator.markers.models import Candidate, MarkerType, Source
-from media_preview_generator.markers.sources.server_markers import read_server_markers
+from media_preview_generator.markers.sources.server_markers import (
+    imported_detail,
+    importer_plugin,
+    read_server_markers,
+)
 from media_preview_generator.servers.base import ServerConfig, ServerType
 from media_preview_generator.servers.emby import EmbyServer
 from media_preview_generator.servers.jellyfin import JellyfinServer
@@ -64,6 +68,100 @@ class TestPlex:
         server = create_autospec(PlexServer, instance=True)
         server.get_markers.return_value = None
         assert read_server_markers(server, _cfg(ServerType.PLEX), "7") is None
+
+
+class TestItemWideMarkersOfOtherVersions:
+    """Plex and Emby serve one marker set per item: with ``duration_ms`` (evidence), an item holding another cut of the
+    file gives no evidence (None), since its markers may describe that cut."""
+
+    INTRO = [{"type": "intro", "start_ms": 24_500, "end_ms": 113_900, "final": False}]
+    EMBY_INTRO = [
+        {"marker_type": "IntroStart", "start_ms": 24_500, "name": ""},
+        {"marker_type": "IntroEnd", "start_ms": 113_900, "name": ""},
+    ]
+
+    @staticmethod
+    def _server(stype, markers, durations):
+        if stype is ServerType.PLEX:
+            server = create_autospec(PlexServer, instance=True)
+            server.get_markers.return_value = markers
+            server.get_part_durations.return_value = durations
+            return server, server.get_part_durations
+        server = create_autospec(EmbyServer, instance=True)
+        server.get_chapter_markers.return_value = markers
+        server.get_media_source_durations.return_value = durations
+        return server, server.get_media_source_durations
+
+    @pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.EMBY], ids=lambda t: t.value)
+    @pytest.mark.parametrize(
+        ("durations", "evidence"),
+        [
+            pytest.param([1_444_574], True, id="one-version"),
+            pytest.param([], True, id="no-version-listed"),
+            pytest.param([1_444_574, 1_446_574], True, id="two-versions-same-cut-2s"),
+            pytest.param([1_442_573, 1_444_574], False, id="two-versions-2001ms-apart"),
+            pytest.param([1_444_574, 1_384_574], False, id="web-and-bluray-60s-apart"),
+            pytest.param([1_444_574, None], False, id="a-version-without-duration"),
+            pytest.param(None, False, id="versions-unreadable"),
+        ],
+    )
+    def test_markers_count_only_when_every_version_is_this_cut(self, stype, durations, evidence):
+        markers = self.INTRO if stype is ServerType.PLEX else self.EMBY_INTRO
+        server, durations_call = self._server(stype, markers, durations)
+        found = read_server_markers(server, _cfg(stype), "777", duration_ms=1_444_574)
+        origin = f"{stype.value}-1"
+        assert found == ([_src(T.INTRO, 24_500, 113_900, origin)] if evidence else None)
+        durations_call.assert_called_once_with("777")
+
+    @pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.EMBY], ids=lambda t: t.value)
+    def test_no_markers_needs_no_version_check(self, stype):
+        server, durations_call = self._server(stype, [], None)
+        assert read_server_markers(server, _cfg(stype), "777", duration_ms=1_444_574) == []
+        durations_call.assert_not_called()
+
+    @pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.EMBY], ids=lambda t: t.value)
+    def test_what_clients_see_ignores_versions(self, stype):
+        # The Inspector shows the server's real state, whatever cut it belongs to.
+        markers = self.INTRO if stype is ServerType.PLEX else self.EMBY_INTRO
+        server, durations_call = self._server(stype, markers, None)
+        found = read_server_markers(server, _cfg(stype), "777", include_ours=True)
+        assert found == [_src(T.INTRO, 24_500, 113_900, f"{stype.value}-1")]
+        durations_call.assert_not_called()
+
+    def test_jellyfin_segments_are_per_version_and_need_no_check(self):
+        server = create_autospec(JellyfinServer, instance=True)
+        server.get_media_segments.return_value = [
+            {"Type": "Intro", "StartTicks": 245_000_000, "EndTicks": 1_139_000_000}
+        ]
+        server.get_bridge_markers.return_value = []
+        found = read_server_markers(server, _cfg(ServerType.JELLYFIN), "bd", duration_ms=1_444_574)
+        assert found == [_src(T.INTRO, 24_500, 113_900, "jellyfin-1")]
+        server.get_media_source_durations.assert_not_called()
+
+
+class TestImporterPlugins:
+    @pytest.mark.parametrize(
+        ("names", "importer"),
+        [
+            (["TheIntroDB"], "TheIntroDB"),
+            (["Media Preview Bridge", "IntroDB"], "IntroDB"),
+            (["Intro DB Segments"], "Intro DB Segments"),
+            (["SkipDB"], "SkipDB"),
+            (["AniSkip"], "AniSkip"),
+            (["Ani-Skip Segments", "TheIntroDB"], "Ani-Skip Segments"),
+            # Intro Skipper fingerprints the server's own files: local detection, not a crowd database
+            (["Intro Skipper"], None),
+            (["Media Preview Bridge", "Trakt", "Chapter Segments Provider"], None),
+            ([], None),
+        ],
+    )
+    def test_importer_plugin_names(self, names, importer):
+        assert importer_plugin(names) == importer
+
+    def test_imported_detail_names_the_plugin(self):
+        assert imported_detail("TheIntroDB") == (
+            "Markers on this server look imported from TheIntroDB; not used as a second opinion"
+        )
 
 
 class TestJellyfin:

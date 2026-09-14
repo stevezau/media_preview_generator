@@ -584,6 +584,49 @@ class EmbyApiClient(MediaServer):
             )
         return out
 
+    def get_media_source_durations(self, item_id: str) -> list[int | None] | None:
+        """Duration of every version (MediaSource) of an item.
+
+        Args:
+            item_id: Server item id.
+
+        Returns:
+            Milliseconds per MediaSource in the server's order (None for a source without a usable
+            ``RunTimeTicks``), or None when the item couldn't be fetched.
+        """
+        item = self._fetch_item_fields(item_id, "MediaSources")
+        if item is None:
+            return None
+        durations: list[int | None] = []
+        for source in item.get("MediaSources") or []:
+            if not isinstance(source, dict):
+                continue
+            ticks = source.get("RunTimeTicks")
+            usable = isinstance(ticks, int) and not isinstance(ticks, bool)
+            durations.append(ticks // 10_000 if usable else None)
+        return durations
+
+    def get_plugin_names(self) -> list[str] | None:
+        """Names of the plugins installed on the server (``GET /Plugins``, administrators only on Jellyfin).
+
+        Returns:
+            The names in the server's order, or None when the list couldn't be read.
+        """
+        try:
+            resp = self._request("GET", "/Plugins", timeout=10)
+        except requests.RequestException as exc:
+            logger.debug("{} plugin list failed on {}: {}", self.vendor_name, self.name, type(exc).__name__)
+            return None
+        if resp.status_code != 200:
+            return None
+        try:
+            body = resp.json()
+        except ValueError:
+            return None
+        if not isinstance(body, list):
+            return None
+        return [str(p["Name"]) for p in body if isinstance(p, dict) and p.get("Name")]
+
     def get_external_ids(self, item_id: str) -> dict[str, Any] | None:
         """ProviderIds (series ids for episodes) plus season/episode numbers.
 

@@ -756,6 +756,54 @@ class TestRegistry:
         reset_limiters()
         assert get_limiter("skipdb") is not first
 
+    def test_a_limiter_created_after_a_restart_carries_on_from_todays_stored_usage(self, tmp_path, monkeypatch):
+        # Audit B S8: before, a restart forgot the reserve (LOW allowed again) and the first response stored used=1.
+        from media_preview_generator.markers.sources import ratelimit
+        from media_preview_generator.markers.store import get_marker_store
+
+        monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
+        day = ratelimit._utc_day()
+        get_marker_store().record_source_usage("theintrodb", day=day, used=80, limit=500, remaining=11)
+        lim = get_limiter("theintrodb")
+        assert lim.usage() == {"day": day, "used": 80, "limit": 500, "remaining": 11, "blocked_until_s": 0.0}
+        assert lim.acquire(priority=ratelimit.PRIORITY_LOW) is Acquire.BUDGET_EXHAUSTED  # the 20% reserve holds
+        assert lim.acquire(priority=2) is Acquire.ALLOWED
+        lim.record(200, {"x-usagelimit-limit": "500", "x-usagelimit-remaining": "10"})
+        assert get_marker_store().source_usage("theintrodb", day) == {"used": 81, "limit": 500, "remaining": 10}
+
+    def test_usage_stored_on_another_day_is_not_carried_over(self, tmp_path, monkeypatch):
+        from media_preview_generator.markers.store import get_marker_store
+
+        monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
+        get_marker_store().record_source_usage("theintrodb", day="2000-01-01", used=499, limit=500, remaining=1)
+        lim = get_limiter("theintrodb")
+        assert (lim.usage()["used"], lim.usage()["limit"], lim.usage()["remaining"]) == (0, None, None)
+
+    def test_an_unreadable_store_leaves_a_fresh_limiter(self, monkeypatch, loguru_caplog):
+        from media_preview_generator.markers import store as store_mod
+
+        def broken(config_dir=None):
+            raise OSError("read-only")
+
+        monkeypatch.setattr(store_mod, "get_marker_store", broken)
+        lim = get_limiter("skipdb")
+        assert lim.usage()["used"] == 0
+        assert lim.acquire(priority=3) is Acquire.ALLOWED
+        assert "Could not read skipdb usage" in loguru_caplog.text
+
+    @pytest.mark.parametrize(
+        ("seed_day", "requests_first", "expected_used"),
+        [("today", 0, 80), ("yesterday", 0, 0), ("today", 1, 1)],
+        ids=["today", "other-day", "after-own-requests"],
+    )
+    def test_seed_usage_only_starts_a_fresh_count_for_today(self, seed_day, requests_first, expected_used):
+        lim = SourceLimiter("theintrodb", min_interval_s=0.0, utc_day=lambda: "2026-09-14")
+        for _ in range(requests_first):
+            assert lim.acquire(priority=2) is Acquire.ALLOWED
+        day = "2026-09-14" if seed_day == "today" else "2026-09-13"
+        lim.seed_usage(day=day, used=80, limit=500, remaining=11)
+        assert lim.usage()["used"] == expected_used
+
     def test_registered_limiter_persists_usage_to_the_marker_store(self, tmp_path, monkeypatch):
         from media_preview_generator.markers.store import get_marker_store
 

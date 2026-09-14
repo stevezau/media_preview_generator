@@ -2040,3 +2040,69 @@ class TestChapterMarkers:
             }
         )
         assert server.get_chapter_markers("42") == [{"marker_type": "IntroEnd", "start_ms": 2, "name": "ok"}]
+
+
+def _json_resp(status, body=None, *, json_error=False):
+    resp = MagicMock(status_code=status)
+    if json_error:
+        resp.json.side_effect = ValueError("no JSON")
+    else:
+        resp.json.return_value = body
+    return resp
+
+
+class TestPluginNames:
+    """``get_plugin_names``: which plugins are installed (an intro-DB importer makes the server's markers crowd copies)."""
+
+    def test_lists_the_installed_plugin_names(self, make_server):
+        server = make_server()
+        body = [{"Name": "TheIntroDB", "Version": "1.1.0.1"}, {"Name": "Trakt"}, {"Version": "no name"}, "junk"]
+        server._request = MagicMock(return_value=_json_resp(200, body))
+        assert server.get_plugin_names() == ["TheIntroDB", "Trakt"]
+        server._request.assert_called_once_with("GET", "/Plugins", timeout=10)
+
+    @pytest.mark.parametrize(
+        ("side_effect", "resp"),
+        [
+            pytest.param(None, _json_resp(401, None, json_error=True), id="401"),
+            pytest.param(None, _json_resp(403, None, json_error=True), id="403-not-admin"),
+            pytest.param(None, _json_resp(500, None, json_error=True), id="500"),
+            pytest.param(None, _json_resp(200, None, json_error=True), id="200-not-json"),
+            pytest.param(None, _json_resp(200, {"Items": []}), id="200-not-a-list"),
+            pytest.param(requests.Timeout("x"), None, id="timeout"),
+        ],
+    )
+    def test_unknown_is_none(self, make_server, side_effect, resp):
+        server = make_server()
+        server._request = MagicMock(side_effect=side_effect, return_value=resp)
+        assert server.get_plugin_names() is None
+
+
+class TestMediaSourceDurations:
+    """``get_media_source_durations``: one duration per version of an item (Emby markers are one set per item)."""
+
+    def test_one_duration_per_media_source(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(
+            return_value={
+                "MediaSources": [
+                    {"Id": "a", "RunTimeTicks": 14_445_740_000},
+                    {"Id": "b", "RunTimeTicks": 13_845_749_999},
+                    {"Id": "c"},
+                    {"Id": "d", "RunTimeTicks": True},
+                    "junk",
+                ]
+            }
+        )
+        assert server.get_media_source_durations("42") == [1_444_574, 1_384_574, None, None]
+        server._fetch_item_fields.assert_called_once_with("42", "MediaSources")
+
+    def test_no_media_sources_is_empty(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(return_value={"MediaSources": None})
+        assert server.get_media_source_durations("42") == []
+
+    def test_lookup_failure_is_none(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(return_value=None)
+        assert server.get_media_source_durations("42") is None

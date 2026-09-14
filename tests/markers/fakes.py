@@ -53,6 +53,10 @@ class FakeRegistry:
             server.get_media_segments.return_value = []
             server.get_bridge_markers.return_value = []
             server.get_chapter_markers.return_value = []
+            # One version per item and no plugins, unless a test says otherwise.
+            server.get_part_durations.return_value = []
+            server.get_media_source_durations.return_value = []
+            server.get_plugin_names.return_value = []
             self.servers_by_id[sid] = server
         return self.servers_by_id[sid]
 

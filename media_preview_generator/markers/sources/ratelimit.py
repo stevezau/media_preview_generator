@@ -302,6 +302,27 @@ class SourceLimiter:
             except Exception as exc:  # usage is display-only; a failed save must never break pacing
                 logger.warning("Could not save {} usage: {}", self.source_id, exc)
 
+    def seed_usage(self, *, day: str, used: int | None, limit: int | None, remaining: int | None) -> None:
+        """Carry on from usage stored earlier today (after a restart), so the daily reserve and "used today" hold.
+
+        Ignored for another UTC day, or once this limiter has handed out a request of its own.
+
+        Args:
+            day: The UTC day the usage was stored for.
+            used: Requests counted that day.
+            limit: The daily limit from the last response's headers.
+            remaining: What the last response said remained.
+        """
+        with self._lock:
+            self._roll_day()
+            if day != self._day or self._used or self._usage_seq:
+                return
+            self._used = max(0, used or 0)
+            if limit is not None and limit > 0:
+                self._limit = int(limit)
+            if remaining is not None:
+                self._replace_remaining(max(0, int(remaining)))
+
     def usage(self) -> dict:
         """Snapshot for the Settings page.
 
@@ -333,6 +354,12 @@ def _persist_usage(source_id: str, day: str, used: int, limit: int | None, remai
     get_marker_store().record_source_usage(source_id, day=day, used=used, limit=limit, remaining=remaining)
 
 
+def _stored_usage(source_id: str, day: str) -> dict | None:
+    from ..store import get_marker_store
+
+    return get_marker_store().source_usage(source_id, day)
+
+
 def get_limiter(source_id: str) -> SourceLimiter:
     """Process-wide limiter for a source.
 
@@ -340,13 +367,22 @@ def get_limiter(source_id: str) -> SourceLimiter:
         source_id: ``theintrodb``, ``introdb`` or ``skipdb`` (others get a 1 s spacing).
 
     Returns:
-        The shared limiter, created on first use.
+        The shared limiter, created on first use from today's stored usage (so a restart keeps the day's count).
     """
     with _limiters_lock:
         if source_id not in _limiters:
-            _limiters[source_id] = SourceLimiter(
+            limiter = SourceLimiter(
                 source_id, min_interval_s=_MIN_INTERVALS.get(source_id, 1.0), on_usage=_persist_usage
             )
+            day = limiter.usage()["day"]
+            try:
+                stored = _stored_usage(source_id, day)
+            except Exception as exc:  # usage is a courtesy to the source; an unreadable store must never block lookups
+                logger.warning("Could not read {} usage: {}", source_id, type(exc).__name__)
+                stored = None
+            if stored:
+                limiter.seed_usage(day=day, **stored)
+            _limiters[source_id] = limiter
         return _limiters[source_id]
 
 

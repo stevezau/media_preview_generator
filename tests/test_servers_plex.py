@@ -1836,6 +1836,31 @@ class TestPlexMarkerHelpers:
         conn.query.return_value = ET.fromstring("<MediaContainer/>")
         assert plex_server_under_test.get_markers("7") is None
 
+    def test_get_part_durations_lists_every_part_of_every_version(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        xml = ET.fromstring(
+            '<MediaContainer><Video ratingKey="777" duration="1444574">'
+            '<Media id="1" duration="1444574"><Part id="11" duration="1444574" file="/tv/bd.mkv"/></Media>'
+            '<Media id="2" duration="1384574"><Part id="21" duration="1384574" file="/tv/web.mkv"/></Media>'
+            '<Media id="3"><Part id="31" file="/tv/unknown.mkv"/></Media>'
+            "</Video></MediaContainer>"
+        )
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = xml
+        assert plex_server_under_test.get_part_durations("/library/metadata/777") == [1_444_574, 1_384_574, None]
+        assert conn.query.call_args.args[0] == "/library/metadata/777"
+
+    def test_get_part_durations_returns_none_when_plex_fails_or_has_no_item(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = RuntimeError("down")
+        assert plex_server_under_test.get_part_durations("7") is None
+        conn.query.side_effect = None
+        conn.query.return_value = ET.fromstring("<MediaContainer/>")
+        assert plex_server_under_test.get_part_durations("7") is None
+
     @staticmethod
     def _prefs(**values):
         import xml.etree.ElementTree as ET

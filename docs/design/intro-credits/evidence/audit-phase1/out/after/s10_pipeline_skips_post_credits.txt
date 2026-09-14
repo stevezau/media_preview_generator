@@ -1,0 +1,9 @@
+S01E06: Plex serves credits [(1192.035, 1218.035, 'non-final'), (1264.035, 1288.928, 'final')]
+   IntroDB outro [(1191.0, 1288.0)], SkipDB [(1282.0, 1289.0)]
+   written to Plex: [('intro', 1.4, 31.82, ('introdb', 'skipdb', 'server_markers')), ('credits', 1191.0, 1218.035, ('introdb', 'server_markers'))] | outcome markers_published
+S01E07: Plex serves credits [(1239.413, 1267.413, 'non-final')]
+   IntroDB outro [(1239.0, 1321.0)], SkipDB [(1314.0, 1321.0)]
+   written to Plex: [('intro', 70.2, 101.0, ('introdb', 'skipdb', 'server_markers')), ('credits', 1239.0, 1267.413, ('introdb', 'server_markers'))] | outcome markers_published
+S01E08: Plex serves credits [(1250.176, 1286.176, 'non-final')]
+   IntroDB outro [(1249.0, 1335.0)], SkipDB [(1329.0, 1336.0)]
+   written to Plex: [('intro', 90.0, 122.0, ('introdb', 'skipdb', 'server_markers')), ('credits', 1249.0, 1286.176, ('introdb', 'server_markers'))] | outcome markers_published

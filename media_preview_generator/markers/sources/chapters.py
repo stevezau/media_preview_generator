@@ -18,6 +18,9 @@ import re
 from ..models import Candidate, MarkerType, Source
 from ..probe import Chapter, MediaProbe
 
+# Bump whenever a change here changes the candidates a file's chapters give, so files probed before are read again.
+CHAPTER_RULES_VERSION = 1
+
 # "End"/"Ending" alone are common final-scene names in movies, so they are deliberately not credits.
 # "OP"/"ED" are handled separately, case-sensitively -- see module docstring.
 _PATTERNS: tuple[tuple[MarkerType, re.Pattern[str]], ...] = (
