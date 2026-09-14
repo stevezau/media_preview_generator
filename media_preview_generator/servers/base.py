@@ -9,7 +9,7 @@ specifics live in concrete subclasses under this package.
 import re
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, TypedDict
@@ -384,7 +384,9 @@ class MediaServer(ABC):
         cfg = getattr(self, "_config", None)
         return getattr(cfg, "path_mappings", None) or []
 
-    def resolve_remote_path_to_item_id(self, remote_path: str) -> str | None:
+    def resolve_remote_path_to_item_id(
+        self, remote_path: str, *, library_ids: Collection[str] | None = None
+    ) -> str | None:
         """Inverse of :meth:`resolve_item_to_remote_path`.
 
         Given a canonical absolute path, walk every server-view
@@ -398,18 +400,27 @@ class MediaServer(ABC):
         This loop is the single source of truth for path-mapping
         translation during reverse lookup; subclasses implement only
         the per-path API call in :meth:`_resolve_one_path`.
+
+        Args:
+            remote_path: Canonical absolute path of the file.
+            library_ids: Search only these libraries. Intro & Credits passes the libraries that hold the file,
+                because its library choice is separate from the preview opt-in. None keeps each server's
+                default scope (Plex: the preview-enabled libraries).
+
+        Returns:
+            The item id, or None when no candidate resolves.
         """
         if not remote_path:
             return None
         from ..config.paths import expand_path_mapping_candidates
 
         for candidate in expand_path_mapping_candidates(remote_path, self.path_mappings):
-            item_id = self._resolve_one_path(candidate)
+            item_id = self._resolve_one_path(candidate, library_ids=library_ids)
             if item_id is not None:
                 return item_id
         return None
 
-    def _resolve_one_path(self, server_view_path: str) -> str | None:
+    def _resolve_one_path(self, server_view_path: str, *, library_ids: Collection[str] | None = None) -> str | None:
         """Subclass hook: server-view path → item id, or ``None`` on miss.
 
         Default returns ``None``. Subclasses override with their
@@ -417,9 +428,10 @@ class MediaServer(ABC):
         basename, Emby ``Path=<exact>`` filter, Jellyfin
         ``MediaPreviewBridge/ResolvePath``) — the base class loops
         candidates so each subclass only has to handle a single
-        already-translated path.
+        already-translated path. ``library_ids`` is the caller's
+        library scope (see :meth:`resolve_remote_path_to_item_id`).
         """
-        del server_view_path
+        del server_view_path, library_ids
         return None
 
     def trigger_refresh(

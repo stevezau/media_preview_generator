@@ -20,6 +20,7 @@ from ..servers.ownership import OwnershipMatch, apply_path_mappings, find_librar
 from .models import Marker, MarkerType
 from .publishers.base import Capability
 from .publishers.factory import publisher_for
+from .publishers.plex_db import SAME_HOST_PATH_ADVICE, versions_agree
 from .settings import ServerMarkersSettings, is_sports_library, library_allowed, load_server
 from .sources.server_markers import read_server_markers
 from .store import FileRecord, MarkerStore
@@ -42,26 +43,36 @@ LIBRARY_OFF_REASON = "This library isn't selected for Intro & Credits on this se
 _SAME_TOLERANCE_MS = 1_000
 _END_OF_FILE_MS = 2_000
 CAPABILITY_TTL_S = 60.0
+# Problems (plugin missing, server restarting after a plugin install) usually clear up soon.
+NOT_READY_TTL_S = 5.0
 # Not a publisher Capability: the check itself failed, so nothing is known about the server.
 CAPABILITY_UNKNOWN = "unknown"
 
 
 class CapabilityCache:
-    """Capability answers per server, reused for ``ttl_s``.
+    """Capability answers per server: ready ones reused for ``ttl_s``, any other state for ``not_ready_ttl_s``.
 
     The Edit tab and the Inspector ask on every load, and one Plex check can wait 30 s on a busy database. An entry
     only counts while the server's config is unchanged, so a saved server (switch, libraries, database folder, URL,
-    credentials) is checked again at once; there is no settings-saved hook to clear it.
+    credentials) is checked again at once; there is no settings-saved hook to clear it. A plugin install or uninstall
+    isn't a config change, so those routes call ``forget``.
     """
 
-    def __init__(self, ttl_s: float = CAPABILITY_TTL_S, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        ttl_s: float = CAPABILITY_TTL_S,
+        clock: Callable[[], float] = time.monotonic,
+        not_ready_ttl_s: float = NOT_READY_TTL_S,
+    ) -> None:
         """Create an empty cache.
 
         Args:
-            ttl_s: How long an answer is reused.
+            ttl_s: How long a ready answer is reused.
             clock: Monotonic seconds (tests inject a fake clock).
+            not_ready_ttl_s: How long any other answer is reused.
         """
         self.ttl_s = ttl_s
+        self.not_ready_ttl_s = not_ready_ttl_s
         self._clock = clock
         self._guard = threading.Lock()
         self._entries: dict[tuple[str, str], tuple[float, str, Any]] = {}
@@ -88,7 +99,7 @@ class CapabilityCache:
                 saved_since = entry is not None and entry[1] != fingerprint
                 if saved_since:
                     del self._entries[key]
-            if entry is not None and not saved_since and self._clock() - entry[0] < self.ttl_s:
+            if entry is not None and not saved_since and self._clock() - entry[0] < self._ttl_for(entry[2]):
                 return copy.deepcopy(entry[2])
             try:
                 value = compute()
@@ -101,6 +112,21 @@ class CapabilityCache:
                         if self._locks.get(key) is lock:
                             del self._locks[key]
             return copy.deepcopy(value)
+
+    def _ttl_for(self, answer: Any) -> float:
+        # The status tab caches a capability dict, the Inspector just the state.
+        state = answer.get("state") if isinstance(answer, dict) else answer
+        return self.ttl_s if state == Capability.READY.value else self.not_ready_ttl_s
+
+    def forget(self, server_id: str) -> None:
+        """Forget one server's answers (both variants), so its next load checks it again.
+
+        Args:
+            server_id: The server's id.
+        """
+        with self._guard:
+            for key in [k for k in self._entries if k[0] == server_id]:
+                del self._entries[key]
 
     def clear(self) -> None:
         """Forget every answer and its lock."""
@@ -120,6 +146,15 @@ _CAPABILITY_CACHE = CapabilityCache()
 def clear_capability_cache() -> None:
     """Forget cached capability answers (tests, or after a change the config doesn't show)."""
     _CAPABILITY_CACHE.clear()
+
+
+def forget_capability(server_id: str) -> None:
+    """Forget one server's cached capability answers, after a change its config doesn't show (plugin install).
+
+    Args:
+        server_id: The server's id.
+    """
+    _CAPABILITY_CACHE.forget(server_id)
 
 
 def _marker_dict(marker: Any) -> dict:
@@ -184,7 +219,8 @@ def _checked_as_if_on(server: Any, config: ServerConfig, settings: ServerMarkers
     if config.type is ServerType.PLEX:
         if "plex_version" not in details:
             details.update(_plex_status(server))
-        if report.state is Capability.NEEDS_LOCAL_DB and details.get("lock_holder") is False:
+        needs_same_path = report.state is Capability.NEEDS_LOCAL_DB and details.get("lock_holder") is False
+        if needs_same_path and SAME_HOST_PATH_ADVICE not in report.message:
             details["hint"] = PLEX_SAME_HOST_PATH_HINT
     return _capability(report.state, report.message, details)
 
@@ -288,11 +324,14 @@ def _checked_state(server: Any, cfg: ServerConfig) -> str:
     return Capability.NEEDS_PLUGIN.value if publisher is None else publisher.capability().state.value
 
 
-def _item_id(server: Any, cfg: ServerConfig, canonical_path: str, known: str | None) -> str | None:
+def _item_id(
+    server: Any, cfg: ServerConfig, canonical_path: str, known: str | None, matches: list[OwnershipMatch]
+) -> str | None:
     if known:
         return known
     try:
-        return server.resolve_remote_path_to_item_id(canonical_path)
+        # The libraries holding the file, as the pipeline looks it up (Plex otherwise searches preview libraries only).
+        return server.resolve_remote_path_to_item_id(canonical_path, library_ids=[m.library_id for m in matches])
     except Exception as exc:
         logger.debug("Item id lookup on {} failed for {}: {}", cfg.name, canonical_path, type(exc).__name__)
         return None
@@ -328,8 +367,30 @@ def _same(current: list[dict], wanted: list[dict], duration_ms: int) -> bool:
     return True
 
 
+def _expected(
+    server_type: ServerType, wanted: list[Marker], ours: tuple[Marker, ...], shown: list[dict], duration_ms: int
+) -> list[dict]:
+    """What the server should show once published, per type.
+
+    The Plex publisher keeps what is already ours on the item when it agrees with the decision within its version
+    tolerance, so a type it would keep counts as ours while the server still shows it.
+    """
+    expected = []
+    for mtype in dict.fromkeys(m.type for m in wanted):
+        want = [m for m in wanted if m.type is mtype]
+        kept = [m for m in ours if m.type is mtype]
+        if server_type is ServerType.PLEX and kept and versions_agree(kept, want):
+            kept_dicts = [_marker_dict(m) for m in kept]
+            if _same([c for c in shown if c["type"] == mtype.value], kept_dicts, duration_ms):
+                expected.extend(kept_dicts)
+                continue
+        expected.extend(_marker_dict(m) for m in want)
+    return expected
+
+
 def _plan(
     *,
+    server_type: ServerType,
     off_reason: str,
     wanted: list[Marker],
     ours: tuple[Marker, ...],
@@ -348,7 +409,7 @@ def _plan(
     # Only the types we manage here: Plex keeps its own marker of a type we didn't decide.
     managed = {m.type.value for m in wanted} | {m.type.value for m in ours}
     shown = [c for c in current if c["type"] in managed]
-    if _same(shown, [_marker_dict(m) for m in wanted], duration_ms):
+    if _same(shown, _expected(server_type, wanted, ours, shown, duration_ms), duration_ms):
         return "up_to_date", ""
     return ("will_replace", "") if shown else ("will_add", "")
 
@@ -368,14 +429,14 @@ def _server_row(
     can_show = _CAN_SHOW.get(cfg.type, ())
     wanted = sorted((m for m in markers.values() if m.type.value in can_show), key=lambda m: (m.start_ms, m.type.value))
     file_state = store.get_publish_state(rec.id, cfg.id) if rec else None
-    item_id = _item_id(server, cfg, canonical_path, file_state.item_id if file_state else None)
+    item_id = _item_id(server, cfg, canonical_path, file_state.item_id if file_state else None, matches)
     item_state = store.get_item_publish_state(cfg.id, item_id) if item_id else None
     if item_state is not None:
-        ours, publish_status = item_state.markers, item_state.status
+        ours = item_state.markers
     elif file_state is not None:
-        ours, publish_status = file_state.markers, file_state.status
+        ours = file_state.markers
     else:
-        ours, publish_status = (), None
+        ours = ()
     # Plex shows one set per item: a type this file decided but the item doesn't show after this file's last publish
     # (nothing changed since) waits for the item's other versions to agree.
     waiting_on_versions = bool(
@@ -387,6 +448,7 @@ def _server_row(
     )
     current = _current(server, cfg, item_id, can_show)
     plan, reason = _plan(
+        server_type=cfg.type,
         off_reason=off_reason,
         wanted=wanted,
         ours=ours,
@@ -403,8 +465,10 @@ def _server_row(
         "can_show": list(can_show),
         "current": current,
         "published": [_marker_dict(m) for m in ours],
-        "publish_status": publish_status,
+        # This file's last attempt; the item row can also reflect another version's attempt on a shared Plex item.
+        "publish_status": file_state.status if file_state else None,
         "publish_message": file_state.message if file_state else "",
+        "item_status": item_state.status if item_state else None,
         "plan": plan,
         "plan_reason": reason,
         "error": None,
@@ -426,6 +490,7 @@ def _degraded_row(cfg: ServerConfig, exc: Exception) -> dict:
         "published": [],
         "publish_status": None,
         "publish_message": "",
+        "item_status": None,
         "plan": "unknown",
         "plan_reason": "",
         "error": f"Couldn't read this server's Intro & Credits state ({type(exc).__name__})",
@@ -443,9 +508,11 @@ def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> d
     Returns:
         ``known``, ``canonical_path``, ``duration_ms``, ``is_movie``, ``decisions`` by type, ``evidence`` rows (empty
         lookups have ``type`` None) and one row per owning server with what it shows now (read live; None when that
-        failed), what is ours there, and the ``plan``: ``will_add``, ``will_replace``, ``will_remove``, ``up_to_date``,
-        ``waiting`` (Plex versions disagree), ``not_enabled``, ``nothing_to_publish``, or ``unknown`` (the server's
-        markers couldn't be read, or its row failed: then ``error`` says why), with ``plan_reason``.
+        failed), what is ours there, this file's last publish (``publish_status``, ``publish_message``), the server
+        item's last publish (``item_status``; another version of a shared Plex item may have written or failed
+        since), and the ``plan``: ``will_add``, ``will_replace``, ``will_remove``, ``up_to_date``, ``waiting`` (Plex
+        versions disagree), ``not_enabled``, ``nothing_to_publish``, or ``unknown`` (the server's markers couldn't be
+        read, or its row failed: then ``error`` says why), with ``plan_reason``.
     """
     rec = store.get_file(canonical_path)
     decisions = store.get_decisions(rec.id) if rec else {}

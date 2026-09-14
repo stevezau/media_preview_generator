@@ -19,7 +19,8 @@ import re
 import threading
 import time
 import unicodedata
-from collections.abc import Iterator
+import urllib.parse
+from collections.abc import Collection, Iterator
 from typing import Any
 
 import requests
@@ -138,14 +139,14 @@ class EmbyApiClient(MediaServer):
         # is also virtually free on the hot path (single attribute
         # read, no acquire) thanks to double-checked locking.
         self._session_lock = threading.Lock()
-        # Reverse-lookup cache: ``{remote_path: (expires_at, item_id)}``.
+        # Reverse-lookup cache: ``{(remote_path, library scope): (expires_at, item_id)}``.
         # Caches POSITIVE results only — see ``_resolve_one_path`` for the
         # negative-cache regression (chain ``62e32c35``, 2026-05-11) that
         # forced every early retry to short-circuit on stale ``None`` for
         # the full TTL. Value type stays ``str | None`` for backwards-compat
         # with any in-memory entry written by older code paths; the reader
         # in ``_resolve_one_path`` defensively ignores ``None`` values.
-        self._reverse_lookup_cache: dict[str, tuple[float, str | None]] = {}
+        self._reverse_lookup_cache: dict[tuple[str, frozenset[str] | None], tuple[float, str | None]] = {}
         self._reverse_lookup_lock = threading.Lock()
 
     @property
@@ -533,11 +534,15 @@ class EmbyApiClient(MediaServer):
         return sources
 
     def _fetch_item_fields(self, item_id: str, fields: str) -> dict[str, Any] | None:
-        """Fetch one item with extra ``Fields`` using the endpoint that works for this auth shape."""
+        """Fetch one item with extra ``Fields`` using the endpoint that works for this auth shape.
+
+        The id is URL-quoted into the per-user path, so an id from an API caller can't reach another endpoint.
+        """
         user_id = self._user_id()
         try:
             if user_id:
-                resp = self._request("GET", f"/Users/{user_id}/Items/{item_id}", params={"Fields": fields})
+                quoted = urllib.parse.quote(str(item_id), safe="")
+                resp = self._request("GET", f"/Users/{user_id}/Items/{quoted}", params={"Fields": fields})
                 resp.raise_for_status()
                 data = resp.json()
             else:
@@ -1250,29 +1255,10 @@ class EmbyApiClient(MediaServer):
 
         Prefers ``MediaSources[0].Path`` over the top-level ``Path``
         because some item types only populate the media source.
+        The endpoint choice lives in :meth:`_fetch_item_fields`.
         """
-        user_id = self._user_id()
-        if user_id:
-            primary_path = f"/Users/{user_id}/Items/{item_id}"
-            primary_params = {"Fields": "Path,MediaSources"}
-            primary_unwrap = lambda data: data  # noqa: E731 — single-item endpoint returns the item directly
-        else:
-            primary_path = "/Items"
-            primary_params = {"Ids": item_id, "Fields": "Path,MediaSources"}
-
-            def primary_unwrap(data):
-                items = data.get("Items") or []
-                return items[0] if items else {}
-
-        try:
-            response = self._request("GET", primary_path, params=primary_params)
-            response.raise_for_status()
-            data = primary_unwrap(response.json())
-        except Exception as exc:
-            logger.debug("{} item lookup failed for {}: {}", self.vendor_name, item_id, exc)
-            return None
-
-        if not isinstance(data, dict):
+        data = self._fetch_item_fields(item_id, "Path,MediaSources")
+        if data is None:
             return None
 
         for source in data.get("MediaSources", []) or []:
@@ -1284,7 +1270,7 @@ class EmbyApiClient(MediaServer):
         path = str(data.get("Path") or "")
         return path or None
 
-    def _resolve_one_path(self, server_view_path: str) -> str | None:
+    def _resolve_one_path(self, server_view_path: str, *, library_ids: Collection[str] | None = None) -> str | None:
         """Cached per-server-view-path lookup.
 
         The base class loops mapped candidates through this hook (see
@@ -1316,14 +1302,19 @@ class EmbyApiClient(MediaServer):
         replace just the uncached body with their vendor-native
         per-path lookup (Emby's ``Path=<exact>`` filter, Jellyfin's
         ``MediaPreviewBridge/ResolvePath``).
+
+        Both vendors look a file up by its path, so ``library_ids`` (the
+        caller's library scope) doesn't change the lookup; it is part of
+        the cache key so an answer is only reused for the same scope.
         """
         basename = os.path.basename(server_view_path or "")
         if not basename:
             return None
 
+        cache_key = (server_view_path, None if library_ids is None else frozenset(library_ids))
         now = time.monotonic()
         with self._reverse_lookup_lock:
-            cached = self._reverse_lookup_cache.get(server_view_path)
+            cached = self._reverse_lookup_cache.get(cache_key)
             # ``cached[1] is not None`` guards against stale negatives
             # left in the cache by older code paths (defence-in-depth
             # for rolling deploys); current code never writes them.
@@ -1332,7 +1323,7 @@ class EmbyApiClient(MediaServer):
         result = self._uncached_resolve_remote_path_to_item_id(server_view_path)
         if result is not None:
             with self._reverse_lookup_lock:
-                self._reverse_lookup_cache[server_view_path] = (now + _REVERSE_LOOKUP_TTL_S, result)
+                self._reverse_lookup_cache[cache_key] = (now + _REVERSE_LOOKUP_TTL_S, result)
         return result
 
     def _find_owning_library_id(self, remote_path: str) -> str | None:

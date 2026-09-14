@@ -12,6 +12,7 @@ from media_preview_generator.markers.decide import DecisionStatus, TypeDecision
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, Source
 from media_preview_generator.markers.publishers.base import Capability, CapabilityReport
 from media_preview_generator.markers.publishers.jellyfin import MARKERS_FEATURE
+from media_preview_generator.markers.publishers.plex_db import SAME_HOST_PATH_ADVICE
 from media_preview_generator.markers.store import MarkerStore
 from media_preview_generator.servers.base import Library, ServerType
 from tests.markers.fakes import FakeRegistry, server_config
@@ -163,6 +164,15 @@ _LOCK_DOMAIN = {
                 Capability.NEEDS_LOCAL_DB, "Plex is running, but not with the database file", _LOCK_DOMAIN
             ),
             True,
+        ),
+        (
+            # The Plex publisher's own lock-domain message already says to mount the same host path: no second hint.
+            CapabilityReport(
+                Capability.NEEDS_LOCAL_DB,
+                f"Plex is running, but not with the database file this app sees at /plex/db. {SAME_HOST_PATH_ADVICE}",
+                _LOCK_DOMAIN,
+            ),
+            False,
         ),
         (
             CapabilityReport(
@@ -507,6 +517,7 @@ def test_unknown_file_lists_every_owning_server(store, factory):
             "published": [],
             "publish_status": None,
             "publish_message": "",
+            "item_status": None,
             "plan": "nothing_to_publish",
             "plan_reason": "",
             "error": None,
@@ -522,6 +533,7 @@ def test_unknown_file_lists_every_owning_server(store, factory):
             "published": [],
             "publish_status": None,
             "publish_message": "",
+            "item_status": None,
             "plan": "not_enabled",
             "plan_reason": "Intro & Credits is off for this server",
             "error": None,
@@ -529,7 +541,7 @@ def test_unknown_file_lists_every_owning_server(store, factory):
     ]
     # Capability uses each server's stored settings (no preview override) for the Inspector.
     assert [(c["config"].id, c.get("settings")) for c in factory.calls] == [("plex", None), ("jf", None)]
-    registry.get("plex").resolve_remote_path_to_item_id.assert_called_once_with(PATH)
+    registry.get("plex").resolve_remote_path_to_item_id.assert_called_once_with(PATH, library_ids=["1"])
     registry.get("plex").get_markers.assert_called_once_with("item-plex")
     registry.get("jf").get_media_segments.assert_called_once_with("item-jf")
 
@@ -808,7 +820,8 @@ def test_capability_check_that_raises_reads_as_unknown_in_the_inspector(store, m
 
 
 def test_published_comes_from_the_item_row_when_the_item_is_known(store, factory):
-    # Another version's publish left only the intro on the shared Plex item after this file wrote both.
+    # Another version's publish left only the intro on the shared Plex item after this file wrote both, then that
+    # version's next write failed (Plex busy). This file's own row still says what happened to this file.
     rec = _known_file(store)
     store.set_publish_state(
         rec.id, "plex", item_id="rk-1", markers=[INTRO, CREDITS], status="written", message="2 marker(s)"
@@ -818,8 +831,8 @@ def test_published_comes_from_the_item_row_when_the_item_is_known(store, factory
     registry = _registry(server_config("plex", ServerType.PLEX))
     row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
     assert row["published"] == [{"type": "intro", "start_ms": 11_000, "end_ms": 37_000}]
-    assert row["publish_status"] == "failed"
-    assert row["publish_message"] == "2 marker(s)"
+    assert (row["publish_status"], row["publish_message"]) == ("written", "2 marker(s)")
+    assert row["item_status"] == "failed"
 
 
 def test_published_falls_back_to_the_file_state_without_an_item_row(store, factory):
@@ -831,7 +844,8 @@ def test_published_falls_back_to_the_file_state_without_an_item_row(store, facto
     row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
     assert row["published"] == [{"type": "intro", "start_ms": 11_000, "end_ms": 37_000}]
     assert (row["publish_status"], row["publish_message"]) == ("waiting", "Not in this server's library yet")
-    registry.get("plex").resolve_remote_path_to_item_id.assert_called_once_with(PATH)
+    assert row["item_status"] is None
+    registry.get("plex").resolve_remote_path_to_item_id.assert_called_once_with(PATH, library_ids=["1"])
 
 
 def test_plex_waits_when_its_versions_do_not_agree(store, factory):
@@ -965,6 +979,7 @@ def test_one_failing_server_gives_a_degraded_row(store, factory, monkeypatch, fa
         "published": [],
         "publish_status": None,
         "publish_message": "",
+        "item_status": None,
         "plan": "unknown",
         "plan_reason": "",
         "error": "Couldn't read this server's Intro & Credits state (_Boom)",
@@ -1119,3 +1134,120 @@ def test_failed_check_after_a_save_still_evicts_the_old_answer_and_lock():
     assert ("a", "status") not in cache._entries and ("a", "status") not in cache._locks
     # Saving the old settings back must check again, not revive the answer from before the save.
     assert cache.get(before, "status", lambda: "fresh") == "fresh"
+
+
+# --------------------------------------------------------------------------- Plex keeps agreeing times (audit C MED-3)
+
+INTRO_KEPT = Marker(T.INTRO, 60_000, 90_000, ("chapters",))
+INTRO_DECIDED_LATER = Marker(T.INTRO, 60_000, 91_500, ("chapters", "theintrodb"))
+
+
+def _intro_only(marker):
+    return {
+        T.INTRO: _decided(marker),
+        T.CREDITS: _none(T.CREDITS),
+        T.RECAP: _none(T.RECAP),
+        T.PREVIEW: _none(T.PREVIEW),
+    }
+
+
+@pytest.mark.parametrize(
+    ("stype", "ours", "decided", "current", "plan"),
+    [
+        # The Plex publisher keeps what is already ours when it agrees within 2 s: nothing will change.
+        (ServerType.PLEX, [INTRO_KEPT], INTRO_DECIDED_LATER, INTRO_KEPT, "up_to_date"),
+        # Plex's own marker isn't ours: it is replaced by the decided times.
+        (ServerType.PLEX, [], INTRO_DECIDED_LATER, Marker(T.INTRO, 60_000, 93_000, ()), "will_replace"),
+        # Ours no longer agrees with the decision (more than 2 s): it is replaced.
+        (ServerType.PLEX, [INTRO_KEPT], Marker(T.INTRO, 60_000, 92_500, ()), INTRO_KEPT, "will_replace"),
+        # Ours agrees but Plex shows something else now: compared with the decided times as before.
+        (ServerType.PLEX, [INTRO_KEPT], INTRO_DECIDED_LATER, Marker(T.INTRO, 75_000, 110_000, ()), "will_replace"),
+        (ServerType.PLEX, [INTRO_KEPT], INTRO_DECIDED_LATER, INTRO_DECIDED_LATER, "up_to_date"),
+        # Jellyfin writes the decided times whatever it had: no keep rule (Emby has no publisher, so nothing is ours).
+        (ServerType.JELLYFIN, [INTRO_KEPT], INTRO_DECIDED_LATER, INTRO_KEPT, "will_replace"),
+    ],
+    ids=[
+        "plex-kept",
+        "plex-own-marker",
+        "plex-ours-disagrees",
+        "plex-shows-other",
+        "plex-shows-decided",
+        "jellyfin-no-keep",
+    ],
+)
+def test_plan_mirrors_the_plex_keep_rule(store, factory, stype, ours, decided, current, plan):
+    rec = _known_file(store, _intro_only(decided))
+    sid = "plex" if stype is ServerType.PLEX else "jf"
+    if ours:
+        _published(store, rec, sid, "item-1", ours, basis_for=[decided])
+    registry = _registry(server_config(sid, stype))
+    if stype is ServerType.PLEX:
+        registry.get(sid).get_markers.return_value = _plex_rows(current)
+    else:
+        registry.get(sid).get_media_segments.return_value = _jf_rows(current)
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), sid)
+    assert (row["plan"], row["plan_reason"]) == (plan, "")
+
+
+# --------------------------------------------------------------------------- capability cache: short-lived problems
+
+
+@pytest.mark.parametrize(
+    ("variant", "ready", "problem"),
+    [
+        (
+            "status",
+            {"state": "ready", "message": "", "details": {}},
+            {"state": "needs_plugin", "message": "", "details": {}},
+        ),
+        ("inspector", "ready", "unreachable"),
+    ],
+)
+def test_answers_other_than_ready_are_reused_for_5_seconds_only(variant, ready, problem):
+    now = [0.0]
+    cache = inspect.CapabilityCache(ttl_s=60.0, clock=lambda: now[0])
+    cfg, other = server_config("jf", ServerType.JELLYFIN), server_config("jf2", ServerType.JELLYFIN)
+    computed = []
+
+    def compute(answer):
+        def run():
+            computed.append(answer)
+            return answer
+
+        return run
+
+    cache.get(cfg, variant, compute(problem))
+    cache.get(other, variant, compute(ready))
+    now[0] = 4.9
+    assert cache.get(cfg, variant, compute(ready)) == problem
+    now[0] = 5.1
+    assert cache.get(cfg, variant, compute(ready)) == ready  # Jellyfin is back after its restart
+    assert cache.get(other, variant, compute(problem)) == ready  # a ready answer still lasts 60 s
+    now[0] = 59.0
+    assert cache.get(cfg, variant, compute(problem)) == ready
+    assert computed == [problem, ready, ready]
+
+
+def test_forget_capability_drops_one_servers_answers():
+    now = [0.0]
+    cache = inspect.CapabilityCache(ttl_s=60.0, clock=lambda: now[0])
+    jf, plex = server_config("jf", ServerType.JELLYFIN), server_config("plex", ServerType.PLEX)
+    for cfg in (jf, plex):
+        for variant in ("status", "inspector"):
+            cache.get(cfg, variant, lambda: "ready")
+    cache.forget("jf")
+    assert set(cache._entries) == {("plex", "status"), ("plex", "inspector")}
+    assert cache.get(jf, "inspector", lambda: "needs_plugin") == "needs_plugin"
+    assert cache.get(plex, "inspector", lambda: "unused") == "ready"
+
+
+def test_forget_capability_uses_the_shared_cache(factory):
+    cfg = server_config("jf", ServerType.JELLYFIN)
+    inspect.server_status_payload(MagicMock(), cfg)
+    inspect.server_status_payload(MagicMock(), cfg)
+    inspect.forget_capability("other")
+    inspect.server_status_payload(MagicMock(), cfg)
+    assert len(factory.calls) == 1
+    inspect.forget_capability("jf")
+    inspect.server_status_payload(MagicMock(), cfg)
+    assert len(factory.calls) == 2

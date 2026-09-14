@@ -107,6 +107,7 @@ class TestRetryThroughThePipeline:
                     ffprobe="ffprobe",
                     force=force,
                     clients={},
+                    live_config=registry.get_config,  # the fake registry stands in for the saved servers
                 )
 
             monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda config: registry)

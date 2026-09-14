@@ -4,8 +4,9 @@ Plex has no API for intro/credits markers. It serves markers from ``taggings`` r
 ``tags(tag_type=12, tag='')`` row, and rebuilds those rows from ``media_parts.extra_data`` when it re-detects, so
 both places are written in one short transaction. Proven on PMS 1.43.4 in the lab; anything unexpected stops writes.
 
-SQLite is only safe to share when both processes lock the very same file, so every check and every write first
-proves that another process (Plex) holds the database open through the path this app sees.
+SQLite is only safe to share when both processes lock the very same file, so ``capability()`` and every write first
+prove that another process (Plex) holds the database open through the path this app sees; only then is the database
+opened. What Plex serves is read over its HTTP API (``sources.server_markers``), never from the database.
 """
 
 from __future__ import annotations
@@ -47,7 +48,11 @@ FINAL_TOLERANCE_MS = 2_000
 VERSION_AGREEMENT_MS = 2_000
 INTRO_JSON_VERSION = 5
 CREDITS_JSON_VERSION = 4
-# The longest one write() or read() waits for locks in total (this process's lock on the database, then Plex's write
+SAME_HOST_PATH_ADVICE = (
+    "Mount the exact folder Plex uses, on the same machine "
+    "(on unRAID, the same /mnt/cache or /mnt/user path Plex uses)."
+)
+# The longest one write() waits for locks in total (this process's lock on the database, then Plex's write
 # lock) before giving up until the next run. capability() allows this twice: once for the lock probe, once for its
 # read-only checks after the Plex calls.
 BUSY_TIMEOUT_S = 30.0
@@ -389,7 +394,8 @@ class _Part(NamedTuple):
     proxy_type: int | None
 
 
-def _versions_agree(mine: list[Marker], theirs: list[Marker]) -> bool:
+def versions_agree(mine: list[Marker], theirs: list[Marker]) -> bool:
+    """Whether two marker lists of one type match pairwise (in start order) within ``VERSION_AGREEMENT_MS``."""
     if len(mine) != len(theirs):
         return False
     pairs = zip(sorted(mine, key=lambda m: m.start_ms), sorted(theirs, key=lambda m: m.start_ms), strict=True)
@@ -465,6 +471,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         settings: ServerMarkersSettings,
         *,
         sibling_markers: Callable[[str], dict[MarkerType, Marker] | None] | None = None,
+        settings_provider: Callable[[], ServerMarkersSettings] | None = None,
         mountinfo_path: str = "/proc/self/mountinfo",
     ) -> None:
         """Create the publisher.
@@ -474,11 +481,14 @@ class PlexMarkerPublisher(MarkerPublisher):
             config: That server's ``ServerConfig``.
             settings: That server's ``ServerMarkersSettings``.
             sibling_markers: Looks up decided markers for another local file (multi-version items).
+            settings_provider: Returns the saved settings right now; when given, every check (and so every write)
+                reads the switch and the database-write confirmation from it instead of ``settings``.
             mountinfo_path: For tests.
         """
         self._server = server
         self._config = config
         self._settings = settings
+        self._settings_provider = settings_provider
         self._sibling_markers = sibling_markers or (lambda _path: None)
         self._mountinfo_path = mountinfo_path
 
@@ -593,7 +603,8 @@ class PlexMarkerPublisher(MarkerPublisher):
         return paths
 
     def _local_checks(self, *, deadline: float) -> CapabilityReport:
-        """Settings, database files and the shared lock: everything that needs no Plex connection.
+        """Settings (read live when a ``settings_provider`` was given), database files and the shared lock: everything
+        that needs no Plex connection.
 
         Args:
             deadline: When to stop waiting for this process's lock on the database.
@@ -602,9 +613,10 @@ class PlexMarkerPublisher(MarkerPublisher):
             READY when all pass. A missing lock holder is reported as UNREACHABLE with ``details["lock_holder"]``
             False, so ``capability()`` can tell "Plex stopped" from "different file".
         """
-        if not self._settings.enabled:
+        settings = self._settings_provider() if self._settings_provider is not None else self._settings
+        if not settings.enabled:
             return CapabilityReport(Capability.DISABLED, "Intro & Credits is off for this server")
-        if not self._settings.db_write_confirmed_at:
+        if not settings.db_write_confirmed_at:
             return CapabilityReport(Capability.NEEDS_CONFIRMATION, "Confirm the Plex database write to turn this on")
         db = self.db_path()
         if not db or not os.path.isfile(db):
@@ -663,8 +675,7 @@ class PlexMarkerPublisher(MarkerPublisher):
             return CapabilityReport(
                 Capability.NEEDS_LOCAL_DB,
                 f"Plex is running, but not with the database file this app sees at {local.details['db_path']}. "
-                "Mount the exact folder Plex uses, on the same machine (on unRAID, the same /mnt/cache or /mnt/user "
-                "path Plex uses).",
+                f"{SAME_HOST_PATH_ADVICE}",
                 {**local.details, "plex_pass": status.get("plex_pass"), "plex_version": status.get("version")},
             )
         if not local.ready:
@@ -696,30 +707,6 @@ class PlexMarkerPublisher(MarkerPublisher):
             error = publish_error_from_sqlite(exc)
             return CapabilityReport(error.state or Capability.MISCONFIGURED, str(error), details)
         return CapabilityReport(Capability.READY, "Written into this Plex server's database", details)
-
-    def read(self, item_id: str) -> list[Marker]:
-        """Our view of the item's intro/credits rows, converted to served times.
-
-        Raises:
-            PublishError: The database can't be read.
-        """
-        rating_key = _rating_key(item_id)
-        try:
-            with self._database(read_only=True, deadline=time.monotonic() + BUSY_TIMEOUT_S) as conn:
-                tag_id = self._marker_tag_id(conn)
-                rows = conn.execute(
-                    "SELECT text, time_offset, end_time_offset, extra_data FROM taggings WHERE metadata_item_id=? "
-                    "AND tag_id=? AND text IN ('intro','credits') ORDER BY time_offset",
-                    (rating_key, tag_id),
-                ).fetchall()
-        except sqlite3.Error as exc:
-            raise publish_error_from_sqlite(exc) from exc
-        out = []
-        for text, start, end, extra in rows:
-            mtype = MarkerType.INTRO if text == "intro" else MarkerType.CREDITS
-            served_start, served_end = _served_times(mtype, int(start), int(end), _row_is_final(extra))
-            out.append(Marker(mtype, served_start, served_end, ("plex",)))
-        return out
 
     def _local_candidates(self, plex_path: str) -> list[str]:
         return apply_path_mappings(plex_path, list(self._config.path_mappings or [])) or [plex_path]
@@ -770,10 +757,10 @@ class PlexMarkerPublisher(MarkerPublisher):
         for mtype in (MarkerType.INTRO, MarkerType.CREDITS):
             mine = [m for m in markers if m.type is mtype]
             theirs = [None if d is None else [m for m in d.values() if m.type is mtype] for d in decisions]
-            if not mine or any(t is None or not _versions_agree(mine, t) for t in theirs):
+            if not mine or any(t is None or not versions_agree(mine, t) for t in theirs):
                 continue
             kept = [m for m in prior if m.type is mtype]
-            if kept and _versions_agree(kept, mine) and all(_versions_agree(kept, t) for t in theirs):
+            if kept and versions_agree(kept, mine) and all(versions_agree(kept, t) for t in theirs):
                 desired.extend(kept)
             else:
                 desired.extend(mine)

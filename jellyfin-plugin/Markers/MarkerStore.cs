@@ -48,6 +48,12 @@ public static class MarkerStore
 
     private static string Dir => Path.Combine(Plugin.Instance!.DataFolderPath, "markers");
 
+    /// <summary>
+    /// Gets a value indicating whether markers were ever pushed to this server (the store folder exists). Until then the
+    /// segment provider supports no item, so servers that only use trickplay do no per-item provider work.
+    /// </summary>
+    public static bool Exists => Directory.Exists(Dir);
+
     private static string FileFor(Guid itemId) => Path.Combine(Dir, itemId.ToString("N") + ".json");
 
     /// <summary>Whether a segment has an accepted type and sane ticks.</summary>
@@ -113,15 +119,19 @@ public static class MarkerStore
 
     /// <summary>Forget an item.</summary>
     /// <param name="itemId">Item id.</param>
-    public static void Delete(Guid itemId)
+    /// <returns>True when a store file was deleted.</returns>
+    public static bool Delete(Guid itemId)
     {
         lock (Gate)
         {
             var path = FileFor(itemId);
-            if (File.Exists(path))
+            if (!File.Exists(path))
             {
-                File.Delete(path);
+                return false;
             }
+
+            File.Delete(path);
+            return true;
         }
     }
 }

@@ -816,6 +816,61 @@ class TestResolveOnePath:
         assert result == "9"
 
 
+class TestResolveScopedToLibraries:
+    """Intro & Credits resolves in the libraries that hold the file, whatever their preview opt-in (audit C MED-1).
+
+    Movies (section 1) has previews on; TV Shows (section 2) has previews off because Plex makes its own thumbnails,
+    and Intro & Credits is on there. The preview path keeps searching only preview-enabled sections.
+    """
+
+    EPISODE = "/tv/Show/Season 01/Show S01E01.mkv"
+
+    def _server(self, *, tv_previews: bool):
+        from media_preview_generator.servers.base import Library, ServerConfig
+
+        cfg = ServerConfig(
+            id="plex-1",
+            type=ServerType.PLEX,
+            name="Plex",
+            enabled=True,
+            url="http://plex:32400",
+            auth={"token": "t"},
+            libraries=[
+                Library("1", "Movies", ("/movies",), enabled=True),
+                Library("2", "TV Shows", ("/tv",), enabled=tv_previews),
+            ],
+        )
+        server = PlexServer(cfg)
+        movies, tv = MagicMock(), MagicMock()
+        movies.key, movies.title, movies.METADATA_TYPE = 1, "Movies", "movie"
+        tv.key, tv.title, tv.METADATA_TYPE = 2, "TV Shows", "episode"
+        episode = MagicMock(ratingKey=42)
+        episode.media = [MagicMock(parts=[MagicMock(file=self.EPISODE)])]
+        in_section = {"1": [], "2": [episode]}
+        plex = MagicMock()
+        plex.library.sections.return_value = [movies, tv]
+        # Plex answers per section: only section 2's file= query holds the episode.
+        plex.fetchItems.side_effect = lambda ekey: in_section[ekey.split("/library/sections/")[1].split("/")[0]]
+        server._plex = plex
+        return server, plex
+
+    @pytest.mark.parametrize("tv_previews", [False, True], ids=["tv-previews-off", "tv-previews-on"])
+    def test_markers_caller_finds_the_episode_in_its_library(self, tv_previews):
+        server, plex = self._server(tv_previews=tv_previews)
+        with patch("media_preview_generator.plex_client.retry_plex_call", side_effect=lambda f, *a, **k: f(*a, **k)):
+            assert server.resolve_remote_path_to_item_id(self.EPISODE, library_ids=["2"]) == "42"
+        sections = [c.args[0].split("/library/sections/")[1].split("/")[0] for c in plex.fetchItems.call_args_list]
+        assert sections == ["2"]
+
+    @pytest.mark.parametrize(("tv_previews", "expected"), [(False, None), (True, "42")])
+    def test_preview_caller_keeps_the_preview_library_filter(self, tv_previews, expected):
+        server, plex = self._server(tv_previews=tv_previews)
+        with patch("media_preview_generator.plex_client.retry_plex_call", side_effect=lambda f, *a, **k: f(*a, **k)):
+            assert server.resolve_remote_path_to_item_id(self.EPISODE) == expected
+        sections = [c.args[0].split("/library/sections/")[1].split("/")[0] for c in plex.fetchItems.call_args_list]
+        assert sections == (["1"] if not tv_previews else ["1", "2"])
+
+
 class TestGetBundleMetadata:
     """D31 — get_bundle_metadata is the canary's path to Plex's bundle hash.
 
@@ -1714,13 +1769,13 @@ class TestPlexMarkerHelpers:
 
         return ET.fromstring(f'<MediaContainer myPlexSubscription="{subscription}" friendlyName="lab"/>')
 
-    def test_has_plex_pass_is_read_fresh_from_the_server_root(self, plex_server_under_test):
+    def test_plex_pass_is_read_fresh_from_the_server_root(self, plex_server_under_test):
         # plexapi's myPlexSubscription attribute is frozen at connect time; a claim or lapse must show up.
         conn = plex_server_under_test._connect.return_value
         conn.myPlexSubscription = True
         conn.query.side_effect = [self._root("1"), self._root("0")]
-        assert plex_server_under_test.has_plex_pass() is True
-        assert plex_server_under_test.has_plex_pass() is False
+        assert plex_server_under_test.get_server_status()["plex_pass"] is True
+        assert plex_server_under_test.get_server_status()["plex_pass"] is False
         assert [c.args[0] for c in conn.query.call_args_list] == ["/", "/"]
 
     def test_server_status_reads_pass_and_version_from_one_root_query(self, plex_server_under_test):
@@ -1742,16 +1797,6 @@ class TestPlexMarkerHelpers:
         else:
             plex_server_under_test._connect.return_value.query.return_value = None
         assert plex_server_under_test.get_server_status() is None
-
-    @pytest.mark.parametrize("failure", ["connect", "query", "empty"])
-    def test_has_plex_pass_unreachable(self, plex_server_under_test, failure):
-        if failure == "connect":
-            plex_server_under_test._connect.side_effect = RuntimeError("down")
-        elif failure == "query":
-            plex_server_under_test._connect.return_value.query.side_effect = RuntimeError("down")
-        else:
-            plex_server_under_test._connect.return_value.query.return_value = None
-        assert plex_server_under_test.has_plex_pass() is None
 
     def test_get_markers_parses_served_markers(self, plex_server_under_test):
         import xml.etree.ElementTree as ET

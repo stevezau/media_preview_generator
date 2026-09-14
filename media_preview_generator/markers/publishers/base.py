@@ -56,7 +56,7 @@ class ItemNotFoundError(PublishError):
 
 
 class MarkerPublisher(ABC):
-    """Writes and reads markers on one server."""
+    """Writes markers to one server. What a server shows is read through ``sources.server_markers``."""
 
     supported_types: frozenset[MarkerType] = frozenset()
     name: str = ""
@@ -67,10 +67,6 @@ class MarkerPublisher(ABC):
     @abstractmethod
     def capability(self) -> CapabilityReport:
         """Check whether this server can receive markers."""
-
-    @abstractmethod
-    def read(self, item_id: str) -> list[Marker]:
-        """Markers currently on the server for an item, as clients see them (supported types only)."""
 
     @abstractmethod
     def write(

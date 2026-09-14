@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -1912,7 +1912,7 @@ class PlexServer(MediaServer):
         ]
         return [(bare, f) for f in files]
 
-    def _resolve_one_path(self, server_view_path: str) -> str | None:
+    def _resolve_one_path(self, server_view_path: str, *, library_ids: Collection[str] | None = None) -> str | None:
         """Return the Plex ratingKey for the file at ``server_view_path``.
 
         Uses Plex's per-section ``type=<media_type>&file=<basename>``
@@ -1936,6 +1936,10 @@ class PlexServer(MediaServer):
         The base class :meth:`MediaServer.resolve_remote_path_to_item_id`
         loops mapped candidates through this hook so callers can pass
         canonical paths.
+
+        ``library_ids`` (section keys) replaces the preview-library filter
+        below: Intro & Credits passes the libraries that hold the file,
+        which can have previews turned off.
         """
         import os as _os
         import urllib.parse
@@ -1979,8 +1983,11 @@ class PlexServer(MediaServer):
         selected_library_titles: set[str] = {
             str(n).strip().lower() for n in (getattr(self._config, "plex_libraries", None) or []) if str(n).strip()
         }
+        scoped_library_ids = None if library_ids is None else {str(s).strip() for s in library_ids}
 
         def _is_selected(section) -> bool:
+            if scoped_library_ids is not None:
+                return str(getattr(section, "key", "")).strip() in scoped_library_ids
             if selected_library_ids:
                 return str(getattr(section, "key", "")).strip() in selected_library_ids
             if selected_library_titles:
@@ -2175,11 +2182,6 @@ class PlexServer(MediaServer):
         if root is None:
             return None
         return {"plex_pass": root.get("myPlexSubscription") in ("1", "true"), "version": root.get("version")}
-
-    def has_plex_pass(self) -> bool | None:
-        """Whether the server has an active Plex Pass (see ``get_server_status``); None when unreachable."""
-        status = self.get_server_status()
-        return None if status is None else status["plex_pass"]
 
     def get_marker_detection_prefs(self) -> dict[str, str | None]:
         """Plex's own intro/credits detection prefs, read fresh (Plex hides them on servers without Plex Pass)."""

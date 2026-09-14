@@ -33,6 +33,7 @@ from media_preview_generator.servers.plex import PlexServer
 from tests.markers.fakes import FakeRegistry
 from tests.markers.test_pipeline import CHAPTERS_BOTH, DUR, _ctx
 from tests.markers.test_plex_db_publisher import PLEX_VERSION, _make_db, _rows
+from tests.markers.test_plex_db_publisher import _served as _plex_served
 
 T = MarkerType
 INTRO = Marker(T.INTRO, 126_771, 157_068, ("chapters",))
@@ -234,7 +235,7 @@ def test_pipeline_after_a_failed_write_uses_the_real_publisher(request, tmp_path
         second = pipeline.check_item(item, ctx=_ctx(store, reg, settings_raw=off))
     store.close()
     assert first.outcome_key == FileOutcome.FAILED.value
-    target.server.resolve_remote_path_to_item_id.assert_called_with(target.path)
+    target.server.resolve_remote_path_to_item_id.assert_called_with(target.path, library_ids=["1"])
     if target.atomic_writes:
         # A failed Plex write changed nothing, so the item row's (empty) record stays exact: nothing to clear.
         assert calls == [[]]
@@ -300,7 +301,7 @@ class PlexItem:
         )
         server = create_autospec(PlexServer, instance=True)
         self.item_ids = dict.fromkeys(self.paths.values(), "7")
-        server.resolve_remote_path_to_item_id.side_effect = lambda path: self.item_ids.get(path)
+        server.resolve_remote_path_to_item_id.side_effect = lambda path, *, library_ids: self.item_ids.get(path)
         server.get_external_ids.return_value = None
         server.get_server_status.return_value = {"plex_pass": True, "version": PLEX_VERSION}
         server.get_marker_detection_prefs.return_value = {"intro": "never", "credits": "never"}
@@ -378,8 +379,7 @@ class PlexItem:
         self.item_ids[self.paths[version]] = str(item)
 
     def served(self, item: int = 7) -> list[tuple[str, int, int]]:
-        publisher = publisher_for(self.server, self.cfg, sibling_markers=lambda _path: None)
-        return [(m.type.value, m.start_ms, m.end_ms) for m in publisher.read(str(item))]
+        return [(mtype.value, start, end) for mtype, start, end in _plex_served(self.db, item)]
 
     def recorded(self, item: int = 7) -> list[tuple[str, int, int]] | None:
         row = self.store.get_item_publish_state("plex-1", str(item))

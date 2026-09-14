@@ -982,6 +982,12 @@ def test_existing_server_connection(server_id: str):
     return jsonify(response_payload)
 
 
+def _forget_marker_capability(server_id: str) -> None:
+    from ...markers.inspect import forget_capability
+
+    forget_capability(server_id)
+
+
 @api.route("/servers/<server_id>/install-plugin", methods=["POST"])
 @setup_or_auth_required
 def install_jellyfin_plugin(server_id: str):
@@ -1020,6 +1026,8 @@ def install_jellyfin_plugin(server_id: str):
     except Exception as exc:
         logger.warning("Plugin install on {!r} raised: {}", cfg.name or cfg.id, exc)
         return jsonify({"ok": False, "error": str(exc)}), 200
+    finally:
+        _forget_marker_capability(server_id)  # the Intro & Credits tab's cached plugin state is out of date now
 
     return jsonify(result)
 
@@ -1063,6 +1071,8 @@ def uninstall_jellyfin_plugin(server_id: str):
     except Exception as exc:
         logger.warning("Plugin uninstall on {!r} raised: {}", cfg.name or cfg.id, exc)
         return jsonify({"ok": False, "error": str(exc)}), 200
+    finally:
+        _forget_marker_capability(server_id)  # the Intro & Credits tab's cached plugin state is out of date now
 
     return jsonify(result)
 

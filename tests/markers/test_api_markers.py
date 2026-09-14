@@ -353,6 +353,42 @@ def test_item_by_server_item_refusals(client, servers, item_calls, resolve_calls
     assert calls == [] and item_calls == []
 
 
+@pytest.mark.parametrize(
+    ("server_id", "item_id", "status"),
+    [
+        ("plex-1", "42", 404),
+        ("plex-1", "/library/metadata/42", 404),
+        ("plex-1", "abc", 400),
+        ("plex-1", "42?x=1", 400),
+        ("plex-1", "../../library/sections", 400),
+        ("jf-1", "0123456789abcdef0123456789ABCDEF", 404),
+        ("jf-1", "01234567-89ab-cdef-0123-456789abcdef", 404),
+        ("jf-1", "1234", 404),
+        ("jf-1", "../../System/Configuration?x=", 400),
+        ("jf-1", "abc xyz", 400),
+        ("jf-1", "g123", 400),
+        ("jf-1", "a" * 37, 400),
+        ("emby-1", "5678", 404),
+        ("emby-1", "5678/../../System/Info", 400),
+    ],
+)
+def test_item_by_server_item_checks_the_item_id_shape(
+    client, servers, item_calls, resolve_calls, server_id, item_id, status
+):
+    # 404 = the id was accepted and looked up (the fake resolves nothing); 400 = refused before any lookup.
+    calls, _answers = resolve_calls
+    resp = client.get(
+        "/api/markers/item", query_string={"server_id": server_id, "item_id": item_id}, headers=_api_headers()
+    )
+    assert resp.status_code == status
+    assert resp.get_json()["error"]
+    if status == 400:
+        assert calls == []
+    else:
+        assert [c["item_id"] for c in calls] == [item_id]
+    assert item_calls == []
+
+
 def test_item_payload_crash_is_a_json_error_without_details(client, servers, media, monkeypatch):
     from media_preview_generator.markers import inspect
 
@@ -383,8 +419,8 @@ def test_one_failing_server_still_returns_the_other_rows(client, servers, media,
     publisher.capability.return_value = CapabilityReport(Capability.READY, "ok")
     monkeypatch.setattr(inspect, "publisher_for", lambda server, cfg, **kw: publisher)
     monkeypatch.setattr(inspect, "read_server_markers", lambda server, cfg, item_id, include_ours: [])
-    monkeypatch.setattr(PlexServer, "resolve_remote_path_to_item_id", lambda self, path: "1")
-    monkeypatch.setattr(JellyfinServer, "resolve_remote_path_to_item_id", lambda self, path: "2")
+    monkeypatch.setattr(PlexServer, "resolve_remote_path_to_item_id", lambda self, path, *, library_ids: "1")
+    monkeypatch.setattr(JellyfinServer, "resolve_remote_path_to_item_id", lambda self, path, *, library_ids: "2")
     real_state = MarkerStore.get_publish_state
 
     def get_publish_state(self, file_id, server_id):
@@ -523,3 +559,28 @@ def test_bearer_token_is_accepted(app, servers, monkeypatch):
     monkeypatch.setattr(inspect, "server_status_payload", lambda server, config: {"ok": True})
     resp = app.test_client().get("/api/markers/servers/plex-1/status", headers=_api_headers())
     assert resp.status_code == 200
+
+
+# --------------------------------------------------------------------------- plugin install forgets the capability
+
+
+@pytest.mark.parametrize("route", ["install-plugin", "uninstall-plugin"])
+@pytest.mark.parametrize("outcome", ["ok", "raises"])
+def test_plugin_install_routes_forget_the_cached_capability(client, servers, monkeypatch, route, outcome):
+    from media_preview_generator.markers import inspect
+    from media_preview_generator.servers.base import ServerType
+    from media_preview_generator.servers.jellyfin import JellyfinServer
+    from tests.markers.fakes import server_config
+
+    def plugin_call(self):
+        if outcome == "raises":
+            raise RuntimeError("Jellyfin said no")
+        return {"ok": True, "steps": [], "error": ""}
+
+    monkeypatch.setattr(JellyfinServer, route.replace("-", "_"), plugin_call)
+    jf, plex = server_config("jf-1", ServerType.JELLYFIN), server_config("plex-1", ServerType.PLEX)
+    for cfg in (jf, plex):
+        inspect._CAPABILITY_CACHE.get(cfg, "status", lambda: {"state": "ready", "message": "", "details": {}})
+    resp = client.post(f"/api/servers/jf-1/{route}", headers=_api_headers())
+    assert resp.status_code == 200
+    assert set(inspect._CAPABILITY_CACHE._entries) == {("plex-1", "status")}

@@ -589,6 +589,41 @@ class TestResolveItemToRemotePath:
             assert call_args.args[1] == "/Users/u-1/Items/42", call_args
 
 
+@pytest.mark.parametrize(
+    ("user_id", "expected_path", "expected_params"),
+    [
+        (None, "/Items", {"Ids": "1/../../System", "Fields": "ProviderIds"}),
+        ("u-1", "/Users/u-1/Items/1%2F..%2F..%2FSystem", {"Fields": "ProviderIds"}),
+    ],
+)
+def test_item_field_lookup_quotes_the_item_id_in_the_url_path(make_server, user_id, expected_path, expected_params):
+    server = make_server(user_id=user_id)
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"Items": [{"Id": "1"}]} if user_id is None else {"Id": "1"}
+    server._request = MagicMock(return_value=resp)
+    assert server._fetch_item_fields("1/../../System", "ProviderIds") == {"Id": "1"}
+    server._request.assert_called_once_with("GET", expected_path, params=expected_params)
+
+
+class TestResolveWithMarkersLibraryScope:
+    """Intro & Credits passes the libraries holding the file (audit C MED-1). Emby resolves by exact path, so the
+    preview opt-in never mattered; the answer is the same with or without the scope."""
+
+    PATH = "/tv/Show/Season 01/Show S01E01.mkv"
+
+    @pytest.mark.parametrize("previews", [False, True], ids=["previews-off", "previews-on"])
+    @pytest.mark.parametrize("library_ids", [None, ["2"]], ids=["preview-caller", "markers-caller"])
+    def test_found_whatever_the_preview_opt_in(self, previews, library_ids):
+        server = EmbyServer(_emby_config(libraries=[Library("2", "TV Shows", ("/tv",), enabled=previews)]))
+        path_resp = MagicMock()
+        path_resp.json.return_value = {"Items": [{"Id": "1234", "Path": self.PATH}]}
+        path_resp.raise_for_status.return_value = None
+        with patch.object(EmbyServer, "_request", return_value=path_resp) as req:
+            assert server.resolve_remote_path_to_item_id(self.PATH, library_ids=library_ids) == "1234"
+        assert req.call_args.args == ("GET", "/Items")
+        assert req.call_args.kwargs["params"]["Path"] == self.PATH
+
+
 class TestResolveRemotePathToItemIdViaExactPath:
     """Emby override that uses the native ``GET /Items?Path=<exact>``
     filter (single indexed-column lookup, ~1 ms) before falling back

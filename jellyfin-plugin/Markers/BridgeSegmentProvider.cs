@@ -88,7 +88,11 @@ public class BridgeSegmentProvider : IMediaSegmentProvider
     }
 
     /// <inheritdoc />
-    public ValueTask<bool> Supports(BaseItem item) => ValueTask.FromResult(item is Video);
+    /// <remarks>
+    /// Only once markers were ever pushed (the store folder exists): Jellyfin runs every supporting provider for every
+    /// video on library refreshes and the Media Segment Scan task. DELETE still works, since the folder exists by then.
+    /// </remarks>
+    public ValueTask<bool> Supports(BaseItem item) => ValueTask.FromResult(item is Video && MarkerStore.Exists);
 
 #if JF12
     /// <inheritdoc />

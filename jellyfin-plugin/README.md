@@ -67,6 +67,8 @@ Content-Type: application/json
 - Markers are stored as one small JSON file per item in `<jellyfin-config>/plugins/Jellyfin.Plugin.MediaPreviewBridge/markers/`. A file that can't be read or doesn't hold valid markers is ignored (logged as a warning) and counts as no markers; the next POST replaces it.
 - If the provider is switched off for a library (Library → Media Segment Providers), Jellyfin keeps the markers but doesn't serve them.
 - On Jellyfin 12, a refresh that finds the media file changed deletes the item's stored markers along with its other extracted data; push them again for the new file.
+- When Jellyfin removes a video from the library, its stored markers are deleted too. Jellyfin 10.11 reports only the top item when a whole show or season folder is removed, so the episodes' marker files stay behind there (they are only served again if the same file comes back at the same path with the same size).
+- The **Media Preview Bridge** segment provider takes part only once markers have been pushed to the server (the `markers` folder exists). Until then Jellyfin skips it for every item, so servers that only use trickplay do no extra work during library scans or the Media Segment Scan task.
 
 ## Required Jellyfin library options
 

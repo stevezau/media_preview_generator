@@ -87,3 +87,20 @@ def test_settings_override_replaces_the_stored_block(stype, cls):
     assert type(pub) is cls
     if pub is not None:
         assert pub._settings is override
+
+
+@pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.JELLYFIN, ServerType.EMBY])
+def test_saved_settings_provider_reaches_the_plex_publisher_only(stype):
+    # Plex writes Plex's database directly, so it re-reads the saved switch before each write (audit C MED-2).
+    def provider():
+        raise AssertionError("not called while building")
+
+    pub = publisher_for(
+        create_autospec(_SERVER_CLASS[stype], instance=True), _cfg(stype, _MARKERS), settings_provider=provider
+    )
+    if stype is ServerType.PLEX:
+        assert pub._settings_provider is provider
+    elif stype is ServerType.JELLYFIN:
+        assert not hasattr(pub, "_settings_provider")
+    else:
+        assert pub is None

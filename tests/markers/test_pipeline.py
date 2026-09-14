@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import threading
 import time
@@ -90,7 +91,18 @@ def _clients(theintrodb=NO_DATA, introdb=NO_DATA, skipdb=NO_DATA):
     return {"theintrodb": FakeClient(theintrodb), "introdb": FakeClient(introdb), "skipdb": FakeClient(skipdb)}
 
 
-def _ctx(store, registry, *, settings_raw=None, clients=None, detectors=(), force=False, now=None, ttl=300.0):
+def _ctx(
+    store,
+    registry,
+    *,
+    settings_raw=None,
+    clients=None,
+    detectors=(),
+    force=False,
+    now=None,
+    ttl=300.0,
+    live_config=None,
+):
     raw = settings_raw or {"sources": [{"id": "theintrodb", "enabled": True}]}
     settings = load_global(validate_global(raw, None)[0])
     return PipelineContext(
@@ -105,6 +117,8 @@ def _ctx(store, registry, *, settings_raw=None, clients=None, detectors=(), forc
         local_detectors=detectors,
         now=now or (lambda: datetime(2026, 9, 13, tzinfo=timezone.utc)),
         capability_ttl_s=ttl,
+        # The registry's configs stand in for the saved settings; TestConsentBeforeEachWrite uses the real ones.
+        live_config=live_config or registry.get_config,
     )
 
 
@@ -274,6 +288,50 @@ class TestOwners:
         assert out.outcome_key == FileOutcome.SKIPPED.value
         assert _state(store, media, f"{stype.value}-1").status == "skipped"
         server.put_bridge_markers.assert_not_called()
+
+
+class TestItemIdLookupScope:
+    """Item ids are looked up in the libraries that hold the file, whatever their preview opt-in (audit C MED-1)."""
+
+    @pytest.mark.parametrize("previews", [False, True], ids=["previews-off", "previews-on"])
+    @pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.JELLYFIN, ServerType.EMBY])
+    def test_lookup_is_scoped_to_the_matching_libraries(self, store, media, stype, previews):
+        reg = _registry(media, stype)
+        sid = f"{stype.value}-1"
+        root = _media_root(media)
+        reg.configs_by_id[sid].libraries = [
+            Library("1", "Movies", ("/elsewhere/movies",), enabled=True),
+            Library("2", "TV Shows", (root,), enabled=previews),
+            Library("3", "TV (4K)", (root,), enabled=previews),
+        ]
+        publishers = {} if stype is ServerType.EMBY else {sid: ready_publisher()}
+        # No chapters: the evidence search reaches the server's own markers, so Emby (no publisher) is asked too.
+        _run(_ctx(store, reg), media, publishers, probe=_probe())
+        calls = reg.get(sid).resolve_remote_path_to_item_id.call_args_list
+        assert [(c.args, c.kwargs) for c in calls] == [((media,), {"library_ids": ["2", "3"]})]
+
+    def test_plex_markers_only_library_resolves_at_the_plex_boundary(self, store, media):
+        from media_preview_generator.servers.plex import PlexServer
+
+        reg = _registry(media, ServerType.PLEX)
+        cfg = reg.configs_by_id["plex-1"]
+        cfg.libraries = [
+            Library("1", "Movies", ("/elsewhere/movies",), enabled=True),
+            Library("2", "TV Shows", (_media_root(media),), enabled=False),  # Plex makes its own thumbnails here
+        ]
+        movies, tv = MagicMock(key=1, METADATA_TYPE="movie"), MagicMock(key=2, METADATA_TYPE="episode")
+        episode = MagicMock(ratingKey=42)
+        episode.media = [MagicMock(parts=[MagicMock(file=media)])]
+        plex = MagicMock()
+        plex.library.sections.return_value = [movies, tv]
+        plex.fetchItems.side_effect = lambda ekey: [episode] if ekey.startswith("/library/sections/2/") else []
+        server = PlexServer(cfg)
+        server._plex = plex
+        reg.servers_by_id["plex-1"] = server
+        publisher = ready_publisher()
+        out, _ = _run(_ctx(store, reg), media, {"plex-1": publisher}, probe=_probe(CHAPTERS_BOTH))
+        assert _rows(out)["plex-1"]["status"] == ServerStatus.WRITTEN.value
+        assert publisher.write.call_args.args == ("42", [INTRO_CH, CREDITS_CH])
 
 
 class TestIdentityAndProbe:
@@ -1022,7 +1080,7 @@ class TestOnlineLookups:
         _run(_ctx(store, reg), media, {"plex-1": ready_publisher()})
         assert reg.get("plex-1").get_external_ids.call_count == 1
         assert reg.get("jellyfin-1").get_external_ids.call_count == 1  # plex had nothing, so jellyfin was asked
-        reg.get("plex-1").resolve_remote_path_to_item_id.assert_called_once_with(media)
+        reg.get("plex-1").resolve_remote_path_to_item_id.assert_called_once_with(media, library_ids=["1"])
 
     def test_lookups_use_the_job_priority_at_the_time_of_the_lookup(self, store, media):
         other = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E02 - Lawnmower Dog.mkv")
@@ -1774,6 +1832,195 @@ class TestPublishFanOut:
         assert plex.write.call_args.args[1] == [Marker(T.INTRO, 5_000, 30_000, ("user",), locked=True)]
         assert all(c.calls == [] for c in ctx.clients.values())
         assert "intro" in out.message
+
+
+@pytest.fixture
+def saved_settings(tmp_path):
+    """The real settings manager on a temp config folder."""
+    from media_preview_generator.web import settings_manager as sm_mod
+
+    sm_mod.reset_settings_manager()
+    yield sm_mod.get_settings_manager(str(tmp_path / "config"))
+    sm_mod.reset_settings_manager()
+
+
+def _second_episode(media):
+    other = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E02 - Lawnmower Dog.mkv")
+    with open(other, "wb") as f:
+        f.write(b"y" * 100)
+    return other
+
+
+class TestConsentBeforeEachWrite:
+    """Turning Intro & Credits off (or the server, or a library) stops a running job's writes (audit C MED-2)."""
+
+    @pytest.mark.parametrize(
+        ("flip", "message"),
+        [
+            (lambda entry: entry.update(enabled=False), "This server is turned off on the Servers page"),
+            (lambda entry: entry["markers"].update(enabled=False), "Intro & Credits is off for this server"),
+        ],
+        ids=["server-off", "markers-off"],
+    )
+    def test_turning_it_off_after_the_first_file_stops_the_second_write(
+        self, store, media, saved_settings, flip, message
+    ):
+        from media_preview_generator.servers.registry import server_config_to_dict
+
+        other = _second_episode(media)
+        reg = _registry(media, ServerType.PLEX)
+        saved_settings.set("media_servers", [server_config_to_dict(reg.configs_by_id["plex-1"])])
+        plex = ready_publisher()
+        ctx = _ctx(store, reg, live_config=pipeline.live_server_config)
+
+        first, _ = _run(ctx, media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+        entries = saved_settings.get("media_servers")
+        flip(entries[0])
+        saved_settings.set("media_servers", entries)
+        second, _ = _run(ctx, other, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+
+        assert first.publisher_rows[0]["status"] == ServerStatus.WRITTEN.value
+        assert (second.publisher_rows[0]["status"], second.publisher_rows[0]["message"]) == (
+            ServerStatus.SKIPPED.value,
+            message,
+        )
+        assert [c.kwargs["canonical_path"] for c in plex.write.call_args_list] == [media]
+        assert _state(store, other, "plex-1").status == "skipped"
+        assert "plex-1" not in ctx._capabilities  # checked again once it's back on
+
+    # Emby has no publisher yet: its row is "Not supported" before any write could be attempted.
+    @pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.JELLYFIN])
+    @pytest.mark.parametrize(
+        ("change", "status", "message"),
+        [
+            ("removed", ServerStatus.SKIPPED, "This server was removed"),
+            ("server-off", ServerStatus.SKIPPED, "This server is turned off on the Servers page"),
+            ("markers-off", ServerStatus.SKIPPED, "Intro & Credits is off for this server"),
+            (
+                "library-deselected",
+                ServerStatus.SKIPPED,
+                "This library isn't selected for Intro & Credits on this server",
+            ),
+            ("library-removed", ServerStatus.SKIPPED, "This library isn't selected for Intro & Credits on this server"),
+            ("path-excluded", ServerStatus.SKIPPED, "This file is excluded on this server"),
+            ("unreadable", ServerStatus.FAILED, "Couldn't read this server's saved settings (RuntimeError)"),
+            ("unchanged", ServerStatus.WRITTEN, "2 marker(s)"),
+        ],
+    )
+    def test_saved_settings_matrix(self, store, media, stype, change, status, message):
+        reg = _registry(media, stype)
+        sid = f"{stype.value}-1"
+        live = copy.deepcopy(reg.configs_by_id[sid])
+        if change == "server-off":
+            live.enabled = False
+        elif change == "markers-off":
+            live.markers["enabled"] = False
+        elif change == "library-deselected":
+            live.markers["library_ids"] = ["9"]
+        elif change == "library-removed":
+            live.libraries = [Library("1", "TV Shows", ("/somewhere/else",))]
+        elif change == "path-excluded":
+            live.exclude_paths = [{"value": "Rick and Morty", "type": "regex"}]
+
+        def live_config(server_id):
+            assert server_id == sid
+            if change == "unreadable":
+                raise RuntimeError("settings.json unreadable")
+            return None if change == "removed" else live
+
+        pub = ready_publisher("plex_db" if stype is ServerType.PLEX else "jellyfin_bridge")
+        ctx = _ctx(store, reg, live_config=live_config)
+        out, _ = _run(ctx, media, {sid: pub}, probe=_probe(CHAPTERS_BOTH))
+        row = out.publisher_rows[0]
+        assert (row["status"], row["message"]) == (status.value, message)
+        assert pub.write.call_count == (1 if change == "unchanged" else 0)
+        assert (sid in ctx._capabilities) is (change == "unchanged")
+
+    def test_plex_confirmation_cleared_loads_as_off(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        live = copy.deepcopy(reg.configs_by_id["plex-1"])
+        live.markers["plex"]["db_write_confirmed_at"] = None
+        plex = ready_publisher()
+        out, _ = _run(
+            _ctx(store, reg, live_config=lambda _sid: live), media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH)
+        )
+        assert (out.publisher_rows[0]["status"], out.publisher_rows[0]["message"]) == (
+            ServerStatus.SKIPPED.value,
+            "Intro & Credits is off for this server",
+        )
+        plex.write.assert_not_called()
+
+    def test_back_on_checks_the_server_again_and_writes(self, store, media):
+        other = _second_episode(media)
+        reg = _registry(media, ServerType.JELLYFIN)
+        live = copy.deepcopy(reg.configs_by_id["jellyfin-1"])
+        live.markers["enabled"] = False
+        jf = ready_publisher("jellyfin_bridge")
+        ctx = _ctx(store, reg, live_config=lambda _sid: live)
+        _run(ctx, media, {"jellyfin-1": jf}, probe=_probe(CHAPTERS_BOTH))
+        live.markers["enabled"] = True
+        out, _ = _run(ctx, other, {"jellyfin-1": jf}, probe=_probe(CHAPTERS_BOTH))
+        assert out.publisher_rows[0]["status"] == ServerStatus.WRITTEN.value
+        assert jf.capability.call_count == 2
+        assert [c.kwargs["canonical_path"] for c in jf.write.call_args_list] == [other]
+
+    def test_the_publisher_reads_the_saved_settings_on_every_check(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        live = copy.deepcopy(reg.configs_by_id["plex-1"])
+        factory_kwargs = []
+
+        def factory(server, cfg, **kwargs):
+            factory_kwargs.append(kwargs)
+            return ready_publisher()
+
+        with (
+            patch.object(pipeline, "probe_media", return_value=_probe(CHAPTERS_BOTH)),
+            patch.object(pipeline, "publisher_for", side_effect=factory),
+        ):
+            check_item(_item(media), ctx=_ctx(store, reg, live_config=lambda _sid: live))
+        provider = factory_kwargs[0]["settings_provider"]
+        assert (provider().enabled, provider().db_write_confirmed_at) == (True, "2026-09-13T00:00:00+00:00")
+        live.markers["enabled"] = False
+        assert provider().enabled is False
+        live.markers["enabled"], live.enabled = True, False
+        assert provider().enabled is False
+
+    def test_build_context_reads_the_saved_settings(self, store, saved_settings):
+        from media_preview_generator.servers.registry import server_config_to_dict
+
+        cfg = server_config("plex-1", ServerType.PLEX)
+        saved_settings.set("media_servers", [{"id": "other", "type": "jellyfin"}, server_config_to_dict(cfg)])
+        with (
+            patch.object(pipeline, "get_global_settings", return_value=load_global({})),
+            patch.object(pipeline, "get_marker_store", return_value=store),
+            patch.object(pipeline, "build_clients", return_value={}),
+        ):
+            ctx = pipeline.build_context(registry=MagicMock(), config=MagicMock(ffmpeg_path=None), priority=3)
+        assert ctx.live_config("plex-1") == cfg
+        assert ctx.live_config("gone") is None
+
+
+class TestPlexPassUnknown:
+    """A READY Plex whose Plex Pass couldn't be read isn't written: Plex serves nothing without a Pass (audit C LOW)."""
+
+    # Emby has no publisher yet, so it never reaches the capability check.
+    @pytest.mark.parametrize(
+        ("stype", "details", "status", "message"),
+        [
+            (ServerType.PLEX, {"plex_pass": None}, ServerStatus.SKIPPED, "Can't reach Plex to confirm Plex Pass"),
+            (ServerType.PLEX, {"plex_pass": True}, ServerStatus.WRITTEN, "2 marker(s)"),
+            (ServerType.JELLYFIN, {"plugin_version": "10.11.1.0"}, ServerStatus.WRITTEN, "2 marker(s)"),
+        ],
+        ids=["plex-unknown", "plex-pass", "jellyfin"],
+    )
+    def test_unknown_pass_is_not_ready_for_writes(self, store, media, stype, details, status, message):
+        reg = _registry(media, stype)
+        sid = f"{stype.value}-1"
+        pub = ready_publisher("plex_db" if stype is ServerType.PLEX else "jellyfin_bridge")
+        pub.capability.return_value = CapabilityReport(Capability.READY, "ready", details)
+        out, _ = _run(_ctx(store, reg), media, {sid: pub}, probe=_probe(CHAPTERS_BOTH))
+        assert (out.publisher_rows[0]["status"], out.publisher_rows[0]["message"]) == (status.value, message)
+        assert pub.write.call_count == (0 if status is ServerStatus.SKIPPED else 1)
 
 
 class TestStages:

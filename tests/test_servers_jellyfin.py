@@ -794,6 +794,33 @@ class TestResolveRemotePathToItemIdViaPlugin:
             assert req.call_args_list[0].args == ("GET", "/MediaPreviewBridge/ResolvePath")
 
 
+class TestResolveWithMarkersLibraryScope:
+    """Intro & Credits passes the libraries holding the file (audit C MED-1). Jellyfin resolves by exact path, so the
+    preview opt-in never mattered; the answer is the same with or without the scope."""
+
+    PATH = "/tv/Show/Season 01/Show S01E01.mkv"
+
+    @pytest.mark.parametrize("previews", [False, True], ids=["previews-off", "previews-on"])
+    @pytest.mark.parametrize("library_ids", [None, ["2"]], ids=["preview-caller", "markers-caller"])
+    def test_found_whatever_the_preview_opt_in(self, previews, library_ids):
+        server = JellyfinServer(_jelly_config(libraries=[Library("2", "TV Shows", ("/tv",), enabled=previews)]))
+        plugin_resp = MagicMock(status_code=200)
+        plugin_resp.json.return_value = {"itemId": "abc123"}
+        with patch.object(JellyfinServer, "_request", return_value=plugin_resp) as req:
+            assert server.resolve_remote_path_to_item_id(self.PATH, library_ids=library_ids) == "abc123"
+        assert req.call_args.args == ("GET", "/MediaPreviewBridge/ResolvePath")
+        assert req.call_args.kwargs["params"] == {"path": self.PATH}
+
+    def test_positive_cache_is_keyed_by_the_library_scope(self, jelly):
+        with patch.object(JellyfinServer, "_uncached_resolve_remote_path_to_item_id", return_value="abc") as uncached:
+            assert jelly._resolve_one_path(self.PATH, library_ids=["2"]) == "abc"
+            assert jelly._resolve_one_path(self.PATH, library_ids=("2",)) == "abc"
+            assert uncached.call_count == 1
+            assert jelly._resolve_one_path(self.PATH) == "abc"
+            assert jelly._resolve_one_path(self.PATH, library_ids=["1"]) == "abc"
+        assert [c.args for c in uncached.call_args_list] == [(self.PATH,)] * 3
+
+
 class TestResolveOnePathCacheSemantics:
     """``_resolve_one_path`` caches positive results but MUST NOT cache
     negatives.
@@ -2880,6 +2907,23 @@ class TestGetExternalIdsEdgeCases:
         result = server.get_external_ids("m")
         assert result["tmdb"] is None
         assert result["imdb"] == "tt1"
+
+
+@pytest.mark.parametrize(
+    ("user_id", "expected_path", "expected_params"),
+    [
+        (None, "/Items", {"Ids": "../../System/Configuration?x=", "Fields": "Path,MediaSources"}),
+        ("u1", "/Users/u1/Items/..%2F..%2FSystem%2FConfiguration%3Fx%3D", {"Fields": "Path,MediaSources"}),
+    ],
+)
+def test_item_lookup_quotes_the_item_id_in_the_url_path(make_server, user_id, expected_path, expected_params):
+    # An item id from an API caller must never change which Jellyfin endpoint the app's credentials reach.
+    server = make_server(user_id=user_id)
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"Items": [{"Path": "/m.mkv"}]} if user_id is None else {"Path": "/m.mkv"}
+    server._request = MagicMock(return_value=resp)
+    assert server.resolve_item_to_remote_path("../../System/Configuration?x=") == "/m.mkv"
+    server._request.assert_called_once_with("GET", expected_path, params=expected_params)
 
 
 class TestFetchItemFieldsEdgeCases:

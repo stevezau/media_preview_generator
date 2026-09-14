@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from flask import jsonify, request
@@ -18,6 +19,10 @@ from .api_jobs import _config_unwritable_response
 _ONLINE_SOURCE_IDS = ("theintrodb", "introdb", "skipdb")
 _AUTH_SECRET_KEYS = ("token", "api_key", "password", "access_token")
 _MASK = "****"
+# Item ids go into the media server's URL path: Plex rating keys, Jellyfin/Emby GUIDs (with or without dashes) or
+# Emby's numeric ids. Anything else is refused before the server is asked.
+_PLEX_ITEM_ID_RE = re.compile(r"(?:/library/metadata/)?\d+")
+_EMBYISH_ITEM_ID_RE = re.compile(r"[0-9a-fA-F-]{1,36}|\d+")
 
 
 def _parse_job_priority(raw: object) -> int | None:
@@ -227,11 +232,13 @@ def marker_item():
 
     Returns:
         200 with ``markers.inspect.item_payload`` (a server whose state can't be read gets a degraded row); 400 when the
-        path isn't a file inside a server library or the query is incomplete; 404 for an unknown server or an item
-        with no file here; 409 when the server is off; 500 with a JSON error when the file's data can't be built.
+        path isn't a file inside a server library, the query is incomplete or ``item_id`` isn't shaped like that
+        server's ids; 404 for an unknown server or an item with no file here; 409 when the server is off; 500 with a
+        JSON error when the file's data can't be built.
     """
     from ...markers import inspect
     from ...markers.store import get_marker_store
+    from ...servers.base import ServerType
 
     registry = _registry()
     path = request.args.get("path")
@@ -243,6 +250,9 @@ def marker_item():
         server = registry.get(server_id)
         if cfg is None or server is None:
             return jsonify({"error": "server not found"}), 404
+        item_id_re = _PLEX_ITEM_ID_RE if cfg.type is ServerType.PLEX else _EMBYISH_ITEM_ID_RE
+        if not item_id_re.fullmatch(item_id):
+            return jsonify({"error": "item_id isn't an item id this server uses"}), 400
         if not cfg.enabled:
             return _server_off_response(cfg)
         path = inspect.resolve_local_path(server, cfg, item_id)

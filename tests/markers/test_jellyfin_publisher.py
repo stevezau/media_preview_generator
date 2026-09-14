@@ -391,66 +391,6 @@ def test_transport_failure_is_unreachable(call):
     assert ei.value.state is Capability.UNREACHABLE
 
 
-def test_read_returns_only_stored_segments_jellyfin_serves():
-    server = _server()
-    recap = {"type": "Recap", "startTicks": 0, "endTicks": 200_000_000}
-    preview = {"type": "Preview", "startTicks": 13_100_000_000, "endTicks": 13_200_000_000}
-    server.get_bridge_markers.return_value = [
-        OUTRO,
-        INTRO,
-        recap,
-        preview,
-        {"type": "Commercial", "startTicks": 1, "endTicks": 2},
-        {"type": "Intro", "startTicks": "x", "endTicks": 2},
-    ]
-    # Recap stored but not served (e.g. stale); Preview served with different times by another provider.
-    server.get_media_segments.return_value = _core(
-        OUTRO,
-        INTRO,
-        {"type": "Commercial", "startTicks": 1, "endTicks": 2},
-        other_provider=[{**preview, "startTicks": 13_000_000_000}],
-    )
-    assert _pub(server).read("abc") == [
-        Marker(T.INTRO, 126_771, 157_068, ("jellyfin",)),
-        Marker(T.CREDITS, 1_295_000, 1_321_472, ("jellyfin",)),
-    ]
-    server.get_bridge_markers.assert_called_once_with("abc")
-    server.get_media_segments.assert_called_once_with("abc")
-
-
-def test_read_all_four_types_when_served():
-    server = _server()
-    recap = {"type": "Recap", "startTicks": 0, "endTicks": 200_000_000}
-    preview = {"type": "Preview", "startTicks": 13_100_000_000, "endTicks": 13_200_000_000}
-    server.get_bridge_markers.return_value = [preview, OUTRO, recap, INTRO]
-    server.get_media_segments.return_value = _core(INTRO, OUTRO, recap, preview)
-    assert _pub(server).read("abc") == [
-        Marker(T.RECAP, 0, 20_000, ("jellyfin",)),
-        Marker(T.INTRO, 126_771, 157_068, ("jellyfin",)),
-        Marker(T.CREDITS, 1_295_000, 1_321_472, ("jellyfin",)),
-        Marker(T.PREVIEW, 1_310_000, 1_320_000, ("jellyfin",)),
-    ]
-
-
-def test_read_empty_store_is_empty_without_reading_segments():
-    server = _server()
-    server.get_bridge_markers.return_value = []
-    assert _pub(server).read("abc") == []
-    server.get_media_segments.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    ("stored", "core"),
-    [pytest.param(None, [], id="store-unreadable"), pytest.param([INTRO], None, id="segments-unreadable")],
-)
-def test_read_failure_raises_instead_of_claiming_no_markers(stored, core):
-    server = _server()
-    server.get_bridge_markers.return_value = stored
-    server.get_media_segments.return_value = core
-    with pytest.raises(PublishError):
-        _pub(server).read("abc")
-
-
 def test_segment_keys():
     assert bridge_key(INTRO) == ("Intro", 1_267_710_000, 1_570_680_000)
     assert core_key(_core(INTRO)[0]) == ("Intro", 1_267_710_000, 1_570_680_000)

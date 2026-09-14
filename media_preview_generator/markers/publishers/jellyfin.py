@@ -138,27 +138,6 @@ class JellyfinMarkerPublisher(MarkerPublisher):
         served = {core_key(row) for row in rows}
         return [seg for seg in segments if bridge_key(seg) in served]
 
-    def read(self, item_id: str) -> list[Marker]:
-        """Our markers as clients see them: stored by the plugin and served by Jellyfin, ordered by start.
-
-        Raises:
-            PublishError: The plugin's store or Jellyfin's segments couldn't be read.
-        """
-        stored = self._server.get_bridge_markers(item_id)
-        if stored is None:
-            raise PublishError(f"Couldn't read markers for Jellyfin item {item_id}")
-        if not stored:
-            return []
-        shown = self._shown(item_id, stored)
-        if shown is None:
-            raise PublishError(f"Couldn't read the media segments Jellyfin serves for item {item_id}")
-        out = []
-        for seg in shown:
-            converted = segment_times(*bridge_key(seg))
-            if converted is not None:
-                out.append(Marker(*converted, ("jellyfin",)))
-        return self.project(out)
-
     def write(
         self,
         item_id: str,

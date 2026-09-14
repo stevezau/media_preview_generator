@@ -89,7 +89,6 @@ def ready_publisher(name="plex_db", types=("intro", "credits"), *, atomic_writes
     )
     pub.succeed = lambda item_id, markers, **kwargs: pub.project(markers)
     pub.write.side_effect = pub.succeed
-    pub.read.return_value = []
     return pub
 
 

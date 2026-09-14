@@ -150,6 +150,7 @@ def _publisher(
     mappings=None,
     mountinfo_lines="",
     mountinfo_path=None,
+    settings_provider=None,
 ):
     server = MagicMock()
     server.get_server_status.return_value = (
@@ -172,6 +173,7 @@ def _publisher(
         cfg,
         settings,
         sibling_markers=sibling_markers,
+        settings_provider=settings_provider,
         mountinfo_path=mountinfo_path or _mountinfo(tmp_path, fs, mountinfo_lines),
     )
 
@@ -182,6 +184,22 @@ def _rows(db, sql, *params):
         return conn.execute(sql, params).fetchall()
     finally:
         conn.close()
+
+
+def _served(db, item=7):
+    """What Plex serves for the item: its intro/credits rows on the marker tag, in served times (start order)."""
+    rows = _rows(
+        db,
+        "SELECT text, time_offset, end_time_offset, t.extra_data FROM taggings t JOIN tags g ON g.id = t.tag_id "
+        "WHERE t.metadata_item_id=? AND g.tag_type=12 AND g.tag='' AND t.text IN ('intro','credits') "
+        "ORDER BY t.time_offset",
+        item,
+    )
+    out = []
+    for text, start, end, extra in rows:
+        mtype = MarkerType.INTRO if text == "intro" else MarkerType.CREDITS
+        out.append((mtype, *plex_db._served_times(mtype, int(start), int(end), plex_db._row_is_final(extra))))
+    return out
 
 
 class TestExtraDataEncoding:
@@ -504,17 +522,39 @@ class TestMultiVersion:
         ]
 
 
-class TestRead:
-    def test_read_returns_served_times(self, tmp_path):
+class TestSavedSettingsBeforeEveryWrite:
+    """With a ``settings_provider`` the switch and the confirmation are read at each check, not when the job started
+    (audit C MED-2)."""
+
+    @pytest.mark.parametrize(
+        ("saved", "state"),
+        [
+            (ServerMarkersSettings(False, None, "2026-09-13T00:00:00+00:00", "restore"), Capability.DISABLED),
+            (ServerMarkersSettings(True, None, None, "restore"), Capability.NEEDS_CONFIRMATION),
+        ],
+        ids=["turned-off", "confirmation-cleared"],
+    )
+    def test_a_job_started_before_the_change_writes_nothing(self, tmp_path, saved, state):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder)
+        live = {"settings": ServerMarkersSettings(True, None, "2026-09-13T00:00:00+00:00", "restore")}
+        pub = _publisher(tmp_path, folder, settings_provider=lambda: live["settings"])
+        assert _write_one(pub, [INTRO]) == [INTRO]
+        live["settings"] = saved
+        with pytest.raises(PublishError) as ei:
+            _write_one(pub, [INTRO, CREDITS_FINAL], previous=[INTRO])
+        assert ei.value.state is state
+        assert pub.capability().state is state
+        assert _served(db) == [(T.INTRO, 11_000, 37_000)]
+
+    def test_without_a_provider_the_settings_given_at_creation_count(self, tmp_path):
         folder = tmp_path / "Plex Media Server"
         _make_db(folder)
-        pub = _publisher(tmp_path, folder)
-        pub.write("7", [INTRO, CREDITS_NONFINAL], previous=[], duration_ms=DUR, canonical_path="/data/tv/S01E01.mkv")
-        got = pub.read("7")
-        assert [(m.type, m.start_ms, m.end_ms) for m in got] == [
-            (T.INTRO, 11_000, 37_000),
-            (T.CREDITS, 1_200_000, 1_250_000),
-        ]
+        assert _publisher(tmp_path, folder, enabled=False).capability().state is Capability.DISABLED
+        on = _publisher(
+            tmp_path, folder, enabled=False, settings_provider=lambda: ServerMarkersSettings(True, None, "t", "restore")
+        )
+        assert on.capability().state is Capability.READY
 
 
 class TestCapability:
@@ -739,7 +779,7 @@ class TestWriteGuards:
         pub = _publisher(tmp_path, folder)
         _write_one(pub, [INTRO], item_id="/library/metadata/7")
         assert _rows(db, "SELECT metadata_item_id FROM taggings") == [(7,)]
-        assert [m.type for m in pub.read("/library/metadata/7")] == [T.INTRO]
+        assert _served(db) == [(T.INTRO, 11_000, 37_000)]
 
     @pytest.mark.parametrize("item_id", ["", "abc", "/library/metadata/", "7a"])
     def test_non_numeric_item_id_is_not_found(self, tmp_path, item_id):
@@ -748,8 +788,6 @@ class TestWriteGuards:
         pub = _publisher(tmp_path, folder)
         with pytest.raises(ItemNotFoundError):
             _write_one(pub, [INTRO], item_id=item_id)
-        with pytest.raises(ItemNotFoundError):
-            pub.read(item_id)
 
     def test_deleted_parts_are_neither_versions_nor_rewritten(self, tmp_path):
         folder = tmp_path / "Plex Media Server"
@@ -905,25 +943,6 @@ class TestMultiVersionMatrix:
         assert _write_one(pub, [INTRO], path="/disk2/tv/A.mkv") == [INTRO]
         assert seen == ["/disk1/tv/B.mkv", "/disk2/tv/B.mkv"]
         assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 1
-
-
-class TestReadDetails:
-    def test_read_keeps_final_credits_end_and_ignores_other_rows(self, tmp_path):
-        folder = tmp_path / "Plex Media Server"
-        db = _make_db(folder)
-        pub = _publisher(tmp_path, folder)
-        _write_one(pub, [CREDITS_FINAL, INTRO])
-        _insert_taggings(
-            db,
-            (7, 999, 0, "intro", 1, 2, "other tag"),
-            (8, 563, 0, "intro", 3, 4, "other item"),
-            (7, 563, 5, "commercial", 5, 6, "commercial"),
-        )
-        got = pub.read("7")
-        assert [(m.type, m.start_ms, m.end_ms, m.decided_by) for m in got] == [
-            (T.INTRO, 11_000, 37_000, ("plex",)),
-            (T.CREDITS, 1_299_000, DUR, ("plex",)),
-        ]
 
 
 class TestCapabilityDetails:
@@ -1368,20 +1387,6 @@ class TestSqliteErrors:
         assert isinstance(err, PublishError) and err.state is state and message in str(err)
         assert labels.get(message, "") in str(err)
 
-    def test_read_of_a_broken_database_raises_publish_error(self, tmp_path):
-        folder = tmp_path / "Plex Media Server"
-        db = Path(plex_db_path(str(folder)))
-        db.parent.mkdir(parents=True)
-        db.write_bytes(b"this is not a sqlite database" * 10)
-        with pytest.raises(PublishError) as ei:
-            _publisher(tmp_path, folder).read("7")
-        assert ei.value.state is Capability.MISCONFIGURED
-
-    def test_read_without_a_config_folder_is_misconfigured(self, tmp_path):
-        with pytest.raises(PublishError) as ei:
-            _publisher(tmp_path, "").read("7")
-        assert ei.value.state is Capability.MISCONFIGURED
-
 
 class TestSchemaGuards:
     def test_newest_parts_are_sampled_first(self, tmp_path):
@@ -1515,12 +1520,11 @@ class TestLockTimeouts:
         monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 0.5)
         db, pub, writer, release = self._paused_writer(tmp_path, monkeypatch)
         try:
-            for call in (lambda: _write_one(pub, [INTRO]), lambda: pub.read("7")):
-                start = time.monotonic()
-                with pytest.raises(PublishError) as ei:
-                    call()
-                assert ei.value.state is Capability.UNREACHABLE
-                assert time.monotonic() - start < 0.5 + 1.0
+            start = time.monotonic()
+            with pytest.raises(PublishError) as ei:
+                _write_one(pub, [INTRO])
+            assert ei.value.state is Capability.UNREACHABLE
+            assert time.monotonic() - start < 0.5 + 1.0
             start = time.monotonic()
             assert pub.capability().state is Capability.UNREACHABLE
             assert time.monotonic() - start < 0.5 + 1.0
@@ -1630,13 +1634,13 @@ class TestLockSerialisation:
     def journal_mode(self):
         """Overrides the module fixture: WAL only, the probe needs a -shm file."""
 
-    @pytest.mark.parametrize("holder", ["read", "capability", "write"])
+    @pytest.mark.parametrize("holder", ["capability", "write"])
     def test_probe_waits_for_every_open_connection(self, tmp_path, monkeypatch, holder):
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder, journal_mode="wal")
         pub = _publisher(tmp_path, folder)
         inside, release, probed = threading.Event(), threading.Event(), threading.Event()
-        pause_in = {"read": "_marker_tag_id", "capability": "_check_library_marker_versions", "write": "_plan"}[holder]
+        pause_in = {"capability": "_check_library_marker_versions", "write": "_plan"}[holder]
         real_pause, real_probe = getattr(PlexMarkerPublisher, pause_in), plex_db._shm_dms_locked_elsewhere
         paused = []
 
@@ -1650,7 +1654,6 @@ class TestLockSerialisation:
         monkeypatch.setattr(PlexMarkerPublisher, pause_in, staticmethod(pausing) if pause_in != "_plan" else pausing)
         monkeypatch.setattr(plex_db, "_shm_dms_locked_elsewhere", lambda path: (probed.set(), real_probe(path))[1])
         operation = {
-            "read": lambda: pub.read("7"),
             "capability": pub.capability,
             "write": lambda: _write_one(pub, [INTRO]),
         }
@@ -1739,8 +1742,8 @@ class TestLockSerialisation:
             return original(self, **kwargs)
 
         monkeypatch.setattr(PlexMarkerPublisher, "_connect", failing_once)
-        with pytest.raises(PublishError):
-            pub.read("7")
+        with pytest.raises(sqlite3.OperationalError), pub._database(read_only=True, deadline=time.monotonic() + 5):
+            pass
         assert plex_db.shm_lock_held_elsewhere(str(db)) is False  # runs; no holder in this test
 
     def test_probe_inside_our_own_open_connection_is_refused(self, tmp_path):
@@ -1902,8 +1905,7 @@ class TestRoundTwoLows:
                 '{"pv:final":"0","pv:version":"4","url":"pv%3Afinal=0&pv%3Aversion=4"}',
             ),
         )
-        [credits] = _publisher(tmp_path, folder).read("7")
-        assert (credits.start_ms, credits.end_ms) == (1_299_000, DUR - 2_000)
+        assert _served(db) == [(T.CREDITS, 1_299_000, DUR - 2_000)]
 
 
 class TestAgreeingVersionsDoNotPingPong:
@@ -2071,7 +2073,7 @@ class TestServedTimesDecideWhatIsAlreadyThere:
             path, intro, duration = (self.A, intro_a, DUR) if run % 2 == 0 else (self.B, intro_b, DUR + 1_500)
             item_row = _write_one(pub, [intro, self.CREDITS], previous=item_row, duration_ms=duration, path=path)
             assert item_row == [self.CREDITS]
-            assert pub.read("7") == [Marker(T.CREDITS, 1_295_324, DUR - 1_000, ("plex",))]
+            assert _served(Path(plex_db_path(str(folder)))) == [(T.CREDITS, 1_295_324, DUR - 1_000)]
         assert sql_log.count("COMMIT") == 1
 
     def test_rows_and_key_serving_the_desired_times_are_left_as_they_are(self, tmp_path, sql_log):

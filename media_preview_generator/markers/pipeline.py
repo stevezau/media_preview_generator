@@ -25,6 +25,8 @@ from ..job_kinds import ItemOutcome, KindHandlers
 from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig, ServerType
 from ..servers.ownership import OwnershipMatch, find_library_matches
+from ..servers.registry import server_config_from_dict
+from ..web.settings_manager import get_settings_manager
 from .decide import DecisionContext, DecisionStatus, TypeDecision, decide
 from .external_ids import ids_from_path, ids_from_server_dict, merge_ids
 from .models import Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
@@ -39,7 +41,7 @@ from .publishers.base import (
     PublishError,
 )
 from .publishers.factory import publisher_for
-from .settings import GlobalMarkersSettings, get_global_settings
+from .settings import GlobalMarkersSettings, ServerMarkersSettings, get_global_settings, load_server
 from .sources.chapters import chapter_candidates
 from .sources.introdb import IntroDbClient
 from .sources.online import LookupResult
@@ -86,6 +88,21 @@ class LocalDetectorSpec:
     detect: LocalDetector
 
 
+def live_server_config(server_id: str) -> ServerConfig | None:
+    """A server's config as saved right now.
+
+    Args:
+        server_id: The server's id.
+
+    Returns:
+        Its config, or None when no saved server has that id.
+    """
+    for raw in get_settings_manager().get("media_servers") or []:
+        if isinstance(raw, dict) and str(raw.get("id") or "") == server_id:
+            return server_config_from_dict(raw)
+    return None
+
+
 @dataclass
 class PipelineContext:
     """Everything one Intro & Credits job needs to process items.
@@ -105,6 +122,8 @@ class PipelineContext:
         local_detectors: Detectors that need a worker slot.
         now: Current UTC time (tests use a fake clock).
         capability_ttl_s: How long a server's capability answer is reused.
+        live_config: A server's saved config right now (None once it was removed). The registry is a snapshot from
+            when the job started; consent is read from here before every write.
     """
 
     registry: Any
@@ -118,6 +137,7 @@ class PipelineContext:
     local_detectors: tuple[LocalDetectorSpec, ...] = ()
     now: Callable[[], datetime] = _utcnow
     capability_ttl_s: float = 300.0
+    live_config: Callable[[str], ServerConfig | None] = live_server_config
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
     _capability_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -191,7 +211,10 @@ class _ItemServers:
         self._server_ids: MediaIds | None = None
 
     def item_id(self, owner: _Owning) -> str | None:
-        """The server's item id for this file (hint first), or None when the server doesn't have it (yet)."""
+        """The server's item id for this file (hint first), or None when the server doesn't have it (yet).
+
+        Looked up in the libraries that hold the file: Plex otherwise searches only libraries with previews on.
+        """
         sid = owner.config.id
         if sid not in self._item_ids:
             hint = self._hints.get(sid)
@@ -199,7 +222,9 @@ class _ItemServers:
                 self._item_ids[sid] = str(hint)
             else:
                 try:
-                    self._item_ids[sid] = owner.server.resolve_remote_path_to_item_id(self._path)
+                    self._item_ids[sid] = owner.server.resolve_remote_path_to_item_id(
+                        self._path, library_ids=[m.library_id for m in owner.matches]
+                    )
                 except Exception as exc:
                     logger.debug("Item id lookup on {} failed for {}: {}", owner.config.name, self._path, exc)
                     self._item_ids[sid] = None
@@ -514,6 +539,32 @@ def _previous_on_item(item_row: ItemPublishStateRow | None, publisher: MarkerPub
     return list(item_row.markers)
 
 
+def _consent_problem(ctx: PipelineContext, cfg: ServerConfig, path: str) -> str | None:
+    """Why the saved settings no longer allow writing this file to this server, or None when they do.
+
+    A Plex block whose database-write confirmation was cleared loads as off.
+    """
+    live = ctx.live_config(cfg.id)
+    if live is None:
+        return "This server was removed"
+    if not live.enabled:
+        return "This server is turned off on the Servers page"
+    if not load_server(live.markers, live.type.value).enabled:
+        return "Intro & Credits is off for this server"
+    if live.exclude_paths and is_path_excluded(path, live.exclude_paths):
+        return "This file is excluded on this server"
+    if not marker_matches(path, [live]):
+        return "This library isn't selected for Intro & Credits on this server"
+    return None
+
+
+def _live_markers_settings(ctx: PipelineContext, cfg: ServerConfig) -> ServerMarkersSettings:
+    live = ctx.live_config(cfg.id)
+    if live is None or not live.enabled:
+        return load_server(None, cfg.type.value)
+    return load_server(live.markers, live.type.value)
+
+
 def _publish_to(
     owner: _Owning,
     rec: FileRecord,
@@ -554,7 +605,12 @@ def _publish_to(
         store.clear_publish_basis(rec.id, cfg.id)
         return _finish(status, message, name=name, item_id=item_id, reason_code=reason_code)
 
-    publisher = publisher_for(owner.server, cfg, sibling_markers=lambda p: markers_for_path(store, p))
+    publisher = publisher_for(
+        owner.server,
+        cfg,
+        sibling_markers=lambda p: markers_for_path(store, p),
+        settings_provider=lambda: _live_markers_settings(ctx, cfg),
+    )
     if publisher is None:
         return _not_written(ServerStatus.SKIPPED, "Not supported for this server type yet", name="")
     try:
@@ -565,6 +621,9 @@ def _publish_to(
         return _not_written(ServerStatus.FAILED, message, name=publisher.name)
     if not report.ready:
         return _not_written(ServerStatus.SKIPPED, report.message or report.state.value, name=publisher.name)
+    if "plex_pass" in report.details and report.details["plex_pass"] is None:
+        # READY with an unknown Pass is what the status tab shows; Plex serves no markers without a Pass (spec §6.3).
+        return _not_written(ServerStatus.SKIPPED, "Can't reach Plex to confirm Plex Pass", name=publisher.name)
     item_id = servers.item_id(owner)
     if not item_id:
         message = "Not in this server's library yet"
@@ -598,6 +657,18 @@ def _publish_to(
 
     # Held from reading what is ours on the item until the result is recorded (lock order: see _KeyedLocks).
     with _ITEM_LOCKS.hold((cfg.id, item_id)):
+        # The job's registry is a snapshot: switching Intro & Credits (or the server, or a library) off must stop
+        # a running or paused job's very next write.
+        try:
+            refused = _consent_problem(ctx, cfg, path)
+        except Exception as exc:
+            logger.warning("Couldn't read the saved settings of {}: {}", cfg.name, type(exc).__name__)
+            ctx._capabilities.pop(cfg.id, None)
+            message = f"Couldn't read this server's saved settings ({type(exc).__name__})"
+            return _not_written(ServerStatus.FAILED, message, name=publisher.name)
+        if refused:
+            ctx._capabilities.pop(cfg.id, None)
+            return _not_written(ServerStatus.SKIPPED, refused, name=publisher.name)
         item_row = store.get_item_publish_state(cfg.id, item_id)
         # A forced re-detect and a waiting row always look at the item again: a version may have been added (never
         # decided) or removed without this file's decision or the item row changing.
