@@ -95,8 +95,9 @@ Expected: `4 passed`, `clean`.
 `tests/test_servers_emby_markers_vcr.py` pins the Media Preview Bridge for Emby routes (Ping, the admin probe,
 GET/POST/DELETE markers with `ReplaceOwn`), Emby's per-user item read (`Chapters`, `MediaSources`) and the read of a
 grouped item's versions (`Chapters,MediaSources,AlternateMediaSources`, with an API key and per user; Emby groups
-S01E01 with its "- Extended" cut), recorded against `mlab-emby` (Emby 4.10) with the plugin installed and nothing
-stored on Synth Chapters S01E01, S01E01 - Extended and S01E02 (the test removes what it posts):
+S01E01 with its "- Extended" cut) and the Emby Premiere read (`/Registrations/dvr`, no key on the lab Emby), recorded
+against `mlab-emby` (Emby 4.10) with the plugin installed and nothing stored on Synth Chapters S01E01, S01E01 - Extended
+and S01E02 (the test removes what it posts):
 
 ```bash
 cd /home/data/workspace/plex_generate_vid_previews
@@ -106,7 +107,7 @@ EMBY_URL=http://127.0.0.1:18096 EMBY_USER_ID="$EMBY_UID" \
 grep -rlF -e "$EMBY_TOKEN" -e "$EMBY_UID" tests/cassettes/test_servers_emby_markers_vcr/ && echo "LEAK" || echo "clean"
 ```
 
-Expected: `13 passed`, `clean`. The user id is recorded as `/Users/FAKE_USER_ID/` (`_scrub_request_uri`), which is what
+Expected: `14 passed`, `clean`. The user id is recorded as `/Users/FAKE_USER_ID/` (`_scrub_request_uri`), which is what
 the test sends on replay; the per-user route answers a single item, so the `Items`-list collapse above doesn't apply.
 `TestEmbyItemMissingContract` pins how Emby answers an item id it doesn't have (per user: 404; API key: an empty
 `Items` list), which Check servers uses to tell a deleted item from a failed read.

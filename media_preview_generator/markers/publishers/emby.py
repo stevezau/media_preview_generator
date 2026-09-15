@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 TICKS_PER_MS = 10_000
 MARKERS_FEATURE = "markers"
 CREDITS_BEFORE_END_NOTE = "Emby skips to the end of the file"
+CREDENTIALS_REJECTED = "Emby rejected this server's credentials; reconnect it"
 # Emby's chapter MarkerType values for each type we write (intro start and end come as a pair).
 _ROW_TYPES: dict[MarkerType, tuple[str, ...]] = {
     MarkerType.INTRO: ("IntroStart", "IntroEnd"),
@@ -219,7 +220,7 @@ class EmbyMarkerPublisher(MarkerPublisher):
             )
         access = self._server.get_bridge_markers_access()
         if access == "unauthorized":
-            return CapabilityReport(Capability.MISCONFIGURED, "Emby rejected this server's credentials; reconnect it")
+            return CapabilityReport(Capability.MISCONFIGURED, CREDENTIALS_REJECTED)
         if access == "forbidden":
             return CapabilityReport(
                 Capability.MISCONFIGURED,

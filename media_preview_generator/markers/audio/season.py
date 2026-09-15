@@ -378,6 +378,12 @@ def _current_record(ctx: PipelineContext, path: str) -> FileRecord | None:
     return rec if rec is not None and _disk_identity(path) == (rec.size, rec.mtime_ns) else None
 
 
+def _changed_since_record(ctx: PipelineContext, path: str) -> bool:
+    rec = ctx.store.get_file(path)
+    identity = _disk_identity(path)
+    return rec is not None and identity is not None and identity != (rec.size, rec.mtime_ns)
+
+
 def _cached_points(ctx: PipelineContext, rec: FileRecord | None) -> np.ndarray | None:
     stored = cached_fingerprint(ctx.store, rec) if rec is not None else None
     return points_of(stored) if stored is not None else None
@@ -823,11 +829,13 @@ def detect_season_audio(
     records: dict[str, FileRecord] = {rec.canonical_path: rec}
     points: dict[str, np.ndarray] = {rec.canonical_path: own}
     others = [p for p in group.episodes if p != rec.canonical_path]
+    left_out_changed = False
     for n, path in enumerate(others, 1):
         if cancel_check and cancel_check():
             raise DetectorUnavailableError("cancelled")
         member = _member_record(ctx, path)
         if member is None:
+            left_out_changed = left_out_changed or _changed_since_record(ctx, path)
             continue
         cached = _cached_points(ctx, member)
         if cached is None:
@@ -876,7 +884,37 @@ def detect_season_audio(
     matched = {path: records[path] for path in points.keys() | previous_used}
     signature = _signature(ctx, _signature_paths(rec.canonical_path, group), matched)
     _request_redecide(ctx, rec, records, signature)
+    if left_out_changed:
+        # The sibling's own run in this job reads it again, and its request for this file would be dropped as one of
+        # the job's own items: the job asks for this file after it finishes (season_audio_answer_outdated).
+        ctx.note_changed_sibling_left_out(rec.canonical_path)
     return DetectorAnswer(tuple(candidates), signature)
+
+
+def season_audio_answer_outdated(ctx: PipelineContext, canonical_path: str) -> bool:
+    """Whether an episode's stored season audio answer is out of date with its season on disk now, and its intro could
+    change with it (the conditions ``season_audio_followups`` asks a sibling again on).
+
+    Read after a job finished, for its own episodes whose answer left out a sibling changed on disk: once the job read
+    that sibling again, the episode goes into the job's Season follow-up instead of waiting for its own next run. While
+    the sibling is still unread, the answer is as current as a new run's would be.
+
+    Args:
+        ctx: The job's context.
+        canonical_path: Local path of the episode.
+
+    Returns:
+        True when a run now would match the season with other files than the stored answer.
+    """
+    rec = _current_record(ctx, canonical_path)
+    answer = ctx.store.get_detector_run(rec.id, Source.SEASON_AUDIO) if rec is not None else None
+    if answer is None:
+        return False
+    intro = ctx.store.get_decisions(rec.id).get(MarkerType.INTRO)
+    if intro is not None and intro.status is DecisionStatus.DECIDED and not intro_rests_on_season_audio(ctx, rec):
+        return False
+    signature = _signature(ctx, _signature_paths(canonical_path, season_group(canonical_path)))
+    return answer != signature and ctx.store.get_detector_failure(rec.id, Source.SEASON_AUDIO) != signature
 
 
 def season_audio_spec(ffmpeg_path: str | None) -> LocalDetectorSpec | None:

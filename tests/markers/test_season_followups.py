@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import os
 import re
+import sqlite3
 import threading
 import time
 from random import Random
@@ -16,10 +17,12 @@ import pytest
 from media_preview_generator.job_kinds import JOB_KIND_INTRO_CREDITS
 from media_preview_generator.markers import job_runner, triggers
 from media_preview_generator.markers.audio import season
+from media_preview_generator.markers.models import MarkerType
 from media_preview_generator.markers.store import MarkerStore
 from media_preview_generator.servers.base import ServerType
 from media_preview_generator.web.jobs import JobManager, JobStatus
 from tests.markers import test_job_runner, test_job_runner_real, test_triggers
+from tests.markers.audio import test_season
 from tests.markers.audio.test_season import (
     COLD_OPEN_AT,
     HIGH,
@@ -30,11 +33,14 @@ from tests.markers.audio.test_season import (
     _Chapters,
     _cold_open_points,
     _cold_open_season,
+    _decided,
     _episode_noise,
+    _evidence,
     _fuzz_cases,
     _intro_decision,
     _introdb_answer,
     _point_ms,
+    _season_ctx,
     _spec,
     _write,
 )
@@ -45,6 +51,7 @@ from tests.markers.test_pipeline import _ctx, _registry, _run
 env, _item = test_job_runner.env, test_job_runner._item
 engine = test_job_runner_real.engine
 settings, _server = test_triggers.settings, test_triggers._server
+store, show = test_season.store, test_season.show
 
 SHOW = "/media/tv/Show (2020) {tvdb-1}"
 S1, S2 = f"{SHOW}/Season 01", f"{SHOW}/Season 02"
@@ -160,6 +167,16 @@ class TestSeasonFollowUpJob:
         assert len(create.call_args.kwargs["file_paths"]) == job_runner.MAX_RETRY_FILES
         assert any("more episode" in c.args[1] for c in env.jm.add_log.call_args_list)
 
+    def test_a_failed_read_of_an_own_episodes_season_answer_leaves_the_job_completed(self, env):
+        env.ctx.take_changed_siblings_left_out.return_value = [ep(S1, 1)]
+        with patch.object(
+            job_runner, "season_audio_answer_outdated", side_effect=sqlite3.OperationalError("disk I/O error")
+        ) as outdated:
+            create = self._run(env, [_item(ep(S1, 1))], [ep(S1, 2)])
+        outdated.assert_called_once_with(env.ctx, ep(S1, 1))
+        assert create.call_args.kwargs["file_paths"] == [ep(S1, 2)]
+        env.jm.complete_job.assert_called_once_with("j1", warning=None)
+
     def test_a_season_job_that_cant_be_created_leaves_the_job_completed(self, env):
         env.ctx.take_followups.return_value = [ep(S1, 2)]
         with (
@@ -209,6 +226,100 @@ class TestSeasonFollowUpJob:
         ):
             job_runner.run_intro_credits_job("j1")
         assert verify.called is verified
+
+
+class TestAnEpisodeRunBeforeItsChangedSibling:
+    """Task 17: a job's episode run before a sibling it lists whose file changed on disk gets a season audio answer without
+    that sibling. Once the job reads the sibling, the episode goes into the job's Season follow-up."""
+
+    def _season_answered_then_sibling_replaced(self, store, show):
+        e1, e2 = show(1, 2)
+        with _Audio():
+            for path in (e1, e2):
+                _run(_season_ctx(store, path), path, {"plex-1": ready_publisher()}, stage="process")
+        assert _evidence(store, e1, season.Source.SEASON_AUDIO)[0].origin == "1/1"
+        _write(e2, 999)  # copied back: a new size and mtime
+        return e1, e2
+
+    def _job(self, store, paths, source, *, fail_while_running=None, before_queue=None):
+        """One job over ``paths``; ``fail_while_running[path]`` are the files ffmpeg fails on during that path's run."""
+        ctx = _season_ctx(store, paths[0])
+        for path in paths:
+            with _Audio(fail=(fail_while_running or {}).get(path)):
+                _run(ctx, path, {"plex-1": ready_publisher()}, stage="process")
+        if before_queue is not None:
+            before_queue(ctx)
+        job = SimpleNamespace(id="j1", priority=3, config={"source": source})
+        with patch.object(job_runner, "_queue_season_followups") as queue_season:
+            job_runner._queue_season_followups_after(job, {"source": source}, ctx, set(paths))
+        return job, queue_season
+
+    def test_the_episode_is_queued_once_the_job_read_its_changed_sibling(self, store, show):
+        e1, e2 = self._season_answered_then_sibling_replaced(store, show)
+        job, queue_season = self._job(store, [e1, e2], "schedule")
+        assert _evidence(store, e1, season.Source.SEASON_AUDIO) == []  # matched without E02
+        assert _evidence(store, e2, season.Source.SEASON_AUDIO)[0].origin == "1/1"
+        queue_season.assert_called_once_with(job, [e1])
+        with _Audio():  # the Season job
+            _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process")
+        assert _evidence(store, e1, season.Source.SEASON_AUDIO)[0].origin == "1/1"
+
+    def test_a_changed_sibling_the_job_doesnt_list_is_queued_without_the_episode(self, store, show):
+        # The chapter step asks for the changed sibling; the episode's answer is as current as a new run's would be until
+        # that sibling is read (a Season job reading it can't queue the episode again: spec §14, one run late).
+        e1, e2 = self._season_answered_then_sibling_replaced(store, show)
+        job, queue_season = self._job(store, [e1], "schedule")
+        assert _evidence(store, e1, season.Source.SEASON_AUDIO) == []
+        queue_season.assert_called_once_with(job, [e2])
+
+    def test_a_season_job_still_never_queues_another(self, store, show):
+        e1, e2 = self._season_answered_then_sibling_replaced(store, show)
+        _job, queue_season = self._job(store, [e1, e2], job_runner.SEASON_SOURCE)
+        assert _evidence(store, e1, season.Source.SEASON_AUDIO) == []
+        queue_season.assert_not_called()
+
+    def test_an_episode_whose_intro_another_source_decided_is_not_queued(self, store, show):
+        # Its intro doesn't rest on season audio, so a new answer can't change it.
+        e1, e2 = self._season_answered_then_sibling_replaced(store, show)
+
+        def decided_by_chapters(_ctx):
+            rec = store.get_file(e1)
+            decision = _decided(MarkerType.INTRO, 10_000, 40_000, ("chapters",))
+            store.save_decisions(rec.id, {MarkerType.INTRO: decision}, settings_fingerprint="x")
+
+        _job, queue_season = self._job(store, [e1, e2], "schedule", before_queue=decided_by_chapters)
+        queue_season.assert_not_called()
+
+    def test_an_episode_whose_own_last_attempt_failed_on_the_season_as_it_is_now_is_not_queued(self, store, show):
+        e1, e2 = self._season_answered_then_sibling_replaced(store, show)
+
+        def failed_on_this_season(ctx):
+            now = season._signature(ctx, season._signature_paths(e1, season.season_group(e1)))
+            store.set_detector_failure(store.get_file(e1).id, season.Source.SEASON_AUDIO, now)
+
+        _job, queue_season = self._job(store, [e1, e2], "schedule", before_queue=failed_on_this_season)
+        queue_season.assert_not_called()
+
+    def test_a_sibling_left_out_because_ffmpeg_failed_on_it_doesnt_queue_the_episode(self, store, show):
+        # Not a change on disk: E02's own run fingerprints it, and E01 waits for its next run as before.
+        e1, e2 = show(1, 2)
+        _job, queue_season = self._job(store, [e1, e2], "schedule", fail_while_running={e1: {e2}})
+        assert _evidence(store, e1, season.Source.SEASON_AUDIO) == []
+        assert _evidence(store, e2, season.Source.SEASON_AUDIO)[0].origin == "1/1"
+        queue_season.assert_not_called()
+
+    def test_an_episode_changed_on_disk_after_its_run_is_not_queued(self, store, show):
+        # Its own next run reads the new file.
+        e1, e2 = self._season_answered_then_sibling_replaced(store, show)
+        _job, queue_season = self._job(store, [e1, e2], "schedule", before_queue=lambda _ctx: _write(e1, 777))
+        queue_season.assert_not_called()
+
+    def test_no_changed_sibling_leaves_the_jobs_own_episodes_out(self, store, show):
+        # E02 is up to date: its run finds E01's answer current, so neither episode is asked again.
+        e1, e2 = show(1, 2)
+        _job, queue_season = self._job(store, [e1, e2], "schedule")
+        assert _evidence(store, e1, season.Source.SEASON_AUDIO)[0].origin == "1/1"
+        queue_season.assert_not_called()
 
 
 class TestFollowUpConfigIsReadWhenItsFilesAreListed:

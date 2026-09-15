@@ -125,7 +125,7 @@ real library mounted read-only.
 | Plugin path | `IItemRepository.SaveChapters(internalId, list)` keeping existing `Chapter` rows. | (lab) `evidence/plugins/emby-4.10` |
 | What wipes | `MetadataRefreshMode=FullRefresh` ("Search for missing metadata" / "Replace all") wipes all markers. Default/ValidationOnly/image refresh, recursive series refresh, library scan, restart do not. | (lab) |
 | Self-heal | Plugin stores markers and re-applies on `ILibraryManager.ItemUpdated` (registered from an `IServerEntryPoint`) when they vanished — re-applied within the same refresh. | (lab) |
-| Client | Emby web shows **Skip Intro** **without Premiere**. Clicking it on the unlicensed lab server opened Emby Premiere's "Unlock Feature" dialog, so where a skip lands wasn't measured. | (lab, Playwright) + `evidence/lab/phase2-results.md` Task 10 round 3 |
+| Client | Emby web shows **Skip Intro** for our markers, but **skipping an intro needs an Emby Premiere key on the server**. The player checks the Premiere feature `dvr` against Emby's licence server by server id (same code in 4.9.1.90 and 4.10.0.40; Emby's Premiere Feature Matrix lists Intro Skipping under "Server / All Apps"). Without a key the button shows only while a per-browser counter is under 5 (each episode adds 2: 2 at the first, 4 at the second, so the first 2 episodes), a click opens "Unlock Feature" and doesn't seek, and then the button stops showing. `CreditsStart` drives the "Up Next" overlay with no check; Emby web has no Skip Credits button. `GET /Registrations/dvr` answers `IsRegistered`. Native apps not tested. | (lab, Playwright + the web client's `videoosd.js`) + emby.media Intro Skip and Premiere Feature Matrix + `evidence/lab/phase2-results.md` "Phase 2 close-out" |
 | Versions | Each version is its own item with its own `Chapters3` rows; an item lists every version as a MediaSource with its `ItemId` (with an API key only when `AlternateMediaSources` is asked for). The web player shows the chapters of the version it plays. | (lab, 4.10 + 4.9) `evidence/lab/phase2-results.md` Task 10 round 3 |
 | 4.9.1.90 | Same chapter behaviour; the plugin's 4.9 build passes the same checks as 4.10 on `mlab-emby49` (18/18; the 2 web-player checks are 4.10 only). 4.9's `DELETE /Library/VirtualFolders?name=` answers 500 (needs `Id=`). | (lab) `evidence/lab/phase2-results.md` Task 4 (first build, fix rounds 1–2) |
 | Install | Catalog plugins install via `POST /Packages/Installed/{name}` + restart (proven with TimeMarkEdit). Separate builds for 4.9 and 4.10 (ABI change). Catalog entry needs a forum thread + developer id from Emby staff. | (lab) + dev.emby.media |
@@ -447,6 +447,8 @@ at the last write), `atomic_writes`.
 - Multi-version items share one marker set: publish only when all parts' decisions agree within 2 s.
 - Unknown schema (columns/JSON shape differ from 1.43) → stop writing, show message.
 - Never write `tags`; never run integrity checks with stock SQLite (custom tokenizer).
+- Rows and `pv:` keys that already serve the desired times stay byte for byte, except a stale credits `final` flag on
+  a one-version item under "Use ours" (see §14, 2026-09-15 "Plex credits `final` flag").
 - Warn when Plex's own detection is on (it can force-overwrite). Before a file is reported up to date, the job reads
   the item's rows back: gone → written again; replaced by Plex's own → written again (`on_plex_redetect=restore`) or
   kept per type (`keep_plex`): the publisher leaves that type's rows and `pv:` key alone on every write path until
@@ -710,8 +712,8 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
 
 1. **TheIntroDB terms** — used without authorization; per-user keys; must degrade gracefully.
 2. **Plex DB writes are unsupported by Plex** — opt-in with confirmation; unknown schema → stop.
-3. **Plex client display** — proven at the API (served XML identical to native), not yet seen in a real Plex app
-   (needs a claimed lab server). Verify in phase 1.
+3. **Plex client display** — proven at the API (served XML identical to native) and in Plex Web 4.160.0 (Skip Intro
+   and Skip Credits shown and landing at the marker ends, phase 2 close-out row 20). Native Plex apps not tested.
 4. **Plex Pass for viewers** — non-Pass viewers never see skip buttons; say so in the UI.
 5. **Emby catalog acceptance** — not guaranteed; manual install fallback (built: the Edit tab's "Install by hand"
    and the guide's manual install). Catalog text is written (`emby-plugin/README.md` "Catalog submission"); not
@@ -1011,3 +1013,34 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   then queues nothing that tick; otherwise it applies its own mode's "unfinished" check (Find markers ignores Check
   servers jobs). Deleting a schedule leaves its paused jobs paused with a WARNING. Season view: "Publish N" counts episodes with at least one decided marker of any type,
   `needs_review` any type in review; the header's show and season are the Publish job's.
+- 2026-09-15 · Emby needs Emby Premiere to skip intros (§3.3, §7; phase 2 close-out, owner checks,
+  `evidence/lab/phase2-results.md` "Phase 2 close-out"): replaces §3.3's "Emby web shows Skip Intro without Premiere".
+  The key is the server's, not the viewer's. Without it Emby shows Skip Intro for the first 2 episodes, opens "Unlock
+  Feature" instead of skipping, then hides the button; credits' "Up Next" works. The Emby Edit tab reads `GET
+  /Registrations/dvr` (the answer kept an hour per server URL, a failed or timed-out read 5 minutes; not asked of an
+  Emby that is unreachable or rejects the credentials) and, only when `IsRegistered` is false, shows the amber row
+  "Viewers can't skip intros: this Emby server has no Emby Premiere key. Skip Credits (Up Next) still works." with an
+  ⓘ; a failed read, a 404 or an older Emby shows nothing and never blocks the tab. The guide and the plugin's catalog
+  text say so.
+- 2026-09-15 · Plex credits `final` flag (§3.1, §6.3; phase 2 close-out, lab row 10): under Use ours, rows and the
+  `pv:` key that serve the desired times but carry another `final` flag than this file's duration gives are rewritten
+  through the normal write (e.g. credits stored non-final while a longer version existed, after that version is
+  deleted); on a first publish, Plex's own rows with the same times get our flag too. Only on an item with one version
+  (optimized copies aside) and a known duration: on a multi-version item each version's runtime can give another flag
+  for the same times, so the stored flag stays and nothing flips back and forth. Never under Keep Plex's: rows serving
+  the wanted times can be Plex's own even when the item record lists those times (a write that changed nothing
+  records them too), and Plex's own rows are never touched. The write runs when a job has a reason to write: a normal
+  job on an item whose versions changed, Check servers, or a forced run; a normal job doesn't rewrite an item that
+  already reads back as ours. Plex Web 4.160.0 ignores `final`; Plex's docs say some apps show post-play at the final
+  credits.
+- 2026-09-15 · A new season's lone opener gets its previous-season hint one run late (§6.2 step 4; Task 17 row 2)
+  when the previous season is fingerprinted in the same backfill: the hint reads cached fingerprints only, and nothing
+  asks the opener again in that job. Its next run is due, because the signature includes whether the previous season's
+  files have fingerprints. Precision is unaffected. Known limitation, not changed.
+- 2026-09-15 · A sibling changed on disk mid-job (§6.2 step 4; Task 17 fix round 1 finding): an episode whose season
+  audio answer left out a sibling changed on disk (its record no longer matches the file) is noted by the job. When the
+  job ends, a noted episode goes into the job's Season follow-up if its answer is now out of date (the job read that
+  sibling again) and its intro is undecided or rests on season audio. The cap, "no chaining" and "a Season job never
+  queues another" are unchanged. Known limitation: when the changed sibling isn't one of the job's files, the job's
+  Season job reads it, and that Season job can't queue the earlier episode again, so the episode is one run late, as
+  before.

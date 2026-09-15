@@ -736,8 +736,10 @@ plugin's version with a ✓ once Emby is back. The API key or user this app uses
   markers decided for its own file, with no waiting for the other versions to agree. A file that Emby lists under
   another version's item isn't written: **"This file is Emby item 55, another version of item 53; markers not
   written"**.
-- In the lab, Emby's web player showed **Skip Intro** on a server without Emby Premiere, but clicking it opened
-  Emby Premiere's "Unlock Feature" dialog.
+- **Emby Premiere:** Emby only lets viewers skip intros when the Emby server has an active Emby Premiere key: without
+  one, Emby shows "Skip Intro" a few times and then asks for Premiere instead of skipping. The credits "Up Next" prompt
+  works either way. The key is the server's, so it covers every user and app on that server. When the server has no
+  key, the tab's amber **Emby Premiere** row says so.
 
 ### Multi-version Plex items
 
@@ -878,6 +880,7 @@ table covers every state the check can report, using its exact wording:
 | *(Emby)* "Can't reach this Emby server" / "Can't reach the Media Preview Bridge markers endpoint on this Emby server" | A transient connection problem | Confirm the server is up and reachable; recheck |
 | *(Emby)* "Emby rejected this server's credentials; reconnect it" | The stored API key or login no longer works | Reconnect the server from the Servers page |
 | *(Emby)* "Emby refused the Media Preview Bridge markers endpoint; this server's API key or user needs administrator rights" | The connected account isn't an administrator | Reconnect with an admin account or API key |
+| *(Emby)* Emby shows "Unlock Feature" when a viewer clicks **Skip Intro**, or stops showing Skip Intro; the tab's amber **Emby Premiere** row reads "Viewers can't skip intros: this Emby server has no Emby Premiere key. Skip Credits (Up Next) still works." | Emby only skips intros on a server with an active Emby Premiere key. Without one, its player shows Skip Intro for the first few episodes, asks for Premiere instead of skipping, then hides the button | Add an Emby Premiere key to this Emby server. Nothing to change in this app: the markers are written either way, and the tab notices the key within an hour |
 | *(Settings)* **Matching audio across a season** shows "Not available" with a reason, e.g. "Needs an ffmpeg with the chromaprint muxer (jellyfin-ffmpeg in the amd64 image); none was found" | This container's ffmpeg has no chromaprint (the arm64 image, or a custom ffmpeg) | Use the amd64 Docker image; every other source keeps working. Saved season audio answers can't help decide an intro meanwhile, so one decided with them goes to **Needs review** on its next check unless other sources agree; they can still keep an intro in review that they contradict |
 | *(Settings)* **Matching audio across a season** shows "Not available": "ffmpeg didn't answer the check for the chromaprint muxer; it is checked again in 10 minutes" | ffmpeg timed out, couldn't start, or exited with an error when asked for its muxers (a busy or slow container start) | Nothing: jobs started meanwhile match no episodes, but saved season audio answers still count, and the check runs again after 10 minutes |
 | *(Plex)* Red "✕ Not active" next to Plex Pass: "This Plex server has no Plex Pass, so Plex won't show any markers." | Plex hides all markers — even ones already in its database — without Plex Pass | Add Plex Pass to this Plex server |

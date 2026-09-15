@@ -25,15 +25,22 @@ from .base import FlagTarget, HealthCheckIssue, ServerType, WebhookEvent
 # kept per catalog URL: reused for an hour, and for up to a day while the catalog can't be read.
 CATALOG_TTL_S = 3_600.0
 CATALOG_KEEP_ON_ERROR_S = 86_400.0
+# Whether a server's Emby Premiere key lets viewers skip intros is kept per server URL the same way, for an hour; a
+# failed or timed-out read for 5 minutes, so an Emby that hangs doesn't hold up every load of the tab.
+REGISTRATION_TTL_S = 3_600.0
+REGISTRATION_ERROR_TTL_S = 300.0
+REGISTRATION_TIMEOUT_S = 10
 _monotonic = time.monotonic
 _catalog_answers: dict[str, tuple[float, bool]] = {}
+_registration_answers: dict[str, tuple[float, bool | None]] = {}
 _catalog_guard = threading.Lock()
 
 
 def clear_catalog_cache() -> None:
-    """Forget every cached catalog answer (tests)."""
+    """Forget every cached catalog and Emby Premiere answer (tests)."""
     with _catalog_guard:
         _catalog_answers.clear()
+        _registration_answers.clear()
 
 
 class EmbyServer(EmbyApiClient):
@@ -287,6 +294,39 @@ class EmbyServer(EmbyApiClient):
         if not isinstance(body, list):
             return None
         return any(isinstance(p, dict) and (p.get("Name") or p.get("name")) == self.PLUGIN_NAME for p in body)
+
+    def intro_skip_registered(self) -> bool | None:
+        """Whether this server's Emby Premiere key lets viewers skip intros (``GET /Registrations/dvr``).
+
+        Emby's players check the Premiere feature ``dvr`` against the server's registration before they skip an intro
+        (spec §3.3); credits' "Up Next" has no such check. An answer is reused per server URL for
+        ``REGISTRATION_TTL_S``, a failed read for ``REGISTRATION_ERROR_TTL_S``.
+
+        Returns:
+            ``IsRegistered``; None when it couldn't be read (a transport error or timeout, an error status, an Emby
+            without the route, an unexpected answer).
+        """
+        url = self._config.url.rstrip("/")
+        with _catalog_guard:
+            cached = _registration_answers.get(url)
+        if cached is not None:
+            ttl = REGISTRATION_ERROR_TTL_S if cached[1] is None else REGISTRATION_TTL_S
+            if _monotonic() - cached[0] < ttl:
+                return cached[1]
+        registered = self._read_registration()
+        with _catalog_guard:
+            _registration_answers[url] = (_monotonic(), registered)
+        return registered
+
+    def _read_registration(self) -> bool | None:
+        try:
+            resp = self._request("GET", "/Registrations/dvr", timeout=REGISTRATION_TIMEOUT_S)
+            body = resp.json() if resp.status_code == 200 else None
+        except (requests.RequestException, ValueError) as exc:
+            logger.debug("Emby Premiere registration read failed on {}: {}", self.name, type(exc).__name__)
+            return None
+        registered = body.get("IsRegistered") if isinstance(body, dict) else None
+        return registered if isinstance(registered, bool) else None
 
     def install_plugin(self) -> dict[str, Any]:
         """Install the plugin from Emby's catalog and restart Emby; say so when it has to be installed by hand.

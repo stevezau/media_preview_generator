@@ -26,6 +26,7 @@ from ..web.jobs import PAUSED_BY_SCHEDULE, PRIORITY_LOW, PRIORITY_NORMAL, JobSta
 from ..web.routes.job_runner import _build_selected_gpus, _format_eta, _inflight_jobs, _inflight_lock
 from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import start_fingerprint_sweep
+from .audio.season import season_audio_answer_outdated
 from .external_ids import is_season_folder
 from .outcomes import (
     NOT_IN_LIBRARY,
@@ -266,7 +267,7 @@ def _waiting_season_jobs(jm) -> list:
 
 
 def _queue_season_followups(job, paths: list[str]) -> None:
-    """Queue the other episodes of this job's seasons to be decided again (spec §5.3). Never raises.
+    """Queue episodes of this job's seasons to be decided again (spec §5.3). Never raises.
 
     One waiting Season job at the job's Season priority takes them when they fit; a file a waiting Season job (at any
     priority) or a webhook follow-up that has never started already lists isn't queued again: it reads the file after
@@ -275,7 +276,8 @@ def _queue_season_followups(job, paths: list[str]) -> None:
 
     Args:
         job: The job that just finished.
-        paths: Files its season steps asked about that weren't its own items.
+        paths: Files its season steps asked about that weren't its own items, and its own items whose season audio
+            answer left out a sibling it read again later (``_queue_season_followups_after``).
     """
     jm = get_job_manager()
     try:
@@ -289,7 +291,7 @@ def _queue_season_followups(job, paths: list[str]) -> None:
             queued |= _queued_in_waiting_follow_ups(jm)
             fresh = sorted(set(paths) - queued)
             if not fresh:
-                jm.add_log(job.id, f"INFO - {len(paths)} other episode(s) of the same season are already queued")
+                jm.add_log(job.id, f"INFO - {len(paths)} episode(s) of the same season are already queued")
                 return
             chosen = fresh[:MAX_RETRY_FILES]
             if len(fresh) > len(chosen):
@@ -318,7 +320,7 @@ def _queue_season_followups(job, paths: list[str]) -> None:
                 )
         jm.add_log(
             job.id,
-            f"INFO - {len(chosen)} other episode(s) of the same season are checked again with this job's results "
+            f"INFO - {len(chosen)} episode(s) of the same season are checked again with this job's results "
             f"(job {target.id[:8]})",
         )
     except Exception:
@@ -326,7 +328,8 @@ def _queue_season_followups(job, paths: list[str]) -> None:
 
 
 def _queue_season_followups_after(job, cfg: dict, ctx, listed: set[str]) -> None:
-    """Queue the Season job for the files this job's season steps asked about that weren't its items.
+    """Queue the Season job for the files this job's season steps asked about that weren't its items, and for its own
+    items whose season audio answer left out a sibling changed on disk that the job read again after them.
 
     A Season job queues none: a sibling whose answer is still out of date is asked for again by the season's next run,
     so nothing loops.
@@ -334,6 +337,17 @@ def _queue_season_followups_after(job, cfg: dict, ctx, listed: set[str]) -> None
     if cfg.get("source") == SEASON_SOURCE:
         return
     paths = [path for path in ctx.take_followups() if path not in listed]
+    for path in ctx.take_changed_siblings_left_out():
+        if path in paths:
+            continue
+        try:
+            outdated = season_audio_answer_outdated(ctx, path)
+        except Exception as exc:
+            # The job has completed: a failed read only leaves this episode to its next run.
+            logger.warning("Couldn't check whether {} needs its season asked again: {}", path, type(exc).__name__)
+            continue
+        if outdated:
+            paths.append(path)
     if paths:
         _queue_season_followups(job, paths)
 

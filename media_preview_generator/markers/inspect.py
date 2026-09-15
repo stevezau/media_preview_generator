@@ -24,7 +24,7 @@ from .models import SERVER_SOURCES, Marker, MarkerType, Source
 from .outcomes import kept_note, with_kept_note
 from .ownership import allowed_matches, owning_servers
 from .publishers.base import Capability, versions_agree
-from .publishers.emby import credits_note
+from .publishers.emby import CREDENTIALS_REJECTED, credits_note
 from .publishers.factory import publisher_for
 from .publishers.plex_db import SAME_HOST_PATH_ADVICE
 from .settings import ServerMarkersSettings, is_sports_library, load_server
@@ -240,7 +240,23 @@ def _checked_as_if_on(server: Any, config: ServerConfig, settings: ServerMarkers
             details["hint"] = PLEX_SAME_HOST_PATH_HINT
         if report.ready and details.get("plex_pass") is None:
             warning = PLEX_PASS_UNCHECKED_WARNING
+    # Not asked of an Emby that can't be reached or rejects the credentials: the read would only fail, and slowly.
+    emby_answers = report.state is not Capability.UNREACHABLE and report.message != CREDENTIALS_REJECTED
+    if config.type is ServerType.EMBY and emby_answers:
+        registered = _emby_intro_skip_registered(server, config)
+        if registered is not None:
+            details["intro_skip_registered"] = registered
     return _capability(report.state, report.message, details, warning)
+
+
+def _emby_intro_skip_registered(server: Any, config: ServerConfig) -> bool | None:
+    # Only a note on the tab: a failed read shows nothing and never fails the status.
+    try:
+        registered = server.intro_skip_registered()
+    except Exception as exc:
+        logger.debug("Couldn't read {}'s Emby Premiere registration: {}", config.name, type(exc).__name__)
+        return None
+    return registered if isinstance(registered, bool) else None
 
 
 def server_status_payload(server: Any, config: ServerConfig) -> dict:

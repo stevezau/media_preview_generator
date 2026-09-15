@@ -12,6 +12,7 @@ import os
 import pytest
 
 from media_preview_generator.servers import EmbyServer, Library, ServerConfig, ServerType
+from media_preview_generator.servers import emby as emby_module
 
 pytestmark = [pytest.mark.vcr]
 
@@ -121,6 +122,17 @@ class TestEmbyBridgeMarkersContract:
             "Stale": False,
             "Stored": 0,
         }
+
+
+class TestEmbyPremiereRegistrationContract:
+    """The Intro & Credits tab's Emby Premiere note reads ``GET /Registrations/dvr``: the lab Emby has no Premiere key."""
+
+    def test_a_server_without_a_premiere_key_is_not_registered(self):
+        emby_module.clear_catalog_cache()  # the answer is kept per server URL for an hour
+        try:
+            assert _emby_lab(per_user=False).intro_skip_registered() is False
+        finally:
+            emby_module.clear_catalog_cache()
 
 
 class TestEmbyItemMissingContract:

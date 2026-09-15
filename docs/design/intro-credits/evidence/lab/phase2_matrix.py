@@ -1131,15 +1131,6 @@ def plex_delete_our_rows(item: str) -> list[dict]:
     return rows
 
 
-def _times(state: dict) -> dict:
-    """A read of Plex, Jellyfin and Emby without Plex's credits ``final`` flag.
-
-    The Plex publisher leaves rows that already serve the wanted times alone, whatever ``final`` they carry (a flag stored
-    from another version's runtime serves the same), so a restored row can carry another flag than the dropped one.
-    """
-    return {**state, "plex": sorted((m["type"], m["start"], m["end"]) for m in state["plex"])}
-
-
 def reconcile_job(timeout: float = 1800) -> tuple[dict, list[dict], dict]:
     answer = app_ok("POST", "/api/markers/reconcile")
     job = p1.wait_job(answer["job_id"], timeout=timeout)
@@ -1148,7 +1139,8 @@ def reconcile_job(timeout: float = 1800) -> tuple[dict, list[dict], dict]:
 
 @row(10)
 def row_10_reconcile_restores() -> dict:
-    """Markers Plex, Jellyfin and Emby dropped come back from one Check servers job; a second run lists no files."""
+    """Markers Plex, Jellyfin and Emby dropped come back from one Check servers job, Plex's credits ``final`` flag
+    included; a second run lists no files. A forced job first puts right a ``final`` flag left from a deleted version."""
     set_publish_when("high")
     p1.set_redetect("restore")
     ep = p1.synth_path(1)
@@ -1156,6 +1148,8 @@ def row_10_reconcile_restores() -> dict:
     item = plex_item(ep)
     jf_item = p1.jf_items("mlab-jellyfin")[ep]["id"]
     emby_item = emby_items("mlab-emby")[ep]["id"]
+    flag_before = p1.plex_served(item)
+    flag_job, flag_files = run_job({"file_paths": [ep], "force": True, "library_name": "Phase 2 row 10 final flag"})
     reference = {
         "plex": p1.plex_served(item),
         "jellyfin": jf_tuples("mlab-jellyfin", jf_item),
@@ -1178,21 +1172,32 @@ def row_10_reconcile_restores() -> dict:
     second, second_files, second_answer = reconcile_job()
     listed_files = [f["file"] for f in files]
     name = ep.rsplit("/", 1)[-1]
+    credits_before_drop = [m for m in reference["plex"] if m["type"] == "credits"]
     checks = {
+        "forced job completed": flag_job["status"] == "completed",
+        "Plex's credits run to the file's end, so they are final before the drop": bool(credits_before_drop) and all(m["final"] for m in credits_before_drop),
         "every server dropped them first": not before["plex"] and not before["jellyfin"] and not before["emby"],
         "first run completed and lists the file": first["status"] == "completed" and ep in listed_files,
         "Plex intro back at the chapter": any(m["type"] == "intro" and abs(m["start"] - truth[0]) <= 1_000 for m in after["plex"]),
-        "all three serve the same times as before the drop": _times(after) == _times(reference),
+        "all three serve the same markers as before the drop, Plex's final flag included": after == reference,
         "rows written on the three": all(server_row(files, name, s).get("status") == "markers_written" for s in ("mlab-plex", "mlab-jellyfin", "mlab-emby")),
         "second run completed with no files": second["status"] == "completed" and not second_files,
     }  # fmt: skip
     notes = [
+        f"forced job {flag_job['id'][:8]}: Plex served {flag_before} before it, {reference['plex']} after; Plex row {server_row(flag_files, ep.rsplit('/', 1)[-1], 'mlab-plex').get('status')}",
         f"first {first['id'][:8]} ({answer}) files {[f.rsplit('/', 1)[-1] for f in listed_files]} outcome {first['progress'].get('outcome')}",
         f"second {second['id'][:8]} ({second_answer}) files {len(second_files)}; log {[x for x in p1.job_logs(second['id']) if 'Check servers' in x][-2:]}",
         f"Plex rows deleted {[(r['text'], r['start'], r['end'], r['extra_data']) for r in deleted]}; Plex served before the drop {reference['plex']}, after {after['plex']}",
-        "expectation changed: served times are compared without Plex's credits final flag (see _times)",
     ]  # fmt: skip
-    evidence = {"reference": reference, "before": before, "after": after, "files": files, "second_files": second_files}
+    evidence = {
+        "flag_before": flag_before,
+        "flag_files": flag_files,
+        "reference": reference,
+        "before": before,
+        "after": after,
+        "files": files,
+        "second_files": second_files,
+    }
     return checks_result(
         10, "Check servers restores dropped markers on Plex, Jellyfin and Emby", checks, evidence, notes
     )

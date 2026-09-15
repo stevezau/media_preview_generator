@@ -455,7 +455,9 @@ message, details, warning}`, checked as if Intro & Credits were already on — o
 `needs_plex_detection_once`, `unsupported_schema`, `unreachable`, `misconfigured`, or `unknown` when the check itself
 failed; `warning` is `""` unless a `ready` Plex couldn't confirm Plex Pass, in which case jobs wait instead of
 writing; on Emby, `needs_plugin` carries `details.catalog_listed`: `true` when Emby's plugin catalog lists the plugin,
-`false` when it doesn't, `null` when the catalog couldn't be read), `can_show` (marker types this server type can
+`false` when it doesn't, `null` when the catalog couldn't be read; on a reachable Emby, `details.intro_skip_registered`
+is Emby's `GET /Registrations/dvr` `IsRegistered` (whether its Emby Premiere key lets viewers skip intros), left out
+when that couldn't be read or Emby rejected the credentials), `can_show` (marker types this server type can
 display) and `libraries` (with each one's default selection).
 `404` for an unknown server; `500` with a JSON error when the status can't be built. A server turned off on the
 Servers page isn't contacted (`capability.state` is `disabled`).

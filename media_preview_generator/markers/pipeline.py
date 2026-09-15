@@ -243,6 +243,9 @@ class PipelineContext:
     _importer_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
     _importer_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _followups: set[str] = field(default_factory=set, repr=False)
+    # Files of this job whose season audio answer left out a sibling that had changed on disk
+    # (``note_changed_sibling_left_out``).
+    _left_out_changed: set[str] = field(default_factory=set, repr=False)
     _followups_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # Files this job's lookups skipped because a source's daily budget ran out, by source (job_runner turns this
     # into a completion warning once the job finishes).
@@ -294,6 +297,26 @@ class PipelineContext:
         with self._followups_guard:
             taken = sorted(self._followups)
             self._followups.clear()
+        return taken
+
+    def note_changed_sibling_left_out(self, canonical_path: str) -> None:
+        """Remember that this file's season audio answer left out a sibling that had changed on disk.
+
+        Args:
+            canonical_path: Local path of the file whose answer it was.
+        """
+        with self._followups_guard:
+            self._left_out_changed.add(canonical_path)
+
+    def take_changed_siblings_left_out(self) -> list[str]:
+        """The files noted by ``note_changed_sibling_left_out``, sorted, and forget them.
+
+        Returns:
+            Every path noted since the last call, sorted.
+        """
+        with self._followups_guard:
+            taken = sorted(self._left_out_changed)
+            self._left_out_changed.clear()
         return taken
 
 

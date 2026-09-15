@@ -218,6 +218,84 @@ class TestCatalogCache:
         assert req.call_count == 1
 
 
+class TestIntroSkipRegistration:
+    @pytest.mark.parametrize("registered", [True, False])
+    def test_reads_is_registered_from_the_dvr_registration(self, registered):
+        server = _server()
+        body = {"Name": "dvr", "IsTrial": False, "IsRegistered": registered}
+        with patch.object(server, "_request", return_value=_resp(200, body)) as req:
+            assert server.intro_skip_registered() is registered
+        req.assert_called_once_with("GET", "/Registrations/dvr", timeout=emby_module.REGISTRATION_TIMEOUT_S)
+
+    def test_the_answer_is_reused_for_an_hour_per_server_url(self, monkeypatch):
+        now = [1_000.0]
+        monkeypatch.setattr(emby_module, "_monotonic", lambda: now[0])
+        server, other = _server(), _server()
+        other._config = ServerConfig(id="e2", type=ServerType.EMBY, name="Emby 2", enabled=True,
+                                     url="http://emby-2:8096/", auth={}, libraries=[])  # fmt: skip
+        with patch.object(server, "_request", return_value=_resp(200, {"IsRegistered": False})) as req:
+            assert server.intro_skip_registered() is False
+            now[0] += 3_599
+            assert server.intro_skip_registered() is False
+        assert req.call_count == 1
+        with patch.object(other, "_request", return_value=_resp(200, {"IsRegistered": True})) as other_req:
+            assert other.intro_skip_registered() is True  # another Emby, another key
+        assert other_req.call_count == 1
+        with patch.object(server, "_request", return_value=_resp(200, {"IsRegistered": True})) as req:
+            now[0] += 2
+            assert server.intro_skip_registered() is True  # an hour on: read again (a key was added)
+        assert req.call_count == 1
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            requests.ConnectionError("down"),
+            requests.Timeout("hung"),
+            _resp(404, None),
+            _resp(401, {"IsRegistered": False}),
+            _resp(200, ["not", "an", "object"]),
+            _resp(200, {"Name": "dvr"}),
+            _resp(200, {"IsRegistered": "false"}),
+        ],
+        ids=["network", "timeout", "no-route", "unauthorized", "not-an-object", "no-field", "not-a-bool"],
+    )
+    def test_an_answer_that_cant_be_read_is_unknown_and_kept_for_five_minutes(self, monkeypatch, answer):
+        now = [1_000.0]
+        monkeypatch.setattr(emby_module, "_monotonic", lambda: now[0])
+        server = _server()
+        kwargs = {"side_effect": answer} if isinstance(answer, Exception) else {"return_value": answer}
+        with patch.object(server, "_request", **kwargs) as req:
+            assert server.intro_skip_registered() is None
+            now[0] += emby_module.REGISTRATION_ERROR_TTL_S - 1
+            assert server.intro_skip_registered() is None  # a hanging Emby isn't asked on every tab load
+        assert req.call_count == 1
+        now[0] += 2
+        with patch.object(server, "_request", return_value=_resp(200, {"IsRegistered": False})) as req:
+            assert server.intro_skip_registered() is False  # five minutes on: asked again
+            now[0] += emby_module.REGISTRATION_TTL_S - 1
+            assert server.intro_skip_registered() is False
+        assert req.call_count == 1
+
+    def test_a_failed_read_after_an_hour_replaces_the_answer_for_five_minutes(self, monkeypatch):
+        now = [1_000.0]
+        monkeypatch.setattr(emby_module, "_monotonic", lambda: now[0])
+        server = _server()
+        with patch.object(server, "_request", return_value=_resp(200, {"IsRegistered": False})):
+            assert server.intro_skip_registered() is False
+        now[0] += emby_module.REGISTRATION_TTL_S + 1
+        with patch.object(server, "_request", side_effect=requests.Timeout("hung")) as req:
+            assert server.intro_skip_registered() is None
+            assert server.intro_skip_registered() is None
+        assert req.call_count == 1
+
+    def test_a_body_that_isnt_json_is_unknown(self):
+        server = _server()
+        bad = _resp(200)
+        bad.json.side_effect = ValueError("not json")
+        with patch.object(server, "_request", return_value=bad):
+            assert server.intro_skip_registered() is None
+
+
 class TestCatalogInstall:
     def test_not_in_the_catalog_says_install_by_hand(self):
         server = _server()

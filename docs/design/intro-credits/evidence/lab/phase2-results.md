@@ -390,7 +390,8 @@ schedules; the Task 11 tables dropped from the lab `markers.db` again.
 
 ## Task 17 — phase-2 lab matrix (2026-09-15, `feat/markers-detection` 93e5c60, image `ca49022ec1fd`)
 
-**22 pass, 0 fail, 1 needs owner (row 20).** Product fixes: none. Phase-1 regression: 16 of 16 rows pass.
+**22 pass, 0 fail, 1 needs owner (row 20).** Product fixes: none. Phase-1 regression: 16 of 16 rows pass. The phase 2
+close-out (below) records row 20 as pass in Plex Web and re-ran row 10 with the `final` flag compared.
 
 Runner: `./phase2_matrix.py configure`, then `./phase2_matrix.py run <rows>`. The lab scripts take the lab folder from
 `MLAB_DIR`, so a worktree runs against the long-lived lab. Raw evidence is in `results/p2-row-NN.json`,
@@ -451,9 +452,9 @@ phase-1 row 7 under row 19's conditions, with the checks below; all pass.
 | 5 Rick and Morty S01 at High | pass | Normal job after row 18's forced run. Intro `decided_by` includes season_audio on 11 of 11. On the 11 online truth cases: 11 useful, 0 wrong, 0 missed (phase 1: 11 intros from online agreement). |
 | 6 Emby write and serve (4.10) | pass | Synth Chapters E01–E03 show IntroStart, IntroEnd and CreditsStart at the decisions, and keep their 4 plain chapters. Synth Audio S01 has no marker chapters. The Extended copy (130 s) is its own item (120) with its own CreditsStart 100 s; its Files row reads "2 marker(s); Emby skips to the end of the file". The old "can't show credits" text doesn't appear. |
 | 7 Emby wipe matrix and a replaced file | pass | S01E02 keeps its markers through FullRefresh with Replace all (healed), Default, ValidationOnly, a library scan and a restart. S01E03 replaced by a new encode (6,467,367 bytes; the file it replaced was 5,038,532, the first run's re-encode): plugin GET `Stale` true and no marker chapters. The next normal job writes it (`markers_written`), and `Stale` is false. |
-| 8 Emby web Skip Intro | pass | `skip found: True`, t 22.9 s, visible button "Skip Intro". Native Emby apps: needs owner. |
+| 8 Emby web Skip Intro | pass | `skip found: True`, t 22.9 s, visible button "Skip Intro". The lab Embys have no Emby Premiere key, so a click opens "Unlock Feature" and doesn't skip (close-out, "Emby needs Emby Premiere to skip intros"). Native Emby apps: not testable here. |
 | 9 Emby 4.9 | pass | Row 6's first part: marker chapters equal the decisions on 7 files, with 4 plain chapters kept. FullRefresh: markers back. |
-| 10 Check servers restores | pass | Our rows dropped on all three: Plex taggings deleted, Jellyfin 10.11 plugin DELETE, Emby plugin DELETE. One Check servers job listed S01E01 and E03 (2 published), wrote Plex, Jellyfin and Emby back, and all serve the times from before the drop. The second run listed 0 files: "0 published item(s) changed on servers". |
+| 10 Check servers restores | pass | Re-run in the close-out with the `final` flag compared. A forced job on S01E01 first rewrote its stale non-final credits as final (they run to the file's end). Our rows dropped on all three: Plex taggings deleted, Jellyfin 10.11 plugin DELETE, Emby plugin DELETE. One Check servers job listed S01E01 and E03 (2 published), wrote Plex, Jellyfin and Emby back, and all serve the markers from before the drop, Plex's `final` flag included. The second run listed 0 files: "0 published item(s) changed on servers". |
 | 11 Plex version drift | pass | The Plexonly cut was added as a second version of S01E03, which the app can't read. Check servers first: it listed E03, Plex then served none of ours, and the row read "Waiting for this item's other versions to agree on: intro, credits". A normal job kept it waiting. With the copy removed, a normal job wrote both markers again. |
 | 12 Plex P3 and P4 | pass | P3 answer below. P4 answer below. At the end Rick and Morty S01E01 and Synth S01E02 are written back. |
 | 13 L274 final flag | pass | With Keep Plex's, Plex's forced intro detection on the season changed the intro (129.0–156.8 s → 126.8–157.1 s; the row requires the times to differ) and left the credits rows alone (1298000–1320000, `final` true before and after). The next job reads "Keeping Plex's intro" and doesn't mention credits. A normal job over the season under "Use ours" put ours back. |
@@ -463,7 +464,7 @@ phase-1 row 7 under row 19's conditions, with the checks below; all pass.
 | 17 Security | pass | Without the token, `GET /api/markers/season`, `POST /api/markers/season/publish`, `GET /api/markers/sources/local` and `POST /api/markers/reconcile` all answer 401. With it, `season?path=/etc/passwd` and `…/synth-audio/../../etc/passwd` answer 400. |
 | 18 Resources | pass | Forced job on Rick and Morty S01 with its 11 fingerprints deleted, 24 s. Chromaprint: at most 1 ffmpeg at once (sampled every 0.5 s), with `-threads 2`. `mlab-app` peaked at 303.6 % CPU and 242 MiB, against phase 1 row 15's 86 % and 99 MiB (no fingerprinting then). |
 | 19 Phase-1 regression | pass | Rows 14, 1, 2, 3, 13, 4, 6, 5, 7, 8, 9, 10, 16, 18, 19 and 17 all pass. Row 1: 5 Markers written and 9 Needs review; Rick and Morty credits sources disagree today, see the notes. Two expectations changed, see below. |
-| 20 Plex app | needs owner | Open Synth Chapters S01E02 on the lab Plex in a Plex app: Skip Intro at 0:17 and Skip Credits at 1:40. Synth Audio has no published intro (R2/G3). |
+| 20 Plex app | pass (Plex Web) | Plex Web 4.160.0 on the lab Plex, Synth Chapters S01E02 (our intro 17–47 s, credits 100–120 s): "Skip Intro" shown at 18.0 s and a click landed at 47.00 s; "Skip Credits" shown at 101.0 s and a click landed at 120.00 s, then S01E03 started. Viewers need Plex Pass on their own account (or a Plex Pass admin's Home). Plex Web ignores the credits `final` flag. Native Plex apps: not testable here. Details in the close-out. |
 | 21 Check servers schedule | pass | Fresh config: `GET /api/schedules` answers `[]`. A saved `{"job_type": "intro_credits", "reconcile": true}` schedule with Run now twice gave exactly one LOW "Intro & Credits · Check servers" job carrying the schedule's id. The schedule was then deleted. |
 | 22 Deleted Jellyfin item | pass | Phase 1's published `S01E01 - Extended` and `S01E03 - Copy` were removed and scanned. Check servers (E01, E02 and E03 listed) raised no "Couldn't read" warning, and the run after listed nothing. |
 | 23 Emby `Replacing` round trip (note 9) | pass | Check 22 on both Embys (`emby_plugin_check.py --checks 22`). S01E01 starts with markers at 10 s, 40 s and credits 100 s. A slow SQLite trigger on `Chapters3` held a POST of 12–42 s, no credits, inside Emby's chapter write. The store file, read while that POST still waited, held IntroStart 12 s, IntroEnd 42 s, no credits, and `Replacing` IntroStart 10 s, IntroEnd 40 s, CreditsStart 100 s. The container was then killed: `library.db` still held the three old marker rows (MarkerType 1, 2 and 3 at 10, 40 and 100 s). After the restart, Emby served the old markers and the plugin GET answered IntroStart 12 s. A POST without `ReplaceOwn` answered 200 with `Stored` 2. Emby then served only 12 s and 42 s, the store file had no `Replacing`, and the plain chapters were unchanged. The trigger and its table were dropped in a `finally` block; `hold_objects_left` is 0 on both. |
@@ -512,11 +513,9 @@ served credits only. Then Plex's non-forced intro detection ran on the season.
 - **Row 10.**
   - Plex's markers are dropped by deleting our taggings rows. Plex's forced credits detection fails on the synth files
     (phase 1 row 5), so it would drop nothing.
-  - expectation changed: the restored Plex rows are compared in served times without the credits `final` flag. The
-    publisher leaves rows that already serve the wanted times alone, whatever flag a version with another runtime
-    stored, so a restored row can carry a different flag.
   - In the first run, the dropped credits row carried `final` false, left from when S01E01 had its 130 s second version,
-    and the restored row carried `final` true. The first run's check compared the flag too.
+    and the restored row carried `final` true. The close-out fixed the publisher and re-ran the row with the flag
+    compared (see "Phase 2 close-out").
 - **Row 11.**
   - expectation changed: the row predates Plex version drift (Task 9). A version the app can't read now takes our
     markers off the item ("Waiting for this item's other versions to agree").
@@ -553,19 +552,96 @@ served credits only. Then Plex's non-forced intro detection ran on the season.
 
 ### Open items for the owner
 
-- **Row 20 (ledger L276):** Plex app Skip Intro / Skip Credits on the lab Plex.
-- **Native Emby apps (note 6):** Skip Intro on a TV or mobile client.
+- **Row 20 (ledger L276):** done in Plex Web by the close-out; native Plex apps aren't testable here.
+- **Native Emby apps (note 6):** Skip Intro on a TV or mobile client; not testable here. Emby needs Emby Premiere on
+  the server to skip intros (close-out).
 - **G3 and the harness gate (`evidence/eval/phase2-harness.md`, Task 15).**
   - Eval lists, 118 intro episodes: Plex's own markers 23 useful / 15 wrong. Season audio alone 91 / 13 / 14.
   - Shipped (G3 on), High and Medium: 0 useful / 0 wrong. The "Medium beats Plex" gate fails by construction; High
     passes.
   - With G3 off: 23 useful / 7 wrong (eval lists), 23 / 4 (full folder). The gate passes.
   - The owner kept G3 on (§14, 2026-09-15). The lab agrees: row 3 is Needs review where Plex and season audio agree.
-- **Plex `final` flag (row 10; the controller is investigating).** After a longer version is deleted, a credits row
-  can keep `final` false: the publisher leaves a row that already serves the wanted times alone, so the flag stored
-  while S01E01 had its 130 s version stayed on the 120 s file.
+- **Plex `final` flag (row 10).** After a longer version is deleted, a credits row could keep `final` false: the
+  publisher left a row that already serves the wanted times alone, so the flag stored while S01E01 had its 130 s
+  version stayed on the 120 s file. Fixed in the close-out.
 - **Spec note: a new season's lone opener gets its previous-season hint one run late** when the previous season is
-  fingerprinted in the same backfill.
+  fingerprinted in the same backfill (spec §14, 2026-09-15).
   - The hint uses cached fingerprints only, and nothing asks the opener again in that job. Its next run is due,
     because the signature includes whether the previous season has fingerprints.
   - Precision is unaffected; the effect is one run of delay.
+
+## Phase 2 close-out (2026-09-15, lane `lane/p2-closeout` on 07eff93, image `b526c3fb8e0a`)
+
+The owner checks (row 20 and Emby Premiere) and two Task 17 findings, turned into product, docs and lab changes. Lab:
+`mlab-app` recreated on the close-out image; nothing else changed on the servers. Raw owner-check evidence is in
+`results/owner-checks/` (git-ignored).
+
+### Row 20: Plex Web shows and runs Skip Intro and Skip Credits — pass (Plex Web)
+
+- **Setup.** Plex Web 4.160.0 served by the lab Plex, headless Chromium. Every request went through an allowlist (the
+  lab server and plex.tv); no request reached the production server. The server has Plex Pass; the synth VP9/Opus files
+  direct-played.
+- **Synth Chapters S01E02 (our intro 17–47 s, credits 100–120 s, `final` true).**
+
+  | Step | Observed |
+  |---|---|
+  | Played from 0 s | "Skip Intro" shown at 18.0 s |
+  | Clicked "Skip Intro" at 19.75 s | `currentTime` 47.00 s (the marker's end), label "0:47 / 2:00" |
+  | Seek to 96 s, played | "Skip Credits" shown at 101.0 s |
+  | Clicked "Skip Credits" at 102.73 s | `currentTime` 120.00 s (the marker's end), then S01E03 started |
+
+  Both buttons show about 1 s after the marker starts, and Plex Web hides each by itself about 10 s later. Plex Web's
+  code seeks to `endTimeOffset` rounded to whole seconds.
+- **Plex Pass per viewer.** Plex Web's intro skip checks the signed-in account's `intro-markers` feature, and credits
+  skip on a library item checks `credits-markers`. Plex's docs say the same: the account playing needs Plex Pass (or
+  must be in the Home of a Plex Pass admin). A viewer without it gets no skip buttons, even with our markers in place.
+  Not tested with a second account.
+- **`final` and non-final credits.** S01E01 (credits 100–120 s, non-final at the time) and S01E02 (`final` true) behave
+  the same in Plex Web: the same "Skip Credits" times, the same 120.00 s target, no post-play screen, and the same
+  watched time. Plex Web 4.160.0 never reads a marker's `final`. Plex's credits article says some apps minimise the
+  player into the post-play screen at the final credits; that couldn't be checked here.
+- **Native Plex apps (TV, mobile, HTPC):** not testable here.
+- Screenshots: `../screenshots/phase2/row20-plex-web-skip-intro-shown.png`,
+  `../screenshots/phase2/row20-plex-web-after-skip-intro.png` (burnt-in "Chapter 2 47s-100s", player "0:47 / 2:00"),
+  `../screenshots/phase2/row20-plex-web-skip-credits-shown.png`.
+
+### Emby needs Emby Premiere to skip intros (rows 6–9, note 6)
+
+- **Web client code**, `videoosd.js`, the same on 4.10.0.40 and 4.9.1.90: Skip Intro validates the Premiere feature
+  `dvr`, which Emby's licence server checks by server id. Without it the button shows only while a per-browser counter
+  is under 5 (each episode adds 2), a click opens "Unlock Feature" and doesn't seek, and then the button stops showing.
+  `CreditsStart` drives the "Up Next" overlay with no check; Emby's web player has no Skip Credits button.
+- **API** (both lab Embys): `GET /Registrations/dvr` → `IsRegistered` false, `IsTrial` false.
+- **Emby 4.10 web, Synth Chapters S01E03 (our intro 25–55 s):** with fresh browser storage, "Skip Intro" was visible at
+  26.9 s; a click at 27.5 s opened "Unlock Feature" and the video was still at 30.1 s. With the counter preset to 5, no
+  "Skip Intro" appeared inside the intro. Screenshot: `../screenshots/phase2/ownercheck-b-emby410-web-fresh-after-click.png`.
+- **Docs:** Emby's Intro Skip article ("Requires … an Emby Premiere subscription") and Premiere Feature Matrix (Intro
+  Skipping under "Server / All Apps").
+- **Native Emby apps:** not testable here; Emby's docs put Intro Skip under Premiere for all apps.
+- **Product:** the Emby Intro & Credits tab reads `GET /Registrations/dvr` (kept an hour per server URL) and, when
+  `IsRegistered` is false, shows the amber **Emby Premiere** row "Viewers can't skip intros: this Emby server has no Emby
+  Premiere key. Skip Credits (Up Next) still works." with an ⓘ. A failed read shows nothing and is kept 5 minutes.
+  Lab: both Embys' status answers `intro_skip_registered: false`, Jellyfin's has no such field. Screenshot:
+  `../screenshots/phase2/closeout-emby-tab-no-premiere.png`.
+
+### Row 10 re-run: the Plex `final` flag
+
+- **Product.** Rows and the `pv:credits` key that serve the wanted times with a stale `final` flag are now rewritten
+  on a one-version item under "Use ours", never under "Keep Plex's" (spec §14, 2026-09-15 "Plex credits `final`
+  flag").
+- **Lab** (`./phase2_matrix.py run 10`, `MLAB_DIR` at the main checkout's lab folder): pass, 8 of 8 checks.
+  - Before the row, Plex served S01E01's credits 100–120 s with `final` false (and no intro row). A forced job on
+    S01E01 wrote Plex (`markers_written`, "2 marker(s)"): credits 100–120 s with `final` true, intro 10–40 s. Plex's
+    database then held the credits row `98000–120000` with `pv:final` 1 and the part's `pv:credits` entry with
+    `"final":true`.
+  - Our rows dropped on Plex, Jellyfin 10.11 and Emby; one Check servers job listed S01E03 and S01E01 and wrote them
+    back. Plex, Jellyfin and Emby serve exactly the markers from before the drop, Plex's `final` flag included. The
+    second Check servers run listed 0 files.
+  - The earlier run's result is kept in scratch; `results/p2-row-10.json` is this run's.
+
+### Task 17 findings
+
+- **A sibling changed on disk mid-job.** An episode whose season audio answer left out a sibling changed on disk now
+  goes into the job's Season follow-up once the job has read that sibling again (spec §14, 2026-09-15). Unit-tested
+  (`tests/markers/test_season_followups.py::TestAnEpisodeRunBeforeItsChangedSibling`); not re-run in the lab.
+- **A lone opener's previous-season hint one run late:** recorded in spec §14 as a known limitation.

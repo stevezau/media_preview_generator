@@ -267,20 +267,43 @@ def _row_is_final(extra_data: str | None) -> bool:
     return '"pv:final":"1"' in (extra_data or "")
 
 
+def _rows_served_with_final(rows: list[_TaggingRow], mtype: MarkerType) -> list[tuple[int, int, bool]]:
+    """``(start, end, final)`` per taggings row of a type, in served times."""
+    out = []
+    for r in rows:
+        if r.text == _TYPE_TEXT[mtype]:
+            final = _row_is_final(r.extra_data)
+            out.append((*_served_times(mtype, r.time_offset, r.end_time_offset, final), final))
+    return sorted(out)
+
+
 def _served_of(markers: list[Marker] | tuple[Marker, ...], mtype: MarkerType) -> list[tuple[int, int]]:
     return sorted((m.start_ms, m.end_ms) for m in markers if m.type is mtype)
 
 
-def _part_served(mtype: MarkerType, value: str | None) -> list[tuple[int, int]] | None:
-    """Served times in a stored ``pv:intros``/``pv:credits`` value, each entry with its own ``final``; None if unreadable."""
+def _served_with_final(markers: list[Marker] | tuple[Marker, ...], mtype: MarkerType, duration_ms: int) -> list:
+    """``(start, end, final)`` per marker of a type, in served times, with the ``final`` flag this duration gives."""
+    return sorted((m.start_ms, m.end_ms, _stored_times(m, duration_ms)[2]) for m in markers if m.type is mtype)
+
+
+def _part_entries(mtype: MarkerType, value: str | None) -> list[tuple[int, int, bool]] | None:
+    """``(start, end, final)`` per entry of a stored ``pv:intros``/``pv:credits`` value, in served times; None if
+    unreadable."""
     try:
         entries = json.loads(value)["MediaPartMarkersArray"]["MediaPartMarker"]
-        return sorted(
-            _served_times(mtype, int(e["startTimeOffset"]), int(e["endTimeOffset"]), e.get("final") is True)
-            for e in entries
-        )
+        out = []
+        for e in entries:
+            final = e.get("final") is True
+            out.append((*_served_times(mtype, int(e["startTimeOffset"]), int(e["endTimeOffset"]), final), final))
+        return sorted(out)
     except (ValueError, KeyError, TypeError, AttributeError):
         return None
+
+
+def _part_served(mtype: MarkerType, value: str | None) -> list[tuple[int, int]] | None:
+    """Served times in a stored ``pv:intros``/``pv:credits`` value, each entry with its own ``final``; None if unreadable."""
+    entries = _part_entries(mtype, value)
+    return None if entries is None else [(start, end) for start, end, _final in entries]
 
 
 def _stored_row(marker: Marker, duration_ms: int | None) -> tuple[int, int, str]:
@@ -335,6 +358,7 @@ def merge_part_extra_data(
     duration_ms: int | None,
     *,
     previous: list[Marker] | tuple[Marker, ...] = (),
+    refresh_final: frozenset[MarkerType] = frozenset(),
 ) -> str:
     """Rewrite ``pv:intros``/``pv:credits`` for managed types, keep every other key, rebuild ``url``.
 
@@ -346,6 +370,9 @@ def merge_part_extra_data(
         previous: Markers we published before. A managed type without wanted markers loses its key only while the
             key still serves exactly these times (compared in served time, so a changed duration doesn't matter); a
             value Plex re-detected since stays.
+        refresh_final: Types whose value is also rewritten when it serves the wanted times with another ``final``
+            flag than ``duration_ms`` gives (see ``_refresh_final_types``). Other values serving the wanted times
+            stay byte for byte.
 
     Returns:
         The new ``extra_data`` string.
@@ -374,9 +401,10 @@ def merge_part_extra_data(
         key = _PART_KEY[mtype]
         of_type = [m for m in wanted if m.type is mtype]
         if of_type:
-            # A value that already serves these times stays byte for byte: a final flag stored from another
-            # version's runtime serves the same, and rewriting it would flip back on that version's next run.
-            if _part_served(mtype, d.get(key)) != _served_of(of_type, mtype):
+            stale_final = mtype in refresh_final and _part_entries(mtype, d.get(key)) != _served_with_final(
+                of_type, mtype, duration_ms
+            )
+            if _part_served(mtype, d.get(key)) != _served_of(of_type, mtype) or stale_final:
                 d[key] = _part_payload(mtype, of_type, duration_ms)
             continue
         ours_before = [m for m in previous if m.type is mtype]
@@ -458,6 +486,23 @@ class _Plan(NamedTuple):
 def _nothing_to_write(plan: _Plan) -> bool:
     # With nothing of ours to show, other rows (Plex's own) are only renumbered around rows we actually remove.
     return plan.is_noop or not (plan.ours or plan.replaced_texts or plan.part_updates)
+
+
+def _refresh_final_types(
+    parts: list[_Part], wanted: list[Marker], duration_ms: int | None, keep_plex: bool
+) -> frozenset[MarkerType]:
+    """The types whose rows and ``pv:`` key are rewritten when they serve the wanted times with a stale ``final`` flag.
+
+    The flag says whether credits run to the end of the file, and Plex's docs say some apps open their post-play screen
+    at the final credits, so a flag left from a version since deleted is put right. Only on an item with one version:
+    with several, each version's runtime can give another flag for the same times, and rewriting would flip it back
+    on the other version's next run. Only with the file's duration known. Never under "Keep Plex's": rows serving the
+    wanted times can be Plex's own even when our record lists those times (a write that changed nothing still records
+    them), and those rows are never touched. Under "Use ours", Plex's rows with identical times get our flag.
+    """
+    if keep_plex or not duration_ms or duration_ms <= 0 or len(_version_files(parts)) != 1:
+        return frozenset()
+    return frozenset(m.type for m in wanted)
 
 
 def _kept_types(
@@ -838,16 +883,15 @@ class PlexMarkerPublisher(MarkerPublisher):
         wanted = [m for m in wanted if m.type not in kept_types]
         prior = [m for m in prior if m.type not in kept_types]
         wanted_types = {m.type for m in wanted}
+        refresh_final = _refresh_final_types(parts, wanted, duration_ms, keep_plex)
         replaced: set[str] = set()
         for mtype in wanted_types:
-            # Rows already serving exactly the wanted times stay as they are (see merge_part_extra_data for why).
+            # Rows already serving exactly the wanted times stay as they are, unless only their final flag is stale.
             text = _TYPE_TEXT[mtype]
-            current = sorted(
-                _served_times(mtype, r.time_offset, r.end_time_offset, _row_is_final(r.extra_data))
-                for r in rows
-                if r.text == text
-            )
-            if current != _served_of(wanted, mtype):
+            current = _rows_served_with_final(rows, mtype)
+            if [(start, end) for start, end, _final in current] != _served_of(wanted, mtype):
+                replaced.add(text)
+            elif mtype in refresh_final and current != _served_with_final(wanted, mtype, duration_ms):
                 replaced.add(text)
         for mtype in {m.type for m in prior} - wanted_types:
             # A type we no longer show: its rows go only while they still serve exactly what we published. Compared
@@ -877,7 +921,9 @@ class PlexMarkerPublisher(MarkerPublisher):
         own_types = {m.type for m in own_prior} - wanted_types
         part_updates = []
         for part in parts:
-            extra = merge_part_extra_data(part.extra_data, wanted, managed, duration_ms, previous=prior)
+            extra = merge_part_extra_data(
+                part.extra_data, wanted, managed, duration_ms, previous=prior, refresh_final=refresh_final
+            )
             if own_types and part.id in calling_part_ids:
                 extra = merge_part_extra_data(extra, [], own_types, duration_ms, previous=own_prior)
             if not _same_extra_data(extra, part.extra_data):
@@ -971,7 +1017,8 @@ class PlexMarkerPublisher(MarkerPublisher):
 
         Types of ours that are no longer desired are removed only where they still serve exactly ``previous``; Plex's
         own rows of those types stay. A desired type replaces whatever rows the item has of that type, except a type
-        kept as Plex's own while the server is set to "Keep Plex's" (see ``_kept_types``).
+        kept as Plex's own while the server is set to "Keep Plex's" (see ``_kept_types``). Rows and keys that already
+        serve the desired times stay, unless only their credits ``final`` flag is stale (see ``_refresh_final_types``).
 
         Returns:
             The desired set now on the item, kept types left out (see ``MarkerPublisher.write``).

@@ -794,6 +794,49 @@ class TestEmbyTab:
         expect(block.locator(".alert-warning")).to_have_count(0)
         expect(authed_page.locator("#markersInstallPluginBtn")).to_have_count(0)
 
+    @pytest.mark.parametrize(
+        ("state", "message", "details"),
+        [
+            ("ready", "Media Preview Bridge for Emby plugin", {"plugin_version": "1.0.0.0"}),
+            ("needs_plugin", "Install the Media Preview Bridge for Emby plugin", {"catalog_listed": True}),
+        ],
+        ids=["ready", "needs-plugin"],
+    )
+    def test_no_premiere_key_says_viewers_cant_skip_intros(
+        self, authed_page: Page, app_url: str, state: str, message: str, details: dict
+    ) -> None:
+        server = _vendor_server("emby", "emby-1")
+        status = _status(server, state, message, {**details, "intro_skip_registered": False})
+        _mock_server_page(authed_page, server, status)
+        _open_tab(authed_page, app_url, server)
+        premiere = authed_page.locator("#markersStatusBlock div.markers-kv-label:text-is('Emby Premiere') + div")
+        note = premiere.locator(".badge.bg-warning-subtle.markers-premiere-note")
+        expect(note).to_have_text(
+            "Viewers can't skip intros: this Emby server has no Emby Premiere key. Skip Credits (Up Next) still works.",
+            timeout=5000,
+        )
+        tooltip = premiere.locator(".info-icon").evaluate(
+            "el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')"
+        )
+        assert tooltip == "Emby only lets viewers skip intros on servers with Emby Premiere."
+
+    @pytest.mark.parametrize("registered", [True, None], ids=["premiere-key", "couldnt-be-read"])
+    def test_a_premiere_key_or_an_unread_registration_shows_no_note(
+        self, authed_page: Page, app_url: str, registered: bool | None
+    ) -> None:
+        server = _vendor_server("emby", "emby-1")
+        details = {"plugin_version": "1.0.0.0"}
+        if registered is not None:
+            details["intro_skip_registered"] = registered
+        _mock_server_page(
+            authed_page, server, _status(server, "ready", "Media Preview Bridge for Emby plugin", details)
+        )
+        _open_tab(authed_page, app_url, server)
+        block = authed_page.locator("#markersStatusBlock")
+        expect(block).to_contain_text("1.0.0.0 ✓", timeout=5000)
+        expect(block.locator(".markers-premiere-note")).to_have_count(0)
+        expect(block).not_to_contain_text("Emby Premiere")
+
     def test_emby_save_sends_switch_and_libraries(self, authed_page: Page, app_url: str) -> None:
         server = _vendor_server("emby", "emby-1")
         captured = _mock_server_page(

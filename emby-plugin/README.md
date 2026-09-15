@@ -118,8 +118,8 @@ season audio matching) and sends them to every server that has the file. This pl
 own IntroStart / IntroEnd / CreditsStart chapter markers. The file's own chapters are never changed, and markers from
 Emby's own intro detection or other plugins are replaced only when the app asks. When Emby rebuilds an item's chapters
 it writes them again; when the file is replaced by a different file it stops until the app sends new ones; when the item
-is removed it forgets them. Each version of a video is its own Emby item and gets its own markers. No data leaves the
-server.
+is removed it forgets them. Each version of a video is its own Emby item and gets its own markers. Viewers need Emby
+Premiere on the server to skip intros, as for Emby's own intro detection. No data leaves the server.
 
 **Targets:** Emby Server 4.9 and 4.10 (separate DLLs).
 

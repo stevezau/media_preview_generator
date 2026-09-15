@@ -11,6 +11,7 @@
     const SPORTS_NAME_RE = /\bsports?\b/i;
     const EMBY_MANUAL_GUIDE_URL = 'https://github.com/stevezau/media_preview_generator/blob/main/docs/guides.md#emby-the-media-preview-bridge-for-emby-plugin';
     const RESTARTING = { jellyfin: 'Jellyfin', emby: 'Emby' };
+    const EMBY_NO_PREMIERE_NOTE = "Viewers can't skip intros: this Emby server has no Emby Premiere key. Skip Credits (Up Next) still works.";
 
     const $ = (sel, el) => (el || document).querySelector(sel);
     const $$ = (sel, el) => Array.from((el || document).querySelectorAll(sel));
@@ -202,6 +203,11 @@
         // "Can show" never says otherwise; the info icon explains why viewers still see the whole file after it.
         rows.push(kvRow('Can show', 'Intro · credits start'
             + infoIcon('Emby has no credits end: Skip Credits always skips to the end of the file, past any scene after the credits.')));
+        // Only a confirmed "no key": null (Emby couldn't be asked, or has no such route) shows nothing.
+        if (details.intro_skip_registered === false) {
+            rows.push(kvRow('Emby Premiere', badge('warn', EMBY_NO_PREMIERE_NOTE, 'text-wrap text-start lh-base markers-premiere-note')
+                + infoIcon('Emby only lets viewers skip intros on servers with Emby Premiere.')));
+        }
         return kvGrid(rows) + (pluginStates.includes(capability.state) ? '' : warningLine(capability));
     }
 

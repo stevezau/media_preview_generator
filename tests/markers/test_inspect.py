@@ -324,12 +324,70 @@ def test_emby_without_the_plugin_needs_it_and_says_whether_the_catalog_has_it():
     server = MagicMock(name="emby-client")
     server.get_bridge_info.return_value = {"installed": False, "version": None, "features": []}
     server.bridge_catalog_listed.return_value = False
+    server.intro_skip_registered.return_value = None
     payload = inspect.server_status_payload(server, cfg)
     assert payload["capability"]["state"] == "needs_plugin"
     assert payload["capability"]["message"] == "Install the Media Preview Bridge for Emby plugin"
     assert payload["capability"]["details"] == {"catalog_listed": False}
     assert payload["can_show"] == ["intro", "credits"]
     assert payload["settings"] == {"enabled": False, "library_ids": None, "emby": {"on_emby_redetect": "keep_emby"}}
+
+
+def _emby_ready_client():
+    server = MagicMock(name="emby-client")
+    server.get_bridge_info.return_value = {"installed": True, "version": "1.0.0.0", "features": [MARKERS_FEATURE]}
+    server.get_bridge_markers_access.return_value = "ok"
+    return server
+
+
+@pytest.mark.parametrize(
+    ("answer", "details"),
+    [
+        (True, {"plugin_version": "1.0.0.0", "can_show": ["intro", "credits"], "intro_skip_registered": True}),
+        (False, {"plugin_version": "1.0.0.0", "can_show": ["intro", "credits"], "intro_skip_registered": False}),
+        (None, {"plugin_version": "1.0.0.0", "can_show": ["intro", "credits"]}),
+        (RuntimeError("boom"), {"plugin_version": "1.0.0.0", "can_show": ["intro", "credits"]}),
+    ],
+    ids=["premiere", "no-premiere", "unknown", "read-raised"],
+)
+def test_emby_status_says_whether_its_premiere_key_lets_viewers_skip_intros(answer, details):
+    server = _emby_ready_client()
+    if isinstance(answer, Exception):
+        server.intro_skip_registered.side_effect = answer
+    else:
+        server.intro_skip_registered.return_value = answer
+    capability = inspect.server_status_payload(server, server_config("emby", ServerType.EMBY))["capability"]
+    assert (capability["state"], capability["details"]) == ("ready", details)
+    server.intro_skip_registered.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("stype", "info", "access", "state"),
+    [
+        (ServerType.EMBY, None, "ok", "unreachable"),
+        (ServerType.EMBY, {"installed": True, "version": "1.0.0.0", "features": [MARKERS_FEATURE]}, "unauthorized", "misconfigured"),
+        (ServerType.JELLYFIN, _INSTALLED, "ok", "ready"),
+    ],
+    ids=["emby-unreachable", "emby-credentials-rejected", "jellyfin"],
+)  # fmt: skip
+def test_premiere_is_not_asked_of_an_emby_that_cant_answer_or_another_vendor(stype, info, access, state):
+    server = _emby_ready_client() if stype is ServerType.EMBY else _jellyfin_client(info=info)
+    server.get_bridge_info.return_value = info
+    server.get_bridge_markers_access.return_value = access
+    capability = inspect.server_status_payload(server, server_config("s1", stype))["capability"]
+    assert capability["state"] == state
+    assert "intro_skip_registered" not in capability["details"]
+    server.intro_skip_registered.assert_not_called()
+
+
+def test_premiere_is_still_asked_of_an_emby_whose_account_lacks_administrator_rights():
+    server = _emby_ready_client()
+    server.get_bridge_markers_access.return_value = "forbidden"
+    server.intro_skip_registered.return_value = False
+    capability = inspect.server_status_payload(server, server_config("emby", ServerType.EMBY))["capability"]
+    assert capability["state"] == "misconfigured" and "administrator rights" in capability["message"]
+    assert capability["details"] == {"intro_skip_registered": False}
+    server.intro_skip_registered.assert_called_once_with()
 
 
 def test_a_server_type_without_a_publisher_says_so(monkeypatch):

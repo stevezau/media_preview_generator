@@ -2303,17 +2303,85 @@ class TestServedTimesDecideWhatIsAlreadyThere:
             assert _served(Path(plex_db_path(str(folder)))) == [(T.CREDITS, 1_295_324, DUR - 1_000)]
         assert sql_log.count("COMMIT") == 1
 
-    def test_rows_and_key_serving_the_desired_times_are_left_as_they_are(self, tmp_path, sql_log):
+    STORED_NOT_FINAL = (
+        '{"MediaPartMarkersArray":{"attributeName":"credits","version":4,'
+        '"MediaPartMarker":[{"startTimeOffset":1293324,"endTimeOffset":1321000}]}}'
+    )
+    STORED_FINAL = (
+        '{"MediaPartMarkersArray":{"attributeName":"credits","version":4,'
+        '"MediaPartMarker":[{"startTimeOffset":1293324,"endTimeOffset":1319000,"final":true}]}}'
+    )
+
+    def _one_version_serving_credits(self, tmp_path, *, final):
+        """A one-version item whose row and key serve CREDITS' times (1_295_324 .. DUR-1000), stored with ``final``."""
         folder = tmp_path / "Plex Media Server"
-        stored_as_not_final = (
-            '{"MediaPartMarkersArray":{"attributeName":"credits","version":4,'
-            '"MediaPartMarker":[{"startTimeOffset":1293324,"endTimeOffset":1321000}]}}'
+        key = self.STORED_FINAL if final else self.STORED_NOT_FINAL
+        db = _make_db(folder, parts=((self.A, encode_extra_data({"pv:credits": key})),))
+        row = (
+            (1_293_324, DUR - 1_000, CREDITS_FINAL_ROW_EXTRA) if final else (1_293_324, DUR + 1_000, CREDITS_ROW_EXTRA)
         )
-        db = _make_db(folder, parts=((self.A, encode_extra_data({"pv:credits": stored_as_not_final})),))
-        _insert_taggings(db, (7, 563, 0, "credits", 1_293_324, DUR + 1_000, CREDITS_ROW_EXTRA))
+        _insert_taggings(db, (7, 563, 0, "credits", *row))
+        return folder, db
+
+    @pytest.mark.parametrize(
+        "previous", [[CREDITS], ()], ids=["our-record-after-a-longer-version-went", "first-publish-over-plex-s-rows"]
+    )
+    def test_use_ours_rewrites_rows_and_key_with_a_stale_final_flag(self, tmp_path, sql_log, previous):
+        # After a longer version is deleted, credits stored as not final on its runtime run to this file's end. Under
+        # Use ours, Plex's own rows with the same times get our flag too.
+        folder, db = self._one_version_serving_credits(tmp_path, final=False)
+        pub = _publisher(tmp_path, folder, redetect="restore")
+        assert _write_one(pub, [self.CREDITS], previous=previous, path=self.A) == [self.CREDITS]
+        assert _rows(db, "SELECT time_offset, end_time_offset, extra_data FROM taggings WHERE text='credits'") == [
+            (1_293_324, DUR - 1_000, CREDITS_FINAL_ROW_EXTRA)
+        ]
+        assert _part_markers(db, 1, "pv:credits") == [
+            {"startTimeOffset": 1_293_324, "endTimeOffset": DUR - 1_000, "final": True}
+        ]
+        assert _served(Path(plex_db_path(str(folder)))) == [(T.CREDITS, 1_295_324, DUR - 1_000)]
+        assert "COMMIT" in sql_log and pub.last_write_changed is True
+
+    @pytest.mark.parametrize(
+        ("final", "duration_ms"),
+        [(True, DUR), (False, None)],
+        ids=["same-final-flag", "duration-unknown"],
+    )
+    def test_rows_and_key_serving_the_desired_times_with_no_stale_flag_are_left_as_they_are(
+        self, tmp_path, sql_log, final, duration_ms
+    ):
+        folder, db = self._one_version_serving_credits(tmp_path, final=final)
         before = _rows(db, "SELECT * FROM taggings"), _rows(db, "SELECT extra_data FROM media_parts")
-        # Same served times (1_295_324 .. DUR-1000); this caller's duration would store them as final.
-        assert _write_one(_publisher(tmp_path, folder), [self.CREDITS], path=self.A) == [self.CREDITS]
+        pub = _publisher(tmp_path, folder)
+        assert _write_one(pub, [self.CREDITS], previous=[self.CREDITS], duration_ms=duration_ms, path=self.A) == [
+            self.CREDITS
+        ]
+        assert (_rows(db, "SELECT * FROM taggings"), _rows(db, "SELECT extra_data FROM media_parts")) == before
+        assert _writes(sql_log) == [] and pub.last_write_changed is False
+
+    @pytest.mark.parametrize(
+        ("previous", "kept_types"),
+        [((), frozenset()), ([CREDITS], frozenset()), ([CREDITS], frozenset({T.CREDITS}))],
+        ids=["same-times-no-record", "same-times-with-our-record", "kept-as-plex-s-own"],
+    )
+    def test_keep_plex_s_never_rewrites_a_final_flag_alone(self, tmp_path, sql_log, previous, kept_types):
+        folder, db = self._one_version_serving_credits(tmp_path, final=False)
+        before = _rows(db, "SELECT * FROM taggings"), _rows(db, "SELECT extra_data FROM media_parts")
+        pub = _publisher(tmp_path, folder, redetect="keep_plex")
+        pub.write(
+            "7", [self.CREDITS], previous=list(previous), duration_ms=DUR, canonical_path=self.A, kept_types=kept_types
+        )
+        assert (_rows(db, "SELECT * FROM taggings"), _rows(db, "SELECT extra_data FROM media_parts")) == before
+        assert _writes(sql_log) == []
+
+    def test_keep_plex_s_leaves_plex_s_rows_through_a_first_write_and_a_forced_second_write(self, tmp_path, sql_log):
+        # Write 1 changes nothing but its result becomes the item record; write 2 (a forced run) sends that record.
+        folder, db = self._one_version_serving_credits(tmp_path, final=False)
+        before = _rows(db, "SELECT * FROM taggings"), _rows(db, "SELECT extra_data FROM media_parts")
+        pub = _publisher(tmp_path, folder, redetect="keep_plex")
+        item_row = _write_one(pub, [self.CREDITS], previous=(), path=self.A)
+        assert item_row == [self.CREDITS] and pub.last_write_changed is False
+        assert _write_one(pub, [self.CREDITS], previous=item_row, path=self.A) == [self.CREDITS]
+        assert pub.last_write_changed is False
         assert (_rows(db, "SELECT * FROM taggings"), _rows(db, "SELECT extra_data FROM media_parts")) == before
         assert _writes(sql_log) == []
 
