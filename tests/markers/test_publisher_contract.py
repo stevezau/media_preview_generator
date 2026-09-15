@@ -2,8 +2,8 @@
 
 ``write`` returns what is ours on the server item afterwards; ``previous`` is what this app last left on that item (None
 when unknown); ``atomic_writes`` says whether a failed write can have left anything behind. ``MagicMock`` publishers in
-``test_pipeline.py`` never exercise that, so this runs the real Plex (temp database with Plex 1.43's schema) and
-Jellyfin (autospec'd server) publishers.
+``test_pipeline.py`` never exercise that, so this runs the real Plex (temp database with Plex 1.43's schema), Jellyfin
+and Emby (autospec'd servers) publishers.
 """
 
 from __future__ import annotations
@@ -157,7 +157,36 @@ def jellyfin(tmp_path):
     )
 
 
-VENDORS = ["plex", "jellyfin"]
+@pytest.fixture
+def emby(tmp_path):
+    from tests.markers.test_emby_publisher import FakeEmby
+
+    path = _media(tmp_path)
+    fake = FakeEmby(path, item_id="4242")
+    fake.server.get_media_source_durations.return_value = [DUR]
+    cfg = _config("emby-1", ServerType.EMBY, str(tmp_path / "media"))
+
+    def shown():
+        return fake.markers_shown()
+
+    return SimpleNamespace(
+        name="emby",
+        fake=fake,
+        server=fake.server,
+        cfg=cfg,
+        item_id="4242",
+        path=path,
+        shown=shown,
+        both=[("IntroStart", INTRO.start_ms), ("IntroEnd", INTRO.end_ms), ("CreditsStart", CREDITS.start_ms)],
+        # The plugin may still hold what a failed write stored, so an unknown previous clears it.
+        after_unknown_clear="cleared",
+        # Stored before the confirmation failed, and the best-effort DELETE failed too.
+        failure_leaves_markers=True,
+        atomic_writes=False,
+    )
+
+
+VENDORS = ["plex", "jellyfin", "emby"]
 
 
 def _publisher(target):
@@ -202,11 +231,6 @@ def test_known_previous_removes_what_we_published(request, vendor):
     publisher.write(target.item_id, [INTRO, CREDITS], previous=[], duration_ms=DUR, canonical_path=target.path)
     ours = publisher.write(target.item_id, [], previous=[INTRO, CREDITS], duration_ms=DUR, canonical_path=target.path)
     assert ours == [] and target.shown() == []
-
-
-def test_emby_has_no_publisher_yet(tmp_path):
-    cfg = _config("emby-1", ServerType.EMBY, str(tmp_path / "media"))
-    assert publisher_for(MagicMock(), cfg, sibling_markers=lambda _path: None) is None
 
 
 @pytest.mark.parametrize("vendor", VENDORS)
@@ -279,12 +303,13 @@ def test_read_back_accepts_the_recorded_item_files(request, vendor):
     ours = publisher.write(target.item_id, [INTRO, CREDITS], previous=[], duration_ms=DUR, canonical_path=target.path)
     files = publisher.last_item_files
     assert publisher.shows(target.item_id, ours, item_files=files) is Shown.OURS
-    if vendor == "plex":
+    if vendor == "plex":  # one marker set for every version of an item
         assert files == (target.path,)
         assert publisher.shows(target.item_id, ours, item_files=("/other.mkv",)) is Shown.VERSIONS_CHANGED
         assert publisher.shows(target.item_id, ours, item_files=None) is Shown.OURS
     else:
-        assert files is None  # Jellyfin item ids are per version: nothing to track
+        assert files is None  # Jellyfin and Emby item ids are per version: nothing to track
+        assert publisher.shows(target.item_id, ours, item_files=("/other.mkv",)) is Shown.OURS
 
 
 # --- Multi-version Plex items: the real pipeline and PlexMarkerPublisher on one item (plex-item-publish-design.md) ---
@@ -1340,3 +1365,243 @@ class TestKeepPlexsPerType:
         assert item.part_types() == {os.path.basename(item.paths["1080p"]): ["pv:credits", "pv:intros"]}
         (extra,) = _rows(item.db, "SELECT extra_data FROM media_parts WHERE id=1")[0]
         assert json.loads(extra)["pv:intros"] == plex_own
+
+
+# --- Emby through the real pipeline and EmbyMarkerPublisher (the plugin modelled by FakeEmby) ---
+
+EMBY_OWN_INTRO = [("IntroStart", 600_000_000, "Intro"), ("IntroEnd", 900_000_000, "Intro End")]
+SHOWN_EMBY_BOTH = [("IntroStart", INTRO.start_ms), ("IntroEnd", INTRO.end_ms), ("CreditsStart", CREDITS.start_ms)]
+# Credits followed by a scene: a "Credits" chapter 30 s before the end.
+CHAPTERS_EARLY_CREDITS = (
+    Chapter(0, 126_771, "Chapter 1"),
+    Chapter(126_771, 157_068, "Intro"),
+    Chapter(157_068, 1_250_000, "Chapter 2"),
+    Chapter(1_250_000, 1_290_000, "Credits"),
+    Chapter(1_290_000, None, "Stinger"),
+)
+
+
+@pytest.fixture
+def emby_run(emby, tmp_path):
+    emby.server.resolve_remote_path_to_item_id.return_value = emby.item_id
+    emby.server.get_external_ids.return_value = None
+    emby.server.get_plugin_names.return_value = []
+    reg = FakeRegistry({emby.cfg.id: emby.cfg}, servers_by_id={emby.cfg.id: emby.server})
+    store = MarkerStore(str(tmp_path / "markers.db"))
+    item = ProcessableItem(canonical_path=emby.path, server_id=emby.cfg.id)
+    publisher_class = type(_publisher(emby))
+
+    def run(*, force=False, chapters=CHAPTERS_BOTH, settings_raw=NO_ONLINE):
+        with (
+            patch.object(pipeline, "probe_media", return_value=MediaProbe(DUR, chapters)),
+            patch.object(publisher_class, "capability", return_value=CapabilityReport(Capability.READY, "ok")),
+        ):
+            return pipeline.check_item(item, ctx=_ctx(store, reg, settings_raw=settings_raw, force=force))
+
+    def kept():
+        row = store.get_item_publish_state(emby.cfg.id, emby.item_id)
+        return None if row is None else {t.value for t in row.kept_types}
+
+    run.kept = kept
+    yield run
+    store.close()
+
+
+def _row_of(out) -> tuple[str, str]:
+    return out.publisher_rows[0]["status"], out.publisher_rows[0]["message"]
+
+
+class TestEmbyThroughThePipeline:
+    def test_markers_emby_lost_are_written_again(self, emby, emby_run):
+        assert _row_of(emby_run()) == ("markers_written", "2 marker(s)")
+        emby.server.put_emby_markers.reset_mock()
+        assert _row_of(emby_run()) == ("markers_up_to_date", "Up to date")
+        emby.server.put_emby_markers.assert_not_called()
+
+        emby.fake.rows = [r for r in emby.fake.rows if r[0] == "Chapter"]  # a refresh dropped every marker row
+        assert _row_of(emby_run()) == ("markers_written", "2 marker(s)")
+        assert emby.shown() == SHOWN_EMBY_BOTH and emby.server.put_emby_markers.call_count == 1
+
+    def test_forced_run_is_written_only_when_it_restores_something(self, emby, emby_run):
+        emby_run()
+        emby.server.put_emby_markers.reset_mock()
+        assert emby_run(force=True).outcome_key == "markers_up_to_date"
+        emby.server.put_emby_markers.assert_not_called()
+        emby.fake.rows = [r for r in emby.fake.rows if r[0] != "CreditsStart"]
+        assert emby_run(force=True).outcome_key == "markers_published"
+        assert emby.shown() == SHOWN_EMBY_BOTH and emby.server.put_emby_markers.call_count == 1
+
+    def test_a_replaced_file_with_the_same_markers_sends_the_new_file_size(self, emby, emby_run):
+        emby_run()
+        assert emby.server.put_emby_markers.call_args.kwargs["file_size"] == 100
+        with open(emby.path, "wb") as fh:
+            fh.write(b"y" * 250)
+        os.utime(emby.path, ns=(9, 9))
+        emby.server.put_emby_markers.reset_mock()
+        assert _row_of(emby_run()) == ("markers_written", "2 marker(s)")
+        assert emby.server.put_emby_markers.call_args.kwargs["file_size"] == 250
+        emby.server.put_emby_markers.reset_mock()
+        assert emby_run(force=True).outcome_key == "markers_up_to_date"
+        emby.server.put_emby_markers.assert_not_called()
+
+    def test_credits_that_end_before_the_file_are_sent_and_the_row_says_emby_skips_to_the_end(self, emby, emby_run):
+        first, second = emby_run(chapters=CHAPTERS_EARLY_CREDITS), emby_run(chapters=CHAPTERS_EARLY_CREDITS)
+        assert _row_of(first) == ("markers_written", "2 marker(s); Emby skips to the end of the file")
+        assert _row_of(second) == ("markers_up_to_date", "Up to date; Emby skips to the end of the file")
+        assert emby.shown()[-1] == ("CreditsStart", 1_250_000)
+
+    @pytest.mark.parametrize(
+        ("setting", "row", "kept"),
+        [
+            ("restore", ("markers_written", "2 marker(s)"), set()),
+            ("keep_emby", ("markers_up_to_date", "Keeping Emby's intro"), {"intro"}),
+        ],
+    )
+    def test_emby_own_intro_replacing_ours_follows_the_setting(self, emby, emby_run, setting, row, kept):
+        emby.cfg.markers["emby"] = {"on_emby_redetect": setting}
+        emby_run()
+        emby.fake.rows = [r for r in emby.fake.rows if r[0] not in ("IntroStart", "IntroEnd")] + EMBY_OWN_INTRO
+        outs = [emby_run(), emby_run()]
+        assert _row_of(outs[0]) == row
+        assert _row_of(outs[1])[1] == ("Up to date" if setting == "restore" else "Keeping Emby's intro")
+        assert emby_run.kept() == kept
+        own_intro_shown = ("IntroStart", 60_000) in emby.shown()
+        assert own_intro_shown is (setting == "keep_emby")
+
+    def test_keep_emby_on_a_first_publish_then_emby_drops_its_intro(self, emby, emby_run):
+        emby.cfg.markers["emby"] = {"on_emby_redetect": "keep_emby"}
+        emby.fake.rows += EMBY_OWN_INTRO
+        assert _row_of(emby_run()) == ("markers_written", "1 marker(s); keeping Emby's intro")
+        assert emby_run.kept() == {"intro"}
+        emby.fake.rows = [r for r in emby.fake.rows if r not in EMBY_OWN_INTRO]
+        assert _row_of(emby_run()) == ("markers_written", "2 marker(s)")
+        assert emby.shown() == SHOWN_EMBY_BOTH and emby_run.kept() == set()
+
+    def test_a_first_publish_that_keeps_every_type_is_up_to_date_and_clears_nothing(self, emby, emby_run):
+        emby.cfg.markers["emby"] = {"on_emby_redetect": "keep_emby"}
+        emby.fake.rows += [*EMBY_OWN_INTRO, ("CreditsStart", 11_000_000_000, "Credits")]
+        assert _row_of(emby_run()) == ("markers_up_to_date", "Keeping Emby's intro and credits")
+        assert emby_run.kept() == {"intro", "credits"}
+        assert _row_of(emby_run()) == ("markers_up_to_date", "Keeping Emby's intro and credits")
+
+    def test_ours_written_back_for_a_kept_intro_stop_being_reported_as_embys(self, emby, emby_run, tmp_path):
+        emby.cfg.markers["emby"] = {"on_emby_redetect": "keep_emby"}
+        emby.fake.rows += EMBY_OWN_INTRO
+        emby_run()
+        assert emby_run.kept() == {"intro"}
+        # "Replace all metadata" deletes every marker row; the plugin's healer writes back what it stores.
+        from tests.markers.test_emby_publisher import _rows_for
+
+        emby.fake.rows = [("Chapter", 0, "Chapter 1"), *_rows_for(emby.fake.stored)]
+        emby.server.put_emby_markers.reset_mock()
+        first, second = emby_run(), emby_run()
+        assert _row_of(first)[1] == _row_of(second)[1] == "Up to date"
+        assert emby_run.kept() == set() and emby.shown() == SHOWN_EMBY_BOTH
+        emby.server.put_emby_markers.assert_not_called()
+
+    def test_switching_to_use_ours_replaces_the_kept_intro(self, emby, emby_run):
+        emby.cfg.markers["emby"] = {"on_emby_redetect": "keep_emby"}
+        emby.fake.rows += EMBY_OWN_INTRO
+        emby_run()
+        emby.cfg.markers["emby"] = {"on_emby_redetect": "restore"}
+        assert _row_of(emby_run()) == ("markers_written", "2 marker(s)")
+        assert emby.shown() == SHOWN_EMBY_BOTH and emby_run.kept() == set()
+
+    def test_a_kept_only_item_with_nothing_decided_any_more_clears_the_plugin_store(self, emby, emby_run):
+        # The plugin still stores our intro under Keep Emby's; left there, it would show once Emby's intro is gone.
+        emby.cfg.markers["emby"] = {"on_emby_redetect": "keep_emby"}
+        emby.fake.rows += EMBY_OWN_INTRO
+        intro_only = (Chapter(0, 126_771, "Chapter 1"), Chapter(126_771, 157_068, "Intro"), Chapter(157_068, None, "B"))
+        emby_run(chapters=intro_only)
+        assert emby_run.kept() == {"intro"} and emby.fake.stored is not None
+        off = {**NO_ONLINE, "detect": {"intro": False, "credits": False}}
+        out = emby_run(chapters=intro_only, settings_raw=off)
+        assert out.publisher_rows[0]["status"] == "markers_written"
+        emby.server.delete_emby_markers.assert_called_once_with(emby.item_id)
+        assert emby.fake.stored is None and emby_run.kept() == set()
+        assert emby.fake.markers_shown() == [("IntroStart", 60_000), ("IntroEnd", 90_000)]  # Emby's own stay
+
+
+# --- Emby versions: each version is its own item with its own chapters, and Emby plays each with its own ---
+
+
+class EmbyVersions:
+    """Two versions of one episode on Emby (items ``a`` and ``b``, 2160p listed first on both) through the real pipeline
+    and publisher."""
+
+    def __init__(self, tmp_path, monkeypatch):
+        from media_preview_generator.markers.publishers.emby import EmbyMarkerPublisher
+        from tests.markers.test_emby_publisher import FakeEmbyItems
+
+        folder = tmp_path / "media" / "Show (2020) {tvdb-1}" / "Season 01"
+        folder.mkdir(parents=True)
+        self.paths = {}
+        for version, size in (("2160p", 250), ("1080p", 100)):
+            path = folder / f"Show (2020) - S01E01 - {version}.mkv"
+            path.write_bytes(b"x" * size)
+            self.paths[version] = str(path)
+        self.items = {"1080p": "a", "2160p": "b"}
+        self.fake = FakeEmbyItems({"b": self.paths["2160p"], "a": self.paths["1080p"]})
+        server = self.fake.server
+        by_path = {path: self.items[version] for version, path in self.paths.items()}
+        server.resolve_remote_path_to_item_id.side_effect = lambda path, *, library_ids: by_path.get(path)
+        server.get_external_ids.return_value = None
+        server.get_plugin_names.return_value = []
+        self.cfg = _config("emby-1", ServerType.EMBY, str(tmp_path / "media"))
+        self.registry = FakeRegistry({"emby-1": self.cfg}, servers_by_id={"emby-1": server})
+        self.store = MarkerStore(str(tmp_path / "markers.db"))
+        self.chapters: dict[str, tuple[Chapter, ...]] = {}
+        monkeypatch.setattr(
+            pipeline, "probe_media", lambda path, *, ffprobe: MediaProbe(DUR, self.chapters.get(path, ()))
+        )
+        monkeypatch.setattr(EmbyMarkerPublisher, "capability", lambda self: CapabilityReport(Capability.READY, "ok"))
+
+    def run(self, version: str, *, force: bool = False):
+        item = ProcessableItem(canonical_path=self.paths[version], server_id="emby-1")
+        return pipeline.check_item(item, ctx=_ctx(self.store, self.registry, settings_raw=NO_ONLINE, force=force))
+
+    def shown(self, version: str) -> list[tuple[str, int]]:
+        return self.fake.items[self.items[version]].markers_shown()
+
+    def posts(self) -> list[tuple[str, int | None]]:
+        return [(c.args[0], c.kwargs["file_size"]) for c in self.fake.server.put_emby_markers.call_args_list]
+
+
+@pytest.fixture
+def emby_versions(tmp_path, monkeypatch):
+    item = EmbyVersions(tmp_path, monkeypatch)
+    yield item
+    item.store.close()
+
+
+EMBY_BOTH = [("IntroStart", INTRO_X[0]), ("IntroEnd", INTRO_X[1]), ("CreditsStart", CREDITS_AT)]
+
+
+class TestEmbyVersions:
+    def test_each_version_publishes_its_own_markers_on_its_own_item(self, emby_versions):
+        item = emby_versions
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        item.chapters[item.paths["2160p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT - 19_000)
+        first = item.run("1080p")  # 2160p was never decided: it doesn't hold 1080p back
+        assert _outcomes(first) == ["published"] and first.publisher_rows[0]["message"] == "2 marker(s)"
+        assert item.shown("1080p") == EMBY_BOTH and item.shown("2160p") == []
+        assert _outcomes(item.run("2160p")) == ["published"]
+        assert item.shown("2160p") == [*EMBY_BOTH[:2], ("CreditsStart", CREDITS_AT - 19_000)]
+        assert item.shown("1080p") == EMBY_BOTH
+        assert item.posts() == [("a", 100), ("b", 250)]  # each item with its own file's size
+        assert item.store.get_item_publish_state("emby-1", "a").item_files is None
+        assert _outcomes(item.run("1080p"), item.run("2160p"), item.run("1080p", force=True)) == ["up_to_date"] * 3
+        assert len(item.posts()) == 2
+
+    def test_a_version_re_decided_leaves_the_other_versions_item_alone(self, emby_versions):
+        item = emby_versions
+        for version in ("1080p", "2160p"):
+            item.chapters[item.paths[version]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        item.run("1080p"), item.run("2160p")
+        assert item.shown("1080p") == item.shown("2160p") == EMBY_BOTH
+        item.chapters[item.paths["2160p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT - 19_000)
+        os.utime(item.paths["2160p"], ns=(5, 5))  # a new cut of 2160p
+        assert _outcomes(item.run("2160p"), item.run("1080p")) == ["published", "up_to_date"]
+        assert item.shown("2160p")[-1] == ("CreditsStart", CREDITS_AT - 19_000)
+        assert item.shown("1080p") == EMBY_BOTH
+        assert [post[0] for post in item.posts()] == ["a", "b", "b"]

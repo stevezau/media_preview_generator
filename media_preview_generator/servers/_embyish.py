@@ -111,6 +111,25 @@ def is_video_library_folder(raw: dict) -> bool:
     return collection_type not in _NON_VIDEO_COLLECTION_TYPES
 
 
+def _chapter_rows(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """An item's ``Chapters`` as ``{"marker_type", "start_ms", "name"}`` rows (rows without an integer start skipped)."""
+    out: list[dict[str, Any]] = []
+    for chapter in item.get("Chapters") or []:
+        if not isinstance(chapter, dict):
+            continue
+        ticks = chapter.get("StartPositionTicks")
+        if not isinstance(ticks, int) or isinstance(ticks, bool):
+            continue
+        out.append(
+            {
+                "marker_type": str(chapter.get("MarkerType") or "Chapter"),
+                "start_ms": ticks // 10_000,
+                "name": str(chapter.get("Name") or ""),
+            }
+        )
+    return out
+
+
 class EmbyApiClient(MediaServer):
     """Base class for Emby and Jellyfin clients.
 
@@ -566,23 +585,7 @@ class EmbyApiClient(MediaServer):
             are skipped), or None when the item couldn't be fetched.
         """
         item = self._fetch_item_fields(item_id, "Chapters")
-        if item is None:
-            return None
-        out: list[dict[str, Any]] = []
-        for chapter in item.get("Chapters") or []:
-            if not isinstance(chapter, dict):
-                continue
-            ticks = chapter.get("StartPositionTicks")
-            if not isinstance(ticks, int) or isinstance(ticks, bool):
-                continue
-            out.append(
-                {
-                    "marker_type": str(chapter.get("MarkerType") or "Chapter"),
-                    "start_ms": ticks // 10_000,
-                    "name": str(chapter.get("Name") or ""),
-                }
-            )
-        return out
+        return None if item is None else _chapter_rows(item)
 
     def get_media_source_durations(self, item_id: str) -> list[int | None] | None:
         """Duration of every version (MediaSource) of an item.
@@ -606,6 +609,33 @@ class EmbyApiClient(MediaServer):
             durations.append(ticks // 10_000 if usable else None)
         return durations
 
+    def get_chapters_and_versions(
+        self, item_id: str
+    ) -> tuple[list[dict[str, Any]], list[tuple[str, str | None]]] | None:
+        """An item's chapter rows and every version of it, in one read.
+
+        Emby keeps each version of a video as its own item with its own chapters, and lists an item's other versions
+        as MediaSources next to its own: with an API key only when ``AlternateMediaSources`` is asked for, on the
+        per-user route always. Each source names its version's item (``ItemId``). The order is Emby's and needn't put
+        the item's own file first.
+
+        Args:
+            item_id: Server item id.
+
+        Returns:
+            ``(chapter rows as get_chapter_markers returns them, [(server-side path, version item id or None)])``
+            (sources without a path left out), or None when the item couldn't be fetched.
+        """
+        item = self._fetch_item_fields(item_id, "Chapters,MediaSources,AlternateMediaSources")
+        if item is None:
+            return None
+        versions = [
+            (str(source["Path"]), str(source["ItemId"]) if source.get("ItemId") else None)
+            for source in item.get("MediaSources") or []
+            if isinstance(source, dict) and source.get("Path")
+        ]
+        return _chapter_rows(item), versions
+
     def get_plugin_names(self) -> list[str] | None:
         """Names of the plugins installed on the server (``GET /Plugins``, administrators only on Jellyfin).
 
@@ -626,6 +656,68 @@ class EmbyApiClient(MediaServer):
         if not isinstance(body, list):
             return None
         return [str(p["Name"]) for p in body if isinstance(p, dict) and p.get("Name")]
+
+    # A valid item id no library item has, per vendor: the admin-only Markers route answers it without touching an item.
+    _BRIDGE_ACCESS_PROBE_ID = ""
+
+    def get_bridge_info(self) -> dict[str, Any] | None:
+        """Bridge plugin presence, version and feature list.
+
+        Returns:
+            ``{"installed": bool, "version": str | None, "features": list[str]}``, or None when the server
+            can't be reached (transport error or a 5xx, which Jellyfin answers to every route while starting up).
+        """
+        not_installed: dict[str, Any] = {"installed": False, "version": None, "features": []}
+        try:
+            resp = self._request("GET", "/MediaPreviewBridge/Ping", timeout=10)
+        except requests.RequestException as exc:
+            logger.debug("Bridge ping failed on {}: {}", self.name, type(exc).__name__)
+            return None
+        if resp.status_code >= 500:
+            return None
+        if resp.status_code != 200:
+            return not_installed
+        try:
+            payload = resp.json()
+        except ValueError:
+            return not_installed
+        if not isinstance(payload, dict):
+            return not_installed
+        # Jellyfin's plugin answers camelCase, Emby keeps the C# PascalCase names.
+        features = payload.get("features", payload.get("Features"))
+        return {
+            "installed": bool(payload.get("ok", payload.get("Ok"))),
+            "version": payload.get("version", payload.get("Version")),
+            "features": [str(f) for f in features] if isinstance(features, list) else [],
+        }
+
+    def get_bridge_markers_access(self) -> str | None:
+        """Whether this server's credentials may use the Bridge markers routes, which need an administrator.
+
+        Probes with an id no item has: an authorised caller gets the plugin's "item not found".
+
+        Returns:
+            ``"ok"``; ``"unauthorized"`` (401: credentials rejected); ``"forbidden"`` (403: not an administrator);
+            None when it couldn't be told (unreachable, no route, other status).
+        """
+        try:
+            resp = self._request("GET", f"/MediaPreviewBridge/Markers/{self._BRIDGE_ACCESS_PROBE_ID}", timeout=10)
+        except requests.RequestException as exc:
+            logger.debug("Bridge markers access probe failed on {}: {}", self.name, type(exc).__name__)
+            return None
+        if resp.status_code == 401:
+            return "unauthorized"
+        if resp.status_code == 403:
+            return "forbidden"
+        if resp.status_code == 200:
+            return "ok"
+        if resp.status_code == 404:
+            try:
+                body = resp.json()
+            except ValueError:
+                return None
+            return "ok" if isinstance(body, dict) and "error" in body else None
+        return None
 
     def get_external_ids(self, item_id: str) -> dict[str, Any] | None:
         """ProviderIds (series ids for episodes) plus season/episode numbers.

@@ -1042,10 +1042,17 @@ def _publish_to(
             and basis == (decided_hash, item_version)
         )
 
+    vendor = cfg.type.value.capitalize()
+
+    def _shown_differently(ours: list[Marker]) -> str:
+        # How the server shows some of ours other than decided (Emby: credits that end before the file does).
+        return publisher.projection_note(ours, duration_ms=rec.duration_ms)
+
     def _up_to_date(kept_types: frozenset[MarkerType]) -> dict:
         if needs_review and not wanted:
             return _row(cfg, publisher.name, ServerStatus.NEEDS_REVIEW, "Sources don't agree yet", path)
-        message = with_kept_note("", kept_note(kept_types, wanted)) or "Up to date"
+        message = with_kept_note("", kept_note(kept_types, wanted, vendor)) or "Up to date"
+        message = with_kept_note(message, _shown_differently([m for m in wanted if m.type not in kept_types]))
         return _row(cfg, publisher.name, ServerStatus.UP_TO_DATE, message, path)
 
     # Held from reading what is ours on the item until the result is recorded (lock order: see _KeyedLocks).
@@ -1081,9 +1088,7 @@ def _publish_to(
                 )
                 if shown is None:
                     return {**_up_to_date(item_row.kept_types), READ_BACK_FAILED: True}
-                released = (
-                    bool(item_row.kept_types) and _live_markers_settings(ctx, cfg).on_plex_redetect != "keep_plex"
-                )
+                released = bool(item_row.kept_types) and not _live_markers_settings(ctx, cfg).keeps_server_markers
                 if shown is Shown.OURS and not released:
                     return _up_to_date(item_row.kept_types)
                 reason = {
@@ -1092,7 +1097,9 @@ def _publish_to(
                 }.get(shown, f"markers {shown.value} since last run")
             logger.info("{} item {}: {}; publishing again", cfg.name, item_id, reason)
         previous = _previous_on_item(item_row, publisher)
-        if not wanted and previous == [] and own_previous is None:
+        # Emby's plugin still stores ours for a kept type, out of sight: nothing to show still clears them.
+        kept_hold_ours = publisher.kept_types_hold_ours and item_row is not None and bool(item_row.kept_types)
+        if not wanted and previous == [] and own_previous is None and not kept_hold_ours:
             if needs_review:
                 return _row(cfg, publisher.name, ServerStatus.NEEDS_REVIEW, "Sources don't agree yet", path)
             message = "This server can't show the markers found for this file" if markers else "No markers found"
@@ -1143,7 +1150,7 @@ def _publish_to(
         if not changed and _unchanged(version):
             return _up_to_date(kept)  # a forced run whose write changed nothing
         store.set_publish_basis(rec.id, cfg.id, decided_hash=decided_hash, item_version=version)
-        note = kept_note(kept, wanted)
+        note = with_kept_note(kept_note(kept, wanted, vendor), _shown_differently(ours))
         shown_types = {m.type for m in ours} | kept
         waiting_for = [m.type.value for m in wanted if m.type not in shown_types]
         if waiting_for:

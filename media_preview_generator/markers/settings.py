@@ -26,6 +26,7 @@ SOURCE_IDS: tuple[str, ...] = (
 )
 PUBLISH_WHEN_VALUES: tuple[str, ...] = ("high", "medium")
 ON_PLEX_REDETECT_VALUES: tuple[str, ...] = ("restore", "keep_plex")
+ON_EMBY_REDETECT_VALUES: tuple[str, ...] = ("restore", "keep_emby")
 SECRET_MASK = "****"
 _API_KEY_RE = re.compile(r"^[^\s]{1,200}$")
 # Sports libraries are excluded by default: no source covers them (spec §4). Name-based because no vendor
@@ -55,11 +56,13 @@ def default_server_markers(server_type: str) -> dict[str, Any]:
         server_type: ``plex``, ``emby`` or ``jellyfin``.
 
     Returns:
-        A fresh dict; Plex servers also get the ``plex`` sub-block.
+        A fresh dict; Plex servers also get the ``plex`` sub-block, Emby servers the ``emby`` one.
     """
     block: dict[str, Any] = {"enabled": False, "library_ids": None}
     if server_type == "plex":
         block["plex"] = {"db_write_confirmed_at": None, "on_plex_redetect": "restore"}
+    if server_type == "emby":
+        block["emby"] = {"on_emby_redetect": "restore"}
     return block
 
 
@@ -126,6 +129,15 @@ class ServerMarkersSettings:
     library_ids: tuple[str, ...] | None
     db_write_confirmed_at: str | None
     on_plex_redetect: str
+    on_emby_redetect: str = "restore"
+
+    @property
+    def keeps_server_markers(self) -> bool:
+        """Whether the server's own markers of a type stay instead of ours ("Keep Plex's", "Keep Emby's").
+
+        Each server type loads only its own block, so the other vendor's field is always its default.
+        """
+        return self.on_plex_redetect == "keep_plex" or self.on_emby_redetect == "keep_emby"
 
 
 def _normalise_sources(raw_sources: Any, existing_sources: Any) -> tuple[list[dict] | None, str]:
@@ -257,6 +269,14 @@ def validate_server(raw: object, server_type: str) -> tuple[dict | None, str]:
         if block["enabled"] and not confirmed:
             return None, "Confirm the Plex database write before turning on Intro & Credits for this Plex server"
         block["plex"] = {"db_write_confirmed_at": confirmed, "on_plex_redetect": redetect}
+    if server_type == "emby":
+        emby_raw = raw.get("emby") or {}
+        if not isinstance(emby_raw, dict):
+            return None, "markers.emby must be an object"
+        redetect = emby_raw.get("on_emby_redetect", "restore")
+        if redetect not in ON_EMBY_REDETECT_VALUES:
+            return None, "markers.emby.on_emby_redetect must be 'restore' or 'keep_emby'"
+        block["emby"] = {"on_emby_redetect": redetect}
     return block, ""
 
 
@@ -327,12 +347,14 @@ def load_server(raw: object, server_type: str) -> ServerMarkersSettings:
             )
         block = default_server_markers(server_type)
     plex = block.get("plex") or {}
+    emby = block.get("emby") or {}
     ids = block["library_ids"]
     return ServerMarkersSettings(
         enabled=block["enabled"],
         library_ids=tuple(ids) if ids is not None else None,
         db_write_confirmed_at=plex.get("db_write_confirmed_at"),
         on_plex_redetect=plex.get("on_plex_redetect", "restore"),
+        on_emby_redetect=emby.get("on_emby_redetect", "restore"),
     )
 
 

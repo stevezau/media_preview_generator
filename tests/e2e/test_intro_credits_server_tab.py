@@ -207,6 +207,7 @@ class TestPlexTab:
         expect(_lib_toggle(authed_page, "3")).not_to_be_checked()
         expect(authed_page.locator("#markersPlexRedetectGroup")).to_be_visible()
         expect(authed_page.locator("#markersRedetectRestore")).to_be_checked()
+        expect(authed_page.locator("#markersEmbyRedetectGroup")).to_be_hidden()
         expect(authed_page.locator("#markersEnabled")).not_to_be_checked()
 
     def test_detection_on_with_keep_plex_says_plexs_markers_are_kept(self, authed_page: Page, app_url: str) -> None:
@@ -593,6 +594,7 @@ class TestJellyfinTab:
             {"method": "POST", "url": f"{app_url}/api/servers/jf-1/install-plugin"},
         ]
         expect(authed_page.locator("#markersPlexRedetectGroup")).to_be_hidden()
+        expect(authed_page.locator("#markersEmbyRedetectGroup")).to_be_hidden()
 
     def test_plugin_outdated_offers_update(self, authed_page: Page, app_url: str) -> None:
         server = _vendor_server("jellyfin", "jf-1")
@@ -680,7 +682,48 @@ class TestEmbyTab:
         _flip_switch_on(authed_page)
         expect(authed_page.locator("#markersPlexConfirmModal")).to_be_hidden()
         body = _save_and_get_put(authed_page, captured)
-        assert body["markers"] == {"enabled": True, "library_ids": None}
+        assert body["markers"] == {"enabled": True, "library_ids": None, "emby": {"on_emby_redetect": "restore"}}
+
+    def test_emby_markers_setting_is_named_and_explained(self, authed_page: Page, app_url: str) -> None:
+        server = _vendor_server("emby", "emby-1")
+        status = _status(server, "ready", "Media Preview Bridge for Emby plugin", {"plugin_version": "1.0.0.0"})
+        _mock_server_page(authed_page, server, status)
+        _open_tab(authed_page, app_url, server)
+        group = authed_page.locator("#markersEmbyRedetectGroup")
+        expect(group).to_be_visible(timeout=5000)
+        expect(authed_page.locator("#markersPlexRedetectGroup")).to_be_hidden()
+        expect(group.locator(".fw-semibold")).to_have_text("When Emby has its own markers")
+        expect(group.locator("[role='group']")).to_have_attribute("aria-label", "When Emby has its own markers")
+        expect(group.locator("label[for='markersEmbyRedetectRestore']")).to_have_text("Use ours")
+        expect(group.locator("label[for='markersEmbyRedetectKeep']")).to_have_text("Keep Emby's")
+        expect(group.locator("#markersEmbyRedetectRestore")).to_have_attribute("value", "restore")
+        expect(group.locator("#markersEmbyRedetectKeep")).to_have_attribute("value", "keep_emby")
+        expect(group.locator("#markersEmbyRedetectRestore")).to_be_checked()
+        icon = group.locator(".info-icon")
+        tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
+        assert tooltip == (
+            "Emby can show intro and credits markers of its own, from its intro detection (Emby Premiere) or another "
+            "plugin. Before we publish: 'Use ours' writes ours over them; 'Keep Emby's' leaves them and writes ours "
+            "only for the types Emby has none of. After we publish, Emby's detection can replace ours: 'Use ours' "
+            "writes ours again on the next Intro & Credits job that checks the file; 'Keep Emby's' keeps Emby's until "
+            "you switch to 'Use ours' or Emby removes them."
+        )
+
+    @pytest.mark.parametrize(
+        ("stored", "click", "sent"), [("restore", "Keep", "keep_emby"), ("keep_emby", "Restore", "restore")]
+    )
+    def test_emby_markers_setting_loads_the_stored_choice_and_sends_the_new_one(
+        self, authed_page: Page, app_url: str, stored: str, click: str, sent: str
+    ) -> None:
+        markers = {"enabled": True, "library_ids": ["1"], "emby": {"on_emby_redetect": stored}}
+        server = _vendor_server("emby", "emby-1", markers)
+        captured = _mock_server_page(authed_page, server, _status(server, "ready", "", {"plugin_version": "1.0.0.0"}))
+        _open_tab(authed_page, app_url, server)
+        checked = "Keep" if stored == "keep_emby" else "Restore"
+        expect(authed_page.locator(f"#markersEmbyRedetect{checked}")).to_be_checked(timeout=5000)
+        authed_page.locator(f"label[for='markersEmbyRedetect{click}']").click()
+        body = _save_and_get_put(authed_page, captured)
+        assert body["markers"] == {"enabled": True, "library_ids": ["1"], "emby": {"on_emby_redetect": sent}}
 
     def test_emby_unknown_state_shows_the_message(self, authed_page: Page, app_url: str) -> None:
         server = _vendor_server("emby", "emby-1")

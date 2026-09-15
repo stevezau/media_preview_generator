@@ -113,6 +113,7 @@ class TestValidateServer:
         assert err == ""
         assert block == ms.default_server_markers(server_type)
         assert ("plex" in block) is (server_type == "plex")
+        assert ("emby" in block) is (server_type == "emby")
 
     def test_plex_enable_requires_confirmation(self):
         block, err = ms.validate_server({"enabled": True}, "plex")
@@ -124,11 +125,48 @@ class TestValidateServer:
         assert err == "" and block["enabled"] is True
         assert block["plex"] == {"db_write_confirmed_at": "2026-09-13T10:00:00+00:00", "on_plex_redetect": "restore"}
 
-    @pytest.mark.parametrize("server_type", ["emby", "jellyfin"])
-    def test_non_plex_enable_needs_no_confirmation_and_drops_plex_block(self, server_type):
+    @pytest.mark.parametrize(
+        ("server_type", "expected"),
+        [
+            ("emby", {"enabled": True, "library_ids": None, "emby": {"on_emby_redetect": "restore"}}),
+            ("jellyfin", {"enabled": True, "library_ids": None}),
+        ],
+    )
+    def test_non_plex_enable_needs_no_confirmation_and_drops_plex_block(self, server_type, expected):
         raw = {"enabled": True, "plex": {"db_write_confirmed_at": "x"}}
         block, err = ms.validate_server(raw, server_type)
-        assert err == "" and block == {"enabled": True, "library_ids": None}
+        assert err == "" and block == expected
+
+    @pytest.mark.parametrize(("server_type", "has_emby_block"), [("plex", False), ("emby", True), ("jellyfin", False)])
+    def test_emby_block_is_kept_only_for_emby(self, server_type, has_emby_block):
+        raw = {"enabled": False, "emby": {"on_emby_redetect": "keep_emby"}}
+        if server_type == "plex":
+            raw["plex"] = {"db_write_confirmed_at": None}
+        block, err = ms.validate_server(raw, server_type)
+        assert err == ""
+        assert block.get("emby") == ({"on_emby_redetect": "keep_emby"} if has_emby_block else None)
+        settings = ms.load_server(raw, server_type)
+        assert settings.on_emby_redetect == ("keep_emby" if has_emby_block else "restore")
+        assert settings.keeps_server_markers is has_emby_block
+
+    @pytest.mark.parametrize("raw", [{"emby": {"on_emby_redetect": "keep_plex"}}, {"emby": "keep_emby"}])
+    def test_rejects_bad_emby_block(self, raw):
+        block, err = ms.validate_server(raw, "emby")
+        assert block is None and "markers.emby" in err
+
+    @pytest.mark.parametrize(
+        ("server_type", "raw", "keeps"),
+        [
+            ("plex", {"plex": {"db_write_confirmed_at": "t", "on_plex_redetect": "keep_plex"}}, True),
+            ("plex", {"plex": {"db_write_confirmed_at": "t", "on_plex_redetect": "restore"}}, False),
+            ("emby", {"emby": {"on_emby_redetect": "keep_emby"}}, True),
+            ("emby", {"emby": {"on_emby_redetect": "restore"}}, False),
+            ("emby", {}, False),
+            ("jellyfin", {}, False),
+        ],
+    )
+    def test_keeps_server_markers_follows_each_vendors_setting(self, server_type, raw, keeps):
+        assert ms.load_server({"enabled": True, **raw}, server_type).keeps_server_markers is keeps
 
     def test_rejects_bad_on_plex_redetect(self):
         raw = {"plex": {"on_plex_redetect": "sometimes"}}

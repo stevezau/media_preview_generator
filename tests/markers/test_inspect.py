@@ -313,14 +313,28 @@ def test_jellyfin_ready_details(factory):
     assert payload["can_show"] == ["intro", "credits", "recap", "preview"]
 
 
-def test_emby_needs_its_plugin():
-    cfg = server_config("emby", ServerType.EMBY, markers={"enabled": False, "library_ids": None})
+def test_emby_without_the_plugin_needs_it_and_says_whether_the_catalog_has_it():
+    cfg = server_config(
+        "emby",
+        ServerType.EMBY,
+        markers={"enabled": False, "library_ids": None, "emby": {"on_emby_redetect": "keep_emby"}},
+    )
     server = MagicMock(name="emby-client")
+    server.get_bridge_info.return_value = {"installed": False, "version": None, "features": []}
+    server.bridge_catalog_listed.return_value = False
     payload = inspect.server_status_payload(server, cfg)
     assert payload["capability"]["state"] == "needs_plugin"
-    assert "Emby" in payload["capability"]["message"] and "plugin" in payload["capability"]["message"]
+    assert payload["capability"]["message"] == "Install the Media Preview Bridge for Emby plugin"
+    assert payload["capability"]["details"] == {"catalog_listed": False}
     assert payload["can_show"] == ["intro", "credits"]
-    assert server.method_calls == []
+    assert payload["settings"] == {"enabled": False, "library_ids": None, "emby": {"on_emby_redetect": "keep_emby"}}
+
+
+def test_a_server_type_without_a_publisher_says_so(monkeypatch):
+    monkeypatch.setattr(inspect, "publisher_for", lambda server, config, **kwargs: None)
+    payload = inspect.server_status_payload(MagicMock(), server_config("jf", ServerType.JELLYFIN))
+    assert payload["capability"]["state"] == "needs_plugin"
+    assert payload["capability"]["message"] == "No marker publisher for this server type"
 
 
 def test_server_turned_off_is_never_probed(factory):
@@ -935,6 +949,91 @@ def test_a_credits_end_that_differs_is_not_up_to_date(store, factory, stype, dec
 
 PLEX_CREDITS = Marker(T.CREDITS, 1_250_000, 1_280_000, ())
 PLEX_INTRO = Marker(T.INTRO, 60_000, 90_000, ())
+EMBY_INTRO = PLEX_INTRO
+
+
+def _emby_rows(*markers):
+    rows = []
+    for m in markers:
+        if m.type is T.INTRO:
+            rows += [
+                {"marker_type": "IntroStart", "start_ms": m.start_ms},
+                {"marker_type": "IntroEnd", "start_ms": m.end_ms},
+            ]
+        else:
+            rows.append({"marker_type": "CreditsStart", "start_ms": m.start_ms})
+    return rows
+
+
+def test_emby_plan_says_emby_skips_to_the_end_of_the_file_for_credits_that_end_before_it(store, factory):
+    early = Marker(T.CREDITS, 1_250_000, 1_290_000, ("chapters",))  # a scene follows: ends 30 s before the file does
+    _known_file(
+        store,
+        {T.INTRO: _decided(INTRO), T.CREDITS: _decided(early), T.RECAP: _none(T.RECAP), T.PREVIEW: _none(T.PREVIEW)},
+    )
+    registry = _registry(server_config("emby", ServerType.EMBY), server_config("jf", ServerType.JELLYFIN))
+    registry.get("emby").get_chapter_markers.return_value = _emby_rows(INTRO, early)
+    registry.get("jf").get_media_segments.return_value = _jf_rows(INTRO, early)
+    payload = inspect.item_payload(PATH, registry=registry, store=store)
+    # Emby gets the credits start anyway (owner decision 2026-09-14) and says what its player does with it.
+    assert (_row(payload, "emby")["plan"], _row(payload, "emby")["plan_reason"]) == (
+        "up_to_date",
+        "Emby skips to the end of the file",
+    )
+    assert (_row(payload, "jf")["plan"], _row(payload, "jf")["plan_reason"]) == ("up_to_date", "")
+    registry.get("emby").get_chapter_markers.return_value = _emby_rows(INTRO)
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), "emby")
+    assert (row["plan"], row["plan_reason"]) == ("will_replace", "Emby skips to the end of the file")
+    registry.get("emby").get_chapter_markers.return_value = None
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), "emby")
+    assert (row["plan"], row["plan_reason"]) == ("unknown", "Emby skips to the end of the file")
+
+
+def test_emby_keep_rule_compares_credits_by_their_start(store, factory):
+    # Emby keeps no credits end: a credits start equal to ours is ours, not Emby's, even for credits ending early.
+    early = Marker(T.CREDITS, 1_250_000, 1_290_000, ("chapters",))
+    _known_file(
+        store,
+        {T.INTRO: _decided(INTRO), T.CREDITS: _decided(early), T.RECAP: _none(T.RECAP), T.PREVIEW: _none(T.PREVIEW)},
+    )
+    markers = {"enabled": True, "library_ids": None, "emby": {"on_emby_redetect": "keep_emby"}}
+    registry = _registry(server_config("emby", ServerType.EMBY, markers=markers))
+    registry.get("emby").get_chapter_markers.return_value = _emby_rows(INTRO, early)
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), "emby")
+    assert (row["plan"], row["plan_reason"]) == ("up_to_date", "Emby skips to the end of the file")
+
+
+def test_emby_credits_that_run_to_the_end_carry_no_note(store, factory):
+    _known_file(store)
+    registry = _registry(server_config("emby", ServerType.EMBY))
+    registry.get("emby").get_chapter_markers.return_value = _emby_rows(INTRO, CREDITS)
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), "emby")
+    assert (row["plan"], row["plan_reason"]) == ("up_to_date", "")
+
+
+@pytest.mark.parametrize(
+    ("setting", "ours", "kept", "shown", "plan", "reason"),
+    [
+        ("keep_emby", [INTRO, CREDITS], None, [EMBY_INTRO, CREDITS], "keeps_emby", "Keeping Emby's intro"),
+        ("restore", [INTRO, CREDITS], None, [EMBY_INTRO, CREDITS], "will_replace", ""),
+        ("keep_emby", [INTRO, CREDITS], None, [CREDITS], "will_replace", ""),  # gone, not replaced: ours go back
+        ("keep_emby", [INTRO, CREDITS], None, [INTRO, CREDITS], "up_to_date", ""),
+        ("keep_emby", [CREDITS], {T.INTRO}, [EMBY_INTRO, CREDITS], "keeps_emby", "Keeping Emby's intro"),
+        ("keep_emby", [CREDITS], {T.INTRO}, [CREDITS], "will_replace", ""),  # Emby dropped its intro
+        ("restore", [CREDITS], {T.INTRO}, [EMBY_INTRO, CREDITS], "will_replace", ""),  # switched to Use ours
+        # A refresh deleted Emby's intro and the plugin wrote back the intro it stores: ours again, not Emby's.
+        ("keep_emby", [CREDITS], {T.INTRO}, [INTRO, CREDITS], "up_to_date", ""),
+    ],
+    ids=["keep-replaced", "restore-replaced", "keep-missing", "keep-ours", "keep-recorded", "keep-recorded-gone", "restore-recorded", "keep-recorded-ours-again"],
+)  # fmt: skip
+def test_emby_markers_of_its_own_follow_the_setting(store, factory, setting, ours, kept, shown, plan, reason):
+    rec = _known_file(store)
+    markers = {"enabled": True, "library_ids": None, "emby": {"on_emby_redetect": setting}}
+    registry = _registry(server_config("emby", ServerType.EMBY, markers=markers))
+    _published(store, rec, "emby", "item-emby", ours, basis_for=[INTRO, CREDITS], kept=kept)
+    registry.get("emby").get_chapter_markers.return_value = _emby_rows(*shown)
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), "emby")
+    assert (row["plan"], row["plan_reason"]) == (plan, reason)
 
 
 @pytest.mark.parametrize(
@@ -959,6 +1058,8 @@ PLEX_INTRO = Marker(T.INTRO, 60_000, 90_000, ())
         ("keep_plex", [INTRO], {T.CREDITS}, [INTRO, PLEX_CREDITS], "keeps_plex", "Keeping Plex's credits"),
         ("keep_plex", [INTRO], {T.CREDITS}, [INTRO], "will_replace", ""),  # Plex dropped its credits: ours go back
         ("restore", [INTRO], {T.CREDITS}, [INTRO, PLEX_CREDITS], "will_replace", ""),  # switched to restore
+        # Plex's kept credits happen to match the decision: still Plex's (unlike Emby, nothing writes ours back there).
+        ("keep_plex", [INTRO], {T.CREDITS}, [INTRO, CREDITS], "keeps_plex", "Keeping Plex's credits"),
     ],
     ids=[
         "keep-replaced",
@@ -970,6 +1071,7 @@ PLEX_INTRO = Marker(T.INTRO, 60_000, 90_000, ())
         "keep-recorded",
         "keep-recorded-gone",
         "restore-recorded",
+        "keep-recorded-equal-to-decision",
     ],
 )
 def test_plex_markers_replaced_by_plex_follow_on_plex_redetect(
@@ -1118,13 +1220,23 @@ def test_published_falls_back_to_the_file_state_without_an_item_row(store, facto
     registry.get("plex").resolve_remote_path_to_item_id.assert_called_once_with(PATH, library_ids=["1"])
 
 
-def test_plex_waits_when_its_versions_do_not_agree(store, factory):
+@pytest.mark.parametrize(
+    ("stype", "waits"), [(ServerType.PLEX, True), (ServerType.EMBY, False), (ServerType.JELLYFIN, False)]
+)
+def test_only_plex_waits_for_its_versions_to_agree(store, factory, stype, waits):
+    # Plex shows one marker set per item; Emby and Jellyfin versions are items with their own.
     rec = _known_file(store)
-    _published(store, rec, "plex", "rk-1", [INTRO], basis_for=[INTRO, CREDITS], status="waiting", message="Waiting")
-    registry = _registry(server_config("plex", ServerType.PLEX))
-    registry.get("plex").get_markers.return_value = _plex_rows(INTRO)
-    row = _row(inspect.item_payload(PATH, registry=registry, store=store), "plex")
-    assert (row["plan"], row["plan_reason"]) == ("waiting", "versions don't agree yet")
+    sid = stype.value
+    _published(store, rec, sid, "rk-1", [INTRO], basis_for=[INTRO, CREDITS], status="waiting", message="Waiting")
+    registry = _registry(server_config(sid, stype))
+    registry.get(sid).resolve_remote_path_to_item_id.return_value = "rk-1"
+    registry.get(sid).get_markers.return_value = _plex_rows(INTRO)
+    registry.get(sid).get_chapter_markers.return_value = _emby_rows(INTRO)
+    registry.get(sid).get_media_segments.return_value = _jf_rows(INTRO)
+    row = _row(inspect.item_payload(PATH, registry=registry, store=store), sid)
+    assert (row["plan"], row["plan_reason"]) == (
+        ("waiting", "versions don't agree yet") if waits else ("will_replace", "")
+    )
 
 
 def test_plex_decision_changed_since_publish_is_not_waiting(store, factory):
@@ -1456,8 +1568,9 @@ def _intro_only(marker):
         (ServerType.PLEX, [INTRO_KEPT], INTRO_DECIDED_LATER, Marker(T.INTRO, 75_000, 110_000, ()), "will_replace"),
         # Plex shows the decided times, but the publisher writes the kept ones back: a write will happen.
         (ServerType.PLEX, [INTRO_KEPT], INTRO_DECIDED_LATER, INTRO_DECIDED_LATER, "will_replace"),
-        # Jellyfin writes the decided times whatever it had: no keep rule (Emby has no publisher, so nothing is ours).
+        # Jellyfin and Emby write the decided times whatever they had: no keep rule.
         (ServerType.JELLYFIN, [INTRO_KEPT], INTRO_DECIDED_LATER, INTRO_KEPT, "will_replace"),
+        (ServerType.EMBY, [INTRO_KEPT], INTRO_DECIDED_LATER, INTRO_KEPT, "will_replace"),
     ],
     ids=[
         "plex-kept",
@@ -1466,16 +1579,19 @@ def _intro_only(marker):
         "plex-shows-other",
         "plex-shows-decided",
         "jellyfin-no-keep",
+        "emby-no-keep",
     ],
 )
 def test_plan_mirrors_the_plex_keep_rule(store, factory, stype, ours, decided, current, plan):
     rec = _known_file(store, _intro_only(decided))
-    sid = "plex" if stype is ServerType.PLEX else "jf"
+    sid = {ServerType.PLEX: "plex", ServerType.JELLYFIN: "jf", ServerType.EMBY: "emby"}[stype]
     if ours:
         _published(store, rec, sid, "item-1", ours, basis_for=[decided])
     registry = _registry(server_config(sid, stype))
     if stype is ServerType.PLEX:
         registry.get(sid).get_markers.return_value = _plex_rows(current)
+    elif stype is ServerType.EMBY:
+        registry.get(sid).get_chapter_markers.return_value = _emby_rows(current)
     else:
         registry.get(sid).get_media_segments.return_value = _jf_rows(current)
     row = _row(inspect.item_payload(PATH, registry=registry, store=store), sid)

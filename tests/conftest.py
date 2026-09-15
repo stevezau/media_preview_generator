@@ -758,6 +758,11 @@ def _scrub_request_uri(request):
     - Plex direct cert hostnames (``172-16-10-240.262280e6da5f4e50adbc3bffffa82415.plex.direct``)
       — these encode the user's Plex ``machineIdentifier``.
     - Custom port numbers that hint at network topology.
+    - The recording user's Emby/Jellyfin id in per-user paths (``/Users/<id>/Items/...``,
+      from ``EMBY_USER_ID`` / ``JELLYFIN_USER_ID`` while recording): replaced with
+      ``FAKE_USER_ID``, so a test replays them with ``user_id="FAKE_USER_ID"``. vcrpy
+      also runs this hook on replay, where those variables aren't set: a test sending
+      any other id doesn't match.
 
     Replaces every recorded request URI with a generic ``http://fake-server``
     prefix, keeping the path + query (which IS the API contract we
@@ -769,7 +774,12 @@ def _scrub_request_uri(request):
     global _last_recorded_request_path
     parsed = urlparse(request.uri)
     _last_recorded_request_path = parsed.path
-    fake = parsed._replace(scheme="http", netloc="fake-server")
+    path = parsed.path
+    for variable in ("EMBY_USER_ID", "JELLYFIN_USER_ID"):
+        user_id = os.environ.get(variable)
+        if user_id and user_id != "FAKE_USER_ID":
+            path = path.replace(f"/Users/{user_id}/", "/Users/FAKE_USER_ID/")
+    fake = parsed._replace(scheme="http", netloc="fake-server", path=path)
     request.uri = urlunparse(fake)
     return request
 
@@ -907,11 +917,20 @@ def _scrub_response_body(response):
             for it in items
         )
 
+    def _synthetic_item(item):
+        if not isinstance(item, dict):
+            return False
+        if item.get("Path"):
+            return str(item["Path"]).startswith(_SYNTHETIC_PREFIXES)
+        # An Emby item asked for other fields (``Chapters,MediaSources``) comes without its ``Path``: it is known by
+        # the files of its versions instead.
+        sources = item.get("MediaSources")
+        return bool(sources) and all(
+            isinstance(src, dict) and str(src.get("Path") or "").startswith(_SYNTHETIC_PREFIXES) for src in sources
+        )
+
     def _all_synthetic(items):
-        return all(
-            isinstance(it, dict) and any(str(it.get("Path") or "").startswith(p) for p in _SYNTHETIC_PREFIXES)
-            for it in items
-        ) or _all_media_segments(items)
+        return all(_synthetic_item(it) for it in items) or _all_media_segments(items)
 
     def _strip_item_identifiers(items):
         for it in items:

@@ -78,8 +78,8 @@ class FakeClient:
 def ready_publisher(name="plex_db", types=("intro", "credits"), *, atomic_writes=None):
     """A ready publisher whose ``write`` returns what it was asked to show (the per-version contract).
 
-    ``atomic_writes`` defaults to False for the Jellyfin bridge (the plugin may store before an error) and True for
-    everything else. Tests that make ``write`` fail restore it with ``pub.write.side_effect = pub.succeed``. A write
+    ``atomic_writes`` defaults to False for the Jellyfin and Emby bridges (the plugin may store before an error) and True
+    for everything else. Tests that make ``write`` fail restore it with ``pub.write.side_effect = pub.succeed``. A write
     changes the server unless ``previous`` already was that set; ``shows`` answers "still ours" unless a test says
     otherwise.
     """
@@ -89,11 +89,14 @@ def ready_publisher(name="plex_db", types=("intro", "credits"), *, atomic_writes
     pub = MagicMock(spec=MarkerPublisher)
     pub.name = name
     pub.supported_types = frozenset(MarkerType(t) for t in types)
-    pub.atomic_writes = (name != "jellyfin_bridge") if atomic_writes is None else atomic_writes
+    bridge = name in ("jellyfin_bridge", "emby_bridge")
+    pub.atomic_writes = not bridge if atomic_writes is None else atomic_writes
+    pub.kept_types_hold_ours = name == "emby_bridge"
     pub.capability.return_value = CapabilityReport(Capability.READY, "ok")
     pub.project.side_effect = lambda ms: sorted(
         (m for m in ms if m.type in pub.supported_types), key=lambda m: (m.start_ms, m.type.value)
     )
+    pub.projection_note.return_value = ""
 
     def succeed(item_id, markers, **kwargs):
         ours = pub.project(markers)

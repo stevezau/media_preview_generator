@@ -20,9 +20,10 @@ from .decide import DecisionStatus, shortened_by
 from .models import Marker, MarkerType
 from .outcomes import kept_note, with_kept_note
 from .ownership import allowed_matches, owning_servers
-from .publishers.base import Capability
+from .publishers.base import Capability, versions_agree
+from .publishers.emby import credits_note
 from .publishers.factory import publisher_for
-from .publishers.plex_db import SAME_HOST_PATH_ADVICE, versions_agree
+from .publishers.plex_db import SAME_HOST_PATH_ADVICE
 from .settings import ServerMarkersSettings, is_sports_library, load_server
 from .sources.server_markers import read_server_markers
 from .store import FileRecord, MarkerStore
@@ -32,7 +33,6 @@ _CAN_SHOW: dict[ServerType, tuple[str, ...]] = {
     ServerType.JELLYFIN: ("intro", "credits", "recap", "preview"),
     ServerType.EMBY: ("intro", "credits"),
 }
-EMBY_NEEDS_PLUGIN_MESSAGE = "Emby needs the Media Preview Bridge for Emby plugin (coming in the next phase)"
 PLEX_SAME_HOST_PATH_HINT = (
     "Map Plex's config folder into both containers from the identical host path "
     "(on unRAID, don't mix /mnt/user and /mnt/cache)."
@@ -180,6 +180,8 @@ def _settings_block(config: ServerConfig, settings: ServerMarkersSettings) -> di
             "db_write_confirmed_at": settings.db_write_confirmed_at,
             "on_plex_redetect": settings.on_plex_redetect,
         }
+    if config.type is ServerType.EMBY:
+        block["emby"] = {"on_emby_redetect": settings.on_emby_redetect}
     return block
 
 
@@ -223,7 +225,7 @@ def _checked_as_if_on(server: Any, config: ServerConfig, settings: ServerMarkers
     )
     publisher = publisher_for(server, config, settings=preview)
     if publisher is None:
-        return _capability(Capability.NEEDS_PLUGIN, EMBY_NEEDS_PLUGIN_MESSAGE)
+        return _capability(Capability.NEEDS_PLUGIN, "No marker publisher for this server type")
     report = publisher.capability()
     details = dict(report.details)
     warning = ""
@@ -400,18 +402,20 @@ def _matching(shown: list[dict], expected: list[dict], duration_ms: int, server_
     return matched
 
 
-def _kept_on_plex(
+def _kept_on_server(
     current: list[dict],
     wanted: list[Marker],
     ours: tuple[Marker, ...],
     recorded: frozenset[MarkerType],
     duration_ms: int,
+    server_type: ServerType,
 ) -> frozenset[MarkerType]:
-    """The types a Plex server set to "Keep Plex's" leaves as its own on the next run (``plex_db._kept_types``).
+    """The types a server set to keep its own markers ("Keep Plex's", "Keep Emby's") leaves as its own on the next run.
 
-    Kept on an earlier run, or a decided (or recorded) type Plex shows markers of that are neither what we'd write nor
-    what we left there, while Plex still shows markers of the type. A recorded type no longer decided whose markers
-    aren't ours is left alone by the job, so it is left out here too.
+    Kept on an earlier run, or a decided (or recorded) type the server shows markers of that are neither what we'd
+    write nor what we left there, while the server still shows markers of the type (``plex_db._kept_types``; Emby's
+    plugin leaves such a type alone). A recorded type no longer decided whose markers aren't ours is left alone by the
+    job, so it is left out here too.
     """
     kept = set()
     for mtype in MarkerType:
@@ -421,8 +425,12 @@ def _kept_on_plex(
         want = [_marker_dict(m) for m in wanted if m.type is mtype]
         mine = [_marker_dict(m) for m in ours if m.type is mtype]
         # _same never matches an empty list against shown markers.
-        provably_ours = _same(now, want, duration_ms, ServerType.PLEX) or _same(now, mine, duration_ms, ServerType.PLEX)
-        if mtype in recorded or ((want or mine) and not provably_ours):
+        shows_decision = _same(now, want, duration_ms, server_type)
+        provably_ours = shows_decision or _same(now, mine, duration_ms, server_type)
+        # Plex keeps a kept type whatever it shows. Emby's plugin writes ours back for a kept type once a refresh has
+        # deleted Emby's rows: rows showing the decision are ours again, and the job records them so.
+        recorded_kept = mtype in recorded and not (server_type is ServerType.EMBY and shows_decision)
+        if recorded_kept or ((want or mine) and not provably_ours):
             kept.add(mtype)
     return frozenset(kept)
 
@@ -455,7 +463,7 @@ def _plan(
     current: list[dict] | None,
     waiting_on_versions: bool,
     duration_ms: int,
-    keep_plex: bool = False,
+    keep_own: bool = False,
     recorded_kept: frozenset[MarkerType] = frozenset(),
 ) -> tuple[str, str]:
     if off_reason:
@@ -463,15 +471,20 @@ def _plan(
     if not wanted:
         return ("will_remove", "") if ours else ("nothing_to_publish", "")
     kept = (
-        _kept_on_plex(current, wanted, ours, recorded_kept, duration_ms)
-        if keep_plex and current is not None
+        _kept_on_server(current, wanted, ours, recorded_kept, duration_ms, server_type)
+        if keep_own and current is not None
         else frozenset()
     )
-    note = kept_note(kept, wanted)
+    vendor = server_type.value.capitalize()
+    note = kept_note(kept, wanted, vendor)
+    # Emby's credits skip runs to the end of the file, past a scene after credits that end earlier.
+    shown_note = (
+        credits_note([m for m in wanted if m.type not in kept], duration_ms) if server_type is ServerType.EMBY else ""
+    )
     if waiting_on_versions:
         return "waiting", with_kept_note(VERSIONS_DISAGREE_REASON, note)
     if current is None:
-        return "unknown", ""
+        return "unknown", shown_note
     # Plex's own markers of a kept type stay whatever this file decided: compare only the other types.
     wanted = [m for m in wanted if m.type not in kept]
     ours = tuple(m for m in ours if m.type not in kept)
@@ -487,9 +500,10 @@ def _plan(
             shown = matched
     # Compared within _SAME_TOLERANCE_MS where a job compares Plex's rows exactly: a Plex marker within a second of
     # ours reads "Up to date" here while the job counts it as Plex's. Plex's own detection doesn't land that close.
+    reason = with_kept_note(with_kept_note("", note), shown_note)
     if _same(shown, expected, duration_ms, server_type):
-        return ("keeps_plex", with_kept_note("", note)) if note else ("up_to_date", "")
-    return ("will_replace" if shown else "will_add"), with_kept_note("", note)
+        return (f"keeps_{server_type.value}" if note else "up_to_date"), reason
+    return ("will_replace" if shown else "will_add"), reason
 
 
 def _server_row(
@@ -538,8 +552,8 @@ def _server_row(
         current=current,
         waiting_on_versions=waiting_on_versions,
         duration_ms=(rec.duration_ms or 0) if rec else 0,
-        # Every job leaves Plex's own re-detected markers alone, type by type ("Keep Plex's").
-        keep_plex=cfg.type is ServerType.PLEX and settings.on_plex_redetect == "keep_plex",
+        # Every job leaves the server's own markers alone, type by type ("Keep Plex's", "Keep Emby's").
+        keep_own=settings.keeps_server_markers,
         recorded_kept=item_state.kept_types if item_state is not None else frozenset(),
     )
     return {
@@ -612,8 +626,9 @@ def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> d
         failed), what is ours there, this file's last publish (``publish_status``, ``publish_message``), the server
         item's last publish (``item_status``; another version of a shared Plex item may have written or failed
         since), and the ``plan``: ``will_add``, ``will_replace``, ``will_remove``, ``up_to_date``, ``waiting`` (Plex
-        versions disagree), ``keeps_plex`` (Plex's own detection replaced ours and the server is set to keep them;
-        ``plan_reason`` names the kept types, also on other plans),
+        versions disagree), ``keeps_plex`` / ``keeps_emby`` (the server shows its own markers of a decided type and is
+        set to keep them; ``plan_reason`` names the kept types, also on other plans, and on Emby says when decided
+        credits end before the file does),
         ``not_enabled``, ``nothing_to_publish``, or ``unknown`` (the server's markers couldn't be read, or its row
         failed: then ``error`` says why), with ``plan_reason``, and ``version_count`` (a Plex item's versions, which
         share one marker set; None for other servers or when it couldn't be read).

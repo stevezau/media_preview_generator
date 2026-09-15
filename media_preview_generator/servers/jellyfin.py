@@ -41,8 +41,6 @@ from .ownership import apply_inverse_path_mappings
 # covers the typical Jellyfin scan cadence and keeps the publisher
 # retry-loop responsive.
 _JELLYFIN_FULL_REFRESH_COOLDOWN_S = 60.0
-# A valid GUID no library item has; the admin-only Markers route answers it with the plugin's own 404.
-_BRIDGE_ACCESS_PROBE_ID = "ffffffffffffffffffffffffffffffff"
 
 
 class JellyfinServer(EmbyApiClient):
@@ -429,6 +427,8 @@ class JellyfinServer(EmbyApiClient):
     # with the plugin the user-visible delay drops from 24h to 0s.
 
     PLUGIN_NAME = "Media Preview Bridge"
+    # A valid GUID no library item has; the admin-only Markers route answers it with the plugin's own 404.
+    _BRIDGE_ACCESS_PROBE_ID = "ffffffffffffffffffffffffffffffff"
     PLUGIN_GUID = "c2cb9bf9-7c5d-4f1a-9a07-2d6f5e5b0001"
     PLUGIN_REPO_URL = "https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json"
 
@@ -471,36 +471,6 @@ class JellyfinServer(EmbyApiClient):
         except (ValueError, AttributeError) as exc:
             self._media_preview_bridge_installed = False
             return {"installed": False, "version": "", "error": f"bad JSON: {exc}"[:200]}
-
-    def get_bridge_info(self) -> dict[str, Any] | None:
-        """Bridge plugin presence, version and feature list.
-
-        Returns:
-            ``{"installed": bool, "version": str | None, "features": list[str]}``, or None when the server
-            can't be reached (transport error or a 5xx, which Jellyfin answers to every route while starting up).
-        """
-        not_installed: dict[str, Any] = {"installed": False, "version": None, "features": []}
-        try:
-            resp = self._request("GET", "/MediaPreviewBridge/Ping", timeout=10)
-        except requests.RequestException as exc:
-            logger.debug("Bridge ping failed on {}: {}", self.name, type(exc).__name__)
-            return None
-        if resp.status_code >= 500:
-            return None
-        if resp.status_code != 200:
-            return not_installed
-        try:
-            payload = resp.json()
-        except ValueError:
-            return not_installed
-        if not isinstance(payload, dict):
-            return not_installed
-        features = payload.get("features")
-        return {
-            "installed": bool(payload.get("ok")),
-            "version": payload.get("version"),
-            "features": [str(f) for f in features] if isinstance(features, list) else [],
-        }
 
     def get_bridge_marker_state(self, item_id: str) -> dict[str, Any] | None:
         """What the Bridge plugin stores for an item, served or not.
@@ -551,34 +521,6 @@ class JellyfinServer(EmbyApiClient):
         """
         state = self.get_bridge_marker_state(item_id)
         return None if state is None else state["segments"]
-
-    def get_bridge_markers_access(self) -> str | None:
-        """Whether this server's credentials may use the Bridge markers routes, which need an administrator.
-
-        Probes with an id no item has: an authorised caller gets the plugin's "item not found".
-
-        Returns:
-            ``"ok"``; ``"unauthorized"`` (401: credentials rejected); ``"forbidden"`` (403: not an administrator);
-            None when it couldn't be told (unreachable, no route, other status).
-        """
-        try:
-            resp = self._request("GET", f"/MediaPreviewBridge/Markers/{_BRIDGE_ACCESS_PROBE_ID}", timeout=10)
-        except requests.RequestException as exc:
-            logger.debug("Bridge markers access probe failed on {}: {}", self.name, type(exc).__name__)
-            return None
-        if resp.status_code == 401:
-            return "unauthorized"
-        if resp.status_code == 403:
-            return "forbidden"
-        if resp.status_code == 200:
-            return "ok"
-        if resp.status_code == 404:
-            try:
-                body = resp.json()
-            except ValueError:
-                return None
-            return "ok" if isinstance(body, dict) and "error" in body else None
-        return None
 
     def put_bridge_markers(
         self, item_id: str, segments: list[dict[str, Any]], file_size: int | None = None

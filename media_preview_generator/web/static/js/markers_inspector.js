@@ -39,6 +39,7 @@
         up_to_date: ['Up to date', 'text-bg-success'],
         waiting: ['Waiting', 'text-bg-info'],
         keeps_plex: ['Keeps Plex\'s', 'text-bg-secondary'],
+        keeps_emby: ['Keeps Emby\'s', 'text-bg-secondary'],
         unknown: ['Unknown', 'text-bg-secondary'],
         not_enabled: ['Intro & Credits off', 'text-bg-secondary'],
         nothing_to_publish: ['Nothing to send yet', 'text-bg-secondary'],

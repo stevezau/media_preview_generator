@@ -991,15 +991,15 @@ def _forget_marker_capability(server_id: str) -> None:
 @api.route("/servers/<server_id>/install-plugin", methods=["POST"])
 @setup_or_auth_required
 def install_jellyfin_plugin(server_id: str):
-    """One-click install Media Preview Bridge plugin on a saved Jellyfin server.
+    """One-click install of the Media Preview Bridge plugin on a saved Jellyfin or Emby server.
 
-    Drives the "Install plugin in Jellyfin" button on the Edit Server
-    modal (only visible for Jellyfin servers when the plugin probe
-    reports missing). Calls
-    :meth:`JellyfinServer.install_plugin` which adds our manifest URL
-    to Jellyfin's plugin repositories, queues the package install, and
-    requests a Jellyfin restart. Caller polls
-    ``/test-connection`` afterwards for the plugin badge to flip.
+    Drives the Install / Update buttons on the Edit Server modal. Jellyfin:
+    :meth:`JellyfinServer.install_plugin` adds our manifest URL to Jellyfin's
+    plugin repositories, queues the package install, and requests a restart.
+    Emby: :meth:`EmbyServer.install_plugin` installs from Emby's own catalog
+    and restarts, or answers ``manual: true`` when the catalog doesn't list
+    the plugin (the user installs the DLL by hand). Caller polls the server's
+    status afterwards for the plugin badge to flip.
     """
     raw_servers = _get_media_servers()
     target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
@@ -1014,12 +1014,12 @@ def install_jellyfin_plugin(server_id: str):
     except Exception as exc:
         return jsonify({"ok": False, "error": f"invalid server config: {exc}"}), 400
 
-    if cfg.type is not ServerType.JELLYFIN:
-        return jsonify({"ok": False, "error": "plugin install is Jellyfin-only"}), 400
+    if cfg.type not in (ServerType.JELLYFIN, ServerType.EMBY):
+        return jsonify({"ok": False, "error": "plugin install is for Jellyfin and Emby servers"}), 400
 
     live = _instantiate_for_probe(cfg)
     if live is None or not hasattr(live, "install_plugin"):
-        return jsonify({"ok": False, "error": "this Jellyfin client doesn't support plugin install"}), 400
+        return jsonify({"ok": False, "error": "this client doesn't support plugin install"}), 400
 
     try:
         result = live.install_plugin()

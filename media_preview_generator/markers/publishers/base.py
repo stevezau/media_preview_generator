@@ -10,6 +10,9 @@ from enum import Enum
 
 from ..models import Marker, MarkerType
 
+# Versions of one item that decided a type within this of each other show one marker set (spec §6.3).
+VERSION_AGREEMENT_MS = 2_000
+
 
 class Capability(str, Enum):
     """Whether a server can receive markers right now, and if not, why."""
@@ -82,6 +85,54 @@ def compare_shown(
     return Shown.MISSING if missing else Shown.OURS
 
 
+def versions_agree(mine: list[Marker], theirs: list[Marker]) -> bool:
+    """Whether two marker lists of one type match pairwise (in start order) within ``VERSION_AGREEMENT_MS``."""
+    if len(mine) != len(theirs):
+        return False
+    pairs = zip(sorted(mine, key=lambda m: m.start_ms), sorted(theirs, key=lambda m: m.start_ms), strict=True)
+    return all(
+        abs(a.start_ms - b.start_ms) <= VERSION_AGREEMENT_MS and abs(a.end_ms - b.end_ms) <= VERSION_AGREEMENT_MS
+        for a, b in pairs
+    )
+
+
+def agreed_across_versions(
+    markers: Iterable[Marker],
+    others: Iterable[Mapping[MarkerType, Marker] | None],
+    prior: Iterable[Marker],
+    types: Iterable[MarkerType],
+) -> list[Marker]:
+    """The markers one Plex item shows for all its versions: the types every version decided alike.
+
+    A type is kept only when the calling file has it and every other version is decided, has that type and agrees
+    within ``VERSION_AGREEMENT_MS``. The times are the calling file's, unless what this app already left on the item
+    (``prior``) agrees with every version too: then that stays, so versions whose times differ slightly don't rewrite
+    each other's markers on every run.
+
+    Args:
+        markers: The calling file's decided markers.
+        others: Each other version's decided markers by type; None for a version never decided.
+        prior: What this app last left on the item.
+        types: The types the server shows.
+
+    Returns:
+        The agreed markers (unsorted).
+    """
+    markers, others, prior = list(markers), list(others), list(prior)
+    agreed: list[Marker] = []
+    for mtype in types:
+        mine = [m for m in markers if m.type is mtype]
+        theirs = [None if d is None else [m for m in d.values() if m.type is mtype] for d in others]
+        if not mine or any(t is None or not versions_agree(mine, t) for t in theirs):
+            continue
+        kept = [m for m in prior if m.type is mtype]
+        if kept and versions_agree(kept, mine) and all(versions_agree(kept, t) for t in theirs):
+            agreed.extend(kept)
+        else:
+            agreed.extend(mine)
+    return agreed
+
+
 class PublishError(Exception):
     """A publisher call failed; ``state`` says which capability problem caused it (if any).
 
@@ -109,11 +160,15 @@ class MarkerPublisher(ABC):
     # publish to one server, so the flag always belongs to the caller's last write.
     last_write_changed: bool = True
     # Set by every successful ``write``: the types whose markers on the item are the server's own and stay there
-    # untouched ("Keep Plex's"); the caller records them and passes them back as ``kept_types``. Empty elsewhere.
+    # untouched ("Keep Plex's", "Keep Emby's"); the caller records them and passes them back as ``kept_types``. Empty
+    # elsewhere.
     last_kept_types: frozenset[MarkerType] = frozenset()
     # Set by every ``write`` that read the item: the item's version files that write computed the marker set for. The
-    # caller records them and passes them back to ``shows``. None where items have no shared versions (Jellyfin).
+    # caller records them and passes them back to ``shows``. None where items have no shared versions (Jellyfin, Emby).
     last_item_files: tuple[str, ...] | None = None
+    # True when a type kept as the server's own can still hold markers of ours out of sight (Emby's plugin stores them
+    # and shows them once Emby's own rows are gone): a write with nothing to show still has something to remove then.
+    kept_types_hold_ours: bool = False
 
     @abstractmethod
     def capability(self) -> CapabilityReport:
@@ -190,3 +245,16 @@ class MarkerPublisher(ABC):
     def project(self, markers: Iterable[Marker]) -> list[Marker]:
         """Keep supported types, ordered by start."""
         return sorted((m for m in markers if m.type in self.supported_types), key=lambda m: (m.start_ms, m.type.value))
+
+    def projection_note(self, markers: Iterable[Marker], *, duration_ms: int | None) -> str:
+        """How this server shows some of the markers it is sent differently from how they were decided.
+
+        Args:
+            markers: The markers this server shows as ours.
+            duration_ms: File duration; None when unknown.
+
+        Returns:
+            Row and Inspector wording (Emby: credits that end before the file does); "" when every marker shows as
+            decided.
+        """
+        return ""

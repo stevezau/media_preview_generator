@@ -90,15 +90,20 @@ RETRY_REASON_CODES = frozenset({NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN})
 EXTRAS_NOT_CHECKED = "Extras aren't checked for markers"
 
 
-def kept_note(kept_types: Iterable[MarkerType], wanted: Iterable[Marker]) -> str:
-    """Row and Inspector wording for the decided types a Plex server keeps as its own ("Keep Plex's").
+def kept_note(kept_types: Iterable[MarkerType], wanted: Iterable[Marker], vendor: str) -> str:
+    """Row and Inspector wording for the decided types a server keeps as its own ("Keep Plex's", "Keep Emby's").
+
+    Args:
+        kept_types: The types kept as the server's own.
+        wanted: The decided markers.
+        vendor: The server's brand as users know it (``Plex``, ``Emby``).
 
     Returns:
         "keeping Plex's credits" (or "intro and credits"); "" when none of ``wanted`` is kept.
     """
     kept, wanted_types = set(kept_types), {m.type for m in wanted}
     names = [t.value for t in MarkerType if t in kept and t in wanted_types]
-    return f"keeping Plex's {' and '.join(names)}" if names else ""
+    return f"keeping {vendor}'s {' and '.join(names)}" if names else ""
 
 
 def with_kept_note(message: str, note: str) -> str:

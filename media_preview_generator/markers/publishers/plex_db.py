@@ -36,6 +36,7 @@ from .base import (
     MarkerPublisher,
     PublishError,
     Shown,
+    agreed_across_versions,
     compare_shown,
 )
 
@@ -48,7 +49,6 @@ MARKER_TAG_TYPE = 12
 # Plex serves credits starting 2 s later than stored and non-final credits ending 2 s earlier (spec §3.1).
 CREDITS_SERVE_SHIFT_MS = 2_000
 FINAL_TOLERANCE_MS = 2_000
-VERSION_AGREEMENT_MS = 2_000
 INTRO_JSON_VERSION = 5
 CREDITS_JSON_VERSION = 4
 SAME_HOST_PATH_ADVICE = (
@@ -395,17 +395,6 @@ class _Part(NamedTuple):
     file: str
     extra_data: str | None
     proxy_type: int | None
-
-
-def versions_agree(mine: list[Marker], theirs: list[Marker]) -> bool:
-    """Whether two marker lists of one type match pairwise (in start order) within ``VERSION_AGREEMENT_MS``."""
-    if len(mine) != len(theirs):
-        return False
-    pairs = zip(sorted(mine, key=lambda m: m.start_ms), sorted(theirs, key=lambda m: m.start_ms), strict=True)
-    return all(
-        abs(a.start_ms - b.start_ms) <= VERSION_AGREEMENT_MS and abs(a.end_ms - b.end_ms) <= VERSION_AGREEMENT_MS
-        for a, b in pairs
-    )
 
 
 def _same_extra_data(a: str | None, b: str | None) -> bool:
@@ -806,18 +795,7 @@ class PlexMarkerPublisher(MarkerPublisher):
             )
         # None = never decided, so no type is desired yet. {} = decided with no markers.
         decisions = [self._sibling_decision(p.file) for p in others]
-        desired: list[Marker] = []
-        for mtype in (MarkerType.INTRO, MarkerType.CREDITS):
-            mine = [m for m in markers if m.type is mtype]
-            theirs = [None if d is None else [m for m in d.values() if m.type is mtype] for d in decisions]
-            if not mine or any(t is None or not versions_agree(mine, t) for t in theirs):
-                continue
-            kept = [m for m in prior if m.type is mtype]
-            if kept and versions_agree(kept, mine) and all(versions_agree(kept, t) for t in theirs):
-                desired.extend(kept)
-            else:
-                desired.extend(mine)
-        return self.project(desired)
+        return self.project(agreed_across_versions(markers, decisions, prior, (MarkerType.INTRO, MarkerType.CREDITS)))
 
     def _plan(
         self,

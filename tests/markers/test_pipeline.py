@@ -178,7 +178,7 @@ class TestOwners:
         assert all(c.calls == [] for c in ctx.clients.values())
 
     def test_owner_without_a_publisher_is_skipped_not_failed(self, store, media):
-        # Emby has no publisher until phase 2: the owner counts, its row says why nothing was written.
+        # A server type the factory builds no publisher for (none given here): the owner counts, its row says why.
         reg = _registry(media, ServerType.EMBY)
         out, _ = _run(_ctx(store, reg), media, {}, probe=_probe(CHAPTERS_BOTH))
         assert [r["status"] for r in out.publisher_rows] == [ServerStatus.SKIPPED.value]
@@ -270,9 +270,13 @@ class TestOwners:
         [
             (ServerType.PLEX, lambda server: None, "Plex database not found"),
             (ServerType.JELLYFIN, lambda server: setattr(server.get_bridge_info, "return_value", None), "reach"),
-            (ServerType.EMBY, lambda server: None, "Not supported"),
+            (
+                ServerType.EMBY,
+                lambda server: setattr(server.get_bridge_info, "return_value", {"installed": False, "features": []}),
+                "Install the Media Preview Bridge for Emby plugin",
+            ),
         ],
-        ids=["plex-no-db", "jellyfin-unreachable", "emby-no-publisher"],
+        ids=["plex-no-db", "jellyfin-unreachable", "emby-no-plugin"],
     )
     def test_real_publisher_factory_per_vendor(self, store, media, stype, prepare, message):
         reg = _registry(media, stype)
@@ -285,6 +289,7 @@ class TestOwners:
         assert out.outcome_key == FileOutcome.SKIPPED.value
         assert _state(store, media, f"{stype.value}-1").status == "skipped"
         server.put_bridge_markers.assert_not_called()
+        server.put_emby_markers.assert_not_called()
 
 
 class TestItemIdLookupScope:
@@ -2777,8 +2782,7 @@ class TestConsentBeforeEachWrite:
         assert _state(store, other, "plex-1").status == "skipped"
         assert "plex-1" not in ctx._capabilities  # checked again once it's back on
 
-    # Emby has no publisher yet: its row is "Not supported" before any write could be attempted.
-    @pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.JELLYFIN])
+    @pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.JELLYFIN, ServerType.EMBY])
     @pytest.mark.parametrize(
         ("change", "status", "message"),
         [
@@ -2817,7 +2821,9 @@ class TestConsentBeforeEachWrite:
                 raise RuntimeError("settings.json unreadable")
             return None if change == "removed" else live
 
-        pub = ready_publisher("plex_db" if stype is ServerType.PLEX else "jellyfin_bridge")
+        pub = ready_publisher(
+            {ServerType.PLEX: "plex_db", ServerType.JELLYFIN: "jellyfin_bridge"}.get(stype, "emby_bridge")
+        )
         ctx = _ctx(store, reg, live_config=live_config)
         out, _ = _run(ctx, media, {sid: pub}, probe=_probe(CHAPTERS_BOTH))
         row = out.publisher_rows[0]
@@ -2928,7 +2934,6 @@ class TestPlexPassUnknown:
     a backfill while Plex's HTTP is down must not run the whole capability check for every file.
     """
 
-    # Emby has no publisher yet, so it never reaches the capability check.
     @pytest.mark.parametrize(
         ("stype", "details", "status", "message", "reason_code"),
         [
@@ -2941,13 +2946,16 @@ class TestPlexPassUnknown:
             ),
             (ServerType.PLEX, {"plex_pass": True}, ServerStatus.WRITTEN, "2 marker(s)", None),
             (ServerType.JELLYFIN, {"plugin_version": "10.11.1.0"}, ServerStatus.WRITTEN, "2 marker(s)", None),
+            (ServerType.EMBY, {"plugin_version": "1.0.0.0"}, ServerStatus.WRITTEN, "2 marker(s)", None),
         ],
-        ids=["plex-unknown", "plex-pass", "jellyfin"],
+        ids=["plex-unknown", "plex-pass", "jellyfin", "emby"],
     )
     def test_unknown_pass_is_not_ready_for_writes(self, store, media, stype, details, status, message, reason_code):
         reg = _registry(media, stype)
         sid = f"{stype.value}-1"
-        pub = ready_publisher("plex_db" if stype is ServerType.PLEX else "jellyfin_bridge")
+        pub = ready_publisher(
+            {ServerType.PLEX: "plex_db", ServerType.JELLYFIN: "jellyfin_bridge"}.get(stype, "emby_bridge")
+        )
         pub.capability.return_value = CapabilityReport(Capability.READY, "ready", details)
         ctx = _ctx(store, reg)
         out, _ = _run(ctx, media, {sid: pub}, probe=_probe(CHAPTERS_BOTH))
@@ -3113,6 +3121,89 @@ class TestReadBackVerify:
         assert (out.publisher_rows[0]["status"], out.publisher_rows[0]["message"]) == (status.value, message)
         assert store.get_item_publish_state("plex-1", "item-plex-1").kept_types == kept
 
+    @pytest.mark.parametrize(
+        ("stype", "setting", "writes"),
+        [
+            (ServerType.PLEX, "keep_plex", 2),
+            (ServerType.PLEX, "restore", 3),
+            (ServerType.EMBY, "keep_emby", 2),
+            (ServerType.EMBY, "restore", 3),
+        ],
+    )
+    def test_each_vendors_keep_setting_holds_or_releases_kept_types(self, store, media, stype, setting, writes):
+        reg = _registry(media, stype)
+        sid = f"{stype.value}-1"
+        vendor = "Plex" if stype is ServerType.PLEX else "Emby"
+        pub = ready_publisher("plex_db" if stype is ServerType.PLEX else "emby_bridge")
+        _run(_ctx(store, reg), media, {sid: pub}, probe=_probe(CHAPTERS_BOTH))
+        pub.shows.return_value = Shown.REPLACED
+        self._keeping(pub, {T.CREDITS}, {T.INTRO}, changed=False)
+        first, _ = _run(_ctx(store, reg), media, {sid: pub})
+        assert first.publisher_rows[0]["message"] == f"Keeping {vendor}'s credits"
+
+        block = "plex" if stype is ServerType.PLEX else "emby"
+        key = "on_plex_redetect" if stype is ServerType.PLEX else "on_emby_redetect"
+        reg.configs_by_id[sid].markers.setdefault(block, {})[key] = setting
+        pub.shows.return_value = Shown.OURS
+        second, _ = _run(_ctx(store, reg), media, {sid: pub})
+
+        assert pub.write.call_count == writes
+        if writes == 3:  # released: the kept credits go through the publisher again
+            assert pub.write.call_args.kwargs["kept_types"] == {T.CREDITS}
+        else:
+            assert second.publisher_rows[0]["message"] == f"Keeping {vendor}'s credits"
+
+    @pytest.mark.parametrize(("publisher", "writes"), [("plex_db", 1), ("emby_bridge", 2)])
+    def test_nothing_decided_on_an_item_of_kept_types_only_clears_them_where_they_hold_ours(
+        self, store, media, publisher, writes
+    ):
+        # Emby's plugin still stores ours for a kept type; Plex's kept rows are Plex's own, so nothing is sent there.
+        stype = ServerType.PLEX if publisher == "plex_db" else ServerType.EMBY
+        sid = f"{stype.value}-1"
+        reg = _registry(media, stype)
+        pub = ready_publisher(publisher)
+        self._keeping(pub, {T.INTRO, T.CREDITS}, set(), changed=True)
+        _run(_ctx(store, reg), media, {sid: pub}, probe=_probe(CHAPTERS_BOTH))
+        assert store.get_item_publish_state(sid, f"item-{sid}").kept_types == {T.INTRO, T.CREDITS}
+        pub.write.side_effect = pub.succeed
+        pub.last_kept_types = frozenset()
+        off = {"sources": [{"id": "theintrodb", "enabled": True}], "detect": {"intro": False, "credits": False}}
+
+        out, _ = _run(_ctx(store, reg, settings_raw=off), media, {sid: pub}, probe=_probe(CHAPTERS_BOTH))
+
+        assert pub.write.call_count == writes
+        if publisher == "emby_bridge":
+            call = pub.write.call_args
+            assert call.args == (f"item-{sid}", []) and call.kwargs["previous"] == []
+            assert call.kwargs["kept_types"] == {T.INTRO, T.CREDITS}
+        else:
+            assert out.publisher_rows[0]["status"] == ServerStatus.NONE.value
+
+    @pytest.mark.parametrize(
+        ("kept", "shown", "changed", "status", "message"),
+        [
+            (set(), {T.INTRO, T.CREDITS}, True, ServerStatus.WRITTEN, "2 marker(s); Emby skips to the end of the file"),
+            (set(), {T.INTRO, T.CREDITS}, False, ServerStatus.UP_TO_DATE, "Up to date; Emby skips to the end of the file"),
+            ({T.INTRO}, {T.CREDITS}, True, ServerStatus.WRITTEN, "1 marker(s); keeping Emby's intro; Emby skips to the end of the file"),
+        ],
+        ids=["written", "unchanged", "kept"],
+    )  # fmt: skip
+    def test_a_note_for_markers_the_server_shows_differently_reaches_the_row(
+        self, store, media, kept, shown, changed, status, message
+    ):
+        reg = _registry(media, ServerType.EMBY)
+        emby = ready_publisher("emby_bridge")
+        emby.projection_note.side_effect = lambda ms, **kw: (
+            "Emby skips to the end of the file" if any(m.type is T.CREDITS for m in ms) else ""
+        )
+        self._keeping(emby, kept, shown, changed=changed)
+        out, _ = _run(_ctx(store, reg), media, {"emby-1": emby}, probe=_probe(CHAPTERS_BOTH))
+        row = out.publisher_rows[0]
+        assert (row["status"], row["message"]) == (status.value, message)
+        call = emby.projection_note.call_args
+        assert call.args == ([m for m in (INTRO_CH, CREDITS_CH) if m.type in shown],)
+        assert call.kwargs == {"duration_ms": DUR}
+
     def test_a_kept_type_is_kept_after_a_failed_write(self, store, media):
         reg = _registry(media, ServerType.PLEX)
         pub = ready_publisher()
@@ -3201,16 +3292,20 @@ class TestReadBackVersions:
         [
             (ServerType.PLEX, False, True),
             (ServerType.PLEX, True, False),  # none of ours on the item for a version added since to disagree with
-            (ServerType.JELLYFIN, False, False),  # Jellyfin item ids are per version: no versions to record
+            # Jellyfin and Emby item ids are per version: no versions to record.
+            (ServerType.JELLYFIN, False, False),
+            (ServerType.EMBY, False, False),
         ],
-        ids=["plex", "plex-kept-only", "jellyfin"],
+        ids=["plex", "plex-kept-only", "jellyfin", "emby"],
     )
     def test_a_plex_record_without_item_files_is_written_once_to_record_them(
         self, store, media, stype, kept_only, drift
     ):
         reg = _registry(media, stype)
         sid = f"{stype.value}-1"
-        pub = ready_publisher("plex_db" if stype is ServerType.PLEX else "jellyfin_bridge")
+        pub = ready_publisher(
+            {ServerType.PLEX: "plex_db", ServerType.EMBY: "emby_bridge"}.get(stype, "jellyfin_bridge")
+        )
         pub.last_item_files = None  # published before item versions were recorded
         if kept_only:
             reg.configs_by_id[sid].markers["plex"]["on_plex_redetect"] = "keep_plex"

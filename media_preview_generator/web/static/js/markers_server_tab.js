@@ -1,5 +1,5 @@
-// Servers → Edit → "Intro & Credits" tab: this server's switch, library selection, capability status and the
-// Plex database-write confirmation. servers.js calls the window globals exported at the bottom.
+// Servers → Edit → "Intro & Credits" tab: this server's switch, library selection, capability status, the Plex
+// database-write confirmation and what happens when Plex or Emby has markers of its own. servers.js calls the window globals exported at the bottom.
 
 (function () {
     'use strict';
@@ -48,6 +48,11 @@
     function storedPlex(server) {
         const plex = storedMarkers(server).plex;
         return plex && typeof plex === 'object' ? plex : {};
+    }
+
+    function storedEmby(server) {
+        const emby = storedMarkers(server).emby;
+        return emby && typeof emby === 'object' ? emby : {};
     }
 
     // ---------- status block ---------------------------------------------------
@@ -318,6 +323,15 @@
         if (restoreRadio) restoreRadio.checked = !keepPlex;
         if (keepRadio) keepRadio.checked = keepPlex;
 
+        const emby = vendorOf(server) === 'emby';
+        const embyGroup = $('#markersEmbyRedetectGroup');
+        if (embyGroup) embyGroup.classList.toggle('d-none', !emby);
+        const keepEmby = emby && storedEmby(server).on_emby_redetect === 'keep_emby';
+        const embyRestoreRadio = $('#markersEmbyRedetectRestore');
+        const embyKeepRadio = $('#markersEmbyRedetectKeep');
+        if (embyRestoreRadio) embyRestoreRadio.checked = !keepEmby;
+        if (embyKeepRadio) embyKeepRadio.checked = keepEmby;
+
         renderLibraries(server.libraries || [], markers);
         fetchStatus(server);
     }
@@ -335,6 +349,10 @@
                 db_write_confirmed_at: storedPlex(server).db_write_confirmed_at || server._markersConfirmedAt || null,
                 on_plex_redetect: picked ? picked.value : (storedPlex(server).on_plex_redetect || 'restore'),
             };
+        }
+        if (vendorOf(server) === 'emby') {
+            const picked = document.querySelector('input[name="markersEmbyRedetect"]:checked');
+            out.emby = { on_emby_redetect: picked ? picked.value : (storedEmby(server).on_emby_redetect || 'restore') };
         }
         return out;
     }

@@ -295,11 +295,15 @@ Credits tab**.
 }
 ```
 
+An Emby server's block has `"emby": {"on_emby_redetect": "restore"}` in place of `plex`.
+
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `enabled` | bool | `false` | Off until turned on for this server. On a Plex server, setting this `true` requires `plex.db_write_confirmed_at` to already be set (or included in the same request) — 400 otherwise. |
 | `library_ids` | array of strings \| `null` | `null` | `null` = every library except sports-type ones (name matched, whole word "sport"/"sports" — no vendor exposes an actual sports library kind). An explicit list is taken literally, including a deliberate sports library. |
 | `plex` | object | *(Plex servers only)* | Absent on Emby/Jellyfin entries. |
+| `emby` | object | *(Emby servers only)* | Absent on Plex/Jellyfin entries. |
+| `emby.on_emby_redetect` | `"restore"` \| `"keep_emby"` | `"restore"` | Edit → Intro & Credits "When Emby has its own markers": `restore` is "Use ours", `keep_emby` is "Keep Emby's". Markers from Emby's own intro detection (Emby Premiere) or another plugin: `restore` has the Media Preview Bridge for Emby plugin replace them with ours (`ReplaceOwn`); `keep_emby` leaves a type Emby has markers of and shows ours only for the other types (row message e.g. "1 marker(s); keeping Emby's intro"). The plugin still stores ours for a kept type and shows them once Emby's are gone; the next job that checks the file records them as ours again (or writes them, when it finds none of Emby's left). Remembered per server item in `markers.db`. |
 | `plex.db_write_confirmed_at` | ISO-8601 timestamp \| `null` | `null` | Set once the one-time "Send intro & credits markers to Plex?" confirmation is accepted. Clearing it while `enabled` stays `true` in the same request is rejected (400) — send `enabled: false` in the same PUT to revoke. |
 | `plex.on_plex_redetect` | `"restore"` \| `"keep_plex"` | `"restore"` | Edit → Intro & Credits "When Plex has its own markers": `restore` is "Use ours", `keep_plex` is "Keep Plex's". What a job does when Plex shows markers of a decided type that aren't ours: `restore` writes ours over them; `keep_plex` keeps Plex's markers of that type on every later run (forced ones included) until the setting is switched to `restore` or Plex has none of that type left (row message e.g. "Keeping Plex's credits", or "1 marker(s); keeping Plex's credits"). Under `keep_plex`, "not ours" means not what the job would write and not what the item record says this app left there, so markers on an item with no record of that type (a first publish, a reset `markers.db`, a re-added server) are kept too. Decided per type, and remembered per server item in `markers.db`. Markers that are gone are written again either way. |
 
@@ -417,8 +421,10 @@ reset header (TheIntroDB's can't be trusted — see `ratelimit.py`).
 **Response:** `200` with `known`, `canonical_path`, `duration_ms`, `is_movie`, `decisions` (by marker type),
 `evidence` rows, and `servers` (one row per owning server: `current` markers as read live, `published` markers that
 are ours, `plan` — `will_add` / `will_replace` / `will_remove` / `up_to_date` / `waiting` / `keeps_plex` (Plex's own
-detection replaced ours and `on_plex_redetect` is `keep_plex`) / `not_enabled` / `nothing_to_publish` / `unknown` —
-with `plan_reason` (names the types Plex keeps, e.g. "Keeping Plex's credits", on any plan), and `version_count`: a
+detection replaced ours and `on_plex_redetect` is `keep_plex`) / `keeps_emby` (the same for Emby and `keep_emby`) /
+`not_enabled` / `nothing_to_publish` / `unknown` — with `plan_reason` (names the types the server keeps, e.g. "Keeping
+Plex's credits", on any plan; on Emby also "Emby skips to the end of the file" when decided credits end before the file
+does), and `version_count`: a
 Plex item's number of versions (`Media` entries other than optimized copies), which share one marker set (`null` for
 other servers or when it can't be read); a server whose state can't be read gets a degraded row with `error` set
 instead of failing the whole response). `400` when the path isn't a file inside a server library, the
@@ -895,7 +901,7 @@ For full design and per-vendor details see [Multi-Media-Server](multi-server.md)
 | GET | `/api/servers/<id>/health-check` | Per-server settings audit. Returns `{vendor, issues, issue_count, fixable_count}`; `issues[]` carries `{flag, label, severity, current, recommended, rationale, library_id, library_name, fixable}`. Works for Plex (server-wide prefs via `/:/prefs`), Emby and Jellyfin (per-library `LibraryOptions`). Replaces the older Jellyfin-only `/jellyfin/trickplay-status` route. |
 | POST | `/api/servers/<id>/health-check/apply` | Apply settings to one or more flags. Three body shapes (all backwards-compatible): `{}` = fix every issue at recommended value; `{"flags": ["FlagName", ...]}` = fix only named flags toward recommended; `{"set": [{"flag": "X", "value": true\|false, "library_ids": ["id"]\|null}]}` = set each flag to the EXPLICIT value (enables disable-direction toggles on the Previews readiness card). Returns `{ok, results}` keyed `<library_id>:<flag>` (or `:<flag>` for server-wide prefs). |
 | GET | `/api/servers/<id>/previews-readiness` | Unified readiness payload for every vendor. Returns `{vendor, overall_ok, sections: [{id, title, docs_anchor, ok, severity, checks: [{id, label, docs_anchor, tooltip, ok, severity, current, recommended, actions: {enable?, disable?}, reason, meta}]}]}`. Drives the unified Previews readiness card on the Edit Server modal. See the [Previews readiness guide](guides/previews-readiness.md). |
-| POST | `/api/servers/<id>/install-plugin` | Jellyfin only. Adds the Media Preview Bridge manifest URL to Jellyfin's plugin repos, queues the package install, and restarts Jellyfin. Returns `{ok, steps: [{step, ok, detail}], error}`. |
+| POST | `/api/servers/<id>/install-plugin` | Jellyfin and Emby (400 for Plex). Jellyfin: adds the Media Preview Bridge manifest URL to Jellyfin's plugin repos, queues the package install, and restarts Jellyfin. Returns `{ok, steps: [{step, ok, detail}], error}`. Emby: installs Media Preview Bridge for Emby from Emby's own plugin catalog and restarts Emby; when the catalog doesn't list it, answers `ok: false, manual: true` (install the DLL by hand). Returns `{ok, steps, error, manual}`. |
 | POST | `/api/servers/<id>/uninstall-plugin` | Jellyfin only. Removes the Media Preview Bridge plugin (`DELETE /Packages/{GUID}`; 404 treated as success — already gone) and restarts Jellyfin. Repo URL stays in place for possible re-install. Same response shape as `/install-plugin`. |
 | GET | `/api/bif/servers/<id>/search?q=<query>` | Multi-server BIF Viewer search; returns `preview_kind` (`bif` or `trickplay`) per result so the viewer renders the right format |
 | GET | `/api/bif/trickplay/info?server_id=...&path=...` | Parse a Jellyfin trickplay manifest + report sheet metadata |

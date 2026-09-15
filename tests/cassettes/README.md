@@ -92,6 +92,25 @@ grep -rlE "$PLEX_TOKEN|$JF_TOKEN" tests/cassettes/test_servers_markers_vcr/ && e
 
 Expected: `4 passed`, `clean`.
 
+`tests/test_servers_emby_markers_vcr.py` pins the Media Preview Bridge for Emby routes (Ping, the admin probe,
+GET/POST/DELETE markers with `ReplaceOwn`), Emby's per-user item read (`Chapters`, `MediaSources`) and the read of a
+grouped item's versions (`Chapters,MediaSources,AlternateMediaSources`, with an API key and per user; Emby groups
+S01E01 with its "- Extended" cut), recorded against `mlab-emby` (Emby 4.10) with the plugin installed and nothing
+stored on Synth Chapters S01E01, S01E01 - Extended and S01E02 (the test removes what it posts):
+
+```bash
+cd /home/data/workspace/plex_generate_vid_previews
+set -a; . docs/design/intro-credits/evidence/lab/env; set +a
+EMBY_URL=http://127.0.0.1:18096 EMBY_USER_ID="$EMBY_UID" \
+  /home/data/.venv/bin/python -m pytest --no-cov -n 0 tests/test_servers_emby_markers_vcr.py --record-mode=once
+grep -rlF -e "$EMBY_TOKEN" -e "$EMBY_UID" tests/cassettes/test_servers_emby_markers_vcr/ && echo "LEAK" || echo "clean"
+```
+
+Expected: `10 passed`, `clean`. The user id is recorded as `/Users/FAKE_USER_ID/` (`_scrub_request_uri`), which is what
+the test sends on replay; the per-user route answers a single item, so the `Items`-list collapse above doesn't apply.
+The API-key read answers an `Items` list whose item has no `Path` (it asks for other fields): the scrubber keeps it
+when every one of its `MediaSources` paths is synthetic.
+
 **Known gotcha — `PLEX_URL`/`PLEX_TOKEN` don't reach the test under pytest.**
 `tests/conftest.py`'s session-scoped `_isolate_dotenv_from_tests` fixture
 unconditionally pops `PLEX_URL`/`PLEX_TOKEN` from `os.environ` before any

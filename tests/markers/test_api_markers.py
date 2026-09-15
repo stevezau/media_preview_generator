@@ -647,3 +647,36 @@ def test_plugin_install_routes_forget_the_cached_capability(client, servers, mon
     resp = client.post(f"/api/servers/jf-1/{route}", headers=_api_headers())
     assert resp.status_code == 200
     assert set(inspect._CAPABILITY_CACHE._entries) == {("plex-1", "status")}
+
+
+@pytest.mark.parametrize(
+    ("answer", "manual"),
+    [
+        ({"ok": True, "steps": [{"step": "catalog", "ok": True, "detail": "listed"}], "error": "", "manual": False}, False),
+        ({"ok": False, "steps": [], "error": "install it by hand", "manual": True}, True),
+    ],
+    ids=["catalog", "by-hand"],
+)  # fmt: skip
+def test_emby_plugin_install_answers_the_clients_result_and_forgets_the_capability(
+    client, servers, monkeypatch, answer, manual
+):
+    from media_preview_generator.markers import inspect
+    from media_preview_generator.servers.base import ServerType
+    from media_preview_generator.servers.emby import EmbyServer
+    from tests.markers.fakes import server_config
+
+    calls = []
+    monkeypatch.setattr(EmbyServer, "install_plugin", lambda self: calls.append(self.id) or answer)
+    emby = server_config("emby-1", ServerType.EMBY)
+    inspect._CAPABILITY_CACHE.get(emby, "status", lambda: {"state": "needs_plugin", "message": "", "details": {}})
+    resp = client.post("/api/servers/emby-1/install-plugin", headers=_api_headers())
+    assert resp.status_code == 200
+    assert resp.get_json() == answer and resp.get_json()["manual"] is manual
+    assert calls == ["emby-1"]
+    assert ("emby-1", "status") not in inspect._CAPABILITY_CACHE._entries
+
+
+def test_plugin_install_is_refused_for_plex(client, servers, monkeypatch):
+    resp = client.post("/api/servers/plex-1/install-plugin", headers=_api_headers())
+    assert resp.status_code == 400
+    assert resp.get_json() == {"ok": False, "error": "plugin install is for Jellyfin and Emby servers"}

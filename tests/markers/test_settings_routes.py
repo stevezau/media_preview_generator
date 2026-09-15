@@ -227,6 +227,22 @@ def test_server_save_without_markers_key_replaces_a_missing_or_non_object_block_
     assert get_settings_manager().get("media_servers")[0]["markers"] == default_server_markers(server_type)
 
 
+def test_emby_block_is_merged_and_validated(client):
+    from media_preview_generator.web.settings_manager import get_settings_manager
+
+    stored = {"enabled": False, "library_ids": ["7"], "emby": {"on_emby_redetect": "keep_emby"}}
+    sid = _add_server(client, "emby", markers=stored)
+    resp = client.put(f"/api/servers/{sid}", json={"markers": {"enabled": True}})
+    assert resp.status_code == 200, resp.get_json()
+    saved = get_settings_manager().get("media_servers")[0]["markers"]
+    assert saved == {"enabled": True, "library_ids": ["7"], "emby": {"on_emby_redetect": "keep_emby"}}
+    resp = client.put(f"/api/servers/{sid}", json={"markers": {"emby": {"on_emby_redetect": "restore"}}})
+    assert resp.status_code == 200, resp.get_json()
+    assert get_settings_manager().get("media_servers")[0]["markers"]["emby"] == {"on_emby_redetect": "restore"}
+    resp = client.put(f"/api/servers/{sid}", json={"markers": {"emby": {"on_emby_redetect": "sometimes"}}})
+    assert resp.status_code == 400 and "on_emby_redetect" in resp.get_json()["error"]
+
+
 def test_server_save_with_markers_still_validates_the_merged_block(client):
     from media_preview_generator.web.settings_manager import get_settings_manager
 

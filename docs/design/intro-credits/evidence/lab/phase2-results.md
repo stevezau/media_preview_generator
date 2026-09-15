@@ -128,3 +128,128 @@ Findings:
   prefixes read as marker sets, 10 of them with a cut number (`CreditsStartTicks` 1, 10, … 100000000). The `}` test
   closes that; a cut inside a string still reaches the reader and fails there (covered by "cut inside Path, then }").
 - Lab left clean on both (no store files, no marker rows, no copy library, detection off, store folder 755).
+
+## Task 10 — Emby publisher through Media Preview Bridge for Emby (2026-09-15)
+
+**Setup.** `mlab-app` rebuilt from lane `p2-task-10` (`media_preview_generator:p2-t10`), then put back on `pr-241`.
+Intro & Credits turned on for `mlab-emby` (Emby 4.10.0.40, plugin 1.0.0.0) with `PUT /api/servers/mlab-emby
+{"markers": {"enabled": true, "library_ids": null}}` (saved block gained `"emby": {"on_emby_redetect": "restore"}`), and
+turned off again at the end. `mlab-emby49` has no app server, so Emby 4.9.1.90 was driven through the lane's
+`EmbyMarkerPublisher` directly. Scripts and raw results: scratchpad `t10/lab_app_t10.py`, `t10/lab_publisher_t10.py`
+(`lab-app-run.json`, `lab-app-cleanup.json`, `lab-publisher.json`, scrubbed).
+
+**Emby groups S01E01 with its "- Extended" copy on both versions.** `GET /Users/{uid}/Items/{id}?Fields=MediaSources`
+answers two sources for S01E01 and S01E01 - Extended (120 008 ms and 130 008 ms; the `/Items` list shows them apart),
+and two equal sources (120 008 ms) for S01E03 and S01E03 - Copy. One chapter set can't fit two cuts, so those two
+files are refused; the equal-length pair publishes.
+
+| # | Check | Result |
+|---|---|---|
+| 1 | Status tab payload | PASS: `ready`, "Media Preview Bridge for Emby plugin", `plugin_version` 1.0.0.0, `can_show` intro + credits |
+| 2 | Job 1 over the synth show, `mlab-emby` rows | PASS: S01E02, S01E03, S01E03 - Copy `markers_written` "2 marker(s)"; S01E01 and S01E01 - Extended `failed` "This Emby item groups versions of different lengths; one marker set can't fit them all" |
+| 3 | Chapters after job 1 (`Fields=Chapters`) | PASS: S01E02 IntroStart 17 000 / IntroEnd 47 000 / CreditsStart 100 000; S01E03 and the Copy 25 000 / 55 000 / 100 000 (= `SYNTH_TRUTH`), each with its 4 original `Chapter` rows; nothing on the refused pair |
+| 4 | Job 2, same files | PASS: the three `markers_up_to_date` "Up to date"; store files `51.json`, `52.json`, `54.json` mtimes unchanged; Emby log "stored markers for item" count unchanged (11): no POST |
+| 5 | Inspector, S01E02 / S01E01 - Extended | PASS: `up_to_date`, reason ""; Extended `will_add` with reason "Emby skips to the end of the file" (credits 100–120 s on a 130 s file) |
+| 6 | Emby 4.9, S01E02 Use ours | PASS: POST `ReplaceOwn` true then one chapter read; rows 17 000 / 47 000 / 100 000 + 4 plain; unchanged write = state read + chapter read, no POST; `shows` ours; DELETE leaves the 4 plain chapters |
+| 7 | Emby 4.9, S01E03 with credits ending 10 s early | PASS: credits start 100 000 sent; `projection_note` "Emby skips to the end of the file"; unchanged write sends nothing; DELETE clean |
+| 8 | Emby 4.9, S01E01 (grouped) | PASS: refused before any plugin call |
+| 9 | Emby 4.10, Keep Emby's on Synth Show (2020) S01E01 (Emby rows IntroStart 20 s, IntroEnd 50 s, CreditsStart 200 s, not the plugin's) | PASS: POST `ReplaceOwn` false; ours `[]`, kept intro + credits; plugin stores ours (300000000 / 600000000 / 2100000000, size 12 695 354); Emby's 3 rows unchanged; `shows` with kept types ours; second write: no POST; DELETE clears the store, Emby's rows unchanged |
+
+Other job rows: Plex, Jellyfin 10.11 and 12.0 were up to date on both jobs except one Plex write on job 1 (S01E01, "2
+marker(s)", up to date on job 2), from phase-2 Plex code on a lab `markers.db` written by `pr-241`.
+
+Lab left clean: `DELETE /MediaPreviewBridge/Markers/{51,52,54}` (200, `Stored` 0), no store files on either Emby, no
+plugin rows on the synth episodes (plain chapters intact), Emby Intro & Credits off, `mlab-app` on `pr-241` and healthy.
+
+## Task 10 — round 1: Emby versions share one marker set (2026-09-15; superseded by round 3 below)
+
+**What Emby does.** Every version is its own item with its own chapter rows (S01E01 = item 53 with 4 chapters,
+S01E01 - Extended = item 55 with 5), and the per-user item answer lists all versions as MediaSources, the item's own
+file first (53: S01E01, Extended; 55: Extended, S01E01; the same on 4.9 with items 11/10). `GET /Items?Ids=` without a
+user id lists only the item's own file. The plugin compares its stored size and path with the POSTed item's own
+`item.Path` and that file's size (`StoredMarkers.IsStale`), so each version item takes its own file's size: no plugin
+change.
+
+**Rule.** The Plex rule (plex-item-publishing.md): a type goes onto a version item only when every version decided it
+within 2 s; otherwise the row waits ("Waiting for this item's other versions to agree on: …"). The versions are
+recorded (`item_files`); a version added or re-decided apart since shows as `VERSIONS_CHANGED` in the read-back.
+
+**Run.** `mlab-app` on `media_preview_generator:p2-t10` (round 1 build), Intro & Credits on for `mlab-emby` only (Plex
+and both Jellyfins switched off for the run, so nothing was written there, and switched back on). Jobs over Synth
+Chapters (2021). POSTs counted from the Emby log ("stored markers for item") and the store files' mtimes. Script:
+scratchpad `t10/lab_app_r1.py`, results `lab-r1-run.json`, `lab-r1-cleanup.json`.
+
+| Job | Change before it | S01E01 (53) | S01E01 - Extended (55) | S01E02 / S01E03 / Copy | POSTs |
+|---|---|---|---|---|---|
+| 1 | — | written "2 marker(s)"; IntroStart 10 000 / IntroEnd 40 000 / CreditsStart 100 000 + 4 chapters | written "2 marker(s); Emby skips to the end of the file"; same rows + 5 chapters | written at `SYNTH_TRUTH` | 5 |
+| 2 | — | up to date | up to date "Up to date; Emby skips to the end of the file" | up to date | 0 |
+| 3 | Extended's credits locked 5 s later (105 000) in `markers.db` | waiting "…agree on: credits" (the read-back saw Extended re-decided apart); intro only | waiting "…agree on: credits"; intro only | up to date | 2 |
+| 4 | — | waiting, unchanged | waiting, unchanged | up to date | 0 |
+| 5 | credits row restored (100 000, unlocked) | written "2 marker(s)" | written "2 marker(s); Emby skips…" | up to date | 2 |
+| 6 | — | up to date | up to date | up to date | 0 |
+
+Inspector after job 6: S01E01 `up_to_date`; Extended `up_to_date`, reason "Emby skips to the end of the file".
+
+Lab left clean: `DELETE /MediaPreviewBridge/Markers/{51..55}` (200, `Stored` 0), no store files on either Emby, no
+plugin rows on the synth episodes (plain chapters intact), Extended's credits row as before, Plex/Jellyfin switches
+back on, Emby off, `mlab-app` on `pr-241`.
+
+## Task 10 — round 3: each Emby version plays its own chapters, so each is published on its own (2026-09-15)
+
+**Emby web, grouped item.** On `mlab-emby` (4.10) the plugin stored intro 10–40 s on S01E01 (item 53) and intro
+20–50 s on S01E01 - Extended (item 55). Logged in as `lab`, item 53's page, "Version" picked in the selector, Play,
+then seeks; "Skip Intro" read from the visible buttons 3 s after each seek. Script: scratchpad
+`t10/emby_versions_play.py`. Screenshots: `docs/design/intro-credits/evidence/screenshots/phase2/task10-r3-*.png`.
+
+| Page / version picked | Stream | 7.9 s | 14.9 s (only 53's intro) | 47.9 s (only 55's intro) | 57.9 s |
+|---|---|---|---|---|---|
+| 53 / S01E01 | `videos/55/…?MediaSourceId=mediasource_53` | no | **Skip Intro** (`page53-v53-at12`) | no (`page53-v53-at45`) | no |
+| 53 / Extended | `videos/55/…?MediaSourceId=mediasource_55` | no | no (`page53-v55-at12`) | **Skip Intro** (`page53-v55-at45`) | no |
+| 55 / Extended | `videos/55/…?MediaSourceId=mediasource_55` | no | no | **Skip Intro** | no |
+| 55 / S01E01 | the player moved on to S01E02 (item 51) before the first seek, twice (`page55-v53-at5`) | — | — | — | — |
+
+The version picker's screenshot is `page53-v55-item`. The player shows the chapters of the version it plays, not
+the chapters of the page's item. Clicking "Skip Intro" opens Emby Premiere's "Unlock Feature" dialog on this unlicensed
+server, so where a skip lands wasn't measured. Markers deleted afterwards, the played state reset and the web devices
+removed.
+
+**API.** With an API key and no user id, `GET /Items?Ids=53&Fields=MediaSources` lists only item 53's own source.
+Adding `AlternateMediaSources` lists both. Each source has `ItemId` (53, 55) and `Id` `mediasource_<item id>`, on 4.9.1.90
+(items 11/10) and 4.10. The per-user route lists both either way. `/Items?UserId=` as a query parameter lists only the
+own source. `Chapters` in the same read gives that item's own rows (53: 4, 55: 5).
+
+**Rule now.** Each Emby version is its own item and is published on its own, the way Jellyfin versions are. There's no
+agreement across versions, no waiting and no recorded version files. The write reads the item once
+(`Fields=Chapters,MediaSources,AlternateMediaSources`) and checks that this file is that item's own version.
+Emby listing the file under another version's item fails the row ("This file is Emby item 55, another version of
+item 53"). An item with several versions and none of them this file waits as not in the library. The POST carries
+this file's size.
+
+**Publisher on both Embys.** Lane `EmbyMarkerPublisher`, scratchpad `t10/lab_publisher_r3.py`
+(`lab-publisher-r3.json`). The 4.9 client had an API key only, the 4.10 client a user id.
+
+| Check | Emby 4.9 (API key) | Emby 4.10 (user id) |
+|---|---|---|
+| Versions read | 11: S01E01→11, Extended→10; 10: Extended→10, S01E01→11 | 53: →53, →55; 55: →55, →53 |
+| First write, per item | item read, POST `ReplaceOwn` true, chapter read; 11 IntroStart 10 000 / IntroEnd 40 000, 10 20 000 / 50 000 | same on 53 / 55 |
+| Unchanged second write | item read + store read, no POST; `shows` ours | same |
+| Extended file offered on S01E01's item | `PublishError` "This file is Emby item 10, another version of item 11", one item read, no plugin call | same with 55 / 53 |
+| DELETE both | no marker rows, 4 and 5 plain chapters left, stores empty | same |
+
+**Run.** `mlab-app` on `media_preview_generator:p2-t10` (round 3 build), Intro & Credits on for `mlab-emby` only, same
+sequence and counting as round 1. Script: scratchpad `t10/lab_app_r3.py` (`lab-r3-run.json`, `lab-r3-cleanup.json`).
+
+| Job | Change before it | S01E01 (53) | S01E01 - Extended (55) | S01E02 / S01E03 / Copy | POSTs |
+|---|---|---|---|---|---|
+| 1 | — | written "2 marker(s)"; IntroStart 10 000 / IntroEnd 40 000 / CreditsStart 100 000 + 4 chapters | written "2 marker(s); Emby skips to the end of the file"; same rows + 5 chapters | written | 5 |
+| 2 | — | up to date | up to date "Up to date; Emby skips to the end of the file" | up to date | 0 |
+| 3 | Extended's credits locked 5 s later (105 000) | up to date, CreditsStart 100 000 | written "2 marker(s); Emby skips…", CreditsStart 105 000 (only `55.json` changed) | up to date | 1 |
+| 4 | — | up to date | up to date | up to date | 0 |
+| 5 | credits row restored (100 000, unlocked) | up to date | written, CreditsStart 100 000 | up to date | 1 |
+| 6 | — | up to date | up to date | up to date | 0 |
+
+Inspector after job 6: S01E01 `up_to_date`; Extended `up_to_date`, reason "Emby skips to the end of the file".
+
+Lab left clean: `DELETE /MediaPreviewBridge/Markers/{51..55}` (200, `Stored` 0), no store files on either Emby, no
+plugin rows on the synth episodes (plain chapters intact), Extended's credits row as before, Plex/Jellyfin switches
+back on, Emby off, `mlab-app` on `pr-241`.
