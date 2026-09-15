@@ -24,12 +24,17 @@ publishers, per-server Edit tab, Settings section, Inspector tab, config migrati
 lab-proven: lab matrix 18/19 (row 11 unit-tested), `pr-241` image checked on the lab, and a scale run on 715 real files
 with 0 failures (`evidence/lab/phase1-results.md`). Its findings are fixed in §5.5 rules 6–7 and a warning when an
 online source's daily budget runs out (§14, 2026-09-14/15), or moved into phase 2 (the season chapter-intro check).
-**Phase 2 is built** (`plan-phase2.md`; the ledger in `.superpowers/sdd/plan-phase2/progress.md` says which tasks are
-done): season audio intros (fingerprint store, v3 matcher, season step with the silence guard and the season
-chapter-intro check, Season follow-up jobs), the Emby Bridge plugin and Emby publisher, Plex version drift, the Check
-servers job (§6.2 step 6), the Season view and its API, the Settings / Edit tab / Inspector UI, and the accuracy harness
-(`evidence/eval/phase2-harness.md`: reproduces §5.3 exactly; the full report against Plex's own markers). Rulings R1–R5
-and G3 are in §14. Next: the phase-2 lab matrix (`plan-phase2.md` Task 17). Build runs on PR #241, branch
+**Phase 2 is built, audited and lab-proven** (`plan-phase2.md`; ledger `.superpowers/sdd/plan-phase2/progress.md`):
+season audio intros (fingerprint store, v3 matcher, season step with the silence guard and the season chapter-intro
+check, Season follow-up jobs), the Emby Bridge plugin and Emby publisher, Plex version drift, the Check servers job
+(§6.2 step 6), the Season view and its API, the Settings / Edit tab / Inspector UI, and the accuracy harness
+(`evidence/eval/phase2-harness.md`: reproduces §5.3 exactly; the full report against Plex's own markers). Milestone
+audit: 0 critical/high, 7 medium fixed. Lab matrix 23/23 (row 20 in Plex Web; native Plex and Emby apps not
+testable), owner checks done (Plex Web skip buttons, Emby Premiere), and the `pr-241` image
+(`sha256:3afed8e7124b6a2c465bcdf6c70f261c044b78ee18c29cbf642444d628908341`, from `8a8b92e`) re-ran rows 1, 2 and 8
+on the lab (`evidence/lab/phase2-results.md` "PR image check"). Rulings R1–R5 and G3 are in §14. Still open with the
+owner: the Emby catalog submission (roadmap checkpoint 4). Next: owner review of PR #241, then phase 3 (credits text;
+`plan-phase3.md` is written after that review). Build runs on PR #241, branch
 `feat/markers-detection`; spec, slimmed evidence and plans live in `docs/design/intro-credits/`. Local-only, gitignored
 files stay beside them: `evidence/lab/env` (tokens), `evidence/lab/synth/` (webm), `evidence/lab/scale_mounts.sh` and
 `evidence/lab/results/` (real library paths), `evidence/online/skipdb-dump.json`,

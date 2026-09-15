@@ -283,6 +283,11 @@ class EmbyCheck:
         self.ok("POST", f"/ScheduledTasks/Running/{task['Id']}")
         return self.wait_task(key, started)
 
+    def clear_play_state(self) -> None:
+        """Reset the lab user's resume position and played flag on the item the web client plays."""
+        body = {"PlaybackPositionTicks": 0, "PlayCount": 0, "Played": False}
+        self.ok("POST", f"/Users/{self.uid}/Items/{self.item}/UserData", body)
+
     def devices(self) -> dict[str, str]:
         return {d["Id"]: d.get("ReportedDeviceId", "") for d in self.ok("GET", "/Devices")["Items"]}
 
@@ -355,6 +360,8 @@ class EmbyCheck:
         pm.SHOTS.mkdir(parents=True, exist_ok=True)
         before = set(self.devices())
         try:
+            # A resume position from an earlier run makes Emby show "Resume" instead of the "Play" button the client clicks.
+            self.clear_play_state()
             out = subprocess.run(
                 ["nice", "-n", "19", sys.executable, str(CLIENT), self.item, str(shot)],
                 capture_output=True,
@@ -364,6 +371,10 @@ class EmbyCheck:
         finally:
             new_devices = sorted(set(self.devices()) - before)
             self.delete_devices(new_devices)
+            try:
+                self.clear_play_state()
+            except Exception as exc:  # a failed reset must not hide the check's own error
+                pm.say(f"couldn't reset the play state afterwards: {type(exc).__name__}")
         line = next((ln for ln in out.stdout.splitlines() if ln.startswith("skip found:")), out.stderr[-500:])
         position = re.search(r"\| t: (-?[\d.]+)", line)
         return {

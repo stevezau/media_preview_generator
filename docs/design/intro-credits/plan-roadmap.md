@@ -130,29 +130,48 @@ phase 2 Task 7, and F5 (a late credits start on the end card after a post-credit
 less, never story. Evidence: `evidence/lab/phase1-results.md`.
 
 ### Phase 2 — Season audio intros, Emby, reconcile, Season view, eval harness (plan: `plan-phase2.md`)
-- `audio/fingerprint.py`: `ffmpeg -ss 0 -t W -i <file> -vn -ac 2 -f chromaprint -algorithm 1 -fp_format raw -`,
+- [x] `audio/fingerprint.py`: `ffmpeg -ss 0 -t W -i <file> -vn -ac 2 -f chromaprint -algorithm 1 -fp_format raw -`,
   `W = min(900 s, 35% of duration)`, 0.1238 s/point, uses `/usr/lib/jellyfin-ffmpeg/ffmpeg` (capability-probe
   `-muxers` for chromaprint; arm64 image lacks it → source unavailable with a message). Cached per identity.
-- `audio/matcher.py`: v3 (inverted index ±2, `popcount(a^b) ≤ 6`, gaps ≤ 3.5 s, runs 8–120 s, all non-overlapping
+- [x] `audio/matcher.py`: v3 (inverted index ±2, `popcount(a^b) ≤ 6`, gaps ≤ 3.5 s, runs 8–120 s, all non-overlapping
   runs, cluster ±4 s, rank (len ≥ 15 s, support, len), quorum ≥ 50% of others, ≥ 1 when one other). Pair results
   cached in `season_pairs`. Must reproduce `evidence/eval/eval_results_v3.json` segment-for-segment on cached
   fingerprints before use.
-- `audio/season.py`: group = season folder; one sibling is enough; first episode uses ≤ 4 episodes of the previous
-  season as a hint that needs a second source; re-decide siblings without an intro when a new episode arrives
-  (superseded: spec §14 2026-09-14 R3, 2026-09-15 season step).
-- Emby plugin (`emby-plugin/`, `MediaBrowser.Server.Core` NuGet refs): `POST/GET/DELETE
+- [x] `audio/season.py`: group = season folder (shipped as the folder's episodes with the same season number, at most
+  the 40 nearest); one sibling is enough; first episode uses ≤ 4 episodes of the previous season as a hint that needs
+  a second source.
+- *(superseded)* `audio/season.py`: re-decide siblings without an intro when a new episode arrives — superseded, not built as
+  written: spec §14 2026-09-14 R3 and 2026-09-15 season step (a job matches inline and queues a Season follow-up job
+  for changed episodes outside it).
+- [x] Emby plugin (`emby-plugin/`, `MediaBrowser.Server.Core` NuGet refs): `POST/GET/DELETE
   /MediaPreviewBridge/Markers/{id}`, `GET /MediaPreviewBridge/Ping` with `features`, `SaveChapters` keeping Chapter
   rows, re-apply on `ItemUpdated` from `IServerEntryPoint`. Builds 4.9 + 4.10. Catalog submission text + manual
   install docs. `publishers/emby.py` (IntroStart, IntroEnd, CreditsStart).
-- `reconcile.py`: APScheduler job every 12 h (superseded: spec §14 2026-09-14) + after each Intro & Credits job
-  (superseded: spec §14 2026-09-14); read back each published server, re-publish on drift; Plex
-  `on_plex_redetect=keep_plex` stores Plex's set as evidence instead (superseded: spec §14 2026-09-14).
-- Inspector Season view + `GET /api/markers/season`.
-- `tools/markers_eval/`: intros (118 eps), credits (80 files + 205-movie chapter set), online (43 cases), and a
+- [ ] Emby catalog submission itself — deferred: the text is in `emby-plugin/README.md`, but the entry needs the
+  owner's Emby forum thread / developer id (owner checkpoint 4).
+- [x] `reconcile.py`: read back each published server, re-publish on drift — shipped as the Check servers job, which
+  the user starts or schedules (spec §14 2026-09-14 R5).
+- *(superseded)* `reconcile.py`: APScheduler job every 12 h — superseded: spec §14 2026-09-14 (R5, nothing scheduled by default).
+- *(superseded)* `reconcile.py`: reconcile after each Intro & Credits job — superseded: spec §14 2026-09-14 (phase 1's read-back
+  before "Up to date" and the delayed verify job cover it).
+- *(superseded)* Plex `on_plex_redetect=keep_plex` stores Plex's set as evidence instead — superseded: spec §14 2026-09-14 (Keep
+  Plex's keeps Plex's markers on the server, read as `server_markers` evidence like any server's).
+- [x] Inspector Season view + `GET /api/markers/season`.
+- [x] `tools/markers_eval/`: intros (118 eps), credits (80 files + 205-movie chapter set), online (43 cases), and a
   **Plex baseline** column read-only from the prod Plex DB for the same files. Report useful/wrong/missed per
   source, per publish setting, and for Plex's own markers.
 Done when: harness ≥ spec §5.3 numbers (91/13/14 of 118 or better), **our decided markers are at least as good as
 Plex's native markers on the same files (more useful, not more wrong)**, Emby skip button in the lab.
+
+**Status 2026-09-15: built, audited and lab-proven; owner review of PR #241 next.** Harness reproduces §5.3 exactly
+(91/13/14 eval lists, 91/10/17 full folder). Against Plex's own markers: on the 118 intro episodes the shipped rules
+(R2, and G3 kept on by the owner) publish 0 useful / 0 wrong against Plex's 23 / 15, so "Medium beats Plex" fails by
+construction there (High passes; G3 off would pass); on the online cases ours has 11 useful / 10 wrong intros against
+Plex's 8 / 14, but fewer useful credits there (0 with default sources, 6 with TheIntroDB, against Plex's 13); chapter
+credits beat Plex on the 40-movie, 40-episode and 205-movie sets (more useful, 0 wrong each). Emby web
+shows Skip Intro in the lab (row 8; skipping needs Emby Premiere on the server). Milestone audit 0 critical/high, 7
+medium fixed; lab matrix 23/23; `pr-241` image `sha256:3afed8e7…` from `8a8b92e` re-ran rows 1, 2 and 8. Evidence:
+`evidence/lab/phase2-results.md`, `evidence/eval/phase2-harness.md`.
 
 ### Phase 3 — Credits text detection (plan: `plan-phase3.md`)
 - `credits/frames.py`: `ffmpeg -threads 2 [hwaccel args from the worker's GPU] -skip_frame nokey -ss <tail> -copyts

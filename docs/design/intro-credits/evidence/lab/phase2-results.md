@@ -645,3 +645,20 @@ The owner checks (row 20 and Emby Premiere) and two Task 17 findings, turned int
   goes into the job's Season follow-up once the job has read that sibling again (spec §14, 2026-09-15). Unit-tested
   (`tests/markers/test_season_followups.py::TestAnEpisodeRunBeforeItsChangedSibling`); not re-run in the lab.
 - **A lone opener's previous-season hint one run late:** recorded in spec §14 as a known limitation.
+
+## PR image check (2026-09-15, `pr-241` from `8a8b92e`)
+
+- **Image.** "Build PR Docker Image" run 34959097736 (success) built `ghcr.io/stevezau/media_preview_generator:pr-241`
+  from `8a8b92e765f9…` for linux/amd64. Pulled digest `sha256:3afed8e7124b6a2c465bcdf6c70f261c044b78ee18c29cbf642444d628908341`,
+  the digest the workflow pushed. The image's `GIT_SHA` env is `8a8b92e765f9929edd6a9d60a61b0a145820d732`; its OCI
+  `revision` label is the ffmpeg base image's, not ours.
+- **Image checks.** `import media_preview_generator.markers.audio.season, media_preview_generator.markers.reconcile,
+  numpy` prints `ok`. `/usr/lib/jellyfin-ffmpeg/ffmpeg -hide_banner -muxers | grep -c chromaprint` prints `1`.
+- **App.** `MLAB_DIR=<main lab> MLAB_APP_IMAGE=ghcr.io/stevezau/media_preview_generator:pr-241 ./app.sh recreate`
+  (config volume kept), healthy. Then `./phase2_matrix.py run 1 2 8` with `MLAB_DIR` at the main checkout's lab folder.
+
+| Row | Result | Evidence |
+|---|---|---|
+| 1 Capability | pass | 5 of 5 `ready`: Plex (Plex Pass, ext4, lock holder), Jellyfin 10.11 plugin 10.11.1.0, Jellyfin 12.0 plugin 12.0.1.0, both Embys plugin 1.0.0.0 with `intro_skip_registered` false. Season audio available with `/usr/lib/jellyfin-ffmpeg/ffmpeg`. |
+| 2 Season audio backfill, High then Medium | pass | High ran after the show's 6 fingerprints were deleted: chromaprint ffmpeg peak 1 at once. Medium ran none (cached). Both runs: 5 Needs review, 0 published, no server serves an intro of ours. Season audio 3/3 on S01E01 19.4–48.3 s (theme 20–50 s), E02 44.5–73.3 s, E03 4.3–33.3 s, E04 69.5–98.3 s. S02E01 has no same-season answer; its previous-season hint was 4/4 at 14.1–43.7 s (theme 15–45 s) in both runs. |
+| 8 Emby web Skip Intro | pass (second run) | `skip found: True`, t 23.0 s, visible button "Skip Intro"; S01E02 marker chapters IntroStart 17 s, IntroEnd 47 s, CreditsStart 100 s. The first run failed in the client: Emby's item page showed **Resume** / **From Beginning** instead of **Play** (Playwright waited 15 s for the "Play" button), because Task 17's row 8 run had left the lab user's play position at 22 s on S01E02 (`PlaybackPositionTicks` 220000000, last played 08:33 UTC). The markers were already correct on that run. After resetting that user data (`POST /Users/{uid}/Items/51/UserData`, position 0), row 8 passed alone. The row leaves the position at 22 s again, so it was reset once more afterwards. Harness gap, not product, now fixed: `EmbyCheck.web_skip` resets the play state before and after playing, and row 8 then passed twice in a row on the same image. |
