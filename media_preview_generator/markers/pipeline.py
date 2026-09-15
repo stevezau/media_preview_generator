@@ -238,7 +238,8 @@ class PipelineContext:
     # (path, source) pairs a forced run already refreshed, so the worker stage doesn't ask those sources twice and
     # still refreshes the sources after the detector that handed the item to a worker.
     _refreshed: set[tuple[str, Source]] = field(default_factory=set, repr=False)
-    # Per server id: its intro-DB importer plugin ("" = none), or None when its plugin list couldn't be read.
+    # Per server id: its importer plugins of a crowd database (IntroDB/TheIntroDB, SkipDB, AniSkip), joined ("" = none),
+    # or None when its plugin list couldn't be read; the copy counts as that database's group.
     _importers: dict[str, str | None] = field(default_factory=dict, repr=False)
     _importer_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
     _importer_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -902,7 +903,8 @@ def _lookup(client: Any, source: Source, ids: MediaIds, rec: FileRecord, ctx: Pi
 
 
 def _importer_plugin(ctx: PipelineContext, owner: _Owning) -> tuple[bool, str | None]:
-    """Whether the server's plugin list could be read, and its intro-DB importer plugin; asked once per server per job."""
+    """Whether the server's plugin list could be read, and its importer plugins of a crowd database (IntroDB/TheIntroDB,
+    SkipDB, AniSkip), joined; the copy counts as that database's group. Asked once per server per job."""
     sid = owner.config.id
     with ctx._importer_guard:
         lock = ctx._importer_locks.setdefault(sid, threading.Lock())

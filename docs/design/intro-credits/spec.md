@@ -308,7 +308,11 @@ than 15 s at end of file (Animal), credits over a scene (A Season to Remember), 
 the Dead), several sitcoms whose credits run squeezed over a scene. Why not preview frames: no better at 6 s, much
 worse at the default 10 s, and it would couple the two job types.
 
-Credits text alone is one source: under the default publish rule it needs a second source (§5.5).
+Credits text alone is one source: at "High" it needs a second source; at "Medium" it may publish alone, since
+it reads this file's own frames (§5.5 rule 6; owner, 2026-09-16). It also agrees with a server's own credits marker
+as an independent source (rule 7 still shortens). The skip ends at the roll's last credit frame, refined at 1 fps to
+the roll's last contiguous credit frame (no fade step), when more than 30 s of the file follows the roll (a scene
+after the credits); otherwise it runs to the end of the file. Emby still gets the start only (§6.3 R1).
 Full rule tuning happens in phase 3 on a larger hand-checked set.
 
 ### 5.5 Combining evidence
@@ -342,11 +346,11 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    agrees with both sides can't hide a contradiction. Another chapter of the same type counts as one side of such a
    pair; a chapter within tolerance of two groups that disagree with each other is still accepted.
 6. A single source is accepted only at the **"Medium"** publish setting, only when that source checks the file's
-   cut itself — chapters, or SkipDB `exact`/`shifted` matches for an intro or recap (IntroDB and TheIntroDB return an
-   answer whatever the file's length, so alone they never decide; SkipDB alone never decides credits or a preview,
-   which need an agreeing independent source as at High) — and only when no sane candidate from another independent
-   source (markers already on a server included) contradicts it and every pair of the source's own candidates agrees;
-   its other edge takes the safer value across those candidates.
+   cut itself — chapters, credits text (it reads this file's own frames), or SkipDB `exact`/`shifted` matches for an
+   intro or recap (IntroDB and TheIntroDB return an answer whatever the file's length, so alone they never decide;
+   SkipDB alone never decides credits or a preview, which need an agreeing independent source as at High) — and only
+   when no sane candidate from another independent source (markers already on a server included) contradicts it and
+   every pair of the source's own candidates agrees; its other edge takes the safer value across those candidates.
 7. Markers already on a server count as agreement evidence, never as a sole source, and never supply the published
    times on their own. When a server marker agrees, it may **shorten** the composed skip (a later intro/recap start,
    an earlier credits/preview end) but never lengthen it — so a crowd answer running to the end of the file can't
@@ -354,7 +358,7 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    source. A Plex item's markers are not used for a file whose item has another version with a duration more
    than 2 s different (one set per item describes one cut); Emby's reader applies the same check to the versions Emby
    lists with the item, although each Emby version has its own markers (§3.3, §6.3). Markers on a Jellyfin/Emby server
-   that has an intro-database importer plugin join the crowd group of rule 8. Once credits or a preview are decided
+   that has an importer plugin count as the database it imports (rule 8). Once credits or a preview are decided
    (any path but a lock), a server's own detection markers of that type (never an importer plugin's, never ours or
    another cut's) may also move the **start** later. If any of them covers the decided start or starts within 10 s of
    it, the server says the credits are already running there and nothing moves. Otherwise each server offers its first
@@ -366,8 +370,12 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    never turn "Needs review" into a published one. Intro and recap ends are never moved this way. A chapter decision
    shortened or confirmed only by server markers still counts as chapters alone for the evidence search.
 8. Online sources are independent of each other only if they don't copy each other: IntroDB data looks partly seeded
-   from others — IntroDB + TheIntroDB always count as one source, and so do server markers written by an importer of
-   those databases. Season audio and its previous-season hint count as one source (the same method on the same show).
+   from others — IntroDB + TheIntroDB always count as one source. Server markers written by an importer plugin count
+   as the database it imports (by the plugin's name): an IntroDB or TheIntroDB importer's as IntroDB + TheIntroDB, a
+   SkipDB importer's as SkipDB (so SkipDB and its copy never agree). An AniSkip importer's also count as IntroDB +
+   TheIntroDB until phase 4 measures what they copy (precision first). When the database can't be told (no name
+   matches, or the server has importers of more than one database) they count as IntroDB + TheIntroDB, as before.
+   Season audio and its previous-season hint count as one source (the same method on the same show).
    SkipDB intro starts also match TheIntroDB's to ≤ 44 ms on the Daredevil S03 episodes both cover
    (agreement is on intro ends, so they stay separate for now; re-measure before enabling TheIntroDB by default).
 9. A decided intro and recap overlapping by more than 5 s → both "Needs review".
@@ -1049,3 +1057,22 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   queues another" are unchanged. Known limitation: when the changed sibling isn't one of the job's files, the job's
   Season job reads it, and that Season job can't queue the earlier episode again, so the episode is one run late, as
   before.
+- 2026-09-16 · Phase 3 owner answers: Q1 credits text alone at Medium (yes; measured on 80: alone 65 useful / 3 wrong,
+  Medium with Plex 56 / 1 vs Plex 47 / 13; cited from `plan-phase3.md` "Measured while planning" until Task 1 copies
+  them into `evidence/credits/phase3-measurements.md`) · Q2 credits text and a server's own marker are independent
+  (yes) · Q3 credits text ends at the last credit frame when the roll ends more than 30 s before the end of the file
+  (4 of 76 runs), else no end; Emby unchanged (R1)
+- 2026-09-16 · Phase 3 owner answers: Q4 gate — per set, Medium wrong ≤ 2 % and ≤ Plex, High wrong ≤ 1 % and ≤ Plex
+  (caps rounded up: 80 → 2 and 1, 205 → 5 and 3), Medium useful ≥ Plex, rule J ≥ 59 / ≤ 1 early of 80 · Q5 rule J
+  ships as measured, frame-checked · Q6 AMD: self-test decides · Q8 ≤ +250 MB image
+- 2026-09-16 · Phase 3 owner answer Q7: a throwaway container on `plex` for the lab's GPU rows 12–15 only (synthetic
+  movie, no `/data*` or Plex config, no prod Plex access, removed after)
+- 2026-09-16 · Importer copies join their database's group (§5.5 rules 7 and 8; Task 9 fix round 1). An importer
+  plugin's markers were always grouped with IntroDB + TheIntroDB, but the plugin check also matches SkipDB and AniSkip
+  importers, so SkipDB and a SkipDB importer's copy of it agreed and decided (credits at High: SkipDB 5 730 s and the
+  copy 5 731 s published over credits text at 5 700 s). Now the database comes from the plugin names the stored row
+  names (`copied_from`). Rows now name every importer plugin, and the reader version is 2, so servers are read once
+  again (a row stored earlier named only the first plugin and could file a two-database server's copy as SkipDB).
+  AniSkip copies count as IntroDB + TheIntroDB until phase 4 measures them (Task 9 fix round 2). Unknown or more than
+  one database: as before. Known limit: on a server with importers of two databases the copy's database can't be
+  told, so SkipDB plus its copy still decide there (pinned by test_pipeline's `two-databases` row).

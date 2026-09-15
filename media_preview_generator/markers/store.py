@@ -22,6 +22,7 @@ from loguru import logger
 
 from .decide import DecisionStatus, TypeDecision
 from .models import SERVER_SOURCES, Candidate, FileIdentity, Marker, MarkerType, Source
+from .sources.server_markers import importer_database
 
 SCHEMA_VERSION = 1
 _SERVER_SOURCE_VALUES = (Source.SERVER_MARKERS.value, Source.SERVER_MARKERS_IMPORTED.value)
@@ -750,7 +751,8 @@ class MarkerStore:
 
         A candidate's ``origin`` is rebuilt from the row's own ``label`` (e.g. a chapter title) when set,
         falling back to the replace/lookup key in ``origin`` -- the two differ for chapters, which share one
-        lookup key ("") across many differently-titled candidates.
+        lookup key ("") across many differently-titled candidates. An importer plugin's copy gets ``copied_from``
+        from the plugin names its row's detail carries, so rows stored before the database was read get it too.
         """
         return [
             Candidate(
@@ -760,6 +762,7 @@ class MarkerStore:
                 Source(r["source"]),
                 r["confidence"] if r["confidence"] is not None else 1.0,
                 r["label"] or r["origin"],
+                importer_database(r["detail"]) if r["source"] == Source.SERVER_MARKERS_IMPORTED.value else "",
             )
             for r in self._evidence_query(file_id)
             if r["type"] is not None and r["start_ms"] is not None

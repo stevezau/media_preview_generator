@@ -25,7 +25,8 @@ class Source(str, Enum):
     SEASON_AUDIO = "season_audio"
     CREDITS_TEXT = "credits_text"
     SERVER_MARKERS = "server_markers"
-    # Markers on a Jellyfin/Emby server that has an intro-DB importer plugin: a copy of crowd data, not a second opinion.
+    # Markers on a Jellyfin/Emby server with importer plugins of a crowd database (IntroDB/TheIntroDB, SkipDB, AniSkip):
+    # a copy, not a second opinion; the copy counts as that database's group.
     SERVER_MARKERS_IMPORTED = "server_markers_imported"
     USER = "user"
     # A season's only episode matched against the previous season's cached fingerprints (spec §5.3): a hint that
@@ -52,6 +53,8 @@ class Candidate:
             counts as 0.0), then the shorter skip. Chapter selection ignores confidence (first
             intro/recap chapter, last credits/preview chapter, the earlier end on a tied start).
         origin: Free text: the server id for server markers, the chapter title for chapters.
+        copied_from: For markers an importer plugin wrote (``server_markers_imported``): the crowd database the plugin
+            imports, "introdb" (IntroDB or TheIntroDB), "skipdb" or "aniskip"; "" when it can't be told.
     """
 
     type: MarkerType
@@ -60,6 +63,7 @@ class Candidate:
     source: Source
     confidence: float = 1.0
     origin: str = ""
+    copied_from: str = ""
 
 
 @dataclass(frozen=True)

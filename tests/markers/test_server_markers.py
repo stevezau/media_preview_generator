@@ -9,6 +9,7 @@ import pytest
 from media_preview_generator.markers.models import Candidate, MarkerType, Source
 from media_preview_generator.markers.sources.server_markers import (
     imported_detail,
+    importer_database,
     importer_plugin,
     read_server_markers,
 )
@@ -150,7 +151,7 @@ class TestImporterPlugins:
             (["Intro DB Segments"], "Intro DB Segments"),
             (["SkipDB"], "SkipDB"),
             (["AniSkip"], "AniSkip"),
-            (["Ani-Skip Segments", "TheIntroDB"], "Ani-Skip Segments"),
+            (["Ani-Skip Segments", "Trakt", "TheIntroDB"], "Ani-Skip Segments, TheIntroDB"),
             # Intro Skipper fingerprints the server's own files: local detection, not a crowd database
             (["Intro Skipper"], None),
             (["Media Preview Bridge", "Trakt", "Chapter Segments Provider"], None),
@@ -162,8 +163,33 @@ class TestImporterPlugins:
 
     def test_imported_detail_names_the_plugin(self):
         assert imported_detail("TheIntroDB") == (
-            "Markers on this server look imported from TheIntroDB; not used as a second opinion"
+            "Markers on this server look imported from TheIntroDB; not a second opinion for that database"
         )
+
+    @pytest.mark.parametrize(
+        ("names", "database"),
+        [
+            (["TheIntroDB"], "introdb"),
+            (["IntroDB"], "introdb"),
+            (["Intro DB Segments"], "introdb"),
+            (["SkipDB"], "skipdb"),
+            (["Skip-DB Importer"], "skipdb"),
+            (["AniSkip"], "aniskip"),
+            (["Ani-Skip Segments"], "aniskip"),
+            (["IntroDB", "TheIntroDB"], "introdb"),
+            # importers of two databases: the server's markers could be a copy of either
+            (["SkipDB", "TheIntroDB"], ""),
+            (["Ani-Skip Segments", "SkipDB"], ""),
+        ],
+    )
+    def test_importer_database_from_the_names_and_from_the_stored_detail(self, names, database):
+        plugins = importer_plugin(names)
+        assert importer_database(plugins) == database
+        assert importer_database(imported_detail(plugins)) == database
+
+    @pytest.mark.parametrize("text", ["", "Intro Skipper", "imported", "Chapter Segments Provider"])
+    def test_importer_database_is_unknown_without_a_database_name(self, text):
+        assert importer_database(text) == ""
 
 
 class TestJellyfin:

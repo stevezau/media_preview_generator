@@ -2377,3 +2377,101 @@ class TestSeasonIntroChapterLimit:
 
 def _limited(publish_when, limit):
     return DecisionContext(DUR, False, publish_when, frozenset({T.INTRO}), ORDER, limit)
+
+
+def _agreed(start, end, decided_by, reason):
+    return (DecisionStatus.DECIDED, start, end, decided_by, reason)
+
+
+_NOT_YET = (DecisionStatus.NEEDS_REVIEW, None, None, None, "sources don't agree yet")
+_SKIPDB_COPY_INTRO = _agreed(
+    128_000, 157_000, ("skipdb", "server_markers_imported"), "sources agree: skipdb, server_markers_imported"
+)
+_INTRODB_COPY_INTRO = _agreed(
+    128_000, 157_000, ("introdb", "server_markers_imported"), "sources agree: introdb, server_markers_imported"
+)
+_SKIPDB_COPY_CREDITS = _agreed(
+    1_241_000, DUR, ("skipdb", "server_markers_imported"), "sources agree: skipdb, server_markers_imported"
+)
+_INTRODB_COPY_CREDITS = _agreed(
+    1_241_000, DUR, ("introdb", "server_markers_imported"), "sources agree: introdb, server_markers_imported"
+)
+# At Medium SkipDB may decide an intro alone (rule 6); its copy is the same source and may still give the later start.
+_SKIPDB_ALONE_INTRO = _agreed(128_000, 157_000, ("skipdb", "server_markers_imported"), "single source (skipdb)")
+
+
+class TestImportedCopiesJoinTheDatabaseTheyImport:
+    """Rule 8 (ruling 2026-09-16): an importer plugin's markers are in the independence group of the database it
+    imports. AniSkip's, and one whose database can't be told (""), stay with IntroDB/TheIntroDB."""
+
+    @pytest.mark.parametrize(
+        ("crowd", "copied_from", "high", "medium"),
+        [
+            (S.SKIPDB, "skipdb", _NOT_YET, _SKIPDB_ALONE_INTRO),
+            (S.SKIPDB, "introdb", _SKIPDB_COPY_INTRO, _SKIPDB_COPY_INTRO),
+            (S.SKIPDB, "aniskip", _SKIPDB_COPY_INTRO, _SKIPDB_COPY_INTRO),
+            (S.SKIPDB, "", _SKIPDB_COPY_INTRO, _SKIPDB_COPY_INTRO),
+            (S.INTRODB, "introdb", _NOT_YET, _NOT_YET),
+            (S.THEINTRODB, "introdb", _NOT_YET, _NOT_YET),
+            (S.INTRODB, "skipdb", _INTRODB_COPY_INTRO, _INTRODB_COPY_INTRO),
+            # AniSkip copies stay with the crowd group until phase 4 measures what they copy
+            (S.INTRODB, "aniskip", _NOT_YET, _NOT_YET),
+            (S.INTRODB, "", _NOT_YET, _NOT_YET),
+        ],
+        ids=[
+            "skipdb+skipdb-copy",
+            "skipdb+introdb-copy",
+            "skipdb+aniskip-copy",
+            "skipdb+unknown-copy",
+            "introdb+introdb-copy",
+            "theintrodb+introdb-copy",
+            "introdb+skipdb-copy",
+            "introdb+aniskip-copy",
+            "introdb+unknown-copy",
+        ],
+    )
+    def test_intro(self, crowd, copied_from, high, medium):
+        copy = Candidate(T.INTRO, 128_000, 160_000, S.SERVER_MARKERS_IMPORTED, origin="jf-1", copied_from=copied_from)
+        for level, expected in (("high", high), ("medium", medium)):
+            d = decide([intro(crowd, 127_000, 157_000), copy], ctx(level, types=(T.INTRO,)), {})[T.INTRO]
+            got = (d.status, *((d.marker.start_ms, d.marker.end_ms, d.marker.decided_by) if d.marker else (None,) * 3))
+            assert (*got, d.reason) == expected, level
+
+    @pytest.mark.parametrize(
+        ("crowd", "copied_from", "high", "medium"),
+        [
+            # SkipDB and its copy are one source, and SkipDB alone never decides credits, at Medium either (rule 6)
+            (S.SKIPDB, "skipdb", _NOT_YET, _NOT_YET),
+            (S.SKIPDB, "introdb", _SKIPDB_COPY_CREDITS, _SKIPDB_COPY_CREDITS),
+            (S.SKIPDB, "aniskip", _SKIPDB_COPY_CREDITS, _SKIPDB_COPY_CREDITS),
+            (S.SKIPDB, "", _SKIPDB_COPY_CREDITS, _SKIPDB_COPY_CREDITS),
+            (S.INTRODB, "introdb", _NOT_YET, _NOT_YET),
+            (S.THEINTRODB, "introdb", _NOT_YET, _NOT_YET),
+            (S.INTRODB, "skipdb", _INTRODB_COPY_CREDITS, _INTRODB_COPY_CREDITS),
+            (S.INTRODB, "aniskip", _NOT_YET, _NOT_YET),
+            (S.INTRODB, "", _NOT_YET, _NOT_YET),
+        ],
+        ids=[
+            "skipdb+skipdb-copy",
+            "skipdb+introdb-copy",
+            "skipdb+aniskip-copy",
+            "skipdb+unknown-copy",
+            "introdb+introdb-copy",
+            "theintrodb+introdb-copy",
+            "introdb+skipdb-copy",
+            "introdb+aniskip-copy",
+            "introdb+unknown-copy",
+        ],
+    )
+    def test_credits(self, crowd, copied_from, high, medium):
+        copy = Candidate(T.CREDITS, 1_242_000, None, S.SERVER_MARKERS_IMPORTED, origin="jf-1", copied_from=copied_from)
+        for level, expected in (("high", high), ("medium", medium)):
+            d = decide([credits(crowd, 1_241_000), copy], ctx(level, types=(T.CREDITS,)), {})[T.CREDITS]
+            got = (d.status, *((d.marker.start_ms, d.marker.end_ms, d.marker.decided_by) if d.marker else (None,) * 3))
+            assert (*got, d.reason) == expected, level
+
+    def test_copied_from_means_nothing_on_a_servers_own_markers(self):
+        own = Candidate(T.INTRO, 128_000, 160_000, S.SERVER_MARKERS, origin="plex-1", copied_from="skipdb")
+        d = decide([intro(S.SKIPDB, 127_000, 157_000), own], ctx("high", types=(T.INTRO,)), {})[T.INTRO]
+        assert (d.status, d.marker.start_ms, d.marker.end_ms) == (DecisionStatus.DECIDED, 128_000, 157_000)
+        assert d.marker.decided_by == ("skipdb", "server_markers")

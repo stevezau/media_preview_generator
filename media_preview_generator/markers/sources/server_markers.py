@@ -15,33 +15,54 @@ if TYPE_CHECKING:
     from ...servers.base import ServerConfig
 
 # Bump when reading a server changes what a stored answer would hold, so servers are read again (spec §6.2).
-READER_VERSION = 1
+# 2: an importer-plugin row names every importer plugin, not just the first (its copy's database is read from them).
+READER_VERSION = 2
 # Plex markers are one set per item: another version of the item further apart than this is another cut. Emby keeps
 # each version's markers on its own item (spec §14 2026-09-15), but its reader still applies this check to the versions
 # Emby lists with the item: every version for a client with a user id, only the item's own with an API key (which then
 # always passes).
 SAME_CUT_MS = 2_000
 _PLEX_TYPES = {"intro": MarkerType.INTRO, "credits": MarkerType.CREDITS}
-# Plugins that write IntroDB / TheIntroDB / SkipDB / AniSkip answers as the server's own segments. Intro Skipper is left
-# out on purpose: it fingerprints the server's own files (local detection), it doesn't copy a crowd database.
-_IMPORTER_PLUGIN_RE = re.compile(r"intro[ _-]?db|skip[ _-]?db|ani[ _-]?skip", re.IGNORECASE)
+# Plugins that write IntroDB / TheIntroDB / SkipDB / AniSkip answers as the server's own segments, by the database they
+# import ("intro db" covers TheIntroDB too). Intro Skipper is left out on purpose: it fingerprints the server's own
+# files (local detection), it doesn't copy a crowd database.
+_IMPORTER_DATABASES = {
+    "introdb": re.compile(r"intro[ _-]?db", re.IGNORECASE),
+    "skipdb": re.compile(r"skip[ _-]?db", re.IGNORECASE),
+    "aniskip": re.compile(r"ani[ _-]?skip", re.IGNORECASE),
+}
 
 
 def importer_plugin(plugin_names: Iterable[str]) -> str | None:
-    """The first installed plugin that imports a crowd skip database, so the server's markers are that data again.
+    """The installed plugins that import a crowd skip database, so the server's markers are that data again.
 
     Args:
         plugin_names: Names of the server's installed plugins.
 
     Returns:
-        The plugin's name, or None when there is none.
+        Their names joined with ", " in the server's order, or None when there is none.
     """
-    return next((name for name in plugin_names if _IMPORTER_PLUGIN_RE.search(name)), None)
+    names = [name for name in plugin_names if any(p.search(name) for p in _IMPORTER_DATABASES.values())]
+    return ", ".join(names) or None
 
 
-def imported_detail(plugin_name: str) -> str:
+def importer_database(text: str) -> str:
+    """Which crowd database importer plugin names (or the :func:`imported_detail` naming them) point to.
+
+    Args:
+        text: Plugin names, or an imported evidence row's detail.
+
+    Returns:
+        "introdb", "skipdb" or "aniskip"; "" when none matches or several do (a server with importers of two
+        databases: its markers could be a copy of either).
+    """
+    found = [database for database, pattern in _IMPORTER_DATABASES.items() if pattern.search(text)]
+    return found[0] if len(found) == 1 else ""
+
+
+def imported_detail(plugin_names: str) -> str:
     """Why a server's markers don't count as a second opinion (shown with its evidence in the Inspector)."""
-    return f"Markers on this server look imported from {plugin_name}; not used as a second opinion"
+    return f"Markers on this server look imported from {plugin_names}; not a second opinion for that database"
 
 
 def _candidate(mtype: MarkerType, start_ms: int, end_ms: int | None, origin: str) -> Candidate:

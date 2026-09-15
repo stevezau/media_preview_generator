@@ -2147,7 +2147,7 @@ class TestServerMarkersFromVendors:
         else:
             imported = source is Source.SERVER_MARKERS_IMPORTED
             detail = (
-                f"Markers on this server look imported from {plugins[-1]}; not used as a second opinion"
+                f"Markers on this server look imported from {plugins[-1]}; not a second opinion for that database"
                 if imported
                 else ""
             )
@@ -2162,6 +2162,95 @@ class TestServerMarkersFromVendors:
             assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
         server.get_plugin_names.assert_called_once_with()
         reg.get("plex-1").get_plugin_names.assert_not_called()  # Plex detects its own markers
+
+    @pytest.mark.parametrize(
+        ("plugins", "published"),
+        [
+            (["SkipDB"], None),
+            (["TheIntroDB"], Marker(T.INTRO, 24_046, 114_105, ("skipdb", "server_markers_imported"))),
+            (["AniSkip"], Marker(T.INTRO, 24_046, 114_105, ("skipdb", "server_markers_imported"))),
+            # importers of two databases: which one wrote the markers can't be told, so they count as IntroDB's copy
+            (["SkipDB", "TheIntroDB"], Marker(T.INTRO, 24_046, 114_105, ("skipdb", "server_markers_imported"))),
+        ],
+        ids=["skipdb-importer", "theintrodb-importer", "aniskip-importer", "two-databases"],
+    )
+    def test_a_skipdb_importers_copy_is_skipdb_again(self, store, media, plugins, published):
+        # Ruling 2026-09-16 (rule 8): an imported copy belongs to the group of the database it was imported from.
+        reg = _registry(media, ServerType.PLEX, ServerType.JELLYFIN)
+        reg.configs_by_id["jellyfin-1"].markers["enabled"] = False
+        server = reg.get("jellyfin-1")
+        server.get_media_segments.return_value = [
+            {"Type": "Intro", "StartTicks": _ticks(24_046), "EndTicks": _ticks(114_105)}
+        ]
+        server.get_plugin_names.return_value = plugins
+        plex = ready_publisher()
+        skipdb = LookupResult("ok", (Candidate(T.INTRO, 24_046, 114_105, Source.SKIPDB),))
+        out, _ = _run(
+            _ctx(store, reg, clients=_clients(skipdb=skipdb), settings_raw=INTRO_DEFAULTS),
+            media,
+            {"plex-1": plex},
+            probe=_probe(duration=S03E05_BLURAY_MS),
+        )
+        rec = store.get_file(media)
+        copies = [c for c in store.get_evidence(rec.id) if c.source is Source.SERVER_MARKERS_IMPORTED]
+        assert [c.origin for c in copies] == ["jellyfin-1"]
+        if published is None:
+            plex.write.assert_not_called()
+            assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+            assert store.get_decisions(rec.id)[T.INTRO].reason == "sources don't agree yet"
+        else:
+            assert plex.write.call_args.args[1] == [published]
+
+    def test_a_row_naming_one_of_two_importers_is_read_again_and_its_database_becomes_unknown(self, store, media):
+        # Reader version 1 stored only the first importer plugin: ["SkipDB", "TheIntroDB"] read as a SkipDB copy, which
+        # let IntroDB and that copy agree. Version 2 reads the server again; both names make the database unknown, so
+        # the copy counts with IntroDB/TheIntroDB again and IntroDB needs another source.
+        reg = _registry(media, ServerType.PLEX, ServerType.JELLYFIN)
+        reg.configs_by_id["jellyfin-1"].markers["enabled"] = False
+        server = reg.get("jellyfin-1")
+        server.get_media_segments.return_value = [
+            {"Type": "Intro", "StartTicks": _ticks(24_046), "EndTicks": _ticks(114_105)}
+        ]
+        server.get_plugin_names.return_value = ["SkipDB", "TheIntroDB"]
+        st = os.stat(media)
+        rec = store.upsert_file(
+            FileIdentity(media, st.st_size, st.st_mtime_ns),
+            duration_ms=S03E05_BLURAY_MS,
+            season_key=None,
+            is_movie=False,
+        )
+        old = Candidate(T.INTRO, 24_046, 114_105, Source.SERVER_MARKERS, origin="jellyfin-1")
+        store.replace_evidence(
+            rec.id,
+            Source.SERVER_MARKERS_IMPORTED,
+            [old],
+            origin="jellyfin-1",
+            detail="Markers on this server look imported from SkipDB; not used as a second opinion",
+            version=1,
+            also_replaces=(Source.SERVER_MARKERS,),
+        )
+        assert [c.copied_from for c in store.get_evidence(rec.id)] == ["skipdb"]
+        ctx = _ctx(store, reg, clients=_clients(introdb=IDB_S03E05_INTRO), settings_raw=INTRO_DEFAULTS)
+        assert pipeline.READER_VERSION == 2
+        assert pipeline._server_markers_due(ctx, rec, "jellyfin-1", first_read_only=False)
+        plex = ready_publisher()
+
+        out, _ = _run(ctx, media, {"plex-1": plex}, probe=_probe(duration=S03E05_BLURAY_MS))
+
+        server.get_media_segments.assert_called()
+        rows = [r for r in store.evidence_rows(rec.id) if r.origin == "jellyfin-1"]
+        assert [(r.source, r.detail) for r in rows] == [
+            (
+                Source.SERVER_MARKERS_IMPORTED,
+                "Markers on this server look imported from SkipDB, TheIntroDB; not a second opinion for that database",
+            )
+        ]
+        assert store.evidence_version(rec.id, Source.SERVER_MARKERS_IMPORTED, "jellyfin-1") == 2
+        copies = [c for c in store.get_evidence(rec.id) if c.source is Source.SERVER_MARKERS_IMPORTED]
+        assert [(c.start_ms, c.end_ms, c.copied_from) for c in copies] == [(24_046, 114_105, "")]
+        plex.write.assert_not_called()
+        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        assert store.get_decisions(rec.id)[T.INTRO].reason == "sources don't agree yet"
 
     def test_markers_stored_before_the_plugin_check_are_dropped_when_the_plugins_cant_be_read(self, store, media):
         # A store from before this check holds the copy as independent server markers; they must not keep counting.

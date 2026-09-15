@@ -31,19 +31,24 @@ SEASON_INTRO_CHAPTERS_MIN_OTHERS = 2
 SEASON_INTRO_CHAPTER_MIN_MARGIN_MS = 30_000
 LONG_INTRO_CHAPTER_REASON = "Intro chapter is much longer than the rest of the season's"
 # IntroDB data looks partly seeded from other sources (spec §5.5), so IntroDB and TheIntroDB are always one
-# independence group -- never two votes, whether or not they agree with each other. Markers an intro-DB importer
-# plugin wrote on a Jellyfin/Emby server are that crowd data again.
+# independence group -- never two votes, whether or not they agree with each other.
 _INTRODB_GROUP = "introdb/theintrodb"
 _INDEPENDENCE_GROUP = {
     Source.INTRODB: _INTRODB_GROUP,
     Source.THEINTRODB: _INTRODB_GROUP,
+    # An importer plugin whose database can't be told (rule 8): the crowd group, as before the database was read.
     Source.SERVER_MARKERS_IMPORTED: _INTRODB_GROUP,
     # The previous season's audio is the same method on the same show: never a second opinion for season audio.
     Source.SEASON_AUDIO_PREVIOUS: Source.SEASON_AUDIO.value,
 }
-# At "Medium" a lone source publishes only when it checks this file's cut itself (rule 6): IntroDB takes no duration,
-# TheIntroDB answers the closest cut it has, and markers already on servers never decide alone (rule 7). Season audio
-# only agrees in phase 2 (owner, 2026-09-14: 13 wrong of 104 answered alone), and the previous season's is a hint.
+# Markers an importer plugin wrote on a Jellyfin/Emby server are the database it imports again (rule 8; ruling
+# 2026-09-16): a SkipDB importer's copy never agrees with SkipDB. AniSkip isn't a source yet and nothing has measured
+# what it copies, so its copies stay with the crowd group until phase 4 does (precision first).
+_IMPORTED_GROUP = {"introdb": _INTRODB_GROUP, "skipdb": Source.SKIPDB.value, "aniskip": _INTRODB_GROUP}
+# At "Medium" a lone source publishes only when it checks this file's cut itself (rule 6): chapters, SkipDB's
+# duration-matched intros and recaps, and credits text, which reads this file's own frames (owner, Q1, 2026-09-16).
+# IntroDB takes no duration, TheIntroDB answers the closest cut it has, and markers already on servers never decide
+# alone (rule 7). Season audio only agrees (R2: 13 wrong of 104 answered alone), and the previous season's is a hint.
 _AGREEMENT_ONLY = SERVER_SOURCES | {
     Source.INTRODB,
     Source.THEINTRODB,
@@ -162,8 +167,10 @@ def sanity_problem(candidate: Candidate, ctx: DecisionContext) -> str | None:
     return None
 
 
-def _group(source: Source) -> str:
-    return _INDEPENDENCE_GROUP.get(source, source.value)
+def _group(candidate: Candidate) -> str:
+    if candidate.source is Source.SERVER_MARKERS_IMPORTED and candidate.copied_from in _IMPORTED_GROUP:
+        return _IMPORTED_GROUP[candidate.copied_from]
+    return _INDEPENDENCE_GROUP.get(candidate.source, candidate.source.value)
 
 
 def _tolerance_ms(mtype: MarkerType) -> int:
@@ -265,7 +272,7 @@ def _agreeing_cliques(candidates: list[Candidate], mtype: MarkerType, ctx: Decis
             continue
         last_hi = hi
         window = by_value[lo : hi + 1]
-        if len({_group(c.source) for c in window}) >= 2 and any(c.source not in _AUDIO_OR_SERVER for c in window):
+        if len({_group(c) for c in window}) >= 2 and any(c.source not in _AUDIO_OR_SERVER for c in window):
             cliques.append(sorted(window, key=rank))
     return cliques
 
@@ -317,11 +324,7 @@ def _compose_cluster(cluster: list[Candidate], mtype: MarkerType, ctx: DecisionC
     decided_by names the winner, whichever candidate(s) supplied the unchecked edge, and every
     other confirming candidate that directly agrees with the winner, in source order.
     """
-    confirmed = [
-        c
-        for c in cluster
-        if any(_group(o.source) != _group(c.source) and _agree(c, o, ctx.duration_ms) for o in cluster)
-    ]
+    confirmed = [c for c in cluster if any(_group(o) != _group(c) and _agree(c, o, ctx.duration_ms) for o in cluster)]
     confirmed_non_server = [c for c in confirmed if c.source not in SERVER_SOURCES]
     winner = min(confirmed_non_server, key=_sort_key(ctx))
     other_edge, edge_suppliers = _safer_other_edge(mtype, confirmed, ctx)
@@ -340,8 +343,8 @@ def _contradicting_groups(marker: Marker, pool: list[Candidate], ctx: DecisionCo
     d = ctx.duration_ms
     value = _checked_value(marker.type, marker)
     far = [c for c in pool if abs(_agree_value(c, d) - value) > _tolerance_ms(marker.type)]
-    pairs = [(a, b) for a, b in combinations(far, 2) if _group(a.source) != _group(b.source) and _agree(a, b, d)]
-    return sorted({_group(c.source) for pair in pairs for c in pair})
+    pairs = [(a, b) for a, b in combinations(far, 2) if _group(a) != _group(b) and _agree(a, b, d)]
+    return sorted({_group(c) for pair in pairs for c in pair})
 
 
 def _chapter_choice_key(c: Candidate, duration_ms: int) -> tuple[int, int]:
@@ -420,7 +423,7 @@ def _decide_from_chapters(
     )
     if suspect and all(c.source in SERVER_SOURCES for c in agreeing):
         return _review(mtype, chapter_marker, LONG_INTRO_CHAPTER_REASON)
-    if len({_group(c.source) for c in agreeing}) >= (1 if suspect else 2):
+    if len({_group(c) for c in agreeing}) >= (1 if suspect else 2):
         other_edge, _ = _safer_other_edge(mtype, agreeing, ctx)
         if mtype in _START_SEGMENTS:
             safer = other_edge > chapter_marker.start_ms
@@ -443,7 +446,7 @@ def _decide_from_cliques(mtype: MarkerType, cliques: list[list[Candidate]], ctx:
         rank = _sort_key(ctx)
         # Stable sort: clusters sharing a winner keep ascending compared-value order.
         ranked = sorted(composed, key=lambda mw: rank(mw[1]))
-        names = " vs ".join(dict.fromkeys(_group(winner.source) for _, winner in ranked))
+        names = " vs ".join(dict.fromkeys(_group(winner) for _, winner in ranked))
         return _review(mtype, ranked[0][0], f"agreeing sources conflict: {names}")
 
     merged = list({id(c): c for cl in cliques for c in cl}.values())
@@ -454,7 +457,8 @@ def _decide_from_cliques(mtype: MarkerType, cliques: list[list[Candidate]], ctx:
 
 
 def _may_decide_alone(candidate: Candidate) -> bool:
-    """Whether a candidate's source checks this file's cut well enough to publish alone at "Medium" (rule 6).
+    """Whether a candidate's source checks this file's cut well enough to publish alone at "Medium" (rule 6): chapters,
+    credits text, and SkipDB for intros and recaps.
 
     SkipDB's duration match holds for intros and recaps, not for credits or previews: on the lab scale run every lone
     SkipDB credits answer started early, some by minutes (Battlestar Galactica S04E05: 6.7 min of story).
@@ -466,8 +470,8 @@ def _may_decide_alone(candidate: Candidate) -> bool:
 
 def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: DecisionContext) -> TypeDecision:
     """No two independent sources agree. Only "medium" may publish, and only a lone, self-consistent group that
-    checks this file's cut itself (not IntroDB/TheIntroDB, not markers already on servers, and SkipDB only for an
-    intro or recap).
+    checks this file's cut itself (not IntroDB/TheIntroDB, not season audio, not markers already on servers, and SkipDB
+    only for an intro or recap).
 
     A second independent group here (server markers included) contradicts the first unless both are
     server markers (a server's own and an importer plugin's copy, which never form a cluster); a group
@@ -476,7 +480,7 @@ def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: De
     decided_by names the sources that supplied either edge.
     """
     ranked = sorted(sane, key=_sort_key(ctx))
-    groups = sorted({_group(c.source) for c in sane})
+    groups = sorted({_group(c) for c in sane})
     proposal = next((c for c in ranked if _may_decide_alone(c)), None)
     if ctx.publish_when == "medium" and proposal is not None and len(groups) == 1:
         if not all(_agree(a, b, ctx.duration_ms) for a, b in combinations(sane, 2)):
@@ -487,9 +491,7 @@ def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: De
         if not _marker_is_sane(marker, ctx):
             return _review(mtype, _own_marker(proposal, ctx), "sources disagree on the other edge")
         return TypeDecision(mtype, DecisionStatus.DECIDED, marker, None, f"single source ({proposal.source.value})")
-    disagree = any(
-        _group(a.source) != _group(b.source) and not _agree(a, b, ctx.duration_ms) for a, b in combinations(sane, 2)
-    )
+    disagree = any(_group(a) != _group(b) and not _agree(a, b, ctx.duration_ms) for a, b in combinations(sane, 2))
     if disagree:
         reason = f"sources disagree: {', '.join(groups)}"
     elif _only_audio_and_server_markers({c.source for c in sane}):

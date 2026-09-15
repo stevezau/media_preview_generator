@@ -7,6 +7,7 @@ import pytest
 from media_preview_generator.markers import store as store_mod
 from media_preview_generator.markers.decide import DecisionStatus, TypeDecision
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, Source
+from media_preview_generator.markers.sources.server_markers import imported_detail
 from media_preview_generator.markers.store import MarkerStore, get_marker_store, reset_marker_store
 
 T = MarkerType
@@ -308,6 +309,26 @@ def test_evidence_version_is_stored_per_lookup_and_goes_with_its_rows(store):
     store.replace_evidence(rec.id, Source.CHAPTERS, [chapter])
     assert store.evidence_version(rec.id, Source.CHAPTERS) is None
     assert store.evidence_version(other.id, Source.CHAPTERS) == 3
+
+
+@pytest.mark.parametrize(
+    ("source", "plugins", "copied_from"),
+    [
+        (Source.SERVER_MARKERS_IMPORTED, "SkipDB", "skipdb"),
+        (Source.SERVER_MARKERS_IMPORTED, "TheIntroDB", "introdb"),
+        (Source.SERVER_MARKERS_IMPORTED, "Ani-Skip Segments", "aniskip"),
+        (Source.SERVER_MARKERS_IMPORTED, "SkipDB, TheIntroDB", ""),
+        # a server's own markers are never a copy, whatever their row says
+        (Source.SERVER_MARKERS, "SkipDB", ""),
+    ],
+)
+def test_an_imported_copy_reads_back_the_database_its_detail_names(store, source, plugins, copied_from):
+    rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
+    stored = Candidate(T.CREDITS, 1_241_000, None, Source.SERVER_MARKERS, origin="jf-1")
+    store.replace_evidence(rec.id, source, [stored], origin="jf-1", detail=imported_detail(plugins), version=1)
+    assert store.get_evidence(rec.id) == [
+        Candidate(T.CREDITS, 1_241_000, None, source, origin="jf-1", copied_from=copied_from)
+    ]
 
 
 def test_an_answer_can_replace_another_sources_rows_under_the_same_origin(store):
