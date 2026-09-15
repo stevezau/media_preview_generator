@@ -13,7 +13,7 @@ import json
 import os
 import sqlite3
 import threading
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -27,6 +27,8 @@ SCHEMA_VERSION = 1
 _SERVER_SOURCE_VALUES = (Source.SERVER_MARKERS.value, Source.SERVER_MARKERS_IMPORTED.value)
 # A file Check servers took for a server isn't taken for it again sooner (it may not have run: gone from disk, cancelled).
 _RECHECK_TAKEN_AGAIN = timedelta(days=1)
+# ``meta`` key: the last file id whose fingerprint the cache sweep checked (``fingerprint_checks``).
+_FINGERPRINT_CHECKED_UP_TO = "fingerprint_checked_up_to"
 
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -175,6 +177,14 @@ _SCHEMA = (
         size INTEGER NOT NULL,
         mtime_ns INTEGER NOT NULL,
         failed_at TEXT NOT NULL)""",
+    # A file whose fingerprint failed, with the identity it had then: other episodes' season steps don't run ffmpeg on
+    # it again (up to 300 s on a worker, per sibling) until that identity changes or the entry is old. Its own run and a
+    # forced re-detect still try. Kept apart from probe failures, which also stop a member's chapters being read.
+    """CREATE TABLE IF NOT EXISTS member_fingerprint_failures (
+        canonical_path TEXT PRIMARY KEY,
+        size INTEGER NOT NULL,
+        mtime_ns INTEGER NOT NULL,
+        failed_at TEXT NOT NULL)""",
     # A server's empty (or unusable) answer for a file, asked again by Check servers: how many times it was read again
     # without markers (the backoff step; gone once the answer has markers or the file changes), when the last re-read
     # that couldn't replace the answer happened (the backoff counts from it), and when Check servers last took the
@@ -287,6 +297,16 @@ class PublishStateRow:
     status: str
     message: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class FingerprintCheck:
+    """A fingerprinted file for the cache sweep to look for on disk, with the identity its row had when listed."""
+
+    file_id: int
+    canonical_path: str
+    size: int
+    mtime_ns: int
 
 
 @dataclass(frozen=True)
@@ -591,6 +611,34 @@ class MarkerStore:
             if source in SERVER_SOURCES and origin:
                 self._count_server_reread(conn, file_id, origin, has_markers=bool(candidates))
             self._write_evidence(conn, file_id, source, candidates, origin, detail, version, also_replaces, now)
+
+    def replace_detector_answer(
+        self,
+        file_id: int,
+        answers: Mapping[Source, list[Candidate]],
+        *,
+        version: int,
+        run: tuple[Source, str] | None = None,
+    ) -> None:
+        """Store a local detector's answer under each of its sources, and what it was based on, in one transaction.
+
+        A failure (or the process ending) part way leaves the old answer and the old basis, so the answer stays due.
+
+        Args:
+            file_id: The file.
+            answers: Candidates per source the detector stores under (an empty list: "looked, nothing there").
+            version: The detector's version.
+            run: ``(source, signature)`` for ``detector_runs``, or None when the detector keeps no basis.
+        """
+        now = self._now()
+        with self._tx() as conn:
+            for source in sorted(answers, key=lambda s: s.value):
+                self._write_evidence(conn, file_id, source, answers[source], "", "", version, (), now)
+            if run is not None:
+                conn.execute(
+                    "INSERT OR REPLACE INTO detector_runs (file_id, source, signature, run_at) VALUES (?,?,?,?)",
+                    (file_id, run[0].value, run[1], now),
+                )
 
     @staticmethod
     def _count_server_reread(conn: sqlite3.Connection, file_id: int, server_id: str, *, has_markers: bool) -> None:
@@ -907,6 +955,9 @@ class MarkerStore:
     ) -> bool:
         """Store a fingerprint computed from the file with identity ``(size, mtime_ns)``.
 
+        One that replaces a stored fingerprint (made another way: ``get_fingerprint`` refused it) also drops the matcher
+        runs cached with the old one.
+
         Returns:
             False (nothing stored) when the file's row has another identity now: the file was replaced while ffmpeg
             ran, and its own next run fingerprints the new file.
@@ -915,6 +966,11 @@ class MarkerStore:
             row = conn.execute("SELECT size, mtime_ns FROM files WHERE id=?", (file_id,)).fetchone()
             if row is None or (row["size"], row["mtime_ns"]) != (size, mtime_ns):
                 return False
+            replaced = conn.execute(
+                "SELECT 1 FROM fingerprints WHERE file_id=? AND window=?", (file_id, window)
+            ).fetchone()
+            if replaced:
+                conn.execute("DELETE FROM season_pairs WHERE file_a=? OR file_b=?", (file_id, file_id))
             conn.execute(
                 "INSERT OR REPLACE INTO fingerprints (file_id, window, start_s, length_s, algorithm, points) "
                 "VALUES (?,?,?,?,?,?)",
@@ -922,25 +978,108 @@ class MarkerStore:
             )
         return True
 
-    def get_fingerprint(self, file_id: int, window: str) -> StoredFingerprint | None:
-        """The cached fingerprint of a file, or None when it was never fingerprinted (or changed since)."""
+    @staticmethod
+    def _made_as(row: sqlite3.Row, algorithm: int | None, length_s: float | None) -> bool:
+        # length_s is compared to the millisecond: the ffmpeg command passes it with three decimals.
+        return (algorithm is None or row["algorithm"] == algorithm) and (
+            length_s is None or round(row["length_s"], 3) == round(length_s, 3)
+        )
+
+    def get_fingerprint(
+        self, file_id: int, window: str, *, algorithm: int | None = None, length_s: float | None = None
+    ) -> StoredFingerprint | None:
+        """The cached fingerprint of a file.
+
+        Args:
+            file_id: The file.
+            window: The fingerprinted window.
+            algorithm: The chromaprint algorithm it must have been made with (None: any).
+            length_s: The window length it must have been made with (None: any).
+
+        Returns:
+            The fingerprint, or None when it was never fingerprinted (or changed since), or was made with another
+            algorithm or window length (it is computed again).
+        """
         with self._lock:
             r = self._conn.execute(
                 "SELECT * FROM fingerprints WHERE file_id=? AND window=?", (file_id, window)
             ).fetchone()
-        if r is None:
+        if r is None or not self._made_as(r, algorithm, length_s):
             return None
         return StoredFingerprint(
             r["file_id"], r["window"], r["start_s"], r["length_s"], r["algorithm"], bytes(r["points"])
         )
 
-    def has_fingerprint(self, file_id: int, window: str) -> bool:
-        """Whether a file has a cached fingerprint, without reading its points."""
+    def has_fingerprint(
+        self, file_id: int, window: str, *, algorithm: int | None = None, length_s: float | None = None
+    ) -> bool:
+        """Whether ``get_fingerprint`` with the same arguments finds one, without reading its points."""
         with self._lock:
             r = self._conn.execute(
-                "SELECT 1 FROM fingerprints WHERE file_id=? AND window=?", (file_id, window)
+                "SELECT algorithm, length_s FROM fingerprints WHERE file_id=? AND window=?", (file_id, window)
             ).fetchone()
-        return r is not None
+        return r is not None and self._made_as(r, algorithm, length_s)
+
+    def fingerprint_checks(self, limit: int) -> list[FingerprintCheck]:
+        """The next files with a cached fingerprint for the cache sweep to look for on disk (nothing is marked).
+
+        In file id order from just after the cursor ``finish_fingerprint_checks`` left, wrapping round to the lowest id
+        once the highest is passed, so each file is checked once per pass over the cache.
+
+        Args:
+            limit: Most files to return.
+
+        Returns:
+            Each file with its row's identity, in that order.
+        """
+        if limit <= 0:
+            return []
+        query = (
+            "SELECT p.file_id, f.canonical_path, f.size, f.mtime_ns FROM fingerprints p JOIN files f ON f.id = p.file_id "
+            "WHERE p.file_id {} ? GROUP BY p.file_id ORDER BY p.file_id LIMIT ?"
+        )
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM meta WHERE key=?", (_FINGERPRINT_CHECKED_UP_TO,)).fetchone()
+            after = int(row["value"]) if row else 0
+            batch = self._conn.execute(query.format(">"), (after, limit)).fetchall()
+            if len(batch) < limit:
+                batch += self._conn.execute(query.format("<="), (after, limit - len(batch))).fetchall()
+        return [FingerprintCheck(r["file_id"], r["canonical_path"], r["size"], r["mtime_ns"]) for r in batch]
+
+    def finish_fingerprint_checks(self, checked_up_to: int, gone: Iterable[FingerprintCheck]) -> int:
+        """Record a sweep's checks in one transaction: drop the cache of the files found gone, and move the cursor.
+
+        A gone file's fingerprints, the matcher runs cached with them and its unreadable-member entries go. Its
+        ``files`` row stays, with the decisions, locked markers and publish records tied to it. A file whose row has
+        another identity than when it was listed is left alone: a new file came to that path, and its own run may
+        already have fingerprinted it.
+
+        Args:
+            checked_up_to: The id of the last file checked (``fingerprint_checks`` order); the next sweep starts after it.
+            gone: Each file found gone, as ``fingerprint_checks`` listed it.
+
+        Returns:
+            How many files' cache was dropped.
+        """
+        dropped = 0
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (_FINGERPRINT_CHECKED_UP_TO, str(checked_up_to)),
+            )
+            for check in gone:
+                unchanged = conn.execute(
+                    "SELECT 1 FROM files WHERE id=? AND size=? AND mtime_ns=?",
+                    (check.file_id, check.size, check.mtime_ns),
+                ).fetchone()
+                if unchanged is None:
+                    continue
+                dropped += 1
+                conn.execute("DELETE FROM fingerprints WHERE file_id=?", (check.file_id,))
+                conn.execute("DELETE FROM season_pairs WHERE file_a=? OR file_b=?", (check.file_id, check.file_id))
+                for table in ("member_probe_failures", "member_fingerprint_failures"):
+                    conn.execute(f"DELETE FROM {table} WHERE canonical_path=?", (check.canonical_path,))
+        return dropped
 
     def get_season_pair(
         self, file_a: int, file_b: int, matcher_version: int
@@ -1068,6 +1207,36 @@ class MarkerStore:
         with self._lock:
             r = self._conn.execute(
                 "SELECT failed_at FROM member_probe_failures WHERE canonical_path=? AND size=? AND mtime_ns=?",
+                (identity.canonical_path, identity.size, identity.mtime_ns),
+            ).fetchone()
+        return datetime.fromisoformat(r["failed_at"]) if r else None
+
+    def record_member_fingerprint_failure(
+        self, identity: FileIdentity, failed_at: datetime, *, forget_before: datetime
+    ) -> None:
+        """Remember that a file with this identity couldn't be fingerprinted (replaces the path's older entry).
+
+        Entries that no longer keep a file from being fingerprinted are forgotten in the same write, as for probe
+        failures.
+
+        Args:
+            identity: The file as it was when ffmpeg failed.
+            failed_at: When (the job's clock).
+            forget_before: Entries of any path that failed before this are removed.
+        """
+        with self._tx() as conn:
+            conn.execute("DELETE FROM member_fingerprint_failures WHERE failed_at < ?", (forget_before.isoformat(),))
+            conn.execute(
+                "INSERT OR REPLACE INTO member_fingerprint_failures (canonical_path, size, mtime_ns, failed_at) "
+                "VALUES (?,?,?,?)",
+                (identity.canonical_path, identity.size, identity.mtime_ns, failed_at.isoformat()),
+            )
+
+    def member_fingerprint_failed_at(self, identity: FileIdentity) -> datetime | None:
+        """When fingerprinting a file with exactly this identity last failed, or None (never, or another identity)."""
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT failed_at FROM member_fingerprint_failures WHERE canonical_path=? AND size=? AND mtime_ns=?",
                 (identity.canonical_path, identity.size, identity.mtime_ns),
             ).fetchone()
         return datetime.fromisoformat(r["failed_at"]) if r else None

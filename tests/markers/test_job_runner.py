@@ -367,6 +367,96 @@ class TestRun:
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
 
     @pytest.mark.parametrize(
+        ("config", "items", "swept"),
+        [
+            ({}, None, True),
+            ({"reconcile": True}, None, True),
+            ({}, [], True),
+            ({"source": "season", "file_paths": ["/m/a.mkv"]}, None, False),
+            ({"retry_attempt": 1, "file_paths": ["/m/a.mkv"]}, None, False),
+            ({"verify": True, "file_paths": ["/m/a.mkv"]}, None, False),
+        ],
+        ids=["library", "check-servers", "no-files", "season", "retry", "verify"],
+    )
+    def test_a_job_sweeps_the_fingerprint_cache_when_it_ends_unless_it_follows_another(self, env, config, items, swept):
+        env.job.config = {"libraries": [], **config}
+        with patch.object(job_runner, "start_fingerprint_sweep", return_value=True) as sweep:
+            self._run(items)
+        assert sweep.call_args_list == ([call(env.ctx.store)] if swept else [])
+        assert env.jm.complete_job.call_count == 1
+
+    def test_the_cleanup_starts_after_the_slot_is_back_and_outside_the_jobs_log(self, env):
+        from media_preview_generator.jobs.worker import is_job_thread_for
+
+        seen = []
+        sweep = MagicMock(
+            side_effect=lambda store: seen.append(
+                (env.gate.release.called, is_job_thread_for(threading.get_ident(), "j1"))
+            )
+        )
+        with patch.object(job_runner, "start_fingerprint_sweep", sweep):
+            self._run()
+        assert seen == [(True, False)]
+
+    def test_a_cancelled_job_starts_no_sweep(self, env):
+        env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "cancelled": True}
+        with patch.object(job_runner, "start_fingerprint_sweep") as sweep:
+            self._run()
+        env.jm.cancel_job.assert_called_once_with("j1")
+        sweep.assert_not_called()
+
+    def test_a_sweep_that_cant_start_leaves_the_completed_job_alone(self, env):
+        with patch.object(job_runner, "start_fingerprint_sweep", side_effect=RuntimeError("can't start new thread")):
+            self._run()
+        env.jm.complete_job.assert_called_once_with("j1", warning=None)
+        env.gate.release.assert_called_once_with(3)
+
+    def test_a_sweep_blocked_on_the_file_system_holds_neither_the_job_nor_its_slot(self, env, tmp_path, monkeypatch):
+        from media_preview_generator.markers.audio import fingerprint as fpmod
+        from media_preview_generator.markers.models import FileIdentity
+        from media_preview_generator.markers.store import MarkerStore
+
+        monkeypatch.setattr(job_runner, "start_fingerprint_sweep", fpmod.start_fingerprint_sweep)
+        monkeypatch.setattr(fpmod, "_sweep_started_at", None)
+        monkeypatch.setattr(fpmod, "SWEEP_MIN_GAP_S", 0.0)  # only the running sweep can keep a second one out
+        store = MarkerStore(str(tmp_path / "markers.db"))
+        env.ctx.store = store
+        media = tmp_path / "Season 01" / "S01E01.mkv"
+        media.parent.mkdir()
+        media.write_bytes(b"x")
+        rec = store.upsert_file(FileIdentity(str(media), 1, 1), duration_ms=300_000, season_key=None, is_movie=False)
+        store.set_fingerprint(rec.id, size=1, mtime_ns=1, window="intro", start_s=0.0, length_s=105.0, algorithm=1,
+                              points=b"")  # fmt: skip
+        entered, unblock, real_stat = threading.Event(), threading.Event(), os.stat
+
+        def stat(path, *args, **kwargs):  # a hard-mounted share that stalls: no error, no answer
+            if str(path) == str(media):
+                entered.set()
+                unblock.wait(10)
+            return real_stat(path, *args, **kwargs)
+
+        sweeping_at_release = []
+        env.gate.release.side_effect = lambda priority: sweeping_at_release.append(fpmod._SWEEP_LOCK.locked())
+        try:
+            with (
+                patch.object(fpmod.os, "stat", side_effect=stat),
+                patch.object(store, "fingerprint_checks", wraps=store.fingerprint_checks) as listed,
+            ):
+                self._run()
+                assert entered.wait(5) and fpmod._SWEEP_LOCK.locked()  # the sweep is stuck in os.stat; the job returned
+                env.jm.complete_job.assert_called_once_with("j1", warning=None)
+                assert sweeping_at_release == [False]  # the slot was given back before the sweep started
+                self._run()  # the next job completes too, and starts no second sweep
+                assert env.jm.complete_job.call_count == 2 and sweeping_at_release == [False, True]
+                assert listed.call_count == 1
+                unblock.set()
+                assert fpmod._SWEEP_LOCK.acquire(timeout=5)
+                fpmod._SWEEP_LOCK.release()
+        finally:
+            unblock.set()
+            store.close()
+
+    @pytest.mark.parametrize(
         ("outcome", "warnings", "expected"),
         [
             ({"markers_published": 2, "failed": 0}, [], {"warning": None}),
@@ -1099,6 +1189,17 @@ class TestRestart:
         env.jm.get_file_results.return_value = []
         env.ctx.store.get_file.side_effect = records.get
         return make
+
+    def test_a_job_whose_files_all_finished_before_the_restart_starts_the_sweep(self, env, finished):
+        item = finished("a.mkv", "markers_published")
+        with (
+            patch.object(job_runner, "build_items", return_value=([item], [], {})),
+            patch.object(job_runner, "start_fingerprint_sweep") as sweep,
+        ):
+            job_runner.run_intro_credits_job("j1")
+        env.dispatcher.submit_items.assert_not_called()
+        env.jm.complete_job.assert_called_once_with("j1", warning=None)
+        sweep.assert_called_once_with(env.ctx.store)
 
     def test_resumed_job_skips_unchanged_finished_files_and_carries_their_counts(self, env, finished, tmp_path):
         done = finished("a.mkv", "markers_published")

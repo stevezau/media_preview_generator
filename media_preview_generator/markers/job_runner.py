@@ -25,6 +25,7 @@ from ..web.job_gate import format_wait_message, get_job_gate
 from ..web.jobs import PAUSED_BY_SCHEDULE, PRIORITY_LOW, PRIORITY_NORMAL, JobStatus, WorkerStatus, get_job_manager
 from ..web.routes.job_runner import _build_selected_gpus, _format_eta, _inflight_jobs, _inflight_lock
 from ..web.settings_manager import get_settings_manager
+from .audio.fingerprint import start_fingerprint_sweep
 from .external_ids import is_season_folder
 from .outcomes import (
     NOT_IN_LIBRARY,
@@ -39,6 +40,7 @@ from .ownership import marker_libraries
 from .pipeline import budget_exhausted_warnings, build_context, cached_capability, kind_handlers
 from .reconcile import RECONCILE_SOURCE
 from .settings import load_server
+from .store import MarkerStore
 
 _POLL_S = 1.0
 # Polls a PENDING preview job may go without a thread before its follow-up stops waiting for it. Covers the moment
@@ -687,6 +689,21 @@ def _skip_finished_before_restart(
     return remaining, dict(carried)
 
 
+def _start_fingerprint_sweep(cfg: dict, store: MarkerStore) -> None:
+    """After a job completed and gave back its slot: start clearing the cached fingerprints of a batch of files gone
+    from disk, so markers.db doesn't grow with every renamed or deleted episode (``start_fingerprint_sweep``: its own
+    thread, at most one an hour).
+
+    Season, retry and verify jobs don't: they follow a job that did. Never raises.
+    """
+    if cfg.get("source") == SEASON_SOURCE or cfg.get("retry_attempt") or cfg.get("verify"):
+        return
+    try:
+        start_fingerprint_sweep(store)
+    except Exception as exc:
+        logger.warning("Couldn't start clearing old audio fingerprints: {}", exc)
+
+
 def _complete(jm, job_id: str, outcome: dict[str, int], warnings: list[str]) -> None:
     """Complete the job: failed (red) when every counted file failed, a warning (amber) when some did or on warnings."""
     failed = outcome.get(FileOutcome.FAILED.value, 0)
@@ -807,6 +824,8 @@ def run_intro_credits_job(job_id: str) -> None:
     slot = {"held": False, "priority": job.priority}
     cfg = dict(job.config or {})
     dispatcher = None
+    # Set once the job completes: the fingerprint cache sweep starts after the slot is given back.
+    sweep_store = None
 
     def cancel_check() -> bool:
         return jm.is_cancellation_requested(job_id)
@@ -929,12 +948,14 @@ def run_intro_credits_job(job_id: str) -> None:
                         jm.complete_job(job_id, warning=" | ".join(warnings) or None)
                     else:
                         jm.complete_job(job_id, warning=" ".join(["No files to check.", *warnings]))
+                    sweep_store = ctx.store
                     return
                 listed = {item.canonical_path for item in items}
                 items, carried = _skip_finished_before_restart(jm, job_id, items, ctx.store)
                 if not items:
                     jm.set_job_outcome(job_id, carried)
                     _complete(jm, job_id, carried, warnings)
+                    sweep_store = ctx.store
                     return
                 waiting: dict[str, set[str]] = {}
                 replaced: set[str] = set()
@@ -1033,6 +1054,7 @@ def run_intro_credits_job(job_id: str) -> None:
                     _mark_retried_items_gone(ctx.store, gone_items, retried, sender_paths)
                 if replaced and checks_replaced_later:
                     _queue_verify(job, cfg, replaced, sender_paths)
+                sweep_store = ctx.store
             finally:
                 clear_failures()
     except Exception as exc:
@@ -1065,6 +1087,9 @@ def run_intro_credits_job(job_id: str) -> None:
         except Exception as exc:
             logger.debug("Could not clear worker statuses after {}: {}", job_id, exc)
         unregister_job_thread()
+        # After the slot is back, and outside the job's log: a skipped cleanup's warning isn't about this job.
+        if sweep_store is not None:
+            _start_fingerprint_sweep(cfg, sweep_store)
         try:
             loguru_logger.complete()
             loguru_logger.remove(handler_id)

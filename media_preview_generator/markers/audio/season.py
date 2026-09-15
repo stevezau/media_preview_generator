@@ -14,6 +14,7 @@ the season, and by every run of an episode of the group (one that arrives decide
 from __future__ import annotations
 
 import bisect
+import functools
 import hashlib
 import json
 import math
@@ -34,7 +35,15 @@ from ..models import Candidate, FileIdentity, MarkerType, Source
 from ..probe import ProbeError, probe_media
 from ..sources.chapters import CHAPTER_RULES_VERSION, chapter_candidates
 from . import POINT_S
-from .fingerprint import WINDOW, FingerprintError, chromaprint_ffmpeg, ensure_fingerprint, points_of
+from .fingerprint import (
+    FingerprintError,
+    FingerprintSkippedError,
+    cached_fingerprint,
+    chromaprint_ffmpeg,
+    ensure_fingerprint,
+    has_cached_fingerprint,
+    points_of,
+)
 from .matcher import (
     MAX_BIT_DIFF,
     MAX_GAP_S,
@@ -48,7 +57,7 @@ from .matcher import (
 )
 
 if TYPE_CHECKING:
-    from ..pipeline import LocalDetectorSpec, PipelineContext
+    from ..pipeline import DetectorAnswer, LocalDetectorSpec, PipelineContext
     from ..store import FileRecord
 
 # The season step's own version (matcher v3 plus the silence guard, the provable pair skip and the group rule): stored with
@@ -56,7 +65,8 @@ if TYPE_CHECKING:
 SEASON_AUDIO_VERSION = 4
 MAX_PREVIOUS_SEASON_FILES = 4
 MAX_GROUP_EPISODES = 40
-# A season member ffprobe couldn't read is left out of other episodes' season steps for this long (while unchanged).
+# A season member ffprobe couldn't read, or ffmpeg couldn't fingerprint, is left out of other episodes' season steps for
+# this long (while unchanged).
 UNREADABLE_MEMBER_RETRY = timedelta(days=1)
 # chromaprint gives silence (and noise too quiet to hear) one constant value, so a shared quiet stretch matches like an
 # intro would (the v3 matcher keeps that behaviour).
@@ -369,8 +379,26 @@ def _current_record(ctx: PipelineContext, path: str) -> FileRecord | None:
 
 
 def _cached_points(ctx: PipelineContext, rec: FileRecord | None) -> np.ndarray | None:
-    stored = ctx.store.get_fingerprint(rec.id, WINDOW) if rec is not None else None
+    stored = cached_fingerprint(ctx.store, rec) if rec is not None else None
     return points_of(stored) if stored is not None else None
+
+
+def _identity_of(rec: FileRecord) -> FileIdentity:
+    return FileIdentity(rec.canonical_path, rec.size, rec.mtime_ns)
+
+
+def _fingerprint_failed_lately(ctx: PipelineContext, member: FileRecord) -> bool:
+    """Whether another episode's season step skips fingerprinting this member: ffmpeg failed on it as it is now less than
+    a day ago (a forced re-detect tries anyway)."""
+    if ctx.force:
+        return False
+    failed_at = ctx.store.member_fingerprint_failed_at(_identity_of(member))
+    return failed_at is not None and ctx.now() - failed_at < UNREADABLE_MEMBER_RETRY
+
+
+def _record_fingerprint_failure(ctx: PipelineContext, rec: FileRecord) -> None:
+    now = ctx.now()
+    ctx.store.record_member_fingerprint_failure(_identity_of(rec), now, forget_before=now - UNREADABLE_MEMBER_RETRY)
 
 
 def _member_record(ctx: PipelineContext, path: str) -> FileRecord | None:
@@ -473,7 +501,7 @@ def _signature_item(ctx: PipelineContext, path: str) -> list:
     rec = ctx.store.get_file(path) if identity is not None else None
     current = rec is not None and (rec.size, rec.mtime_ns) == identity
     size, mtime_ns = identity or (None, None)
-    return [path, size, mtime_ns, bool(current and ctx.store.has_fingerprint(rec.id, WINDOW))]
+    return [path, size, mtime_ns, bool(current and has_cached_fingerprint(ctx.store, rec))]
 
 
 def _signature(
@@ -568,6 +596,7 @@ def season_audio_needs_worker(rec: FileRecord, ctx: PipelineContext) -> bool:
     It does while an episode of the folder (this one included) still needs ffmpeg or ffprobe, or while a pair this
     episode hasn't been matched with yet is too slow for a checking thread (:func:`slow_to_match`: long constant
     stretches in both openings that don't provably rule out an intro). Otherwise matching is cheap enough to run inline.
+    A sibling ffmpeg failed on lately doesn't count: the step leaves it out.
 
     Args:
         rec: The episode.
@@ -587,6 +616,8 @@ def season_audio_needs_worker(rec: FileRecord, ctx: PipelineContext) -> bool:
             continue
         cached = _cached_points(ctx, stored)
         if cached is None:
+            if path != rec.canonical_path and _fingerprint_failed_lately(ctx, stored):
+                continue
             return True
         fingerprinted[path] = (stored, cached)
     if rec.canonical_path not in fingerprinted:
@@ -664,13 +695,15 @@ def intro_rests_on_season_audio(ctx: PipelineContext, rec: FileRecord) -> bool:
 
 def _request_redecide(ctx: PipelineContext, rec: FileRecord, members: dict[str, FileRecord], signature: str) -> None:
     """Ask again for the siblings whose intro is undecided, or decided with a season audio answer, and whose answer
-    was based on other season files than this run's."""
+    was based on other season files than this run's. A sibling season audio never answered for is left alone: its own
+    run matches the whole group, and one no server takes for Intro & Credits never runs."""
     folder = os.path.dirname(rec.canonical_path)
     stale = []
     for path, member in members.items():
         if member.id == rec.id or os.path.dirname(path) != folder:
             continue
-        if ctx.store.get_detector_run(member.id, Source.SEASON_AUDIO) == signature:
+        answer = ctx.store.get_detector_run(member.id, Source.SEASON_AUDIO)
+        if answer is None or answer == signature:
             continue
         intro = ctx.store.get_decisions(member.id).get(MarkerType.INTRO)
         if (
@@ -692,7 +725,8 @@ def season_audio_followups(rec: FileRecord, ctx: PipelineContext) -> list[str]:
     decided on a 1/1 match made before it arrived. A sibling counts when it has an answer, its record matches the disk
     (otherwise its own run reads it again), its intro is undecided or was decided with that answer, and its own last
     attempt didn't already fail on the season as it is now (so a file that can't be fingerprinted is asked again once
-    per change of its season, not on every sibling's run).
+    per change of its season, not on every sibling's run). In a flat folder the siblings also include the files whose
+    own group holds this episode though this episode's group doesn't hold them (:func:`groups_holding`).
 
     Args:
         rec: The episode being run.
@@ -702,8 +736,13 @@ def season_audio_followups(rec: FileRecord, ctx: PipelineContext) -> list[str]:
         The siblings' paths, sorted.
     """
     view = _season_view(ctx, rec.canonical_path)
+    group = view.group()
+    siblings = [*group.episodes]
+    siblings += [
+        path for path in groups_holding(rec.canonical_path, view.videos, view.group) if path not in group.episodes
+    ]
     stale = []
-    for path in view.group().episodes:
+    for path in siblings:
         member = ctx.store.get_file(path) if path != rec.canonical_path else None
         answer = ctx.store.get_detector_run(member.id, Source.SEASON_AUDIO) if member is not None else None
         if answer is None:
@@ -722,7 +761,7 @@ def season_audio_followups(rec: FileRecord, ctx: PipelineContext) -> list[str]:
         signature = view.signature(path)
         if answer != signature and ctx.store.get_detector_failure(member.id, Source.SEASON_AUDIO) != signature:
             stale.append(path)
-    return stale
+    return sorted(stale)
 
 
 def detect_season_audio(
@@ -734,8 +773,11 @@ def detect_season_audio(
     phase_callback: Callable[[str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
     pause_check: Callable[[], bool] | None = None,
-) -> list[Candidate]:
+) -> DetectorAnswer:
     """Match this episode's opening against its season (or, alone, the previous season's cached episodes).
+
+    A sibling ffmpeg can't fingerprint is remembered, and other episodes' steps leave it out for a day while it stays
+    unchanged; this episode's own fingerprint is always tried.
 
     Args:
         rec: The episode (its identity matches the disk: the pipeline just checked).
@@ -747,12 +789,13 @@ def detect_season_audio(
         pause_check: Unused (a paused job doesn't block a worker).
 
     Returns:
-        At most one intro candidate (season audio, or the previous-season hint).
+        At most one intro candidate (season audio, or the previous-season hint), with the signature of the season files
+        it was matched with (the pipeline stores both together).
 
     Raises:
         DetectorUnavailableError: No chromaprint ffmpeg, this episode couldn't be fingerprinted, or cancelled.
     """
-    from ..pipeline import DetectorUnavailableError
+    from ..pipeline import DetectorAnswer, DetectorUnavailableError
 
     phase = phase_callback or (lambda _text: None)
     ffmpeg = chromaprint_ffmpeg(getattr(ctx.config, "ffmpeg_path", None))
@@ -761,7 +804,14 @@ def detect_season_audio(
     group = season_group(rec.canonical_path)
     phase("Fingerprinting audio…")
     try:
-        own = ensure_fingerprint(ctx.store, rec, ffmpeg=ffmpeg, cancel_check=cancel_check)
+        # A failure is recorded while the file's lock is held, so siblings' steps waiting on it skip it (for a day).
+        own = ensure_fingerprint(
+            ctx.store,
+            rec,
+            ffmpeg=ffmpeg,
+            cancel_check=cancel_check,
+            on_failure=functools.partial(_record_fingerprint_failure, ctx, rec),
+        )
     except FingerprintError as exc:
         if not (cancel_check and cancel_check()):
             # Siblings' runs don't ask for this file again until its season changes (season_audio_followups).
@@ -783,7 +833,17 @@ def detect_season_audio(
         if cached is None:
             phase(f"Fingerprinting season audio {n}/{len(others)}…")
             try:
-                cached = ensure_fingerprint(ctx.store, member, ffmpeg=ffmpeg, cancel_check=cancel_check)
+                cached = ensure_fingerprint(
+                    ctx.store,
+                    member,
+                    ffmpeg=ffmpeg,
+                    cancel_check=cancel_check,
+                    skip=functools.partial(_fingerprint_failed_lately, ctx, member),
+                    on_failure=functools.partial(_record_fingerprint_failure, ctx, member),
+                )
+            except FingerprintSkippedError:
+                logger.debug("Season audio leaves out {}: it couldn't be fingerprinted lately", os.path.basename(path))
+                continue
             except FingerprintError as exc:
                 logger.info("Season audio leaves out {} this time: {}", os.path.basename(path), exc)
                 continue
@@ -815,9 +875,8 @@ def detect_season_audio(
 
     matched = {path: records[path] for path in points.keys() | previous_used}
     signature = _signature(ctx, _signature_paths(rec.canonical_path, group), matched)
-    ctx.store.set_detector_run(rec.id, Source.SEASON_AUDIO, signature)
     _request_redecide(ctx, rec, records, signature)
-    return candidates
+    return DetectorAnswer(tuple(candidates), signature)
 
 
 def season_audio_spec(ffmpeg_path: str | None) -> LocalDetectorSpec | None:

@@ -6,12 +6,15 @@ from __future__ import annotations
 import os
 import random
 import re
+import sqlite3
+import subprocess
 import threading
 import time
 import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -125,6 +128,14 @@ def _evidence(store, path, source):
     return [c for c in store.get_evidence(rec.id) if c.source is source]
 
 
+def _detect_and_store(ctx, rec):
+    """The season audio detector on one file, its answer stored the way the pipeline stores it."""
+    pipeline._run_detector(
+        ctx, rec, _spec(), gpu=None, gpu_device_path=None, phase=lambda _t: None, cancel_check=None, pause_check=None
+    )
+    return [c for c in ctx.store.get_evidence(rec.id) if c.source is Source.SEASON_AUDIO]
+
+
 def _introdb_answer(start_ms, end_ms):
     return _clients(introdb=LookupResult("ok", (Candidate(MarkerType.INTRO, start_ms, end_ms, Source.INTRODB),)))
 
@@ -204,7 +215,7 @@ class TestSeasonAudio:
         assert cand.origin == "2/2" and cand.confidence == 1.0
         # Owner decision 2026-09-14: season audio never decides alone, not even at Medium.
         assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
-        assert ctx.take_followups() == [e2, e3]
+        assert ctx.take_followups() == []  # e2 and e3 never had an answer: their own runs match the whole season
         assert all(store.get_fingerprint(store.get_file(p).id, "intro") is not None for p in (e1, e2, e3))
 
     def test_the_rest_of_the_season_matches_on_the_checking_thread(self, store, show):
@@ -218,7 +229,7 @@ class TestSeasonAudio:
         assert out is not None and audio.computed == []
         (cand,) = _evidence(store, e2, Source.SEASON_AUDIO)
         assert cand.origin == "2/2"
-        assert ctx.take_followups() == [e3]  # e1 already ran with this season's fingerprints
+        assert ctx.take_followups() == []  # e1 already ran with this season's fingerprints; e3 never had an answer
 
     @pytest.mark.parametrize("raw", [HIGH, MEDIUM], ids=["high", "medium"])
     def test_a_lone_audio_match_needs_review(self, store, show, raw):
@@ -282,13 +293,35 @@ class TestSeasonAudio:
         rec = store.upsert_file(FileIdentity(e2, *_identity(e2)), duration_ms=DUR, season_key=None, is_movie=False)
         decision = _decided(MarkerType.INTRO, 10_000, 40_000, decided_by)
         store.save_decisions(rec.id, {MarkerType.INTRO: decision}, settings_fingerprint="x")
+        store.set_detector_run(rec.id, Source.SEASON_AUDIO, "an earlier season")
         if locked:
             store.lock_marker(rec.id, decision.marker)
         store.set_intro_chapter_limit(rec.id, None)  # no intro chapter: the chapter step has nothing to ask about
         ctx = _season_ctx(store, e1)
         with _Audio():
             _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process")
-        assert ctx.take_followups() == ([e2, e3] if asked else [e3])
+        assert ctx.take_followups() == ([e2] if asked else [])  # e3 never had an answer
+
+    def test_a_member_no_server_takes_is_never_queued_for_a_season_job(self, store, show):
+        paths = show(1, 4)
+        excluded = paths[2]
+        registry = _registry(paths[0], ServerType.PLEX)
+        registry.configs_by_id["plex-1"].exclude_paths.append({"value": r"S01E03", "type": "regex"})
+
+        def job(items):
+            ctx = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),))
+            for path in items:
+                if _run(ctx, path, {"plex-1": ready_publisher()})[0] is None:
+                    _run(ctx, path, {"plex-1": ready_publisher()}, stage="process")
+            return [p for p in ctx.take_followups() if p not in items]
+
+        with _Audio(points=_episode_noise) as audio:
+            assert job([p for p in paths if p != excluded]) == []
+            assert excluded in audio.computed  # it still counts in its siblings' matches
+            (e5,) = show(1, 5)[4:]
+            assert excluded not in job([e5])
+            (e6,) = show(1, 6)[5:]
+            assert excluded not in job([e6])
 
     def test_a_run_reads_its_season_once(self, store, show):
         e1, e2, e3 = show(1, 3)
@@ -468,7 +501,8 @@ class TestFailures:
         (cand,) = _evidence(store, e1, Source.SEASON_AUDIO)
         assert cand.origin == "1/1"
         assert season.season_audio_due(store.get_file(e1), ctx) is False
-        assert season.season_audio_needs_worker(store.get_file(e1), ctx) is True  # e3 still has no fingerprint
+        # e3 has no fingerprint, but ffmpeg failed on it just now: other episodes' steps leave it out for a day.
+        assert season.season_audio_needs_worker(store.get_file(e1), ctx) is False
         with _Audio():
             _run(ctx, e3, {"plex-1": ready_publisher()}, stage="process")  # e3's own run fingerprints it
         assert season.season_audio_due(store.get_file(e1), ctx) is True
@@ -527,6 +561,157 @@ class TestFailures:
             assert e4 in job([e5])  # a new episode: asked once more
             assert job([e1]) == []
 
+    def test_a_sibling_that_cant_be_fingerprinted_is_not_fingerprinted_again_by_every_episode(self, store, show):
+        paths = show(1, 10)
+        broken = paths[4]
+        registry = _registry(paths[0], ServerType.PLEX)
+        clock = {"now": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+
+        def run(ctx, path):
+            if _run(ctx, path, {"plex-1": ready_publisher()})[0] is None:
+                _run(ctx, path, {"plex-1": ready_publisher()}, stage="process")
+
+        def job(items):
+            """A job over ``items`` and its Season job; returns how many times ffmpeg ran on the broken file."""
+            audio.computed.clear()
+            ctx = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),), now=lambda: clock["now"])
+            for path in items:
+                run(ctx, path)
+            season_job = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),), now=lambda: clock["now"])
+            for path in ctx.take_followups():
+                if path not in items:
+                    run(season_job, path)
+            return audio.computed.count(broken)
+
+        with _Audio(fail={broken}, points=_episode_noise) as audio:
+            # The first episode's step, then the broken file's own run (which always tries); was once per episode.
+            assert job(paths) == 2
+            assert job([paths[0]]) == 0
+            (e11,) = show(1, 11)[10:]
+            assert job([e11]) == 0  # a new episode and the Season job of its siblings, within the day
+            clock["now"] += timedelta(days=1)
+            (e12,) = show(1, 12)[11:]
+            assert job([e12]) == 1  # a day later, one step tries it again
+
+    @pytest.mark.parametrize(
+        ("target", "failed_ago", "same_identity", "force", "tried"),
+        [
+            ("sibling", timedelta(hours=23), True, False, False),
+            ("sibling", timedelta(days=1), True, False, True),
+            ("sibling", timedelta(hours=23), False, False, True),
+            ("sibling", timedelta(hours=23), True, True, True),
+            ("own", timedelta(hours=23), True, False, True),
+        ],
+        ids=["sibling-within-a-day", "sibling-a-day-later", "sibling-changed-since", "sibling-forced", "own-run"],
+    )
+    def test_a_fingerprint_failure_is_skipped_only_by_other_episodes_for_a_day_while_the_file_is_unchanged(
+        self, store, show, target, failed_ago, same_identity, force, tried
+    ):
+        e1, e2, e3 = show(1, 3)
+        now = datetime(2026, 9, 13, tzinfo=timezone.utc)
+        failed_as = FileIdentity(e2, *(_identity(e2) if same_identity else (1, 1)))
+        store.record_member_fingerprint_failure(failed_as, now - failed_ago, forget_before=now - timedelta(days=30))
+        ctx = _ctx(
+            store,
+            _registry(e1, ServerType.PLEX),
+            settings_raw=MEDIUM,
+            detectors=(_spec(),),
+            force=force,
+            now=lambda: now,
+        )
+        with _Audio() as audio:
+            _run(ctx, e1 if target == "sibling" else e2, {"plex-1": ready_publisher()}, stage="process")
+        assert (e2 in audio.computed) is tried
+        assert e3 in audio.computed
+
+    def test_a_files_own_failed_run_keeps_a_later_siblings_step_from_fingerprinting_it(self, store, show):
+        e1, e2 = show(1, 2)
+        with _Audio(fail={e1}) as audio:
+            _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process")
+            assert store.member_fingerprint_failed_at(FileIdentity(e1, *_identity(e1))) is not None
+            audio.computed.clear()
+            _run(_season_ctx(store, e2), e2, {"plex-1": ready_publisher()}, stage="process")
+        assert audio.computed == [e2]
+
+    def test_siblings_waiting_on_a_file_that_fails_meanwhile_dont_run_ffmpeg_on_it_again(self, store, show):
+        paths = show(1, 5)
+        broken, siblings = paths[4], paths[:4]
+        for path in paths:
+            store.upsert_file(FileIdentity(path, *_identity(path)), duration_ms=DUR, season_key=None, is_movie=False)
+        waiting, guard, all_waiting = [], threading.Lock(), threading.Event()
+        real_ensure = fingerprint.ensure_fingerprint
+
+        def ensure(store_, rec_, **kwargs):
+            if rec_.canonical_path == broken:
+                with guard:
+                    waiting.append(rec_.canonical_path)
+                    if len(waiting) == len(siblings):
+                        all_waiting.set()
+            return real_ensure(store_, rec_, **kwargs)
+
+        def compute(path, duration_ms, *, ffmpeg, cancel_check=None):
+            audio.computed.append(path)
+            if path == broken:
+                all_waiting.wait(10)  # every sibling's step is at the broken file before ffmpeg fails on it
+                raise fingerprint.FingerprintError("ffmpeg exited 1")
+            return _episode_noise(path)
+
+        errors = []
+        real_record = season._record_fingerprint_failure
+
+        def slow_record(ctx, rec):  # a slow store write between ffmpeg failing and the failure being recorded
+            time.sleep(0.05)
+            real_record(ctx, rec)
+
+        def detect(path):
+            try:
+                season.detect_season_audio(store.get_file(path), ctx=_season_ctx(store, path))
+            except Exception as exc:  # pragma: no cover - reported below
+                errors.append(exc)
+
+        with (
+            _Audio() as audio,
+            patch.object(fingerprint, "compute_fingerprint", side_effect=compute),
+            patch.object(season, "ensure_fingerprint", side_effect=ensure),
+            patch.object(season, "_record_fingerprint_failure", side_effect=slow_record),
+        ):
+            threads = [threading.Thread(target=detect, args=(path,)) for path in siblings]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(20)
+        assert errors == [] and all_waiting.is_set()
+        assert audio.computed.count(broken) == 1
+
+    def test_a_sibling_whose_fingerprint_is_cancelled_is_not_remembered_as_a_failure(self, store, show):
+        e1, e2, e3 = show(1, 3)
+        rec = store.upsert_file(FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=None, is_movie=False)
+        cancelled = threading.Event()
+
+        def compute(path, duration_ms, *, ffmpeg, cancel_check=None):
+            if path == e2:
+                cancelled.set()  # the user cancels while ffmpeg reads E2
+                raise fingerprint.FingerprintError("Fingerprinting cancelled")
+            return fake_points(path)
+
+        with (
+            _Audio(),
+            patch.object(fingerprint, "compute_fingerprint", side_effect=compute),
+            pytest.raises(pipeline.DetectorUnavailableError),
+        ):
+            season.detect_season_audio(rec, ctx=_season_ctx(store, e1), cancel_check=cancelled.is_set)
+        assert store.member_fingerprint_failed_at(FileIdentity(e2, *_identity(e2))) is None
+
+    def test_a_file_whose_own_fingerprint_failed_lately_still_needs_a_worker(self, store, show):
+        e1, e2 = show(1, 2)
+        with _Audio(fail={e1}):
+            _run(_season_ctx(store, e2), e2, {"plex-1": ready_publisher()}, stage="process")  # e2's step fails on e1
+        rec = store.get_file(e1)
+        assert store.member_fingerprint_failed_at(FileIdentity(e1, rec.size, rec.mtime_ns)) is not None
+        ctx = _season_ctx(store, e1)
+        assert season.season_audio_needs_worker(rec, ctx) is True
+        assert season.season_audio_needs_worker(store.get_file(e2), ctx) is False
+
     def test_a_cancelled_fingerprint_is_not_remembered_as_a_failure(self, store, show):
         e1, _ = show(1, 2)
         rec = store.upsert_file(FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=None, is_movie=False)
@@ -555,6 +740,143 @@ class TestFailures:
             season.detect_season_audio(rec, ctx=ctx, cancel_check=lambda: True)
         assert audio.computed == [e1]
         assert store.get_detector_run(rec.id, Source.SEASON_AUDIO) is None
+
+    def test_a_failure_while_the_answer_is_stored_leaves_it_due(self, store, show):
+        e1, _ = show(1, 2)
+        real_write = MarkerStore._write_evidence
+
+        def failing(conn, file_id, source, *args):
+            if source is Source.SEASON_AUDIO:
+                raise sqlite3.OperationalError("disk I/O error")  # or the process ends here
+            return real_write(conn, file_id, source, *args)
+
+        with _Audio():
+            _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process")
+            (before,) = _evidence(store, e1, Source.SEASON_AUDIO)
+            show(1, 3)
+            with (
+                patch.object(MarkerStore, "_write_evidence", staticmethod(failing)),
+                pytest.raises(sqlite3.OperationalError),
+            ):
+                _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process")
+            ctx = _season_ctx(store, e1)
+            assert season.season_audio_due(store.get_file(e1), ctx) is True
+            _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process")
+            (after,) = _evidence(store, e1, Source.SEASON_AUDIO)
+        assert (before.origin, after.origin) == ("1/1", "2/2")
+
+    @staticmethod
+    def _decided_with_season_audio(store, show):
+        """E1 decided by IntroDB and a 1/1 season audio match; E3-E6 then arrive with another opening."""
+        e1, e2 = show(1, 2)
+        intro = noise(11, 240)
+
+        def points(path):
+            body = _episode_noise(path)
+            if os.path.basename(path).endswith(("E01.mkv", "E02.mkv")):
+                body[200:440] = intro
+            return body
+
+        clients = _introdb_answer(round(200 * POINT_S * 1000), round(439 * POINT_S * 1000))
+        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=HIGH, detectors=(_spec(),), clients=clients)
+        with _Audio(points=points):
+            for path in (e1, e2):
+                _run(ctx, path, {"plex-1": ready_publisher()}, stage="process")
+        show(1, 6)  # against E3-E6 its answer would fall below quorum, but it can't be matched again
+        return e1, clients
+
+    @staticmethod
+    def _decided_with_the_previous_season_hint(store, show):
+        """A new season's first episode decided by IntroDB and the previous season's hint; its season then arrives."""
+        TestWeeklyReleases()._cache_previous(store, show(1, 4))
+        (s2e1,) = show(2, 1)
+        start, end = planted_ms(s2e1)
+        clients = _introdb_answer(start, end - 1_000)
+        ctx = _ctx(store, _registry(s2e1, ServerType.PLEX), settings_raw=HIGH, detectors=(_spec(),), clients=clients)
+        with _Audio():
+            _run(ctx, s2e1, {"plex-1": ready_publisher()}, stage="process")
+        show(2, 3)
+        return s2e1, clients
+
+    @pytest.mark.parametrize(
+        ("decided", "answer"),
+        [
+            ("_decided_with_season_audio", Source.SEASON_AUDIO),
+            ("_decided_with_the_previous_season_hint", Source.SEASON_AUDIO_PREVIOUS),
+        ],
+        ids=["season-audio", "previous-season-hint"],
+    )
+    def test_without_chromaprint_a_stored_season_audio_answer_no_longer_decides(self, store, show, decided, answer):
+        target, clients = getattr(self, decided)(store, show)
+        registry = _registry(target, ServerType.PLEX)
+        assert store.get_markers(store.get_file(target).id)[MarkerType.INTRO].decided_by == ("introdb", answer.value)
+        with patch.object(season, "chromaprint_ffmpeg", return_value=None):
+            detectors = pipeline.default_local_detectors(_ctx(store, registry, settings_raw=HIGH).settings, MagicMock())
+        assert detectors == ()
+        ctx = _ctx(store, registry, settings_raw=HIGH, detectors=detectors, clients=clients)
+        ctx.chromaprint = fingerprint.ChromaprintState.ABSENT  # what build_context records for this container
+        with _Audio():
+            out, _ = _run(ctx, target, {"plex-1": ready_publisher()})
+        rec = store.get_file(target)
+        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        assert store.get_decisions(rec.id)[MarkerType.INTRO].status is DecisionStatus.NEEDS_REVIEW
+        assert MarkerType.INTRO not in store.get_markers(rec.id)
+        assert _evidence(store, target, answer)  # kept for when chromaprint is back
+
+    def test_a_chromaprint_check_that_didnt_answer_keeps_stored_season_audio_answers_deciding(
+        self, store, show, tmp_path
+    ):
+        target, clients = self._decided_with_season_audio(store, show)
+        registry = _registry(target, ServerType.PLEX)
+        ffmpeg = tmp_path / "ffmpeg"
+        ffmpeg.write_text("")
+        ffmpeg.chmod(0o755)
+        settings = _ctx(store, registry, settings_raw=HIGH).settings
+        fingerprint.forget_chromaprint_answers()
+        try:
+            with (
+                patch.object(fingerprint, "JELLYFIN_FFMPEG", str(tmp_path / "missing")),
+                patch.object(fingerprint.shutil, "which", return_value=None),
+                patch.object(fingerprint.subprocess, "run", side_effect=subprocess.TimeoutExpired("ffmpeg", 20)),
+            ):
+                state = fingerprint.chromaprint_state(str(ffmpeg))
+                detectors = pipeline.default_local_detectors(settings, SimpleNamespace(ffmpeg_path=str(ffmpeg)), state)
+        finally:
+            fingerprint.forget_chromaprint_answers()
+        assert (state, detectors) == (fingerprint.ChromaprintState.UNKNOWN, ())
+        ctx = _ctx(store, registry, settings_raw=HIGH, detectors=detectors, clients=clients)
+        ctx.chromaprint = state
+        with _Audio():
+            _run(ctx, target, {"plex-1": ready_publisher()})
+        rec = store.get_file(target)
+        assert store.get_decisions(rec.id)[MarkerType.INTRO].status is DecisionStatus.DECIDED
+        assert store.get_markers(rec.id)[MarkerType.INTRO].decided_by == ("introdb", "season_audio")
+
+    @pytest.mark.parametrize(
+        ("detectors", "chromaprint"),
+        [("registered", "available"), ("none", "absent"), ("none", "unknown")],
+        ids=["registered", "absent", "unknown"],
+    )
+    def test_a_stale_season_audio_answer_can_still_hold_a_chapter_in_review(self, store, show, detectors, chromaprint):
+        (path,) = show(1, 1)
+        rec = store.upsert_file(FileIdentity(path, *_identity(path)), duration_ms=DUR, season_key=None, is_movie=False)
+        intro_chapter = chapter_candidates(_chapter_probe(60_000, at_ms=0))  # an "Intro" chapter at 0-60 s
+        store.replace_evidence(rec.id, Source.CHAPTERS, intro_chapter, version=CHAPTER_RULES_VERSION)
+        store.replace_evidence(rec.id, Source.INTRODB, [Candidate(MarkerType.INTRO, 300_000, 390_000, Source.INTRODB)])
+        audio = Candidate(MarkerType.INTRO, 300_000, 390_000, Source.SEASON_AUDIO, 1.0, "2/2")
+        store.replace_evidence(rec.id, Source.SEASON_AUDIO, [audio])
+        ctx = _ctx(
+            store,
+            _registry(path, ServerType.PLEX),
+            settings_raw=HIGH,
+            detectors=(_spec(),) if detectors == "registered" else (),
+        )
+        ctx.chromaprint = fingerprint.ChromaprintState(chromaprint)
+
+        decision = pipeline._decide(ctx, rec, frozenset({MarkerType.INTRO}))[MarkerType.INTRO]
+
+        # IntroDB and season audio agree against the chapter; without the detector the chapter alone would decide.
+        assert decision.status is DecisionStatus.NEEDS_REVIEW and decision.marker is None
 
     def test_no_chromaprint_registers_no_detector(self, loguru_caplog):
         from media_preview_generator.markers.settings import load_global, validate_global
@@ -1268,13 +1590,13 @@ class TestConcurrentChanges:
             patch.object(season, "chromaprint_ffmpeg", return_value="/ffmpeg"),
         ):
             a = store.get_file(paths[0])
-            season.detect_season_audio(a, ctx=ctx)
+            _detect_and_store(ctx, a)
             b = store.get_file(paths[1])
             cached = store.get_season_pair(a.id, b.id, season.SEASON_AUDIO_VERSION)
             assert cached is None or cached == [tuple(r) for r in matcher.pair_runs(a_pts, new_b)]
             assert season.season_audio_due(a, ctx) is True
-            (b_intro,) = season.detect_season_audio(b, ctx=ctx)
-            (a_intro,) = season.detect_season_audio(a, ctx=ctx)
+            (b_intro,) = _detect_and_store(ctx, b)
+            (a_intro,) = _detect_and_store(ctx, a)
         assert abs(b_intro.start_ms - 1_400 * POINT_S * 1000) <= 500 and b_intro.origin == "2/2"
         assert abs(a_intro.start_ms - 300 * POINT_S * 1000) <= 500 and a_intro.origin == "2/2"
         assert season.season_audio_due(a, ctx) is False
@@ -1436,6 +1758,50 @@ class TestFlatFolder:
             _write(paths[6], 999)
             assert _job(store, registry, [paths[6]], chapters) == [paths[41]]
         assert _intro_decision(store, paths[41])[:2] == (DecisionStatus.NEEDS_REVIEW, LONG_INTRO_CHAPTER_REASON)
+
+    def test_a_change_reaches_a_file_whose_group_holds_the_changed_episode_for_season_audio_too(self, store, tmp_path):
+        # E41's group is E6-E45. The intro is in E41 and 20 of its 39 others (E6-E25), the quorum's edge: E6's replacement
+        # drops E41's answer, though E41 isn't in E6's group.
+        folder = tmp_path / "media" / "tv" / "Show (2020) {tvdb-1}"
+        folder.mkdir(parents=True)
+        paths = {e: str(folder / f"Show (2020) - S01E{e:02d}.mkv") for e in range(1, 46)}
+        for e, path in paths.items():
+            _write(path, 100 + e)
+        intro = noise(7, 240)
+        with_intro = set(range(6, 26)) | {41}
+        replaced = set()
+
+        def points(path):
+            e = int(re.search(r"E(\d+)", os.path.basename(path)).group(1))
+            body = noise(e, 1_500)
+            if e in with_intro and e not in replaced:
+                body[200:440] = intro
+            return body
+
+        clients = _introdb_answer(round(200 * POINT_S * 1000), round(439 * POINT_S * 1000))
+        registry = _registry(paths[1], ServerType.PLEX)
+
+        def job(items):
+            ctx = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),), clients=clients)
+            for path in items:
+                if _run(ctx, path, {"plex-1": ready_publisher()})[0] is None:
+                    _run(ctx, path, {"plex-1": ready_publisher()}, stage="process")
+            requested = ctx.take_followups()
+            season_job = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),), clients=clients)
+            for path in requested:
+                if path not in items and _run(season_job, path, {"plex-1": ready_publisher()})[0] is None:
+                    _run(season_job, path, {"plex-1": ready_publisher()}, stage="process")
+            return requested
+
+        with _Audio(points=points):
+            job(list(paths.values()))
+            e41 = store.get_file(paths[41])
+            assert store.get_markers(e41.id)[MarkerType.INTRO].decided_by == ("introdb", "season_audio")
+            replaced.add(6)
+            _write(paths[6], 999)  # a release whose opening doesn't match
+            assert paths[41] in job([paths[6]])
+        assert store.get_decisions(e41.id)[MarkerType.INTRO].status is DecisionStatus.NEEDS_REVIEW
+        assert MarkerType.INTRO not in store.get_markers(e41.id)
 
 
 def _record_intro_chapter(store, path, length_ms, chapter_version=CHAPTER_RULES_VERSION):

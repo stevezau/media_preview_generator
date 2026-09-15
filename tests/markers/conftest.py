@@ -6,6 +6,14 @@ import pytest
 from loguru import logger
 
 
+@pytest.fixture(autouse=True)
+def _no_background_fingerprint_sweep(monkeypatch):
+    """Jobs these tests run start no fingerprint cache sweep thread; the tests of the sweep put it back."""
+    from media_preview_generator.markers import job_runner
+
+    monkeypatch.setattr(job_runner, "start_fingerprint_sweep", lambda store: False)
+
+
 @pytest.fixture
 def app(tmp_path):
     """Same app fixture as tests/test_routes.py (setup complete, fixed API token)."""

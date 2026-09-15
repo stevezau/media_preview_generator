@@ -966,6 +966,22 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   (Reservation Dogs S01E05/E06 "Intro" chapters that are story, `evidence/lab/phase1-results.md`) makes a much longer
   intro chapter need an agreeing source that isn't server markers; a season ends with the same decisions whatever order
   its episodes arrive in. Harness unchanged: 91 / 13 / 14 (eval lists), 91 / 10 / 17 (whole folder).
+- 2026-09-15 · Phase 2 audit, detection (§5.3, §6.1; `.superpowers/sdd/plan-phase2/audit-detection.md`): a file ffmpeg
+  can't fingerprint is skipped by other episodes' season steps for a day while its identity is unchanged (its own run and
+  a forced re-detect still try); a fingerprint made with another algorithm or window length is computed again (and its
+  cached pairs dropped). Siblings that waited on a file's lock while ffmpeg failed on it skip it too. Every job that
+  completes, except Season, retry and verify jobs, starts a background sweep after giving back its slot (one at a time,
+  at most one start an hour, a warning when a start is skipped for one running over 10 minutes, at most every 10
+  minutes): up to 2,000 fingerprinted files within 60 s,
+  oldest-checked first, dropping the fingerprints, pairs and member failures of files gone from a folder that still
+  exists; `files` rows stay, no auto_vacuum. The season-audio answer and its signature are stored in one transaction. A
+  Season job never queues a member season audio never answered for. In a flat folder, a change also reaches files whose
+  own group holds the changed episode for season audio, as for F1. The sweep deletes only when the file's row still has
+  the identity it was listed with. A fingerprint failure is recorded while the file's lock is held. Chromaprint has
+  three states: available; absent (every ffmpeg listed its muxers without it, kept for the process), where stored
+  season audio (and hint) answers can keep a type in review but never help decide it; unknown (a check timed out,
+  couldn't start or exited with an error, asked again after 10 minutes), where no season audio runs but stored answers
+  count as before.
 - 2026-09-15 · Season follow-up jobs (§6.2 step 4; phase 2 Task 8): `Season: <show> · <season>` jobs run at LOW, or
   NORMAL when a webhook follow-up queued them (its retries and verify job queue LOW); at most 500 files; new requests
   join a waiting Season job of the same priority; a Season job never queues another. Webhook follow-ups for episodes of

@@ -32,6 +32,7 @@ from ..servers.base import ServerConfig, ServerType
 from ..servers.ownership import OwnershipMatch
 from ..servers.registry import server_config_from_dict
 from ..web.settings_manager import get_settings_manager
+from .audio.fingerprint import ChromaprintState, chromaprint_state
 from .audio.season import season_audio_spec, season_intro_chapter_limits
 from .decide import (
     DecisionContext,
@@ -109,7 +110,7 @@ PLEX_PASS_UNKNOWN_TTL_S = 5.0
 # Answers read from the saved settings alone: cheap, and wrong the moment the user saves, so never reused.
 _SETTINGS_ANSWERS = frozenset({Capability.DISABLED, Capability.NEEDS_CONFIRMATION})
 
-LocalDetector = Callable[..., list[Candidate]]
+LocalDetector = Callable[..., "list[Candidate] | DetectorAnswer"]
 
 
 def _utcnow() -> datetime:
@@ -126,14 +127,26 @@ class DetectorUnavailableError(Exception):
 
 
 @dataclass(frozen=True)
+class DetectorAnswer:
+    """A local detector's answer with what it was based on (season audio: the season's files and fingerprints).
+
+    The pipeline stores both in one transaction, so an answer can't be recorded as current without being stored.
+    """
+
+    candidates: tuple[Candidate, ...]
+    signature: str
+
+
+@dataclass(frozen=True)
 class LocalDetectorSpec:
     """A detector that reads the file itself (phase 2: season audio; phase 3: credit text).
 
     Attributes:
         source: The source whose place in the user's order the detector runs at.
         types: Marker types it can decide.
-        detect: ``detect(file, *, ctx, gpu, gpu_device_path, phase_callback, cancel_check, pause_check)``; raises
-            ``DetectorUnavailableError`` when it can't answer this time.
+        detect: ``detect(file, *, ctx, gpu, gpu_device_path, phase_callback, cancel_check, pause_check)``: a list of
+            candidates, or a ``DetectorAnswer`` whose signature is stored as the answer's basis (``detector_runs``);
+            raises ``DetectorUnavailableError`` when it can't answer this time.
         stores: Sources its candidates are stored under, each candidate under its own ``source``; empty = ``source``.
         version: Stored with its answer; an answer from another version is asked again, even for decided types.
         due: ``due(file, ctx)``: whether a stored answer of this version is out of date anyway (None: never).
@@ -200,6 +213,9 @@ class PipelineContext:
             read again on its backoff even when everything is decided, since its own detection may have run since
             (spec §5.5 rule 7 shortening). With a type still undecided, an unusable answer is read again as on any run,
             and an empty one a day old waits for the backoff too; a re-read that fails still counts.
+        chromaprint: What the job's check for an ffmpeg with chromaprint found. Without a registered season audio
+            detector, any state but UNKNOWN keeps stored season audio answers from helping decide (``_decide``);
+            UNKNOWN (ffmpeg didn't answer) still registers no detector, but stored answers count as if it were there.
     """
 
     registry: Any
@@ -215,6 +231,7 @@ class PipelineContext:
     capability_ttl_s: float = 300.0
     live_config: Callable[[str], ServerConfig | None] = live_server_config
     recheck_empty_server_markers: bool = False
+    chromaprint: ChromaprintState = ChromaprintState.AVAILABLE
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
     _capability_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -371,12 +388,15 @@ def build_clients(settings: GlobalMarkersSettings) -> dict[str, Any]:
     return clients
 
 
-def default_local_detectors(settings: GlobalMarkersSettings, config: Any) -> tuple[LocalDetectorSpec, ...]:
+def default_local_detectors(
+    settings: GlobalMarkersSettings, config: Any, chromaprint: ChromaprintState = ChromaprintState.ABSENT
+) -> tuple[LocalDetectorSpec, ...]:
     """The local detectors a job uses: season audio when its source is on and an ffmpeg with chromaprint exists.
 
     Args:
         settings: Global detection settings.
         config: The job's ``Config`` (its ``ffmpeg_path``).
+        chromaprint: The job's :func:`chromaprint_state`, for the warning when no detector can be registered.
 
     Returns:
         The detector specs, in no particular order (the pipeline runs them at their source's place).
@@ -384,13 +404,18 @@ def default_local_detectors(settings: GlobalMarkersSettings, config: Any) -> tup
     detectors: list[LocalDetectorSpec] = []
     if settings.source_enabled(Source.SEASON_AUDIO.value):
         spec = season_audio_spec(getattr(config, "ffmpeg_path", None))
-        if spec is None:
+        if spec is not None:
+            detectors.append(spec)
+        elif chromaprint is ChromaprintState.UNKNOWN:
+            logger.warning(
+                "Season audio matching is on, but ffmpeg didn't answer the check for chromaprint; no episode is matched "
+                "by this job, saved season audio answers still count, and ffmpeg is checked again in 10 minutes"
+            )
+        else:
             logger.warning(
                 "Season audio matching is on, but no ffmpeg with chromaprint was found; TV intros come from the other "
                 "sources only"
             )
-        else:
-            detectors.append(spec)
     return tuple(detectors)
 
 
@@ -415,17 +440,24 @@ def build_context(
         A context for one job.
     """
     settings = get_global_settings()
+    ffmpeg_path = getattr(config, "ffmpeg_path", None)
+    chromaprint = (
+        chromaprint_state(ffmpeg_path)
+        if settings.source_enabled(Source.SEASON_AUDIO.value)
+        else ChromaprintState.ABSENT
+    )
     return PipelineContext(
         registry=registry,
         config=config,
         settings=settings,
         store=get_marker_store(),
         priority=priority if callable(priority) else (lambda: priority),
-        ffprobe=ffprobe_path_for(getattr(config, "ffmpeg_path", None)),
+        ffprobe=ffprobe_path_for(ffmpeg_path),
         force=force,
         clients=build_clients(settings),
-        local_detectors=default_local_detectors(settings, config),
+        local_detectors=default_local_detectors(settings, config, chromaprint),
         recheck_empty_server_markers=recheck_empty_server_markers,
+        chromaprint=chromaprint,
     )
 
 
@@ -529,6 +561,8 @@ _RIDERS = {
     Source.SERVER_MARKERS.value: Source.SERVER_MARKERS_IMPORTED.value,
     Source.SEASON_AUDIO.value: Source.SEASON_AUDIO_PREVIOUS.value,
 }
+# Sources whose answers only a local detector makes (the previous-season hint included).
+_LOCAL_DETECTOR_SOURCES = frozenset({Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS, Source.CREDITS_TEXT})
 
 
 def _decision_order(settings: GlobalMarkersSettings) -> tuple[str, ...]:
@@ -550,16 +584,36 @@ def _decide(
 ) -> dict[MarkerType, TypeDecision]:
     """Decide from everything stored for the enabled sources, so a forced and a normal run always agree.
 
+    Stored answers of a local detector this job doesn't have (season audio without an ffmpeg with chromaprint) can't be
+    matched again as the season changes, so they may hold a type in review but never help decide it: a type the
+    decision with them decides is decided again without them. When the chromaprint check didn't answer
+    (``ctx.chromaprint`` UNKNOWN), stored season audio answers count as usual until it does.
     ``intro_chapter_limit`` is the season's limit on an intro chapter deciding alone (``season_intro_chapter_limits``).
     """
     order = _decision_order(ctx.settings)
-    enabled = set(order)
-    candidates = [c for c in ctx.store.get_evidence(rec.id) if c.source.value in enabled]
-    dctx = DecisionContext(
-        rec.duration_ms or 0, rec.is_movie, ctx.settings.publish_when, types, order, intro_chapter_limit
-    )
+    evidence = ctx.store.get_evidence(rec.id)
     # A lock always wins (spec §5.5 rule 1); what respect_locks=False should change is for the phase 4 editor.
-    return decide(candidates, dctx, ctx.store.get_locked(rec.id))
+    locked = ctx.store.get_locked(rec.id)
+
+    def decide_from(sources: tuple[str, ...]) -> dict[MarkerType, TypeDecision]:
+        enabled = set(sources)
+        dctx = DecisionContext(
+            rec.duration_ms or 0, rec.is_movie, ctx.settings.publish_when, types, sources, intro_chapter_limit
+        )
+        return decide([c for c in evidence if c.source.value in enabled], dctx, locked)
+
+    decisions = decide_from(order)
+    registered = {source.value for spec in ctx.local_detectors for source in (spec.source, *spec.stored_sources)}
+    unavailable = {source.value for source in _LOCAL_DETECTOR_SOURCES} - registered
+    if ctx.chromaprint is ChromaprintState.UNKNOWN:
+        unavailable -= {Source.SEASON_AUDIO.value, Source.SEASON_AUDIO_PREVIOUS.value}
+    if not any(c.source.value in unavailable and c.source.value in order for c in evidence):
+        return decisions
+    without = decide_from(tuple(source_id for source_id in order if source_id not in unavailable))
+    return {
+        mtype: without[mtype] if decision.status is DecisionStatus.DECIDED else decision
+        for mtype, decision in decisions.items()
+    }
 
 
 def _decisions_changed(
@@ -723,22 +777,22 @@ def _run_detector(
     cancel_check: Callable[[], bool] | None,
     pause_check: Callable[[], bool] | None,
 ) -> None:
-    """Run one detector and store its answer under each of its sources with its version.
+    """Run one detector and store its answer under each of its sources with its version, and its basis when it gave one,
+    in one transaction.
 
     Anything but ``DetectorUnavailableError`` propagates, so a GPU error reaches the worker's CPU fallback.
     """
     try:
-        found = list(
-            spec.detect(
-                rec,
-                ctx=ctx,
-                gpu=gpu,
-                gpu_device_path=gpu_device_path,
-                phase_callback=phase,
-                cancel_check=cancel_check,
-                pause_check=pause_check,
-            )
+        answer = spec.detect(
+            rec,
+            ctx=ctx,
+            gpu=gpu,
+            gpu_device_path=gpu_device_path,
+            phase_callback=phase,
+            cancel_check=cancel_check,
+            pause_check=pause_check,
         )
+        found = list(answer.candidates if isinstance(answer, DetectorAnswer) else answer)
     except DetectorUnavailableError as exc:
         logger.info(
             "{} had no answer for {} this time: {}", spec.source.value, os.path.basename(rec.canonical_path), exc
@@ -747,8 +801,12 @@ def _run_detector(
     stray = [c for c in found if c.source not in spec.stored_sources]
     if stray:
         logger.warning("{} returned candidates for sources it doesn't store: {}", spec.source.value, stray)
-    for source in sorted(spec.stored_sources, key=lambda s: s.value):
-        ctx.store.replace_evidence(rec.id, source, [c for c in found if c.source is source], version=spec.version)
+    ctx.store.replace_detector_answer(
+        rec.id,
+        {source: [c for c in found if c.source is source] for source in spec.stored_sources},
+        version=spec.version,
+        run=(spec.source, answer.signature) if isinstance(answer, DetectorAnswer) else None,
+    )
 
 
 def _note_budget_exhausted(ctx: PipelineContext, source: Source) -> None:

@@ -630,7 +630,16 @@ Season audio compares an episode with the other episodes of its season on disk: 
 with the same season number in their names (in a folder holding more than 40 of them, the 40 nearest by episode
 number). The first episode of a season a job checks fingerprints every member that has no fingerprint yet, on a
 worker (once per file; a replaced file is fingerprinted again). The rest of the season then matches from those saved
-fingerprints, normally without taking a worker.
+fingerprints, normally without taking a worker. An episode ffmpeg can't fingerprint (damaged audio, a network read that
+stalls) is left out of the other episodes' matching for a day while the file stays unchanged; its own check and a
+re-detect still try it.
+
+Saved fingerprints take up to about 28 KB per episode. When an Intro & Credits job completes (except Season, retry and
+verify jobs), a cleanup starts in the background, at most once an hour. It looks for up to 2,000 fingerprinted files on
+disk, for at most a minute, and clears the fingerprints of files that are gone (renamed by an upgrade, or deleted) while
+their folder is still there; the next cleanup goes on where it stopped. A file whose folder is missing, as in an
+unmounted library, keeps its fingerprint. The app log (not the job's log) says how many were cleared, and warns (at most
+every 10 minutes) when a cleanup is still waiting on a stalled network share.
 
 An episode with no other episode of its season on disk yet (a new season's first weekly release) is compared with the
 previous season's first 4 episodes that are already fingerprinted, when its folder is named like a season (`Season 2`
@@ -869,7 +878,8 @@ table covers every state the check can report, using its exact wording:
 | *(Emby)* "Can't reach this Emby server" / "Can't reach the Media Preview Bridge markers endpoint on this Emby server" | A transient connection problem | Confirm the server is up and reachable; recheck |
 | *(Emby)* "Emby rejected this server's credentials; reconnect it" | The stored API key or login no longer works | Reconnect the server from the Servers page |
 | *(Emby)* "Emby refused the Media Preview Bridge markers endpoint; this server's API key or user needs administrator rights" | The connected account isn't an administrator | Reconnect with an admin account or API key |
-| *(Settings)* **Matching audio across a season** shows "Not available" with a reason, e.g. "Needs an ffmpeg with the chromaprint muxer (jellyfin-ffmpeg in the amd64 image); none was found" | This container's ffmpeg has no chromaprint (the arm64 image, or a custom ffmpeg) | Use the amd64 Docker image; every other source keeps working |
+| *(Settings)* **Matching audio across a season** shows "Not available" with a reason, e.g. "Needs an ffmpeg with the chromaprint muxer (jellyfin-ffmpeg in the amd64 image); none was found" | This container's ffmpeg has no chromaprint (the arm64 image, or a custom ffmpeg) | Use the amd64 Docker image; every other source keeps working. Saved season audio answers can't help decide an intro meanwhile, so one decided with them goes to **Needs review** on its next check unless other sources agree; they can still keep an intro in review that they contradict |
+| *(Settings)* **Matching audio across a season** shows "Not available": "ffmpeg didn't answer the check for the chromaprint muxer; it is checked again in 10 minutes" | ffmpeg timed out, couldn't start, or exited with an error when asked for its muxers (a busy or slow container start) | Nothing: jobs started meanwhile match no episodes, but saved season audio answers still count, and the check runs again after 10 minutes |
 | *(Plex)* Red "✕ Not active" next to Plex Pass: "This Plex server has no Plex Pass, so Plex won't show any markers." | Plex hides all markers — even ones already in its database — without Plex Pass | Add Plex Pass to this Plex server |
 | *(Plex)* "Plex's database is on a network share (…). The app must run on the same machine as Plex to write markers; Plex stays read-only." | SQLite's write mode doesn't work over NFS/SMB/CIFS | Run this app on the same machine as Plex |
 | *(Plex)* "Plex's database is on a filesystem this app doesn't recognise as a local disk (…); Plex stays read-only." | The app couldn't prove the folder is a real local disk, so it refuses to risk Plex's database | Check the mount; open an issue if it's genuinely local |

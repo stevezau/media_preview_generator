@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import errno
+import os
+import shutil
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -18,9 +22,17 @@ from media_preview_generator.markers.store import MarkerStore
 
 @pytest.fixture(autouse=True)
 def _fresh_chromaprint_cache():
-    fpmod.has_chromaprint.cache_clear()
+    fpmod.forget_chromaprint_answers()
     yield
-    fpmod.has_chromaprint.cache_clear()
+    fpmod.forget_chromaprint_answers()
+
+
+class _Clock:
+    def __init__(self, now: float = 1_000.0):
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
 
 
 @pytest.fixture
@@ -78,6 +90,99 @@ def test_has_chromaprint_reads_the_muxer_list(stdout, returncode, found):
     assert run.call_args.args[0] == ["/x/ffmpeg", "-hide_banner", "-muxers"]
 
 
+@pytest.mark.parametrize(
+    "stdout",
+    [" E  mp4             MP4 (MPEG-4 Part 14)\n", " E  chromaprint     Chromaprint\n"],
+    ids=["without", "with"],
+)
+def test_an_ffmpeg_that_listed_its_muxers_is_never_asked_again(monkeypatch, stdout):
+    clock = _Clock()
+    monkeypatch.setattr(fpmod, "_monotonic", clock)
+    with patch.object(fpmod.subprocess, "run", return_value=MagicMock(stdout=stdout, returncode=0)) as run:
+        first = fpmod.has_chromaprint("/x/ffmpeg")
+        clock.now += 30 * 86_400
+        assert fpmod.has_chromaprint("/x/ffmpeg") is first
+    assert run.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"side_effect": subprocess.TimeoutExpired("ffmpeg", 20)},
+        {"side_effect": OSError("Text file busy")},
+        {"return_value": MagicMock(stdout="", returncode=1)},
+    ],
+    ids=["timed-out", "couldnt-start", "exited-with-an-error"],
+)
+def test_an_ffmpeg_that_didnt_list_its_muxers_is_asked_again_after_10_minutes(monkeypatch, failure):
+    clock = _Clock()
+    monkeypatch.setattr(fpmod, "_monotonic", clock)
+    listed = MagicMock(stdout=" E  chromaprint     Chromaprint\n", returncode=0)
+    with patch.object(fpmod.subprocess, "run", **failure) as run:
+        assert fpmod.has_chromaprint("/x/ffmpeg") is False
+        clock.now += fpmod.CHROMAPRINT_RETRY_S - 1
+        assert fpmod.has_chromaprint("/x/ffmpeg") is False
+        assert run.call_count == 1
+    with patch.object(fpmod.subprocess, "run", return_value=listed) as run:
+        clock.now += 1
+        assert fpmod.has_chromaprint("/x/ffmpeg") is True
+    assert run.call_count == 1
+
+
+def test_callers_checking_one_ffmpeg_at_once_share_one_check(monkeypatch):
+    second_asking, answers = threading.Event(), []
+    listed = MagicMock(stdout=" E  chromaprint     Chromaprint\n", returncode=0)
+
+    def muxers(*args, **kwargs):
+        second_asking.wait(5)
+        time.sleep(0.1)  # the second caller reaches the check while this one still runs
+        return listed
+
+    def ask():
+        answers.append(fpmod.has_chromaprint("/x/ffmpeg"))
+
+    with patch.object(fpmod.subprocess, "run", side_effect=muxers) as run:
+        first = threading.Thread(target=ask)
+        first.start()
+        second = threading.Thread(target=lambda: (second_asking.set(), ask()))
+        second.start()
+        first.join(10)
+        second.join(10)
+    assert answers == [True, True]
+    assert run.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("states", "expected"),
+    [
+        ({"conf": "absent", "jf": "available"}, "available"),
+        ({"conf": "unknown", "jf": "available"}, "available"),
+        ({"conf": "unknown", "jf": "absent"}, "unknown"),
+        ({"conf": "absent", "jf": "absent"}, "absent"),
+        ({}, "absent"),
+    ],
+    ids=["one-has-it", "one-unknown-one-has-it", "one-unknown", "none-has-it", "no-ffmpeg"],
+)
+def test_the_chromaprint_state_is_available_then_unknown_then_absent(tmp_path, states, expected):
+    binaries = {}
+    for name in states:
+        binary = tmp_path / name
+        binary.write_text("")
+        binary.chmod(0o755)
+        binaries[str(binary)] = fpmod.ChromaprintState(states[name])
+    missing = str(tmp_path / "missing")
+    with (
+        patch.object(fpmod, "JELLYFIN_FFMPEG", str(tmp_path / "jf") if "jf" in states else missing),
+        patch.object(fpmod.shutil, "which", return_value=None),
+        patch.object(fpmod, "muxer_state", side_effect=lambda ffmpeg: binaries[ffmpeg]),
+    ):
+        configured = str(tmp_path / "conf") if "conf" in states else missing
+        assert fpmod.chromaprint_state(configured) is fpmod.ChromaprintState(expected)
+        found, reason = fpmod.chromaprint_status(configured)
+    assert (found is not None) is (expected == "available")
+    assert ("checked again in 10 minutes" in reason) is (expected == "unknown")
+
+
 def test_chromaprint_ffmpeg_prefers_configured_then_jellyfin_then_path(tmp_path):
     configured, jellyfin, on_path = (tmp_path / n for n in ("conf", "jf", "path"))
     for p in (configured, jellyfin, on_path):
@@ -130,11 +235,15 @@ def test_cancel_kills_ffmpeg():
 def _record(store, tmp_path, name="S01E01.mkv"):
     path = tmp_path / name
     path.write_bytes(b"x" * 10)
+    return _record_at(store, path)
+
+
+def _record_at(store, path):
     st = path.stat()
     return store.upsert_file(
         FileIdentity(str(path), st.st_size, st.st_mtime_ns),
         duration_ms=300_000,
-        season_key=str(tmp_path),
+        season_key=str(path.parent),
         is_movie=False,
     )
 
@@ -156,6 +265,32 @@ def test_ensure_stores_nothing_for_a_file_replaced_meanwhile(store, tmp_path):
     with patch.object(fpmod, "compute_fingerprint", return_value=np.array([5], dtype="<u4")):
         assert fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg") is None
     assert store.get_fingerprint(rec.id, "intro") is None
+
+
+def test_skip_is_asked_after_the_lock_and_a_cache_miss(store, tmp_path):
+    rec = _record(store, tmp_path)
+    with patch.object(fpmod, "compute_fingerprint", return_value=np.array([5], dtype="<u4")) as compute:
+        with pytest.raises(fpmod.FingerprintSkippedError):
+            fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", skip=lambda: True)
+        compute.assert_not_called()
+        fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", skip=lambda: False)
+        assert fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", skip=lambda: True).tolist() == [5]  # cached
+    compute.assert_called_once_with(rec.canonical_path, rec.duration_ms, ffmpeg="ffmpeg", cancel_check=None)
+
+
+@pytest.mark.parametrize(("cancelled", "recorded"), [(False, True), (True, False)], ids=["failed", "cancelled"])
+def test_a_failure_is_reported_while_the_files_lock_is_still_held(store, tmp_path, cancelled, recorded):
+    rec = _record(store, tmp_path)
+    held_at_failure = []
+
+    def on_failure():
+        entry = fpmod._FILE_LOCKS._locks.get(rec.id)
+        held_at_failure.append(entry is not None and entry[0].locked())
+
+    with patch.object(fpmod, "compute_fingerprint", side_effect=fpmod.FingerprintError("ffmpeg exited 1")):
+        with pytest.raises(fpmod.FingerprintError):
+            fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", cancel_check=lambda: cancelled, on_failure=on_failure)
+    assert held_at_failure == ([True] if recorded else [])
 
 
 def test_at_most_two_fingerprints_run_at_once(store, tmp_path):
@@ -180,3 +315,189 @@ def test_at_most_two_fingerprints_run_at_once(store, tmp_path):
         for t in threads:
             t.join(10)
     assert peak[0] == 2
+
+
+@pytest.mark.parametrize("made", [{"algorithm": 2}, {"length_s": 60.0}], ids=["other-algorithm", "other-window"])
+def test_a_fingerprint_made_another_way_is_computed_again(store, tmp_path, made):
+    rec = _record(store, tmp_path)
+    old = {"start_s": 0.0, "length_s": fpmod.window_s(rec.duration_ms), "algorithm": fpmod.ALGORITHM, **made}
+    store.set_fingerprint(
+        rec.id, size=rec.size, mtime_ns=rec.mtime_ns, window="intro", points=b"\x01\x00\x00\x00", **old
+    )
+    other = _record(store, tmp_path, "S01E02.mkv")
+    store.set_fingerprint(other.id, size=other.size, mtime_ns=other.mtime_ns, window="intro", start_s=0.0,
+                          length_s=fpmod.window_s(other.duration_ms), algorithm=fpmod.ALGORITHM, points=b"")  # fmt: skip
+    store.set_season_pair(rec.id, other.id, 4, [], identity_a=(rec.size, rec.mtime_ns),
+                          identity_b=(other.size, other.mtime_ns))  # fmt: skip
+    assert fpmod.has_cached_fingerprint(store, rec) is False
+    with patch.object(fpmod, "compute_fingerprint", return_value=np.array([5, 6], dtype="<u4")) as compute:
+        assert fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg").tolist() == [5, 6]
+    compute.assert_called_once_with(rec.canonical_path, rec.duration_ms, ffmpeg="ffmpeg", cancel_check=None)
+    stored = store.get_fingerprint(rec.id, "intro")
+    assert (stored.algorithm, stored.length_s) == (fpmod.ALGORITHM, fpmod.window_s(rec.duration_ms))
+    assert fpmod.has_cached_fingerprint(store, rec) is True
+    assert store.get_season_pair(rec.id, other.id, 4) is None  # matched with the old points
+
+
+class TestCacheSweep:
+    @staticmethod
+    def _fingerprinted(store, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x" * 10)
+        rec = _record_at(store, path)
+        store.set_fingerprint(rec.id, size=rec.size, mtime_ns=rec.mtime_ns, window="intro", start_s=0.0,
+                              length_s=fpmod.window_s(rec.duration_ms), algorithm=fpmod.ALGORITHM, points=b"")  # fmt: skip
+        return rec
+
+    def test_a_renamed_files_fingerprint_pairs_and_failures_go_and_its_row_stays(self, store, tmp_path):
+        season = tmp_path / "Show" / "Season 01"
+        old = self._fingerprinted(store, season / "Show - S01E01 - WEB.mkv")
+        live = self._fingerprinted(store, season / "Show - S01E02.mkv")
+        store.set_season_pair(old.id, live.id, 4, [], identity_a=(old.size, old.mtime_ns),
+                              identity_b=(live.size, live.mtime_ns))  # fmt: skip
+        identity = FileIdentity(old.canonical_path, old.size, old.mtime_ns)
+        now = datetime(2026, 9, 13, tzinfo=timezone.utc)
+        store.record_member_fingerprint_failure(identity, now, forget_before=now)
+        store.record_member_probe_failure(identity, now, forget_before=now)
+        os.rename(old.canonical_path, season / "Show - S01E01 - Bluray.mkv")  # a quality upgrade
+
+        assert fpmod.sweep_fingerprint_cache(store) == 1
+
+        assert store.get_fingerprint(old.id, "intro") is None
+        assert store.get_season_pair(old.id, live.id, 4) is None
+        assert store.member_fingerprint_failed_at(identity) is None and store.member_probe_failed_at(identity) is None
+        assert store.get_file(old.canonical_path) == old
+        assert store.get_fingerprint(live.id, "intro") is not None
+
+    def test_a_file_whose_folder_is_missing_keeps_its_fingerprint(self, store, tmp_path):
+        rec = self._fingerprinted(store, tmp_path / "Show" / "Season 01" / "Show - S01E01.mkv")
+        shutil.rmtree(tmp_path / "Show")  # an unmounted library looks the same
+
+        assert fpmod.sweep_fingerprint_cache(store) == 0
+        assert store.get_fingerprint(rec.id, "intro") is not None
+
+    def test_a_file_that_cant_be_read_keeps_its_fingerprint(self, store, tmp_path):
+        rec = self._fingerprinted(store, tmp_path / "Show" / "Season 01" / "Show - S01E01.mkv")
+        real_stat = os.stat
+
+        def stat(path, *args, **kwargs):  # the folder reads fine, the file doesn't (a stalled network mount)
+            if str(path) == rec.canonical_path:
+                raise OSError(errno.ESTALE, "Stale file handle")
+            return real_stat(path, *args, **kwargs)
+
+        with patch.object(fpmod.os, "stat", side_effect=stat):
+            assert fpmod.sweep_fingerprint_cache(store) == 0
+        assert store.get_fingerprint(rec.id, "intro") is not None
+
+    def test_each_sweep_checks_at_most_2000_files_and_the_next_one_goes_on_from_there(self, store, tmp_path):
+        folder = tmp_path / "Show" / "Season 01"
+        folder.mkdir(parents=True)
+        recs = []
+        for n in range(2_500):
+            rec = store.upsert_file(FileIdentity(str(folder / f"gone {n:04d}.mkv"), 1, 1), duration_ms=300_000,
+                                    season_key=str(folder), is_movie=False)  # fmt: skip
+            store.set_fingerprint(rec.id, size=1, mtime_ns=1, window="intro", start_s=0.0, length_s=105.0,
+                                  algorithm=1, points=b"")  # fmt: skip
+            recs.append(rec)
+
+        assert fpmod.sweep_fingerprint_cache(store) == 2_000
+        assert [store.has_fingerprint(r.id, "intro") for r in (recs[1_999], recs[2_000])] == [False, True]
+        assert fpmod.sweep_fingerprint_cache(store) == 500
+        assert not any(store.has_fingerprint(r.id, "intro") for r in recs)
+
+    def test_a_sweep_out_of_time_stops_and_the_next_goes_on_from_the_first_file_it_left(
+        self, store, tmp_path, monkeypatch
+    ):
+        recs = [self._fingerprinted(store, tmp_path / "Show" / "Season 01" / f"S01E{n:02d}.mkv") for n in range(1, 7)]
+        clock = _Clock()
+        monkeypatch.setattr(fpmod, "_monotonic", clock)
+        real_stat, checked = os.stat, []
+
+        def slow_stat(path, *args, **kwargs):  # each file takes 25 s to read: two fit in the 60 s budget, not three
+            if str(path) in {r.canonical_path for r in recs}:
+                checked.append(str(path))
+                clock.now += 25
+            return real_stat(path, *args, **kwargs)
+
+        with patch.object(fpmod.os, "stat", side_effect=slow_stat):
+            fpmod.sweep_fingerprint_cache(store)
+            assert checked == [r.canonical_path for r in recs[:3]]
+            checked.clear()
+            fpmod.sweep_fingerprint_cache(store)
+        assert checked == [r.canonical_path for r in recs[3:6]]
+
+
+class TestBackgroundSweep:
+    @pytest.fixture(autouse=True)
+    def fresh(self, monkeypatch):
+        self.clock = _Clock()
+        monkeypatch.setattr(fpmod, "_monotonic", self.clock)
+        monkeypatch.setattr(fpmod, "_sweep_started_at", None)
+        monkeypatch.setattr(fpmod, "_stuck_warned_at", None)
+        yield
+        assert fpmod._SWEEP_LOCK.acquire(timeout=5)
+        fpmod._SWEEP_LOCK.release()
+
+    @pytest.fixture
+    def blocked_sweep(self):
+        """A sweep that stays running until the test ends (or 10 s pass)."""
+        entered, release = threading.Event(), threading.Event()
+
+        def sweep(store):
+            entered.set()
+            release.wait(10)
+            return 0
+
+        with patch.object(fpmod, "sweep_fingerprint_cache", side_effect=sweep) as swept:
+            yield entered, swept
+            release.set()
+
+    def test_one_sweep_at_a_time_and_a_stuck_one_is_warned_about(self, loguru_caplog, blocked_sweep):
+        entered, swept = blocked_sweep
+        assert fpmod.start_fingerprint_sweep(MagicMock()) is True
+        assert entered.wait(5)
+        self.clock.now += fpmod.SWEEP_MIN_GAP_S  # the gap is over, but the sweep still runs
+        assert fpmod.start_fingerprint_sweep(MagicMock()) is False
+        assert "still waiting on the file system" in loguru_caplog.text  # running for more than 10 minutes
+        assert swept.call_count == 1
+
+    def test_a_stuck_sweep_is_warned_about_at_most_once_every_10_minutes(self, loguru_caplog, blocked_sweep):
+        entered, _ = blocked_sweep
+        assert fpmod.start_fingerprint_sweep(MagicMock()) is True
+        assert entered.wait(5)
+        warned = []
+        for minutes in (11, 12, 20, 21, 22):  # jobs completing while the sweep stays stuck
+            self.clock.now = 1_000.0 + minutes * 60
+            assert fpmod.start_fingerprint_sweep(MagicMock()) is False
+            warned.append(loguru_caplog.text.count("still waiting on the file system"))
+        assert warned == [1, 1, 1, 2, 2]
+
+    def test_no_warning_for_a_sweep_running_less_than_10_minutes(self, loguru_caplog, blocked_sweep):
+        entered, _ = blocked_sweep
+        assert fpmod.start_fingerprint_sweep(MagicMock()) is True
+        assert entered.wait(5)
+        self.clock.now += fpmod.SWEEP_STUCK_S
+        assert fpmod.start_fingerprint_sweep(MagicMock()) is False
+        assert "still waiting" not in loguru_caplog.text
+
+    def test_a_sweep_starts_at_most_once_an_hour(self):
+        done = threading.Event()
+        with patch.object(fpmod, "sweep_fingerprint_cache", side_effect=lambda store: done.set() or 0) as swept:
+            assert fpmod.start_fingerprint_sweep(MagicMock()) is True
+            assert done.wait(5)
+            assert fpmod._SWEEP_LOCK.acquire(timeout=5)  # finished
+            fpmod._SWEEP_LOCK.release()
+            self.clock.now += fpmod.SWEEP_MIN_GAP_S - 1
+            assert fpmod.start_fingerprint_sweep(MagicMock()) is False
+            self.clock.now += 1
+            done.clear()
+            assert fpmod.start_fingerprint_sweep(MagicMock()) is True
+            assert done.wait(5)
+        assert swept.call_count == 2
+
+    def test_a_sweep_that_raises_is_logged_and_frees_the_next_one(self, loguru_caplog):
+        with patch.object(fpmod, "sweep_fingerprint_cache", side_effect=OSError("disk I/O error")):
+            assert fpmod.start_fingerprint_sweep(MagicMock()) is True
+            assert fpmod._SWEEP_LOCK.acquire(timeout=5)
+            fpmod._SWEEP_LOCK.release()
+        assert "Couldn't clear old audio fingerprints" in loguru_caplog.text

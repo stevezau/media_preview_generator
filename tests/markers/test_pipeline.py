@@ -13,6 +13,7 @@ import pytest
 
 from media_preview_generator.job_kinds import ItemOutcome
 from media_preview_generator.markers import pipeline
+from media_preview_generator.markers.audio.fingerprint import ChromaprintState
 from media_preview_generator.markers.decide import DecisionStatus
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
 from media_preview_generator.markers.outcomes import OUTCOME_KEYS, FileOutcome, ServerStatus, file_outcome
@@ -3099,6 +3100,8 @@ class TestConsentBeforeEachWrite:
             patch.object(pipeline, "get_global_settings", return_value=load_global({})),
             patch.object(pipeline, "get_marker_store", return_value=store),
             patch.object(pipeline, "build_clients", return_value={}),
+            patch.object(pipeline, "chromaprint_state", return_value=ChromaprintState.ABSENT),
+            patch("media_preview_generator.markers.audio.season.chromaprint_ffmpeg", return_value=None),
         ):
             ctx = pipeline.build_context(registry=MagicMock(), config=MagicMock(ffmpeg_path=None), priority=3)
         assert ctx.live_config("plex-1") == cfg
@@ -4375,6 +4378,7 @@ class TestHandlersAndContext:
             patch.object(pipeline, "get_marker_store", return_value=store),
             patch.object(pipeline, "ffprobe_path_for", return_value="/x/ffprobe") as ffprobe_for,
             patch.object(pipeline, "build_clients", return_value={"introdb": "client"}) as build,
+            patch.object(pipeline, "chromaprint_state", return_value=ChromaprintState.ABSENT),
             patch("media_preview_generator.markers.audio.season.chromaprint_ffmpeg", return_value=None),
         ):
             ctx = pipeline.build_context(registry=registry, config=config, priority=3, force=True)
@@ -4388,6 +4392,8 @@ class TestHandlersAndContext:
             patch.object(pipeline, "get_global_settings", return_value=settings),
             patch.object(pipeline, "get_marker_store", return_value=store),
             patch.object(pipeline, "build_clients", return_value={}),
+            patch.object(pipeline, "chromaprint_state", return_value=ChromaprintState.ABSENT),
+            patch("media_preview_generator.markers.audio.season.chromaprint_ffmpeg", return_value=None),
         ):
             ctx = pipeline.build_context(
                 registry=registry, config=config, priority=3, recheck_empty_server_markers=True
@@ -4398,26 +4404,41 @@ class TestHandlersAndContext:
             patch.object(pipeline, "get_global_settings", return_value=settings),
             patch.object(pipeline, "get_marker_store", return_value=store),
             patch.object(pipeline, "build_clients", return_value={}),
+            patch.object(pipeline, "chromaprint_state", return_value=ChromaprintState.ABSENT),
+            patch("media_preview_generator.markers.audio.season.chromaprint_ffmpeg", return_value=None),
         ):
             ctx = pipeline.build_context(registry=registry, config=config, priority=lambda: live["priority"])
         live["priority"] = 1
         assert ctx.priority() == 1
 
-    def test_build_context_registers_season_audio_when_chromaprint_is_found(self, store):
+    @pytest.mark.parametrize(
+        ("state", "found", "warning"),
+        [
+            (ChromaprintState.AVAILABLE, "/usr/lib/jellyfin-ffmpeg/ffmpeg", None),
+            (ChromaprintState.ABSENT, None, "no ffmpeg with chromaprint was found"),
+            (ChromaprintState.UNKNOWN, None, "ffmpeg didn't answer the check for chromaprint"),
+        ],
+        ids=["available", "absent", "unknown"],
+    )
+    def test_build_context_records_the_chromaprint_state_and_registers_season_audio_only_when_available(
+        self, store, loguru_caplog, state, found, warning
+    ):
         settings = load_global({})
         config = MagicMock(ffmpeg_path="/usr/local/bin/ffmpeg")
         with (
             patch.object(pipeline, "get_global_settings", return_value=settings),
             patch.object(pipeline, "get_marker_store", return_value=store),
             patch.object(pipeline, "build_clients", return_value={}),
-            patch(
-                "media_preview_generator.markers.audio.season.chromaprint_ffmpeg",
-                return_value="/usr/lib/jellyfin-ffmpeg/ffmpeg",
-            ) as found,
+            patch.object(pipeline, "chromaprint_state", return_value=state) as checked,
+            patch("media_preview_generator.markers.audio.season.chromaprint_ffmpeg", return_value=found) as looked_up,
         ):
             ctx = pipeline.build_context(registry=MagicMock(), config=config, priority=3)
-        assert [s.source for s in ctx.local_detectors] == [Source.SEASON_AUDIO]
-        assert all(call.args == ("/usr/local/bin/ffmpeg",) for call in found.call_args_list)
+        checked.assert_called_once_with("/usr/local/bin/ffmpeg")
+        assert all(call.args == ("/usr/local/bin/ffmpeg",) for call in looked_up.call_args_list)
+        assert ctx.chromaprint is state
+        assert [s.source for s in ctx.local_detectors] == ([Source.SEASON_AUDIO] if found else [])
+        messages = {"no ffmpeg with chromaprint was found", "ffmpeg didn't answer the check for chromaprint"}
+        assert {m for m in messages if m in loguru_caplog.text} == ({warning} if warning else set())
 
     def test_decision_order_ranks_each_rider_right_after_its_switch(self):
         raw = {"sources": [{"id": "server_markers"}, {"id": "season_audio"}, {"id": "chapters"}]}

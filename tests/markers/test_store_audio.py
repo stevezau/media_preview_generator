@@ -48,6 +48,22 @@ class TestFingerprints:
         assert _fp(store, rec) is False
         assert store.get_fingerprint(rec.id, "intro") is None
 
+    @pytest.mark.parametrize(
+        ("wanted", "found"),
+        [
+            ({}, True),
+            ({"algorithm": 1, "length_s": 455.0004}, True),
+            ({"algorithm": 2}, False),
+            ({"length_s": 456.0}, False),
+        ],
+        ids=["any", "same-to-the-millisecond", "other-algorithm", "other-window"],
+    )
+    def test_a_fingerprint_made_another_way_is_not_found(self, store, wanted, found):
+        rec = _file(store)
+        _fp(store, rec)
+        assert (store.get_fingerprint(rec.id, "intro", **wanted) is not None) is found
+        assert store.has_fingerprint(rec.id, "intro", **wanted) is found
+
     def test_empty_points_record_a_file_without_audio(self, store):
         rec = _file(store)
         assert _fp(store, rec, points=b"") is True
@@ -154,6 +170,101 @@ class TestMemberProbeFailures:
         assert store.member_probe_failed_at(gone) is None
         assert store.member_probe_failed_at(recent) == self.AT + timedelta(hours=12)
         assert store._count("member_probe_failures") == 2
+
+
+class TestMemberFingerprintFailures:
+    AT = datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
+
+    def test_a_failure_counts_only_for_the_identity_it_was_recorded_with(self, store):
+        store.record_member_fingerprint_failure(FileIdentity("/m/S01E02.mkv", 100, 1), self.AT, forget_before=self.AT)
+        assert store.member_fingerprint_failed_at(FileIdentity("/m/S01E02.mkv", 100, 1)) == self.AT
+        assert store.member_fingerprint_failed_at(FileIdentity("/m/S01E02.mkv", 200, 2)) is None
+        assert store.member_probe_failed_at(FileIdentity("/m/S01E02.mkv", 100, 1)) is None
+
+    def test_recording_a_failure_forgets_entries_that_stopped_counting_for_any_path(self, store):
+        gone = FileIdentity("/m/gone/S01E02.mkv", 100, 1)
+        recent = FileIdentity("/m/S01E03.mkv", 100, 1)
+        store.record_member_fingerprint_failure(gone, self.AT, forget_before=self.AT - timedelta(days=1))
+        store.record_member_fingerprint_failure(recent, self.AT + timedelta(hours=12), forget_before=self.AT)
+        later = self.AT + timedelta(days=1, hours=6)
+        store.record_member_fingerprint_failure(
+            FileIdentity("/m/S01E04.mkv", 100, 1), later, forget_before=later - timedelta(days=1)
+        )
+        assert store.member_fingerprint_failed_at(gone) is None
+        assert store.member_fingerprint_failed_at(recent) == self.AT + timedelta(hours=12)
+        assert store._count("member_fingerprint_failures") == 2
+
+
+class TestFingerprintChecks:
+    def test_checks_go_on_after_the_last_file_checked_and_wrap_round(self, store):
+        recs = [_file(store, f"/m/S01E{n:02d}.mkv") for n in range(1, 6)]
+        for rec in recs:
+            _fp(store, rec)
+        _file(store, "/m/movie.mkv")  # no fingerprint: never listed
+        paths = [r.canonical_path for r in recs]
+
+        def listed(limit):
+            return [check.canonical_path for check in store.fingerprint_checks(limit)]
+
+        assert listed(2) == paths[0:2]
+        assert listed(2) == paths[0:2]  # listing alone doesn't move on
+        store.finish_fingerprint_checks(recs[0].id, [])  # only the first was checked
+        assert listed(2) == paths[1:3]
+        store.finish_fingerprint_checks(recs[3].id, [])
+        assert listed(3) == [paths[4], paths[0], paths[1]]
+        assert listed(10) == [paths[4], *paths[:4]]
+
+    def test_finishing_drops_the_gone_files_cache_and_keeps_their_rows_and_other_files_cache(self, store):
+        a, b = _file(store, "/m/S01E01.mkv"), _file(store, "/m/S01E02.mkv")
+        _fp(store, a), _fp(store, b)
+        _pair(store, a, b, [(1.0, 2.0, 3.0, 4.0)])
+        (check_a, check_b) = store.fingerprint_checks(5)
+        assert (check_a.file_id, check_a.size, check_a.mtime_ns) == (a.id, a.size, a.mtime_ns)
+        assert store.finish_fingerprint_checks(check_b.file_id, [check_a]) == 1
+        assert store.get_fingerprint(a.id, "intro") is None and store.get_season_pair(a.id, b.id, 3) is None
+        assert store.get_file(a.canonical_path) == a and store.get_fingerprint(b.id, "intro") is not None
+        assert [check.canonical_path for check in store.fingerprint_checks(5)] == [b.canonical_path]
+
+    def test_a_file_that_came_back_with_another_identity_after_its_check_keeps_its_new_fingerprint(self, store):
+        a = _file(store, "/m/S01E01.mkv")
+        _fp(store, a)
+        now = datetime(2026, 9, 13, tzinfo=timezone.utc)
+        (check,) = store.fingerprint_checks(5)  # the sweep finds it gone...
+        back = _file(store, "/m/S01E01.mkv", size=200, mtime=2)  # ...then a new file lands there and is fingerprinted
+        _fp(store, back)
+        store.record_member_fingerprint_failure(FileIdentity(back.canonical_path, 200, 2), now, forget_before=now)
+        assert store.finish_fingerprint_checks(check.file_id, [check]) == 0
+        assert store.get_fingerprint(back.id, "intro") is not None
+        assert store.member_fingerprint_failed_at(FileIdentity(back.canonical_path, 200, 2)) == now
+        assert [c.size for c in store.fingerprint_checks(5)] == [200]  # the cursor moved on anyway
+
+
+class TestDetectorAnswer:
+    AUDIO = [Candidate(MarkerType.INTRO, 10_000, 40_000, Source.SEASON_AUDIO, 1.0, "2/2")]
+
+    def test_the_answer_of_every_source_and_its_basis_are_stored_together(self, store):
+        rec = _file(store)
+        answers = {Source.SEASON_AUDIO: self.AUDIO, Source.SEASON_AUDIO_PREVIOUS: []}
+        store.replace_detector_answer(rec.id, answers, version=4, run=(Source.SEASON_AUDIO, "sig"))
+        assert store.get_evidence(rec.id) == self.AUDIO
+        assert {r.source for r in store.evidence_rows(rec.id)} == {Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}
+        assert store.evidence_version(rec.id, Source.SEASON_AUDIO_PREVIOUS) == 4
+        assert store.get_detector_run(rec.id, Source.SEASON_AUDIO) == "sig"
+
+    def test_a_failure_part_way_keeps_the_old_answer_and_basis(self, store):
+        rec = _file(store)
+        store.replace_detector_answer(rec.id, {Source.SEASON_AUDIO: []}, version=3, run=(Source.SEASON_AUDIO, "old"))
+        broken = [Candidate(MarkerType.INTRO, 1, 2, Source.SEASON_AUDIO_PREVIOUS, 1.0, "4/4")]
+        with pytest.raises(AttributeError):  # the second source's rows can't be written
+            store.replace_detector_answer(
+                rec.id,
+                {Source.SEASON_AUDIO: self.AUDIO, Source.SEASON_AUDIO_PREVIOUS: [*broken, None]},
+                version=4,
+                run=(Source.SEASON_AUDIO, "new"),
+            )
+        assert store.get_evidence(rec.id) == []
+        assert store.evidence_version(rec.id, Source.SEASON_AUDIO) == 3
+        assert store.get_detector_run(rec.id, Source.SEASON_AUDIO) == "old"
 
 
 class TestIntroChapterLimits:

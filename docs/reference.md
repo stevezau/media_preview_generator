@@ -345,14 +345,19 @@ the same state in Settings), and doesn't queue a retry for those files — nothi
 next scheduled or manual run for the same files asks it again on its own.
 
 When a job's season step finds that other episodes of the same season could now be decided differently (their season
-intro-chapter check or season audio answer is out of date), the job queues a **Season job** for them once it
+intro-chapter check or season audio answer is out of date; an episode season audio never answered for, such as one no
+server takes for Intro & Credits, has no answer to go out of date), the job queues a **Season job** for them once it
 completes: `source: "season"`, named `Season: <show> · <season folder>` (or `Season: N seasons`), at Low priority —
 Normal when the job was a webhook follow-up (not its retries or verify job, which queue theirs at Low), never ahead of
 the job that asked — and capped at 500 files; more are left to their next run. Episodes already listed by a Season job
 that hasn't read its files yet, or by a webhook follow-up that hasn't started, aren't queued again; new ones join such
 a Season job at the same priority while it stays within 500 files. A Season job queues no further Season job, verify
 job or retry for a file gone from disk. A cancelled job queues none. The requests live in memory: a restart before the
-job completes drops them, and the season's next run asks again. Plex/Emby/Jellyfin webhooks arrive one episode at a
+job completes drops them, and the season's next run asks again. Every job that completes, except Season, retry and verify
+jobs, then starts a background cleanup once it has given back its slot (at most one running, and at most one start an
+hour). It checks up to 2,000 fingerprinted files on disk for at most 60 s, those checked longest ago first, and clears
+the cached fingerprints (and the matches made with them) of files gone from a folder that still exists. The app log
+line, not the job's, is `Cleared the cached audio fingerprints of N file(s) no longer on disk`. Plex/Emby/Jellyfin webhooks arrive one episode at a
 time: an episode whose season folder a webhook follow-up that hasn't read its files yet already covers joins that
 follow-up (renamed "Intro & Credits · N files") while it stays within 500 files, instead of queuing another. A joined
 episode doesn't wait for its own preview job: markers don't need previews.
@@ -539,7 +544,8 @@ body must be a JSON object with a path"}`, `{"error": "Path is not a file inside
 
 **Response:** `200` with `{"season_audio": {"available", "ffmpeg", "message"}}` — season audio matching needs an
 ffmpeg with the chromaprint muxer (jellyfin-ffmpeg in the amd64 image; the arm64 image has none). `ffmpeg` is the
-binary found (`null` when none), and `message` says why it isn't available (`""` when it is), e.g.
+binary found (`null` when none), and `message` says why it isn't available (`""` when it is): no ffmpeg lists the
+muxer, or one didn't answer the check (then it is asked again after 10 minutes), e.g.
 `{"season_audio": {"available": true, "ffmpeg": "/usr/lib/jellyfin-ffmpeg/ffmpeg", "message": ""}}`.
 
 #### POST /api/markers/reconcile
