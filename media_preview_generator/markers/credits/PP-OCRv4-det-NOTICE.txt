@@ -1,0 +1,13 @@
+The text detection model ch_PP-OCRv4_det_infer.onnx (PP-OCRv4, PaddlePaddle Authors, Apache License 2.0) is taken
+unchanged from the rapidocr_onnxruntime 1.4.4 wheel on PyPI (RapidAI, Apache License 2.0) at image build time and
+verified by sha256 (d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9).
+textdet.py adapts the detection pre- and post-processing of rapidocr_onnxruntime 1.4.4 (ch_ppocr_det/text_detect.py,
+ch_ppocr_det/utils.py; Copyright (c) 2020 PaddlePaddle Authors; Licensed under the Apache License, Version 2.0,
+http://www.apache.org/licenses/LICENSE-2.0).
+
+The full licence text is in PP-OCRv4-det-LICENSE-Apache-2.0.txt next to this file.
+
+The wheel ships no licence file. The upstream licences, both Apache License 2.0:
+- RapidOCR (Copyright (c) 2021 RapidOCR Authors): https://github.com/RapidAI/RapidOCR/blob/v1.4.4/LICENSE
+- PaddleOCR, which trained and released PP-OCRv4 (Copyright (c) 2016 PaddlePaddle Authors):
+  https://github.com/PaddlePaddle/PaddleOCR/blob/v2.7.0/LICENSE

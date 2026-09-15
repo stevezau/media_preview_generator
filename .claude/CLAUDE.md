@@ -112,7 +112,7 @@ Output: `{plex_config}/Media/localhost/{hash}/Indexes/index-sd.bif`
 
 ## Key Dependencies
 
-Python >=3.10 | Flask 3.x | Flask-SocketIO | plexapi | loguru | APScheduler 3.x | SQLAlchemy 2.x | gunicorn | pymediainfo | requests
+Python >=3.11 | Flask 3.x | Flask-SocketIO | plexapi | loguru | APScheduler 3.x | SQLAlchemy 2.x | gunicorn | pymediainfo | requests
 
 ## Test Fixtures
 

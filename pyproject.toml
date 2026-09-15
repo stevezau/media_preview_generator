@@ -11,7 +11,7 @@ authors = [
 description = "GPU-accelerated video preview thumbnail generation for Plex, Emby, and Jellyfin media servers"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: End Users/Desktop",
@@ -19,7 +19,6 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Multimedia :: Video",
@@ -30,7 +29,7 @@ dependencies = [
     "requests==2.33.0",
     # urllib3 >=2.6.3 covers CVE-2025-50181/50182 (redirect-handling),
     # CVE-2025-66418/66471 (chunked encoding), CVE-2026-21441
-    # (proxy-auth). python>=3.10 is already required so dropping 1.x
+    # (proxy-auth). python>=3.11 is already required so dropping 1.x
     # support is safe.
     "urllib3>=2.6.3,<3.0.0",
     # python-dotenv >=1.2.2 covers CVE-2026-28684.
@@ -54,6 +53,13 @@ dependencies = [
     "pillow>=12.2.0,<14",
     # numpy vectorises the season intro matcher (markers/audio/matcher.py); imported only by Intro & Credits.
     "numpy>=2.0,<3",
+    # Credit text detection (markers/credits/textdet.py). Imported only by its helper process, never by the web app.
+    "onnxruntime==1.30.0",
+    # Deliberately Linux x86_64 only: that is the only platform this ships on, and there is no Linux aarch64
+    # wheel, so the arm64 image detects text on the CPU.
+    "onnxruntime-ep-webgpu==0.3.0; platform_machine == 'x86_64'",
+    "opencv-python-headless==5.0.0.93",
+    "pyclipper==1.4.0",
 ]
 
 [project.optional-dependencies]
@@ -94,6 +100,8 @@ test = [
     # type= is omitted" bug that the mock-based unit test missed.
     "pytest-recording>=0.13.0",
     "vcrpy>=6.0.0",
+    # tests/markers/credits/rapidocr_reference.py: the verbatim rapidocr post-processing uses shapely.
+    "shapely==2.1.2",
 ]
 dev = [
     "media-preview-generator[test]",
@@ -172,7 +180,7 @@ git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--mat
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
 extend-exclude = [
     "media_preview_generator/_version.py",
     ".venv",
@@ -194,6 +202,10 @@ select = [
 ignore = [
     "E501",  # line-too-long handled by formatter
     "B008",  # function calls in argument defaults (Flask/Depends idiom)
+    # UP042 wants the 13 `str, Enum` classes on StrEnum, which changes what str()/f-string give:
+    # "ServerType.PLEX" today, "plex" after. Those strings reach logs, settings.json and the API, so the
+    # migration is its own change with its own tests, not a side effect of moving the floor to 3.11.
+    "UP042",
 ]
 
 [tool.ruff.lint.per-file-ignores]
