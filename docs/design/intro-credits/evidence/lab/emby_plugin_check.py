@@ -2,8 +2,11 @@
 """Lab proof for the Media Preview Bridge for Emby plugin (plan-phase2 Task 4), on each lab Emby.
 
     ./emby_plugin_check.py mlab-emby mlab-emby49     run the whole check table on each container, in order
+    ./emby_plugin_check.py mlab-emby --checks 9,10,16,11
+                                                     run only these checks (9 before 10, 16 and 11), merged into
+                                                     that container's results file
 
-Install the plugin first (emby-plugin/README.md). Checks 1-8, 12-15 and 20 use Synth Chapters S01E01; 17 and 19
+Install the plugin first (emby-plugin/README.md). Checks 1-8, 12-15, 20 and 21 use Synth Chapters S01E01; 17 and 19
 use S01E02; 9-11, 16 and 18 use a disposable copy of S01E01 inside the container's own config volume (library "Plugin
 Check" at /config/plugcheck), so the synth folder the other lab servers mount never changes. Check 17 stops the
 container once to add marker rows the plugin didn't write straight into Emby's library.db (Emby's own intro detection
@@ -158,8 +161,9 @@ class EmbyCheck:
         return self.docker("grep", "-F", text, "/config/logs/embyserver.txt", check=False).splitlines()
 
     def store_dir(self) -> str:
+        # Rotated logs too: a container up for more than a day has started a new embyserver.txt since.
         line = self.docker(
-            "sh", "-c", "grep -h 'Media Preview Bridge: marker store' /config/logs/embyserver.txt | tail -1"
+            "sh", "-c", "grep -h 'Media Preview Bridge: marker store' /config/logs/embyserver*.txt | tail -1"
         )
         return line.rsplit("marker store ", 1)[1].strip()
 
@@ -939,6 +943,108 @@ class EmbyCheck:
             "delete_after_restoring_permissions": final_status,
         }
 
+    # ------------------------------------------------------------------------------------ S01E01: a stopped write
+
+    def replacing_store(self, markers: dict | None, replacing: dict) -> bytes:
+        """The store file a POST (``markers``) or DELETE (None) leaves when Emby stops before it writes the rows."""
+        body = {**markers, "FileSize": self.size, "Path": pm.synth_path(1)} if markers else {}
+        return json.dumps({**body, "Replacing": replacing}, separators=(",", ":")).encode()
+
+    def item_update(self, item_id: str) -> int:
+        """A metadata edit: Emby raises ItemUpdated without touching the item's marker rows (check 16B)."""
+        dto = self.ok("GET", f"/Users/{self.uid}/Items/{item_id}")
+        return self.call("POST", f"/Items/{item_id}", dto)[0]
+
+    def wait_rows(self, item_id: str, rows: list[tuple]) -> list[tuple]:
+        try:
+            pm.wait_until("marker rows", lambda: self.marker_rows(self.chapters(item_id)) == rows, 60, every=2)
+        except TimeoutError:
+            pass
+        return self.marker_rows(self.chapters(item_id))
+
+    def check_21_stopped_write(self) -> tuple[bool, dict]:
+        # The store is saved (with the rows it replaces) before the chapter rows. Each step plants the store file such a
+        # save leaves while the rows are still the earlier set, as if Emby stopped in between (publishers audit LOW-3).
+        name = f"{self.item}.json"
+        old = {**INTRO, "FileSize": self.size}
+        steps: dict[str, dict] = {}
+
+        self.bridge("POST", self.item, old)
+        self.write_store_file(name, self.replacing_store(INTRO_2, INTRO))
+        _, got = self.bridge("GET", self.item)
+        status, data = self.bridge("POST", self.item, {**INTRO_2, "FileSize": self.size})
+        stored = self.read_store_file(self.item)
+        steps["POST after a stopped POST"] = {
+            "get_before": got,
+            "status": status,
+            "stored": data.get("Stored"),
+            "rows": self.marker_rows(self.chapters(self.item)),
+            "store_file": stored,
+        }
+
+        self.bridge("POST", self.item, old)
+        self.write_store_file(name, self.replacing_store(INTRO_2, INTRO))
+        status, data = self.bridge("DELETE", self.item)
+        steps["DELETE after a stopped POST"] = {
+            "status": status,
+            "rows": self.marker_rows(self.chapters(self.item)),
+            "store_file_left": name in self.store_files(),
+        }
+
+        finished = f"finished an interrupted marker write for item {self.item}"
+        before = self.log_count(finished)
+        self.bridge("POST", self.item, old)
+        self.write_store_file(name, self.replacing_store(INTRO_2, INTRO))
+        edit = self.item_update(self.item)
+        rows = self.wait_rows(self.item, ROWS_5)
+        steps["item update after a stopped POST"] = {
+            "metadata_edit_status": edit,
+            "rows": rows,
+            "store_file": self.read_store_file(self.item) if name in self.store_files() else None,
+            "finished_logged": self.wait_log(finished, before, timeout=30),
+        }
+
+        before = self.log_count(finished)
+        self.write_store_file(name, self.replacing_store(None, INTRO_2))
+        _, got = self.bridge("GET", self.item)
+        edit = self.item_update(self.item)
+        rows = self.wait_rows(self.item, [])
+        steps["item update after a stopped DELETE"] = {
+            "get_before": got,
+            "metadata_edit_status": edit,
+            "rows": rows,
+            "store_file_left": name in self.store_files(),
+            "finished_logged": self.wait_log(finished, before, timeout=30),
+        }
+        chapters = self.chapters(self.item)
+        self.bridge("DELETE", self.item)
+
+        post, delete = steps["POST after a stopped POST"], steps["DELETE after a stopped POST"]
+        healed, deleted = steps["item update after a stopped POST"], steps["item update after a stopped DELETE"]
+        ok = (
+            post["get_before"].get("IntroStartTicks") == INTRO_2["IntroStartTicks"]
+            and post["get_before"].get("CreditsStartTicks") is None
+            and post["status"] == 200
+            and post["stored"] == 2
+            and post["rows"] == ROWS_5
+            and "Replacing" not in post["store_file"]
+            and delete["status"] == 200
+            and delete["rows"] == []
+            and not delete["store_file_left"]
+            and healed["metadata_edit_status"] < 300
+            and healed["rows"] == ROWS_5
+            and healed["store_file"] is not None
+            and "Replacing" not in healed["store_file"]
+            and healed["store_file"].get("IntroStartTicks") == INTRO_2["IntroStartTicks"]
+            and healed["finished_logged"]
+            and deleted["get_before"].get("IntroStartTicks") is None
+            and deleted["rows"] == []
+            and not deleted["store_file_left"]
+            and deleted["finished_logged"]
+            and self.plain(chapters) == self.originals
+        )
+        return ok, {"steps": steps}
+
     # ------------------------------------------------------------------------------------------------------- run
 
     def cleanup(self) -> dict:
@@ -961,7 +1067,7 @@ class EmbyCheck:
         done["store_files_left"] = self.store_files()
         return done
 
-    def run(self) -> None:
+    def run(self, only: set[int] | None = None) -> None:
         pm.say(f"== {self.container} ({self.url})")
         self.item = self.find_episode(pm.synth_path(1))
         self.other = self.find_episode(pm.synth_path(2))
@@ -1009,8 +1115,16 @@ class EmbyCheck:
             ),
             (18, "Sweep task deletes the store file of a removed show's episode", self.check_18_sweep),
             (19, "Store write failure: 500 JSON, rows and store unchanged", self.check_19_write_failure),
+            (
+                21,
+                "Stopped write (store saved with the rows it replaces, rows not written): POST, DELETE and an item "
+                "update take both sets for ours",
+                self.check_21_stopped_write,
+            ),
         ]
         for number, title, fn in checks:
+            if only is not None and number not in only:
+                continue
             if number in (10, 16, 11) and not self.copy:
                 continue
             self.run_check(number, title, fn)
@@ -1027,6 +1141,10 @@ class EmbyCheck:
         }
         pm.RESULTS.mkdir(exist_ok=True)
         path = pm.RESULTS / f"emby-plugin-{self.container}.json"
+        if only is not None and path.exists():
+            # Merged: the checks run now replace their earlier results.
+            earlier = [r for r in json.loads(path.read_text())["checks"] if r["check"] not in only]
+            body["checks"] = sorted([*earlier, *body["checks"]], key=lambda r: r["check"])
         path.write_text(json.dumps(self.scrub(body), indent=2, default=str) + "\n")
         failed = [r["check"] for r in self.results if r["result"] != "PASS"]
         summary = f"{len(self.results) - len(failed)}/{len(self.results)} passed" + (
@@ -1036,13 +1154,18 @@ class EmbyCheck:
 
 
 def main(argv: list[str]) -> int:
+    only = None
+    if "--checks" in argv:
+        at = argv.index("--checks")
+        only = {int(n) for n in argv[at + 1].split(",")}
+        argv = argv[:at] + argv[at + 2 :]
     containers = argv or list(SERVERS)
     unknown = [c for c in containers if c not in SERVERS]
     if unknown:
         print(f"unknown container(s): {unknown}; choose from {list(SERVERS)}", file=sys.stderr)
         return 2
     for container in containers:
-        EmbyCheck(container).run()
+        EmbyCheck(container).run(only)
     return 0
 
 

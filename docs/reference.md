@@ -330,7 +330,7 @@ column) holds:
 | `retry_delay` | int | Present only on a retry or verify job: seconds waited before it took a slot. |
 | `retry_not_before` | ISO-8601 timestamp | Present only on a retry or verify job: the due time (survives a restart without waiting again in full). |
 | `verify` | bool | Present only on a verify job: the delayed check of files published after they were replaced. It queues no further verify job, and doesn't retry a file gone from disk. |
-| `reconcile` | bool | Present only on a Check servers job: it lists the files of drifted published items (and decided files to ask servers again about) instead of libraries or paths. |
+| `reconcile` | bool | Present only on a Check servers job: it lists the files of drifted published items (and of items whose last publish failed, and decided files to ask servers again about) instead of libraries or paths. |
 
 Retries (files not yet on disk, not yet in a server's library, or on a Plex whose Plex Pass check didn't answer)
 reuse the webhook preview-retry backoff (`webhook_retry_count` / `webhook_retry_delay`) and cap at **500 files** per
@@ -361,11 +361,16 @@ episode doesn't wait for its own preview job: markers don't need previews.
 `POST /api/markers/reconcile`, the Dashboard's Start New Job dialog, or a schedule with `config.reconcile` (see
 [Schedules](#post-apischedules)); nothing schedules it by default. LOW priority unless the request or schedule sets one.
 Only one is queued or running at a time: asking again (a **Re-run** of a finished one included) returns that job. It
-reads back every item this app published
-(`item_publish_state`) on each enabled server with Intro & Credits on, 500 items per call (Plex one item per connection
-under the lock proof; Jellyfin and Emby one request per item, stopping a server after 20 failed reads in a row), and
-lists only the files of items that aren't `ours` any more (`missing`, `replaced`, `versions_changed`, `gone`, or a kept
-type on a server now set to `restore`). A pause during the read-back gives the job's gate slot back until resume. It
+reads back every item this app published (`item_publish_state` with status `written`) on each enabled server with
+Intro & Credits on, 500 items per call (Plex one item per connection under the lock proof; Jellyfin and Emby one
+request per item, stopping a server after 20 failed reads in a row; a read that got no HTTP answer isn't followed by an
+"is the item gone?" request), and lists only the files of items that aren't `ours` any more (`missing`, `replaced`,
+`versions_changed`, `gone`, or a kept type on a server now set to `restore`). For `missing`, `replaced` and
+`versions_changed` the Plex item's current version files (optimized copies left out, mapped through the server's path
+mappings) are listed too. Items whose last publish failed (status `failed`) aren't read back: their files are listed 1
+day after the failure, then 2, 4, 8 and 16 days after each retry, at most 5 retries per failure (a success, or a new
+failure after one, starts over); an item whose files don't fit the run's remaining files waits untaken. A pause during
+the read-back gives the job's gate slot back until resume. It
 also lists files with decided credits or preview whose stored answer from an enabled server (Intro & Credits on or not)
 is empty or unusable and that show none of ours on that server's item, re-reading that server's own markers once the
 answer is 1 day old, then 2, 4, 8 and 16 days after each re-read that stays empty or fails, and not after the fifth; a

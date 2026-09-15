@@ -30,7 +30,7 @@ import requests
 from loguru import logger
 
 from ..config import resolve_frame_interval
-from ._embyish import EmbyApiClient, is_video_library_folder
+from ._embyish import NO_ANSWER_ERRORS, EmbyApiClient, is_video_library_folder
 from .base import FlagTarget, HealthCheckIssue, ServerType, WebhookEvent
 from .ownership import apply_inverse_path_mappings
 
@@ -558,14 +558,18 @@ class JellyfinServer(EmbyApiClient):
         """
         return self._request("DELETE", f"/MediaPreviewBridge/Markers/{item_id}")
 
-    def get_media_segments(self, item_id: str) -> list[dict[str, Any]] | None:
+    def get_media_segments(self, item_id: str, *, raise_no_answer: bool = False) -> list[dict[str, Any]] | None:
         """Segments Jellyfin serves for an item, from every registered provider.
 
         Args:
             item_id: Jellyfin item id.
+            raise_no_answer: Raise instead of returning None when Jellyfin gave no HTTP answer.
 
         Returns:
             Core ``/MediaSegments`` ``Items`` (``Type``, ``StartTicks``, ``EndTicks``, ...), or None on any error.
+
+        Raises:
+            requests.RequestException: With ``raise_no_answer``: one of ``NO_ANSWER_ERRORS``.
         """
         try:
             resp = self._request("GET", f"/MediaSegments/{item_id}")
@@ -573,6 +577,8 @@ class JellyfinServer(EmbyApiClient):
                 return None
             body = resp.json()
         except (requests.RequestException, ValueError) as exc:
+            if raise_no_answer and isinstance(exc, NO_ANSWER_ERRORS):
+                raise
             logger.debug("Media segments read failed on {} for {}: {}", self.name, item_id, type(exc).__name__)
             return None
         items = body.get("Items") if isinstance(body, dict) else None

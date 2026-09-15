@@ -43,6 +43,16 @@ def _rows_for(stored):
     return rows
 
 
+def _post_ticks(markers):
+    intro = next((m for m in markers if m.type is T.INTRO), None)
+    credits = next((m for m in markers if m.type is T.CREDITS), None)
+    return (
+        intro.start_ms * 10_000 if intro else None,
+        intro.end_ms * 10_000 if intro else None,
+        credits.start_ms * 10_000 if credits else None,
+    )
+
+
 def _ready_server():
     server = create_autospec(EmbyServer, instance=True)
     server.get_bridge_info.return_value = {"installed": True, "version": "1.0.0.0", "features": ["markers"]}
@@ -54,14 +64,15 @@ def _ready_server():
 
 class FakeEmby:
     """An autospec'd EmbyServer over a model of the Bridge plugin: one stored marker set per item and the item's chapter
-    rows, merged the way ``MarkerChapters.Apply`` does (only the plugin's own rows are removed; a type that has someone
-    else's rows keeps them unless ``ReplaceOwn``). ``versions`` is what Emby lists as the item's MediaSources: ``(path,
-    version item id)``."""
+    rows, merged the way ``MarkerChapters.Apply`` does (only the plugin's own rows are removed, those of the stored set
+    and of the set a stopped write was replacing; a type that has someone else's rows keeps them unless
+    ``ReplaceOwn``). ``versions`` is what Emby lists as the item's MediaSources: ``(path, version item id)``."""
 
     def __init__(self, media_path, *, server=None, item_id="42"):
         self.path = media_path
         self.versions = [(media_path, item_id)]
         self.stored = None  # (intro_start_ticks, intro_end_ticks, credits_start_ticks)
+        self.replacing = None  # the set a write Emby stopped before its rows replaces (StoredMarkers.Replacing)
         self.size = None
         self.rows = [("Chapter", 0, "Chapter 1")]  # (MarkerType, ticks, name)
         self.stale = False  # the file on disk has another size than the one posted
@@ -77,7 +88,7 @@ class FakeEmby:
             s.get_emby_marker_state.side_effect = self._state
 
     def _apply(self, wanted, replace_own):
-        ours = _rows_for(self.stored)
+        ours = _rows_for(self.stored) + _rows_for(self.replacing)
         rows = [r for r in self.rows if r not in ours]
         written = 0
         for group in (INTRO_GROUP, ("CreditsStart",)):
@@ -97,15 +108,20 @@ class FakeEmby:
         self.replace_own.append(replace_own)
         wanted = (intro_start_ticks, intro_end_ticks, credits_start_ticks)
         written = self._apply(None if self.stale else wanted, replace_own)
-        self.stored, self.size = wanted, file_size
+        self.stored, self.size, self.replacing = wanted, file_size, None
         return _ok(Stale=self.stale, Stored=written)
 
     def _delete(self, item_id):
         self._apply(None, False)
-        self.stored, self.size = None, None
+        self.stored, self.size, self.replacing = None, None, None
         return _ok(Stored=0)
 
-    def _chapters(self, item_id):
+    def stop_during_post(self, markers, file_size):
+        """Emby stops after the plugin saved a POST's store (naming the set it replaces) and before the rows."""
+        self.replacing = self.stored
+        self.stored, self.size = _post_ticks(markers), file_size
+
+    def _chapters(self, item_id, **_kwargs):
         ours = _rows_for(self.stored)
         rows = [r for r in self.rows if not (self.show_nothing and r in ours)]
         return [{"marker_type": t, "start_ms": ticks // 10_000, "name": name} for t, ticks, name in rows]
@@ -137,7 +153,7 @@ class FakeEmbyItems:
         )
         s.put_emby_markers.side_effect = lambda item_id, **kw: self.items[item_id]._put(item_id, **kw)
         s.delete_emby_markers.side_effect = lambda item_id: self.items[item_id]._delete(item_id)
-        s.get_chapter_markers.side_effect = lambda item_id: self.items[item_id]._chapters(item_id)
+        s.get_chapter_markers.side_effect = lambda item_id, **_kw: self.items[item_id]._chapters(item_id)
         s.get_emby_marker_state.side_effect = lambda item_id: self.items[item_id]._state(item_id)
 
 
@@ -165,6 +181,27 @@ def _write(emby, markers, previous=(), publisher=None, **kw):
         canonical_path=emby.path,
         kept_types=frozenset(kw.get("kept_types", ())),
     )
+
+
+class TestStoppedPluginWrite:
+    """Emby stopped between the plugin's store save and its chapter rows (publishers audit LOW-3). The plugin's store
+    names the set it replaces then, so the app's next write converges with no change on the app's side."""
+
+    @pytest.mark.parametrize("setting", ["keep_emby", "restore"])
+    @pytest.mark.parametrize("next_decision", ["new-intro", "nothing"])
+    def test_the_next_write_after_a_stopped_post_replaces_the_rows_it_left(self, emby, setting, next_decision):
+        publisher = _publisher(emby, setting)
+        assert _write(emby, [OLD_INTRO], previous=[], publisher=publisher) == [OLD_INTRO]
+        emby.stop_during_post([INTRO], 321)
+        assert emby.markers_shown() == [("IntroStart", OLD_INTRO.start_ms), ("IntroEnd", OLD_INTRO.end_ms)]
+
+        wanted = [INTRO] if next_decision == "new-intro" else []
+        ours = _write(emby, wanted, previous=None, publisher=publisher)  # the POST failed: nothing known as ours
+
+        assert ours == wanted and publisher.last_kept_types == frozenset()
+        shown = [("IntroStart", INTRO.start_ms), ("IntroEnd", INTRO.end_ms)] if wanted else []
+        assert emby.markers_shown() == shown and emby.replacing is None
+        assert publisher.shows("42", ours) is Shown.OURS
 
 
 class TestCapability:

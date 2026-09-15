@@ -9,8 +9,8 @@ namespace MediaPreviewBridge.Emby.Markers
 {
     /// <summary>
     /// Emby keeps markers as chapter rows with a MarkerType. The plugin only ever removes rows equal to the ones it
-    /// wrote for the stored markers; the file's chapters and markers from Emby or other plugins stay unless the caller
-    /// asks for ours to replace a type.
+    /// wrote for the stored markers (or for the markers a write under way replaces); the file's chapters and markers
+    /// from Emby or other plugins stay unless the caller asks for ours to replace a type.
     /// </summary>
     public static class MarkerChapters
     {
@@ -37,19 +37,46 @@ namespace MediaPreviewBridge.Emby.Markers
         }
 
         /// <summary>
-        /// <paramref name="existing"/> without the rows written for <paramref name="ours"/>, plus the rows for
-        /// <paramref name="wanted"/>, by start. Intro (start + end) and credits are handled as types: a type that still
-        /// has someone else's rows keeps them and gets none of ours, unless <paramref name="replaceOthers"/>, which
-        /// swaps those rows for ours.
+        /// <paramref name="existing"/> without the rows written for <paramref name="ours"/> or for the markers it was
+        /// replacing (<see cref="StoredMarkers.Replacing"/>), plus the rows for <paramref name="wanted"/>, by start.
+        /// Intro (start + end) and credits are handled as types: a type that still has someone else's rows keeps them and
+        /// gets none of ours, unless <paramref name="replaceOthers"/>, which swaps those rows for ours.
         /// </summary>
         /// <param name="written">How many of our rows the result holds for <paramref name="wanted"/>.</param>
         public static List<ChapterInfo> Apply(IEnumerable<ChapterInfo> existing, StoredMarkers ours, StoredMarkers wanted, bool replaceOthers, out int written)
         {
-            var ourRows = RowsFor(ours);
+            var ourRows = RowsFor(ours).Concat(RowsFor(ours?.Replacing)).ToList();
             var list = (existing ?? Enumerable.Empty<ChapterInfo>()).Where(c => !ourRows.Any(r => SameRow(c, r))).ToList();
             var wantedRows = RowsFor(wanted);
             written = AddType(list, wantedRows, IntroTypes, replaceOthers) + AddType(list, wantedRows, CreditsTypes, replaceOthers);
             return list.OrderBy(c => c.StartPositionTicks).ToList();
+        }
+
+        /// <summary>
+        /// What <paramref name="existing"/> still shows of <paramref name="stored"/> or of the markers it was replacing,
+        /// per type, or null when no row of either is there. A write saves this beside its new markers before it writes
+        /// the rows, so a stop in between leaves no row of ours the store doesn't name.
+        /// </summary>
+        public static StoredMarkers ShownOf(IEnumerable<ChapterInfo> existing, StoredMarkers stored)
+        {
+            var rows = (existing ?? Enumerable.Empty<ChapterInfo>()).ToList();
+            var shown = new StoredMarkers();
+            foreach (var set in new[] { stored, stored?.Replacing })
+            {
+                var setRows = RowsFor(set);
+                if (!shown.IntroStartTicks.HasValue && HasRowOf(rows, setRows, IntroTypes))
+                {
+                    shown.IntroStartTicks = set.IntroStartTicks;
+                    shown.IntroEndTicks = set.IntroEndTicks;
+                }
+
+                if (!shown.CreditsStartTicks.HasValue && HasRowOf(rows, setRows, CreditsTypes))
+                {
+                    shown.CreditsStartTicks = set.CreditsStartTicks;
+                }
+            }
+
+            return StoredMarkers.HasMarkers(shown) ? shown : null;
         }
 
         /// <summary>Whether both lists hold the same rows (type, start and name), in any order.</summary>
@@ -83,6 +110,9 @@ namespace MediaPreviewBridge.Emby.Markers
             list.AddRange(rows);
             return rows.Count;
         }
+
+        private static bool HasRowOf(List<ChapterInfo> rows, List<ChapterInfo> setRows, MarkerType[] types) =>
+            setRows.Any(r => types.Contains(r.MarkerType) && rows.Any(c => SameRow(c, r)));
 
         private static bool SameRow(ChapterInfo a, ChapterInfo b) =>
             a.MarkerType == b.MarkerType && a.StartPositionTicks == b.StartPositionTicks && string.Equals(a.Name, b.Name, StringComparison.Ordinal);

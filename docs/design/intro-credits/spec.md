@@ -414,10 +414,13 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    **Intro & Credits · Check servers**, a LOW job the user starts from Start New Job or `POST /api/markers/reconcile`,
    or schedules in Automation → Schedules like any other job; nothing is scheduled by default (R5). It bulk-reads every
    published item and re-runs drifted files (Plex forced detection, Emby FullRefresh without heal, a Plex version
-   change, an item the server replaced), plus files with decided credits or preview whose server's stored answer is
-   empty or unusable, on a 1/2/4/8/16-day backoff (at most 5 re-reads, failed ones included). Locked markers always
-   re-assert. Plex `on_plex_redetect` = `restore` (default) or `keep_plex`; Emby `on_emby_redetect` = `restore` or
-   `keep_emby`. `keep_plex` keeps Plex's markers (§14 2026-09-14), not stored as evidence.
+   change, an item the server replaced; a drifted Plex item's current version files too), plus files with decided
+   credits or preview whose server's stored answer is empty or unusable, on a 1/2/4/8/16-day backoff (at most 5
+   re-reads, failed ones included), and the files of items whose last publish failed, on the same backoff (at most 5
+   retries per failure). Locked markers re-assert, except that `keep_plex` / `keep_emby` keep the server's own markers
+   over them until the phase-4 lock editor settles how the two meet (nothing locks a marker before phase 4). Plex
+   `on_plex_redetect` = `restore` (default) or `keep_plex`; Emby `on_emby_redetect` = `restore` or `keep_emby`.
+   `keep_plex` keeps Plex's markers (§14 2026-09-14), not stored as evidence.
 7. **Outcomes** per server: markers written / reused / needs review / skipped + reason.
 8. **Manual edit** in the Inspector: no job — save, lock, publish to every owner immediately.
 

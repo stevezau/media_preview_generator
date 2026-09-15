@@ -2411,6 +2411,45 @@ class TestReadBackMany:
         }
         assert pub.shows("8", [INTRO]) is Shown.GONE
 
+    @pytest.mark.parametrize(
+        ("read", "shown"),
+        [
+            ("versions-changed", Shown.VERSIONS_CHANGED),
+            ("kept-type-rows-deleted", Shown.MISSING),
+            ("plex-row-at-another-time", Shown.REPLACED),
+            ("ours", Shown.OURS),
+        ],
+    )
+    def test_the_read_back_keeps_each_items_version_files_mapped_to_local_paths(self, tmp_path, read, shown):
+        # Check servers runs them for a drifted item (publishers audit MED-2); an optimized copy is never decided.
+        folder = tmp_path / "Plex Media Server"
+        optimized = "/plexmedia/tv/Plex Versions/Optimized for TV/S01E01.mp4"
+        db = _make_db(folder, parts=(("/plexmedia/tv/S01E01 - 1080p.mkv", None), (optimized, None)))
+        _exec(db, "UPDATE media_items SET proxy_type=42 WHERE id=2")
+        mappings = [
+            {"plex_prefix": "/plexmedia", "local_prefix": "/disk1"},
+            {"plex_prefix": "/plexmedia", "local_prefix": "/disk2"},
+        ]
+        pub = _publisher(tmp_path, folder, mappings=mappings)
+        assert pub.live_files("7") == ()  # nothing read yet
+        assert _write_one(pub, [INTRO, CREDITS_FINAL], path="/disk1/tv/S01E01 - 1080p.mkv") == [INTRO, CREDITS_FINAL]
+        files, ours, kept = pub.last_item_files, [INTRO, CREDITS_FINAL], frozenset()
+        if read == "versions-changed":
+            files = ("/plexmedia/tv/S01E01 - 720p.mkv",)
+        elif read == "kept-type-rows-deleted":
+            _exec(db, "DELETE FROM taggings WHERE text='credits'")
+            ours, kept = [INTRO], frozenset({T.CREDITS})
+        elif read == "plex-row-at-another-time":
+            _exec(db, "UPDATE taggings SET time_offset=12000 WHERE text='intro'")  # Plex's own detection
+
+        answers = pub.shows_many([("7", ours, kept, files), *self._items([8])])
+
+        assert answers == {"7": shown, "8": Shown.GONE}
+        assert pub.live_files("7") == ("/disk1/tv/S01E01 - 1080p.mkv", "/disk2/tv/S01E01 - 1080p.mkv")
+        assert pub.live_files("8") == ()
+        pub.shows_many(self._items([8]))
+        assert pub.live_files("7") == ()  # each call starts over
+
     def test_one_connection_per_item_and_the_checks_once_per_call(self, tmp_path, monkeypatch):
         folder = tmp_path / "Plex Media Server"
         _make_db(folder)

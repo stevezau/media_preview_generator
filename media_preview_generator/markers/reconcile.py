@@ -6,8 +6,10 @@ asked (``POST /api/markers/reconcile``, the dashboard's Start job dialog). It re
 (Plex item by item under its database lock proof, Jellyfin and Emby one request per item) and runs the pipeline only
 for the files of items that drifted (Plex's own forced detection, a Jellyfin rescan, an Emby refresh the plugin couldn't
 heal, a Plex version added since, an item the server replaced), which publishes them again under the normal rules
-(Keep Plex's / Keep Emby's, versions, consent). It also runs decided files whose server had no markers of its own, with
-a backoff, so that server's detection since can still shorten their credits (rule 7).
+(Keep Plex's / Keep Emby's, versions, consent). A drifted Plex item's current version files run too, so a file that
+replaced a version this app ran gets its own decision there. It also runs decided files whose server had no markers of
+its own, with a backoff, so that server's detection since can still shorten their credits (rule 7), and the files of
+items whose last publish failed, on the same backoff.
 """
 
 from __future__ import annotations
@@ -39,6 +41,8 @@ RECONCILE_JOB_NAME = "Intro & Credits · Check servers"
 READ_BACK_BATCH = 500
 # Files of a run kept for decided files to ask servers again about while more drifted files wait than a run takes.
 RECHECK_SHARE = 100
+# Drift whose item still exists: its current files run along with the files this app published there.
+_RUN_LIVE_FILES = frozenset({Shown.VERSIONS_CHANGED, Shown.REPLACED, Shown.MISSING})
 
 # Serialises "is a Check servers job already queued?" with its creation (a schedule tick and a click at once).
 _queue_lock = threading.Lock()
@@ -114,6 +118,7 @@ def find_drift(
             warnings.append(f"Couldn't check {name}: no connection to it")
             continue
         answers: dict[str, Shown | None] = {}
+        live: dict[str, tuple[str, ...]] = {}
         stopped = False
         try:
             report = capability(cfg, publisher) if capability is not None else publisher.capability()
@@ -129,6 +134,7 @@ def find_drift(
                 ]
                 read = publisher.shows_many(batch, cancel_check=cancel_check)
                 answers.update(read)
+                live.update({item_id: tuple(publisher.live_files(item_id)) for item_id in read})
                 if stopped_unreadable(batch, read):
                     stopped = True
                     break
@@ -139,7 +145,7 @@ def find_drift(
             logger.warning("Check servers couldn't check {}: {}", name, type(exc).__name__)
             warnings.append(f"Couldn't check {name}")
             continue
-        found, unreadable = _drifted(store, cfg, rows, answers, release_kept=not settings.keeps_server_markers)
+        found, unreadable = _drifted(store, cfg, rows, answers, live, release_kept=not settings.keeps_server_markers)
         drifts.extend(found)
         if stopped:
             logger.warning("Check servers stopped reading {}: {} reads in a row failed", name, UNREADABLE_IN_A_ROW)
@@ -154,10 +160,14 @@ def _drifted(
     cfg: ServerConfig,
     rows: list,
     answers: dict[str, Shown | None],
+    live: dict[str, tuple[str, ...]],
     *,
     release_kept: bool,
 ) -> tuple[list[Drift], int]:
-    """One server's drifted items from its read-back answers (``find_drift``), and how many items couldn't be read."""
+    """One server's drifted items from its read-back answers (``find_drift``), and how many items couldn't be read.
+
+    ``live`` holds each read item's current files (``MarkerPublisher.live_files``).
+    """
     name = cfg.name or cfg.id
     drifts: list[Drift] = []
     unreadable = 0
@@ -174,6 +184,10 @@ def _drifted(
         if shown is Shown.OURS:
             continue
         files = tuple(path for path in store.files_for_item(cfg.id, row.item_id) if _runnable(path, [cfg]))
+        if shown in _RUN_LIVE_FILES:
+            # A version replaced by a file this app never ran (an upgrade that deleted the old file) would keep the
+            # markers decided for the old file: the new file's publish replaces or removes them.
+            files += tuple(path for path in live.get(row.item_id, ()) if path not in files and _runnable(path, [cfg]))
         if files:
             drifts.append(Drift(cfg.id, row.item_id, shown, files))
         elif shown is Shown.GONE:
@@ -211,6 +225,47 @@ def files_to_ask_servers_again(
         [cfg.id for cfg in configs], now=now or _utcnow(), after=RECHECK_AFTER, limit=limit
     )
     return [path for path in taken if _runnable(path, configs)]
+
+
+def files_of_failed_items(*, registry: Any, store: MarkerStore, limit: int, now: datetime | None = None) -> list[str]:
+    """Take server items whose last publish failed, on the ``RECHECK_AFTER`` backoff (``MarkerStore.failed_items_due``),
+    and list their files.
+
+    A failed write queues no retry and leaves the item out of the read-back, so its markers would stay unchecked and
+    the new decision unpublished until another job ran the file. Only servers Check servers reads back count. Items are
+    taken (a retry counted) while their files fit in ``limit``; one none of whose files can run is taken all the same,
+    so it stops after the last step like the rest. A failed publish from a file whose part moved to another item (a
+    merge or split) marks the new item failed while the file's record still points at the old item, so the new item
+    lists no file here: the file runs again through the old item's drift instead.
+
+    Args:
+        registry: The job's ``ServerRegistry``.
+        store: The markers store.
+        limit: Most files to list.
+        now: The current time (default: now).
+
+    Returns:
+        The files' paths, sorted.
+    """
+    if limit <= 0:
+        return []
+    configs = {
+        cfg.id: cfg for cfg in registry.configs() if cfg.enabled and load_server(cfg.markers, cfg.type.value).enabled
+    }
+    taken: list[tuple[str, str]] = []
+    paths: list[str] = []
+    for server_id, item_id in store.failed_items_due(list(configs), now=now or _utcnow(), after=RECHECK_AFTER):
+        files = [
+            path
+            for path in store.files_for_item(server_id, item_id)
+            if path not in paths and _runnable(path, [configs[server_id]])
+        ]
+        if len(paths) + len(files) > limit:
+            break
+        taken.append((server_id, item_id))
+        paths.extend(files)
+    store.record_failed_item_retries(taken)
+    return sorted(paths)
 
 
 @dataclass(frozen=True)
@@ -284,7 +339,8 @@ def check_servers_listing(
     cancel_check: Callable[[], bool] | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> CheckServersListing:
-    """Check servers' files: those of drifted published items, then decided files to ask servers again about.
+    """Check servers' files: those of drifted published items, of items whose last publish failed (on their backoff),
+    then decided files to ask servers again about.
 
     At most ``max_files``. Drifted items take turns across runs (never listed first, then the least recently listed);
     while more drifted files wait than a run takes, ``RECHECK_SHARE`` of them are kept for the files to ask servers
@@ -314,17 +370,21 @@ def check_servers_listing(
     if left:
         warnings.append(f"{left} more changed file(s) are checked on a later run")
     store.record_drift_listed((drift.server_id, drift.item_id) for drift in chosen)
+    retried: list[str] = []
     asked_again: list[str] = []
     if not check():
-        asked_again = files_to_ask_servers_again(registry=registry, store=store, limit=max_files - len(drifted))
+        retried = files_of_failed_items(registry=registry, store=store, limit=max_files - len(drifted))
+        listed = set(drifted) | set(retried)
+        asked_again = files_to_ask_servers_again(registry=registry, store=store, limit=max_files - len(listed))
     logger.info(
-        "Check servers: {} published item(s) changed on servers ({} file(s) this run); {} decided file(s) to ask "
-        "servers again for their own markers",
+        "Check servers: {} published item(s) changed on servers ({} file(s) this run); {} file(s) of items whose last "
+        "publish failed; {} decided file(s) to ask servers again for their own markers",
         len(drifts),
         len(drifted),
+        len(retried),
         len(asked_again),
     )
-    paths = sorted(set(drifted) | set(asked_again), key=lambda p: (os.path.dirname(p), p))
+    paths = sorted(set(drifted) | set(retried) | set(asked_again), key=lambda p: (os.path.dirname(p), p))
     items = [
         ProcessableItem(canonical_path=p, server_id="", item_id_by_server={}, title=os.path.basename(p)) for p in paths
     ]

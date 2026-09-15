@@ -533,6 +533,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         self._sibling_markers = sibling_markers or (lambda _path: None)
         self._mountinfo_path = mountinfo_path
         self._ui_details = ui_details
+        self._live_files: dict[str, tuple[str, ...]] = {}
 
     def db_path(self) -> str | None:
         """DB path, or None when the Plex config folder isn't set."""
@@ -760,6 +761,11 @@ class PlexMarkerPublisher(MarkerPublisher):
 
     def _local_candidates(self, plex_path: str) -> list[str]:
         return apply_path_mappings(plex_path, list(self._config.path_mappings or [])) or [plex_path]
+
+    def _local_version_files(self, parts: list[_Part]) -> tuple[str, ...]:
+        return tuple(
+            sorted({local for p in parts if not _is_optimized_copy(p) for local in self._local_candidates(p.file)})
+        )
 
     def _sibling_decision(self, plex_file: str) -> dict[MarkerType, Marker] | None:
         # A multi-disk mapping yields several local candidates; only the one that exists has a decision.
@@ -1102,6 +1108,17 @@ class PlexMarkerPublisher(MarkerPublisher):
             logger.debug("Plex {}: couldn't look item {} up: {}", self._config.name, item_id, type(exc).__name__)
             return None
 
+    def live_files(self, item_id: str) -> tuple[str, ...]:
+        """The item's versions (optimized copies left out) at its last ``shows_many`` read, mapped to local paths.
+
+        Args:
+            item_id: Plex rating key.
+
+        Returns:
+            Every local candidate of every version's part file, sorted; empty when the item wasn't read or is gone.
+        """
+        return self._live_files.get(item_id, ())
+
     def shows_many(
         self, items: list[ReadBackItem], *, cancel_check: Callable[[], bool] | None = None
     ) -> dict[str, Shown | None]:
@@ -1119,6 +1136,7 @@ class PlexMarkerPublisher(MarkerPublisher):
             shared or read at all (not local, Plex stopped, schema changed, the lock busy past its deadline).
         """
         out: dict[str, Shown | None] = {}
+        self._live_files = {}
         if not items:
             return out
         local = self._local_checks(deadline=time.monotonic() + BUSY_TIMEOUT_S)
@@ -1143,7 +1161,9 @@ class PlexMarkerPublisher(MarkerPublisher):
                     if tag_id is None:
                         self._check_schema(conn)
                         tag_id = self._marker_tag_id(conn)
-                    out[item_id] = self._shown_in(conn, tag_id, rating_key, ours, kept_types, item_files)
+                    shown, parts = self._shown_in(conn, tag_id, rating_key, ours, kept_types, item_files)
+                out[item_id] = shown
+                self._live_files[item_id] = self._local_version_files(parts)
             except PublishError as exc:
                 logger.debug("Plex {}: couldn't read {} item(s) back: {}", self._config.name, len(items) - position,
                              type(exc).__name__)  # fmt: skip
@@ -1163,16 +1183,17 @@ class PlexMarkerPublisher(MarkerPublisher):
         ours: list[Marker],
         kept_types: frozenset[MarkerType],
         item_files: tuple[str, ...] | None,
-    ) -> Shown:
-        """How one item's marker rows compare with ``ours`` (see ``shows``), on an open connection."""
+    ) -> tuple[Shown, list[_Part]]:
+        """One item's rows compared with ``ours`` (see ``shows``) on an open connection, and the item's live parts."""
         if not self._item_exists(conn, rating_key):
-            return Shown.GONE
+            return Shown.GONE, []
         rows = conn.execute(
             "SELECT text, time_offset, end_time_offset, extra_data FROM taggings WHERE metadata_item_id=? AND tag_id=?",
             (rating_key, tag_id),
         ).fetchall()
-        if item_files is not None and _version_files(self._item_parts(conn, rating_key)) != tuple(item_files):
-            return Shown.VERSIONS_CHANGED
+        parts = self._item_parts(conn, rating_key)
+        if item_files is not None and _version_files(parts) != tuple(item_files):
+            return Shown.VERSIONS_CHANGED, parts
         served = {
             mtype: [
                 _served_times(mtype, start, end, _row_is_final(extra))
@@ -1182,5 +1203,5 @@ class PlexMarkerPublisher(MarkerPublisher):
             for mtype, name in _TYPE_TEXT.items()
         }
         if any(not served.get(mtype) for mtype in kept_types):
-            return Shown.MISSING
-        return compare_shown(self.project(ours), served, others_alongside=False)
+            return Shown.MISSING, parts
+        return compare_shown(self.project(ours), served, others_alongside=False), parts

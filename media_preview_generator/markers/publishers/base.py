@@ -191,9 +191,6 @@ class MarkerPublisher(ABC):
     # Set by every ``write`` that read the item: the item's version files that write computed the marker set for. The
     # caller records them and passes them back to ``shows``. None where items have no shared versions (Jellyfin, Emby).
     last_item_files: tuple[str, ...] | None = None
-    # True when a type kept as the server's own can still hold markers of ours out of sight (Emby's plugin stores them
-    # and shows them once Emby's own rows are gone): a write with nothing to show still has something to remove then.
-    kept_types_hold_ours: bool = False
 
     @abstractmethod
     def capability(self) -> CapabilityReport:
@@ -238,6 +235,21 @@ class MarkerPublisher(ABC):
             couldn't be asked (this default: a publisher that can't tell).
         """
         return None
+
+    def live_files(self, item_id: str) -> tuple[str, ...]:
+        """The local paths of the files the server item held when ``shows_many`` last read it.
+
+        Check servers runs them too when the item drifted: a version replaced by a file this app never ran would
+        otherwise keep the markers decided for the old file.
+
+        Args:
+            item_id: The server's item id.
+
+        Returns:
+            Each file's local candidates through the server's path mappings, sorted; empty when not read or where a
+            server item holds one file (this default: Jellyfin and Emby keep each version as its own item).
+        """
+        return ()
 
     def shows_many(
         self, items: list[ReadBackItem], *, cancel_check: Callable[[], bool] | None = None

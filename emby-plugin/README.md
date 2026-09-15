@@ -29,9 +29,10 @@ After the restart, Media Preview Generator's **Intro & Credits** tab shows the p
 
 ## Uninstall
 
-Remove the markers first: have Media Preview Generator clear them, or call `DELETE /MediaPreviewBridge/Markers/{Id}`
-for each item. Once the plugin is gone, the rows it wrote stay in Emby with nothing to remove them or put them back,
-until a "Replace all metadata" refresh of the item (which also removes every other marker). Then delete
+Remove the markers first: call `DELETE /MediaPreviewBridge/Markers/{Id}` for each item. Media Preview Generator has
+no way to clear a whole server yet (turning Intro & Credits off leaves the markers in place). Once the plugin is gone,
+the rows it wrote stay in Emby with nothing to remove them or put them back, until a "Replace all metadata" refresh of
+the item (which also removes every other marker). Then delete
 `MediaPreviewBridge.Emby.dll` and the `MediaPreviewBridge.Emby` folder from Emby's `plugins` folder and restart Emby.
 
 ## API
@@ -63,7 +64,9 @@ POST body:
 - Answers are HTTP 200 JSON, so both Emby versions answer the same way. An unknown or non-numeric id gives
   `Found: false, Error: "item not found"`. A body the plugin refuses gives `Found: true` with `Error` saying why, and
   nothing is stored. When the store file or the item's chapters can't be written, the answer is HTTP 500 with the same
-  JSON shape and `Error` set; the store and the chapter rows are left as they were. Emby itself answers 401 without a
+  JSON shape and `Error` set; the store and the chapter rows are left as they were. If Emby stops in the middle of a
+  write (a restart, a crash), the store file still names the rows that write was replacing, so the next POST, DELETE or
+  update of the item finishes it. Emby itself answers 401 without a
   token and 403 for a user who isn't an administrator.
 - Intro (start + end) and credits are handled as two types. `ReplaceOwn` (default `false`) decides what happens when
   the item already has rows of a type that the plugin didn't write (Emby's own intro detection, another plugin):

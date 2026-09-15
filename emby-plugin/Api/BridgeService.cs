@@ -164,7 +164,7 @@ namespace MediaPreviewBridge.Emby.Api
                 }
 
                 var rows = MarkerChapters.Apply(existing, previous, stale ? null : markers, request.ReplaceOwn, out written);
-                var failure = WriteStoreThenChapters(item, existing, rows, previous, () => _store.Save(item.InternalId, markers));
+                var failure = WriteStoreThenChapters(item, existing, rows, previous, markers);
                 if (failure != null) return failure;
             }
 
@@ -200,7 +200,7 @@ namespace MediaPreviewBridge.Emby.Api
                 }
 
                 var rows = MarkerChapters.Apply(existing, stored, null, false, out _);
-                var failure = WriteStoreThenChapters(item, existing, rows, stored, () => _store.Delete(item.InternalId));
+                var failure = WriteStoreThenChapters(item, existing, rows, stored, null);
                 if (failure != null) return failure;
             }
 
@@ -208,32 +208,50 @@ namespace MediaPreviewBridge.Emby.Api
         }
 
         /// <summary>
-        /// Store first, then the chapter rows. If the rows can't be written, the store gets back what it held before,
-        /// so it keeps describing the rows on the item (the healer and DELETE rely on that). Returns the 500 answer, or
-        /// null when both writes went through. Callers hold <see cref="MarkerStore.Gate"/>.
+        /// Store <paramref name="next"/> (null: none) first, then the chapter rows, so the store always describes the rows
+        /// on the item (the healer and DELETE rely on that). While the rows change, the store also names what they showed
+        /// of ours before (<see cref="StoredMarkers.Replacing"/>), and loses it once they are written: if Emby stops
+        /// in between, the next POST, DELETE or item update still takes those rows for ours. If the rows can't be
+        /// written, the store gets back what it held before. Returns the 500 answer, or null when the rows went through.
+        /// Callers hold <see cref="MarkerStore.Gate"/>.
         /// </summary>
-        private MarkersResponse WriteStoreThenChapters(BaseItem item, List<ChapterInfo> existing, List<ChapterInfo> rows, StoredMarkers previous, Action writeStore)
+        private MarkersResponse WriteStoreThenChapters(BaseItem item, List<ChapterInfo> existing, List<ChapterInfo> rows, StoredMarkers previous, StoredMarkers next)
         {
+            var unchanged = MarkerChapters.SameRows(existing, rows);
+            var replacing = unchanged ? null : MarkerChapters.ShownOf(existing, previous);
             try
             {
-                writeStore();
+                _store.Save(item.InternalId, next, replacing);
             }
             catch (Exception ex)
             {
                 return Failed(Id(item), "couldn't update the marker store", ex);
             }
 
-            if (MarkerChapters.SameRows(existing, rows)) return null;
+            if (unchanged) return null;
             try
             {
                 _itemRepository.SaveChapters(item.InternalId, rows);
-                return null;
             }
             catch (Exception ex)
             {
                 RestoreStore(item.InternalId, previous);
                 return Failed(Id(item), "couldn't write the item's chapters", ex);
             }
+
+            if (replacing == null) return null;
+            try
+            {
+                _store.Save(item.InternalId, next, null);
+            }
+            catch (Exception ex)
+            {
+                // The rows are written. Rows of the replaced set can't be on the item any more, so the store naming them
+                // too changes nothing until the next write or item update drops them.
+                _log.ErrorException("Media Preview Bridge: finishing the marker store failed for item " + Id(item), ex);
+            }
+
+            return null;
         }
 
         private void RestoreStore(long internalId, StoredMarkers previous)

@@ -1208,9 +1208,10 @@ def _publish_to(
                 }.get(shown, f"markers {shown.value} since last run")
             logger.info("{} item {}: {}; publishing again", cfg.name, item_id, reason)
         previous = _previous_on_item(item_row, publisher)
-        # Emby's plugin still stores ours for a kept type, out of sight: nothing to show still clears them.
-        kept_hold_ours = publisher.kept_types_hold_ours and item_row is not None and bool(item_row.kept_types)
-        if not wanted and previous == [] and own_previous is None and not kept_hold_ours:
+        # A kept type is released by the write alone: Emby's plugin still stores ours for it out of sight, and a Plex
+        # record left holding one would be read back as drift on every Check servers run. Plex sends nothing then.
+        holds_kept = item_row is not None and bool(item_row.kept_types)
+        if not wanted and previous == [] and own_previous is None and not holds_kept:
             if needs_review:
                 return _row(cfg, publisher.name, ServerStatus.NEEDS_REVIEW, "Sources don't agree yet", path)
             message = "This server can't show the markers found for this file" if markers else "No markers found"

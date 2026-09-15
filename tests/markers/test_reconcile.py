@@ -19,6 +19,7 @@ from media_preview_generator.markers.publishers.base import (
     Capability,
     CapabilityReport,
     MarkerPublisher,
+    PublishError,
     Shown,
     stopped_unreadable,
 )
@@ -89,6 +90,43 @@ class TestFindDrift:
             ("3", [INTRO], frozenset(), None),
         ]
         assert kwargs["cancel_check"] is None
+
+    @pytest.mark.parametrize(
+        ("shown", "listed"),
+        [
+            (Shown.VERSIONS_CHANGED, "both"),
+            (Shown.REPLACED, "both"),
+            (Shown.MISSING, "both"),
+            (Shown.OURS, "none"),
+            (Shown.GONE, "recorded"),
+        ],
+    )
+    def test_the_current_files_of_a_drifted_item_run_with_the_files_recorded_there(self, store, media, shown, listed):
+        # Publishers audit MED-2: a Sonarr upgrade replaced the version this app ran; the new file had never run.
+        cfg = server_config("plex-1", ServerType.PLEX, root=media.root)
+        recorded, replacement = media("Show - S01E01 - 720p.mkv"), media("Show - S01E01 - 1080p.mkv")
+        _published(store, "plex-1", "7", recorded, files=(recorded,))
+        outside = "/elsewhere/Show - S01E01 - 1080p.mkv"  # a path mapping's other candidate: not on disk here
+        pub = ready_publisher()
+        pub.shows_many.return_value = {"7": shown}
+        pub.live_files.side_effect = lambda item_id: {"7": (outside, recorded, replacement)}[item_id]
+        with patch.object(reconcile, "publisher_for", return_value=pub):
+            drifts, warnings = reconcile.find_drift(registry=_registry(cfg), store=store)
+        expected = {"both": [(shown, (recorded, replacement))], "recorded": [(shown, (recorded,))], "none": []}[listed]
+        assert [(d.shown, d.files) for d in drifts] == expected and warnings == []
+
+    def test_a_recorded_file_gone_with_its_replacement_on_disk_lists_the_replacement(self, store, media):
+        cfg = server_config("plex-1", ServerType.PLEX, root=media.root)
+        recorded, replacement = media("Show - S01E01 - 720p.mkv"), media("Show - S01E01 - 1080p.mkv")
+        _published(store, "plex-1", "7", recorded, files=(recorded,))
+        os.remove(recorded)
+        pub = ready_publisher()
+        pub.shows_many.return_value = {"7": Shown.VERSIONS_CHANGED}
+        pub.live_files.side_effect = lambda item_id: {"7": (replacement,)}[item_id]
+        with patch.object(reconcile, "publisher_for", return_value=pub):
+            drifts, warnings = reconcile.find_drift(registry=_registry(cfg), store=store)
+        assert [(d.item_id, d.shown, d.files) for d in drifts] == [("7", Shown.VERSIONS_CHANGED, (replacement,))]
+        assert warnings == [] and store.get_item_publish_state("plex-1", "7").status == "written"
 
     def test_the_publisher_is_built_for_that_servers_own_client_and_config(self, store, media):
         cfg = server_config("plex-1", ServerType.PLEX, root=media.root)
@@ -394,6 +432,46 @@ class TestFindDrift:
             server.item_missing.assert_not_called()  # asked only when the read failed
 
     @pytest.mark.parametrize("vendor", ["jellyfin", "emby"])
+    @pytest.mark.parametrize(
+        ("failure", "requests_per_item", "shown"),
+        [("timeout", 1, None), ("refused", 1, None), ("http-404", 2, Shown.GONE), ("http-500", 2, None)],
+    )
+    def test_a_read_with_no_http_answer_doesnt_also_ask_whether_the_item_is_missing(
+        self, monkeypatch, vendor, failure, requests_per_item, shown
+    ):
+        # Publishers audit LOW-5: a hung server cost two request timeouts per item before the 20-failure stop.
+        import requests
+
+        from media_preview_generator.markers.publishers.jellyfin import JellyfinMarkerPublisher
+        from media_preview_generator.servers import JellyfinServer
+
+        stype = ServerType.JELLYFIN if vendor == "jellyfin" else ServerType.EMBY
+        cfg = server_config("srv-1", stype, root="/")
+        cfg.auth["user_id"] = "u1"
+        server = (JellyfinServer if vendor == "jellyfin" else EmbyServer)(cfg)
+        calls = []
+
+        def request(method, path, **kwargs):
+            calls.append(path)
+            if failure == "timeout":
+                raise requests.Timeout("read timed out")
+            if failure == "refused":
+                raise requests.ConnectionError("connection refused")
+            status = int(failure.removeprefix("http-"))
+            return MagicMock(status_code=status, **{"raise_for_status.side_effect": requests.HTTPError(str(status))})
+
+        monkeypatch.setattr(server, "_request", request)
+        publisher_cls = JellyfinMarkerPublisher if vendor == "jellyfin" else EmbyMarkerPublisher
+        publisher = publisher_cls(server, cfg, load_server(cfg.markers, stype.value))
+        items = [(str(1000 + n), [INTRO], frozenset(), None) for n in range(30)]
+
+        answers = publisher.shows_many(items)
+
+        read = UNREADABLE_IN_A_ROW if shown is None else len(items)
+        assert list(answers.values()) == [shown] * read
+        assert len(calls) == read * requests_per_item
+
+    @pytest.mark.parametrize("vendor", ["jellyfin", "emby"])
     @pytest.mark.parametrize("answer", [True, False, None])
     def test_vendor_publishers_ask_their_server_whether_an_item_is_missing(self, vendor, answer):
         from media_preview_generator.markers.publishers.jellyfin import JellyfinMarkerPublisher
@@ -423,7 +501,7 @@ class TestFindDrift:
             ],
             "55": [{"marker_type": "Chapter", "start_ms": 0, "name": "Chapter 1"}],  # a refresh dropped ours
         }
-        server.get_chapter_markers.side_effect = lambda item_id: chapters[item_id]
+        server.get_chapter_markers.side_effect = lambda item_id, **_kw: chapters[item_id]
         server.get_bridge_info.return_value = {"installed": True, "version": "1.0.0.0", "features": ["markers"]}
         server.get_bridge_markers_access.return_value = "ok"
         registry = _registry(cfg)
@@ -589,22 +667,24 @@ class TestServersToAskAgain:
 
 
 class TestCheckServersListing:
-    def _listing(self, store, drifts, *, rechecks=(), warnings=(), max_files=500, **kwargs):
+    def _listing(self, store, drifts, *, rechecks=(), failed=(), warnings=(), max_files=500, **kwargs):
         with (
             patch.object(reconcile, "find_drift", return_value=(list(drifts), list(warnings))) as find,
+            patch.object(reconcile, "files_of_failed_items", return_value=list(failed)) as retry,
             patch.object(reconcile, "files_to_ask_servers_again", return_value=list(rechecks)) as ask,
         ):
             listing = reconcile.check_servers_listing(registry="reg", store=store, max_files=max_files, **kwargs)
-        return listing, find, ask
+        return listing, find, retry, ask
 
     def test_items_are_the_drifted_and_asked_again_files_without_hints_a_season_together(self, store):
         drifts = [reconcile.Drift("plex-1", "2", Shown.REPLACED, ("/tv/S/e2.mkv", "/tv/S/e1.mkv")),
                   reconcile.Drift("jf-1", "x", Shown.MISSING, ("/tv/S/e1.mkv",))]  # fmt: skip
         capability, progress = MagicMock(), MagicMock()
-        listing, find, ask = self._listing(
+        listing, find, retry, ask = self._listing(
             store,
             drifts,
             rechecks=["/tv/S 1/b.mkv", "/tv/S/e2.mkv"],  # "/tv/S 1" sorts before "/tv/S/" by path, after it by folder
+            failed=["/tv/S/e3.mkv", "/tv/S/e1.mkv"],
             warnings=["Couldn't read what 1 item(s) show on X"],
             capability=capability,
             progress_callback=progress,
@@ -612,6 +692,7 @@ class TestCheckServersListing:
         assert [(i.canonical_path, i.item_id_by_server, i.server_id, i.title) for i in listing.items] == [
             ("/tv/S/e1.mkv", {}, "", "e1.mkv"),
             ("/tv/S/e2.mkv", {}, "", "e2.mkv"),
+            ("/tv/S/e3.mkv", {}, "", "e3.mkv"),
             ("/tv/S 1/b.mkv", {}, "", "b.mkv"),
         ]
         assert listing.warnings == ["Couldn't read what 1 item(s) show on X"]
@@ -624,10 +705,13 @@ class TestCheckServersListing:
         assert find.call_args.kwargs["capability"] is capability
         assert find.call_args.kwargs["progress_callback"] is progress
         assert find.call_args.kwargs["cancel_check"]() is False
-        ask.assert_called_once_with(registry="reg", store=store, limit=500 - 2)
+        # Failed items' files count against the run's files (drifted e1, e2), then e3 does.
+        retry.assert_called_once_with(registry="reg", store=store, limit=500 - 2)
+        ask.assert_called_once_with(registry="reg", store=store, limit=500 - 3)
 
-    def test_a_cancel_during_the_read_back_takes_no_server_rechecks(self, store):
-        _listing, _find, ask = self._listing(store, [], cancel_check=lambda: True)
+    def test_a_cancel_during_the_read_back_takes_no_server_rechecks_or_failed_items(self, store):
+        _listing, _find, retry, ask = self._listing(store, [], cancel_check=lambda: True)
+        retry.assert_not_called()
         ask.assert_not_called()
 
     def test_more_unfixable_drift_than_a_run_takes_neither_hides_later_drift_nor_starves_rechecks(self, tmp_path):
@@ -640,7 +724,7 @@ class TestCheckServersListing:
         for run in range(3):
             clock["t"] = NOW + timedelta(days=run)
             drifts = stuck if run == 0 else [*stuck, later]  # "later" drifts after the first run
-            listing, _find, ask = self._listing(store, drifts, rechecks=[f"/m/recheck/{run}.mkv"])
+            listing, _find, _retry, ask = self._listing(store, drifts, rechecks=[f"/m/recheck/{run}.mkv"])
             assert ask.call_args.kwargs["limit"] == reconcile.RECHECK_SHARE  # rechecks keep their share
             assert f"/m/recheck/{run}.mkv" in [i.canonical_path for i in listing.items]
             assert len(listing.drifted) == 500 - reconcile.RECHECK_SHARE
@@ -746,6 +830,128 @@ class TestCheckServersListing:
                                                                             "reason_code": "not_in_library"}]) == set()  # fmt: skip
         assert store.get_item_publish_state("jf-1", "x").status == "written"
         pub.item_missing.assert_not_called()
+
+
+class TestFailedItems:
+    """Items whose last publish failed are run again on the RECHECK_AFTER backoff (publishers audit LOW-4)."""
+
+    @staticmethod
+    def _failed(store, server_id, item_id, path):
+        _published(store, server_id, item_id, path)
+        store.set_item_publish_state(server_id, item_id, None, "failed")
+
+    def test_a_transient_failure_is_retried_a_day_later_and_then_read_back(self, tmp_path, media):
+        from tests.markers.test_pipeline import CHAPTERS_BOTH, _ctx, _probe, _run
+        from tests.markers.test_pipeline import _registry as pipeline_registry
+
+        clock = {"t": NOW}
+        store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
+        path = media("tv/Show (2020) {tvdb-1}/Season 01/Show (2020) - S01E01.mkv")
+        registry = pipeline_registry(path, ServerType.PLEX)
+        pub = ready_publisher()
+        _run(_ctx(store, registry), path, {"plex-1": pub}, probe=_probe(CHAPTERS_BOTH))
+        pub.write.side_effect = PublishError("Plex is busy writing its database", state=Capability.UNREACHABLE)
+        _run(_ctx(store, registry, force=True), path, {"plex-1": pub}, probe=_probe(CHAPTERS_BOTH))
+        assert store.get_item_publish_state("plex-1", "item-plex-1").status == "failed"
+        pub.shows_many.side_effect = lambda items, cancel_check=None: {i[0]: Shown.OURS for i in items}
+
+        def check_servers(days):
+            clock["t"] = NOW + timedelta(days=days)
+            with (
+                patch.object(reconcile, "publisher_for", return_value=pub),
+                patch.object(reconcile, "_utcnow", return_value=clock["t"]),
+            ):
+                listing = reconcile.check_servers_listing(registry=registry, store=store, max_files=500)
+            return [i.canonical_path for i in listing.items]
+
+        assert check_servers(0.5) == []  # not due yet
+        assert check_servers(1.1) == [path] and not pub.shows_many.called
+        pub.write.side_effect = pub.succeed
+        out, _ = _run(_ctx(store, registry), path, {"plex-1": pub}, probe=_probe(CHAPTERS_BOTH))
+        assert out.publisher_rows[0]["status"] == "markers_up_to_date"
+        assert store.get_item_publish_state("plex-1", "item-plex-1").status == "written"
+        assert check_servers(3.2) == []
+        assert [[i[0] for i in c.args[0]] for c in pub.shows_many.call_args_list] == [["item-plex-1"]]
+        store.close()
+
+    def test_a_failure_that_stays_is_retried_on_the_backoff_five_times_then_no_more(self, tmp_path, media):
+        clock = {"t": NOW}
+        store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
+        path = media("Movie (2020).mkv")
+        self._failed(store, "plex-1", "7", path)
+        registry = _registry(server_config("plex-1", ServerType.PLEX, root=media.root))
+        runs_with_files = []
+        with patch.object(reconcile, "_utcnow", side_effect=lambda: clock["t"]):
+            for day in range(1, 60):
+                clock["t"] = NOW + timedelta(days=day, minutes=day)  # a daily run, a little later each day
+                listing = reconcile.check_servers_listing(registry=registry, store=store, max_files=500)
+                if listing.items:
+                    runs_with_files.append(day)
+                    assert [i.canonical_path for i in listing.items] == [path]
+                    store.set_item_publish_state("plex-1", "7", None, "failed")  # the run failed again
+            clock["t"] = NOW + timedelta(days=400)
+            final = reconcile.check_servers_listing(registry=registry, store=store, max_files=500)
+        assert runs_with_files == [1, 3, 7, 15, 31]
+        assert (final.items, final.warnings) == ([], [])
+        store.close()
+
+    def test_a_new_failure_after_a_success_starts_the_backoff_over(self, tmp_path, media):
+        clock = {"t": NOW}
+        store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
+        self._failed(store, "plex-1", "7", media("a.mkv"))
+        for day in (2, 4, 8, 16, 32):
+            store.record_failed_item_retries([("plex-1", "7")])
+            clock["t"] = NOW + timedelta(days=day)
+        assert store.failed_items_due(["plex-1"], now=NOW + timedelta(days=400), after=RECHECK_AFTER) == []
+        store.set_item_publish_state("plex-1", "7", [INTRO], "written")
+        store.set_item_publish_state("plex-1", "7", None, "failed")
+        later = clock["t"] + timedelta(days=1, minutes=1)
+        assert store.failed_items_due(["plex-1"], now=later, after=RECHECK_AFTER) == [("plex-1", "7")]
+        store.close()
+
+    @pytest.mark.parametrize(
+        ("change", "listed", "taken"),
+        [
+            ("none", True, True),
+            ("file-deleted", False, True),
+            ("server-off", False, False),
+            ("intro-and-credits-off", False, False),
+            ("other-server", False, False),
+        ],
+    )
+    def test_which_failed_items_are_taken_and_which_files_listed(self, store, media, change, listed, taken):
+        path = media("a.mkv")
+        self._failed(store, "jf-1" if change == "other-server" else "plex-1", "7", path)
+        kwargs = {}
+        if change == "server-off":
+            kwargs["enabled"] = False
+        elif change == "intro-and-credits-off":
+            kwargs["markers"] = {"enabled": False, "library_ids": None}
+        registry = _registry(server_config("plex-1", ServerType.PLEX, root=media.root, **kwargs))
+        if change == "file-deleted":
+            os.remove(path)
+        later = NOW + timedelta(days=400)
+        with patch.object(store, "record_failed_item_retries", wraps=store.record_failed_item_retries) as record:
+            files = reconcile.files_of_failed_items(registry=registry, store=store, limit=10, now=later)
+        assert files == ([path] if listed else [])
+        sid = "jf-1" if change == "other-server" else "plex-1"
+        assert record.call_args.args[0] == ([(sid, "7")] if taken else [])
+
+    def test_items_whose_files_dont_fit_the_limit_wait_untaken(self, store, media):
+        # Versions of one item share a record; each item's files are listed whole or not at all.
+        self._failed(store, "plex-1", "1", media("a/1.mkv"))
+        _published(store, "plex-1", "1", media("a/2.mkv"))
+        store.set_item_publish_state("plex-1", "1", None, "failed")
+        self._failed(store, "plex-1", "2", media("b/1.mkv"))
+        registry = _registry(server_config("plex-1", ServerType.PLEX, root=media.root))
+        later = NOW + timedelta(days=400)
+        assert reconcile.files_of_failed_items(registry=registry, store=store, limit=1, now=later) == []
+        assert reconcile.files_of_failed_items(registry=registry, store=store, limit=0, now=later) == []
+        assert reconcile.files_of_failed_items(registry=registry, store=store, limit=2, now=later) == [
+            media("a/1.mkv"),
+            media("a/2.mkv"),
+        ]
+        assert reconcile.files_of_failed_items(registry=registry, store=store, limit=2, now=later) == [media("b/1.mkv")]
 
 
 class TestQueueing:

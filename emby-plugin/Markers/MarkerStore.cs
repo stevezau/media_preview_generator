@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
 using MediaBrowser.Model.Logging;
 using MediaBrowser.Model.Serialization;
 
@@ -46,11 +47,32 @@ namespace MediaPreviewBridge.Emby.Markers
                 Directory.CreateDirectory(Dir);
                 var path = FileFor(internalId);
                 var tmp = path + TempSuffix;
-                _json.SerializeToFile(markers, tmp);
+                var bytes = new UTF8Encoding(false).GetBytes(_json.SerializeToString(markers));
+                using (var stream = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    stream.Write(bytes, 0, bytes.Length);
+                    // On disk before the rename: after a power cut the renamed file must not come back empty.
+                    stream.Flush(true);
+                }
+
                 // Rename over the old file: there is never a moment without a complete file.
                 if (File.Exists(path)) File.Replace(tmp, path, null);
                 else File.Move(tmp, path);
                 Warned.Remove(internalId);
+            }
+        }
+
+        /// <summary>
+        /// Store <paramref name="markers"/> with the markers a write under way replaces (<paramref name="replacing"/>, see
+        /// <see cref="StoredMarkers.Replacing"/>); when neither has markers, delete the item's file.
+        /// </summary>
+        public void Save(long internalId, StoredMarkers markers, StoredMarkers replacing)
+        {
+            lock (Gate)
+            {
+                var stored = StoredMarkers.With(markers, replacing);
+                if (stored == null) Delete(internalId);
+                else Save(internalId, stored);
             }
         }
 
@@ -74,7 +96,7 @@ namespace MediaPreviewBridge.Emby.Markers
                     else
                     {
                         var markers = _json.DeserializeFromString<StoredMarkers>(text);
-                        if (StoredMarkers.Problem(markers) == null) return markers;
+                        if (StoredMarkers.StoredProblem(markers) == null) return markers;
                         problem = "not a valid marker set";
                     }
                 }

@@ -166,8 +166,6 @@ class EmbyMarkerPublisher(MarkerPublisher):
     name = "emby_bridge"
     # The plugin stores before its chapters are read back, so a PublishError can follow a POST that changed its store.
     atomic_writes = False
-    # Under "Keep Emby's" the plugin still stores ours for a kept type and shows them once Emby's rows are gone.
-    kept_types_hold_ours = True
 
     def __init__(
         self,
@@ -362,9 +360,15 @@ class EmbyMarkerPublisher(MarkerPublisher):
             How Emby's markers compare with ``ours`` (credits by their start); GONE when Emby has no such item; None
             when they couldn't be read.
         """
-        rows = self._server.get_chapter_markers(item_id)
+        try:
+            rows = self._server.get_chapter_markers(item_id, raise_no_answer=True)
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            # No answer at all: asking whether the item exists would wait just as long (a hung Emby, 20 items in a row).
+            logger.debug("Emby {}: couldn't read item {} back: {}", self._config.name, item_id, type(exc).__name__)
+            return None
         if rows is None:
-            # One more request only when the read failed: a deleted item is drift to fix, not a read to warn about.
+            # One more request only when the read got an error answer: a deleted item is drift to fix, not a read to
+            # warn about.
             return Shown.GONE if self.item_missing(item_id) is True else None
         if any(not _has_rows(rows, mtype) for mtype in kept_types):
             return Shown.MISSING

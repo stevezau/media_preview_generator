@@ -788,12 +788,18 @@ Its tooltip sums it up: "Checks that every server with Intro & Credits on still 
 sends them again where they're missing or changed (unless that server is set to keep its own). Covers all servers and
 libraries." In detail:
 
-- It reads back every item this app published on each server with Intro & Credits on (Plex one item at a time,
-  with the same same-machine checks as a write; Jellyfin and Emby one request per item), 500 items per step so its
-  progress moves. Pausing the job during the read-back gives its job slot back until you resume it.
+- It reads back every item whose last publish from this app succeeded, on each server with Intro & Credits on (Plex
+  one item at a time, with the same same-machine checks as a write; Jellyfin and Emby one request per item), 500 items
+  per step so its progress moves. Pausing the job during the read-back gives its job slot back until you resume it.
 - Only the files of items whose markers are gone or different, whose Plex item gained or lost a version, or that the
   server replaced with a new item go through the normal rules again (**Keep Plex's** / **Keep Emby's**, versions, the
-  server switch). A server set back to **Use ours** gets ours for the types it was keeping.
+  server switch). A server set back to **Use ours** gets ours for the types it was keeping. The Plex item's current
+  versions go along too: a file that replaced the one this app published there (an upgrade that deleted the old
+  file) gets its own markers on that item, and markers decided for the old file come off.
+- Items whose last publish failed (Plex busy writing its database, a server that stopped answering mid-write) aren't
+  read back; their files run again 1 day after the failure, then 2, 4, 8 and 16 days after each retry that fails too.
+  After 5 retries they wait for the next job that runs those files. A publish that works, or a new failure
+  after one that did, starts over.
 - It also re-reads a server's own markers for files with decided credits where that server had none (or its answer
   couldn't be used) and shows none of ours, since its own detection may have run since and can shorten our credits
   (see [Sources and the publish rule](#sources-and-the-publish-rule)). Every enabled server counts, with Intro &

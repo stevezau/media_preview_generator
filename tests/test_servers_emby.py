@@ -1980,6 +1980,36 @@ class TestFetchItemFieldsEdgeCases:
         server._request = MagicMock(return_value=resp)
         assert server._fetch_item_fields("x", "ProviderIds") is None
 
+    @pytest.mark.parametrize("user_id", [None, "u1"])
+    @pytest.mark.parametrize(
+        ("failure", "raises"),
+        [
+            (requests.Timeout("read timed out"), True),
+            (requests.ConnectionError("refused"), True),
+            (requests.HTTPError("500"), False),
+            (ValueError("not json"), False),
+        ],
+        ids=["timeout", "refused", "http-error", "not-json"],
+    )
+    def test_raise_no_answer_raises_only_when_the_server_gave_no_http_answer(
+        self, make_server, user_id, failure, raises
+    ):
+        # A caller that would ask the same server again (the read-back's "is the item gone?") skips that on no answer.
+        server = make_server(user_id=user_id)
+        if raises:
+            server._request = MagicMock(side_effect=failure)
+        else:
+            resp = MagicMock(status_code=200)
+            resp.raise_for_status.side_effect = failure if isinstance(failure, requests.HTTPError) else None
+            resp.json.side_effect = failure if isinstance(failure, ValueError) else None
+            server._request = MagicMock(return_value=resp)
+        assert server._fetch_item_fields("x", "Chapters") is None
+        if raises:
+            with pytest.raises(type(failure)):
+                server._fetch_item_fields("x", "Chapters", raise_no_answer=True)
+        else:
+            assert server._fetch_item_fields("x", "Chapters", raise_no_answer=True) is None
+
     def test_empty_items_list_returns_none(self, make_server):
         server = make_server(user_id=None)
         resp = MagicMock(status_code=200)
@@ -2014,7 +2044,9 @@ class TestChapterMarkers:
             {"marker_type": "Chapter", "start_ms": 0, "name": "Chapter 1"},
             {"marker_type": "CreditsStart", "start_ms": 1_295_000, "name": ""},
         ]
-        server._fetch_item_fields.assert_called_once_with("42", "Chapters")
+        server._fetch_item_fields.assert_called_once_with("42", "Chapters", raise_no_answer=False)
+        server.get_chapter_markers("42", raise_no_answer=True)
+        assert server._fetch_item_fields.call_args == call("42", "Chapters", raise_no_answer=True)
 
     def test_lookup_failure_is_none(self, make_server):
         server = make_server()

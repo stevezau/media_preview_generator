@@ -12,7 +12,9 @@ namespace MediaPreviewBridge.Emby.Markers
     /// Emby's "Replace all metadata" and "Search for missing metadata" refreshes delete every marker row. The item is
     /// updated in the same refresh, so markers are written back right there for each type that has no rows and while
     /// the file is still the one they were detected on. When the item's file was replaced (other size or path), our
-    /// rows are removed instead. Also forgets removed items.
+    /// rows are removed instead. A write Emby stopped before its rows were saved is finished at the item's next update
+    /// while the file is still the one it was sent for; for a replaced file the next POST or DELETE clears it.
+    /// Also forgets removed items.
     /// </summary>
     public class MarkerHealer : IServerEntryPoint
     {
@@ -73,10 +75,19 @@ namespace MediaPreviewBridge.Emby.Markers
                         return;
                     }
 
-                    var rows = MarkerChapters.Apply(existing, null, stored, false, out var written);
-                    if (written == 0) return;
-                    _itemRepository.SaveChapters(item.InternalId, rows);
-                    _log.Info("Media Preview Bridge: markers written back for item {0} ({1})", item.InternalId, e.UpdateReason);
+                    // Rows of the set a stopped write was replacing give way to the stored ones.
+                    var rows = MarkerChapters.Apply(existing, stored.Replacing, stored, false, out _);
+                    if (!MarkerChapters.SameRows(existing, rows))
+                    {
+                        _itemRepository.SaveChapters(item.InternalId, rows);
+                        _log.Info("Media Preview Bridge: markers written back for item {0} ({1})", item.InternalId, e.UpdateReason);
+                    }
+
+                    if (stored.Replacing != null)
+                    {
+                        _store.Save(item.InternalId, stored, null);
+                        _log.Info("Media Preview Bridge: finished an interrupted marker write for item {0}", item.InternalId);
+                    }
                 }
             }
             catch (Exception ex)

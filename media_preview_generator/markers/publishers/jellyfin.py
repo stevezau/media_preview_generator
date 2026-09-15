@@ -245,9 +245,16 @@ class JellyfinMarkerPublisher(MarkerPublisher):
             Whether Jellyfin still serves each of ``ours`` (another provider's segments may sit alongside); GONE when
             Jellyfin has no such item; None when the segments couldn't be read.
         """
-        rows = self._server.get_media_segments(item_id)
+        try:
+            rows = self._server.get_media_segments(item_id, raise_no_answer=True)
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            # No answer at all: asking whether the item exists would wait just as long (a hung Jellyfin, 20 items in
+            # a row).
+            logger.debug("Jellyfin {}: couldn't read item {} back: {}", self._config.name, item_id, type(exc).__name__)
+            return None
         if rows is None:
-            # One more request only when the read failed: a deleted item is drift to fix, not a read to warn about.
+            # One more request only when the read got an error answer: a deleted item is drift to fix, not a read to
+            # warn about.
             return Shown.GONE if self.item_missing(item_id) is True else None
         served: dict[MarkerType, list[tuple[int, int]]] = {}
         for row in rows:

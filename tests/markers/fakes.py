@@ -91,7 +91,6 @@ def ready_publisher(name="plex_db", types=("intro", "credits"), *, atomic_writes
     pub.supported_types = frozenset(MarkerType(t) for t in types)
     bridge = name in ("jellyfin_bridge", "emby_bridge")
     pub.atomic_writes = not bridge if atomic_writes is None else atomic_writes
-    pub.kept_types_hold_ours = name == "emby_bridge"
     pub.capability.return_value = CapabilityReport(Capability.READY, "ok")
     pub.project.side_effect = lambda ms: sorted(
         (m for m in ms if m.type in pub.supported_types), key=lambda m: (m.start_ms, m.type.value)

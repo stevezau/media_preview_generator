@@ -3160,6 +3160,26 @@ class TestBridgeMarkers:
         server._request = MagicMock(side_effect=side_effect, return_value=resp)
         assert server.get_media_segments("abc") is None
 
+    @pytest.mark.parametrize(
+        ("side_effect", "resp", "raises"),
+        [
+            pytest.param(requests.Timeout("x"), None, True, id="timeout"),
+            pytest.param(requests.ConnectionError("x"), None, True, id="refused"),
+            pytest.param(None, _bridge_resp(404, None, json_error=True), False, id="404"),
+            pytest.param(None, _bridge_resp(200, None, json_error=True), False, id="200-not-json"),
+        ],
+    )
+    def test_raise_no_answer_raises_only_when_jellyfin_gave_no_http_answer(
+        self, make_server, side_effect, resp, raises
+    ):
+        server = make_server()
+        server._request = MagicMock(side_effect=side_effect, return_value=resp)
+        if raises:
+            with pytest.raises(type(side_effect)):
+                server.get_media_segments("abc", raise_no_answer=True)
+        else:
+            assert server.get_media_segments("abc", raise_no_answer=True) is None
+
 
 class TestPluginNames:
     """``get_plugin_names`` on Jellyfin (``GET /Plugins`` needs an administrator there)."""

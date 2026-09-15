@@ -129,6 +129,35 @@ Findings:
   closes that; a cut inside a string still reaches the reader and fails there (covered by "cut inside Path, then }").
 - Lab left clean on both (no store files, no marker rows, no copy library, detection off, store folder 755).
 
+## Task 4 — Emby plugin, milestone audit fix LOW-3: a write Emby stops half way (2026-09-15)
+
+**Changes.** POST and DELETE save the store first with the rows they replace (`Replacing`: what the item's rows showed
+of ours before), then the chapter rows, then the store without `Replacing`. `Apply`, DELETE and the healer take rows of
+either set for ours; the healer finishes a stopped write at the item's next update ("finished an interrupted marker
+write"). `MarkerStore.Save` flushes the temp file to disk (`Flush(true)`) before the rename. The app's contract is
+unchanged (GET never shows `Replacing`).
+
+**Build.** Both ABIs (`nice -n 19`, sdk:9.0, `dotnet build -c Release -p:EmbyAbi=<abi> -p:Version=1.0.0.0`): `Build
+succeeded.` 0 warnings, 0 errors each. Installed for the run (sha256 = build output), then the builds installed before
+were put back (`mlab-emby` 4f7e48b5…, `mlab-emby49` 06141003…) and both containers restarted.
+
+**Script.** `emby_plugin_check.py` gained check 21 and `--checks N,…` (runs only those checks and merges them into the
+container's results file); `store_dir` reads rotated Emby logs too. Check 21 plants the store file a stopped write
+leaves (the new set with `Replacing` = the rows still on S01E01, or only `Replacing` for a DELETE) and then:
+
+| Step | Before the fix (installed build, `mlab-emby49`) | After: Emby 4.10.0.40 and 4.9.1.90 |
+|---|---|---|
+| POST 12–42 s over rows 10–40 s + credits 100 s | `Stored` 0, the old rows stay (taken for another writer's) | `Stored` 2, rows 12–42 s only, store without `Replacing` |
+| DELETE after the same stop | the old rows stay, store gone: nothing tracks them | no marker rows, store gone |
+| Item update (metadata edit) after a stopped POST | old rows stay, `Replacing` never cleared | rows 12–42 s, store without `Replacing`, log line |
+| Item update after a stopped DELETE | rows stay, store file left | no marker rows, store file deleted, log line |
+
+**Run.** Whole table with the fix: Emby 4.10.0.40 **21/21** (one run), Emby 4.9.1.90 **19/19** (checks 1–8, then the
+rest with `--checks`). Every earlier check passes unchanged. Before the fix, check 21 FAIL on 4.9 (table above); its
+leftover rows were removed afterwards (store planted, DELETE, plain chapters intact).
+
+Lab left clean on both: no store files, no marker rows on S01E01/S01E02, no copy library, the earlier builds loaded.
+
 ## Task 10 — Emby publisher through Media Preview Bridge for Emby (2026-09-15)
 
 **Setup.** `mlab-app` rebuilt from lane `p2-task-10` (`media_preview_generator:p2-t10`), then put back on `pr-241`.

@@ -178,6 +178,8 @@ Adjust/Lock editor in the Inspector (drag handles, keyboard nudge, lock, publish
 AniSkip source (anime; MAL id + episodeLength), Setup Health checks (plugin missing/outdated, Plex Pass missing,
 marker tag row absent, DB not local, Plex detection overwrite risk), helper container for Plex on another machine,
 docs (README, `docs/reference.md`, `docs/guides.md`), trim evidence before release.
+Decide how a locked marker meets **Keep Plex's** / **Keep Emby's**: today the server's own markers of a kept type win
+over a locked one (spec §6.2 step 6); a locked type could bypass kept types, or go to Emby with `ReplaceOwn`.
 
 ## Owner checkpoints (ask, don't assume)
 1. Plex lab claim token (https://plex.tv/claim, valid 4 min) — phase 1 lab tasks.

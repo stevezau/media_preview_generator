@@ -192,6 +192,15 @@ _SCHEMA = (
         item_id TEXT NOT NULL,
         listed_at TEXT NOT NULL,
         PRIMARY KEY (server_id, item_id))""",
+    # How many times Check servers ran the files of a server item whose last publish failed, since the failure that
+    # item row version records, and when it last did (the RECHECK_AFTER backoff counts from it).
+    """CREATE TABLE IF NOT EXISTS failed_item_retries (
+        server_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        item_version INTEGER NOT NULL,
+        retries INTEGER NOT NULL,
+        retried_at TEXT NOT NULL,
+        PRIMARY KEY (server_id, item_id))""",
     """CREATE TABLE IF NOT EXISTS source_usage (
         source TEXT NOT NULL,
         day TEXT NOT NULL,
@@ -1213,6 +1222,57 @@ class MarkerStore:
                     )
                 )
         return out
+
+    def failed_items_due(
+        self, server_ids: Iterable[str], *, now: datetime, after: Sequence[timedelta]
+    ) -> list[tuple[str, str]]:
+        """Server items whose last publish failed and whose next Check servers retry is due.
+
+        The n-th retry is due once ``after[n]`` has passed since the failure or the retry before it; none after
+        ``len(after)`` retries. A publish that succeeds, or fails again after one that did, starts the count over (the
+        item row's version changes; a failure repeated on a retry doesn't change it).
+
+        Args:
+            server_ids: The servers.
+            now: The current time.
+            after: The backoff steps.
+
+        Returns:
+            ``(server_id, item_id)`` pairs, items never retried first, then the longest waiting.
+        """
+        ids = sorted(set(server_ids))
+        if not ids or not after:
+            return []
+        marks = ",".join("?" * len(ids))
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT i.server_id, i.item_id, i.updated_at, r.retries, r.retried_at FROM item_publish_state i "
+                "LEFT JOIN failed_item_retries r ON r.server_id = i.server_id AND r.item_id = i.item_id "
+                "AND r.item_version = i.version "
+                f"WHERE i.status = 'failed' AND i.server_id IN ({marks})",  # noqa: S608 - placeholders only
+                ids,
+            ).fetchall()
+        due = []
+        for r in rows:
+            retries = int(r["retries"] or 0)
+            since = max(r["updated_at"], r["retried_at"] or "")
+            if retries < len(after) and datetime.fromisoformat(since) < now - after[retries]:
+                due.append((retries > 0, since, r["server_id"], r["item_id"]))
+        return [(server_id, item_id) for _, _, server_id, item_id in sorted(due)]
+
+    def record_failed_item_retries(self, pairs: Iterable[tuple[str, str]]) -> None:
+        """Count one Check servers retry now for each of these ``(server_id, item_id)`` failed items."""
+        now = self._now()
+        with self._tx() as conn:
+            for server_id, item_id in pairs:
+                conn.execute(
+                    "INSERT INTO failed_item_retries (server_id, item_id, item_version, retries, retried_at) "
+                    "SELECT server_id, item_id, version, 1, ? FROM item_publish_state WHERE server_id=? AND item_id=? "
+                    "ON CONFLICT(server_id, item_id) DO UPDATE SET retries = CASE WHEN "
+                    "failed_item_retries.item_version = excluded.item_version THEN failed_item_retries.retries + 1 "
+                    "ELSE 1 END, item_version = excluded.item_version, retried_at = excluded.retried_at",
+                    (now, server_id, item_id),
+                )
 
     def files_for_item(self, server_id: str, item_id: str) -> list[str]:
         """Local files whose last publish to this server went to this item.

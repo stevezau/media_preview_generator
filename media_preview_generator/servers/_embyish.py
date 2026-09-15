@@ -96,6 +96,10 @@ _LIST_ITEMS_TIMEOUT_S = 60
 # rows so we don't silently hide legitimate video libraries.
 _NON_VIDEO_COLLECTION_TYPES: frozenset[str] = frozenset({"music", "musicvideos", "photos", "books", "audiobooks"})
 
+# A request that got no HTTP answer at all (refused, reset, timed out): the next request to that server would most
+# likely wait just as long.
+NO_ANSWER_ERRORS = (requests.ConnectionError, requests.Timeout)
+
 
 def is_video_library_folder(raw: dict) -> bool:
     """Return True when an Emby/Jellyfin VirtualFolder dict should be
@@ -552,10 +556,14 @@ class EmbyApiClient(MediaServer):
                 sources.append((str(src.get("Id") or ""), str(src.get("Path") or "")))
         return sources
 
-    def _fetch_item_fields(self, item_id: str, fields: str) -> dict[str, Any] | None:
+    def _fetch_item_fields(self, item_id: str, fields: str, *, raise_no_answer: bool = False) -> dict[str, Any] | None:
         """Fetch one item with extra ``Fields`` using the endpoint that works for this auth shape.
 
         The id is URL-quoted into the per-user path, so an id from an API caller can't reach another endpoint.
+
+        Raises:
+            requests.RequestException: With ``raise_no_answer``, when the server gave no HTTP answer
+                (``NO_ANSWER_ERRORS``); otherwise every failure returns None.
         """
         user_id = self._user_id()
         try:
@@ -570,6 +578,8 @@ class EmbyApiClient(MediaServer):
                 items = resp.json().get("Items") or []
                 data = items[0] if items else None
         except Exception as exc:
+            if raise_no_answer and isinstance(exc, NO_ANSWER_ERRORS):
+                raise
             logger.debug("{} item field lookup failed for {}: {}", self.vendor_name, item_id, exc)
             return None
         return data if isinstance(data, dict) else None
@@ -601,17 +611,21 @@ class EmbyApiClient(MediaServer):
             return None
         return not items if isinstance(items, list) else None
 
-    def get_chapter_markers(self, item_id: str) -> list[dict[str, Any]] | None:
+    def get_chapter_markers(self, item_id: str, *, raise_no_answer: bool = False) -> list[dict[str, Any]] | None:
         """Chapter rows with Emby's marker types (``IntroStart``/``IntroEnd``/``CreditsStart``/``Chapter``).
 
         Args:
             item_id: Server item id.
+            raise_no_answer: Raise instead of returning None when the server gave no HTTP answer.
 
         Returns:
             ``[{"marker_type", "start_ms", "name"}]`` in the server's order (rows without a usable integer start
             are skipped), or None when the item couldn't be fetched.
+
+        Raises:
+            requests.RequestException: With ``raise_no_answer``: one of ``NO_ANSWER_ERRORS``.
         """
-        item = self._fetch_item_fields(item_id, "Chapters")
+        item = self._fetch_item_fields(item_id, "Chapters", raise_no_answer=raise_no_answer)
         return None if item is None else _chapter_rows(item)
 
     def get_media_source_durations(self, item_id: str) -> list[int | None] | None:

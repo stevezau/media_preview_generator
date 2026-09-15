@@ -3342,11 +3342,10 @@ class TestReadBackVerify:
         else:
             assert second.publisher_rows[0]["message"] == f"Keeping {vendor}'s credits"
 
-    @pytest.mark.parametrize(("publisher", "writes"), [("plex_db", 1), ("emby_bridge", 2)])
-    def test_nothing_decided_on_an_item_of_kept_types_only_clears_them_where_they_hold_ours(
-        self, store, media, publisher, writes
-    ):
-        # Emby's plugin still stores ours for a kept type; Plex's kept rows are Plex's own, so nothing is sent there.
+    @pytest.mark.parametrize("publisher", ["plex_db", "emby_bridge"])
+    def test_nothing_decided_on_an_item_of_kept_types_only_goes_through_the_write(self, store, media, publisher):
+        # Emby's plugin still stores ours for a kept type; a Plex record left holding one is drift on every Check servers
+        # run (audit MED-1). The real Plex publisher sends nothing to Plex's DB then (test_publisher_contract).
         stype = ServerType.PLEX if publisher == "plex_db" else ServerType.EMBY
         sid = f"{stype.value}-1"
         reg = _registry(media, stype)
@@ -3358,15 +3357,13 @@ class TestReadBackVerify:
         pub.last_kept_types = frozenset()
         off = {"sources": [{"id": "theintrodb", "enabled": True}], "detect": {"intro": False, "credits": False}}
 
-        out, _ = _run(_ctx(store, reg, settings_raw=off), media, {sid: pub}, probe=_probe(CHAPTERS_BOTH))
+        _run(_ctx(store, reg, settings_raw=off), media, {sid: pub}, probe=_probe(CHAPTERS_BOTH))
 
-        assert pub.write.call_count == writes
-        if publisher == "emby_bridge":
-            call = pub.write.call_args
-            assert call.args == (f"item-{sid}", []) and call.kwargs["previous"] == []
-            assert call.kwargs["kept_types"] == {T.INTRO, T.CREDITS}
-        else:
-            assert out.publisher_rows[0]["status"] == ServerStatus.NONE.value
+        assert pub.write.call_count == 2
+        call = pub.write.call_args
+        assert call.args == (f"item-{sid}", []) and call.kwargs["previous"] == []
+        assert call.kwargs["kept_types"] == {T.INTRO, T.CREDITS}
+        assert store.get_item_publish_state(sid, f"item-{sid}").kept_types == frozenset()
 
     @pytest.mark.parametrize(
         ("kept", "shown", "changed", "status", "message"),

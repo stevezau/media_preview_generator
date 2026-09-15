@@ -18,7 +18,7 @@ from unittest.mock import ANY, MagicMock, create_autospec, patch
 
 import pytest
 
-from media_preview_generator.markers import pipeline
+from media_preview_generator.markers import pipeline, reconcile
 from media_preview_generator.markers.models import Marker, MarkerType
 from media_preview_generator.markers.outcomes import FileOutcome
 from media_preview_generator.markers.probe import Chapter, MediaProbe
@@ -33,7 +33,7 @@ from media_preview_generator.servers.jellyfin import JellyfinServer
 from media_preview_generator.servers.plex import PlexServer
 from tests.markers.fakes import FakeRegistry
 from tests.markers.test_pipeline import CHAPTERS_BOTH, DUR, _ctx
-from tests.markers.test_plex_db_publisher import PLEX_VERSION, _make_db, _rows
+from tests.markers.test_plex_db_publisher import PLEX_VERSION, _make_db, _rows, _writes
 from tests.markers.test_plex_db_publisher import _served as _plex_served
 
 T = MarkerType
@@ -131,7 +131,7 @@ def jellyfin(tmp_path):
 
     server.put_bridge_markers.side_effect = put
     server.delete_bridge_markers.side_effect = delete
-    server.get_media_segments.side_effect = lambda item_id: [
+    server.get_media_segments.side_effect = lambda item_id, **_kw: [
         {"Id": f"s{i}", "ItemId": item_id, "Type": s["type"], "StartTicks": s["startTicks"], "EndTicks": s["endTicks"]}
         for i, s in enumerate(stored)
     ]
@@ -565,6 +565,25 @@ def test_a_write_that_changes_nothing_still_records_the_versions_it_saw(plex_ite
     assert item.store.get_item_publish_state("plex-1", "7").item_files == (a,)
 
 
+def test_a_version_replaced_by_a_file_never_run_gets_that_files_markers_through_check_servers(plex_item):
+    # Publishers audit MED-2: an upgrade deleted the published file and Plex's scan pointed the part at the new one.
+    item = plex_item(versions=("720p", "1080p"), in_item=("720p",))
+    old, new = item.paths["720p"], item.paths["1080p"]
+    item.chapters[old] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    item.chapters[new] = chapters(intro=INTRO_Y)
+    assert _outcomes(item.run("720p")) == ["published"]
+    assert item.served() == [SHOWN_INTRO, SHOWN_CREDITS]
+    os.remove(old)
+    item._sql(("UPDATE media_parts SET file=? WHERE file=?", (new, old)))
+
+    assert _check_servers(item) == [("7", (new,))]
+    assert _outcomes(item.run("1080p")) == ["published"]
+
+    assert item.served() == item.recorded() == [("intro", *INTRO_Y)]
+    assert item.store.get_item_publish_state("plex-1", "7").item_files == (new,)
+    assert _check_servers(item) == []
+
+
 @pytest.mark.parametrize("version_added", [False, True], ids=["same-versions", "version-added-before-upgrade"])
 def test_an_item_recorded_without_its_versions_is_written_once_to_record_them(plex_item, monkeypatch, version_added):
     # A markers.db from before item versions were recorded: the next normal run writes the item once.
@@ -985,7 +1004,7 @@ class TestJellyfinReadBackVerify:
         jellyfin.server.put_bridge_markers.reset_mock()
         served = jellyfin.server.get_media_segments.side_effect
         other = {"Id": "x", "ItemId": "abc", "Type": "Intro", "StartTicks": 50_000_000, "EndTicks": 400_000_000}
-        jellyfin.server.get_media_segments.side_effect = lambda item_id: [*served(item_id), other]
+        jellyfin.server.get_media_segments.side_effect = lambda item_id, **_kw: [*served(item_id), other]
         assert jf_run().outcome_key == "markers_up_to_date"
         assert jf_run(force=True).outcome_key == "markers_up_to_date"
         jellyfin.server.put_bridge_markers.assert_not_called()
@@ -997,7 +1016,7 @@ class TestJellyfinReadBackVerify:
         # The plugin still holds ours for this file; only Jellyfin's own list differs (or can't be read).
         answers = []
 
-        def segments(item_id):
+        def segments(item_id, **_kw):
             answers.append(item_id)
             if len(answers) > 1:
                 return served(item_id)
@@ -1031,7 +1050,7 @@ class TestJellyfinReadBackVerify:
         jf_run()
         jellyfin.server.delete_bridge_markers("abc")
         jellyfin.server.put_bridge_markers.reset_mock()
-        jellyfin.server.get_media_segments.side_effect = lambda item_id: None  # Jellyfin didn't answer
+        jellyfin.server.get_media_segments.side_effect = lambda item_id, **_kw: None  # Jellyfin didn't answer
         out = jf_run()
         assert (out.outcome_key, out.publisher_rows[0]["message"]) == ("markers_up_to_date", "Up to date")
         jellyfin.server.put_bridge_markers.assert_not_called()
@@ -1086,6 +1105,27 @@ def _plex_restarting(item: PlexItem, monkeypatch) -> None:
 def _plex_back(item: PlexItem, monkeypatch) -> None:
     monkeypatch.setattr(plex_db, "shm_lock_held_elsewhere", lambda _db, **_kw: True)
     item.server.get_server_status.return_value = {"plex_pass": True, "version": PLEX_VERSION}
+
+
+def _plex_statements(monkeypatch) -> list[str]:
+    """Every statement run on Plex's database from now on."""
+    log: list[str] = []
+    original = plex_db.PlexMarkerPublisher._connect
+
+    def connect(publisher, *, read_only, **kwargs):
+        conn = original(publisher, read_only=read_only, **kwargs)
+        conn.set_trace_callback(log.append)
+        return conn
+
+    monkeypatch.setattr(plex_db.PlexMarkerPublisher, "_connect", connect)
+    return log
+
+
+def _check_servers(item: PlexItem) -> list[tuple[str, tuple[str, ...]]]:
+    """The drifted items Check servers reads back on the item's server, with the files it lists."""
+    drifts, warnings = reconcile.find_drift(registry=item.registry, store=item.store)
+    assert warnings == []
+    return [(drift.item_id, drift.files) for drift in drifts]
 
 
 class TestKeepPlexsPerType:
@@ -1347,6 +1387,38 @@ class TestKeepPlexsPerType:
         before = item.server.get_markers.call_count
         item.run("1080p", force=True)
         assert item.server.get_markers.call_count == before
+
+    @pytest.mark.parametrize("trigger", ["switched-to-use-ours", "plex-dropped-its-rows"])
+    def test_a_kept_only_item_with_nothing_decided_any_more_leaves_check_servers_after_one_run(
+        self, plex_item, monkeypatch, trigger
+    ):
+        # Publishers audit MED-1: the record kept its kept type, so every Check servers run listed the file again.
+        item = plex_item(versions=("1080p",))
+        path = item.paths["1080p"]
+        item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
+        item.chapters[path] = chapters(intro=INTRO_X)
+        item.run("1080p")
+        _native_intro(item)
+        item.run("1080p")
+        assert (item.recorded(), item.kept()) == ([], {"intro"})
+        statements = _plex_statements(monkeypatch)
+        item.chapters[path] = chapters()  # re-encoded without its intro chapter: nothing decided any more
+        item.touch("1080p", 9)
+        item.run("1080p")
+        assert item.kept() == {"intro"} and item.served() == [PLEX_INTRO]  # Plex's own intro, still kept
+        if trigger == "switched-to-use-ours":
+            item.cfg.markers["plex"]["on_plex_redetect"] = "restore"
+        else:
+            item._sql(("DELETE FROM taggings WHERE metadata_item_id=7 AND text='intro'",))
+
+        assert _check_servers(item) == [("7", (path,))]
+        out = item.run("1080p")
+        assert _check_servers(item) == []
+
+        assert out.publisher_rows[0]["status"] == "markers_up_to_date"
+        assert (item.recorded(), item.kept()) == ([], set())
+        assert _writes(statements) == [] and item.commits == 1
+        assert item.served() == ([PLEX_INTRO] if trigger == "switched-to-use-ours" else [])
 
     def test_kept_types_keep_the_parts_own_key(self, plex_item):
         # Plex rebuilds its rows from the part's pv: keys when it re-detects: a kept type's key isn't ours to change.

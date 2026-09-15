@@ -17,6 +17,15 @@ namespace MediaPreviewBridge.Emby.Markers
         /// <summary>Gets or sets the item's path when the markers were stored (null in files that don't have it).</summary>
         public string Path { get; set; }
 
+        /// <summary>
+        /// Gets or sets, only while a write is under way, the markers of ours the item's rows showed before it (null
+        /// otherwise). The store is saved before the chapter rows, so if Emby stops in between, the rows can still be
+        /// either set: both count as ours until a POST or DELETE clears it, or an item update finishes the write (only
+        /// while the file is still the one the markers were sent for; a replaced file keeps it until the next POST or
+        /// DELETE).
+        /// </summary>
+        public StoredMarkers Replacing { get; set; }
+
         /// <summary>Why these markers can't be stored, or null when they can.</summary>
         public static string Problem(StoredMarkers m)
         {
@@ -26,8 +35,40 @@ namespace MediaPreviewBridge.Emby.Markers
                 return "invalid intro ticks";
             if (m.CreditsStartTicks.HasValue && m.CreditsStartTicks.Value < 0) return "invalid credits ticks";
             if (m.FileSize.HasValue && m.FileSize.Value <= 0) return "invalid fileSize";
-            if (!m.IntroStartTicks.HasValue && !m.CreditsStartTicks.HasValue) return "no markers; use DELETE to clear";
+            if (!HasMarkers(m)) return "no markers; use DELETE to clear";
             return null;
+        }
+
+        /// <summary>
+        /// Why a store file's content can't be used, or null when it can: a valid set, with or without the valid set it
+        /// replaces, or (a DELETE under way) only the set it replaces.
+        /// </summary>
+        public static string StoredProblem(StoredMarkers m)
+        {
+            if (m?.Replacing == null) return Problem(m);
+            if (m.Replacing.Replacing != null || Problem(m.Replacing) != null) return "invalid replaced markers";
+            return (HasMarkers(m) || m.IntroEndTicks.HasValue) ? Problem(m) : null;
+        }
+
+        /// <summary>Whether the set holds an intro or credits.</summary>
+        public static bool HasMarkers(StoredMarkers m) => m != null && (m.IntroStartTicks.HasValue || m.CreditsStartTicks.HasValue);
+
+        /// <summary>
+        /// A copy of <paramref name="markers"/> (no markers when null) holding <paramref name="replacing"/>, or null when
+        /// neither has markers (nothing to store).
+        /// </summary>
+        public static StoredMarkers With(StoredMarkers markers, StoredMarkers replacing)
+        {
+            if (!HasMarkers(markers) && !HasMarkers(replacing)) return null;
+            return new StoredMarkers
+            {
+                IntroStartTicks = markers?.IntroStartTicks,
+                IntroEndTicks = markers?.IntroEndTicks,
+                CreditsStartTicks = markers?.CreditsStartTicks,
+                FileSize = markers?.FileSize,
+                Path = markers?.Path,
+                Replacing = HasMarkers(replacing) ? replacing : null,
+            };
         }
 
         /// <summary>
