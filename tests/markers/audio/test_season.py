@@ -1616,6 +1616,27 @@ class TestUnreadableMembers:
             assert step() == 1
         assert store.get_file(e2).size == 600
 
+    def test_the_entry_of_a_member_deleted_since_is_forgotten_once_it_stops_counting(self, store, show):
+        e1, e2 = show(1, 2)
+        clock = [datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)]
+        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=HIGH, now=lambda: clock[0])
+
+        def probe(path, **kwargs):
+            if path != e1:
+                raise ProbeError("ffprobe timed out")
+            return _chapter_probe(10_000)
+
+        with patch.object(season, "probe_media", side_effect=probe):
+            season.season_intro_chapter_limits(ctx, e1)
+            assert store._count("member_probe_failures") == 1
+            os.remove(e2)  # never probed, or recorded, again
+            e3 = e2.replace("E02", "E03")
+            _write(e3, 103)  # a new episode the season step can't read either
+            clock[0] += timedelta(days=1, minutes=1)
+            season.season_intro_chapter_limits(ctx, e1)
+        assert store.member_probe_failed_at(FileIdentity(e3, *_identity(e3))) == clock[0]
+        assert store._count("member_probe_failures") == 1  # E2's entry went with E3's write
+
     def test_a_forced_re_detect_probes_it_again_within_the_day(self, store, show):
         e1, e2, _ = show(1, 3)
         registry = _registry(e1, ServerType.PLEX)

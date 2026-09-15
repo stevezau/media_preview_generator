@@ -674,8 +674,9 @@ class TestCheckServersListing:
                 {"server_id": "jf-1", "status": "markers_up_to_date"},
             ]
             factory.reset_mock()
-            listing.forget_gone_items(store, registry, path, rows)
-            assert store.get_item_publish_state("jf-1", "x").status == "gone"
+            assert listing.confirmed_gone_items(registry, path, rows) == {("jf-1", "x")}
+            assert store.get_item_publish_state("jf-1", "x").status == "written"  # the job marks it, once retried
+            store.mark_item_gone("jf-1", "x")
             assert store.get_item_publish_state("plex-1", "7").status == "written"  # plex-1 wasn't listed for it
             factory.assert_called_once_with(registry.get("jf-1"), cfg, ui_details=False)
             pub.item_missing.assert_called_once_with("x")
@@ -694,7 +695,7 @@ class TestCheckServersListing:
         ids=["couldnt-ask", "item-still-there", "lookup-raises", "no-publisher", "server-not-in-registry"],
     )
     def test_an_item_the_server_doesnt_confirm_missing_stays_and_is_listed_again(self, store, media, lookup):
-        # "Not in this server's library" can come from a lookup that failed; Check servers queues no retry.
+        # "Not in this server's library" can come from a lookup that failed: no retry, the item is read back again.
         cfg = server_config("jf-1", ServerType.JELLYFIN, root=media.root)
         registry = _registry(cfg)
         path = media("a.mkv")
@@ -711,12 +712,12 @@ class TestCheckServersListing:
                 factory.return_value = None
             if "no-server" in lookup:
                 registry.configs_by_id.pop("jf-1")
-            listing.forget_gone_items(
-                store,
+            gone = listing.confirmed_gone_items(
                 registry,
                 path,
                 [{"server_id": "jf-1", "status": "markers_waiting", "reason_code": "not_in_library"}],
             )
+            assert gone == set()
             assert store.get_item_publish_state("jf-1", "x").status == "written"
             registry.configs_by_id["jf-1"] = cfg
             factory.return_value = pub
@@ -740,9 +741,9 @@ class TestCheckServersListing:
         pub.item_missing.return_value = True
         listing = reconcile.CheckServersListing([], [], {"/m/a.mkv": frozenset({("jf-1", "x")})})
         with patch.object(reconcile, "publisher_for", return_value=pub):
-            listing.forget_gone_items(store, registry, "/m/a.mkv", [row])
-            listing.forget_gone_items(store, registry, "/m/other.mkv", [{"server_id": "jf-1", "status": "markers_waiting",
-                                                                         "reason_code": "not_in_library"}])  # fmt: skip
+            assert listing.confirmed_gone_items(registry, "/m/a.mkv", [row]) == set()
+            assert listing.confirmed_gone_items(registry, "/m/other.mkv", [{"server_id": "jf-1", "status": "markers_waiting",
+                                                                            "reason_code": "not_in_library"}]) == set()  # fmt: skip
         assert store.get_item_publish_state("jf-1", "x").status == "written"
         pub.item_missing.assert_not_called()
 

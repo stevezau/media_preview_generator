@@ -36,7 +36,8 @@ from .outcomes import (
     ServerStatus,
 )
 from .ownership import marker_libraries
-from .pipeline import _capability, budget_exhausted_warnings, build_context, kind_handlers
+from .pipeline import budget_exhausted_warnings, build_context, cached_capability, kind_handlers
+from .reconcile import RECONCILE_SOURCE
 from .settings import load_server
 
 _POLL_S = 1.0
@@ -60,8 +61,9 @@ FILES_SEALED = "files_sealed"
 FOLLOW_UP_LOCK = threading.Lock()
 # Config keys files join a waiting job through (``_queue_season_followups``, ``triggers._join``) or its seal writes.
 _JOINED_KEYS = ("file_paths", "webhook_item_id_hints", FILES_SEALED)
-# Job sources whose files no sender just reported: a file missing from disk won't appear by waiting.
-_NO_RETRY_SOURCES = _USER_PICKED_SOURCES | {SEASON_SOURCE}
+# Job sources whose files no sender just reported: a file missing from disk won't appear by waiting (and nothing was
+# just replaced). A retry Check servers queued is one of them; its not-in-library retries still chain.
+_NO_RETRY_SOURCES = _USER_PICKED_SOURCES | {SEASON_SOURCE, RECONCILE_SOURCE}
 
 
 def _utcnow() -> datetime:
@@ -113,7 +115,7 @@ def _retry_reason(waiting: dict[str, set[str]]) -> str:
     return f"{listed} yet"
 
 
-def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dict[str, str]) -> None:
+def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dict[str, str]) -> list[str]:
     """Create the delayed retry job for files that weren't on disk yet or that a server could take later.
 
     Up to ``webhook_retry_count`` retries, one job for every reason; a verify job's retries go on counting from the
@@ -127,27 +129,37 @@ def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dic
         cfg: Its config.
         waiting: Local paths per reason (``NOT_ON_DISK`` or a row's retry reason code).
         sender_paths: The path each local path was given as (``build_items``); a missing entry is retried as is.
+
+    Returns:
+        The paths the retry job lists (as sent); empty when none was queued.
     """
     jm = get_job_manager()
     paths = _sent_paths({path for files in waiting.values() for path in files}, sender_paths)
     reason = _retry_reason(waiting)
+    # Check servers leaves the items of a file it doesn't retry to be read back again; any other job's file is only
+    # tried again by a job that lists it (a retry chain started by Check servers included: its items are gone).
+    again = (
+        "Check servers checks them again on its next run"
+        if cfg.get("reconcile")
+        else "a later job for them tries again"
+    )
     try:
         attempt = int(cfg.get("retry_attempt") or cfg.get("chain_attempt") or 0) + 1
         count, delay_setting = retry_policy(get_settings_manager())
+        if count < 1:
+            jm.add_log(job.id, f"WARNING - {len(paths)} file(s) {reason}; retries are off, so {again}")
+            return []
         if attempt > count:
             jm.add_log(
                 job.id,
                 f"WARNING - {len(paths)} file(s) still {reason.removesuffix(' yet')} after {count} retr"
-                f"{'y' if count == 1 else 'ies'}; the next run for these files will try again",
+                f"{'y' if count == 1 else 'ies'}; {again}",
             )
-            return
+            return []
         from .triggers import create_intro_credits_job
 
         if len(paths) > MAX_RETRY_FILES:
-            jm.add_log(
-                job.id,
-                f"INFO - {len(paths) - MAX_RETRY_FILES} more files {reason} will be tried on the next run",
-            )
+            jm.add_log(job.id, f"INFO - {len(paths) - MAX_RETRY_FILES} more files {reason} get no retry; {again}")
             paths = paths[:MAX_RETRY_FILES]
         delay = retry_delay_s(attempt, delay_setting)
         base_name = (job.library_name or "Intro & Credits").removeprefix("Retry: ").removeprefix("Verify: ")
@@ -165,8 +177,10 @@ def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dic
             job.id,
             f"INFO - {len(paths)} file(s) {reason}; retry {attempt} of {count} in {delay}s (job {retry.id[:8]})",
         )
+        return paths
     except Exception:
         logger.exception("Could not queue the retry for files job {} found waiting", job.id)
+        return []
 
 
 def _sent_paths(files: set[str], sender_paths: dict[str, str]) -> list[str]:
@@ -249,11 +263,6 @@ def _waiting_season_jobs(jm) -> list:
     return waiting
 
 
-def _cancelled_since_listed(jm, job) -> bool:
-    live = jm.get_job(job.id)
-    return live is None or live.status is not JobStatus.PENDING
-
-
 def _queue_season_followups(job, paths: list[str]) -> None:
     """Queue the other episodes of this job's seasons to be decided again (spec §5.3). Never raises.
 
@@ -294,16 +303,17 @@ def _queue_season_followups(job, paths: list[str]) -> None:
                 ),
                 None,
             )
-            if target is not None and _cancelled_since_listed(jm, target):
-                target = None
+            if target is not None:
+                files = sorted([*(target.config.get("file_paths") or []), *chosen])
+                # Refused when the job was cancelled since it was listed: the files get a new job instead.
+                if jm.update_job_config_if_pending(target.id, {**target.config, "file_paths": files}):
+                    jm.update_job_library_name(target.id, _season_job_name(files))
+                else:
+                    target = None
             if target is None:
                 target = create_intro_credits_job(
                     library_name=_season_job_name(chosen), priority=priority, source=SEASON_SOURCE, file_paths=chosen
                 )
-            else:
-                files = sorted([*(target.config.get("file_paths") or []), *chosen])
-                jm.update_job_config(target.id, {**target.config, "file_paths": files})
-                jm.update_job_library_name(target.id, _season_job_name(files))
         jm.add_log(
             job.id,
             f"INFO - {len(chosen)} other episode(s) of the same season are checked again with this job's results "
@@ -485,6 +495,48 @@ def build_items(
     for item in sorted(items, key=lambda i: (os.path.dirname(i.canonical_path), i.canonical_path)):
         unique.setdefault(item.canonical_path, item)
     return list(unique.values()), warnings, sender_paths
+
+
+def _confirmed_gone_items(listing, registry, path: str, servers: list | None) -> set[tuple[str, str]]:
+    """``CheckServersListing.confirmed_gone_items`` for a file whose result is already recorded. Never raises.
+
+    Returns:
+        The ``(server_id, item_id)`` items a server confirmed gone (the file waits for a retry).
+    """
+    try:
+        return listing.confirmed_gone_items(registry, path, servers or [])
+    except Exception as exc:
+        # Only the exception's type: a message can carry a server's URL or token.
+        logger.warning("Check servers couldn't check the items of {}: {}", os.path.basename(path), type(exc).__name__)
+        return set()
+
+
+def _mark_retried_items_gone(
+    store, gone_items: dict[str, set[tuple[str, str]]], retried: list[str], sender_paths: dict[str, str]
+) -> None:
+    """Take the confirmed-gone items of the files the retry job lists out of Check servers. Never raises.
+
+    Only once that retry exists: a file whose run ended before (cancelled, failed, a restart) or that got no retry
+    (retries off, past the cap) keeps its items, so the next Check servers run reads them back, confirms them again and
+    queues the retry then.
+
+    Args:
+        store: The markers store.
+        gone_items: Per local path, the items confirmed gone.
+        retried: The paths the retry job lists (as sent).
+        sender_paths: The path each local path was given as.
+    """
+    listed = set(retried)
+    for path, items in gone_items.items():
+        if sender_paths.get(path, path) not in listed:
+            continue
+        for server_id, item_id in sorted(items):
+            try:
+                store.mark_item_gone(server_id, item_id)
+                logger.info("{} no longer has item {}; Check servers stops reading it back", server_id, item_id)
+            except Exception as exc:
+                logger.warning("Check servers couldn't mark item {} of {} gone: {}", item_id, server_id,
+                               type(exc).__name__)  # fmt: skip
 
 
 def _in_flight(job_id: str) -> bool:
@@ -851,7 +903,7 @@ def run_intro_credits_job(job_id: str) -> None:
                         registry=registry,
                         store=ctx.store,
                         max_files=MAX_RETRY_FILES,
-                        capability=lambda server_cfg, publisher: _capability(ctx, server_cfg, publisher),
+                        capability=lambda server_cfg, publisher: cached_capability(ctx, server_cfg, publisher),
                         cancel_check=_cancel_check_releasing_slot_while_paused(
                             job_id=job_id,
                             slot=slot,
@@ -885,6 +937,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 waiting: dict[str, set[str]] = {}
                 replaced: set[str] = set()
                 unchecked: dict[str, set[str]] = {}
+                gone_items: dict[str, set[tuple[str, str]]] = {}
                 # Webhook paths (and their retries) can arrive before the file is visible here (an import still
                 # copying over NFS); the preview job retries those too. A file the user picked, or a library
                 # listing, that isn't on disk won't appear by waiting; a verify job's file was there already, and a
@@ -896,8 +949,11 @@ def run_intro_credits_job(job_id: str) -> None:
                 checks_replaced_later = sent_files and not (cfg.get("verify") or cfg.get("verify_chain"))
 
                 def on_file_result(file_path, outcome, reason, worker, servers=None):
-                    # Any server that can take the file later, even when another server was written.
-                    codes = {code for row in servers or [] if (code := retry_reason(row))}
+                    # Any server that can take the file later, even when another server was written. Check servers
+                    # retries only the files whose old item a server confirmed gone (below).
+                    codes = (
+                        set() if listing is not None else {code for row in servers or [] if (code := retry_reason(row))}
+                    )
                     for code in codes:
                         waiting.setdefault(code, set()).add(file_path)
                     if not codes and retries_missing_files and outcome == FileOutcome.FILE_NOT_FOUND.value:
@@ -908,11 +964,12 @@ def run_intro_credits_job(job_id: str) -> None:
                         if isinstance(row, dict) and row.get(READ_BACK_FAILED):
                             name = str(row.get("server_name") or row.get("server_id") or "a server")
                             unchecked.setdefault(name, set()).add(file_path)
-                    if listing is not None:
-                        listing.forget_gone_items(ctx.store, registry, file_path, servers or [])
                     jm.record_file_result(
                         job_id, file_path, outcome, reason, worker, servers=servers, server_messages=True
                     )
+                    if listing is not None and (gone := _confirmed_gone_items(listing, registry, file_path, servers)):
+                        gone_items[file_path] = gone
+                        waiting.setdefault(NOT_IN_LIBRARY, set()).add(file_path)
 
                 set_file_result_callback(on_file_result, job_id=job_id)
                 dispatcher = get_or_create_dispatcher(config, _build_selected_gpus(settings))
@@ -966,9 +1023,12 @@ def run_intro_credits_job(job_id: str) -> None:
                 ]
                 _complete(jm, job_id, outcome, [*warnings, *unchecked_warnings, *budget_exhausted_warnings(ctx)])
                 _queue_season_followups_after(job, cfg, ctx, listed)
-                # Check servers queues no retry: anything still waiting is listed again by a later run.
-                if waiting and not cfg.get("reconcile"):
-                    _queue_retry(job, cfg, waiting, sender_paths)
+                # Check servers only waits for files whose old item a server confirmed gone: they get the retry a normal
+                # job queues (once from here, the retry job counts on), and only then leave Check servers. Any other
+                # file still waiting keeps its item and is listed again by a later run.
+                if waiting:
+                    retried = _queue_retry(job, cfg, waiting, sender_paths)
+                    _mark_retried_items_gone(ctx.store, gone_items, retried, sender_paths)
                 if replaced and checks_replaced_later:
                     _queue_verify(job, cfg, replaced, sender_paths)
             finally:
@@ -1021,7 +1081,8 @@ def start_intro_credits_job_async(job_id: str, config_overrides: dict | None = N
     if config_overrides:
         jm = get_job_manager()
         # Resume paths pass a snapshot of the job's config; files that joined it since (webhook episodes, Season
-        # requests) are kept. Only this branch takes the lock: create_intro_credits_job starts jobs while holding it.
+        # requests) are kept. Only this branch takes the lock: create_intro_credits_job starts jobs without overrides,
+        # and its callers submit_webhook_follow_up and _queue_season_followups hold the (non-reentrant) lock then.
         with FOLLOW_UP_LOCK:
             job = jm.get_job(job_id)
             if job is not None:

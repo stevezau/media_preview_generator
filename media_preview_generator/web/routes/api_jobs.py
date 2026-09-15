@@ -1726,6 +1726,12 @@ def reprocess_job(job_id):
     # and ``_spawn_retry_job`` perform.
     for key in RETRY_STATE_CONFIG_KEYS:
         new_config.pop(key, None)
+    from ...markers.job_runner import FILES_SEALED
+
+    # The seal belongs to the old run's read of its files. Copied, it would keep a reprocessed webhook follow-up from
+    # taking the episodes that arrive while it waits (they'd get jobs of their own), and a reprocessed Season job from
+    # counting as waiting, so a Season request would list its files in another job too.
+    new_config.pop(FILES_SEALED, None)
     new_job = job_manager.create_job(
         library_id=job.library_id,
         library_name=library_name,

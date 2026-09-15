@@ -8,8 +8,9 @@
 // another episode while it's open reloads that episode's season instead of dropping back to "This episode".
 // markers_inspector.js calls setItem(item) for every item and setPath(canonical path) once the item's data
 // arrives — setPath corrects a season already fetched under the item's media_file (used as a placeholder path
-// until the canonical one is known) if the two differ. Text goes through textContent. Depends on app.js globals:
-// apiPost, showToast, _initBootstrapTooltips.
+// until the canonical one is known) if the two differ, and remembers the canonical path for that media_file so the
+// item shown again (the tab re-shown) asks for it straight away. Text goes through textContent. Depends on app.js
+// globals: apiPost, showToast, _initBootstrapTooltips.
 // =========================================================================
 (function () {
     'use strict';
@@ -39,6 +40,8 @@
     const LEGEND = 'Dots: green = server shows this marker, amber = waiting, red = failed, grey = server not enabled or nothing sent yet';
 
     const cache = new Map();
+    // media_file → the canonical path setPath reported for it (a file's canonical path doesn't change).
+    const resolved = new Map();
     let item = null;
     let path = '';
     let seq = 0;
@@ -46,9 +49,11 @@
     const $ = function (id) { return document.getElementById(id); };
 
     // The season path a load/publish should use: the item's own canonical path once render() has reported it
-    // (setPath), else the search result's media_file as a placeholder until that arrives.
+    // (setPath, now or the last time this media_file was shown), else the search result's media_file as a
+    // placeholder until that arrives.
     function askedPath() {
-        return path || (item && item.media_file) || '';
+        const mediaFile = (item && item.media_file) || '';
+        return path || resolved.get(mediaFile) || mediaFile;
     }
 
     function el(tag, className, text) {
@@ -150,8 +155,9 @@
         const titles = el('div');
         const show = String(payload.show || '').replace(/\s*\{[a-z]+-[^}]*\}/gi, '').trim();
         titles.appendChild(el('div', 'mk-season-title', `${show} · ${payload.season || ''}`));
-        const total = counts.episodes || 0;
-        const subText = episodes.length >= MAX_GROUP_EPISODES
+        // total_episodes is the season's size before the cap; only a bigger season says it's showing part of it.
+        const total = counts.total_episodes || counts.episodes || 0;
+        const subText = total > MAX_GROUP_EPISODES
             ? `${total} episodes (showing the ${MAX_GROUP_EPISODES} nearest)`
             : `${total} episodes`;
         titles.appendChild(el('div', 'mk-season-sub text-muted small', subText));
@@ -277,12 +283,13 @@
         const value = next || '';
         const before = askedPath();
         path = value;
+        if (value && item && item.media_file) resolved.set(item.media_file, value);
         const after = askedPath();
         if (after === before) return;
         // render() resolved the item's real path after "Whole season" already loaded (or started loading) the
-        // fallback media_file: that response, once cached under the wrong key, would otherwise render forever.
+        // placeholder media_file: bumping seq drops that response if it's still in flight, and the reload shows the
+        // real path's season in place of whatever the placeholder rendered.
         seq++;
-        if (before) cache.delete(before);
         const body = $('markersSeasonBody');
         if (body && !body.hidden) load();
     }

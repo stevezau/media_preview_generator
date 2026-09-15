@@ -17,7 +17,7 @@ from loguru import logger
 
 from ..servers.base import ServerConfig, ServerType
 from ..servers.ownership import OwnershipMatch, apply_path_mappings
-from .audio.season import season_group
+from .audio.season import folder_videos, season_group, season_size
 from .decide import DecisionStatus, shortened_by
 from .external_ids import ids_from_path
 from .models import SERVER_SOURCES, Marker, MarkerType, Source
@@ -748,10 +748,11 @@ def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) ->
         ``{source, label}``, and ``servers`` dots ``{server_id: {state, message}}``: ``off`` (Intro & Credits off
         there, or this episode's library not selected or excluded), ``ok`` (last publish wrote markers of ours),
         ``none`` (written with nothing of ours, or never published), ``waiting``, ``failed`` or ``skipped``) and
-        ``counts`` (``episodes``; ``ready``: at least one decided marker and no type in Needs review;
-        ``needs_review``).
+        ``counts`` (``episodes``: the files listed; ``total_episodes``: the season's size before the 40-nearest cap;
+        ``ready``: at least one decided marker and no type in Needs review; ``needs_review``).
     """
-    group = season_group(canonical_path)
+    videos = folder_videos(os.path.dirname(canonical_path))
+    group = season_group(canonical_path, videos)
     owners = list(_owners(canonical_path, registry))
     servers = [
         {
@@ -793,5 +794,10 @@ def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) ->
         "season": os.path.basename(group.folder),
         "servers": servers,
         "episodes": episodes,
-        "counts": {"episodes": len(episodes), "ready": ready, "needs_review": review},
+        "counts": {
+            "episodes": len(episodes),
+            "total_episodes": season_size(canonical_path, videos),
+            "ready": ready,
+            "needs_review": review,
+        },
     }

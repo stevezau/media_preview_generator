@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import threading
@@ -515,6 +516,25 @@ class TestWebhookSeasonGrouping:
         assert out == new.id and new.config["file_paths"] == [ep(S1, 2)]
         assert jm.get_job(waiting.id).config["file_paths"] == [ep(S1, 1)]
 
+    def test_an_episode_doesnt_join_a_follow_up_cancelled_between_its_read_and_the_write(self, jm, monkeypatch):
+        waiting = self._existing(jm, [ep(S1, 1)])
+        real_get = jm.get_job
+
+        def read_then_cancelled(job_id):
+            live = real_get(job_id)
+            if job_id != waiting.id or live is None or live.status is not JobStatus.PENDING:
+                return live
+            snapshot = copy.copy(live)  # what the join read: still pending
+            jm.cancel_job(job_id)
+            return snapshot
+
+        monkeypatch.setattr(jm, "get_job", read_then_cancelled)
+        out = self._submit([ep(S1, 2)])
+        (new,) = self._new(jm, {waiting.id})
+        assert out == new.id and new.config["file_paths"] == [ep(S1, 2)]
+        assert real_get(waiting.id).config["file_paths"] == [ep(S1, 1)]
+        assert real_get(waiting.id).library_name == "existing"
+
     def test_another_season_gets_its_own_job(self, jm):
         waiting = self._existing(jm, [ep(S1, 1)])
         out = self._submit([ep(S2, 1)])
@@ -523,7 +543,16 @@ class TestWebhookSeasonGrouping:
         assert jm.get_job(waiting.id).config["file_paths"] == [ep(S1, 1)]
 
     @pytest.mark.parametrize(
-        "extra", [{job_runner.FILES_SEALED: True}, {"retry_attempt": 1}, {"verify": True}, {"force": True}]
+        "extra",
+        [
+            {job_runner.FILES_SEALED: True},
+            {"retry_attempt": 1},
+            {"verify": True},
+            {"force": True},
+            {"follows_job_id": None, "source": "schedule"},  # only webhook follow-ups take episodes
+            {"follows_job_id": None, "source": "season"},  # a waiting Season job takes Season requests only
+        ],
+        ids=["sealed", "retry", "verify", "forced", "no-preview-job", "season-job"],
     )
     def test_sealed_retry_verify_and_forced_jobs_take_no_more_files(self, jm, extra):
         existing = self._existing(jm, [ep(S1, 1)], **extra)
@@ -579,6 +608,41 @@ class TestWebhookSeasonGrouping:
         assert jm.get_job(waiting.id).config["file_paths"] == sealed["file_paths"]
         every = [p for j in jm.get_all_jobs() if j.kind == JOB_KIND_INTRO_CREDITS for p in j.config["file_paths"]]
         assert sorted(every) == [ep(S1, e) for e in range(1, 12)]
+
+
+class TestJobsStartWhileTheirCallerHoldsTheFollowUpLock:
+    """The real start function under the callers of create_intro_credits_job, which hold FOLLOW_UP_LOCK."""
+
+    @pytest.fixture
+    def real_start(self, settings, tmp_path, monkeypatch):
+        settings["media_servers"] = [_server("jf-1", "jellyfin")]
+        manager = JobManager(config_dir=str(tmp_path / "jobs"))
+        monkeypatch.setattr(job_runner, "get_job_manager", lambda: manager)
+        monkeypatch.setattr(triggers, "get_job_manager", lambda: manager)
+        ran = []
+        monkeypatch.setattr(job_runner, "run_intro_credits_job", ran.append)
+        return SimpleNamespace(jm=manager, ran=ran)
+
+    @pytest.mark.parametrize("caller", ["webhook-follow-up", "season-follow-up"])
+    def test_creating_a_job_under_the_lock_returns(self, real_start, caller):
+        asker = _finished_job(real_start.jm)
+
+        def create():
+            if caller == "webhook-follow-up":
+                triggers.submit_webhook_follow_up(preview_job_id="prev-1", paths=[ep(S1, 1)], source="plex")
+            else:
+                job_runner._queue_season_followups(asker, [ep(S1, 2)])
+
+        thread = threading.Thread(target=create, daemon=True)
+        thread.start()
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "starting the job waited for FOLLOW_UP_LOCK, which its caller holds"
+        (created,) = [j for j in real_start.jm.get_all_jobs() if j.id != asker.id]
+        for _ in range(50):
+            if real_start.ran:
+                break
+            time.sleep(0.02)
+        assert real_start.ran == [created.id]
 
 
 class TestResumeKeepsJoinedFiles:

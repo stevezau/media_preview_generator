@@ -3633,6 +3633,26 @@ class TestReprocessJob:
         assert jm.get_job(new_id).kind == kind
         assert start.call_args.args[0] == new_id
 
+    @pytest.mark.parametrize(
+        "kept",
+        [{"source": "sonarr", "follows_job_id": "prev-1"}, {"source": "season"}],
+        ids=["webhook-follow-up", "season-job"],
+    )
+    def test_reprocess_of_a_sealed_intro_credits_follow_up_drops_the_seal(self, client, kept):
+        from media_preview_generator.markers.job_runner import FILES_SEALED
+        from media_preview_generator.web.jobs import get_job_manager
+
+        jm = get_job_manager()
+        config = {"file_paths": ["/data/tv/S01E01.mkv"], **kept, FILES_SEALED: True}
+        job = jm.create_job(library_name="Intro & Credits · S01E01", kind="intro_credits", config=config)
+        jm.complete_job(job.id)
+        with patch("media_preview_generator.web.routes.api_jobs._start_job_async"):
+            resp = client.post(f"/api/jobs/{job.id}/reprocess", headers=_api_headers())
+        assert resp.status_code == 201
+        new_config = jm.get_job(resp.get_json()["id"]).config
+        assert FILES_SEALED not in new_config
+        assert new_config == {"file_paths": ["/data/tv/S01E01.mkv"], **kept}
+
     def test_reprocess_nonexistent_job(self, client):
         resp = client.post("/api/jobs/nonexistent/reprocess", headers=_api_headers())
         assert resp.status_code == 404

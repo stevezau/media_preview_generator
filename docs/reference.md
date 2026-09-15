@@ -371,10 +371,14 @@ answer is 1 day old, then 2, 4, 8 and 16 days after each re-read that stays empt
 file taken for a server isn't taken again within a day. At most 500 files per run (100 of them kept for those re-reads
 while more drifted files wait); drifted items take turns across runs, with the warning "N more changed file(s) are
 checked on a later run". An item the server no longer has is dropped quietly when no runnable file here belongs to it,
-or after a run in which its file's row was "not in library" and the server confirmed the item missing. Check servers
-queues no retry (a later run lists what still waits). Other warnings: `Skipped <server>: <reason>`, `Couldn't check
-<server>`, `Couldn't check <server>: no connection to it`, `Couldn't read what N item(s) show on <server>`. With nothing
-to list it completes at once (log "Every server checked still shows what this app published").
+or when its file's row was "not in library" and the server confirmed the item missing: that file gets one retry job
+(the normal retry above, `source: "reconcile"`, attempt 1; like `manual` jobs, it and its retries queue no not-on-disk
+retry and no verify job) and the item is dropped only once that retry is queued. A run cancelled or failed before
+then, or with `webhook_retry_count` 0, drops nothing, so the next run confirms the item again. Check servers queues no
+other retry (a later run lists what still waits). Other warnings: `Skipped <server>:
+<reason>`, `Couldn't check <server>`, `Couldn't check <server>: no connection to it`, `Couldn't read what N item(s)
+show on <server>`. With nothing to list it completes at once (log "Every server checked still shows what this app
+published").
 
 ### Outcome keys
 
@@ -500,7 +504,8 @@ per-episode `GET /api/markers/item` stays the place for what a server shows righ
   out; only season audio has a `label`, e.g. `"10/10"`) and `servers` dots (`{server_id: {state, message}}`, `state`
   one of `ok` — last publish wrote our markers, `none` — nothing of ours there or never published, `waiting`,
   `failed`, `skipped`, or `off` — Intro & Credits off there, or this episode's library isn't selected or is excluded).
-- `counts` — `episodes`, `ready` (at least one decided marker and nothing in Needs review), `needs_review`.
+- `counts` — `episodes` (the episodes listed), `total_episodes` (the season's size before the 40-nearest cap), `ready`
+  (at least one decided marker and nothing in Needs review), `needs_review`.
 
 `400` `{"error": "Path is not a file inside any server library"}` (also for a missing `path`) or `{"error": "Not a TV
 episode"}` (no `SxxEyy` in its name). `500` `{"error": "Couldn't build the Season view for this file"}`.

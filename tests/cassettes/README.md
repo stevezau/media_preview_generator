@@ -112,7 +112,8 @@ the test sends on replay; the per-user route answers a single item, so the `Item
 `Items` list), which Check servers uses to tell a deleted item from a failed read.
 
 `tests/test_servers_jellyfin_vcr.py::TestJellyfinItemMissingContract` is recorded against the storage lab's Jellyfin
-10.11 (`mlab-jellyfin`), not the Docker-Compose stack; it asks for an item id Jellyfin doesn't have:
+10.11 (`mlab-jellyfin`), not the Docker-Compose stack; it asks for an item id Jellyfin doesn't have, and for Synth
+Chapters S01E02, which must be indexed there:
 
 ```bash
 cd /home/data/workspace/plex_generate_vid_previews
@@ -122,7 +123,9 @@ JELLYFIN_URL=http://127.0.0.1:18097 JELLYFIN_TOKEN="$JF_TOKEN" \
 grep -rlF -e "$JF_TOKEN" tests/cassettes/test_servers_jellyfin_vcr/ && echo "LEAK" || echo "clean"
 ```
 
-Expected: `1 passed`, `clean`.
+Expected: `2 passed`, `clean`. Jellyfin answers `/Items?Ids=<id>` without `Path` or `MediaSources`, so the scrubber
+can't tell it's synthetic; for exactly that request it keeps each item's `Id` and `Type` only, instead of emptying the
+list (which would replay "the server has it" as "it's gone").
 The API-key read answers an `Items` list whose item has no `Path` (it asks for other fields): the scrubber keeps it
 when every one of its `MediaSources` paths is synthetic.
 

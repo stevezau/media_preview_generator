@@ -151,3 +151,40 @@ class TestJellyfinItemMissingContract:
     def test_an_id_jellyfin_doesnt_have_is_missing(self, jellyfin_lab):
         assert jellyfin_lab.get_media_segments(self.UNKNOWN_ITEM) is None
         assert jellyfin_lab.item_missing(self.UNKNOWN_ITEM) is True
+
+    def test_an_item_jellyfin_has_is_not_missing(self, jellyfin_lab):
+        item_id = jellyfin_lab._uncached_resolve_remote_path_to_item_id(self.SYNTH_E02)
+        assert item_id
+        assert jellyfin_lab.item_missing(item_id) is False
+
+
+class TestIdLookupScrub:
+    """The recording scrub keeps an ``/Items?Ids=`` answer's items as ``Id`` and ``Type`` only (no path to vouch for)."""
+
+    ITEM = {"Id": "3d92", "Type": "Episode", "Name": "Real Show", "SeriesName": "Real Show", "ImageTags": {"P": "1"}}
+
+    @staticmethod
+    def _items(uri):
+        import json
+        from types import SimpleNamespace
+
+        from tests.conftest import _scrub_request_uri, _scrub_response_body
+
+        _scrub_request_uri(SimpleNamespace(uri=uri))
+        body = json.dumps({"Items": [dict(TestIdLookupScrub.ITEM)], "TotalRecordCount": 1})
+        return json.loads(_scrub_response_body({"headers": {}, "body": {"string": body}})["body"]["string"])["Items"]
+
+    def test_an_id_lookup_keeps_only_id_and_type(self):
+        assert self._items("http://jf:8096/Items?Ids=3d92") == [{"Id": "3d92", "Type": "Episode"}]
+
+    @pytest.mark.parametrize(
+        "uri",
+        [
+            "http://jf:8096/Items?Ids=3d92&Fields=Path",
+            "http://jf:8096/Items?ParentId=1",
+            "http://jf:8096/Users/u/Items",
+        ],
+        ids=["more-params", "not-an-id-lookup", "other-path"],
+    )
+    def test_any_other_items_answer_is_dropped(self, uri):
+        assert self._items(uri) == []

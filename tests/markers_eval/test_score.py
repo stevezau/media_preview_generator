@@ -11,6 +11,12 @@ from tools.markers_eval.score import Tally, judge_intro
         ((53.0, 91.0), "useful"),  # start 14.5 s early, end 4.75 s late: both inside the tolerances
         ((52.0, 86.0), "wrong"),  # start 15.5 s off
         ((68.0, 91.5), "wrong"),  # end 5.25 s off
+        ((52.5, 86.25), "useful"),  # start exactly 15 s early
+        ((82.5, 86.25), "useful"),  # start exactly 15 s late
+        ((67.5, 91.25), "useful"),  # end exactly 5 s late
+        ((67.5, 81.25), "useful"),  # end exactly 5 s early
+        ((52.499, 86.25), "wrong"),  # start 1 ms past the tolerance
+        ((67.5, 91.251), "wrong"),  # end 1 ms past the tolerance
     ],
 )
 def test_judge_intro_uses_the_spec_tolerances(segment, verdict):

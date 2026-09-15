@@ -1033,14 +1033,21 @@ class MarkerStore:
                 (file_id, limit_ms, self._now()),
             )
 
-    def record_member_probe_failure(self, identity: FileIdentity, failed_at: datetime) -> None:
+    def record_member_probe_failure(
+        self, identity: FileIdentity, failed_at: datetime, *, forget_before: datetime
+    ) -> None:
         """Remember that a season member with this identity couldn't be probed (replaces the path's older entry).
+
+        Entries that no longer keep a member from being probed are forgotten in the same write: the table isn't tied to
+        file rows, and a path gone from disk is never probed or recorded again, so its entry would otherwise stay.
 
         Args:
             identity: The file as it was when probing failed.
             failed_at: When (the job's clock).
+            forget_before: Entries of any path that failed before this are removed.
         """
         with self._tx() as conn:
+            conn.execute("DELETE FROM member_probe_failures WHERE failed_at < ?", (forget_before.isoformat(),))
             conn.execute(
                 "INSERT OR REPLACE INTO member_probe_failures (canonical_path, size, mtime_ns, failed_at) "
                 "VALUES (?,?,?,?)",

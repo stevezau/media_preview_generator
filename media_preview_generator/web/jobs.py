@@ -1627,6 +1627,28 @@ class JobManager:
                 self._persist_job(job)
                 self._emit_event("job_updated", job.to_dict())
 
+    def update_job_config_if_pending(self, job_id: str, config: dict[str, Any]) -> bool:
+        """Update stored config for a job only while it is still PENDING.
+
+        The status check and the write happen under one hold of the manager's lock, so a cancel (or a start) can't
+        land between them: files joining a waiting job are never written into a job that will no longer run them.
+
+        Args:
+            job_id: Job identifier.
+            config: The job's new config.
+
+        Returns:
+            True when the config was written; False when the job is missing or no longer pending.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.status != JobStatus.PENDING:
+                return False
+            job.config = dict(config)
+            self._persist_job(job)
+            self._emit_event("job_updated", job.to_dict())
+            return True
+
     def update_job_library_name(self, job_id: str, library_name: str) -> None:
         """Update the displayed ``library_name`` of an existing job.
 

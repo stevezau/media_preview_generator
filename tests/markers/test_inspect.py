@@ -1775,7 +1775,7 @@ class TestSeasonPayload:
         assert (eps[2]["known"], eps[2]["duration_ms"], eps[2]["evidence"]) == (False, None, [])
         assert eps[2]["intro"] == {"status": None, "reason": "", "marker": None, "proposed": None}
         assert eps[2]["servers"]["plex-1"] == {"state": "none", "message": ""}
-        assert payload["counts"] == {"episodes": 3, "ready": 1, "needs_review": 1}
+        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": 1, "needs_review": 1}
 
     @pytest.mark.parametrize(
         ("status", "markers", "state"),
@@ -1787,7 +1787,24 @@ class TestSeasonPayload:
         payload = inspect.season_payload(season.paths[0], registry=season.reg, store=season.store)
         assert payload["episodes"][0]["servers"]["plex-1"] == {"state": state, "message": "m"}
         # Known, but nothing decided: not ready.
-        assert payload["counts"] == {"episodes": 3, "ready": 0, "needs_review": 0}
+        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": 0, "needs_review": 0}
+
+    @pytest.mark.parametrize(("files", "listed"), [(40, 40), (60, 40)])
+    def test_counts_the_seasons_episodes_before_the_40_nearest_cap(self, tmp_path, store, files, listed):
+        folder = tmp_path / "media" / "tv" / "Show (2020)" / "Season 01"
+        folder.mkdir(parents=True)
+        paths = []
+        for e in range(1, files + 1):
+            p = folder / f"Show (2020) - S01E{e:02d}.mkv"
+            p.write_bytes(b"x")
+            paths.append(str(p))
+        (folder / "Show (2020) - S02E01.mkv").write_bytes(b"x")  # another season in the folder isn't counted
+        reg = _registry(server_config("plex-1", ServerType.PLEX, root=str(tmp_path / "media")))
+
+        payload = inspect.season_payload(paths[0], registry=reg, store=store)
+
+        assert len(payload["episodes"]) == listed
+        assert (payload["counts"]["episodes"], payload["counts"]["total_episodes"]) == (listed, files)
 
     def test_a_failed_publish_keeps_its_last_markers_but_is_failed(self, season):
         intro = Marker(T.INTRO, 127_000, 157_000, ("skipdb",))

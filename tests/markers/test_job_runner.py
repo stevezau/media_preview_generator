@@ -1,6 +1,7 @@
 """Intro & Credits job runner: file selection, the job thread, delegation from the preview runner and restarts."""
 
 import os
+import sqlite3
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -842,7 +843,7 @@ class TestRun:
         assert set(kwargs) == {"registry", "store", "max_files", "capability", "cancel_check", "progress_callback"}
         assert (kwargs["registry"], kwargs["store"], kwargs["max_files"]) == (env.registry, env.ctx.store, 500)
         cached = MagicMock(return_value="report")
-        monkeypatch.setattr(job_runner, "_capability", cached)
+        monkeypatch.setattr(job_runner, "cached_capability", cached)
         assert kwargs["capability"]("cfg", "pub") == "report"
         cached.assert_called_once_with(env.ctx, "cfg", "pub")
         assert kwargs["cancel_check"]() is False
@@ -923,6 +924,46 @@ class TestRun:
             job_runner.run_intro_credits_job("j1")
         assert answers == [True]
         env.jm.cancel_job.assert_called_once_with("j1")
+        assert env.gate.release.call_args_list == [call(3)]  # handed back once while paused; not released again
+        assert env.gate.acquire.call_count == 1  # never taken again: the cancel came first
+
+    def test_a_pause_while_waiting_for_a_slot_after_resume_keeps_the_job_waiting_without_one(self, env, monkeypatch):
+        from media_preview_generator.markers import reconcile
+
+        env.job.config = {"reconcile": True, "source": "reconcile"}
+        state = {"paused": True}
+        env.jm.is_pause_requested.side_effect = lambda job_id: state["paused"]
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            state["paused"] = False  # resumed
+
+        def acquire(priority, cancel_check, on_wait=None):
+            if env.gate.acquire.call_count == 2:  # the slot asked for on resume
+                state["paused"] = True  # paused again while waiting for it
+                assert cancel_check() is True
+                return False
+            return True
+
+        env.gate.acquire.side_effect = acquire
+        monkeypatch.setattr(job_runner, "time", SimpleNamespace(sleep=sleep))
+        seen = []
+
+        def listing(**kwargs):
+            seen.append((kwargs["cancel_check"](), env.gate.release.call_args_list[:], env.gate.acquire.call_count))
+            return reconcile.CheckServersListing([], [])
+
+        with patch.object(reconcile, "check_servers_listing", side_effect=listing):
+            job_runner.run_intro_credits_job("j1")
+        [(cancelled, released, acquired)] = seen
+        assert cancelled is False
+        # Paused: handed back once. The acquire interrupted by the second pause took no slot, so there was nothing to
+        # hand back again; the job waited out that pause and took a slot on the next resume.
+        assert released == [call(3)]
+        assert acquired == 3
+        assert len(sleeps) == 2
+        assert env.gate.release.call_args_list == [call(3), call(3)]
 
     def test_cancel_during_enumeration_cancels_without_submitting(self, env):
         def build(cfg, **kwargs):
@@ -1338,7 +1379,15 @@ class TestLibraryRetry:
         retry_env.results.append(("/m/a.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]))
         self._run(["/m/a.mkv"])
         retry_env.create.assert_not_called()
-        assert any("still" in c.args[1] for c in env.jm.add_log.call_args_list)
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        if count == 0:
+            expected = "WARNING - 1 file(s) not in a server's library yet; retries are off, so a later job for them tries again"
+        else:
+            expected = (
+                f"WARNING - 1 file(s) still not in a server's library after {count} retr{'y' if count == 1 else 'ies'}; "
+                "a later job for them tries again"
+            )
+        assert expected in logs, logs
 
     def test_retry_takes_at_most_500_files_and_says_how_many_wait_for_the_next_run(self, env, retry_env):
         paths = [f"/m/{i:04d}.mkv" for i in range(501)]
@@ -1346,7 +1395,9 @@ class TestLibraryRetry:
         self._run(paths)
         assert retry_env.create.call_args.kwargs["file_paths"] == paths[:500]
         logs = [c.args[1] for c in env.jm.add_log.call_args_list]
-        assert "INFO - 1 more files not in a server's library yet will be tried on the next run" in logs
+        assert (
+            "INFO - 1 more files not in a server's library yet get no retry; a later job for them tries again" in logs
+        )
 
     def test_exactly_500_files_are_all_retried(self, env, retry_env):
         paths = [f"/m/{i:04d}.mkv" for i in range(500)]
@@ -1473,7 +1524,7 @@ class TestLibraryRetry:
         logs = [c.args[1] for c in env.jm.add_log.call_args_list]
         assert (
             "WARNING - 3 file(s) still not on disk, not in a server's library or not checked on Plex after 3 retries; "
-            "the next run for these files will try again"
+            "a later job for them tries again"
         ) in logs, logs
 
     def test_stable_reason_code_is_recognised_whatever_the_message(self, env, retry_env):
@@ -1495,16 +1546,120 @@ class TestLibraryRetry:
         env.job.config = {"reconcile": True, "source": "reconcile"}
         retry_env.results.append(("/m/a.mkv", "markers_waiting", [row]))
         listing = MagicMock(spec=reconcile.CheckServersListing, items=[_item("/m/a.mkv")], warnings=[])
+        listing.confirmed_gone_items.return_value = set()  # no item confirmed gone
         self._run(listing=listing)
         retry_env.create.assert_not_called()
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
-        listing.forget_gone_items.assert_called_once_with(env.ctx.store, env.registry, "/m/a.mkv", [row])
+        listing.confirmed_gone_items.assert_called_once_with(env.registry, "/m/a.mkv", [row])
+
+    @staticmethod
+    def _check_servers_file(env, confirmed_gone):
+        from media_preview_generator.markers import reconcile
+
+        env.job.config = {"reconcile": True, "source": "reconcile"}
+        env.job.library_name = reconcile.RECONCILE_JOB_NAME
+        listing = reconcile.CheckServersListing([_item("/m/a.mkv")], [], {"/m/a.mkv": frozenset({("jf-1", "x")})})
+        return listing, patch.object(reconcile, "_confirmed_missing", return_value=confirmed_gone)
+
+    @pytest.mark.parametrize("confirmed_gone", [True, False], ids=["item-confirmed-gone", "item-not-confirmed-gone"])
+    def test_check_servers_retries_once_a_file_whose_old_item_the_server_confirmed_gone(
+        self, env, retry_env, confirmed_gone
+    ):
+        # The server deleted the old item but may not have indexed the new one yet: the file gets the retry a normal
+        # job queues, and only then leaves Check servers. An item not confirmed gone is read back next run.
+        listing, confirmed_missing = self._check_servers_file(env, confirmed_gone)
+        retry_env.results.append(("/m/a.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]))
+        order = []
+        retry_env.create.side_effect = lambda **kw: order.append("retry") or MagicMock(id="retry-1")
+        env.ctx.store.mark_item_gone.side_effect = lambda *args: order.append(("marked", *args))
+        with confirmed_missing as confirmed:
+            self._run(listing=listing)
+        confirmed.assert_called_once_with(env.registry, "jf-1", "x")
+        env.jm.record_file_result.assert_called_once_with(
+            "j1", "/m/a.mkv", "markers_waiting", "", "Lookup", servers=[NOT_IN_LIBRARY_ROW], server_messages=True
+        )
+        if confirmed_gone:
+            assert order == ["retry", ("marked", "jf-1", "x")]  # marked gone only once its retry exists
+            retry_env.create.assert_called_once_with(
+                library_name="Retry: Intro & Credits · Check servers",
+                priority=3,
+                source="reconcile",
+                file_paths=["/m/a.mkv"],
+                item_id_hints=None,
+                retry_attempt=1,
+                retry_delay_s=60,
+                verify_chain=False,
+            )
+        else:
+            assert order == []
+        env.jm.complete_job.assert_called_once_with("j1", warning=None)
+
+    @pytest.mark.parametrize("ending", ["cancelled", "retries-off", "retry-not-created", "job-failed"])
+    def test_a_confirmed_gone_item_stays_in_check_servers_when_no_retry_was_queued(self, env, retry_env, ending):
+        # Marked gone without a retry, the file would never be tried again: the next run confirms it again instead.
+        listing, confirmed_missing = self._check_servers_file(env, True)
+        retry_env.results.append(("/m/a.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]))
+        if ending == "cancelled":
+            env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "cancelled": True}
+        elif ending == "retries-off":
+            retry_env.settings["webhook_retry_count"] = 0
+        elif ending == "retry-not-created":
+            retry_env.create.side_effect = RuntimeError("jobs.db locked")
+        else:
+            env.jm.complete_job.side_effect = [RuntimeError("jobs.db locked"), None]
+        with confirmed_missing:
+            self._run(listing=listing)
+        env.ctx.store.mark_item_gone.assert_not_called()
+        assert retry_env.create.call_count == (1 if ending == "retry-not-created" else 0)
+        if ending == "retries-off":
+            logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+            assert (
+                "WARNING - 1 file(s) not in a server's library yet; retries are off, so Check servers checks them "
+                "again on its next run"
+            ) in logs, logs
+
+    @pytest.mark.parametrize("failing", ["server-lookup", "marking-gone"])
+    def test_a_store_or_lookup_error_still_records_the_file_and_completes(self, env, retry_env, failing):
+        from media_preview_generator.markers import reconcile
+
+        listing, confirmed_missing = self._check_servers_file(env, True)
+        retry_env.results.append(("/m/a.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]))
+        if failing == "server-lookup":
+            confirmed_missing = patch.object(reconcile, "_confirmed_missing", side_effect=RuntimeError("boom"))
+        else:
+            env.ctx.store.mark_item_gone.side_effect = sqlite3.OperationalError("database is locked")
+        with confirmed_missing:
+            self._run(listing=listing)
+        env.jm.record_file_result.assert_called_once_with(
+            "j1", "/m/a.mkv", "markers_waiting", "", "Lookup", servers=[NOT_IN_LIBRARY_ROW], server_messages=True
+        )
+        # A lookup that raised confirms nothing (no retry, listed again); a failed mark leaves the queued retry.
+        assert retry_env.create.call_count == (0 if failing == "server-lookup" else 1)
+        env.jm.complete_job.assert_called_once_with("j1", warning=None)
+
+    def test_a_retry_check_servers_queued_chains_not_in_library_retries_only(self, env, retry_env):
+        # Its files were on disk and nothing was just replaced: no not-on-disk retry and no verify job.
+        env.job.config = {"source": "reconcile", "file_paths": ["/m/a.mkv", "/m/b.mkv"], "retry_attempt": 1}
+        env.job.library_name = "Retry: Intro & Credits · Check servers"
+        replaced_row = _row("markers_written", "2 marker(s)", verify_later=True)
+        retry_env.results += [
+            ("/m/a.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]),
+            ("/m/b.mkv", "skipped_file_not_found", []),
+            ("/m/c.mkv", "markers_published", [replaced_row]),
+        ]
+        with patch.object(job_runner, "_queue_verify") as verify:
+            self._run(["/m/a.mkv", "/m/b.mkv", "/m/c.mkv"])
+        verify.assert_not_called()
+        retry_env.create.assert_called_once()
+        kwargs = retry_env.create.call_args.kwargs
+        assert (kwargs["file_paths"], kwargs["retry_attempt"], kwargs["source"]) == (["/m/a.mkv"], 2, "reconcile")
+        assert kwargs["library_name"] == "Retry: Intro & Credits · Check servers"
 
     def test_other_jobs_forget_no_items(self, env, retry_env):
         from media_preview_generator.markers import reconcile
 
         retry_env.results.append(("/m/a.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]))
-        with patch.object(reconcile.CheckServersListing, "forget_gone_items") as forget:
+        with patch.object(reconcile.CheckServersListing, "confirmed_gone_items") as forget:
             self._run()
         forget.assert_not_called()
 

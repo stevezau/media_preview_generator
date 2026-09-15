@@ -970,7 +970,7 @@ def _still_fresh(ctx: PipelineContext, cached: tuple[float, CapabilityReport] | 
     return time.monotonic() - cached[0] < ttl
 
 
-def _capability(ctx: PipelineContext, cfg: ServerConfig, publisher: MarkerPublisher) -> CapabilityReport:
+def cached_capability(ctx: PipelineContext, cfg: ServerConfig, publisher: MarkerPublisher) -> CapabilityReport:
     """Per-server capability, cached for ``capability_ttl_s``; one fetch per server even when every check thread misses.
 
     An off or unconfirmed answer isn't cached: Plex reads it from the saved settings, and switching Intro & Credits
@@ -1110,7 +1110,7 @@ def _publish_to(
     if publisher is None:
         return _not_written(ServerStatus.SKIPPED, "Not supported for this server type yet", name="")
     try:
-        report = _capability(ctx, cfg, publisher)
+        report = cached_capability(ctx, cfg, publisher)
     except Exception as exc:
         logger.warning("Couldn't check whether {} can receive markers: {}", cfg.name, type(exc).__name__)
         message = f"Couldn't check this server: {type(exc).__name__}"

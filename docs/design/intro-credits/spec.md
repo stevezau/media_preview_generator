@@ -981,4 +981,6 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   items taking turns. A pause during the read-back gives the job slot back. Files with decided credits or preview whose
   server's stored answer is empty or unusable are re-read once it is 1 day old, then 2, 4, 8 and 16 days after each
   re-read that stays empty or fails, at most 5 times. An item the server no longer has is dropped when no runnable file
-  belongs to it, or when the server confirms it missing after a "not in library" row. It queues no retries.
+  belongs to it, or when the server confirms it missing after a "not in library" row; that file gets the one normal
+  retry, and the item is dropped only once the retry is queued (a cancelled or failed run, or retries off, drops
+  nothing). It queues no other retries.

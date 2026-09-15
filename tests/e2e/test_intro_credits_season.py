@@ -74,7 +74,7 @@ def season() -> dict:
             _episode(3, _type("decided", 2_000, 29_000), _type("needs_review", proposed={"start_ms": 1_230_000, "end_ms": _DURATION}), [audio], _dots("ok", "failed", "HTTP 500 from the plugin")),
             _episode(4, _type(None), _type(None), [], _dots("none", "none"), known=False),
         ],
-        "counts": {"episodes": 4, "ready": 2, "needs_review": 1},
+        "counts": {"episodes": 4, "total_episodes": 4, "ready": 2, "needs_review": 1},
     }  # fmt: skip
 
 
@@ -162,6 +162,22 @@ class TestSeasonView:
         expect(body.locator(".mk-season-legend")).to_have_text(
             "Dots: green = server shows this marker, amber = waiting, red = failed, grey = server not enabled or nothing sent yet"
         )
+
+    @pytest.mark.parametrize(
+        ("total", "text"),
+        [(40, "40 episodes"), (60, "60 episodes (showing the 40 nearest)")],
+    )
+    def test_a_capped_season_says_how_many_it_has(self, authed_page: Page, app_url: str, total: int, text: str) -> None:
+        payload = season()
+        payload["episodes"] = [
+            _episode(n, _type(None), _type(None), [], _dots("none", "none"), known=False) for n in range(1, 41)
+        ]
+        payload["counts"] = {"episodes": 40, "total_episodes": total, "ready": 0, "needs_review": 0}
+        view = _Season(authed_page, app_url, payload)
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        expect(page.locator("#markersSeasonBody .mk-season-sub")).to_have_text(text)
 
     def test_publish_sends_the_episode_path_and_links_the_job(self, authed_page: Page, app_url: str) -> None:
         view = _Season(authed_page, app_url, season())
@@ -252,6 +268,38 @@ class TestSeasonView:
         expect(page.locator(".mk-season-title")).to_contain_text("Season 02", timeout=3000)
         paths = [parse_qs(urlparse(u).query)["path"][0] for u in view.season_requests]
         assert paths == [_MEDIA_FILE, other_path]
+
+    def test_a_canonical_path_arriving_never_loads_a_season_nobody_asked_for(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        other_path = f"{_FOLDER}/South Park S01E03 (Alt Cut).mkv"
+        view = _Season(authed_page, app_url, season())
+        view.payload = {**south_park(), "canonical_path": other_path}
+        view.open_result()
+        page = view.open_tab()
+        expect(page.locator("#markersInspectorPath")).to_have_text(other_path)
+        page.locator("button[data-bs-target='#inspector-tab-frames']").click()
+        view.open_tab()
+        page.wait_for_timeout(300)
+        assert view.season_requests == []
+
+    def test_re_showing_the_tab_asks_for_the_canonical_path_only(self, authed_page: Page, app_url: str) -> None:
+        # Once the item's canonical path is known, showing the tab again must not re-request the placeholder
+        # media_file's season first (setItem clears the path; the canonical one is remembered per media_file).
+        other_path = f"{_FOLDER}/South Park S01E03 (Alt Cut).mkv"
+        view = _Season(authed_page, app_url, season())
+        view.payload = {**south_park(), "canonical_path": other_path}
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        for _ in range(4):
+            page.locator("button[data-bs-target='#inspector-tab-frames']").click()
+            expect(page.locator("#inspector-tab-markers")).not_to_have_class(re.compile(r"\bactive\b"))
+            view.open_tab()
+            expect(page.locator("#markersSeasonBody .mk-season-title")).to_be_visible()
+        page.wait_for_timeout(300)
+        paths = [parse_qs(urlparse(u).query)["path"][0] for u in view.season_requests]
+        assert paths == [other_path]
 
     def test_switching_to_another_episode_keeps_the_whole_season_view(self, authed_page: Page, app_url: str) -> None:
         other_path = f"{_FOLDER}/South Park S01E04.mkv"

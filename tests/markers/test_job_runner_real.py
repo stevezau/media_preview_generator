@@ -340,9 +340,9 @@ class TestCheckServersThroughThePipeline(TestRetryThroughThePipeline):
         assert publishers["jf-1"].write.call_args.args[0] == "item-jf-1"
         assert {j.id for j in engine.jm.get_all_jobs()} == {job.id, first}  # no retry, no verify
 
-    @pytest.mark.parametrize("confirmed", [True, False], ids=["server-confirms-it-is-gone", "lookup-failed"])
+    @pytest.mark.parametrize("case", ["server-confirms-it-is-gone", "lookup-failed", "cancelled-after-confirming"])
     def test_an_item_the_server_dropped_leaves_check_servers_only_once_the_server_confirms_it(
-        self, engine, setup, monkeypatch, confirmed
+        self, engine, setup, monkeypatch, case
     ):
         from media_preview_generator.markers.publishers.base import Shown
 
@@ -355,10 +355,18 @@ class TestCheckServersThroughThePipeline(TestRetryThroughThePipeline):
             # Jellyfin no longer lists the file; its old item reads back empty.
             publishers["jf-1"].shows.return_value = Shown.MISSING
             registry.get("jf-1").resolve_remote_path_to_item_id.return_value = None
-            if confirmed:
-                publishers["jf-1"].item_missing.return_value = True
-            else:
+            if case == "lookup-failed":
                 publishers["jf-1"].item_missing.side_effect = TimeoutError("read timed out")
+            elif case == "cancelled-after-confirming":
+
+                def confirmed_then_cancelled(item_id):
+                    (running,) = [j for j in engine.jm.get_running_jobs() if j.config.get("reconcile")]
+                    engine.jm.request_cancellation(running.id)
+                    return True
+
+                publishers["jf-1"].item_missing.side_effect = confirmed_then_cancelled
+            else:
+                publishers["jf-1"].item_missing.return_value = True
             job = self._check_servers(engine, setup, monkeypatch, publishers)
             [row] = engine.jm.get_file_results(job.id)
             assert {s["id"]: (s["status"], s.get("reason_code")) for s in row["servers"]} == {
@@ -366,13 +374,26 @@ class TestCheckServersThroughThePipeline(TestRetryThroughThePipeline):
                 "jf-1": ("markers_waiting", "not_in_library"),
             }
             publishers["jf-1"].item_missing.assert_called_once_with("item-jf-1")
+            assert job.status is (JobStatus.CANCELLED if case == "cancelled-after-confirming" else JobStatus.COMPLETED)
             status = setup.store.get_item_publish_state("jf-1", "item-jf-1").status
-            assert status == ("gone" if confirmed else "written")
+            # Marked gone only once its retry was queued: a cancelled run leaves it to be confirmed again.
+            assert status == ("gone" if case == "server-confirms-it-is-gone" else "written")
+            others = [j for j in engine.jm.get_all_jobs() if j.id not in {first, job.id}]
+            if case == "server-confirms-it-is-gone":
+                # The file gets the retry any job queues (Jellyfin may not have added its new item yet); the retry
+                # lists the file, not Check servers' drift.
+                (retry,) = others
+                assert (retry.config["retry_attempt"], retry.config["file_paths"]) == (1, [setup.path])
+                assert (retry.config["source"], retry.config.get("reconcile")) == ("reconcile", None)
+            else:
+                assert others == []
+            publishers["jf-1"].item_missing.side_effect = None
+            publishers["jf-1"].item_missing.return_value = False
             again = self._check_servers(engine, setup, monkeypatch, publishers)
         assert again.status is JobStatus.COMPLETED and again.error is None
-        assert [r["file"] for r in engine.jm.get_file_results(again.id)] == ([] if confirmed else [setup.path])
+        listed_again = [] if case == "server-confirms-it-is-gone" else [setup.path]
+        assert [r["file"] for r in engine.jm.get_file_results(again.id)] == listed_again
         assert publishers["jf-1"].write.call_count == 1
-        assert {j.id for j in engine.jm.get_all_jobs()} == {first, job.id, again.id}  # no retry either way
 
     def test_nothing_drifted_completes_at_once(self, engine, setup, monkeypatch):
         registry, publishers = setup.make([("jf-1", ServerType.JELLYFIN)])

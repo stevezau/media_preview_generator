@@ -13,7 +13,7 @@ from ..job_kinds import JOB_KIND_INTRO_CREDITS
 from ..servers.base import ServerConfig
 from ..servers.ownership import webhook_path_candidates
 from ..servers.registry import UnsupportedServerTypeError, server_config_from_dict
-from ..web.jobs import PRIORITY_HIGH, PRIORITY_NORMAL, Job, JobStatus, get_job_manager
+from ..web.jobs import PRIORITY_HIGH, PRIORITY_NORMAL, Job, get_job_manager
 from ..web.settings_manager import get_settings_manager
 from .audio.season import season_group
 from .external_ids import ids_from_path, is_season_folder
@@ -219,17 +219,19 @@ def _join(jm, job: Job, paths: list[str], hints: dict[str, dict[str, str]] | Non
     """Add episodes (and their item id hints) to a waiting follow-up's config.
 
     Returns:
-        False when the job is no longer pending (cancelled since it was listed), and nothing was added.
+        False when the job is no longer pending (cancelled since it was listed, even between this read and the
+        write), and nothing was added.
     """
     live = jm.get_job(job.id)
-    if live is None or live.status is not JobStatus.PENDING:
+    if live is None:
         return False
     cfg = dict(live.config or {})
     cfg["file_paths"] = list(dict.fromkeys([*(cfg.get("file_paths") or []), *paths]))
     joined_hints = dict(cfg.get("webhook_item_id_hints") or {})
     joined_hints.update({p: h for p, h in (hints or {}).items() if p in paths})
     cfg["webhook_item_id_hints"] = joined_hints
-    jm.update_job_config(job.id, cfg)
+    if not jm.update_job_config_if_pending(job.id, cfg):
+        return False
     jm.update_job_library_name(job.id, f"Intro & Credits · {len(cfg['file_paths'])} files")
     return True
 

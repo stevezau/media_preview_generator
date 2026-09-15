@@ -647,9 +647,10 @@ order its episodes arrived in.
 
 For a TV episode, the Inspector's Intro & Credits tab has a **This episode** / **Whole season** switch. **Whole
 season** lists the season's episodes (the same group season audio uses) with each one's intro and credits, the
-sources behind them, and one dot per server. It reads only this app's own records, so a whole season loads at once;
-**This episode** stays the place for what a server shows right now. An episode in **Needs review** has a **Review**
-button (its tooltip gives the reason) that opens that episode; adjusting markers comes in a later update.
+sources behind them, and one dot per server. A season of more than 40 episodes lists the 40 nearest, and the header
+says so ("60 episodes (showing the 40 nearest)"). It reads only this app's own records, so a whole season loads at
+once; **This episode** stays the place for what a server shows right now. An episode in **Needs review** has a
+**Review** button (its tooltip gives the reason) that opens that episode; adjusting markers comes in a later update.
 
 **Publish N to M servers** queues a Normal-priority Intro & Credits job named `Intro & Credits: <show> · Season N`
 (or `· Specials`) for exactly the listed episodes: decided episodes go to every server that doesn't show them yet,
@@ -791,10 +792,14 @@ libraries." In detail:
   Credits on or not. The re-read waits until the answer is 1 day old, then 2, 4, 8 and 16 days after each re-read that
   stays empty or fails; after 5 such re-reads it stops.
 - One run takes at most 500 files; the job warns "N more changed file(s) are checked on a later run", and waiting
-  items take turns across runs. Check servers queues no retries: whatever is still waiting is listed again next run.
+  items take turns across runs. Whatever is still waiting is listed again next run, with one exception below.
 - An item the server no longer has, with no file here that still belongs to it, is dropped from Check servers
   quietly. When a listed file's row is **Waiting** because it isn't in that server's library yet, and that server
-  confirms the item is gone, the item is dropped too, until this app publishes to it again.
+  confirms the item is gone, the file gets one retry job, the same one any job queues for a file not in a server's
+  library yet (same delay and retry count), since the server may not have added the file's new item yet. Once that
+  retry is queued the item is dropped too, until this app publishes to it again. If the job is cancelled or fails
+  first, or retries are off, nothing is dropped and the next run checks the file again. If the server doesn't confirm
+  the item is gone, there is no retry and the file is listed again next run.
 - A server that can't take markers is skipped with its reason ("Skipped Home Plex: …"). Items whose read fails get a
   warning ("Couldn't read what 3 item(s) show on Home Plex") and are read again next run. "Couldn't check Home Plex"
   means reading that server raised an error, or a Jellyfin or Emby server failed 20 reads in a row and the rest of it

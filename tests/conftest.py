@@ -748,6 +748,7 @@ __all__ = [
 # process, so stashing the path here and reading it in ``_scrub_response_body`` right after
 # is safe — by the time the next request is scrubbed, this response has already been handled.
 _last_recorded_request_path = ""
+_last_recorded_request_query = ""
 
 
 def _scrub_request_uri(request):
@@ -771,9 +772,10 @@ def _scrub_request_uri(request):
     """
     from urllib.parse import urlparse, urlunparse
 
-    global _last_recorded_request_path
+    global _last_recorded_request_path, _last_recorded_request_query
     parsed = urlparse(request.uri)
     _last_recorded_request_path = parsed.path
+    _last_recorded_request_query = parsed.query
     path = parsed.path
     for variable in ("EMBY_USER_ID", "JELLYFIN_USER_ID"):
         user_id = os.environ.get(variable)
@@ -917,6 +919,20 @@ def _scrub_response_body(response):
             for it in items
         )
 
+    # An ``/Items?Ids=<id>`` lookup (``item_missing`` with an API key) only pins whether the server lists the id.
+    # Jellyfin answers it without ``Path``/``MediaSources``, so the synthetic check above can't vouch for the item;
+    # rather than collapse the list (which turns "the server has it" into "it's gone" on replay), each item is cut to
+    # its opaque ``Id`` and ``Type``, which identify nothing. Scoped to exactly that request: path ``/Items`` and a
+    # query of ``Ids`` alone.
+    def _id_lookup_items(items):
+        from urllib.parse import parse_qs
+
+        if _last_recorded_request_path != "/Items" or set(parse_qs(_last_recorded_request_query)) != {"Ids"}:
+            return None
+        if not all(isinstance(it, dict) and "Id" in it for it in items):
+            return None
+        return [{key: it[key] for key in ("Id", "Type") if key in it} for it in items]
+
     def _synthetic_item(item):
         if not isinstance(item, dict):
             return False
@@ -953,6 +969,8 @@ def _scrub_response_body(response):
         if isinstance(items, list) and items:
             if _all_synthetic(items):
                 _strip_item_identifiers(items)
+            elif (id_only := _id_lookup_items(items)) is not None:
+                parsed["Items"] = id_only
             else:
                 parsed["Items"] = []
                 parsed["TotalRecordCount"] = 0

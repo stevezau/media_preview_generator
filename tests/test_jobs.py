@@ -1087,6 +1087,35 @@ class TestSetJobOutcome:
         assert job.progress.outcome is None
 
 
+class TestUpdateJobConfigIfPending:
+    """Intro & Credits joins write a waiting job's files only while it is still pending."""
+
+    def test_a_pending_job_takes_the_config(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test", config={"file_paths": ["/a"]})
+
+        assert jm.update_job_config_if_pending(job.id, {"file_paths": ["/a", "/b"]}) is True
+        assert jm.get_job(job.id).config == {"file_paths": ["/a", "/b"]}
+
+    @pytest.mark.parametrize("state", ["running", "completed", "cancelled"])
+    def test_a_job_no_longer_pending_keeps_its_config(self, config_dir, state):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test", config={"file_paths": ["/a"]})
+        if state == "cancelled":
+            jm.cancel_job(job.id)
+        else:
+            jm.start_job(job.id)
+        if state == "completed":
+            jm.complete_job(job.id)
+
+        assert jm.update_job_config_if_pending(job.id, {"file_paths": ["/a", "/b"]}) is False
+        assert jm.get_job(job.id).config == {"file_paths": ["/a"]}
+
+    def test_a_missing_job_is_refused(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        assert jm.update_job_config_if_pending("nope", {"file_paths": ["/b"]}) is False
+
+
 class TestPendingJobsUnderConcurrentCreation:
     """Webhook threads create jobs while other threads list the pending ones (Intro & Credits follow-up dedupe)."""
 

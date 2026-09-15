@@ -2868,7 +2868,7 @@ class TestPublishFanOut:
 
         def check():
             barrier.wait()
-            reports.append(pipeline._capability(ctx, cfg, plex))
+            reports.append(pipeline.cached_capability(ctx, cfg, plex))
 
         threads = [threading.Thread(target=check) for _ in range(16)]
         for t in threads:
@@ -3208,8 +3208,18 @@ class TestReadBackVerify:
             (Shown.REPLACED, "restore", ServerStatus.WRITTEN, "2 marker(s)", 2),
             # Whether Plex's own markers are kept is the publisher's call in its write (see the kept tests below).
             (Shown.REPLACED, "keep_plex", ServerStatus.WRITTEN, "2 marker(s)", 2),
+            (Shown.VERSIONS_CHANGED, "restore", ServerStatus.WRITTEN, "2 marker(s)", 2),
         ],
-        ids=["ours", "unreadable", "read-raises", "missing", "missing-keep", "replaced", "replaced-keep"],
+        ids=[
+            "ours",
+            "unreadable",
+            "read-raises",
+            "missing",
+            "missing-keep",
+            "replaced",
+            "replaced-keep",
+            "versions-changed",
+        ],
     )
     def test_matrix(self, store, media, stype, shows, redetect, status, message, writes):
         pub, row, out = self._published_then_checked(store, media, stype, shows, redetect=redetect)
@@ -3471,7 +3481,8 @@ class TestReadBackVersions:
         [
             (ServerType.PLEX, False, True),
             (ServerType.PLEX, True, False),  # none of ours on the item for a version added since to disagree with
-            # Jellyfin and Emby item ids are per version: no versions to record.
+            # Jellyfin and Emby item ids are per version: they record no versions, and the recording write is Plex's
+            # only, so a record without files is never drift there. A kept-only row would be the same cell.
             (ServerType.JELLYFIN, False, False),
             (ServerType.EMBY, False, False),
         ],

@@ -148,6 +148,20 @@ def season_group(canonical_path: str, videos: Sequence[FolderVideo] | None = Non
     return SeasonGroup(folder, tuple(sorted(members)))
 
 
+def season_size(canonical_path: str, videos: Sequence[FolderVideo] | None = None) -> int:
+    """How many episodes a file's season has before :func:`season_group` caps it to the 40 nearest.
+
+    Args:
+        canonical_path: Local path of one episode.
+        videos: The folder's :func:`folder_videos`, when the caller already read them.
+
+    Returns:
+        The count, the file itself included.
+    """
+    listed = folder_videos(os.path.dirname(canonical_path)) if videos is None else videos
+    return len(_same_season(_folder_video(canonical_path), listed))
+
+
 def _same_season(target: FolderVideo, videos: Sequence[FolderVideo]) -> dict[str, FolderVideo]:
     members = {v.path: v for v in videos if v.season == target.season}
     members[target.path] = target
@@ -391,7 +405,8 @@ def _member_record(ctx: PipelineContext, path: str) -> FileRecord | None:
     if _disk_identity(path) != identity:
         return None
     if probe is None or not probe.duration_ms:
-        ctx.store.record_member_probe_failure(probed_as, ctx.now())
+        now = ctx.now()
+        ctx.store.record_member_probe_failure(probed_as, now, forget_before=now - UNREADABLE_MEMBER_RETRY)
         return None
     return ctx.store.record_member(
         probed_as,

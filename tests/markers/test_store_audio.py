@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from media_preview_generator.markers.models import Candidate, FileIdentity, MarkerType, Source
@@ -133,6 +135,25 @@ class TestRecordMember:
         assert self._record(store, 100, 1) is None
         assert store.get_file("/m/S01E02.mkv") == newer
         assert store.get_evidence(newer.id) == []
+
+
+class TestMemberProbeFailures:
+    AT = datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
+
+    def test_recording_a_failure_forgets_entries_that_stopped_counting_for_any_path(self, store):
+        gone = FileIdentity("/m/gone/S01E02.mkv", 100, 1)  # deleted since: never probed or recorded again
+        recent = FileIdentity("/m/S01E03.mkv", 100, 1)
+        store.record_member_probe_failure(gone, self.AT, forget_before=self.AT - timedelta(days=1))
+        store.record_member_probe_failure(recent, self.AT + timedelta(hours=12), forget_before=self.AT)
+
+        later = self.AT + timedelta(days=1, hours=6)
+        store.record_member_probe_failure(
+            FileIdentity("/m/S01E04.mkv", 100, 1), later, forget_before=later - timedelta(days=1)
+        )
+
+        assert store.member_probe_failed_at(gone) is None
+        assert store.member_probe_failed_at(recent) == self.AT + timedelta(hours=12)
+        assert store._count("member_probe_failures") == 2
 
 
 class TestIntroChapterLimits:

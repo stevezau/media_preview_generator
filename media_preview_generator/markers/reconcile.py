@@ -84,7 +84,7 @@ def find_drift(
     Args:
         registry: The job's ``ServerRegistry``.
         store: The markers store.
-        capability: The job's cached capability check (``pipeline._capability``); None asks the publisher.
+        capability: The job's cached capability check (``pipeline.cached_capability``); None asks the publisher.
         cancel_check: True once the job is cancelled; items not read by then are left out.
         progress_callback: ``(items read, items on this server, message)`` after each batch.
 
@@ -228,18 +228,22 @@ class CheckServersListing:
     warnings: list[str]
     drifted: dict[str, frozenset[tuple[str, str]]] = field(default_factory=dict)
 
-    def forget_gone_items(self, store: MarkerStore, registry: Any, path: str, rows: Iterable[object]) -> None:
-        """After a listed file ran: a drifted item it was listed for leaves Check servers (until this app publishes to
-        it again) when the file's row for that server says "not in this server's library" and the server confirms the
-        item no longer exists. That row can come from a lookup that failed, and Check servers queues no retry, so an
+    def confirmed_gone_items(self, registry: Any, path: str, rows: Iterable[object]) -> set[tuple[str, str]]:
+        """After a listed file ran: the drifted items it was listed for that the server confirms no longer exist, where
+        the file's row for that server says "not in this server's library". Nothing is written here: the job marks them
+        gone (``MarkerStore.mark_item_gone``) only once it has queued the file's retry, so a run that ends before that
+        leaves them to be read back and confirmed again next run. That row can come from a lookup that failed, so an
         item the server doesn't confirm gone stays and is read back on the next run.
 
         Args:
-            store: The markers store.
             registry: The job's ``ServerRegistry``.
             path: The file.
             rows: The file's per-server rows.
+
+        Returns:
+            The ``(server_id, item_id)`` items confirmed gone.
         """
+        gone: set[tuple[str, str]] = set()
         for row in rows:
             if not isinstance(row, dict) or row.get("status") != ServerStatus.WAITING.value:
                 continue
@@ -249,12 +253,13 @@ class CheckServersListing:
                 if server_id != row.get("server_id"):
                     continue
                 if _confirmed_missing(registry, server_id, item_id):
-                    logger.info("{} no longer has item {}; Check servers stops reading it back", server_id, item_id)
-                    store.mark_item_gone(server_id, item_id)
+                    logger.info("{} no longer has item {}", server_id, item_id)
+                    gone.add((server_id, item_id))
                 else:
                     logger.info(
                         "{} didn't confirm item {} is gone; Check servers reads it back again", server_id, item_id
                     )
+        return gone
 
 
 def _confirmed_missing(registry: Any, server_id: str, item_id: str) -> bool:
