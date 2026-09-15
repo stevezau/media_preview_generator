@@ -707,11 +707,24 @@ ahead on a stale setting.
 
 A Sonarr/Radarr/webhook import queues an Intro & Credits job right after the preview job for the same files. It
 runs at Normal priority, or at Low when the preview job itself runs at Low, and it waits for that preview job to
-finish either way. If a file isn't on disk yet, a server hasn't indexed it into its library yet, or Plex didn't
-answer its Plex Pass check, it's retried using the same backoff as preview retries — **Settings → Retry policy →
-Retry count / Initial retry delay**. A retry resolves the path Sonarr/Radarr sent again, so a file that lands on a
+finish either way (episodes that join it later, see below, don't wait for their own preview jobs). If a file isn't
+on disk yet, a server hasn't indexed it into its library yet, or Plex didn't answer its Plex Pass check, it's
+retried using the same backoff as preview retries — **Settings → Retry policy → Retry count / Initial retry delay**.
+A retry resolves the path Sonarr/Radarr sent again, so a file that lands on a
 different disk than the first mapped one is still found. A retry batch holds at most 500 files at a time — a bigger backlog (e.g. a brand new library)
 is picked up on the next run instead.
+
+Plex, Emby and Jellyfin send one webhook per episode. Episodes of a season that arrive while an earlier episode's
+follow-up is still waiting join that job (up to 500 files), so a season pack becomes one Intro & Credits job rather
+than one per episode. An episode that joins doesn't wait for its own preview job: the job runs once the first
+episode's preview job has finished, and markers don't need previews.
+
+A new episode can change what the season's other episodes should get (for example, an intro chapter that looked
+normal turns out far longer than the rest of the season). The job then queues a **Season: …** job that checks those
+other episodes again. It runs at Low priority, or Normal right after a webhook import. Once it has run, the season has
+the same markers whatever order the episodes arrived in, as if they had all been checked together. A Season job holds
+at most 500 episodes; any beyond that, and any request lost to a restart before the job finished, are picked up the
+next time an episode of that season is checked.
 
 ### Troubleshooting Intro & Credits
 

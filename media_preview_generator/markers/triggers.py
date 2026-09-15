@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 
 from loguru import logger
@@ -12,17 +13,16 @@ from ..job_kinds import JOB_KIND_INTRO_CREDITS
 from ..servers.base import ServerConfig
 from ..servers.ownership import webhook_path_candidates
 from ..servers.registry import UnsupportedServerTypeError, server_config_from_dict
-from ..web.jobs import PRIORITY_HIGH, PRIORITY_NORMAL, Job, get_job_manager
+from ..web.jobs import PRIORITY_HIGH, PRIORITY_NORMAL, Job, JobStatus, get_job_manager
 from ..web.settings_manager import get_settings_manager
 from .audio.season import season_group
 from .external_ids import ids_from_path, is_season_folder
-from .job_runner import start_intro_credits_job_async
+from .job_runner import FILES_SEALED, FOLLOW_UP_LOCK, MAX_RETRY_FILES, start_intro_credits_job_async
 from .ownership import marker_matches
 from .settings import load_server
 
-# Serialises "is this file already queued?" with the job creation, so two webhooks for one import queue one job.
-_follow_up_lock = threading.Lock()
-# Same for Inspector re-detect, so a double-click queues one job.
+# Serialises Inspector re-detect's "is this file already queued?" with the job creation, so a double-click queues one
+# job. Webhook follow-ups use job_runner.FOLLOW_UP_LOCK, which their runner also takes to read the files.
 _redetect_lock = threading.Lock()
 _REDETECT_SOURCE = "inspector"
 _SEASON_PUBLISH_SOURCE = "inspector_season"
@@ -155,9 +155,19 @@ def create_intro_credits_job(
     return job
 
 
-def _queued_in_waiting_follow_ups(jm, configs: list[ServerConfig]) -> set[str]:
-    # A follow-up that has never started reads its files when it runs, so a file already listed there is covered.
-    # A revived one (PENDING again, started_at kept) may already have published the file's old version.
+def _queued_in_waiting_follow_ups(jm, configs: list[ServerConfig] | None = None) -> set[str]:
+    """Local paths (every candidate) of the files webhook follow-ups that have never started list.
+
+    A follow-up that has never started reads its files when it runs, so a file already listed there is covered. A
+    revived one (PENDING again, started_at kept) may already have published the file's old version.
+
+    Args:
+        jm: The job manager.
+        configs: Server configs; read from settings only when a waiting follow-up needs them.
+
+    Returns:
+        The covered local paths.
+    """
     queued: set[str] = set()
     for job in jm.get_pending_jobs():
         cfg = job.config or {}
@@ -165,9 +175,58 @@ def _queued_in_waiting_follow_ups(jm, configs: list[ServerConfig]) -> set[str]:
             continue
         if not cfg.get("follows_job_id") or cfg.get("force"):
             continue
+        if configs is None:
+            configs = _server_configs()
         for path in cfg.get("file_paths") or []:
             queued |= _local_candidates(str(path), configs)
     return queued
+
+
+def _season_folders(paths: Iterable[str], configs: list[ServerConfig]) -> set[str]:
+    """Season folders of the episode files among ``paths`` (every local candidate of each sender path)."""
+    return {
+        os.path.dirname(candidate)
+        for path in paths
+        for candidate in _local_candidates(str(path), configs)
+        if ids_from_path(candidate).is_episode
+    }
+
+
+def _joinable_follow_ups(jm, configs: list[ServerConfig]) -> list[tuple[Job, set[str]]]:
+    """Webhook follow-ups whose runner hasn't read its files yet, with the season folders they already cover.
+
+    Call under ``FOLLOW_UP_LOCK``. Retries, verify jobs and forced re-detects keep their own file lists.
+    """
+    joinable = []
+    for job in jm.get_pending_jobs():
+        cfg = job.config or {}
+        if job.kind != JOB_KIND_INTRO_CREDITS or not cfg.get("follows_job_id"):
+            continue
+        if cfg.get(FILES_SEALED) or cfg.get("force") or cfg.get("retry_attempt") or cfg.get("verify"):
+            continue
+        folders = _season_folders(cfg.get("file_paths") or [], configs)
+        if folders:
+            joinable.append((job, folders))
+    return joinable
+
+
+def _join(jm, job: Job, paths: list[str], hints: dict[str, dict[str, str]] | None) -> bool:
+    """Add episodes (and their item id hints) to a waiting follow-up's config.
+
+    Returns:
+        False when the job is no longer pending (cancelled since it was listed), and nothing was added.
+    """
+    live = jm.get_job(job.id)
+    if live is None or live.status is not JobStatus.PENDING:
+        return False
+    cfg = dict(live.config or {})
+    cfg["file_paths"] = list(dict.fromkeys([*(cfg.get("file_paths") or []), *paths]))
+    joined_hints = dict(cfg.get("webhook_item_id_hints") or {})
+    joined_hints.update({p: h for p, h in (hints or {}).items() if p in paths})
+    cfg["webhook_item_id_hints"] = joined_hints
+    jm.update_job_config(job.id, cfg)
+    jm.update_job_library_name(job.id, f"Intro & Credits · {len(cfg['file_paths'])} files")
+    return True
 
 
 def submit_webhook_follow_up(
@@ -180,8 +239,10 @@ def submit_webhook_follow_up(
     """Queue the Intro & Credits job that follows a webhook preview job (spec §6.4 item 9).
 
     Only files a server with Intro & Credits on holds are queued, and not files a waiting follow-up already lists.
-    The job runs at NORMAL, or at the preview job's priority when that is lower; its runner waits for the preview job to
-    finish.
+    Vendor webhooks arrive one episode at a time: an episode whose season folder a waiting follow-up already covers
+    joins it while that job stays within 500 files. A new job runs at NORMAL, or at the preview job's priority when that
+    is lower; its runner waits for the preview job to finish. A joined episode doesn't wait for its own preview job
+    (markers don't need previews): the job it joined waits only for the preview job it was created for.
 
     Args:
         preview_job_id: The preview job just started for the batch.
@@ -190,7 +251,8 @@ def submit_webhook_follow_up(
         item_id_hints: ``{path: {server_id: item_id}}`` from vendor webhooks.
 
     Returns:
-        The new job's id, or None when nothing needed queueing.
+        The new job's id; the joined job's id when the episodes all joined waiting follow-ups; None when nothing needed
+        queueing.
     """
     if not paths or not markers_enabled_anywhere():
         return None
@@ -200,26 +262,44 @@ def submit_webhook_follow_up(
         return None
     configs = _server_configs()
     jm = get_job_manager()
-    with _follow_up_lock:
+    with FOLLOW_UP_LOCK:
         queued = _queued_in_waiting_follow_ups(jm, configs)
         fresh = [p for p in owned if not (_local_candidates(p, configs) & queued)]
         if not fresh:
             logger.info("Intro & Credits for webhook job {}: its files are already queued", preview_job_id)
             return None
+        rest = list(fresh)
+        joined_id: str | None = None
+        for waiting, folders in _joinable_follow_ups(jm, configs):
+            mine = [p for p in rest if _season_folders([p], configs) & folders]
+            if not mine or len(waiting.config.get("file_paths") or []) + len(mine) > MAX_RETRY_FILES:
+                continue
+            if not _join(jm, waiting, mine, item_id_hints):
+                continue
+            logger.info(
+                "Intro & Credits for webhook job {}: {} episode(s) join follow-up {} of the same season",
+                preview_job_id,
+                len(mine),
+                waiting.id[:8],
+            )
+            rest = [p for p in rest if p not in mine]
+            joined_id = joined_id or waiting.id
+        if not rest:
+            return joined_id
         preview = jm.get_job(preview_job_id)
-        if len(fresh) == len(paths) and preview is not None and preview.library_name:
+        if len(rest) == len(paths) and preview is not None and preview.library_name:
             name = f"Intro & Credits · {preview.library_name}"
-        elif len(fresh) == 1:
-            name = f"Intro & Credits · {os.path.basename(fresh[0])}"
+        elif len(rest) == 1:
+            name = f"Intro & Credits · {os.path.basename(rest[0])}"
         else:
-            name = f"Intro & Credits · {len(fresh)} files"
-        hints = {p: h for p, h in (item_id_hints or {}).items() if p in fresh}
+            name = f"Intro & Credits · {len(rest)} files"
+        hints = {p: h for p, h in (item_id_hints or {}).items() if p in rest}
         job = create_intro_credits_job(
             library_name=name,
             # Never ahead of the preview job it follows: with incoming jobs set to Low, previews still drain first.
             priority=max(PRIORITY_NORMAL, preview.priority) if preview is not None else PRIORITY_NORMAL,
             source=source,
-            file_paths=fresh,
+            file_paths=rest,
             follows_job_id=preview_job_id,
             item_id_hints=hints or None,
         )

@@ -22,9 +22,10 @@ from ..processing.retry_queue import BACKOFF_SCHEDULE, retry_policy
 from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig
 from ..web.job_gate import format_wait_message, get_job_gate
-from ..web.jobs import JobStatus, WorkerStatus, get_job_manager
+from ..web.jobs import PRIORITY_LOW, PRIORITY_NORMAL, JobStatus, WorkerStatus, get_job_manager
 from ..web.routes.job_runner import _build_selected_gpus, _format_eta, _inflight_jobs, _inflight_lock
 from ..web.settings_manager import get_settings_manager
+from .external_ids import is_season_folder
 from .outcomes import (
     NOT_IN_LIBRARY,
     PLEX_PASS_UNKNOWN,
@@ -50,6 +51,16 @@ VERIFY_DELAY_FACTOR = 3
 _FINISHED = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED})
 # Job sources where the user chose the files (API/Start job dialog, Inspector re-detect, Season view Publish).
 _USER_PICKED_SOURCES = frozenset({"manual", "inspector", "inspector_season"})
+SEASON_SOURCE = "season"
+# A follow-up's config key once its runner has read its files: nothing joins it after that.
+FILES_SEALED = "files_sealed"
+# Serialises adding files to a waiting follow-up (webhook episodes in triggers.py, Season requests here) with its runner
+# reading them, so a file joins exactly one job.
+FOLLOW_UP_LOCK = threading.Lock()
+# Config keys files join a waiting job through (``_queue_season_followups``, ``triggers._join``) or its seal writes.
+_JOINED_KEYS = ("file_paths", "webhook_item_id_hints", FILES_SEALED)
+# Job sources whose files no sender just reported: a file missing from disk won't appear by waiting.
+_NO_RETRY_SOURCES = _USER_PICKED_SOURCES | {SEASON_SOURCE}
 
 
 def _utcnow() -> datetime:
@@ -210,6 +221,127 @@ def _queue_verify(job, cfg: dict, files: set[str], sender_paths: dict[str, str])
         jm.add_log(job.id, f"INFO - {len(paths)} replaced file(s) are checked again in {delay}s (job {check.id[:8]})")
     except Exception:
         logger.exception("Could not queue the later check of the replaced files job {} published", job.id)
+
+
+def _season_job_name(paths: list[str]) -> str:
+    folders = sorted({os.path.dirname(p) for p in paths})
+    if len(folders) > 1:
+        return f"Season: {len(folders)} seasons"
+    name = os.path.basename(folders[0])
+    if is_season_folder(name):
+        return f"Season: {os.path.basename(os.path.dirname(folders[0]))} · {name}"
+    return f"Season: {name}"
+
+
+def _waiting_season_jobs(jm) -> list:
+    """Season jobs whose runner hasn't read their files yet (call under ``FOLLOW_UP_LOCK``).
+
+    A file they list is decided with everything known when they run, so asking for it again adds nothing.
+    """
+    waiting = []
+    for job in jm.get_pending_jobs():
+        cfg = job.config or {}
+        if job.kind != JOB_KIND_INTRO_CREDITS or cfg.get("source") != SEASON_SOURCE:
+            continue
+        if not (cfg.get(FILES_SEALED) or cfg.get("retry_attempt") or cfg.get("verify")):
+            waiting.append(job)
+    return waiting
+
+
+def _cancelled_since_listed(jm, job) -> bool:
+    live = jm.get_job(job.id)
+    return live is None or live.status is not JobStatus.PENDING
+
+
+def _queue_season_followups(job, paths: list[str]) -> None:
+    """Queue the other episodes of this job's seasons to be decided again (spec §5.3). Never raises.
+
+    One waiting Season job at the job's Season priority takes them when they fit; a file a waiting Season job (at any
+    priority) or a webhook follow-up that has never started already lists isn't queued again: it reads the file after
+    this job's work. Season jobs run at LOW, or at NORMAL for a webhook follow-up (the webhook rule), never ahead of the
+    job that asked; a webhook follow-up's retry or verify job queues its Season job at LOW.
+
+    Args:
+        job: The job that just finished.
+        paths: Files its season steps asked about that weren't its own items.
+    """
+    jm = get_job_manager()
+    try:
+        from .triggers import _queued_in_waiting_follow_ups, create_intro_credits_job
+
+        cfg = job.config or {}
+        priority = max(PRIORITY_NORMAL, job.priority) if cfg.get("follows_job_id") else PRIORITY_LOW
+        with FOLLOW_UP_LOCK:
+            waiting = _waiting_season_jobs(jm)
+            queued = {path for season_job in waiting for path in season_job.config.get("file_paths") or []}
+            queued |= _queued_in_waiting_follow_ups(jm)
+            fresh = sorted(set(paths) - queued)
+            if not fresh:
+                jm.add_log(job.id, f"INFO - {len(paths)} other episode(s) of the same season are already queued")
+                return
+            chosen = fresh[:MAX_RETRY_FILES]
+            if len(fresh) > len(chosen):
+                jm.add_log(
+                    job.id, f"INFO - {len(fresh) - len(chosen)} more episode(s) are decided again on their own next run"
+                )
+            target = next(
+                (
+                    season_job
+                    for season_job in waiting
+                    if season_job.priority == priority
+                    and len(season_job.config.get("file_paths") or []) + len(chosen) <= MAX_RETRY_FILES
+                ),
+                None,
+            )
+            if target is not None and _cancelled_since_listed(jm, target):
+                target = None
+            if target is None:
+                target = create_intro_credits_job(
+                    library_name=_season_job_name(chosen), priority=priority, source=SEASON_SOURCE, file_paths=chosen
+                )
+            else:
+                files = sorted([*(target.config.get("file_paths") or []), *chosen])
+                jm.update_job_config(target.id, {**target.config, "file_paths": files})
+                jm.update_job_library_name(target.id, _season_job_name(files))
+        jm.add_log(
+            job.id,
+            f"INFO - {len(chosen)} other episode(s) of the same season are checked again with this job's results "
+            f"(job {target.id[:8]})",
+        )
+    except Exception:
+        logger.exception("Could not queue the season follow-up for Intro & Credits job {}", job.id)
+
+
+def _queue_season_followups_after(job, cfg: dict, ctx, listed: set[str]) -> None:
+    """Queue the Season job for the files this job's season steps asked about that weren't its items.
+
+    A Season job queues none: a sibling whose answer is still out of date is asked for again by the season's next run,
+    so nothing loops.
+    """
+    if cfg.get("source") == SEASON_SOURCE:
+        return
+    paths = [path for path in ctx.take_followups() if path not in listed]
+    if paths:
+        _queue_season_followups(job, paths)
+
+
+def _seal_files(jm, job_id: str, job, cfg: dict) -> dict:
+    """The config whose files the job lists now: re-read and sealed when other requests may have added files to it.
+
+    Episodes of a season join a webhook follow-up, and Season requests join a Season job, while it waits; the read and
+    the seal happen under the lock those additions take, so a file added to a job is listed by it and nothing is added
+    once it has read its files. (A file can still be listed by two jobs, e.g. a Season job and a started follow-up.)
+
+    Returns:
+        The config to list the files of.
+    """
+    if not (cfg.get("follows_job_id") or cfg.get("source") == SEASON_SOURCE):
+        return cfg
+    with FOLLOW_UP_LOCK:
+        latest = jm.get_job(job_id) or job
+        sealed = {**(latest.config or {}), FILES_SEALED: True}
+        jm.update_job_config(job_id, sealed)
+    return sealed
 
 
 def _wait_for_retry_time(job_id: str, cfg: dict, cancel_check: Callable[[], bool]) -> bool:
@@ -659,6 +791,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 if registry is None:
                     jm.complete_job(job_id, error="Couldn't load the media servers configuration")
                     return
+                cfg = _seal_files(jm, job_id, job, cfg)
                 items, warnings, sender_paths = build_items(
                     cfg, registry=registry, cancel_check=cancel_check, progress_callback=progress_callback
                 )
@@ -668,6 +801,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 if not items:
                     jm.complete_job(job_id, warning=" ".join(["No files to check.", *warnings]))
                     return
+                listed = {item.canonical_path for item in items}
                 ctx = build_context(
                     registry=registry, config=config, priority=live_priority, force=bool(cfg.get("force"))
                 )
@@ -681,8 +815,9 @@ def run_intro_credits_job(job_id: str) -> None:
                 unchecked: dict[str, set[str]] = {}
                 # Webhook paths (and their retries) can arrive before the file is visible here (an import still
                 # copying over NFS); the preview job retries those too. A file the user picked, or a library
-                # listing, that isn't on disk won't appear by waiting; a verify job's file was there already.
-                sent_files = bool(cfg.get("file_paths")) and cfg.get("source") not in _USER_PICKED_SOURCES
+                # listing, that isn't on disk won't appear by waiting; a verify job's file was there already, and a
+                # Season job's files were on disk when the season step saw them.
+                sent_files = bool(cfg.get("file_paths")) and cfg.get("source") not in _NO_RETRY_SOURCES
                 retries_missing_files = sent_files and not cfg.get("verify")
                 # Only files just sent were just replaced: a listing's replaced file may have changed days ago, and
                 # servers rescanned it long since. A verify chain checks once.
@@ -756,6 +891,7 @@ def run_intro_credits_job(job_id: str) -> None:
                     for name, files in sorted(unchecked.items())
                 ]
                 _complete(jm, job_id, outcome, [*warnings, *unchecked_warnings, *budget_exhausted_warnings(ctx)])
+                _queue_season_followups_after(job, cfg, ctx, listed)
                 if waiting:
                     _queue_retry(job, cfg, waiting, sender_paths)
                 if replaced and checks_replaced_later:
@@ -804,15 +940,21 @@ def start_intro_credits_job_async(job_id: str, config_overrides: dict | None = N
 
     Args:
         job_id: The job to start.
-        config_overrides: Keys merged into the job's config first (resume paths pass the job's own config).
+        config_overrides: Keys merged into the job's config first (resume paths pass a snapshot of the job's own
+            config); files that joined the job since the snapshot are kept.
     """
     if config_overrides:
         jm = get_job_manager()
-        job = jm.get_job(job_id)
-        if job is not None:
-            merged = {**(job.config or {}), **config_overrides}
-            if merged != (job.config or {}):
-                jm.update_job_config(job_id, merged)
+        # Resume paths pass a snapshot of the job's config; files that joined it since (webhook episodes, Season
+        # requests) are kept. Only this branch takes the lock: create_intro_credits_job starts jobs while holding it.
+        with FOLLOW_UP_LOCK:
+            job = jm.get_job(job_id)
+            if job is not None:
+                live = job.config or {}
+                merged = {**live, **config_overrides}
+                merged.update({key: live[key] for key in _JOINED_KEYS if key in live})
+                if merged != live:
+                    jm.update_job_config(job_id, merged)
     with _inflight_lock:
         if job_id in _inflight_jobs:
             logger.info("Skipping duplicate Intro & Credits start for {} — already in flight", job_id)

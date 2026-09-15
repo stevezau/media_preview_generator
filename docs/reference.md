@@ -317,10 +317,11 @@ column) holds:
 | Key | Type | Notes |
 |---|---|---|
 | `kind` | `"intro_credits"` | Always this value for a markers job. |
-| `source` | string | What created it: `manual`, `schedule`, `inspector` (re-detect), or a webhook source name (`sonarr`, `radarr`, `plex`, `retry`, …). |
+| `source` | string | What created it: `manual`, `schedule`, `inspector` (re-detect), `season` (a Season follow-up job), or a webhook source name (`sonarr`, `radarr`, `plex`, `retry`, …). |
 | `libraries` | `[{"server_id", "library_id"}]` | Libraries to enumerate. Empty with no `file_paths` = every library Intro & Credits goes to. |
 | `file_paths` | array of strings | Explicit files/folders instead of libraries (webhook follow-ups, Inspector re-detect, retries). |
-| `follows_job_id` | string \| `null` | The preview job this job waits for before taking a job-gate slot (webhook follow-ups only). |
+| `follows_job_id` | string \| `null` | The preview job this job waits for before taking a job-gate slot (webhook follow-ups only). Episodes that later joined the job (see below) don't wait for their own preview jobs. |
+| `files_sealed` | bool | Present once a webhook follow-up or Season job has read its `file_paths`: no more files join it after that. |
 | `force` | bool | Re-detect files already decided, asking every source again. |
 | `webhook_item_id_hints` | `{path: {server_id: item_id}}` | Item ids a vendor webhook already supplied, so the job skips a lookup. |
 | `retry_attempt` | int | Present only on a retry job: which retry this is (1-based). |
@@ -341,6 +342,19 @@ the warning "Couldn't check what N file(s) show on <server>". A job where an onl
 partway through completes with one warning per source that ran out (see `GET /api/markers/sources/usage` above for
 the same state in Settings), and doesn't queue a retry for those files — nothing was stored for the source, so the
 next scheduled or manual run for the same files asks it again on its own.
+
+When a job's season step finds that other episodes of the same season could now be decided differently (their season
+intro-chapter check or season audio answer is out of date), the job queues a **Season job** for them once it
+completes: `source: "season"`, named "Season: <show> · <season folder>" (or "Season: N seasons"), at Low priority —
+Normal when the job was a webhook follow-up (not its retries or verify job, which queue theirs at Low), never ahead of
+the job that asked — and capped at 500 files; more are left to their next run. Episodes already listed by a Season job
+that hasn't read its files yet, or by a webhook follow-up that hasn't started, aren't queued again; new ones join such
+a Season job at the same priority while it stays within 500 files. A Season job queues no further Season job, verify
+job or retry for a file gone from disk. A cancelled job queues none. The requests live in memory: a restart before the
+job completes drops them, and the season's next run asks again. Plex/Emby/Jellyfin webhooks arrive one episode at a
+time: an episode whose season folder a webhook follow-up that hasn't read its files yet already covers joins that
+follow-up (renamed "Intro & Credits · N files") while it stays within 500 files, instead of queuing another. A joined
+episode doesn't wait for its own preview job: markers don't need previews.
 
 ### Outcome keys
 
