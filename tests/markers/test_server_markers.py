@@ -71,8 +71,10 @@ class TestPlex:
 
 
 class TestItemWideMarkersOfOtherVersions:
-    """Plex and Emby serve one marker set per item: with ``duration_ms`` (evidence), an item holding another cut of the
-    file gives no evidence (None), since its markers may describe that cut."""
+    """Plex serves one marker set per item: with ``duration_ms`` (evidence), an item holding another cut of the file
+    gives no evidence (None), since its markers may describe that cut. Emby keeps each version's markers on its own
+    item, but its reader applies the same check to the versions Emby lists with the item (with an API key only the
+    item's own version, so the check passes)."""
 
     INTRO = [{"type": "intro", "start_ms": 24_500, "end_ms": 113_900, "final": False}]
     EMBY_INTRO = [

@@ -525,10 +525,26 @@ class TestVersions:
         assert caught.value.state is None
         versions.server.put_emby_markers.assert_not_called()
 
-    def test_a_file_that_is_none_of_the_items_versions_is_not_in_the_library(self, versions):
-        versions.items["42"].versions = [("/elsewhere/a.mkv", "42"), ("/elsewhere/b.mkv", "43")]
-        with pytest.raises(ItemNotFoundError, match="no version matching this file"):
+    @pytest.mark.parametrize(
+        "own_version",
+        [
+            pytest.param(("/elsewhere/a.mkv", "42"), id="no-version-is-this-file"),
+            # Emby lists this file but names no item for it, so it can't be confirmed as item 42's own version.
+            pytest.param(("MINE", None), id="this-file-without-an-item-id"),
+        ],
+    )
+    def test_a_file_that_is_none_of_the_items_versions_is_not_in_the_library(self, versions, own_version):
+        path, version_id = own_version
+        versions.items["42"].versions = [
+            (versions.items["42"].path if path == "MINE" else path, version_id),
+            ("/elsewhere/b.mkv", "43"),
+        ]
+        with pytest.raises(ItemNotFoundError) as caught:
             _write_item(versions, "42", [INTRO])
+        assert str(caught.value) == (
+            "Emby doesn't show which of this item's versions is this file yet; if the file is already in Emby's "
+            "library, check this server's path mappings"
+        )
         versions.server.put_emby_markers.assert_not_called()
 
     @pytest.mark.parametrize("version_id", ["42", None], ids=["own-id", "no-item-id"])

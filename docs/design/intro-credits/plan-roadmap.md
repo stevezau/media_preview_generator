@@ -138,13 +138,15 @@ less, never story. Evidence: `evidence/lab/phase1-results.md`.
   cached in `season_pairs`. Must reproduce `evidence/eval/eval_results_v3.json` segment-for-segment on cached
   fingerprints before use.
 - `audio/season.py`: group = season folder; one sibling is enough; first episode uses ≤ 4 episodes of the previous
-  season as a hint that needs a second source; re-decide siblings without an intro when a new episode arrives.
+  season as a hint that needs a second source; re-decide siblings without an intro when a new episode arrives
+  (superseded: spec §14 2026-09-14 R3, 2026-09-15 season step).
 - Emby plugin (`emby-plugin/`, `MediaBrowser.Server.Core` NuGet refs): `POST/GET/DELETE
   /MediaPreviewBridge/Markers/{id}`, `GET /MediaPreviewBridge/Ping` with `features`, `SaveChapters` keeping Chapter
   rows, re-apply on `ItemUpdated` from `IServerEntryPoint`. Builds 4.9 + 4.10. Catalog submission text + manual
   install docs. `publishers/emby.py` (IntroStart, IntroEnd, CreditsStart).
-- `reconcile.py`: APScheduler job every 12 h + after each Intro & Credits job; read back each published server,
-  re-publish on drift; Plex `on_plex_redetect=keep_plex` stores Plex's set as evidence instead.
+- `reconcile.py`: APScheduler job every 12 h (superseded: spec §14 2026-09-14) + after each Intro & Credits job
+  (superseded: spec §14 2026-09-14); read back each published server, re-publish on drift; Plex
+  `on_plex_redetect=keep_plex` stores Plex's set as evidence instead (superseded: spec §14 2026-09-14).
 - Inspector Season view + `GET /api/markers/season`.
 - `tools/markers_eval/`: intros (118 eps), credits (80 files + 205-movie chapter set), online (43 cases), and a
   **Plex baseline** column read-only from the prod Plex DB for the same files. Report useful/wrong/missed per

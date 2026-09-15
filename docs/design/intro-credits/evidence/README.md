@@ -9,16 +9,17 @@ real library file paths), `lab/*_truth.txt`, `credits/spot.txt`, `credits/framec
 
 | Folder | What | Key files |
 |---|---|---|
-| `lab/` | Throwaway servers on `storage` + clients | `up.sh` (bring-up), `env` (tokens), `jf_client.py`, `emby_client.py` (API + Playwright skip-button checks), `emby_plugin_check.py` (Emby plugin check table → `phase2-results.md`), `plexdb.sh` (Plex SQLite in the lab container), `plex_inject.py` (Plex `extra_data` builder), `phase1_matrix.py` + `scale_score.py` (phase 1 matrix and scale run; results in `phase1-results.md`), `py_write.py` (stock-sqlite write proof), `synth/` (VP9/Opus episodes — Playwright Chromium has no H.264) |
+| `lab/` | Throwaway servers on `storage` + clients | `up.sh` (bring-up), `env` (tokens), `jf_client.py`, `emby_client.py` (API + Playwright skip-button checks), `emby_plugin_check.py` (Emby plugin check table → `phase2-results.md`), `phase2-results.md` (phase 2 lab results: Emby plugin checks, Emby publisher runs, Season view API, Check servers), `plexdb.sh` (Plex SQLite in the lab container), `plex_inject.py` (Plex `extra_data` builder), `phase1_matrix.py` + `scale_score.py` (phase 1 matrix and scale run; results in `phase1-results.md`), `py_write.py` (stock-sqlite write proof), `synth/` (VP9/Opus episodes — Playwright Chromium has no H.264) |
 | `plugins/` | Prototype plugins proven in the lab | `jellyfin-10.11/` (net9), `jellyfin-12.0/` (net10), `emby-4.10/` (+ `embylibs/` reference DLLs copied from the Emby container `/system/`), `built/` DLLs |
 | `plex-provider-redirect/` | Plex `MetadataProviderUrl` redirect test (not honoured) | `proxy.py`, `log.jsonl`, `pms_marker_strings.txt` |
 | `online/` | TheIntroDB / IntroDB / SkipDB accuracy on 43 verified cases | `cases.json`, `query.py`, `online_results.json`, `skipdb-dump.json` (30 MB snapshot — don't commit) |
 | `coverage/` | Online coverage on a random prod sample | `cov.py`, `coverage_results.json` |
-| `eval/` | TV intro detection eval (118 episodes with studio chapters) | `named_seasons.json`, `run_eval_v3.py`, `eval_results_v3.json` (v1/v2/v3 results), `sweep_intro.*`, `snap_test.py`, `fp_variants.py` + `.log` (alg0/1/2/4, downmix), `fp_alg2.py`, `few_siblings.py` + `.log` (weekly releases / previous season). Fingerprint caches are not kept — first run recomputes (~2 s/episode) |
+| `eval/` | TV intro detection eval (118 episodes with studio chapters) | `named_seasons.json`, `run_eval_v3.py`, `eval_results_v3.json` (v1/v2/v3 results), `sweep_intro.*`, `snap_test.py`, `fp_variants.py` + `.log` (alg0/1/2/4, downmix), `fp_alg2.py`, `few_siblings.py` + `.log` (weekly releases / previous season), `phase2-harness.md` (phase 2 harness `tools/markers_eval`: §5.3 reproduction gate, season step gate, full report against Plex's own markers). Fingerprint caches are not kept — first run recomputes (~2 s/episode) |
 | `detect/` | Detector prototypes | `fp.py`, `fp3.py` (v3 season matcher), credits OCR prototypes |
 | `credits/` | Credits-start eval (80 files with chapter truth) | `movie_credit_truth.json` (205 movies), `movies40.json`, `tv40.json`, `features3.py` (GPU extractor → `f3.jsonl`), `eval_rules3.py` (rules + grid), **`rule_j.py` (reproduces spec §5.4 table)**, `compare_rules.py`, `adjudicated.json` (truth fixed by frame checks), `framechecks/` (contact sheets), `framecheck.py`, `gpu_bench.py` (CPU vs CUDA text detection), `gpu/` (**cross-vendor GPU: WebGPU/Vulkan in the app image, ncnn attempt — see `gpu/RESULTS.md`**) |
 | `design/` | Design report source (artifact https://claude.ai/code/artifact/65394c1a-e878-4fc2-985b-63bc4c307c5d) | `index.html`, `before_*.jpg`, `shot.py` |
 | `history/` | Superseded spec revisions and old report copies | `spec-rev2-2026-09-13.md` |
+| `screenshots/` | UI and lab screenshots cited by the results files | `phase1/`, `phase2/` (e.g. `task10-r3-*.png` Emby versions in the web player) |
 
 ## Lab servers
 

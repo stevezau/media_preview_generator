@@ -545,8 +545,8 @@ You can enable **both** if you want belt-and-suspenders behavior — the recentl
 
 ## Intro & Credits
 
-Skip Intro / Skip Credits markers for Plex and Jellyfin. Detected once per file — from chapters inside the file,
-online databases, and (in a later update) matching the theme tune across a season or reading the on-screen credit
+Skip Intro / Skip Credits markers for Plex, Jellyfin and Emby. Detected once per file — from chapters inside the file,
+online databases, matching the theme tune across a season, and (in a later update) reading the on-screen credit
 roll — then published to every server that has that file. **Precision over coverage:** a missing marker is fine, a
 wrong one isn't, so a marker only ships when the evidence clears the bar below.
 
@@ -567,12 +567,12 @@ drag-to-reorder:
 
 | Source | Notes |
 |---|---|
-| Chapters inside the file | Free, exact when present (~1 in 9 seasons in a sampled library). |
+| Chapters inside the file | Free, exact when present (~1 in 9 seasons in a sampled library). An intro chapter much longer than the rest of the season's (more than twice their median length and more than 30 s longer than it, with at least 2 other episodes carrying one) doesn't decide alone: another source that isn't a server's own marker has to agree. |
 | TheIntroDB | Optional **API key** (masked once saved). Works without one (500 lookups/day); your own free key raises that. Off by default — see the note below. |
 | IntroDB.app | No key needed, TV only. |
 | SkipDB | Free, only counts an answer matched to your file's own length. |
-| Matching audio across a season | **Coming soon** — researched and measured, not built yet. The switch is disabled in this release. |
-| On-screen credit text | **Coming soon** — same as above. |
+| Matching audio across a season | TV intros. Finds the theme tune a season's episodes share and **confirms** an intro another source found. On its own it was 91 right, 13 wrong and 14 missed on 118 test episodes — too many wrong to decide alone — so it never publishes an intro by itself at either setting. Season audio (or the previous-season hint, below) plus a server's own marker isn't enough either, since a server's intro detection matches audio too: that episode goes to **Needs review**. Needs an ffmpeg with chromaprint, which the amd64 Docker image has; elsewhere Settings shows **Not available** and why. CPU, about 2 s per episode, at most 2 at once. See [Season audio and weekly releases](#season-audio-and-weekly-releases). |
+| On-screen credit text | **Coming soon** — researched and measured, not built yet. The switch is disabled in this release. |
 | Markers already on your servers | Second opinion only — see below. |
 
 **"Publish when"** decides how sure the app must be before it writes anything:
@@ -582,7 +582,8 @@ drag-to-reorder:
 - **Medium** — also accepts a single source, but only one that checks *your* file's own cut: chapters, or a SkipDB
   exact/shifted match. A single IntroDB or TheIntroDB answer never publishes alone, because neither knows which cut
   of the file you have. A lone SkipDB answer publishes intros and recaps only — its credits often start minutes
-  before the real credit roll, so they still need a second source to agree.
+  before the real credit roll, so they still need a second source to agree. Season audio never publishes alone at
+  either setting.
 
 Markers already on a Plex/Jellyfin/Emby server only ever *confirm* another source — they never publish on their own,
 and they can only **shorten** a skip (a later intro start, an earlier credits end), never lengthen one. That's
@@ -593,8 +594,12 @@ more than 10 seconds later — so an "End Credits" chapter placed on the last sh
 the Inspector then says "Shortened to Plex's own credits start". Intro ends are never moved this way. A Jellyfin or
 Emby server's markers imported by its own intro-database plugin (e.g. an AniSkip-style importer) never do that and
 don't count as an independent second opinion — they join the online-database group instead of adding a vote of their
-own. Plex and Emby keep one marker set per item, so when an item has another version whose length differs from this
+own. Plex keeps one marker set per item, so when a Plex item has another version whose length differs from this
 file's by more than 2 seconds (or the lengths can't be read), that server's markers aren't used for this file at all.
+Emby's markers go through the same check, even though Emby keeps each version's markers apart (see
+[Emby](#emby-the-media-preview-bridge-for-emby-plugin)); when this app connects to Emby with an API key, Emby lists only
+the item's own version, so the check always passes. Season audio and a server's own marker never confirm each
+other: another source has to agree.
 
 **"Never overwrite my edits"** (on by default) means a marker you lock always wins over detection. In this release
 the Inspector only shows markers and offers **Re-detect**; adjusting and locking markers there comes in a later
@@ -615,6 +620,40 @@ When the sources don't clear the bar above for a marker — nothing agrees, or t
 marker isn't sent to any server and the file shows **Needs review**, even when its other markers were sent. Nothing
 is guessed. Adding markers by hand in the Inspector comes in a later update; for now, **Re-detect** in the Inspector
 asks every source again.
+
+Two reasons are specific to TV intros: "Season audio and a server's own marker agree, but both come from matching
+audio; needs another source", and "Intro chapter is much longer than the rest of the season's".
+
+### Season audio and weekly releases
+
+Season audio compares an episode with the other episodes of its season on disk: the video files in the same folder
+with the same season number in their names (in a folder holding more than 40 of them, the 40 nearest by episode
+number). The first episode of a season a job checks fingerprints every member that has no fingerprint yet, on a
+worker (once per file; a replaced file is fingerprinted again). The rest of the season then matches from those saved
+fingerprints, normally without taking a worker.
+
+An episode with no other episode of its season on disk yet (a new season's first weekly release) is compared with the
+previous season's first 4 episodes that are already fingerprinted, when its folder is named like a season (`Season 2`
+next to `Season 1`). That answer never publishes on its own either, and it isn't a second opinion for season audio
+(it's the same method on the same show). The Inspector shows it as **Previous season audio**.
+
+When a new episode arrives, the season's earlier episodes may now be decided differently: their audio answer can
+change, or the new episode's intro chapter changes what counts as normal for the season. Episodes outside the job
+that brought the new one are checked again by a **Season: …** job (see
+[Webhook follow-ups and retries](#webhook-follow-ups-and-retries)), so the season ends with the same markers whatever
+order its episodes arrived in.
+
+### Season view in the Inspector
+
+For a TV episode, the Inspector's Intro & Credits tab has a **This episode** / **Whole season** switch. **Whole
+season** lists the season's episodes (the same group season audio uses) with each one's intro and credits, the
+sources behind them, and one dot per server. It reads only this app's own records, so a whole season loads at once;
+**This episode** stays the place for what a server shows right now. An episode in **Needs review** has a **Review**
+button (its tooltip gives the reason) that opens that episode; adjusting markers comes in a later update.
+
+**Publish N to M servers** queues a Normal-priority Intro & Credits job named `Intro & Credits: <show> · Season N`
+(or `· Specials`) for exactly the listed episodes: decided episodes go to every server that doesn't show them yet,
+and the rest are checked again. Clicking it again while that job is still queued or running reuses it.
 
 ### Plex: writing straight into Plex's database
 
@@ -654,26 +693,55 @@ trickplay tiles) gets a markers feature. The Edit tab's status block shows wheth
 an **Install** / **Update** button that uses the same plugin-install flow as trickplay. Markers show as Skip Intro /
 Skip Credits / Skip Recap / Skip Preview depending on what was decided.
 
-### Emby
+### Emby: the Media Preview Bridge for Emby plugin
 
-Not supported yet — an Emby publisher plugin is planned for a later phase. The Edit tab shows **"Not available
-yet"** and nothing is written to Emby in this release.
+Emby has no API for markers, so a small Emby plugin, **Media Preview Bridge for Emby**, stores them and writes them
+as Emby's own intro/credits chapter markers, next to the file's own chapters (which it never changes). It puts them
+back when a "Replace all metadata" or "Search for missing metadata" refresh deletes them, stops showing them once the
+file is replaced by a different file until this app sends markers for the new one, and forgets them when the item is
+removed from Emby.
+
+The Edit tab shows whether the plugin is installed and its version. When Emby's plugin catalog lists the plugin,
+**Install** installs it and restarts Emby. Otherwise the tab offers **Install by hand**: download the DLL for your
+Emby version (`MediaPreviewBridge.Emby-4.10.dll` for Emby 4.10, `MediaPreviewBridge.Emby-4.9.dll` for Emby 4.9)
+from the plugin's GitHub release (tags `emby-plugin-v…`), rename it to `MediaPreviewBridge.Emby.dll`, copy it into
+Emby's `plugins` folder (`/config/plugins` in the official Emby container) and restart Emby. The tab shows the
+plugin's version with a ✓ once Emby is back. The API key or user this app uses for Emby needs administrator rights.
+
+- **What Emby shows:** the tab's "Can show" reads **Intro · credits start**. Emby has no credits end: its Skip
+  Credits button always skips to the end of the file, including any scene after the credits. The app still sends
+  the decided credits start; when those credits end before the file does, the file's row and the Inspector's Emby
+  card say **"Emby skips to the end of the file"**. Recaps and previews aren't sent to Emby (it has no button for
+  them).
+- **"When Emby has its own markers"** works like Plex's setting. Emby can have intro and credits markers of its own,
+  from its intro detection (an Emby Premiere feature) or another plugin. **Use ours** (the default) replaces them
+  with ours. **Keep Emby's** leaves a type Emby already has and sends ours only for the other types; the row says so,
+  e.g. **"1 marker(s); keeping Emby's intro"**, and the Inspector shows **Keeps Emby's**. The plugin still keeps ours
+  for a kept type and shows them once Emby's are gone.
+- **Versions:** Emby keeps each version of a video (a movie in two cuts, an episode with two releases) as its own
+  item with its own chapters, and its player shows the chapters of the version playing. So each version gets the
+  markers decided for its own file, with no waiting for the other versions to agree. A file that Emby lists under
+  another version's item isn't written: **"This file is Emby item 55, another version of item 53; markers not
+  written"**.
+- In the lab, Emby's web player showed **Skip Intro** on a server without Emby Premiere, but clicking it opened
+  Emby Premiere's "Unlock Feature" dialog.
 
 ### Multi-version Plex items
 
 When a Plex item has more than one version (a movie in two cuts, an episode with two releases), Plex serves **one**
 marker set for the whole item, not one per file. A marker type only shows up once every version has a decided marker
 of that type **and** they agree within 2 seconds. A newly added version that hasn't been decided yet temporarily
-hides that item's markers on Plex until it catches up — precision first.
+hides that item's markers on Plex until it catches up — precision first. Jellyfin and Emby versions each get their
+own markers.
 
 ### Checking the servers still show them
 
 A server can lose or change our markers without this app doing anything: Plex's own detection replaces them, and a
 server that rescans a replaced file can drop them. So before a job reports a file **Up to date** on a server, it
 reads back what that server shows — Plex's marker rows for the item in its database (read-only, with the same
-same-machine checks as a write), Jellyfin's served segments (one request) — and writes ours again when they're gone
-or different. If that read fails, the file stays **Up to date** for this run, and the job finishes with a warning such as
-**"Couldn't check what 3 file(s) show on Home Plex"**.
+same-machine checks as a write), Jellyfin's served segments (one request), Emby's chapter markers (one request) —
+and writes ours again when they're gone or different. If that read fails, the file stays **Up to date** for this run,
+and the job finishes with a warning such as **"Couldn't check what 3 file(s) show on Home Plex"**.
 
 **Markers written** always means the job changed what the server shows (a forced **Re-detect** that restores lost
 markers included); **Up to date** means the server already showed exactly this.
@@ -686,16 +754,52 @@ log says how many more wait for the next run). A verify job, and any retry it qu
 its retries count on from the retries already used, and a file gone from disk by then isn't retried. Library runs
 and files you picked yourself don't queue one: their replaced files may have changed long ago.
 
-For Jellyfin, a replaced file whose markers are unchanged is always sent again when the plugin still holds the old
-file's size: the plugin serves nothing for a file whose size changed, even while Jellyfin still lists the old
-segments.
+For Jellyfin and Emby, a replaced file whose markers are unchanged is always sent again when the plugin still holds
+the old file's size: the plugin serves nothing for a file whose size changed (Jellyfin can still list the old
+segments meanwhile).
 
 In the Inspector, a server whose markers differ from ours shows **Will replace** or **Will add**, or **Keeps
-Plex's** when Plex's own detection replaced them and that Plex server is set to keep them; the reason names the kept
-types ("Keeping Plex's credits"), also next to **Will add** when another type is still written. Another Jellyfin
-provider's segments next to ours don't count as a difference. The note "All versions of this item share one set of
-markers" appears only on a Plex item with more than one version (a stacked file or a Plex optimized copy isn't a
-version).
+Plex's** / **Keeps Emby's** when the server's own markers replaced ours and that server is set to keep them; the
+reason names the kept types ("Keeping Plex's credits"), also next to **Will add** when another type is still
+written. Another Jellyfin provider's segments next to ours don't count as a difference. The note "All versions of
+this item share one set of markers" appears only on a Plex item with more than one version (a stacked file or a Plex
+optimized copy isn't a version).
+
+### Check servers
+
+The checks above only run for files a job looks at. To check everything this app has published, run **Intro &
+Credits · Check servers**: **Start New Job → Intro & Credits → Check servers** on the Dashboard,
+`POST /api/markers/reconcile`, or a schedule in **Automation → Schedules** (type **Intro & Credits → Check servers**;
+the server and library pickers don't apply). Nothing is scheduled by default. It runs at Low priority unless you pick
+another, and only one runs at a time: asking again while one is queued or running reuses it ("A Check servers job is
+already queued"), and a schedule tick then queues nothing. With Intro & Credits off on every server there's nothing
+to check.
+
+Its tooltip sums it up: "Checks that every server with Intro & Credits on still shows the markers this app sent, and
+sends them again where they're missing or changed (unless that server is set to keep its own). Covers all servers and
+libraries." In detail:
+
+- It reads back every item this app published on each server with Intro & Credits on (Plex one item at a time,
+  with the same same-machine checks as a write; Jellyfin and Emby one request per item), 500 items per step so its
+  progress moves. Pausing the job during the read-back gives its job slot back until you resume it.
+- Only the files of items whose markers are gone or different, whose Plex item gained or lost a version, or that the
+  server replaced with a new item go through the normal rules again (**Keep Plex's** / **Keep Emby's**, versions, the
+  server switch). A server set back to **Use ours** gets ours for the types it was keeping.
+- It also re-reads a server's own markers for files with decided credits where that server had none (or its answer
+  couldn't be used) and shows none of ours, since its own detection may have run since and can shorten our credits
+  (see [Sources and the publish rule](#sources-and-the-publish-rule)). Every enabled server counts, with Intro &
+  Credits on or not. The re-read waits until the answer is 1 day old, then 2, 4, 8 and 16 days after each re-read that
+  stays empty or fails; after 5 such re-reads it stops.
+- One run takes at most 500 files; the job warns "N more changed file(s) are checked on a later run", and waiting
+  items take turns across runs. Check servers queues no retries: whatever is still waiting is listed again next run.
+- An item the server no longer has, with no file here that still belongs to it, is dropped from Check servers
+  quietly. When a listed file's row is **Waiting** because it isn't in that server's library yet, and that server
+  confirms the item is gone, the item is dropped too, until this app publishes to it again.
+- A server that can't take markers is skipped with its reason ("Skipped Home Plex: …"). Items whose read fails get a
+  warning ("Couldn't read what 3 item(s) show on Home Plex") and are read again next run. "Couldn't check Home Plex"
+  means reading that server raised an error, or a Jellyfin or Emby server failed 20 reads in a row and the rest of it
+  was left for the next run; "Couldn't check Home Plex: no connection to it" means there was no client for it.
+- With nothing to fix it finishes at once; its log says "Every server checked still shows what this app published".
 
 ### Turning it off, or revoking the Plex confirmation
 
@@ -738,7 +842,14 @@ table covers every state the check can report, using its exact wording:
 | No status block; only the off switch | "Intro & Credits is off for this server" | Turn on "Send intro & credits markers to this server" |
 | *(Plex)* Status block: "Confirm the Plex database write to turn this on" | Plex has no marker API, so writing needs a one-time confirmation per Plex server; flipping the switch opens that confirmation dialog | Read the dialog and click "Enable for Plex" |
 | *(Jellyfin)* Red "Not installed" badge + **Install** button: "Install the Media Preview Bridge plugin" | Jellyfin has no core marker-write API; the plugin renders markers as media segments | Click **Install** |
-| *(Emby)* Grey "Not available yet" badge: "Emby needs the Media Preview Bridge for Emby plugin (coming in the next phase)" | Emby publishing isn't built yet | Nothing to do yet |
+| *(Emby)* Red "Not installed" badge + **Install** button: "Install the Media Preview Bridge for Emby plugin" | The plugin isn't on this Emby server, and Emby's plugin catalog lists it | Click **Install** (Emby restarts; the tab checks again after 20 s) |
+| *(Emby)* Red "Not installed" · **Install by hand** | Emby's plugin catalog doesn't list the plugin yet (or couldn't be read) | Follow [the manual install](#emby-the-media-preview-bridge-for-emby-plugin) |
+| *(Emby)* After **Install** or **Update**: "Media Preview Bridge for Emby isn't in the Emby plugin catalog yet; install it by hand (see the Intro & Credits guide)" · **Install by hand** / "Couldn't read Emby's plugin catalog" | The catalog doesn't list the plugin, or Emby didn't answer the catalog request | Follow [the manual install](#emby-the-media-preview-bridge-for-emby-plugin), or try again once Emby answers |
+| *(Emby)* Amber "Update needed" badge + **Update** button: "Update Media Preview Bridge for Emby (installed …) to get markers support" | An older plugin without markers support | Click **Update**, or copy the newer DLL in by hand and restart Emby |
+| *(Emby)* "Can't reach this Emby server" / "Can't reach the Media Preview Bridge markers endpoint on this Emby server" | A transient connection problem | Confirm the server is up and reachable; recheck |
+| *(Emby)* "Emby rejected this server's credentials; reconnect it" | The stored API key or login no longer works | Reconnect the server from the Servers page |
+| *(Emby)* "Emby refused the Media Preview Bridge markers endpoint; this server's API key or user needs administrator rights" | The connected account isn't an administrator | Reconnect with an admin account or API key |
+| *(Settings)* **Matching audio across a season** shows "Not available" with a reason, e.g. "Needs an ffmpeg with the chromaprint muxer (jellyfin-ffmpeg in the amd64 image); none was found" | This container's ffmpeg has no chromaprint (the arm64 image, or a custom ffmpeg) | Use the amd64 Docker image; every other source keeps working |
 | *(Plex)* Red "✕ Not active" next to Plex Pass: "This Plex server has no Plex Pass, so Plex won't show any markers." | Plex hides all markers — even ones already in its database — without Plex Pass | Add Plex Pass to this Plex server |
 | *(Plex)* "Plex's database is on a network share (…). The app must run on the same machine as Plex to write markers; Plex stays read-only." | SQLite's write mode doesn't work over NFS/SMB/CIFS | Run this app on the same machine as Plex |
 | *(Plex)* "Plex's database is on a filesystem this app doesn't recognise as a local disk (…); Plex stays read-only." | The app couldn't prove the folder is a real local disk, so it refuses to risk Plex's database | Check the mount; open an issue if it's genuinely local |
@@ -767,7 +878,10 @@ A file's row for one server (the job's Files panel, the Inspector) can also say:
 | **Skipped**: "Intro & Credits is off for this server" | The switch was turned off (or the Plex confirmation revoked) while the job ran | Turn it back on; the job's next file already checks again |
 | **Skipped**: "This library isn't selected for Intro & Credits on this server" | The library was unticked, or removed from the server, while the job ran | Tick it again in Edit → Intro & Credits |
 | **Skipped**: "This file is excluded on this server" | The file matches one of that server's exclude paths | Remove the exclusion if it's wrong |
-| **Skipped**: "Not supported for this server type yet" | Emby has no publisher in this release | Nothing to do yet |
+| **Up to date**: "Keeping Emby's intro" (or credits; also added to other rows, e.g. "1 marker(s); keeping Emby's intro") | This Emby server is set to **Keep Emby's**, and Emby shows its own markers of that type | Switch it to **Use ours** if you want ours |
+| Any row ending "…; Emby skips to the end of the file" | The credits end before the file does (a scene follows them), but Emby's Skip Credits always skips to the end of the file | Nothing; Emby has no credits end |
+| **Waiting**: "Emby doesn't show which of this item's versions is this file yet; if the file is already in Emby's library, check this server's path mappings" | Emby groups several versions in this item, and none of them maps to this file with its own item id | Nothing while Emby is still scanning; otherwise fix the server's path mappings |
+| **Failed**: "This file is Emby item 55, another version of item 53; markers not written" | The job found another version's item for this file | Check how Emby grouped this item's versions |
 | **Failed**: "Couldn't read this server's saved settings (…)" | `settings.json` couldn't be read just before the write, so nothing was written | Check the config volume and the log; the next run tries again |
 | Evidence detail: "Couldn't read this server's plugins, so its markers aren't used" | A Jellyfin/Emby server's plugin list couldn't be read, so its markers might be a crowd database's copy | Nothing; they're read again on a later run |
 | Evidence detail: "Markers on this server look imported from …; not used as a second opinion" | That server's markers came from an intro-database plugin, the same data as the online sources | Nothing; this is expected |

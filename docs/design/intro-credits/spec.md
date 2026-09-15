@@ -22,15 +22,18 @@ published to every server that has the file. Feature name in the UI: **"Intro & 
 **Status (2026-09-15).** Phase 1 (§12: store, chapters/online detection, Intro & Credits job type, Plex + Jellyfin
 publishers, per-server Edit tab, Settings section, Inspector tab, config migration, docs) is built, audited and
 lab-proven: lab matrix 18/19 (row 11 unit-tested), `pr-241` image checked on the lab, and a scale run on 715 real files
-with 0 failures (`evidence/lab/phase1-results.md`). Its findings are fixed in §5.5 rules 6–7 and a warning when an online
-source's daily budget runs out (§14, 2026-09-14/15), or moved into phase 2 (the season chapter-intro check). **Phase 2 is in progress**
-(`plan-phase2.md`; the ledger in `.superpowers/sdd/plan-phase2/progress.md` says which tasks are done): the audio
-fingerprint store, the v3 matcher port, detector plumbing, API cassettes, the accuracy harness (reproduces §5.3
-exactly), Plex version drift and the Emby Bridge plugin are on the branch; the season audio detector and the Emby
-publisher are next. Build runs on PR #241, branch `feat/markers-detection`; spec, slimmed evidence and plans live in
-`docs/design/intro-credits/`. Local-only, gitignored files stay beside them: `evidence/lab/env` (tokens),
-`evidence/lab/synth/` (webm), `evidence/lab/scale_mounts.sh` and `evidence/lab/results/` (real library paths),
-`evidence/online/skipdb-dump.json`, `evidence/plugins/emby-4.10/embylibs/`.
+with 0 failures (`evidence/lab/phase1-results.md`). Its findings are fixed in §5.5 rules 6–7 and a warning when an
+online source's daily budget runs out (§14, 2026-09-14/15), or moved into phase 2 (the season chapter-intro check).
+**Phase 2 is built** (`plan-phase2.md`; the ledger in `.superpowers/sdd/plan-phase2/progress.md` says which tasks are
+done): season audio intros (fingerprint store, v3 matcher, season step with the silence guard and the season
+chapter-intro check, Season follow-up jobs), the Emby Bridge plugin and Emby publisher, Plex version drift, the Check
+servers job (§6.2 step 6), the Season view and its API, the Settings / Edit tab / Inspector UI, and the accuracy harness
+(`evidence/eval/phase2-harness.md`: reproduces §5.3 exactly; the full report against Plex's own markers). Rulings R1–R5
+and G3 are in §14. Next: the phase-2 lab matrix (`plan-phase2.md` Task 17). Build runs on PR #241, branch
+`feat/markers-detection`; spec, slimmed evidence and plans live in `docs/design/intro-credits/`. Local-only, gitignored
+files stay beside them: `evidence/lab/env` (tokens), `evidence/lab/synth/` (webm), `evidence/lab/scale_mounts.sh` and
+`evidence/lab/results/` (real library paths), `evidence/online/skipdb-dump.json`,
+`evidence/plugins/emby-4.10/embylibs/`.
 
 **Working rules (owner's, non-negotiable).**
 - Prove server behaviour on the **lab servers on storage** (§10.3), never on the prod Plex on `plex`. Prod Plex DB:
@@ -113,7 +116,7 @@ real library mounted read-only.
 | Types | Intro, Outro (credits), Recap, Preview, Commercial. | API |
 | Wipes | All segments deleted when the file's mtime changes on refresh (correct: file changed). | source |
 
-### 3.3 Emby (4.10.0.40)
+### 3.3 Emby (4.10.0.40, 4.9.1.90)
 
 | Question | Answer | How |
 |---|---|---|
@@ -122,7 +125,9 @@ real library mounted read-only.
 | Plugin path | `IItemRepository.SaveChapters(internalId, list)` keeping existing `Chapter` rows. | (lab) `evidence/plugins/emby-4.10` |
 | What wipes | `MetadataRefreshMode=FullRefresh` ("Search for missing metadata" / "Replace all") wipes all markers. Default/ValidationOnly/image refresh, recursive series refresh, library scan, restart do not. | (lab) |
 | Self-heal | Plugin stores markers and re-applies on `ILibraryManager.ItemUpdated` (registered from an `IServerEntryPoint`) when they vanished — re-applied within the same refresh. | (lab) |
-| Client | Emby web shows **Skip Intro** **without Premiere**. | (lab, Playwright) |
+| Client | Emby web shows **Skip Intro** **without Premiere**. Clicking it on the unlicensed lab server opened Emby Premiere's "Unlock Feature" dialog, so where a skip lands wasn't measured. | (lab, Playwright) + `evidence/lab/phase2-results.md` Task 10 round 3 |
+| Versions | Each version is its own item with its own `Chapters3` rows; an item lists every version as a MediaSource with its `ItemId` (with an API key only when `AlternateMediaSources` is asked for). The web player shows the chapters of the version it plays. | (lab, 4.10 + 4.9) `evidence/lab/phase2-results.md` Task 10 round 3 |
+| 4.9.1.90 | Same chapter behaviour; the plugin's 4.9 build passes the same checks as 4.10 on `mlab-emby49` (18/18; the 2 web-player checks are 4.10 only). 4.9's `DELETE /Library/VirtualFolders?name=` answers 500 (needs `Id=`). | (lab) `evidence/lab/phase2-results.md` Task 4 (first build, fix rounds 1–2) |
 | Install | Catalog plugins install via `POST /Packages/Installed/{name}` + restart (proven with TimeMarkEdit). Separate builds for 4.9 and 4.10 (ABI change). Catalog entry needs a forum thread + developer id from Emby staff. | (lab) + dev.emby.media |
 
 ## 4. Online sources
@@ -187,14 +192,19 @@ featurettes, `Extras/` folders…), get no ids. TheIntroDB is queried with `dura
 ### 5.3 TV intros — season audio matching
 **Fingerprint** (per file, cached): `ffmpeg -ss 0 -t <W> -i <file> -vn -ac 2 -f chromaprint -algorithm 1
 -fp_format raw -` → uint32 LE, **0.1238 s/point** (measured). `W = min(900 s, 35% of duration)`. The app image's
-`/usr/lib/jellyfin-ffmpeg/ffmpeg` has chromaprint; `/usr/local/bin/ffmpeg` does not. CPU only (no GPU chromaprint),
-~2 s per episode; at most 2 at a time.
+`/usr/lib/jellyfin-ffmpeg/ffmpeg` has chromaprint; `/usr/local/bin/ffmpeg` does not, and the arm64 image has no
+jellyfin-ffmpeg, so there season audio is unavailable with a message (Settings "Not available",
+`GET /api/markers/sources/local`). CPU only (no GPU chromaprint), ~2 s per episode; at most 2 at a time.
 
 **Matcher (v3)** for every episode pair: inverted index (±2 value shift); per shift, runs where
 `popcount(a^b) ≤ 6`, gaps ≤ 3.5 s, length 8–120 s; keep all non-overlapping runs. Per episode: cluster candidates
 (start, end) within ±4 s; rank by (length ≥ 15 s, number of supporting episodes, length); require support from
-≥ 50% of the other episodes in the group (≥ 1 when only one other). Group = the season folder on disk
-(server-agnostic); mixed releases in one season work (R&M NTb + Absinth).
+≥ 50% of the other episodes in the group (≥ 1 when only one other). Group = the video files in the episode's folder
+with the same parsed season number, at most the 40 nearest by episode number (a flat folder can hold hundreds;
+server-agnostic); mixed releases in one season work (Rick and Morty S01). An intro whose points are more than half
+chromaprint's silence value (±2, or ≤ 6 bits apart) is dropped, and a pair that provably can't hold a run of 120 s or
+less is skipped (two silent openings); neither changes the 118-episode numbers (`evidence/eval/phase2-harness.md`,
+Task 7).
 
 **Measured** on 118 episodes with studio-chapter truth ("useful" = end within 5 s and start within 15 s)
 (`evidence/eval/`):
@@ -217,12 +227,18 @@ featurettes, `Extras/` folders…), get no ids. TheIntroDB is queried with `dura
   is decidable from its second episode.
 - **No same-season episode**, up to 4 episodes of the **previous season** (82 episodes had one): 48 useful / 10 wrong /
   24 missed (59%, precision 83%). Used for a season's first episode, as a candidate that still needs a second source.
+- **In the app** (`tools/markers_eval`, `evidence/eval/phase2-harness.md`): the harness's eval-lists mode (at most 8
+  files per season, only files with chapters) reproduces the table above exactly (91 / 13 / 14); app mode, whole season
+  folder (158 files matched): **91 useful / 10 wrong / 17 missed** (The Simpsons S03: 3 wrong become missed).
+
+Season audio never decides alone, at High or Medium (R2), and neither it nor the previous-season hint makes an
+agreeing pair with markers already on a server (G3, §5.5 rule 4): both come from matching audio.
 
 Remaining failures: variable couch gag (The Simpsons), a repeated segment ahead of the real intro (Carême), title card
 10–20 s longer than the chapter (Daredevil, Outlander). Credits via audio matching: 54% precision — **rejected**.
 
-A new episode only fingerprints itself and compares with cached siblings; siblings still without an intro are
-re-decided when it arrives.
+A job fingerprints the season folder's missing episodes on its workers, matches cached fingerprints inline, and
+queues a Season job for same-season episodes outside the job whose inputs changed (R3; §6.4 item 5).
 
 ### 5.4 Credits — on-screen text (movies and TV)
 **Rule (owner):** Skip Credits lands on the **real credit roll** — the first credit card/crawl, including names over
@@ -300,9 +316,16 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
 3. Chapters → accept (first intro/recap chapter, last credits/preview chapter; on a tie the one with the earlier end),
    unless two agreeing independent non-chapter sources contradict the chapter → **"Needs review"**. One contradicting
    source never overrides chapters. When two or more independent sources agree with the chapter's checked edge, the
-   other edge takes their safer value if it is safer (later intro/recap start, earlier credits/preview end).
+   other edge takes their safer value if it is safer (later intro/recap start, earlier credits/preview end). **Season
+   chapter-intro check (F1):** when at least 2 other episodes of the season group have an intro chapter, an intro
+   chapter longer than max(2 × their median, median + 30 s) doesn't decide alone: it needs one agreeing independent
+   source that isn't markers already on a server (else "Needs review", reason "Intro chapter is much longer than the
+   rest of the season's"); the agreeing candidates may then shorten it the same way.
 4. Otherwise accept when two independent sources agree: intro/recap **end** within 5 s; credits/preview **start**
-   within 10 s. Every maximal set of mutually agreeing candidates is considered (a sliding window over the compared
+   within 10 s. An agreeing set needs a candidate that is neither markers already on a server nor season audio (or its
+   previous-season hint): season audio and a server's own detection never decide together (G3; "Needs review", reason
+   "Season audio and a server's own marker agree, but both come from matching audio; needs another source").
+   Every maximal set of mutually agreeing candidates is considered (a sliding window over the compared
    times). Only candidates that agree with a different independent source may supply times: the agreed edge comes
    from the first of them in source order; the other edge takes the safer value across them (latest intro/recap
    start, earliest credits/preview end). If the composed marker fails sanity → "Needs review". (Taking the safest
@@ -323,14 +346,15 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    times on their own. When a server marker agrees, it may **shorten** the composed skip (a later intro/recap start,
    an earlier credits/preview end) but never lengthen it — so a crowd answer running to the end of the file can't
    swallow a post-credits scene that the server's own marker stops before. Markers from several servers count as one
-   source. A Plex/Emby item's markers are not used for a file whose item has another version with a duration more
-   than 2 s different (one set per item describes one cut). Markers on a Jellyfin/Emby server that has an
-   intro-database importer plugin join the crowd group of rule 8. Once credits or a preview are decided (any path but
-   a lock), a server's own detection markers of that type (never an importer plugin's, never ours or another cut's)
-   may also move the **start** later. If any of them covers the decided start or starts within 10 s of it, the server
-   says the credits are already running there and nothing moves. Otherwise each server offers its first start more
-   than 10 s after the decided start and more than 10 s before the decided end, and the latest offer wins — so a
-   server that splits its credits into pieces can't pull the start to its last piece. `decided_by` adds
+   source. A Plex item's markers are not used for a file whose item has another version with a duration more
+   than 2 s different (one set per item describes one cut); Emby's reader applies the same check to the versions Emby
+   lists with the item, although each Emby version has its own markers (§3.3, §6.3). Markers on a Jellyfin/Emby server
+   that has an intro-database importer plugin join the crowd group of rule 8. Once credits or a preview are decided
+   (any path but a lock), a server's own detection markers of that type (never an importer plugin's, never ours or
+   another cut's) may also move the **start** later. If any of them covers the decided start or starts within 10 s of
+   it, the server says the credits are already running there and nothing moves. Otherwise each server offers its first
+   start more than 10 s after the decided start and more than 10 s before the decided end, and the latest offer wins —
+   so a server that splits its credits into pieces can't pull the start to its last piece. `decided_by` adds
    `server_markers`; the reason (and the Inspector) names the server(s). A shortened marker failing sanity sends the
    type to "Needs review" with the unshortened marker proposed. This runs last, after rule 5's contradiction check and
    rules 9–10 have judged the unshortened markers, and only on types still decided, so it can shorten a marker but
@@ -338,7 +362,8 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    shortened or confirmed only by server markers still counts as chapters alone for the evidence search.
 8. Online sources are independent of each other only if they don't copy each other: IntroDB data looks partly seeded
    from others — IntroDB + TheIntroDB always count as one source, and so do server markers written by an importer of
-   those databases. SkipDB intro starts also match TheIntroDB's to ≤ 44 ms on the Daredevil S03 episodes both cover
+   those databases. Season audio and its previous-season hint count as one source (the same method on the same show).
+   SkipDB intro starts also match TheIntroDB's to ≤ 44 ms on the Daredevil S03 episodes both cover
    (agreement is on intro ends, so they stay separate for now; re-measure before enabling TheIntroDB by default).
 9. A decided intro and recap overlapping by more than 5 s → both "Needs review".
 10. A decided preview overlapping decided credits by more than 10 s → the preview goes to "Needs review".
@@ -378,12 +403,21 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    `library_ids`. No enabled owner → nothing is detected.
 3. **Ensure markers for the file.** Fresh `markers` for (size, mtime) → reuse ("detected once, reused"). Otherwise
    gather evidence in §1 order, stop early when §5.5 is satisfied by more than chapters alone (a chapter decision keeps asking so rule 3 can veto it; a server never asked for the file, and not yet published to, is still read once, since rule 7 lets its own markers shorten decided credits; an empty or unusable answer isn't asked again while everything stays decided), decide, store. Stored chapter and online evidence carries its rules or parser version; a file whose stored version is older is probed or asked again on the next run.
-4. **Season step.** Intros need siblings: fingerprint missing episodes in the season folder, re-decide episodes without
-   an intro; if the season has only one episode, use the previous season's cached fingerprints (§5.3).
+4. **Season step.** Intros need siblings. A job fingerprints the season folder's missing episodes on its workers,
+   matches cached fingerprints inline, and queues a Season job for same-season episodes outside the job whose inputs
+   changed (R3). An episode alone in its season group uses up to 4 cached fingerprints of the previous season (§5.3).
+   Season jobs (`Season: <show> · <season>`) run at LOW, or NORMAL when queued by a webhook follow-up (its retries and
+   verify job queue LOW); at most 500 files; new requests join a waiting Season job of the same priority; a Season job
+   never queues another. Requests live in memory: a restart only delays them until the season's next run.
 5. **Publish.** For each enabled owner, its `MarkerPublisher` writes the decided set; unchanged `markers_hash` → skip.
-6. **Reconcile** (periodic + after jobs): read markers back from each server; if they differ (Plex forced
-   detection, Emby FullRefresh without heal), re-publish. Locked markers always re-assert. Plex:
-   `on_plex_redetect` = `restore` (default) or `keep_plex`.
+6. **Reconcile.** After jobs = the read-back before "Up to date" and the delayed verify job (phase 1). On demand =
+   **Intro & Credits · Check servers**, a LOW job the user starts from Start New Job or `POST /api/markers/reconcile`,
+   or schedules in Automation → Schedules like any other job; nothing is scheduled by default (R5). It bulk-reads every
+   published item and re-runs drifted files (Plex forced detection, Emby FullRefresh without heal, a Plex version
+   change, an item the server replaced), plus files with decided credits or preview whose server's stored answer is
+   empty or unusable, on a 1/2/4/8/16-day backoff (at most 5 re-reads, failed ones included). Locked markers always
+   re-assert. Plex `on_plex_redetect` = `restore` (default) or `keep_plex`; Emby `on_emby_redetect` = `restore` or
+   `keep_emby`. `keep_plex` keeps Plex's markers (§14 2026-09-14), not stored as evidence.
 7. **Outcomes** per server: markers written / reused / needs review / skipped + reason.
 8. **Manual edit** in the Inspector: no job — save, lock, publish to every owner immediately.
 
@@ -427,13 +461,36 @@ at the last write), `atomic_writes`.
   (`PLUGIN_REPO_URL` manifest).
 - Types: Intro, Outro (credits), Recap, Preview.
 
-**EmbyMarkerPublisher**
-- New **Media Preview Bridge for Emby** plugin: `POST /MediaPreviewBridge/Markers/{internalId}` stores markers,
-  `SaveChapters` keeping `Chapter` rows, re-applies on `ItemUpdated`. Prototype: `evidence/plugins/emby-4.10/`
-  (lab route `/markerslab/set`).
-- Builds for 4.9 and 4.10. Submit to the Emby catalog; app installs via `POST /Packages/Installed/{name}`. Until
-  accepted: manual DLL install instructions.
-- Types: IntroStart, IntroEnd, CreditsStart.
+**EmbyMarkerPublisher** (`markers/publishers/emby.py`; plugin `emby-plugin/`, contract in its README)
+- **Media Preview Bridge for Emby** plugin, builds for 4.9 and 4.10. JSON keeps C# PascalCase and leaves out nulls;
+  times are ticks (ms × 10,000). `GET /MediaPreviewBridge/Ping` (anonymous) → `{"Ok", "Version", "Features":
+  ["markers"]}`. `GET` / `POST` / `DELETE /MediaPreviewBridge/Markers/{Id}` (administrators; 401 without a token, 403
+  for a non-admin): POST `{IntroStartTicks, IntroEndTicks, CreditsStartTicks, FileSize, ReplaceOwn}`; every answer is a
+  `MarkersResponse` `{Id, Found, IntroStartTicks, IntroEndTicks, CreditsStartTicks, FileSize, Stale, Stored, Error}`
+  (a refused body is 200 with `Error`; a store or chapter write failure is 500 JSON with nothing changed).
+- The plugin writes `SaveChapters` keeping `Chapter` rows and removes only rows equal to what it stored; `ReplaceOwn`
+  replaces other writers' rows of a type (the app sends it for `restore`). **Heal:** re-applies on `ItemUpdated` when a
+  FullRefresh deleted the rows. **Stale guard:** the store records the item's path and `FileSize`; while the file on
+  disk differs, markers are stored but not shown (`Stale: true`) and our rows are removed at the next item update.
+  **Remove:** a removed item's store file is deleted (`ItemRemoved`), and a daily/start-up sweep deletes store files of
+  items Emby no longer has.
+- The publisher checks the Ping `markers` feature and admin access (`needs_plugin` with `catalog_listed`,
+  `plugin_outdated`, `misconfigured`, `unreachable`). **Per version:** each Emby version is its own item and the
+  player plays the chosen version's chapters, so each version is published on its own like Jellyfin (no cross-version
+  agreement, no recorded `item_files`). A write reads `Fields=Chapters,MediaSources,AlternateMediaSources` once and
+  confirms this file is that item's own version (listed under another version's item → failed; several versions and
+  none this file → waiting, not in library). POST carries this file's size; every POST is confirmed by reading the
+  chapters back (not shown → DELETE, failed). An unchanged set whose stored state matches (same ticks and size, not
+  stale) sends nothing. `shows()` reads the chapter rows (credits compared by start). `keep_emby` posts without
+  `ReplaceOwn` and records the types Emby shows its own rows of as kept; the plugin still stores ours for them.
+- **Credits (R1):** Emby always gets the decided credits start, even when the credits end before the file does
+  (end < duration − 2 s); its Skip Credits button then skips to the end of the file, including any scene after the
+  credits. The row and the Inspector note say "Emby skips to the end of the file".
+- Types: IntroStart, IntroEnd, CreditsStart (no recap or preview).
+- Install: `POST /api/servers/{id}/install-plugin` installs from Emby's catalog (`POST /Packages/Installed/{name}` +
+  restart) when `GET /Packages` lists the plugin; `manual: true` when `GET /Packages` doesn't list it (`false` with an
+  error when the catalog can't be read), and the Edit tab links the guide's manual DLL install. Catalog status: §13
+  item 5. Prototype: `evidence/plugins/emby-4.10/`.
 
 ### 6.4 Workers, priority and pause — plugging into the existing engine
 Owner (2026-09-13): marker work must respect the GPU and CPU workers exactly like previews.
@@ -470,8 +527,10 @@ Owner (2026-09-13): marker work must respect the GPU and CPU workers exactly lik
      (`processing/ffmpeg_runner.py`: CUDA / VAAPI / QSV…); a CPU worker decodes in software. Then text detection on
      the worker's GPU (item 7) or CPU.
    - GPU error → rerun that step on CPU in the same worker, mirroring previews.
-5. **Season decision** (cheap numpy matching) runs when a season's last episode in the job finishes, in the
-   dispatcher's completion callback, not in a worker slot.
+5. **Season decision** (cheap numpy matching): a job fingerprints the season folder's missing episodes on its
+   workers, matches cached fingerprints inline, and queues a Season job for same-season episodes outside the job whose
+   inputs changed (R3; the engine has no completion hook; phase 2 Task 3). A pair with more than 2,000,000 value
+   matches is matched on a worker instead of a checking thread.
 6. **Priority and gate.** Webhook-triggered Intro & Credits jobs submit at NORMAL (preview jobs are HIGH), so previews
    drain first; backfill and schedules submit at LOW; users can change it live with the existing priority API.
    Intro & Credits jobs count toward `max_concurrent_jobs` like any job.
@@ -505,7 +564,9 @@ Show a mockup and confirm wording before building each screen.
    - Libraries with checkboxes (sports-type unchecked by default).
    - Status block. Plex: write method (database), Plex Pass state, DB location + local-disk check, Plex's own
      detection on/off, "When Plex has its own markers: Use ours / Keep Plex's". Jellyfin/Emby: plugin name, installed vs
-     required version, Install/Update button, which marker types the server can show.
+     required version, Install/Update button, which marker types the server can show. Emby: "Install by hand" (guide
+     link) when the catalog doesn't list the plugin, "Can show: Intro · credits start" with the no-credits-end tooltip,
+     and "When Emby has its own markers: Use ours / Keep Emby's".
    - Plex only: turning it on asks the database-write confirmation (once per Plex server; stores
      `db_write_confirmed_at`): no API exists; tested on Plex 1.43, stops if the DB looks different; must be same
      machine; Plex re-detection replaces ours and we put them back; viewers need Plex Pass or Plex Home.
@@ -517,8 +578,10 @@ Show a mockup and confirm wording before building each screen.
 3. **Preview Inspector → "Intro & Credits" tab:** decision lane + evidence lanes (Chapters, Season audio, online
    sources, each server's current markers) in two zoom windows (first / last 3 min); per-server "will add / will
    replace"; Adjust, Lock, Re-detect, Publish.
-4. **Inspector → Season view:** per-episode intro/credits, evidence chips, per-server dots, "Needs review", bulk
-   publish.
+4. **Inspector → Season view:** per-episode intro/credits, evidence chips, per-server dots, "Needs review". "Publish N
+   to M servers" = a normal-priority Intro & Credits job for exactly that season's episodes, named `Intro & Credits:
+   <show> · Season N` (or `· Specials`); an identical pending or running job is reused (R4). Review opens that
+   episode; editing is phase 4.
 5. **Dashboard → job queue:** Intro & Credits jobs linked under the preview job; per-server "Markers written × N /
    reused / needs review / skipped (reason)"; source counts.
 6. **Setup Health:** plugin missing/outdated, Plex Pass missing, Plex marker tag row absent, Plex DB not local, Plex
@@ -551,7 +614,8 @@ Per server (`media_servers[]`):
   "plex": {"db_write_confirmed_at": null, "on_plex_redetect": "restore"}
 }
 ```
-`library_ids: null` = all libraries except sports-type. `plex` block only on Plex servers. TheIntroDB key is a secret:
+`library_ids: null` = all libraries except sports-type. `plex` block only on Plex servers; Emby servers carry
+`"emby": {"on_emby_redetect": "restore"}` instead (`keep_emby` = "Keep Emby's"). TheIntroDB key is a secret:
 never logged, masked in UI and API responses.
 
 ## 9. Codebase touchpoints (verified 2026-09-13 on `dev` @ d47e376)
@@ -646,7 +710,9 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
 3. **Plex client display** — proven at the API (served XML identical to native), not yet seen in a real Plex app
    (needs a claimed lab server). Verify in phase 1.
 4. **Plex Pass for viewers** — non-Pass viewers never see skip buttons; say so in the UI.
-5. **Emby catalog acceptance** — not guaranteed; manual install fallback.
+5. **Emby catalog acceptance** — not guaranteed; manual install fallback (built: the Edit tab's "Install by hand"
+   and the guide's manual install). Catalog text is written (`emby-plugin/README.md` "Catalog submission"); not
+   submitted — waiting for the owner's Emby forum thread / developer id (roadmap owner checkpoint 4).
 6. **Multi-version items** — Plex shared markers + Jellyfin alternate versions need a lab test in phase 1.
 7. **Credits truth is subjective** (epilogues, names over footage, post-credit scenes) — adjudications recorded.
 8. **Jellyfin 12.0 catalog install** of a dual-ABI manifest is untested (manual load works).
@@ -831,6 +897,27 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   stays in review. With everything decided, the pipeline still reads a server never asked for the file (not one
   already answered, empty, unreadable or another cut), and a chapter decision backed only by server markers keeps the
   evidence search open. The Inspector says e.g. "Shortened to Plex's own credits start" under the ending.
+- 2026-09-14 · Emby credits (R1, owner; §6.3): Emby always gets the decided credits start, even when the credits end
+  before the file does; Emby's Skip Credits button then skips to the end of the file, including any scene after the
+  credits, and the file's row and the Inspector say "Emby skips to the end of the file". Overrides the recommended
+  "send credits only when they run to the end of the file".
+- 2026-09-14 · Season matching (R3, technical ruling; §5.3, §6.2 step 4, §6.4 item 5): the job engine has no completion
+  hook, so a job fingerprints the season folder's missing episodes on its workers, matches cached fingerprints inline,
+  and queues a Season job for same-season episodes outside the job whose inputs changed. Replaces "a new episode only
+  fingerprints itself" and "runs when a season's last episode in the job finishes, in the dispatcher's completion
+  callback".
+- 2026-09-14 · Check servers (R5, owner: "the user can set a scheduled job just like we do for previews"; §6.2 step 6):
+  reconcile is an Intro & Credits job the user starts (Start New Job, `POST /api/markers/reconcile`) or schedules in
+  Automation → Schedules; nothing is scheduled by default. Replaces the roadmap's "APScheduler job every 12 h + after
+  each Intro & Credits job" (after-job checks stay the read-back and the verify job) and "`keep_plex` stores Plex's set
+  as evidence" (`keep_plex` keeps Plex's markers, owner line above).
+- 2026-09-14 · Local detectors (§6.2 step 3; phase 2 Task 3, ledger L165/L204): a forced run tracks its refresh per
+  (file, source), so a local detector that has to wait for a worker no longer stops later sources being asked again;
+  a detector's answer is stored with its version, and an answer from another version is asked again even for decided
+  types.
+- 2026-09-14 · Season audio needs an ffmpeg with chromaprint (§5.3): jellyfin-ffmpeg in the amd64 image. The arm64
+  image has none, so the source isn't run and Settings shows "Not available" with the reason
+  (`GET /api/markers/sources/local`).
 - 2026-09-15 · Plex version drift in read-back (§6.3), from the parked multi-version limit (a version added to a Plex
   item after publishing, never decided here, left our markers showing for a cut nobody checked): every Plex write
   records the item's version files (optimized copies left out) with the item record, without bumping its version.
@@ -856,4 +943,42 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   undecided file's reason notes the skipped source; Settings shows "Daily limit reached — lookups resume at …"; the log
   line is a WARNING once per source per job. No automatic retry: nothing is stored for a skipped lookup, so the next
   run asks again.
-- 2026-09-15 · Season view Publish queues a NORMAL-priority job of exactly the season's listed episodes (owner)
+- 2026-09-15 · Season view Publish (R4, owner: "Start a job", 2026-09-14; §7.4): "Publish N to M servers" queues a
+  normal-priority Intro & Credits job of exactly the season's listed episodes (the season group, not the whole folder),
+  named `Intro & Credits: <show> · Season N` (or `· Specials`); an identical pending or running job is reused. Not
+  HIGH.
+- 2026-09-15 · Season audio rulings (§5.3, §5.5 rules 4 and 6; `evidence/eval/phase2-harness.md` Task 15). R2
+  (ruling 2026-09-14 while the owner was unsure): season audio never decides alone at High or Medium — alone it would
+  publish 91 useful / 13 wrong / 14 missed on the 118 episodes (10 skipping story). G3 (owner, 2026-09-15: kept on):
+  season audio or its previous-season hint plus markers already on a server never decide together, since a server's
+  intro detection matches audio too. G3 off would publish 23 right / 7 wrong against Plex's own 23 / 15 on the 118
+  episodes (whole-folder mode 23 / 4); it adds no useful answer Plex doesn't have. §5.5 rule 6 is unchanged.
+- 2026-09-15 · Harness gate (phase 2 Task 15, `evidence/eval/phase2-harness.md`): on the 118 intro episodes, "Medium
+  beats Plex" = as useful or more and no more wrong than Plex's own markers; High = no more wrong than Plex. With G3 on
+  (shipped) the gate fails by construction: Medium 0 useful against Plex's 23 (High passes, 0 wrong against 15). With
+  G3 off it passes in both modes.
+- 2026-09-15 · Season step (§5.3, §5.5 rule 3; phase 2 Tasks 7 and 7b): the season group is the folder's episodes with
+  the same parsed season number, at most the 40 nearest; an intro that is more than half silence is dropped and a pair
+  that provably holds no run of 120 s or less is skipped; the season chapter-intro check from lab scale finding F1
+  (Reservation Dogs S01E05/E06 "Intro" chapters that are story, `evidence/lab/phase1-results.md`) makes a much longer
+  intro chapter need an agreeing source that isn't server markers; a season ends with the same decisions whatever order
+  its episodes arrive in. Harness unchanged: 91 / 13 / 14 (eval lists), 91 / 10 / 17 (whole folder).
+- 2026-09-15 · Season follow-up jobs (§6.2 step 4; phase 2 Task 8): `Season: <show> · <season>` jobs run at LOW, or
+  NORMAL when a webhook follow-up queued them (its retries and verify job queue LOW); at most 500 files; new requests
+  join a waiting Season job of the same priority; a Season job never queues another. Webhook follow-ups for episodes of
+  one season join a waiting follow-up (up to 500 files), and joined episodes don't wait for their own preview jobs.
+  Requests are kept in memory, so a restart only delays them until the season's next run.
+- 2026-09-15 · Emby publishes per version (§3.3, §5.5 rule 7, §6.3; phase 2 Task 10 round 3,
+  `evidence/lab/phase2-results.md`): Emby's web player plays each version's own chapters, so each version item gets
+  its own markers, like Jellyfin; no cross-version agreement or recorded version files. Replaces round 1's "Emby
+  versions share one marker set" (the Plex item rule). The server-marker evidence reader still applies the one-cut
+  check to Emby items (parked: stricter than needed). "When Emby has its own markers: Use ours / Keep Emby's"
+  (`on_emby_redetect`) mirrors Plex's setting through the plugin's `ReplaceOwn`.
+- 2026-09-15 · Check servers details (§6.2 step 6; phase 2 Task 11): "Intro & Credits · Check servers", LOW unless
+  asked otherwise; one queued or running at a time (`already_queued`). It reads every published item in steps of 500
+  items (Plex one item per database connection under the lock proof; Jellyfin and Emby one request per item, a
+  server stopped after 20 failed reads in a row, "Couldn't check <name>") and lists at most 500 files per run, drifted
+  items taking turns. A pause during the read-back gives the job slot back. Files with decided credits or preview whose
+  server's stored answer is empty or unusable are re-read once it is 1 day old, then 2, 4, 8 and 16 days after each
+  re-read that stays empty or fails, at most 5 times. An item the server no longer has is dropped when no runnable file
+  belongs to it, or when the server confirms it missing after a "not in library" row. It queues no retries.

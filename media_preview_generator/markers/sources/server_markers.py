@@ -16,7 +16,10 @@ if TYPE_CHECKING:
 
 # Bump when reading a server changes what a stored answer would hold, so servers are read again (spec §6.2).
 READER_VERSION = 1
-# Plex and Emby markers are one set per item: another version of the item further apart than this is another cut.
+# Plex markers are one set per item: another version of the item further apart than this is another cut. Emby keeps
+# each version's markers on its own item (spec §14 2026-09-15), but its reader still applies this check to the versions
+# Emby lists with the item: every version for a client with a user id, only the item's own with an API key (which then
+# always passes).
 SAME_CUT_MS = 2_000
 _PLEX_TYPES = {"intro": MarkerType.INTRO, "credits": MarkerType.CREDITS}
 # Plugins that write IntroDB / TheIntroDB / SkipDB / AniSkip answers as the server's own segments. Intro Skipper is left
@@ -131,9 +134,11 @@ def read_server_markers(
         item_id: The server's item id.
         include_ours: False (evidence): leave out segments our Jellyfin plugin serves. True: everything clients see,
             ours included. Plex and Emby return the same either way.
-        duration_ms: This file's duration, when the markers are read as evidence for it. Plex and Emby serve one
-            marker set per item, so an item whose versions aren't all this cut (within 2 s), or whose versions can't
-            be read, gives None. Jellyfin segments belong to one version and are never checked.
+        duration_ms: This file's duration, when the markers are read as evidence for it. Plex serves one marker set
+            per item, so an item whose versions aren't all this cut (within 2 s), or whose versions can't be read,
+            gives None. Emby items get the same check on the versions Emby lists with them, although each Emby version
+            has its own markers; with an API key Emby lists only the item's own version, so the check passes. Jellyfin
+            segments belong to one version and are never checked.
 
     Returns:
         Candidates with ``origin`` = server id (credits that run to the end have ``end_ms=None``); ``[]`` when the

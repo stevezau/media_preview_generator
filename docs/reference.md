@@ -244,7 +244,7 @@ The **Recently Added Scanner** is not configured via settings keys any more — 
 
 ## Intro & Credits
 
-Skip Intro / Skip Credits markers for Plex and Jellyfin (Emby publishing is a later phase). See the
+Skip Intro / Skip Credits markers for Plex, Jellyfin and Emby. See the
 [Intro & Credits guide](guides.md#intro--credits) for setup and troubleshooting; this section is the settings/API
 reference. Schema version 15 (`upgrade.py`) added this feature, off everywhere by default.
 
@@ -275,10 +275,10 @@ Shared detection settings — one file is detected once, whatever the publish ru
 | `detect.intro` | bool | `true` | TV episodes only. |
 | `detect.credits` | bool | `true` | TV episodes and movies. |
 | `detect.recap` | bool | `false` | Jellyfin's player is the only one with a Skip Recap button. |
-| `publish_when` | `"high"` \| `"medium"` | `"high"` | **High:** chapters publish on their own unless two other independent sources agree on something different (then Needs review); without chapters, two independent sources must agree. **Medium:** also accepts a single source that checks the file's own cut — chapters, or a SkipDB `exact`/`shifted` match. IntroDB and TheIntroDB never decide alone at either level. |
+| `publish_when` | `"high"` \| `"medium"` | `"high"` | **High:** chapters publish on their own unless two other independent sources agree on something different (then Needs review); without chapters, two independent sources must agree. **Medium:** also accepts a single source that checks the file's own cut — chapters, or a SkipDB `exact`/`shifted` match (intros and recaps only). IntroDB, TheIntroDB, season audio and markers already on servers never decide alone at either level, and season audio (or `season_audio_previous`) with markers already on servers isn't an agreeing pair on its own. |
 | `respect_locks` | bool | `true` | A locked marker is never replaced by detection. The Inspector can't adjust or lock markers yet (a later update); it only shows them and offers Re-detect. |
 | `sources` | array | see above | Evidence sources, in checking/precedence order. Reordering in the UI reorders this array. |
-| `sources[].id` | one of `chapters`, `theintrodb`, `introdb`, `skipdb`, `season_audio`, `credits_text`, `server_markers` | — | `season_audio` and `credits_text` are "Coming soon" in this release: measured and speced, not yet built. Their `enabled` value and position still round-trip through save/load, but detection doesn't run for them. |
+| `sources[].id` | one of `chapters`, `theintrodb`, `introdb`, `skipdb`, `season_audio`, `credits_text`, `server_markers` | — | `credits_text` isn't built in this release: its `enabled` value and position round-trip through save/load, but detection doesn't run. `season_audio` runs where ffmpeg has chromaprint (see `GET /api/markers/sources/local`); it only confirms intros another source found. Its previous-season hint is stored as `season_audio_previous` evidence (not a settings id). |
 | `sources[].enabled` | bool | varies | `theintrodb` defaults to `false` (used without the vendor's written permission); the rest default to `true`. |
 | `sources[].api_key` | string | `""` | `theintrodb` only. Optional. `GET`/`POST /api/settings` mask a set key as `****`; posting `****` back keeps the stored key unchanged. Never logged. |
 
@@ -317,7 +317,7 @@ column) holds:
 | Key | Type | Notes |
 |---|---|---|
 | `kind` | `"intro_credits"` | Always this value for a markers job. |
-| `source` | string | What created it: `manual`, `schedule`, `inspector` (re-detect), `season` (a Season follow-up job), or a webhook source name (`sonarr`, `radarr`, `plex`, `retry`, …). |
+| `source` | string | What created it: `manual`, `schedule`, `inspector` (re-detect), `inspector_season` (Season view **Publish**), `season` (a Season follow-up job), `reconcile` (Check servers), or a webhook source name (`sonarr`, `radarr`, `plex`, `retry`, …). |
 | `libraries` | `[{"server_id", "library_id"}]` | Libraries to enumerate. Empty with no `file_paths` = every library Intro & Credits goes to. |
 | `file_paths` | array of strings | Explicit files/folders instead of libraries (webhook follow-ups, Inspector re-detect, retries). |
 | `follows_job_id` | string \| `null` | The preview job this job waits for before taking a job-gate slot (webhook follow-ups only). Episodes that later joined the job (see below) don't wait for their own preview jobs. |
@@ -330,6 +330,7 @@ column) holds:
 | `retry_delay` | int | Present only on a retry or verify job: seconds waited before it took a slot. |
 | `retry_not_before` | ISO-8601 timestamp | Present only on a retry or verify job: the due time (survives a restart without waiting again in full). |
 | `verify` | bool | Present only on a verify job: the delayed check of files published after they were replaced. It queues no further verify job, and doesn't retry a file gone from disk. |
+| `reconcile` | bool | Present only on a Check servers job: it lists the files of drifted published items (and decided files to ask servers again about) instead of libraries or paths. |
 
 Retries (files not yet on disk, not yet in a server's library, or on a Plex whose Plex Pass check didn't answer)
 reuse the webhook preview-retry backoff (`webhook_retry_count` / `webhook_retry_delay`) and cap at **500 files** per
@@ -338,14 +339,14 @@ webhook's own paths, not the first mapped disk's), with their `webhook_item_id_h
 replaced files also queues one verify job (`verify: true`, named "Verify: …") for them, due after three times the
 first retry delay (at least 600 s); none when `webhook_retry_count` is 0. Only jobs for sent files (webhooks and
 retries, not `manual`/`inspector` or library runs) queue one. A job whose read-back of a server failed completes with
-the warning "Couldn't check what N file(s) show on <server>". A job where an online source's daily budget ran out
+the warning `Couldn't check what N file(s) show on <server>`. A job where an online source's daily budget ran out
 partway through completes with one warning per source that ran out (see `GET /api/markers/sources/usage` above for
 the same state in Settings), and doesn't queue a retry for those files — nothing was stored for the source, so the
 next scheduled or manual run for the same files asks it again on its own.
 
 When a job's season step finds that other episodes of the same season could now be decided differently (their season
 intro-chapter check or season audio answer is out of date), the job queues a **Season job** for them once it
-completes: `source: "season"`, named "Season: <show> · <season folder>" (or "Season: N seasons"), at Low priority —
+completes: `source: "season"`, named `Season: <show> · <season folder>` (or `Season: N seasons`), at Low priority —
 Normal when the job was a webhook follow-up (not its retries or verify job, which queue theirs at Low), never ahead of
 the job that asked — and capped at 500 files; more are left to their next run. Episodes already listed by a Season job
 that hasn't read its files yet, or by a webhook follow-up that hasn't started, aren't queued again; new ones join such
@@ -355,6 +356,25 @@ job completes drops them, and the season's next run asks again. Plex/Emby/Jellyf
 time: an episode whose season folder a webhook follow-up that hasn't read its files yet already covers joins that
 follow-up (renamed "Intro & Credits · N files") while it stays within 500 files, instead of queuing another. A joined
 episode doesn't wait for its own preview job: markers don't need previews.
+
+**Check servers** (`reconcile: true`, `source: "reconcile"`, named "Intro & Credits · Check servers") is created by
+`POST /api/markers/reconcile`, the Dashboard's Start New Job dialog, or a schedule with `config.reconcile` (see
+[Schedules](#post-apischedules)); nothing schedules it by default. LOW priority unless the request or schedule sets one.
+Only one is queued or running at a time: asking again returns that job. It reads back every item this app published
+(`item_publish_state`) on each enabled server with Intro & Credits on, 500 items per call (Plex one item per connection
+under the lock proof; Jellyfin and Emby one request per item, stopping a server after 20 failed reads in a row), and
+lists only the files of items that aren't `ours` any more (`missing`, `replaced`, `versions_changed`, `gone`, or a kept
+type on a server now set to `restore`). A pause during the read-back gives the job's gate slot back until resume. It
+also lists files with decided credits or preview whose stored answer from an enabled server (Intro & Credits on or not)
+is empty or unusable and that show none of ours on that server's item, re-reading that server's own markers once the
+answer is 1 day old, then 2, 4, 8 and 16 days after each re-read that stays empty or fails, and not after the fifth; a
+file taken for a server isn't taken again within a day. At most 500 files per run (100 of them kept for those re-reads
+while more drifted files wait); drifted items take turns across runs, with the warning "N more changed file(s) are
+checked on a later run". An item the server no longer has is dropped quietly when no runnable file here belongs to it,
+or after a run in which its file's row was "not in library" and the server confirmed the item missing. Check servers
+queues no retry (a later run lists what still waits). Other warnings: `Skipped <server>: <reason>`, `Couldn't check
+<server>`, `Couldn't check <server>: no connection to it`, `Couldn't read what N item(s) show on <server>`. With nothing
+to list it completes at once (log "Every server checked still shows what this app published").
 
 ### Outcome keys
 
@@ -397,10 +417,11 @@ is `markers_skipped` before it is probed or looked up, whether it came from a fo
 | GET | `/api/markers/season` | Inspector Season view data for one episode's season |
 | POST | `/api/markers/season/publish` | Queue an Intro & Credits job for the episodes of one episode's season |
 | GET | `/api/markers/sources/local` | Whether season audio matching can run in this container |
+| POST | `/api/markers/reconcile` | Queue Intro & Credits · Check servers |
 
 All of them require the same `X-Auth-Token` / `Authorization: Bearer` auth as the rest of the API. `POST
-/api/markers/jobs` is CSRF-exempt (like `POST /api/jobs`) so token-authenticated scripts can call it directly without
-a browser session.
+/api/markers/jobs` and `POST /api/markers/reconcile` are CSRF-exempt (like `POST /api/jobs`) so token-authenticated
+scripts can call them directly without a browser session.
 
 #### POST /api/markers/jobs
 
@@ -418,7 +439,9 @@ message, details, warning}`, checked as if Intro & Credits were already on — o
 `needs_confirmation`, `needs_plugin`, `plugin_outdated`, `needs_pass`, `needs_local_db`,
 `needs_plex_detection_once`, `unsupported_schema`, `unreachable`, `misconfigured`, or `unknown` when the check itself
 failed; `warning` is `""` unless a `ready` Plex couldn't confirm Plex Pass, in which case jobs wait instead of
-writing), `can_show` (marker types this server type can display) and `libraries` (with each one's default selection).
+writing; on Emby, `needs_plugin` carries `details.catalog_listed`: `true` when Emby's plugin catalog lists the plugin,
+`false` when it doesn't, `null` when the catalog couldn't be read), `can_show` (marker types this server type can
+display) and `libraries` (with each one's default selection).
 `404` for an unknown server; `500` with a JSON error when the status can't be built. A server turned off on the
 Servers page isn't contacted (`capability.state` is `disabled`).
 
@@ -479,29 +502,44 @@ per-episode `GET /api/markers/item` stays the place for what a server shows righ
   `failed`, `skipped`, or `off` — Intro & Credits off there, or this episode's library isn't selected or is excluded).
 - `counts` — `episodes`, `ready` (at least one decided marker and nothing in Needs review), `needs_review`.
 
-`400` when the path isn't a file inside a server library, or isn't a TV episode (`SxxEyy` in its name). `500` with a
-JSON error when the data can't be built.
+`400` `{"error": "Path is not a file inside any server library"}` (also for a missing `path`) or `{"error": "Not a TV
+episode"}` (no `SxxEyy` in its name). `500` `{"error": "Couldn't build the Season view for this file"}`.
 
 #### POST /api/markers/season/publish
 
 **Request:** `{"path"}` — any episode of the season.
 
-**Response:** `202` with `{"job_id"}` — a NORMAL-priority, not forced Intro & Credits job named "Intro & Credits:
-<show> · Season N" (or "· Specials") for exactly the episodes `GET /api/markers/season` lists for that path (same
+**Response:** `202` with `{"job_id"}` — a NORMAL-priority, not forced Intro & Credits job named `Intro & Credits:
+<show> · Season N` (or `· Specials`) for exactly the episodes `GET /api/markers/season` lists for that path (same
 folder and season number, at most the 40 nearest), so a folder holding several seasons only sends this one: decided
 episodes are sent to every server that doesn't show them yet, undecided ones are checked again. While a Publish of the
-same episodes is still queued or running, its id is returned instead of starting a second one. `400` when the path
-isn't a TV episode inside a server library. `503` when the config directory isn't writable.
+same episodes is still queued or running, its id is returned instead of starting a second one. For example
+`{"path": "/tv/Show/S01E02.mkv"}` in a flat `Show` folder that also holds `S02E01.mkv` queues "Intro & Credits: Show ·
+Season 1" for `S01E01.mkv` and `S01E02.mkv` only, and answers `202` `{"job_id": "…"}`. `400` `{"error": "The request
+body must be a JSON object with a path"}`, `{"error": "Path is not a file inside any server library"}` or `{"error":
+"Not a TV episode"}`. `503` when the config directory isn't writable.
 
 #### GET /api/markers/sources/local
 
 **Response:** `200` with `{"season_audio": {"available", "ffmpeg", "message"}}` — season audio matching needs an
 ffmpeg with the chromaprint muxer (jellyfin-ffmpeg in the amd64 image; the arm64 image has none). `ffmpeg` is the
-binary found (`null` when none), and `message` says why it isn't available (`""` when it is).
+binary found (`null` when none), and `message` says why it isn't available (`""` when it is), e.g.
+`{"season_audio": {"available": true, "ffmpeg": "/usr/lib/jellyfin-ffmpeg/ffmpeg", "message": ""}}`.
+
+#### POST /api/markers/reconcile
+
+**Request:** optional JSON body `{"priority"}` (`1`-`3` or `high`/`normal`/`low`, default `low`); no body is fine.
+
+**Response:** `202` `{"job_id": "…", "already_queued": false}` for a new Intro & Credits · Check servers job, or
+`{"job_id": "…", "already_queued": true}` with the one already queued or running (whatever priority was asked for).
+`200` `{"job_id": null, "reason": "Intro & Credits is off on every server"}`. `400` `{"error": "The request body must
+be JSON"}`, `{"error": "The request body must be a JSON object"}` or `{"error": "priority must be 1, 2, 3, high, normal
+or low"}`. `503` when the config directory isn't writable (checked before the body).
 
 > [!NOTE]
-> There is no separate "install the Jellyfin plugin" route for Intro & Credits — the Edit tab's Install/Update button
-> calls the existing `POST /api/servers/{id}/install-plugin` (see [Servers](#servers-beyond-the-basics-in-multi-media-server-endpoints)).
+> There is no separate "install the plugin" route for Intro & Credits — the Edit tab's Install/Update button (Jellyfin
+> and Emby) calls the existing `POST /api/servers/{id}/install-plugin` (see
+> [Servers](#servers-beyond-the-basics-in-multi-media-server-endpoints)).
 
 ---
 
@@ -925,7 +963,7 @@ explicit `null` clears it.
 
 - `"full_library"` *(default — optional, omit to get the same behaviour)* — schedule runs a full library scan via the standard job pipeline, processing every item in `library_id` that's missing previews.
 - `"recently_added"` — schedule runs a Recently Added scan instead. Requires `config.lookback_hours` (float, clamped to 0.25–720). Scans only items added within the lookback window (Plex `addedAt`, Emby/Jellyfin `DateCreated`), queuing each through the webhook job pipeline. When `library_id` is `null`, the scan falls back to the globally selected libraries in Settings (or every supported library when no global filter is set); when set, only that section is scanned. Works for Plex, Emby, and Jellyfin — each vendor's processor implements `scan_recently_added` against its native API.
-- `"intro_credits"` — schedule creates an [Intro & Credits](#intro--credits) job (`kind=intro_credits`) instead of a preview job, for the schedule's libraries (every library Intro & Credits goes to when none are chosen). LOW priority unless the schedule sets one. Skipped while an earlier Intro & Credits job from the same schedule is still pending or running.
+- `"intro_credits"` — schedule creates an [Intro & Credits](#intro--credits) job (`kind=intro_credits`) instead of a preview job, for the schedule's libraries (every library Intro & Credits goes to when none are chosen). LOW priority unless the schedule sets one. Skipped while an earlier Intro & Credits job from the same schedule is still pending or running. With `config.reconcile: true` it queues Intro & Credits · Check servers instead (every server; libraries and server don't apply; the UI shows it as "All servers"), skipped while any Check servers job is still pending or running.
 
 ### System Endpoints
 

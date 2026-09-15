@@ -141,7 +141,7 @@ turned off again at the end. `mlab-emby49` has no app server, so Emby 4.9.1.90 w
 **Emby groups S01E01 with its "- Extended" copy on both versions.** `GET /Users/{uid}/Items/{id}?Fields=MediaSources`
 answers two sources for S01E01 and S01E01 - Extended (120 008 ms and 130 008 ms; the `/Items` list shows them apart),
 and two equal sources (120 008 ms) for S01E03 and S01E03 - Copy. One chapter set can't fit two cuts, so those two
-files are refused; the equal-length pair publishes.
+files are refused; the equal-length pair publishes (superseded: spec §14 2026-09-15).
 
 | # | Check | Result |
 |---|---|---|

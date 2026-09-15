@@ -437,7 +437,8 @@ class EmbyMarkerPublisher(MarkerPublisher):
             )
         if len(versions) > 1:
             raise ItemNotFoundError(
-                "This Emby item has no version matching this file (yet); check the server's path mappings"
+                "Emby doesn't show which of this item's versions is this file yet; if the file is already in Emby's "
+                "library, check this server's path mappings"
             )
 
     def _remove_unconfirmed(self, item_id: str) -> None:
