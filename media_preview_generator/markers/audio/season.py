@@ -6,12 +6,14 @@ episode number (a flat folder can hold hundreds). Fingerprinting needs a worker 
 first episode of a group to get one fingerprints every member that has none, so the rest of the season matches from
 cached fingerprints on the checking threads. An episode alone in its folder (a new season's first weekly release) matches against up to four cached
 episodes of the previous season; that answer is a hint (``Source.SEASON_AUDIO_PREVIOUS``). Neither decides alone in
-phase 2 (owner, 2026-09-14). Episodes whose intro is still undecided and whose answer the new fingerprints change are
-handed to the job as follow-ups, which a "Season" job decides again.
+phase 2 (owner, 2026-09-14). Episodes whose answer is out of date and whose intro is still undecided, or was decided
+with that answer, are handed to the job as follow-ups, which a "Season" job decides again: by the run that fingerprints
+the season, and by every run of an episode of the group (one that arrives decided by its chapters never matches).
 """
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import math
@@ -19,6 +21,7 @@ import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -53,6 +56,8 @@ if TYPE_CHECKING:
 SEASON_AUDIO_VERSION = 4
 MAX_PREVIOUS_SEASON_FILES = 4
 MAX_GROUP_EPISODES = 40
+# A season member ffprobe couldn't read is left out of other episodes' season steps for this long (while unchanged).
+UNREADABLE_MEMBER_RETRY = timedelta(days=1)
 # chromaprint gives silence (and noise too quiet to hear) one constant value, so a shared quiet stretch matches like an
 # intro would (the v3 matcher keeps that behaviour).
 SILENCE_POINT = 0x256DF977
@@ -73,6 +78,7 @@ _GAP_PTS = int(MAX_GAP_S / POINT_S)
 _TOO_LONG_RUN_PTS = math.floor(MAX_INTRO_S / POINT_S) + 1
 _TOO_LONG_OVERLAP_PTS = _TOO_LONG_RUN_PTS + 2 * (_GAP_PTS - 1) + 1
 _SEASON_FOLDER_RE = re.compile(r"^(?:season|series|staffel|saison)\s*(\d{1,4})$", re.IGNORECASE)
+_SEASON_AUDIO_SOURCES = frozenset({Source.SEASON_AUDIO.value, Source.SEASON_AUDIO_PREVIOUS.value})
 
 
 @dataclass(frozen=True)
@@ -127,10 +133,9 @@ def season_group(canonical_path: str, videos: Sequence[FolderVideo] | None = Non
         The folder and the group's paths, sorted, the file itself included.
     """
     folder = os.path.dirname(canonical_path)
-    target = _folder_video(canonical_path)
     listed = folder_videos(folder) if videos is None else videos
-    members = {v.path: v for v in listed if v.season == target.season}
-    members[canonical_path] = target
+    target = _folder_video(canonical_path)
+    members = _same_season(target, listed)
     if len(members) > MAX_GROUP_EPISODES:
         position = {path: i for i, path in enumerate(sorted(members))}
 
@@ -141,6 +146,56 @@ def season_group(canonical_path: str, videos: Sequence[FolderVideo] | None = Non
 
         members = {v.path: v for v in sorted(members.values(), key=distance)[:MAX_GROUP_EPISODES]}
     return SeasonGroup(folder, tuple(sorted(members)))
+
+
+def _same_season(target: FolderVideo, videos: Sequence[FolderVideo]) -> dict[str, FolderVideo]:
+    members = {v.path: v for v in videos if v.season == target.season}
+    members[target.path] = target
+    return members
+
+
+def groups_holding(
+    canonical_path: str,
+    videos: Sequence[FolderVideo],
+    group_of: Callable[[str], SeasonGroup] | None = None,
+) -> tuple[str, ...]:
+    """The other files of a folder whose own season group holds this file (in a flat folder, not only its group's).
+
+    A group is the 40 nearest files, so a file with 39 or more others strictly between it and this one (by episode
+    number, or by name order when names carry none) can't hold it: those are all nearer to it. Only the rest are checked.
+
+    Args:
+        canonical_path: Local path of one episode.
+        videos: The folder's :func:`folder_videos`.
+        group_of: :func:`season_group` of another file of the folder, when the caller keeps them.
+
+    Returns:
+        Their paths, sorted.
+    """
+    target = _folder_video(canonical_path)
+    members = _same_season(target, videos)
+    paths = sorted(members)
+    if len(members) <= MAX_GROUP_EPISODES:
+        return tuple(path for path in paths if path != canonical_path)  # every group is the whole season
+    group_of = group_of or (lambda path: season_group(path, videos))
+    if all(v.episode is not None for v in members.values()):
+        rank = {path: members[path].episode for path in paths}
+    elif all(v.episode is None for v in members.values()):
+        rank = {path: i for i, path in enumerate(paths)}
+    else:
+        rank = None  # mixed numbering: no order to bound by, so every file is checked
+    ranks = sorted(rank.values()) if rank else []
+    holding = []
+    for path in paths:
+        if path == canonical_path:
+            continue
+        if rank is not None:
+            low, high = sorted((rank[path], rank[canonical_path]))
+            if bisect.bisect_left(ranks, high) - bisect.bisect_right(ranks, low) >= MAX_GROUP_EPISODES - 1:
+                continue
+        if canonical_path in group_of(path).episodes:
+            holding.append(path)
+    return tuple(holding)
 
 
 def previous_season_files(canonical_path: str) -> tuple[str, ...]:
@@ -309,8 +364,10 @@ def _member_record(ctx: PipelineContext, path: str) -> FileRecord | None:
 
     The store's record when it matches the disk and holds a duration and current chapters; otherwise the file is probed
     and its duration and chapters are stored (its own run then reads nothing again). None for a file that changed since
-    its record was made, or while it was probed (its own run reads it again), or can't be probed. The season step holds
-    only its own file's path lock, so the store refuses to change another file's identity (``record_member``).
+    its record was made, or while it was probed (its own run reads it again), or can't be probed. A file that couldn't be
+    probed isn't probed again for a day while its identity stays the same, except by a forced re-detect. The season
+    step holds only its own file's path lock, so the store refuses to change another file's identity
+    (``record_member``).
     """
     identity = _disk_identity(path)
     rec = ctx.store.get_file(path)
@@ -322,15 +379,22 @@ def _member_record(ctx: PipelineContext, path: str) -> FileRecord | None:
         and ctx.store.evidence_version(rec.id, Source.CHAPTERS) == CHAPTER_RULES_VERSION
     ):
         return rec
+    probed_as = FileIdentity(path, *identity)
+    failed_at = None if ctx.force else ctx.store.member_probe_failed_at(probed_as)
+    if failed_at is not None and ctx.now() - failed_at < UNREADABLE_MEMBER_RETRY:
+        return None
     try:
         probe = probe_media(path, ffprobe=ctx.ffprobe)
     except ProbeError as exc:
         logger.debug("The season step skips {}: {}", os.path.basename(path), exc)
+        probe = None
+    if _disk_identity(path) != identity:
         return None
-    if not probe.duration_ms or _disk_identity(path) != identity:
+    if probe is None or not probe.duration_ms:
+        ctx.store.record_member_probe_failure(probed_as, ctx.now())
         return None
     return ctx.store.record_member(
-        FileIdentity(path, *identity),
+        probed_as,
         duration_ms=probe.duration_ms,
         season_key=os.path.dirname(path),
         chapters=chapter_candidates(probe),
@@ -348,18 +412,23 @@ def season_intro_chapter_limits(ctx: PipelineContext, canonical_path: str) -> tu
     Members of this episode's group the store never saw, or saw with older chapter rules, are probed and stored, so the
     first episode checked sees its whole group whichever it is. A member changed on disk since its record counts as
     having no intro chapter until its own run reads it again. A sibling's own group can reach past this episode's in a
-    flat folder; those extra members are read from the store only.
+    flat folder; those extra members are read from the store only. In a flat folder this episode can also be in the
+    group of a file outside its own group (the 40 nearest aren't symmetric), so the siblings compared also include
+    those files (:func:`groups_holding`).
 
     Args:
         ctx: The job's context.
         canonical_path: Local path of one episode.
 
     Returns:
-        This episode's limit, and the limit each other member of its group would be decided with now (None: none
-        applies, because the episode has no intro chapter or fewer than two others have one).
+        This episode's limit, and the limit each sibling would be decided with now (None: none applies, because the
+        episode has no intro chapter or fewer than two others have one).
     """
-    videos = folder_videos(os.path.dirname(canonical_path))
-    group = season_group(canonical_path, videos)
+    view = _season_view(ctx, canonical_path)
+    group = view.group()
+    siblings = [path for path in group.episodes if path != canonical_path]
+    siblings += [path for path in groups_holding(canonical_path, view.videos, view.group) if path not in group.episodes]
+    groups = {path: view.group(path).episodes for path in siblings}
     lengths = {path: _intro_chapter_ms(ctx, _member_record(ctx, path)) for path in group.episodes}
 
     def length(path: str) -> int | None:
@@ -375,10 +444,7 @@ def season_intro_chapter_limits(ctx: PipelineContext, canonical_path: str) -> tu
         others = [length(other) for other in episodes if other != path]
         return intro_chapter_limit_ms([ms for ms in others if ms is not None])
 
-    siblings = {
-        path: limit(path, season_group(path, videos).episodes) for path in group.episodes if path != canonical_path
-    }
-    return limit(canonical_path, group.episodes), siblings
+    return limit(canonical_path, group.episodes), {path: limit(path, episodes) for path, episodes in groups.items()}
 
 
 def _signature_paths(canonical_path: str, group: SeasonGroup) -> tuple[str, ...]:
@@ -387,27 +453,88 @@ def _signature_paths(canonical_path: str, group: SeasonGroup) -> tuple[str, ...]
     return group.episodes
 
 
-def _signature(ctx: PipelineContext, paths: tuple[str, ...], matched: Mapping[str, FileRecord] | None = None) -> str:
+def _signature_item(ctx: PipelineContext, path: str) -> list:
+    identity = _disk_identity(path)
+    rec = ctx.store.get_file(path) if identity is not None else None
+    current = rec is not None and (rec.size, rec.mtime_ns) == identity
+    size, mtime_ns = identity or (None, None)
+    return [path, size, mtime_ns, bool(current and ctx.store.has_fingerprint(rec.id, WINDOW))]
+
+
+def _signature(
+    ctx: PipelineContext,
+    paths: tuple[str, ...],
+    matched: Mapping[str, FileRecord] | None = None,
+    on_disk: dict[str, list] | None = None,
+) -> str:
     """What an answer is based on: each file's identity and whether it has a fingerprint.
 
     ``matched`` files (a detector run's) enter with the identity they were matched with, so a sibling replaced while the
-    season was matched makes the answer due again; every other file enters as it is on disk now.
+    season was matched makes the answer due again; every other file enters as it is on disk now (read once per path
+    into ``on_disk`` when a caller builds several signatures).
     """
+    on_disk = {} if on_disk is None else on_disk
     items = []
     for path in paths:
         if matched and path in matched:
             items.append([path, matched[path].size, matched[path].mtime_ns, True])
             continue
-        identity = _disk_identity(path) or (None, None)
-        rec = _current_record(ctx, path)
-        has_fingerprint = rec is not None and ctx.store.get_fingerprint(rec.id, WINDOW) is not None
-        items.append([path, identity[0], identity[1], has_fingerprint])
+        if path not in on_disk:
+            on_disk[path] = _signature_item(ctx, path)
+        items.append(on_disk[path])
     payload = json.dumps([SEASON_AUDIO_VERSION, items])
     return hashlib.sha1(payload.encode(), usedforsecurity=False).hexdigest()
 
 
+class _SeasonView:
+    """What one run of an episode reads of its season: the folder listing, groups, previous-season files, and each
+    file's signature item and signature. Kept for the run in ``ctx.run_memo`` (the pipeline drops it once a detector
+    ran), so the chapter step, the follow-ups hook, the early-stop and pending checks (``season_audio_due``) and
+    ``needs_worker`` read the season once."""
+
+    def __init__(self, ctx: PipelineContext, canonical_path: str) -> None:
+        self._ctx = ctx
+        self.canonical_path = canonical_path
+        self.videos = folder_videos(os.path.dirname(canonical_path))
+        self.on_disk: dict[str, list] = {}
+        self._groups: dict[str, SeasonGroup] = {}
+        self._signatures: dict[str, str] = {}
+        self._previous: tuple[str, ...] | None = None
+
+    def group(self, path: str | None = None) -> SeasonGroup:
+        """The season group of this run's episode, or of another file of its folder."""
+        path = path or self.canonical_path
+        if path not in self._groups:
+            self._groups[path] = season_group(path, self.videos)
+        return self._groups[path]
+
+    def previous_season(self) -> tuple[str, ...]:
+        """This run's episode's :func:`previous_season_files`."""
+        if self._previous is None:
+            self._previous = previous_season_files(self.canonical_path)
+        return self._previous
+
+    def signature(self, path: str) -> str:
+        """What an answer for ``path`` made from the files on disk now would be based on."""
+        if path not in self._signatures:
+            group = self.group(path)
+            if path == self.canonical_path and len(group.episodes) == 1:
+                paths = group.episodes + self.previous_season()
+            else:
+                paths = _signature_paths(path, group)
+            self._signatures[path] = _signature(self._ctx, paths, on_disk=self.on_disk)
+        return self._signatures[path]
+
+
+def _season_view(ctx: PipelineContext, canonical_path: str) -> _SeasonView:
+    memo = ctx.run_memo(canonical_path)
+    if "season" not in memo:
+        memo["season"] = _SeasonView(ctx, canonical_path)
+    return memo["season"]
+
+
 def season_audio_due(rec: FileRecord, ctx: PipelineContext) -> bool:
-    """Whether the season's files or their fingerprints changed since this episode's answer.
+    """Whether the season's files or their fingerprints changed since this episode's answer (asked once per run).
 
     Args:
         rec: The episode.
@@ -416,8 +543,7 @@ def season_audio_due(rec: FileRecord, ctx: PipelineContext) -> bool:
     Returns:
         True when the detector should run again.
     """
-    group = season_group(rec.canonical_path)
-    current = _signature(ctx, _signature_paths(rec.canonical_path, group))
+    current = _season_view(ctx, rec.canonical_path).signature(rec.canonical_path)
     return ctx.store.get_detector_run(rec.id, Source.SEASON_AUDIO) != current
 
 
@@ -435,7 +561,8 @@ def season_audio_needs_worker(rec: FileRecord, ctx: PipelineContext) -> bool:
     Returns:
         True when the detector has to run on a worker.
     """
-    group = season_group(rec.canonical_path)
+    view = _season_view(ctx, rec.canonical_path)
+    group = view.group()
     fingerprinted: dict[str, tuple[FileRecord, np.ndarray]] = {}
     for path in group.episodes:
         stored = ctx.store.get_file(path)
@@ -451,7 +578,7 @@ def season_audio_needs_worker(rec: FileRecord, ctx: PipelineContext) -> bool:
         return False
     if len(group.episodes) == 1:
         pairs = []
-        for path in previous_season_files(rec.canonical_path):
+        for path in view.previous_season():
             member = _current_record(ctx, path)
             cached = _cached_points(ctx, member)
             if member is not None and cached is not None:
@@ -506,7 +633,23 @@ def _candidate(segment: IntroSegment, others: int, source: Source) -> Candidate:
     )
 
 
+def intro_rests_on_season_audio(ctx: PipelineContext, rec: FileRecord) -> bool:
+    """Whether a file's published intro was decided with its season audio answer or previous-season hint.
+
+    Args:
+        ctx: The job's context.
+        rec: The file.
+
+    Returns:
+        True for such a marker (a user's lock never counts).
+    """
+    marker = ctx.store.get_markers(rec.id).get(MarkerType.INTRO)
+    return marker is not None and not marker.locked and not _SEASON_AUDIO_SOURCES.isdisjoint(marker.decided_by)
+
+
 def _request_redecide(ctx: PipelineContext, rec: FileRecord, members: dict[str, FileRecord], signature: str) -> None:
+    """Ask again for the siblings whose intro is undecided, or decided with a season audio answer, and whose answer
+    was based on other season files than this run's."""
     folder = os.path.dirname(rec.canonical_path)
     stale = []
     for path, member in members.items():
@@ -515,11 +658,56 @@ def _request_redecide(ctx: PipelineContext, rec: FileRecord, members: dict[str, 
         if ctx.store.get_detector_run(member.id, Source.SEASON_AUDIO) == signature:
             continue
         intro = ctx.store.get_decisions(member.id).get(MarkerType.INTRO)
-        if intro is not None and intro.status is DecisionStatus.DECIDED:
+        if (
+            intro is not None
+            and intro.status is DecisionStatus.DECIDED
+            and not intro_rests_on_season_audio(ctx, member)
+        ):
             continue
         stale.append(path)
     if stale:
         ctx.request_followups(stale)
+
+
+def season_audio_followups(rec: FileRecord, ctx: PipelineContext) -> list[str]:
+    """The siblings whose season audio answer is out of date and whose intro could change with it.
+
+    State, not events: every run of an episode compares each sibling's answer with the season files on disk now, so an
+    episode that arrives already decided (by its chapters, say) and never runs season audio still reaches a sibling
+    decided on a 1/1 match made before it arrived. A sibling counts when it has an answer, its record matches the disk
+    (otherwise its own run reads it again), its intro is undecided or was decided with that answer, and its own last
+    attempt didn't already fail on the season as it is now (so a file that can't be fingerprinted is asked again once
+    per change of its season, not on every sibling's run).
+
+    Args:
+        rec: The episode being run.
+        ctx: The job's context.
+
+    Returns:
+        The siblings' paths, sorted.
+    """
+    view = _season_view(ctx, rec.canonical_path)
+    stale = []
+    for path in view.group().episodes:
+        member = ctx.store.get_file(path) if path != rec.canonical_path else None
+        answer = ctx.store.get_detector_run(member.id, Source.SEASON_AUDIO) if member is not None else None
+        if answer is None:
+            continue
+        intro = ctx.store.get_decisions(member.id).get(MarkerType.INTRO)
+        if (
+            intro is not None
+            and intro.status is DecisionStatus.DECIDED
+            and not intro_rests_on_season_audio(ctx, member)
+        ):
+            continue
+        if path not in view.on_disk:
+            view.on_disk[path] = _signature_item(ctx, path)
+        if view.on_disk[path][1:3] != [member.size, member.mtime_ns]:
+            continue
+        signature = view.signature(path)
+        if answer != signature and ctx.store.get_detector_failure(member.id, Source.SEASON_AUDIO) != signature:
+            stale.append(path)
+    return stale
 
 
 def detect_season_audio(
@@ -560,6 +748,10 @@ def detect_season_audio(
     try:
         own = ensure_fingerprint(ctx.store, rec, ffmpeg=ffmpeg, cancel_check=cancel_check)
     except FingerprintError as exc:
+        if not (cancel_check and cancel_check()):
+            # Siblings' runs don't ask for this file again until its season changes (season_audio_followups).
+            attempted = _signature(ctx, _signature_paths(rec.canonical_path, group))
+            ctx.store.set_detector_failure(rec.id, Source.SEASON_AUDIO, attempted)
         raise DetectorUnavailableError(str(exc)) from exc
     if own is None:
         raise DetectorUnavailableError("the file changed while it was fingerprinted")
@@ -634,4 +826,5 @@ def season_audio_spec(ffmpeg_path: str | None) -> LocalDetectorSpec | None:
         version=SEASON_AUDIO_VERSION,
         due=season_audio_due,
         needs_worker=season_audio_needs_worker,
+        followups=season_audio_followups,
     )

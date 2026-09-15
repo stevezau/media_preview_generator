@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from media_preview_generator.markers.decide import DecisionStatus
-from media_preview_generator.markers.models import Candidate, MarkerType, Source
+from media_preview_generator.markers.models import Candidate, Marker, MarkerType, Source
 from media_preview_generator.markers.outcomes import FileOutcome
 from media_preview_generator.markers.pipeline import DetectorUnavailableError, LocalDetectorSpec
 from media_preview_generator.markers.sources.online import LookupResult
@@ -22,6 +23,7 @@ store = test_pipeline.store
 
 T = MarkerType
 AUDIO_INTRO = Candidate(T.INTRO, 126_000, 158_000, Source.SEASON_AUDIO, 1.0, "2/2")
+HINT_INTRO = Candidate(T.INTRO, 126_000, 158_000, Source.SEASON_AUDIO_PREVIOUS, 1.0, "4/4")
 TEXT_CREDITS = Candidate(T.CREDITS, 1_300_000, DUR, Source.CREDITS_TEXT, 1.0, "")
 
 
@@ -128,16 +130,50 @@ class TestStoredAnswers:
     def test_a_type_decided_without_the_detector_does_not_run_it(self, store, media):
         reg = _registry(media, ServerType.PLEX)
         detector = MagicMock(return_value=[])
+        due = MagicMock(return_value=True)
         intro_by_two = _clients(
             theintrodb=LookupResult("ok", (TIDB_INTRO,)),
             skipdb=LookupResult("ok", (Candidate(T.INTRO, 127_500, 156_500, Source.SKIPDB),)),
         )
-        ctx = _ctx(store, reg, detectors=(_spec(detector),), settings_raw=INTRO_ONLY, clients=intro_by_two)
+        ctx = _ctx(store, reg, detectors=(_spec(detector, due=due),), settings_raw=INTRO_ONLY, clients=intro_by_two)
         _run(ctx, media, _pubs(), stage="process")
         assert store.get_decisions(store.get_file(media).id)[T.INTRO].status is DecisionStatus.DECIDED
         out, _ = _run(ctx, media, _pubs())
         assert out is not None and out.outcome_key == FileOutcome.UP_TO_DATE.value
         detector.assert_not_called()
+        due.assert_not_called()  # a decision made without it costs nothing more
+
+    @pytest.mark.parametrize("due", [False, True], ids=["answer-current", "answer-due"])
+    @pytest.mark.parametrize("answer", [AUDIO_INTRO, HINT_INTRO], ids=["season-audio", "previous-season-hint"])
+    def test_a_type_decided_with_the_detectors_answer_runs_it_again_when_the_answer_is_due(
+        self, store, media, answer, due
+    ):
+        reg = _registry(media, ServerType.PLEX)
+        detector = MagicMock(return_value=[answer])
+        is_due = MagicMock(return_value=False)
+        clients = _clients(theintrodb=LookupResult("ok", (TIDB_INTRO,)))
+        spec = _spec(detector, stores=frozenset({Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}), due=is_due)
+        ctx = _ctx(store, reg, detectors=(spec,), settings_raw=INTRO_ONLY, clients=clients)
+        _run(ctx, media, _pubs(), stage="process")
+        marker = store.get_markers(store.get_file(media).id)[T.INTRO]
+        assert marker.decided_by == ("theintrodb", answer.source.value)
+        is_due.return_value = due
+        out, _ = _run(ctx, media, _pubs())
+        if due:
+            assert out is None  # every type is decided, and still the check hands it to a worker
+            _run(ctx, media, _pubs(), stage="process")
+        else:
+            assert out.outcome_key == FileOutcome.UP_TO_DATE.value
+        assert detector.call_count == (2 if due else 1)
+
+    def test_a_locked_marker_crediting_the_detector_does_not_run_it(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        detector = MagicMock(return_value=[AUDIO_INTRO])
+        ctx = _ctx(store, reg, detectors=(_spec(detector, due=lambda _r, _c: True),), settings_raw=INTRO_ONLY)
+        _run(ctx, media, _pubs(), stage="process")
+        store.lock_marker(store.get_file(media).id, Marker(T.INTRO, 126_000, 158_000, ("season_audio",)))
+        out, _ = _run(ctx, media, _pubs())
+        assert out is not None and detector.call_count == 1
 
     def test_due_hook_runs_it_again_and_gets_the_record_and_context(self, store, media):
         reg = _registry(media, ServerType.PLEX)
@@ -294,3 +330,62 @@ class TestFollowups:
         ctx = _ctx(store, reg, detectors=(_spec(detect),), settings_raw=INTRO_ONLY)
         _run(ctx, media, _pubs(), stage="process")
         assert ctx.take_followups() == ["/tv/sibling.mkv"]
+
+    def test_the_followups_hook_is_asked_before_the_worker_handoff(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        followups = MagicMock(return_value=["/tv/sibling.mkv"])
+        ctx = _ctx(
+            store, reg, detectors=(_spec(MagicMock(return_value=[]), followups=followups),), settings_raw=INTRO_ONLY
+        )
+        assert _run(ctx, media, _pubs())[0] is None  # handed to a worker
+        assert ctx.take_followups() == ["/tv/sibling.mkv"]
+        rec, passed_ctx = followups.call_args.args
+        assert rec.canonical_path == media and passed_ctx is ctx
+
+    def test_the_followups_hook_is_asked_when_every_type_is_decided(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        followups = MagicMock(return_value=["/tv/sibling.mkv"])
+        detector = MagicMock(return_value=[AUDIO_INTRO])
+        clients = _clients(theintrodb=LookupResult("ok", (TIDB_INTRO,)))
+        spec = _spec(detector, followups=followups)
+        ctx = _ctx(store, reg, detectors=(spec,), settings_raw=INTRO_ONLY, clients=clients)
+        _run(ctx, media, _pubs(), stage="process")
+        ctx.take_followups()
+        followups.reset_mock()
+        assert _run(ctx, media, _pubs())[0].outcome_key == FileOutcome.UP_TO_DATE.value
+        assert followups.call_count == 1 and ctx.take_followups() == ["/tv/sibling.mkv"]
+        assert detector.call_count == 1
+
+    def test_the_followups_hook_is_not_asked_for_a_file_without_the_detectors_types(self, store, tmp_path):
+        folder = tmp_path / "media" / "movies" / "Toy Story (1995) {tmdb-862}"
+        folder.mkdir(parents=True)
+        path = str(folder / "Toy Story (1995).mkv")
+        open(path, "wb").close()
+        followups = MagicMock(return_value=["/tv/sibling.mkv"])
+        ctx = _ctx(store, _registry(path, ServerType.PLEX), detectors=(_spec(MagicMock(), followups=followups),))
+        _run(ctx, path, _pubs())
+        followups.assert_not_called()
+
+    def test_the_followups_hook_is_not_asked_while_its_source_is_off(self, store, media):
+        followups = MagicMock(return_value=["/tv/sibling.mkv"])
+        raw = {**INTRO_ONLY, "sources": [{"id": "season_audio", "enabled": False}]}
+        spec = _spec(MagicMock(return_value=[]), followups=followups)
+        ctx = _ctx(store, _registry(media, ServerType.PLEX), detectors=(spec,), settings_raw=raw)
+        assert _run(ctx, media, _pubs())[0] is not None
+        followups.assert_not_called()
+
+
+class TestRunMemo:
+    def test_a_run_memo_is_kept_for_the_run_of_the_file_on_its_own_thread(self, store, media):
+        ctx = _ctx(store, _registry(media, ServerType.PLEX))
+        ctx.run_memo(media)["listing"] = 1
+        assert ctx.run_memo(media) == {}  # outside a run nothing is kept
+        with ctx._running(media):
+            memo = ctx.run_memo(media)
+            memo["listing"] = 2
+            seen_elsewhere = []
+            thread = threading.Thread(target=lambda: seen_elsewhere.append(dict(ctx.run_memo(media))))
+            thread.start()
+            thread.join()
+            assert ctx.run_memo(media) is memo and seen_elsewhere == [{}]
+        assert ctx.run_memo(media) == {}

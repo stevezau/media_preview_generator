@@ -149,12 +149,28 @@ _SCHEMA = (
         signature TEXT NOT NULL,
         run_at TEXT NOT NULL,
         PRIMARY KEY (file_id, source))""",
+    # What a local detector's last failed attempt for a file was based on (season audio: its own fingerprint failed), so
+    # other files' runs don't ask for it again until that changes.
+    """CREATE TABLE IF NOT EXISTS detector_failures (
+        file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        source TEXT NOT NULL,
+        signature TEXT NOT NULL,
+        failed_at TEXT NOT NULL,
+        PRIMARY KEY (file_id, source))""",
     # The season's limit on an intro chapter deciding alone that a file's last decisions used (NULL: none), so a later
     # run of any episode of the season can tell which siblings were decided with a limit that has since changed.
     """CREATE TABLE IF NOT EXISTS intro_chapter_limits (
         file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
         limit_ms INTEGER,
         decided_at TEXT NOT NULL)""",
+    # A file another episode's season step couldn't probe, with the identity it had then: it isn't probed again (up to
+    # a 60 s ffprobe on a checking thread) until that identity changes or the entry is old. Not tied to a file row: an
+    # unreadable file never gets one.
+    """CREATE TABLE IF NOT EXISTS member_probe_failures (
+        canonical_path TEXT PRIMARY KEY,
+        size INTEGER NOT NULL,
+        mtime_ns INTEGER NOT NULL,
+        failed_at TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS source_usage (
         source TEXT NOT NULL,
         day TEXT NOT NULL,
@@ -425,6 +441,7 @@ class MarkerStore:
                         "server_kinds",
                         "publish_basis",
                         "detector_runs",
+                        "detector_failures",
                         "intro_chapter_limits",
                     ):
                         conn.execute(f"DELETE FROM {table} WHERE file_id=?", (file_id,))
@@ -865,6 +882,14 @@ class MarkerStore:
             r["file_id"], r["window"], r["start_s"], r["length_s"], r["algorithm"], bytes(r["points"])
         )
 
+    def has_fingerprint(self, file_id: int, window: str) -> bool:
+        """Whether a file has a cached fingerprint, without reading its points."""
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT 1 FROM fingerprints WHERE file_id=? AND window=?", (file_id, window)
+            ).fetchone()
+        return r is not None
+
     def get_season_pair(
         self, file_a: int, file_b: int, matcher_version: int
     ) -> list[tuple[float, float, float, float]] | None:
@@ -931,6 +956,22 @@ class MarkerStore:
                 (file_id, source.value, signature, self._now()),
             )
 
+    def get_detector_failure(self, file_id: int, source: Source) -> str | None:
+        """The signature a local detector's last failed attempt for a file was based on, or None."""
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT signature FROM detector_failures WHERE file_id=? AND source=?", (file_id, source.value)
+            ).fetchone()
+        return r["signature"] if r else None
+
+    def set_detector_failure(self, file_id: int, source: Source, signature: str) -> None:
+        """Record what a local detector's failed attempt for a file was based on (replaces the previous one)."""
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO detector_failures (file_id, source, signature, failed_at) VALUES (?,?,?,?)",
+                (file_id, source.value, signature, self._now()),
+            )
+
     def get_intro_chapter_limit(self, file_id: int) -> tuple[bool, int | None]:
         """The season intro-chapter limit a file's last decisions used.
 
@@ -948,6 +989,29 @@ class MarkerStore:
                 "INSERT OR REPLACE INTO intro_chapter_limits (file_id, limit_ms, decided_at) VALUES (?,?,?)",
                 (file_id, limit_ms, self._now()),
             )
+
+    def record_member_probe_failure(self, identity: FileIdentity, failed_at: datetime) -> None:
+        """Remember that a season member with this identity couldn't be probed (replaces the path's older entry).
+
+        Args:
+            identity: The file as it was when probing failed.
+            failed_at: When (the job's clock).
+        """
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO member_probe_failures (canonical_path, size, mtime_ns, failed_at) "
+                "VALUES (?,?,?,?)",
+                (identity.canonical_path, identity.size, identity.mtime_ns, failed_at.isoformat()),
+            )
+
+    def member_probe_failed_at(self, identity: FileIdentity) -> datetime | None:
+        """When probing a season member with exactly this identity last failed, or None (never, or another identity)."""
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT failed_at FROM member_probe_failures WHERE canonical_path=? AND size=? AND mtime_ns=?",
+                (identity.canonical_path, identity.size, identity.mtime_ns),
+            ).fetchone()
+        return datetime.fromisoformat(r["failed_at"]) if r else None
 
     def get_item_publish_state(self, server_id: str, item_id: str) -> ItemPublishStateRow | None:
         """What this app last left on a server item, or None when it never published there."""

@@ -9,6 +9,7 @@ import re
 import threading
 import time
 import zlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,16 +18,17 @@ import pytest
 
 from media_preview_generator.markers import pipeline
 from media_preview_generator.markers.audio import POINT_S, fingerprint, matcher, season
-from media_preview_generator.markers.decide import LONG_INTRO_CHAPTER_REASON, DecisionStatus
+from media_preview_generator.markers.decide import LONG_INTRO_CHAPTER_REASON, DecisionStatus, TypeDecision
+from media_preview_generator.markers.external_ids import ids_from_path
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, Source
 from media_preview_generator.markers.outcomes import FileOutcome
-from media_preview_generator.markers.probe import Chapter, MediaProbe
-from media_preview_generator.markers.sources.chapters import CHAPTER_RULES_VERSION
+from media_preview_generator.markers.probe import Chapter, MediaProbe, ProbeError
+from media_preview_generator.markers.sources.chapters import CHAPTER_RULES_VERSION, chapter_candidates
 from media_preview_generator.markers.sources.online import LookupResult
 from media_preview_generator.markers.store import MarkerStore
 from media_preview_generator.servers.base import ServerType
 from tests.markers.fakes import ready_publisher
-from tests.markers.test_pipeline import _clients, _ctx, _item, _registry, _run
+from tests.markers.test_pipeline import EPISODE_IDS, MOVIE_IDS, _clients, _ctx, _item, _registry, _run
 
 DUR = 1_321_472
 N_POINTS = int(fingerprint.window_s(DUR) / POINT_S)
@@ -263,17 +265,57 @@ class TestSeasonAudio:
             and store.get_season_pair(b.id, a.id, season.SEASON_AUDIO_VERSION) is None
         )
 
-    def test_a_decided_sibling_is_not_asked_again(self, store, show):
+    @pytest.mark.parametrize(
+        ("decided_by", "locked", "asked"),
+        [
+            (("skipdb",), False, False),
+            (("introdb", "season_audio"), False, True),
+            (("introdb", "season_audio_previous"), False, True),
+            (("introdb", "season_audio"), True, False),
+        ],
+        ids=["online", "season-audio", "previous-season-hint", "locked"],
+    )
+    def test_a_decided_sibling_is_asked_again_only_when_its_intro_rests_on_season_audio(
+        self, store, show, decided_by, locked, asked
+    ):
         e1, e2, e3 = show(1, 3)
         rec = store.upsert_file(FileIdentity(e2, *_identity(e2)), duration_ms=DUR, season_key=None, is_movie=False)
-        store.save_decisions(
-            rec.id, {MarkerType.INTRO: _decided(MarkerType.INTRO, 10_000, 40_000)}, settings_fingerprint="x"
-        )
+        decision = _decided(MarkerType.INTRO, 10_000, 40_000, decided_by)
+        store.save_decisions(rec.id, {MarkerType.INTRO: decision}, settings_fingerprint="x")
+        if locked:
+            store.lock_marker(rec.id, decision.marker)
         store.set_intro_chapter_limit(rec.id, None)  # no intro chapter: the chapter step has nothing to ask about
         ctx = _season_ctx(store, e1)
         with _Audio():
             _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process")
-        assert ctx.take_followups() == [e3]
+        assert ctx.take_followups() == ([e2, e3] if asked else [e3])
+
+    def test_a_run_reads_its_season_once(self, store, show):
+        e1, e2, e3 = show(1, 3)
+        start, end = planted_ms(e1)
+        ctx = _season_ctx(store, e1, HIGH, clients=_introdb_answer(start - 2_000, end + 3_000))
+        with _Audio():
+            for path, stage in ((e1, "process"), (e2, "check"), (e3, "check")):
+                assert _run(ctx, path, {"plex-1": ready_publisher()}, stage=stage)[0] is not None
+            ctx.take_followups()
+            assert store.get_markers(store.get_file(e1).id)[MarkerType.INTRO].decided_by == ("introdb", "season_audio")
+            (e4,) = show(1, 4)[3:]  # never seen: E2's answer is due and needs a worker
+            with (
+                patch.object(season, "folder_videos", wraps=season.folder_videos) as scans,
+                patch.object(season, "season_group", wraps=season.season_group) as groups,
+                patch.object(season, "_signature_item", wraps=season._signature_item) as items,
+            ):
+                # E1: decided with its season audio answer: chapter step, follow-ups hook, early-stop check.
+                assert _run(ctx, e1, {"plex-1": ready_publisher()})[0] is None
+                runs = {"E1": (scans.call_count, sorted(c.args[0] for c in groups.call_args_list))}
+                assert sorted(c.args[1] for c in items.call_args_list) == [e1, e2, e3, e4]
+                for mock in (scans, groups, items):
+                    mock.reset_mock()
+                # E2: undecided: chapter step, follow-ups hook, pending check, needs_worker.
+                assert _run(ctx, e2, {"plex-1": ready_publisher()})[0] is None
+                runs["E2"] = (scans.call_count, sorted(c.args[0] for c in groups.call_args_list))
+                assert sorted(c.args[1] for c in items.call_args_list) == [e1, e2, e3, e4]
+        assert runs == {"E1": (1, [e1, e2, e3, e4]), "E2": (1, [e1, e2, e3, e4])}
 
     def test_the_detector_is_registered_with_the_season_audio_source_and_version(self):
         spec = _spec()
@@ -296,10 +338,8 @@ def _identity(path):
     return st.st_size, st.st_mtime_ns
 
 
-def _decided(mtype, start, end):
-    from media_preview_generator.markers.decide import TypeDecision
-
-    return TypeDecision(mtype, DecisionStatus.DECIDED, Marker(mtype, start, end, ("skipdb",)), None, "single source")
+def _decided(mtype, start, end, decided_by=("skipdb",)):
+    return TypeDecision(mtype, DecisionStatus.DECIDED, Marker(mtype, start, end, decided_by), None, "single source")
 
 
 class TestWeeklyReleases:
@@ -335,6 +375,26 @@ class TestWeeklyReleases:
                 and store.get_season_pair(old.id, new.id, season.SEASON_AUDIO_VERSION) is None
             )
         assert ctx.take_followups() == []
+
+    def test_a_previous_season_file_replaced_while_it_is_matched_makes_the_hint_due_again(self, store, show):
+        s1 = show(1, 4)
+        (s2e1,) = show(2, 1)
+        self._cache_previous(store, s1)
+        ctx = _season_ctx(store, s2e1)
+        real_runs = season.season_pair_runs
+
+        def runs(a, b):
+            if store.get_file(s1[0]).size < 500:
+                _write(s1[0], 999)  # a new release of S01E01 lands and its own run records it
+                store.upsert_file(FileIdentity(s1[0], *_identity(s1[0])), duration_ms=DUR,
+                                  season_key=os.path.dirname(s1[0]), is_movie=False)  # fmt: skip
+            return real_runs(a, b)
+
+        with _Audio(), patch.object(season, "season_pair_runs", side_effect=runs):
+            _run(ctx, s2e1, {"plex-1": ready_publisher()}, stage="process")
+            (hint,) = _evidence(store, s2e1, Source.SEASON_AUDIO_PREVIOUS)
+            assert hint.origin == "4/4"  # matched with the fingerprint S01E01 had
+            assert season.season_audio_due(store.get_file(s2e1), ctx) is True
 
     def test_one_cached_episode_of_the_previous_season_is_enough_for_a_hint(self, store, show):
         self._cache_previous(store, show(1, 1))
@@ -409,6 +469,9 @@ class TestFailures:
         assert cand.origin == "1/1"
         assert season.season_audio_due(store.get_file(e1), ctx) is False
         assert season.season_audio_needs_worker(store.get_file(e1), ctx) is True  # e3 still has no fingerprint
+        with _Audio():
+            _run(ctx, e3, {"plex-1": ready_publisher()}, stage="process")  # e3's own run fingerprints it
+        assert season.season_audio_due(store.get_file(e1), ctx) is True
 
     def test_a_sibling_changed_on_disk_is_not_read_or_rewritten(self, store, show):
         e1, e2, _ = show(1, 3)
@@ -419,8 +482,6 @@ class TestFailures:
         assert store.get_file(e2) == old
 
     def test_siblings_ffprobe_cant_read_are_left_out(self, store, show):
-        from media_preview_generator.markers.probe import ProbeError
-
         e1, e2, e3 = show(1, 3)
         answers = {e2: MediaProbe(None, ()), e3: ProbeError("ffprobe exited 1")}
 
@@ -433,6 +494,50 @@ class TestFailures:
             _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process")
         assert audio.computed == [e1] and store.get_file(e2) is None and store.get_file(e3) is None
         assert _evidence(store, e1, Source.SEASON_AUDIO) == [] == _evidence(store, e1, Source.SEASON_AUDIO_PREVIOUS)
+
+    def test_a_sibling_that_cant_be_fingerprinted_is_asked_again_once_per_change_of_its_season(self, store, show):
+        e1, e2, e3, e4 = show(1, 4)
+        registry = _registry(e1, ServerType.PLEX)
+        # E4 has an answer from an earlier run, and its audio can't be fingerprinted now.
+        victim = store.upsert_file(FileIdentity(e4, *_identity(e4)), duration_ms=DUR, season_key=None, is_movie=False)
+        store.set_detector_run(victim.id, Source.SEASON_AUDIO, "an earlier season")
+        review = TypeDecision(MarkerType.INTRO, DecisionStatus.NEEDS_REVIEW, None, None, "sources don't agree yet")
+        store.save_decisions(victim.id, {MarkerType.INTRO: review}, settings_fingerprint="x")
+
+        def run(ctx, path):
+            if _run(ctx, path, {"plex-1": ready_publisher()})[0] is None:
+                _run(ctx, path, {"plex-1": ready_publisher()}, stage="process")
+
+        def job(items):
+            ctx = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),))
+            for path in items:
+                run(ctx, path)
+            requested = ctx.take_followups()
+            season_job = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),))
+            for path in requested:
+                if path not in items:
+                    run(season_job, path)  # E4 fails again
+            return requested
+
+        with _Audio(fail={e4}, points=_episode_noise):
+            assert e4 in job([e1, e2, e3])
+            assert store.get_detector_failure(victim.id, Source.SEASON_AUDIO) is not None
+            assert job([e1]) == [] and job([e2]) == []  # its season is the one it failed on
+            (e5,) = show(1, 5)[4:]
+            assert e4 in job([e5])  # a new episode: asked once more
+            assert job([e1]) == []
+
+    def test_a_cancelled_fingerprint_is_not_remembered_as_a_failure(self, store, show):
+        e1, _ = show(1, 2)
+        rec = store.upsert_file(FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=None, is_movie=False)
+        cancelled = fingerprint.FingerprintError("Fingerprinting cancelled")
+        with (
+            _Audio(),
+            patch.object(season, "ensure_fingerprint", side_effect=cancelled),
+            pytest.raises(pipeline.DetectorUnavailableError),
+        ):
+            season.detect_season_audio(rec, ctx=_season_ctx(store, e1), cancel_check=lambda: True)
+        assert store.get_detector_failure(rec.id, Source.SEASON_AUDIO) is None
 
     def test_chromaprint_gone_at_run_time_stores_nothing(self, store, show):
         e1, _ = show(1, 2)
@@ -991,18 +1096,43 @@ class TestSeasonChapterState:
         assert _intro_decision(store, paths[3])[:2] == (DecisionStatus.NEEDS_REVIEW, LONG_INTRO_CHAPTER_REASON)
         assert all(c.args[1].canonical_path == paths[1] for c in decided.call_args_list)  # siblings' limits held
 
-    def test_a_sibling_changed_on_disk_is_not_asked_again(self, store, season_folder):
+    @pytest.mark.parametrize("stored_limit", [True, False], ids=["decided-with-a-limit", "decided-without-one"])
+    def test_a_sibling_changed_on_disk_is_asked_again_and_one_run_reads_the_new_file(
+        self, store, season_folder, stored_limit
+    ):
         paths = self._paths(season_folder, (1, 2, 3, 4))
         registry = _registry(paths[1], ServerType.PLEX)
-        with _Chapters({1: 10_000, 2: 126_000, 3: 12_000, 4: 13_000}) as chapters:
+        lengths = {1: 10_000, 2: 126_000 if stored_limit else None, 3: 12_000, 4: 13_000}
+        with _Chapters(lengths) as chapters:
             for e in (1, 2, 3):
                 _write(paths[e], 100 + e)
             _job(store, registry, [paths[e] for e in (1, 2, 3)], chapters)
-            assert _intro_decision(store, paths[2])[0] is DecisionStatus.NEEDS_REVIEW
-            _write(paths[2], 555)  # replaced; its own run hasn't read it yet, so it counts as no intro chapter
+            assert store.get_intro_chapter_limit(store.get_file(paths[2]).id) == (
+                True,
+                41_000 if stored_limit else None,
+            )
+            lengths[2] = 11_000  # replaced by a release whose intro chapter is like the season's
+            _write(paths[2], 555)
             _write(paths[4], 104)
-            requested = _job(store, registry, [paths[4]], chapters, season_job=False)
-        assert paths[2] not in requested  # its limit changed, but only its own run may read the new file
+            # Its stored decision is the old file's (its limit can't be known until the new file is read): asked again.
+            assert _job(store, registry, [paths[4]], chapters) == [paths[2]]
+            assert _intro_decision(store, paths[2]) == (
+                DecisionStatus.DECIDED,
+                "chapters",
+                Marker(MarkerType.INTRO, 30_000, 41_000, ("chapters",)),
+            )
+            assert _job(store, registry, [paths[1]], chapters) == []  # one run healed it
+
+    def test_a_changed_sibling_never_decided_is_left_alone(self, store, season_folder):
+        paths = self._paths(season_folder, (1, 2, 3))
+        for e, path in paths.items():
+            _write(path, 100 + e)
+        registry = _registry(paths[1], ServerType.PLEX)
+        with _Chapters({1: 10_000, 2: 12_000, 3: 126_000}) as chapters:
+            _job(store, registry, [paths[1]], chapters)  # E1's step records E2 and E3 without deciding them
+            assert store.get_decisions(store.get_file(paths[3]).id) == {}
+            _write(paths[3], 999)
+            assert _job(store, registry, [paths[1]], chapters, season_job=False) == []  # its own run sees the group
 
     def test_a_member_read_with_older_chapter_rules_is_probed_again(self, store, season_folder):
         paths = self._paths(season_folder, (1, 2))
@@ -1237,6 +1367,27 @@ def test_arrivals_reruns_replacements_deletions_and_restarts_end_with_the_all_at
 
 
 class TestFlatFolder:
+    def test_siblings_whose_answers_match_their_own_groups_are_not_asked_again(self, store, tmp_path):
+        folder = tmp_path / "media" / "anime" / "Show {tvdb-1}"
+        folder.mkdir(parents=True)
+        paths = [str(folder / f"Show - S01E{e:02d}.mkv") for e in range(1, 46)]
+        for path in paths:
+            _write(path, 100)
+        ctx = _season_ctx(store, paths[0])
+        review = TypeDecision(MarkerType.INTRO, DecisionStatus.NEEDS_REVIEW, None, None, "sources don't agree yet")
+        recs = []
+        for path in paths:
+            rec = store.upsert_file(
+                FileIdentity(path, *_identity(path)), duration_ms=DUR, season_key=None, is_movie=False
+            )
+            store.save_decisions(rec.id, {MarkerType.INTRO: review}, settings_fingerprint="x")
+            store.set_detector_run(
+                rec.id, Source.SEASON_AUDIO, season._signature(ctx, season.season_group(path).episodes)
+            )
+            recs.append(rec)
+        assert season.season_group(paths[39]).episodes != season.season_group(paths[0]).episodes
+        assert season.season_audio_followups(recs[0], ctx) == []
+
     def test_a_300_episode_folder_matches_and_compares_40_episodes(self, store, tmp_path):
         folder = tmp_path / "media" / "anime" / "Show {tvdb-1}"
         folder.mkdir(parents=True)
@@ -1262,3 +1413,496 @@ class TestFlatFolder:
         assert set(audio.computed) == group and len(audio.computed) == 40
         assert set(probed) == group and len(probed) == 40
         assert first < 10.0 and again < 2.0  # the whole folder would be 300 fingerprints and 44,850 pairs
+
+    def test_a_change_reaches_a_file_whose_group_holds_the_changed_episode_but_not_the_other_way_round(
+        self, store, tmp_path
+    ):
+        # 45 episodes: E6's group is E1-E40, E41's is E6-E45. Replacing E6 changes E41's limit though E41 isn't in E6's.
+        folder = tmp_path / "media" / "tv" / "Show (2020) {tvdb-1}"
+        folder.mkdir(parents=True)
+        paths = {e: str(folder / f"Show (2020) - S01E{e:02d}.mkv") for e in range(1, 46)}
+        for e, path in paths.items():
+            _write(path, 100 + e)
+        assert paths[6] in season.season_group(paths[41]).episodes
+        assert paths[41] not in season.season_group(paths[6]).episodes
+        lengths = {e: 60_000 if e >= 6 and e % 2 == 0 else 10_000 for e in paths}
+        lengths[41] = 100_000
+        registry = _registry(paths[1], ServerType.PLEX)
+        with _Chapters(lengths) as chapters:
+            _job(store, registry, list(paths.values()), chapters)
+            # E41's others: 20 of 60 s, 19 of 10 s (median 60 s, limit 120 s).
+            assert _intro_decision(store, paths[41])[:2] == (DecisionStatus.DECIDED, "chapters")
+            lengths[6] = None  # E6 replaced by a release without an intro chapter: E41's limit drops to 70 s
+            _write(paths[6], 999)
+            assert _job(store, registry, [paths[6]], chapters) == [paths[41]]
+        assert _intro_decision(store, paths[41])[:2] == (DecisionStatus.NEEDS_REVIEW, LONG_INTRO_CHAPTER_REASON)
+
+
+def _record_intro_chapter(store, path, length_ms, chapter_version=CHAPTER_RULES_VERSION):
+    rec = store.upsert_file(FileIdentity(path, *_identity(path)), duration_ms=DUR, season_key=os.path.dirname(path),
+                            is_movie=False)  # fmt: skip
+    store.replace_evidence(
+        rec.id, Source.CHAPTERS, chapter_candidates(_chapter_probe(length_ms)), version=chapter_version
+    )
+    return rec
+
+
+class TestGroupsHolding:
+    """The files whose own group holds an episode: in a flat folder, not only the episode's own group."""
+
+    @staticmethod
+    def _videos(names):
+        return tuple(season._folder_video(f"/tv/Show {{tvdb-1}}/{name}") for name in names)
+
+    @staticmethod
+    def _searched(target, videos):
+        return tuple(
+            sorted(
+                v.path for v in videos if v.path != target and target in season.season_group(v.path, videos).episodes
+            )
+        )
+
+    def test_every_file_of_a_season_of_40_or_fewer_holds_it(self):
+        videos = self._videos([f"Show - S01E{e:02d}.mkv" for e in range(1, 41)] + ["Show - S02E01.mkv"])
+        assert season.groups_holding(videos[0].path, videos) == tuple(v.path for v in videos[1:40])
+
+    def test_a_file_with_38_others_between_can_still_hold_it(self):
+        videos = self._videos([f"Show - S01E{e:02d}.mkv" for e in range(1, 81)])
+        e1, e40 = videos[0].path, videos[39].path
+        holding = season.groups_holding(e40, videos)
+        assert e1 in holding and holding == self._searched(e40, videos)  # E1's group is E1-E40
+
+    def test_it_finds_every_one_with_duplicate_sparse_or_no_episode_numbers(self):
+        rng = random.Random(3)
+        for trial in range(40):
+            numbered = trial % 5 != 4
+            names, episode = [], 1
+            for k in range(rng.randint(41, 140)):
+                episode += rng.choice([0, 0, 1, 1, 1, 2, 5, 20]) if rng.random() < 0.5 else 1
+                names.append(f"Show - S01E{episode:03d} - {k}.mkv" if numbered else f"Show - Part {k:03d}.mkv")
+            videos = self._videos(names)
+            target = rng.choice(videos).path
+            assert season.groups_holding(target, videos) == self._searched(target, videos), (trial, target)
+
+
+class TestSiblingLimits:
+    """What ``season_intro_chapter_limits`` gives a sibling in a flat folder: its own group's limit, from current chapter
+    reads only."""
+
+    @pytest.fixture
+    def flat(self, tmp_path):
+        folder = tmp_path / "media" / "anime" / "Show {tvdb-1}"
+        folder.mkdir(parents=True)
+        paths = {e: str(folder / f"Show - S01E{e:02d}.mkv") for e in range(1, 81)}
+        for e, path in paths.items():
+            _write(path, 100 + e)
+        return paths
+
+    def test_a_siblings_limit_comes_from_its_own_group(self, store, flat):
+        # E1's group is E1-E40, E40's is E20-E59. E1-E20 have 100 s intro chapters, the rest 10 s (E40 30 s).
+        assert season.season_group(flat[40]).episodes == tuple(flat[e] for e in range(20, 60))
+        for e, path in flat.items():
+            _record_intro_chapter(store, path, 100_000 if e <= 20 else 30_000 if e == 40 else 10_000)
+        ctx = _ctx(store, _registry(flat[1], ServerType.PLEX), settings_raw=HIGH)
+        with _Chapters({}) as chapters:
+            _, siblings = season.season_intro_chapter_limits(ctx, flat[1])
+        assert chapters.probed == []
+        # Its own others: one 100 s and 38 of 10 s (limit 40 s). E1's group would give a median of 100 s (limit 200 s).
+        assert siblings[flat[40]] == 40_000
+        # E41-E80 are among E1's 80 nearest, but none of their groups holds E1.
+        assert set(siblings) == {flat[e] for e in range(2, 41)}
+
+    def test_members_outside_this_episodes_group_count_only_with_current_chapter_rules(self, store, flat):
+        # E40's others outside E1's group (E41-E59) hold 200 s chapters read with older rules: they don't count.
+        for e, path in flat.items():
+            old = 41 <= e <= 59
+            length = 200_000 if old or e == 20 else 30_000 if e == 40 else 10_000
+            _record_intro_chapter(store, path, length, CHAPTER_RULES_VERSION - 1 if old else CHAPTER_RULES_VERSION)
+        ctx = _ctx(store, _registry(flat[1], ServerType.PLEX), settings_raw=HIGH)
+        with _Chapters({}) as chapters:
+            _, siblings = season.season_intro_chapter_limits(ctx, flat[1])
+        assert chapters.probed == []  # members outside this episode's group are read from the store only
+        # Current: one 200 s and 19 of 10 s (median 10 s, limit 40 s); with the old reads the median would be 200 s.
+        assert siblings[flat[40]] == 40_000
+
+
+class TestLimitStored:
+    def test_the_limit_is_stored_when_it_changes_though_the_decision_does_not(self, store, tmp_path):
+        folder = tmp_path / "media" / "tv" / "Show (2020) {tvdb-1}" / "Season 01"
+        folder.mkdir(parents=True)
+        paths = {e: str(folder / f"Show (2020) - S01E{e:02d}.mkv") for e in (1, 2, 3, 4)}
+        registry = _registry(paths[1], ServerType.PLEX)
+        with _Chapters({1: 10_000, 2: 12_000, 3: 14_000, 4: 16_000}) as chapters:
+            for e in (1, 2, 3):
+                _write(paths[e], 100 + e)
+            _job(store, registry, [paths[e] for e in (1, 2, 3)], chapters)
+            e1 = store.get_file(paths[1])
+            assert store.get_intro_chapter_limit(e1.id) == (True, 43_000)  # others 12 s and 14 s
+            decided_at = store.get_decisions(e1.id)[MarkerType.INTRO].decided_at
+            _write(paths[4], 104)
+            assert _job(store, registry, [paths[4]], chapters) == []  # E1's decision doesn't change
+            _job(store, registry, [paths[1]], chapters)
+        assert store.get_decisions(e1.id)[MarkerType.INTRO].decided_at == decided_at  # not saved again
+        assert store.get_intro_chapter_limit(e1.id) == (True, 44_000)  # others 12, 14 and 16 s
+
+
+class TestServerKindOfSiblings:
+    """A sibling is re-decided with the kind its own run used: a file whose name has no SxxEyy is an episode only
+    because its server says so."""
+
+    @pytest.mark.parametrize("kind", ["episode", "movie"])
+    def test_a_sibling_whose_decision_doesnt_change_is_not_asked_again(self, store, tmp_path, kind):
+        folder = tmp_path / "media" / "anime" / "Show {tvdb-1}" / "Season 01"
+        folder.mkdir(parents=True)
+        lengths = {"101": 10_000, "102": 12_000, "103": 14_000, "104": 16_000}
+        paths = {n: str(folder / f"Show - {n}.mkv") for n in lengths}
+        assert not any(ids_from_path(p).is_episode for p in paths.values())
+        registry = _registry(paths["101"], ServerType.PLEX)
+        registry.get("plex-1").get_external_ids.return_value = EPISODE_IDS if kind == "episode" else MOVIE_IDS
+
+        def probe(path, **kwargs):
+            return _chapter_probe(lengths[os.path.basename(path)[7:10]])
+
+        def job(names):
+            ctx = _ctx(store, registry, settings_raw=HIGH)
+            for name in names:
+                _run(ctx, paths[name], {"plex-1": ready_publisher()}, probe_effect=probe)
+            return ctx.take_followups()
+
+        with patch.object(season, "probe_media", side_effect=probe):
+            for name in ("101", "102", "103"):
+                _write(paths[name], 100)
+            job(["101", "102", "103"])
+            expected = DecisionStatus.DECIDED if kind == "episode" else DecisionStatus.DISABLED
+            assert store.get_decisions(store.get_file(paths["101"]).id)[MarkerType.INTRO].status is expected
+            _write(paths["104"], 100)
+            # E101's limit changes (43 s to 44 s) and its 10 s chapter still decides: nothing to ask. A movie's run has
+            # no intro to compare.
+            assert job(["104"]) == []
+
+
+class TestUnreadableMembers:
+    """A member ffprobe can't read isn't probed again on every sibling's checking thread (up to 60 s each)."""
+
+    @pytest.mark.parametrize("failure", ["probe-error", "no-duration"])
+    def test_it_is_probed_again_after_a_day_or_once_it_changes(self, store, show, failure):
+        e1, e2, e3 = show(1, 3)
+        clock = [datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)]
+        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=HIGH, now=lambda: clock[0])
+        probed = []
+
+        def probe(path, **kwargs):
+            probed.append(path)
+            if path == e2 and os.path.getsize(path) < 500:
+                if failure == "probe-error":
+                    raise ProbeError("ffprobe timed out")
+                return MediaProbe(None, ())
+            return _chapter_probe(10_000)
+
+        def step():
+            probed.clear()
+            season.season_intro_chapter_limits(ctx, e1)
+            return probed.count(e2)
+
+        with patch.object(season, "probe_media", side_effect=probe):
+            assert step() == 1 and store.get_file(e2) is None
+            assert step() == 0
+            clock[0] += timedelta(hours=23, minutes=59)
+            assert step() == 0
+            clock[0] += timedelta(minutes=1)
+            assert step() == 1  # a day later
+            assert step() == 0
+            _write(e2, 600)  # a new release: readable now
+            assert step() == 1
+        assert store.get_file(e2).size == 600
+
+    def test_a_forced_re_detect_probes_it_again_within_the_day(self, store, show):
+        e1, e2, _ = show(1, 3)
+        registry = _registry(e1, ServerType.PLEX)
+        network_down = [True]
+        probed = []
+
+        def probe(path, **kwargs):
+            probed.append(path)
+            if path == e2 and network_down[0]:
+                raise ProbeError("ffprobe timed out")
+            return _chapter_probe(10_000)
+
+        with patch.object(season, "probe_media", side_effect=probe):
+            season.season_intro_chapter_limits(_ctx(store, registry, settings_raw=HIGH), e1)
+            network_down[0] = False
+            probed.clear()
+            season.season_intro_chapter_limits(_ctx(store, registry, settings_raw=HIGH), e1)
+            assert e2 not in probed
+            season.season_intro_chapter_limits(_ctx(store, registry, settings_raw=HIGH, force=True), e1)
+        assert probed == [e2] and store.get_file(e2) is not None
+
+    def test_a_member_its_own_run_recorded_is_read_by_a_siblings_step_within_the_day(self, store, show):
+        e1, e2, e3 = show(1, 3)
+        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=HIGH)
+        lengths = {e1: 10_000, e2: 12_000, e3: 14_000}
+
+        def season_probe(path, **kwargs):  # the season step can't read E2 (a network blip)
+            if path == e2:
+                raise ProbeError("ffprobe timed out")
+            return _chapter_probe(lengths[path])
+
+        with patch.object(season, "probe_media", side_effect=season_probe):
+            _, before = season.season_intro_chapter_limits(ctx, e1)
+            assert store.get_file(e2) is None and before[e3] is None  # E3 has one other intro chapter: no limit
+            _run(ctx, e2, {"plex-1": ready_publisher()}, probe_effect=lambda path, **kw: _chapter_probe(lengths[path]))
+            _, after = season.season_intro_chapter_limits(ctx, e1)
+        assert after[e3] == 41_000  # E1's 10 s and E2's 12 s: E2's own run recorded it, so the failure doesn't apply
+
+    def test_a_member_replaced_while_it_is_probed_is_not_remembered_as_unreadable(self, store, show):
+        e1, e2 = show(1, 2)
+        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=HIGH)
+        answers = iter([ProbeError("the file was being written"), _chapter_probe(10_000)])
+
+        def probe(path, **kwargs):
+            if path != e2:
+                return _chapter_probe(10_000)
+            answer = next(answers)
+            if isinstance(answer, Exception):
+                os.utime(path, ns=(5, 5))
+                raise answer
+            return answer
+
+        with patch.object(season, "probe_media", side_effect=probe):
+            season.season_intro_chapter_limits(ctx, e1)
+            assert store.get_file(e2) is None
+            season.season_intro_chapter_limits(ctx, e1)
+        assert store.get_file(e2) is not None
+
+
+SEASON_INTRO_AT, COLD_OPEN_AT = 900, 100
+SEASON_INTRO, COLD_OPEN = noise(1, 240), noise(2, 240)
+
+
+def _point_ms(at):
+    return round(at * POINT_S * 1000), round((at + 239) * POINT_S * 1000)
+
+
+def _cold_open_points(episodes):
+    def points(path):
+        e = int(re.search(r"E(\d+)", os.path.basename(path)).group(1))
+        body = noise(100 + e, N_POINTS)
+        if episodes[e]["y"]:
+            body[COLD_OPEN_AT : COLD_OPEN_AT + 240] = COLD_OPEN
+        if episodes[e]["x"]:
+            body[SEASON_INTRO_AT : SEASON_INTRO_AT + 240] = SEASON_INTRO
+        return body
+
+    return points
+
+
+def _cold_open_season(root, episodes, arrivals, reruns=None):
+    """A season where some episodes share the season's intro (``x``), some a cold open (``y``), and some have an intro
+    chapter on one of them (``chapter``: "x", "y" or None). IntroDB (wrongly) gives the cold open as every episode's
+    intro. Each batch of ``arrivals`` is written and run as one job, after an optional re-run of an episode already on
+    disk (``reruns``), and each job's follow-ups run as the Season job (Task 8) runs them.
+
+    Returns:
+        The final intro decisions of the episodes that arrived, every job's follow-up requests, and whether each
+        arrived episode's own run ever ran season audio.
+    """
+    folder = root / "media" / "tv" / "Show (2020) {tvdb-1}" / "Season 01"
+    folder.mkdir(parents=True)
+    store = MarkerStore(str(root / "markers.db"))
+    paths = {e: str(folder / f"Show (2020) - S01E{e:02d}.mkv") for e in episodes}
+    registry = _registry(paths[min(paths)], ServerType.PLEX)
+    clients = _introdb_answer(*_point_ms(COLD_OPEN_AT))
+    requests = []
+
+    def probe(path, **kwargs):
+        chapter = episodes[int(re.search(r"E(\d+)", os.path.basename(path)).group(1))]["chapter"]
+        if chapter is None:
+            return _chapter_probe(None)
+        start, end = _point_ms(SEASON_INTRO_AT if chapter == "x" else COLD_OPEN_AT)
+        return _chapter_probe(end - start, at_ms=start)
+
+    def run(ctx, path):
+        if _run(ctx, path, {"plex-1": ready_publisher()}, probe_effect=probe)[0] is None:
+            _run(ctx, path, {"plex-1": ready_publisher()}, stage="process", probe_effect=probe)
+
+    def job(items):
+        ctx = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),), clients=clients)
+        for path in items:
+            run(ctx, path)
+        requested = ctx.take_followups()
+        requests.append(requested)
+        follow = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),), clients=clients)
+        for path in requested:
+            if path not in items:
+                run(follow, path)
+
+    on_disk = []
+    try:
+        with _Audio(points=_cold_open_points(episodes)), patch.object(season, "probe_media", side_effect=probe):
+            for batch, rerun in zip(arrivals, reruns or [None] * len(arrivals), strict=True):
+                for e in batch:
+                    _write(paths[e], 100 + e)
+                if rerun is not None and on_disk:
+                    job([paths[on_disk[rerun % len(on_disk)]]])
+                job([paths[e] for e in batch])
+                on_disk.extend(batch)
+        decisions = {e: _intro_decision(store, paths[e]) for e in sorted(on_disk)}
+        ran = {e: store.get_detector_run(store.get_file(paths[e]).id, Source.SEASON_AUDIO) is not None for e in on_disk}
+        return decisions, requests, ran
+    finally:
+        store.close()
+
+
+class TestAnswersRestingOnSeasonAudio:
+    """An intro decided with a season audio answer is decided again when the season's audio changes, so the order the
+    episodes arrive in doesn't decide what is published."""
+
+    COLD_OPEN_MARKER = Marker(MarkerType.INTRO, *_point_ms(COLD_OPEN_AT), ("introdb", "season_audio"))
+
+    def test_an_early_match_agreeing_with_a_wrong_online_answer_is_asked_again_when_the_season_grows(self, tmp_path):
+        # E1 and E2 share a cold open IntroDB lists as the intro; E1, E3 and E4 have the season's intro.
+        episodes = {
+            1: {"x": True, "y": True, "chapter": None},
+            2: {"x": False, "y": True, "chapter": None},
+            3: {"x": True, "y": False, "chapter": None},
+            4: {"x": True, "y": False, "chapter": None},
+        }
+        early, _, _ = _cold_open_season(tmp_path / "early", episodes, [[1], [2]])
+        assert early[1] == (DecisionStatus.DECIDED, "sources agree: introdb, season_audio", self.COLD_OPEN_MARKER)
+        weekly, requests, _ = _cold_open_season(tmp_path / "weekly", episodes, [[1], [2], [3, 4]])
+        at_once, _, _ = _cold_open_season(tmp_path / "at-once", episodes, [[1, 2, 3, 4]])
+        assert weekly[1] == at_once[1] == (DecisionStatus.NEEDS_REVIEW, "sources don't agree yet", None)
+        assert weekly == at_once
+        assert "Show (2020) - S01E01.mkv" in {os.path.basename(p) for p in requests[-1]}
+
+    def test_an_episode_decided_by_its_chapter_still_asks_again_for_a_sibling_resting_on_season_audio(self, tmp_path):
+        # E3 arrives with an intro chapter: it decides before season audio, so its own run never matches the season.
+        episodes = {
+            1: {"x": True, "y": True, "chapter": None},
+            2: {"x": False, "y": True, "chapter": None},
+            3: {"x": True, "y": False, "chapter": "x"},
+            4: {"x": True, "y": False, "chapter": "x"},
+        }
+        early, _, _ = _cold_open_season(tmp_path / "early", episodes, [[1], [2]])
+        assert early[1][2] == self.COLD_OPEN_MARKER
+        weekly, requests, ran = _cold_open_season(tmp_path / "weekly", episodes, [[1], [2], [3], [4]])
+        at_once, _, _ = _cold_open_season(tmp_path / "at-once", episodes, [[1, 2, 3, 4]])
+        assert (ran[3], ran[4]) == (False, False)
+        assert weekly == at_once and weekly[1][2] != self.COLD_OPEN_MARKER
+        assert any("S01E01" in p for p in requests[2])  # E3's job, before E3 ever runs season audio
+
+    @pytest.mark.parametrize(
+        ("state", "listed"),
+        [
+            ("no-answer", False),
+            ("answer-current", False),
+            ("undecided", True),
+            ("decided-by-an-online-source", False),
+            ("decided-with-season-audio", True),
+            ("changed-on-disk", False),
+            ("resized-with-the-same-mtime", False),
+        ],
+    )
+    def test_the_season_step_lists_siblings_whose_outdated_answer_could_change_their_intro(
+        self, store, show, state, listed
+    ):
+        e1, e2, e3 = show(1, 3)
+        recs = {
+            p: store.upsert_file(FileIdentity(p, *_identity(p)), duration_ms=DUR, season_key=None, is_movie=False)
+            for p in (e1, e2, e3)
+        }
+        ctx = _season_ctx(store, e1)
+        sibling = recs[e2]
+        if state != "no-answer":
+            current = season._signature(ctx, season.season_group(e2).episodes)
+            store.set_detector_run(sibling.id, Source.SEASON_AUDIO, current if state == "answer-current" else "older")
+        decided_by = {
+            "decided-by-an-online-source": ("skipdb",),
+            "decided-with-season-audio": ("introdb", "season_audio"),
+        }
+        if state in decided_by:
+            decision = _decided(MarkerType.INTRO, 10_000, 40_000, decided_by[state])
+        else:
+            decision = TypeDecision(
+                MarkerType.INTRO, DecisionStatus.NEEDS_REVIEW, None, None, "sources don't agree yet"
+            )
+        store.save_decisions(sibling.id, {MarkerType.INTRO: decision}, settings_fingerprint="x")
+        if state == "changed-on-disk":
+            _write(e2, 999)
+        if state == "resized-with-the-same-mtime":
+            _write(e2, 999)
+            os.utime(e2, ns=(sibling.mtime_ns, sibling.mtime_ns))
+        assert season.season_audio_followups(recs[e1], ctx) == ([e2] if listed else [])
+
+
+FUZZ_SEASONS, FUZZ_CHUNKS = 120, 4
+
+
+def _fuzz_cases(mode):
+    """120 seasons of 3-6 episodes, each arriving one a week in a random order.
+
+    The chapter modes are the re-reviewer's generator (seed 7): an intro chapter length or none per episode, and with
+    re-runs an unchanged episode checked before about half the arrivals. The cold-open mode (seed 11) draws which
+    episodes have the season's intro, a cold open IntroDB wrongly lists, and an intro chapter on either.
+    """
+    cases = []
+    if mode == "cold-open":
+        rng = random.Random(11)
+        for _ in range(FUZZ_SEASONS):
+            count = rng.randint(3, 6)
+            episodes = {
+                e: {"x": rng.random() < 0.75, "y": rng.random() < 0.4, "chapter": rng.choice([None] * 5 + ["x", "y"])}
+                for e in range(1, count + 1)
+            }
+            order = rng.sample(sorted(episodes), count)
+            cases.append((episodes, order, [rng.randrange(10) if rng.random() < 0.4 else None for _ in order]))
+        return cases
+    rng = random.Random(7)
+    for _ in range(FUZZ_SEASONS):
+        count = rng.randint(3, 6)
+        lengths = {e: rng.choice(CHAPTER_CHOICES) for e in range(1, count + 1)}
+        order = rng.sample(list(lengths), count)
+        cases.append(
+            (lengths, order, [rng.randrange(10) if mode == "reruns" and rng.random() < 0.5 else None for _ in order])
+        )
+    return cases
+
+
+def _chapter_season(root, lengths, arrivals, reruns, detectors):
+    folder = root / "media" / "tv" / "Show (2020) {tvdb-1}" / "Season 01"
+    folder.mkdir(parents=True)
+    store = MarkerStore(str(root / "markers.db"))
+    paths = {e: str(folder / f"Show (2020) - S01E{e:02d}.mkv") for e in lengths}
+    registry = _registry(paths[1], ServerType.PLEX)
+    on_disk = []
+    try:
+        with _Audio(points=_episode_noise), _Chapters(lengths) as chapters:
+            for batch, rerun in zip(arrivals, reruns, strict=True):
+                for e in batch:
+                    _write(paths[e], 100 + e)
+                if rerun is not None and on_disk:
+                    _job(store, registry, [paths[on_disk[rerun % len(on_disk)]]], chapters, detectors=detectors)
+                _job(store, registry, [paths[e] for e in batch], chapters, detectors=detectors)
+                on_disk.extend(batch)
+        return {e: _intro_decision(store, paths[e]) for e in lengths}
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("chunk", range(FUZZ_CHUNKS))
+@pytest.mark.parametrize("mode", ["weekly", "reruns", "season-audio", "cold-open"])
+def test_weekly_arrivals_end_with_the_all_at_once_decisions(tmp_path, mode, chunk):
+    size = FUZZ_SEASONS // FUZZ_CHUNKS
+    mismatches = []
+    for i, (inputs, order, reruns) in enumerate(_fuzz_cases(mode)[chunk * size : (chunk + 1) * size]):
+        weekly = [[e] for e in order]
+        if mode == "cold-open":
+            want, _, _ = _cold_open_season(tmp_path / f"all{i}", inputs, [sorted(inputs)])
+            got, _, _ = _cold_open_season(tmp_path / f"weekly{i}", inputs, weekly, reruns)
+        else:
+            detectors = (_spec(),) if mode == "season-audio" else ()
+            want = _chapter_season(tmp_path / f"all{i}", inputs, [sorted(inputs)], [None], detectors)
+            got = _chapter_season(tmp_path / f"weekly{i}", inputs, weekly, reruns, detectors)
+        if got != want:
+            mismatches.append((inputs, order, reruns, {e: (want[e], got[e]) for e in want if want[e] != got[e]}))
+    assert mismatches == []

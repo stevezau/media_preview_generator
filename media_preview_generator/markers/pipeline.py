@@ -17,7 +17,8 @@ import os
 import stat
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -135,6 +136,9 @@ class LocalDetectorSpec:
         needs_worker: ``needs_worker(file, ctx)``: whether it needs a GPU/CPU worker now (None: always). One that
             doesn't runs on the checking thread, unless another detector that has to run at the same source needs a
             worker: then they all run on the worker.
+        followups: ``followups(file, ctx)``: other files whose answer is out of date and whose decision could change
+            with it (season audio: siblings matched before this episode arrived). Every run of a file of a type the
+            detector decides asks the job to run them again, before any worker handoff (None: none).
     """
 
     source: Source
@@ -144,6 +148,7 @@ class LocalDetectorSpec:
     version: int = 1
     due: Callable[[FileRecord, PipelineContext], bool] | None = None
     needs_worker: Callable[[FileRecord, PipelineContext], bool] | None = None
+    followups: Callable[[FileRecord, PipelineContext], Iterable[str]] | None = None
 
     @property
     def stored_sources(self) -> frozenset[Source]:
@@ -217,6 +222,33 @@ class PipelineContext:
     # into a completion warning once the job finishes).
     _budget_exhausted: dict[Source, int] = field(default_factory=dict, repr=False)
     _budget_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # Per file being run: the thread running it and what that run computes once (``run_memo``).
+    _run_memos: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict, repr=False)
+    _run_memos_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def run_memo(self, canonical_path: str) -> dict[str, Any]:
+        """Values the current run of a file reads once and reuses (a detector's folder listing and due answer).
+
+        Args:
+            canonical_path: The file being run.
+
+        Returns:
+            The run's memo, dropped when the run ends and after a detector ran. Outside a run of that file on this
+            thread, a new empty dict every call, so nothing is kept.
+        """
+        with self._run_memos_guard:
+            owner = self._run_memos.get(canonical_path)
+        return owner[1] if owner is not None and owner[0] == threading.get_ident() else {}
+
+    @contextmanager
+    def _running(self, canonical_path: str) -> Iterator[None]:
+        with self._run_memos_guard:
+            self._run_memos[canonical_path] = (threading.get_ident(), {})
+        try:
+            yield
+        finally:
+            with self._run_memos_guard:
+                self._run_memos.pop(canonical_path, None)
 
     def request_followups(self, paths: Iterable[str]) -> None:
         """Ask the job to run these files again after it finishes (their decision may change with this job's work).
@@ -424,16 +456,26 @@ def _resolve_kind(
     if path_ids.is_episode:
         return path_ids, True, None
     if known_kind is not None:
-        if known_kind == "movie" and path_ids.kind == "movie":
-            ids = path_ids
-        else:
-            ids = MediaIds(known_kind) if known_kind in ("movie", "episode") else MediaIds()
+        ids = _ids_of_known_kind(path_ids, known_kind)
         return ids, ids.kind in ("movie", "episode"), None
     answer = servers.server_ids()
     if answer is None:
         return path_ids, False, None
     ids = merge_ids(path_ids, answer) if path_ids.kind == "movie" and answer.kind == "movie" else answer
     return ids, ids.kind in ("movie", "episode"), answer.kind
+
+
+def _ids_of_known_kind(path_ids: MediaIds, known_kind: str) -> MediaIds:
+    if known_kind == "movie" and path_ids.kind == "movie":
+        return path_ids
+    return MediaIds(known_kind) if known_kind in ("movie", "episode") else MediaIds()
+
+
+def _stored_ids(store: MarkerStore, rec: FileRecord) -> MediaIds:
+    """The kind another file's own last run decided with, as far as the store knows it (without asking its server)."""
+    path_ids = ids_from_path(rec.canonical_path)
+    known_kind = None if path_ids.is_episode else store.get_server_kind(rec.id)
+    return path_ids if known_kind is None else _ids_of_known_kind(path_ids, known_kind)
 
 
 def _lookup_ids(ids: MediaIds, servers: _ItemServers) -> MediaIds:
@@ -587,6 +629,24 @@ def _detector_due(ctx: PipelineContext, rec: FileRecord, spec: LocalDetectorSpec
     return bool(spec.due and spec.due(rec, ctx))
 
 
+def _rests_on_detector(
+    spec: LocalDetectorSpec, decisions: dict[MarkerType, TypeDecision], wanted: frozenset[MarkerType]
+) -> bool:
+    """Whether a decided type's marker was decided with this detector's own answer (a user's lock never counts).
+
+    Such a decision can change when the answer does (season audio: a 1/1 match made before the rest of the season
+    arrived), so a due answer is asked again even though the type is decided.
+    """
+    answers = {source.value for source in spec.stored_sources}
+    return any(
+        decisions[t].status is DecisionStatus.DECIDED
+        and decisions[t].marker is not None
+        and not decisions[t].marker.locked
+        and not answers.isdisjoint(decisions[t].marker.decided_by)
+        for t in wanted
+    )
+
+
 def _detector_pending(
     ctx: PipelineContext,
     rec: FileRecord,
@@ -600,15 +660,36 @@ def _detector_pending(
 
     A forced run runs it once per file, and again (on the worker after the checking thread ran it) only when its answer
     is due. A normal run runs it when its stored answer is from another version, even for decided types (like an older
-    parser's answer), or when a type it can decide is still undecided and its answer is due.
+    parser's answer), or when its answer is due and a type it can decide is still undecided or was decided with that
+    answer. A type decided by other sources doesn't ask whether the answer is due.
     """
     wanted = spec.types & types
     if not wanted:
         return False
     if refresh or _answer_from_another_version(ctx, rec, spec):
         return True
-    undecided = ctx.force or any(decisions[t].status is not DecisionStatus.DECIDED for t in wanted)
-    return undecided and _detector_due(ctx, rec, spec)
+    asks = (
+        ctx.force
+        or any(decisions[t].status is not DecisionStatus.DECIDED for t in wanted)
+        or _rests_on_detector(spec, decisions, wanted)
+    )
+    return asks and _detector_due(ctx, rec, spec)
+
+
+def _decided_with_a_due_answer(
+    ctx: PipelineContext,
+    rec: FileRecord,
+    source: Source,
+    decisions: dict[MarkerType, TypeDecision],
+    types: frozenset[MarkerType],
+) -> bool:
+    """Whether a type was decided with the answer of a detector at ``source`` that is due again."""
+    return any(
+        spec.source is source
+        and _rests_on_detector(spec, decisions, spec.types & types)
+        and _detector_due(ctx, rec, spec)
+        for spec in ctx.local_detectors
+    )
 
 
 def _needs_worker(ctx: PipelineContext, rec: FileRecord, spec: LocalDetectorSpec) -> bool:
@@ -1204,18 +1285,24 @@ def _request_season_chapter_followups(ctx: PipelineContext, sibling_limits: dict
     State, not events: every season step compares each sibling's stored limit with the one it would get now, so a
     change is noticed whichever episode runs next, after a worker handoff, a restart, a deleted or replaced episode, or
     a member another episode's step probed. A sibling is asked again only when the new limit changes its intro
-    decision. One never decided is left alone (its own run sees the whole group), and so is one changed on disk since
-    its record (its own run reads it again).
+    decision, re-decided with the kind its own run used. One never decided is left alone (its own run sees the whole
+    group). One changed on disk since it was decided is asked again without deciding it here: its stored evidence is
+    the old file's, and one run reads the new file.
     """
     stale = []
     for path, limit in sibling_limits.items():
         sibling = ctx.store.get_file(path)
-        if sibling is None or _identity_changed(sibling):
+        if sibling is None:
             continue
         stored = ctx.store.get_decisions(sibling.id).get(MarkerType.INTRO)
-        if stored is None or ctx.store.get_intro_chapter_limit(sibling.id) == (True, limit):
+        if stored is None:
             continue
-        types = _enabled_types(ctx.settings, ids_from_path(path))
+        if _identity_changed(sibling):
+            stale.append(path)
+            continue
+        if ctx.store.get_intro_chapter_limit(sibling.id) == (True, limit):
+            continue
+        types = _enabled_types(ctx.settings, _stored_ids(ctx.store, sibling))
         decision = _decide(ctx, sibling, types, limit)[MarkerType.INTRO]
         if _decisions_changed(ctx.store, sibling.id, {MarkerType.INTRO: decision}, stored.settings_fingerprint):
             stale.append(path)
@@ -1291,6 +1378,9 @@ def _attempt(
         phase("Comparing the season's intro chapters…")
         intro_limit, sibling_limits = season_intro_chapter_limits(ctx, path)
         _request_season_chapter_followups(ctx, sibling_limits)
+    for spec in ctx.local_detectors:
+        if spec.followups is not None and spec.types & types and ctx.settings.source_enabled(spec.source.value):
+            ctx.request_followups(spec.followups(rec, ctx))
     # A normal run stops asking once stored answers decide everything beyond chapters alone (answers from an older
     # parser, reader or detector version are still asked again; ``_detector_pending`` says when a detector runs); a
     # forced run asks every source and runs every detector once, so no stale answer is left behind. A server never
@@ -1308,6 +1398,7 @@ def _attempt(
             and source is not Source.SERVER_MARKERS
             and _all_decided(decisions, types)
             and not _stale_evidence(ctx, rec, source)
+            and not _decided_with_a_due_answer(ctx, rec, source, decisions, types)
         ):
             continue
         if cancelled():
@@ -1349,6 +1440,8 @@ def _attempt(
                     cancel_check=cancel_check,
                     pause_check=pause_check,
                 )
+            if pending:
+                ctx.run_memo(path).clear()  # what the detectors' hooks read before they ran is out of date now
         _mark_refreshed(ctx, path, source)
         if not gather_all:
             decisions = _decide(ctx, rec, types, intro_limit)
@@ -1396,7 +1489,7 @@ def _run(
         return ItemOutcome(FileOutcome.SKIPPED.value, EXTRAS_NOT_CHECKED)
     for _ in range(MAX_ATTEMPTS):
         try:
-            with _PATH_LOCKS.hold(item.canonical_path):
+            with _PATH_LOCKS.hold(item.canonical_path), ctx._running(item.canonical_path):
                 return _attempt(
                     item,
                     ctx,
