@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -523,7 +523,7 @@ PATH = "/media/tv/Show/Season 01/Show - S01E01.mkv"
 
 @pytest.fixture
 def store(tmp_path):
-    s = MarkerStore(str(tmp_path / "markers.db"), clock=lambda: datetime(2026, 9, 14, tzinfo=timezone.utc))
+    s = MarkerStore(str(tmp_path / "markers.db"), clock=lambda: datetime(2026, 9, 14, tzinfo=UTC))
     yield s
     s.close()
 

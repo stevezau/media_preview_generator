@@ -7,6 +7,7 @@ run_scheduled_job, and create_app configuration.
 
 import json
 import os
+from datetime import UTC
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -585,7 +586,7 @@ class TestResumeInterruptedRetryChains:
         clobber such chains (which would orphan the still-living
         retry).
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from media_preview_generator.web.jobs import JobStatus
 
@@ -596,12 +597,12 @@ class TestResumeInterruptedRetryChains:
                 "id": "originating-uuid",
                 "library_name": "Foo",
                 "server_id": "jelly-1",
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
                 "config": {
                     "is_retry_chain": True,
                     "retry_attempt": 2,
                     "retry_max_attempts": 5,
-                    "retry_started_at": datetime.now(timezone.utc).isoformat(),
+                    "retry_started_at": datetime.now(UTC).isoformat(),
                     "source": "sonarr",
                 },
                 "status": JobStatus.PENDING,
@@ -634,7 +635,7 @@ class TestResumeInterruptedRetryChains:
         """Without a child to drive the chain, the head would sit
         PENDING forever. Mark FAILED so the user knows to re-trigger.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from media_preview_generator.web.jobs import JobStatus
 
@@ -645,11 +646,11 @@ class TestResumeInterruptedRetryChains:
                 "id": "stuck-uuid",
                 "library_name": "Foo",
                 "server_id": "jelly-1",
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
                 "config": {
                     "is_retry_chain": True,
                     "retry_attempt": 1,
-                    "retry_started_at": datetime.now(timezone.utc).isoformat(),
+                    "retry_started_at": datetime.now(UTC).isoformat(),
                 },
                 "status": JobStatus.PENDING,
                 "error": None,
@@ -696,11 +697,11 @@ class TestResumeInterruptedRetryChains:
         ancient chains PENDING and re-fire against potentially-deleted
         media. Boundary: 25h must be stale.
         """
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from media_preview_generator.web.jobs import JobStatus
 
-        old_started = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+        old_started = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
         chain = type(
             "Chain",
             (),

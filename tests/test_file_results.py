@@ -8,7 +8,7 @@ and the GET /api/jobs/{id}/files API endpoint.
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -82,20 +82,20 @@ class TestFileResultRecording:
         Audit fix — original assertion was just ``assert results[0]["ts"]``
         which passes for any truthy value (including a stale fixture
         string, an exception message, or "{}"). Production format at
-        web/jobs.py:1394 is ``datetime.now(timezone.utc).strftime("%H:%M:%S")``
+        web/jobs.py:1394 is ``datetime.now(UTC).strftime("%H:%M:%S")``
         — pin the regex shape AND verify the recorded timestamp falls
         within ±5 seconds of "now" (otherwise a clock-skew or
         wrong-format regression slips through).
         """
         import re
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         os.makedirs(config_dir, exist_ok=True)
         jm = JobManager(config_dir=config_dir)
         job = jm.create_job(library_name="Test")
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         jm.record_file_result(job.id, "/media/a.mkv", "generated")
-        after = datetime.now(timezone.utc)
+        after = datetime.now(UTC)
         results = jm.get_file_results(job.id)
         ts = results[0]["ts"]
 
@@ -207,7 +207,7 @@ class TestFileResultRetention:
         results_path = jm._file_results_path(job.id)
         assert os.path.isfile(results_path)
 
-        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        old_time = (datetime.now(UTC) - timedelta(days=60)).isoformat()
         jm._jobs[job.id].completed_at = old_time
         jm._persist_job(jm._jobs[job.id])
 

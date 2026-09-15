@@ -10,7 +10,7 @@ Coverage:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from playwright.sync_api import Page, expect
@@ -129,7 +129,7 @@ class TestActiveJobWaitingToRetry:
         """Regression: the retry-waiting card read undefined retryAttempt/maxRetries, so the render threw and the
         Active Jobs card never appeared."""
         mock_dashboard_defaults(authed_page)
-        eta = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+        eta = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
         job = {
             "id": "abcdef01-0000-4000-8000-000000000001",
             "status": "running",

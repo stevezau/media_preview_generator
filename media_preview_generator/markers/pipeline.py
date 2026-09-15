@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from loguru import logger
@@ -114,7 +114,7 @@ LocalDetector = Callable[..., "list[Candidate] | DetectorAnswer"]
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _no_phase(_text: str) -> None:

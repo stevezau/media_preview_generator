@@ -19,7 +19,7 @@ import uuid
 from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any, Optional
 
@@ -338,7 +338,7 @@ class Job:
 
     def __post_init__(self):
         if not self.created_at:
-            self.created_at = datetime.now(timezone.utc).isoformat()
+            self.created_at = datetime.now(UTC).isoformat()
         if isinstance(self.progress, dict):
             # Filter to JobProgress's current fields so a job persisted under a
             # different schema still loads instead of raising TypeError on an
@@ -794,7 +794,7 @@ class JobManager:
                     # comes back online — default to "now" if it was
                     # cleared by the running transition.
                     if not job.progress.retry_eta:
-                        job.progress.retry_eta = datetime.now(timezone.utc).isoformat()
+                        job.progress.retry_eta = datetime.now(UTC).isoformat()
                     job.progress.current_item = ""
                     needs_resave.append(job)
                 self._interrupted_retry_chains.append(job)
@@ -812,7 +812,7 @@ class JobManager:
                 job.error = (
                     "Attempt interrupted by container restart — a fresh attempt will run from the chain's next firing."
                 )
-                job.completed_at = datetime.now(timezone.utc).isoformat()
+                job.completed_at = datetime.now(UTC).isoformat()
                 needs_resave.append(job)
                 retry_interrupted_count += 1
                 self._jobs[job.id] = job
@@ -828,7 +828,7 @@ class JobManager:
                 )
                 job.status = JobStatus.FAILED
                 job.error = "Job was interrupted by server restart"
-                job.completed_at = datetime.now(timezone.utc).isoformat()
+                job.completed_at = datetime.now(UTC).isoformat()
                 needs_resave.append(job)
                 self._interrupted_jobs.append(job)
             elif job.status == JobStatus.PENDING:
@@ -1034,7 +1034,7 @@ class JobManager:
         Caller must hold _lock.
         """
         days = self._get_job_history_days()
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff = datetime.now(UTC) - timedelta(days=days)
         cutoff_iso = cutoff.isoformat()
 
         expired_ids = []
@@ -1195,7 +1195,7 @@ class JobManager:
             return []
 
         max_age_minutes = max(5, min(1440, max_age_minutes))
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        cutoff = datetime.now(UTC) - timedelta(minutes=max_age_minutes)
         revived: list[Job] = []
         not_revived: list[Job] = []
 
@@ -1207,7 +1207,7 @@ class JobManager:
                 ref_str = job.started_at or job.created_at
                 ref_time = datetime.fromisoformat(ref_str.replace("Z", "+00:00"))
                 if ref_time.tzinfo is None:
-                    ref_time = ref_time.replace(tzinfo=timezone.utc)
+                    ref_time = ref_time.replace(tzinfo=UTC)
                 if ref_time < cutoff:
                     logger.debug("Skipping revive of job {} — too old (ref={})", job.id[:8], ref_str)
                     not_revived.append(job)
@@ -1264,7 +1264,7 @@ class JobManager:
                     continue
                 job.status = JobStatus.FAILED
                 job.error = "Interrupted by a restart and not resumed"
-                job.completed_at = datetime.now(timezone.utc).isoformat()
+                job.completed_at = datetime.now(UTC).isoformat()
                 job.paused = False
                 self._persist_job(job)
                 self._emit_event("job_failed", job.to_dict())
@@ -1419,7 +1419,7 @@ class JobManager:
         Returns:
             The mutated Job, or ``None`` if no originating Job exists.
         """
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
 
         with self._lock:
             job = self._jobs.get(originating_job_id)
@@ -1701,7 +1701,7 @@ class JobManager:
             if job and job.status != JobStatus.RUNNING:
                 job.status = JobStatus.RUNNING
                 job.paused = False
-                job.started_at = datetime.now(timezone.utc).isoformat()
+                job.started_at = datetime.now(UTC).isoformat()
                 self._running_job_ids.add(job_id)
                 self._pause_flags[job_id] = False
                 self._pause_events[job_id] = threading.Event()
@@ -1893,7 +1893,7 @@ class JobManager:
                         f"skipping worker completion update (chain drives lifecycle)"
                     )
                 else:
-                    job.completed_at = datetime.now(timezone.utc).isoformat()
+                    job.completed_at = datetime.now(UTC).isoformat()
                     if error:
                         job.status = JobStatus.FAILED
                         job.error = error
@@ -1953,7 +1953,7 @@ class JobManager:
             if job and job.status in (JobStatus.PENDING, JobStatus.RUNNING):
                 job.status = JobStatus.CANCELLED
                 job.paused = False
-                job.completed_at = datetime.now(timezone.utc).isoformat()
+                job.completed_at = datetime.now(UTC).isoformat()
                 self._running_job_ids.discard(job_id)
                 self.clear_pause_flag(job_id)
                 self.clear_active_worker_pool(job_id)
@@ -1993,7 +1993,7 @@ class JobManager:
                         continue
                     child.status = JobStatus.CANCELLED
                     child.error = "Parent retry chain was cancelled."
-                    child.completed_at = datetime.now(timezone.utc).isoformat()
+                    child.completed_at = datetime.now(UTC).isoformat()
                     self._running_job_ids.discard(child.id)
                     self.clear_pause_flag(child.id)
                     self._persist_job(child)
@@ -2104,7 +2104,7 @@ class JobManager:
         with self._lock:
             if job_id not in self._job_logs:
                 self._job_logs[job_id] = deque(maxlen=self._max_log_lines)
-            timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            timestamp = datetime.now(UTC).strftime("%H:%M:%S")
             line = f"[{timestamp}] {message}"
             self._job_logs[job_id].append(line)
             log_path = os.path.join(self._job_logs_dir, f"{job_id}.log")
@@ -2320,7 +2320,7 @@ class JobManager:
                             "Aggregate counts in the job summary remain accurate."
                         ),
                         "worker": "",
-                        "ts": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                        "ts": datetime.now(UTC).strftime("%H:%M:%S"),
                     }
                     try:
                         with open(path, "a") as f:
@@ -2348,7 +2348,7 @@ class JobManager:
             "outcome": outcome,
             "reason": derived_reason,
             "worker": worker,
-            "ts": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+            "ts": datetime.now(UTC).strftime("%H:%M:%S"),
         }
         # Slim per-server attribution — keep the JSONL compact (no
         # canonical_path duplication, no frame_source unless it differs

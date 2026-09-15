@@ -16,7 +16,7 @@ import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from loguru import logger
 
@@ -334,7 +334,7 @@ class MarkerStore:
         """
         os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         self.db_path = db_path
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._lock = threading.RLock()
         self._tx_owner: int | None = None
         self._conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None, timeout=30)

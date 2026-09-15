@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -356,7 +356,7 @@ class TestCacheSweep:
         store.set_season_pair(old.id, live.id, 4, [], identity_a=(old.size, old.mtime_ns),
                               identity_b=(live.size, live.mtime_ns))  # fmt: skip
         identity = FileIdentity(old.canonical_path, old.size, old.mtime_ns)
-        now = datetime(2026, 9, 13, tzinfo=timezone.utc)
+        now = datetime(2026, 9, 13, tzinfo=UTC)
         store.record_member_fingerprint_failure(identity, now, forget_before=now)
         store.record_member_probe_failure(identity, now, forget_before=now)
         os.rename(old.canonical_path, season / "Show - S01E01 - Bluray.mkv")  # a quality upgrade

@@ -11,7 +11,7 @@ import subprocess
 import threading
 import time
 import zlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -565,7 +565,7 @@ class TestFailures:
         paths = show(1, 10)
         broken = paths[4]
         registry = _registry(paths[0], ServerType.PLEX)
-        clock = {"now": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        clock = {"now": datetime(2026, 9, 13, tzinfo=UTC)}
 
         def run(ctx, path):
             if _run(ctx, path, {"plex-1": ready_publisher()})[0] is None:
@@ -608,7 +608,7 @@ class TestFailures:
         self, store, show, target, failed_ago, same_identity, force, tried
     ):
         e1, e2, e3 = show(1, 3)
-        now = datetime(2026, 9, 13, tzinfo=timezone.utc)
+        now = datetime(2026, 9, 13, tzinfo=UTC)
         failed_as = FileIdentity(e2, *(_identity(e2) if same_identity else (1, 1)))
         store.record_member_fingerprint_failure(failed_as, now - failed_ago, forget_before=now - timedelta(days=30))
         ctx = _ctx(
@@ -1953,7 +1953,7 @@ class TestUnreadableMembers:
     @pytest.mark.parametrize("failure", ["probe-error", "no-duration"])
     def test_it_is_probed_again_after_a_day_or_once_it_changes(self, store, show, failure):
         e1, e2, e3 = show(1, 3)
-        clock = [datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)]
+        clock = [datetime(2026, 9, 13, 12, 0, tzinfo=UTC)]
         ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=HIGH, now=lambda: clock[0])
         probed = []
 
@@ -1984,7 +1984,7 @@ class TestUnreadableMembers:
 
     def test_the_entry_of_a_member_deleted_since_is_forgotten_once_it_stops_counting(self, store, show):
         e1, e2 = show(1, 2)
-        clock = [datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)]
+        clock = [datetime(2026, 9, 13, 12, 0, tzinfo=UTC)]
         ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=HIGH, now=lambda: clock[0])
 
         def probe(path, **kwargs):

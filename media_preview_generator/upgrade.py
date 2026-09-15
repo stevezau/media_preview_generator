@@ -14,6 +14,7 @@ import json
 import os
 import sqlite3
 import uuid
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -436,7 +437,6 @@ def _migrate_schema(sm) -> None:
         # so the user sees a single "we migrated your config" card on next
         # login. Dismissal removes the flag (see notifications.py).
         from datetime import datetime as _dt
-        from datetime import timezone as _tz
 
         bak_path = f"{getattr(sm, 'settings_file', '')}.bak" if getattr(sm, "settings_file", None) else ""
         existing = sm.get("_pending_migration_notice") or {}
@@ -459,7 +459,7 @@ def _migrate_schema(sm) -> None:
                 sm.set(
                     "_pending_migration_notice",
                     {
-                        "at": _dt.now(_tz.utc).isoformat(),
+                        "at": _dt.now(UTC).isoformat(),
                         "backup": bak_path,
                         "notes": merged_notes,
                     },
@@ -473,7 +473,7 @@ def _migrate_schema(sm) -> None:
                 {
                     "from": existing.get("from", current),
                     "to": _CURRENT_SCHEMA_VERSION,
-                    "at": _dt.now(_tz.utc).isoformat(),
+                    "at": _dt.now(UTC).isoformat(),
                     "backup": bak_path,
                     "notes": merged_notes,
                 },

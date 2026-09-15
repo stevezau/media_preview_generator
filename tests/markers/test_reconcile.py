@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
@@ -32,7 +32,7 @@ from tests.markers.fakes import FakeRegistry, ready_publisher, server_config
 
 T = MarkerType
 INTRO = Marker(T.INTRO, 10_000, 40_000, ("chapters",))
-NOW = datetime(2026, 9, 15, 12, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 15, 12, tzinfo=UTC)
 
 
 @pytest.fixture

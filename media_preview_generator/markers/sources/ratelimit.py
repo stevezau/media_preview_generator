@@ -16,7 +16,7 @@ import math
 import threading
 import time
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from enum import Enum
 
@@ -37,7 +37,7 @@ DEFAULT_RESERVE_FRACTION = 0.2
 
 
 def _utc_day() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 class Acquire(str, Enum):
@@ -71,7 +71,7 @@ def _delay_s(value: str | None, wall_now: float) -> float | None:
         except (TypeError, ValueError):
             return None
         if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
+            when = when.replace(tzinfo=UTC)
         number = when.timestamp()
     if number >= _EPOCH_THRESHOLD_S:
         number -= wall_now

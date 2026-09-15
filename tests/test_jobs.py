@@ -8,7 +8,7 @@ or cleared.
 """
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -126,7 +126,7 @@ class TestLogRetentionEnforcement:
         assert os.path.isfile(log_path)
 
         # Backdate completed_at to 60 days ago
-        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        old_time = (datetime.now(UTC) - timedelta(days=60)).isoformat()
         jm._jobs[job.id].completed_at = old_time
         jm._persist_job(jm._jobs[job.id])
 
@@ -164,7 +164,7 @@ class TestLogRetentionEnforcement:
         jm.add_log(job.id, "INFO - test")
 
         # Backdate created_at to 90 days ago
-        old_time = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        old_time = (datetime.now(UTC) - timedelta(days=90)).isoformat()
         jm._jobs[job.id].created_at = old_time
 
         with patch("media_preview_generator.web.settings_manager.get_settings_manager") as m:
@@ -368,7 +368,7 @@ class TestRequeueInterruptedJobs:
         os.makedirs(config_dir, exist_ok=True)
         jm = JobManager(config_dir=config_dir)
         job = jm.create_job(library_name="Old Job")
-        job.created_at = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        job.created_at = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
         jm._interrupted_jobs = [job]
 
         result = jm.requeue_interrupted_jobs(max_age_minutes=60)
@@ -381,8 +381,8 @@ class TestRequeueInterruptedJobs:
         os.makedirs(config_dir, exist_ok=True)
         jm = JobManager(config_dir=config_dir)
         job = jm.create_job(library_name="Long Runner")
-        job.created_at = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
-        job.started_at = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        job.created_at = (datetime.now(UTC) - timedelta(hours=5)).isoformat()
+        job.started_at = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
         job.status = JobStatus.FAILED
         job.error = "Job was interrupted by server restart"
         jm._interrupted_jobs = [job]
@@ -399,8 +399,8 @@ class TestRequeueInterruptedJobs:
         os.makedirs(config_dir, exist_ok=True)
         jm = JobManager(config_dir=config_dir)
         job = jm.create_job(library_name="Very Old Runner")
-        job.created_at = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()
-        job.started_at = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+        job.created_at = (datetime.now(UTC) - timedelta(hours=10)).isoformat()
+        job.started_at = (datetime.now(UTC) - timedelta(hours=5)).isoformat()
         job.status = JobStatus.FAILED
         jm._interrupted_jobs = [job]
 
@@ -433,7 +433,7 @@ class TestRequeueInterruptedJobs:
         original_created = job.created_at
         job.status = JobStatus.FAILED
         job.error = "Job was interrupted by server restart"
-        job.completed_at = datetime.now(timezone.utc).isoformat()
+        job.completed_at = datetime.now(UTC).isoformat()
         jm._interrupted_jobs = [job]
 
         result = jm.requeue_interrupted_jobs()
@@ -784,7 +784,7 @@ class TestSqliteJobsBackend:
         # Create 50 fat completed jobs, backdate them past retention,
         # then run the retention tick manually.
         fat_publishers = [{"server_id": f"s{i}", "counts": {"published": 9999}} for i in range(200)]
-        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        old_time = (datetime.now(UTC) - timedelta(days=60)).isoformat()
         for i in range(50):
             j = jm.create_job(library_name=f"old-{i}")
             jm.start_job(j.id)
@@ -1165,7 +1165,7 @@ class TestFailUnrevivedInterruptedJobs:
         finished_ic.status = JobStatus.FAILED
         fresh_ic = jm.create_job(library_name="fresh", kind="intro_credits")
         stale_ic.created_at = stale_preview.created_at = finished_ic.created_at = (
-            datetime.now(timezone.utc) - timedelta(hours=3)
+            datetime.now(UTC) - timedelta(hours=3)
         ).isoformat()
         jm._interrupted_jobs = [stale_ic, stale_preview, finished_ic, fresh_ic]
 

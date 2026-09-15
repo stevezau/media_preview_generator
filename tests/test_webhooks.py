@@ -7,6 +7,7 @@ and the webhooks page route.
 
 import json
 import os
+from datetime import UTC
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -954,7 +955,7 @@ def test_schedule_webhook_job_dedupes_within_ttl(mock_timer_cls, mock_settings_m
     """A second call with the same (source, path) during the TTL window
     should be dropped without starting a new timer, and should log a
     'deduped' history entry."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from media_preview_generator.web import webhooks as wh
 
@@ -965,7 +966,7 @@ def test_schedule_webhook_job_dedupes_within_ttl(mock_timer_cls, mock_settings_m
     # (source, server_id, path) — server_id is "" when the webhook isn't
     # scoped to one configured server.
     normalized_path = os.path.normpath("/tv/Show/S01E01.mkv").replace("\\", "/")
-    now_ts = datetime.now(timezone.utc).timestamp()
+    now_ts = datetime.now(UTC).timestamp()
     with wh._pending_lock:
         wh._recent_dispatches[("sonarr", "", normalized_path)] = now_ts
 
@@ -985,7 +986,7 @@ def test_schedule_webhook_job_dedupes_within_ttl(mock_timer_cls, mock_settings_m
 def test_schedule_webhook_job_allows_dispatch_after_ttl(mock_timer_cls, mock_settings_mgr, app):
     """Entries older than _RECENT_DISPATCH_TTL_SECONDS should be pruned
     and no longer block new dispatches."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from media_preview_generator.web import webhooks as wh
 
@@ -993,7 +994,7 @@ def test_schedule_webhook_job_allows_dispatch_after_ttl(mock_timer_cls, mock_set
     mock_settings_mgr.return_value = MagicMock(get=lambda key, default=None: 60 if key == "webhook_delay" else default)
 
     normalized_path = os.path.normpath("/tv/Show/S01E01.mkv").replace("\\", "/")
-    stale_ts = datetime.now(timezone.utc).timestamp() - wh._RECENT_DISPATCH_TTL_SECONDS - 5
+    stale_ts = datetime.now(UTC).timestamp() - wh._RECENT_DISPATCH_TTL_SECONDS - 5
     with wh._pending_lock:
         wh._recent_dispatches[("sonarr", "", normalized_path)] = stale_ts
 
@@ -1016,7 +1017,7 @@ def test_schedule_webhook_job_allows_dispatch_after_ttl(mock_timer_cls, mock_set
 @patch("media_preview_generator.web.webhooks.threading.Timer")
 def test_schedule_webhook_job_dedup_is_per_source(mock_timer_cls, mock_settings_mgr, app):
     """A recent dispatch for ('plex', path) must not block ('sonarr', path)."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from media_preview_generator.web import webhooks as wh
 
@@ -1024,7 +1025,7 @@ def test_schedule_webhook_job_dedup_is_per_source(mock_timer_cls, mock_settings_
     mock_settings_mgr.return_value = MagicMock(get=lambda key, default=None: 60 if key == "webhook_delay" else default)
 
     normalized_path = os.path.normpath("/tv/Show/S01E01.mkv").replace("\\", "/")
-    now_ts = datetime.now(timezone.utc).timestamp()
+    now_ts = datetime.now(UTC).timestamp()
     with wh._pending_lock:
         wh._recent_dispatches[("plex", "", normalized_path)] = now_ts
 
@@ -1069,7 +1070,7 @@ def test_execute_webhook_job_records_dispatch_before_start(
 @patch("media_preview_generator.web.webhooks.threading.Timer")
 def test_schedule_webhook_job_per_server_dedup_is_independent(mock_timer_cls, mock_settings_mgr, app):
     """A dispatch scoped to one server must not block the same path on another server."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from media_preview_generator.web import webhooks as wh
 
@@ -1077,7 +1078,7 @@ def test_schedule_webhook_job_per_server_dedup_is_independent(mock_timer_cls, mo
     mock_settings_mgr.return_value = MagicMock(get=lambda key, default=None: 60 if key == "webhook_delay" else default)
 
     normalized_path = os.path.normpath("/tv/Show/S01E01.mkv").replace("\\", "/")
-    now_ts = datetime.now(timezone.utc).timestamp()
+    now_ts = datetime.now(UTC).timestamp()
     with wh._pending_lock:
         # Plex server "p1" already dispatched this path recently...
         wh._recent_dispatches[("sonarr", "p1", normalized_path)] = now_ts

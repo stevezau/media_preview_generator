@@ -8,7 +8,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from loguru import logger
 
@@ -70,7 +70,7 @@ _NO_RETRY_SOURCES = _USER_PICKED_SOURCES | {SEASON_SOURCE, RECONCILE_SOURCE}
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def retry_reason(row: object) -> str | None:

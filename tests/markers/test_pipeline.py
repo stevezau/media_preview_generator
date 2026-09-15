@@ -6,7 +6,7 @@ import copy
 import os
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -118,7 +118,7 @@ def _ctx(
         force=force,
         clients=clients if clients is not None else _clients(),
         local_detectors=detectors,
-        now=now or (lambda: datetime(2026, 9, 13, tzinfo=timezone.utc)),
+        now=now or (lambda: datetime(2026, 9, 13, tzinfo=UTC)),
         capability_ttl_s=ttl,
         # The registry's configs stand in for the saved settings; TestConsentBeforeEachWrite uses the real ones.
         live_config=live_config or registry.get_config,
@@ -1210,7 +1210,7 @@ class TestOnlineLookups:
         ],
     )
     def test_lookup_caching_matrix(self, tmp_path, media, first, later, force, queried_again):
-        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        clock = {"t": datetime(2026, 9, 13, tzinfo=UTC)}
         store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
         reg = _registry(media, ServerType.PLEX)
         client = FakeClient(first)
@@ -1602,7 +1602,7 @@ class TestServerMarkers:
         self, tmp_path, media, serves_intro, later, published_first, read_again
     ):
         # Plex may detect the intro overnight after the webhook job read nothing.
-        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        clock = {"t": datetime(2026, 9, 13, tzinfo=UTC)}
         store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
         reg = _registry(media, ServerType.PLEX)
         if serves_intro:
@@ -1797,7 +1797,7 @@ class TestServerMarkersFromVendors:
     def test_chapters_backed_only_by_server_markers_keep_the_search_open(self, tmp_path, media, setup, marker):
         # Server markers never decide alone, so chapters + server markers still count as chapters alone: the free
         # sources are asked again when their "no data" answer is due, TheIntroDB isn't spent on it at Low.
-        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        clock = {"t": datetime(2026, 9, 13, tzinfo=UTC)}
         store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
         if setup == "plex-shortens":
             reg = _registry(media, ServerType.PLEX)
@@ -1847,7 +1847,7 @@ class TestServerMarkersFromVendors:
     ):
         # A webhook import is checked before Plex's own credits detection runs. Check servers reads Plex again a day
         # later, and Plex's credits then shorten the decided start (rule 7); a normal run never asks again.
-        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        clock = {"t": datetime(2026, 9, 13, tzinfo=UTC)}
         store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
         reg = _registry(media, ServerType.PLEX, ServerType.JELLYFIN)
         reg.configs_by_id["plex-1"].markers["enabled"] = False  # Plex only lends evidence
@@ -1887,7 +1887,7 @@ class TestServerMarkersFromVendors:
     ):
         # No source knows the credits, so they stay undecided. An unusable answer is read again on every run; an
         # empty one only once it is a day old, whatever the job.
-        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        clock = {"t": datetime(2026, 9, 13, tzinfo=UTC)}
         store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
         reg = _registry(media, ServerType.PLEX, ServerType.JELLYFIN)
         reg.configs_by_id["plex-1"].markers["enabled"] = False  # Plex only lends evidence
@@ -1919,7 +1919,7 @@ class TestServerMarkersFromVendors:
     ):
         # One re-read already counted, so Check servers' next step is 2 days; the answer is 36 h old. A normal job's
         # empty-answer retry (1 day) reads it.
-        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        clock = {"t": datetime(2026, 9, 13, tzinfo=UTC)}
         store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
         reg = _registry(media, ServerType.PLEX, ServerType.JELLYFIN)
         reg.configs_by_id["plex-1"].markers["enabled"] = False
@@ -1946,7 +1946,7 @@ class TestServerMarkersFromVendors:
     ):
         # Sixty daily Check servers runs: each takes the file only when its backoff is due, and the pipeline's failed
         # re-read counts. Then Plex serves usable markers and a forced run reads them: the count starts again.
-        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        clock = {"t": datetime(2026, 9, 13, tzinfo=UTC)}
         store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
         reg = _registry(media, ServerType.PLEX, ServerType.JELLYFIN)
         reg.configs_by_id["plex-1"].markers["enabled"] = False  # Plex only lends evidence
@@ -1976,7 +1976,7 @@ class TestServerMarkersFromVendors:
         reads = plex_server.get_markers.call_count
         passes = []
         for day in range(1, 61):
-            clock["t"] = datetime(2026, 9, 13, tzinfo=timezone.utc) + timedelta(days=day, minutes=day)
+            clock["t"] = datetime(2026, 9, 13, tzinfo=UTC) + timedelta(days=day, minutes=day)
             if store.take_server_rechecks(
                 ["plex-1", "jellyfin-1"], now=clock["t"], after=pipeline.RECHECK_AFTER, limit=10
             ):
@@ -2009,7 +2009,7 @@ class TestServerMarkersFromVendors:
     def test_with_everything_decided_a_server_is_read_only_the_first_time(self, tmp_path, media, case):
         # Credits decided by IntroDB + SkipDB before the servers come up. Runs two days apart, so the empty-answer
         # retry (1 day) would be due every time: a decided file reads each server once, whatever it answered.
-        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        clock = {"t": datetime(2026, 9, 13, tzinfo=UTC)}
         store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
         types = (ServerType.PLEX,) if case != "other-cut-item" else (ServerType.PLEX, ServerType.JELLYFIN)
         reg = _registry(media, *types)
@@ -2366,7 +2366,7 @@ class TestServerMarkersFromVendors:
         assert server.get_plugin_names.call_count == 1
 
     def test_an_importer_plugin_installed_later_replaces_the_earlier_answer(self, tmp_path, media):
-        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        clock = {"t": datetime(2026, 9, 13, tzinfo=UTC)}
         store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
         reg = _registry(media, ServerType.JELLYFIN)
         server = reg.get("jellyfin-1")
@@ -2833,7 +2833,7 @@ class TestPublishFanOut:
         assert _state(store, media, "plex-1").status == "written"
 
     def test_unchanged_decisions_are_not_saved_again(self, tmp_path, media):
-        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        clock = {"t": datetime(2026, 9, 13, tzinfo=UTC)}
         store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
         reg = _registry(media, ServerType.PLEX)
         plex = ready_publisher()
@@ -2911,7 +2911,7 @@ class TestPublishFanOut:
         }
 
     def test_up_to_date_leaves_publish_state_untouched(self, tmp_path, media):
-        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        clock = {"t": datetime(2026, 9, 13, tzinfo=UTC)}
         store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
         reg = _registry(media, ServerType.PLEX)
         plex = ready_publisher()

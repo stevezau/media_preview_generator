@@ -27,7 +27,7 @@ Matrix coverage per .claude/rules/testing.md:
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -94,7 +94,7 @@ class TestUpsertMutatesOriginatingJob:
             basename="Foo",
             attempt=1,
             max_attempts=5,
-            next_run_at=(datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat(),
+            next_run_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
             wait_seconds=30,
             outcome="scheduled",
             originating_job_id=original.id,
@@ -169,7 +169,7 @@ class TestUpsertMutatesOriginatingJob:
 class TestStateMachine:
     def test_outcome_scheduled_pending_with_countdown(self, jm):
         original = _seed_originating_job(jm)
-        eta = (datetime.now(timezone.utc) + timedelta(seconds=120)).isoformat()
+        eta = (datetime.now(UTC) + timedelta(seconds=120)).isoformat()
         job = jm.upsert_retry_chain_job(
             canonical_path="/x.mkv",
             basename="x",
@@ -235,7 +235,7 @@ class TestStateMachine:
         jm.update_progress(original.id, current_item="[Webhook Targets] 1/1 completed")
         assert jm.get_job(original.id).progress.current_item == "[Webhook Targets] 1/1 completed"
 
-        eta = (datetime.now(timezone.utc) + timedelta(seconds=120)).isoformat()
+        eta = (datetime.now(UTC) + timedelta(seconds=120)).isoformat()
         job = jm.upsert_retry_chain_job(
             canonical_path="/x.mkv",
             basename="x",
@@ -280,7 +280,7 @@ class TestStateMachine:
             basename="x",
             attempt=1,
             max_attempts=5,
-            next_run_at=(datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat(),
+            next_run_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
             wait_seconds=30,
             outcome="scheduled",
             originating_job_id=original.id,
@@ -653,7 +653,7 @@ class TestPersistenceAndRestart:
         import media_preview_generator.web.jobs as jobs_mod
 
         original = _seed_originating_job(jm)
-        eta = (datetime.now(timezone.utc) + timedelta(seconds=120)).isoformat()
+        eta = (datetime.now(UTC) + timedelta(seconds=120)).isoformat()
         jm.upsert_retry_chain_job(
             canonical_path="/data/Foo.mkv",
             basename="Foo",

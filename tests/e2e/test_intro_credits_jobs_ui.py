@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from playwright.sync_api import Page, Route, expect
@@ -572,7 +572,7 @@ class TestQueueRows:
         expect(jellyfin).to_contain_text(re.compile(r"Waiting × 1\s*No markers found × 2\s*Failed × 1"))
 
     def test_retry_job_is_labelled_and_offers_no_chain_retry_button(self, dashboard) -> None:
-        eta = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+        eta = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
         retry = _markers_job(
             "bbbbbbbb-0000-4000-8000-000000000003",
             library_name="Retry: Intro & Credits · Rick and Morty S01",
@@ -595,7 +595,7 @@ class TestQueueRows:
                 "current_item": "Retry starting in 300s — waiting for these files to appear on disk or on a server",
             },
         )
-        soon_eta = (datetime.now(timezone.utc) + timedelta(seconds=45)).isoformat()
+        soon_eta = (datetime.now(UTC) + timedelta(seconds=45)).isoformat()
         soon = json.loads(json.dumps(retry))
         soon["id"] = "bbbbbbbb-0000-4000-8000-000000000004"
         soon["config"]["retry_not_before"] = soon_eta
@@ -612,7 +612,7 @@ class TestQueueRows:
         expect(row).to_contain_text("Rick and Morty S01")
 
     def test_verify_job_keeps_its_prefix_and_has_no_retry_chip(self, dashboard) -> None:
-        eta = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+        eta = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
         verify = _markers_job(
             "bbbbbbbb-0000-4000-8000-000000000005",
             library_name="Verify: Intro & Credits · Rick and Morty S01",
@@ -631,7 +631,7 @@ class TestQueueRows:
         )
         soon = json.loads(json.dumps(verify))
         soon["id"] = "bbbbbbbb-0000-4000-8000-000000000006"
-        soon_eta = (datetime.now(timezone.utc) + timedelta(seconds=45)).isoformat()
+        soon_eta = (datetime.now(UTC) + timedelta(seconds=45)).isoformat()
         soon["config"]["retry_not_before"] = soon_eta
         soon["progress"]["retry_eta"] = soon_eta
         page = dashboard([verify, soon])
@@ -650,7 +650,7 @@ class TestQueueRows:
         expect(row).not_to_contain_text("Retry starting")
 
     def test_running_verify_card_checks_again_without_the_retry_wording(self, dashboard) -> None:
-        eta = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+        eta = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
         waiting = {"percent": 0, "outcome": None, "retry_eta": eta, "retry_wait_total": 600}
         verify = _markers_job(
             "bbbbbbbb-0000-4000-8000-000000000007",

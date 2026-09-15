@@ -8,7 +8,7 @@ import os
 import threading
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
@@ -1050,7 +1050,7 @@ class ScheduleManager:
                 # no next_run_time attribute yet (APScheduler queues these
                 # and assigns next_run_time at start time).
                 try:
-                    next_fire = trigger.get_next_fire_time(None, datetime.now(timezone.utc))
+                    next_fire = trigger.get_next_fire_time(None, datetime.now(UTC))
                     if next_fire is not None:
                         sched["next_run"] = next_fire.isoformat()
                 except Exception as exc:
@@ -1237,7 +1237,7 @@ class ScheduleManager:
         """Update the last run time for a schedule."""
         with self._lock:
             if schedule_id in self._schedules:
-                self._schedules[schedule_id]["last_run"] = datetime.now(timezone.utc).isoformat()
+                self._schedules[schedule_id]["last_run"] = datetime.now(UTC).isoformat()
                 self._save_schedules()
 
     def create_schedule(
@@ -1319,7 +1319,7 @@ class ScheduleManager:
             "server_id": server_id,
             "config": config or {},
             "enabled": enabled,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "last_run": None,
             "next_run": None,
             "priority": priority,

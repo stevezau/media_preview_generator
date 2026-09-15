@@ -1,6 +1,7 @@
 """Tests for media_preview_generator.web.scheduler."""
 
 import os
+from datetime import UTC
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -949,14 +950,13 @@ class TestSchedulePersistence:
         # (the canary observed "Next: 3 days ago" because next_run wasn't
         # re-computed on load, only when the cron actually fired).
         from datetime import datetime as _dt
-        from datetime import timezone as _tz
 
         s1_after = manager2.get_schedule(s1["id"])
         assert s1_after["next_run"] is not None, "next_run not refreshed during re-registration"
         nr = _dt.fromisoformat(s1_after["next_run"])
         if nr.tzinfo is None:
-            nr = nr.replace(tzinfo=_tz.utc)
-        assert nr > _dt.now(_tz.utc), f"next_run {nr.isoformat()} is in the past — UI would show stale"
+            nr = nr.replace(tzinfo=UTC)
+        assert nr > _dt.now(UTC), f"next_run {nr.isoformat()} is in the past — UI would show stale"
 
         manager2.stop()
 

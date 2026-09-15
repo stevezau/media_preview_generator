@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import threading
 from collections.abc import Iterable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from loguru import logger
 
@@ -29,7 +29,7 @@ _SEASON_PUBLISH_SOURCE = "inspector_season"
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def markers_enabled_anywhere() -> bool:

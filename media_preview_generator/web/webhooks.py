@@ -12,7 +12,7 @@ import re
 import secrets
 import threading
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
 
@@ -245,7 +245,7 @@ def _add_history_entry(
     query param on inbound webhook URLs).
     """
     entry: dict[str, object] = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "source": source,
         "event_type": event_type,
         "title": title,
@@ -355,7 +355,7 @@ def _check_and_record_dedup(source: str, server_id: str | None, canonical_path: 
 
     Caller must hold ``_pending_lock``.
     """
-    now_ts = datetime.now(timezone.utc).timestamp()
+    now_ts = datetime.now(UTC).timestamp()
     expired = [k for k, ts in _recent_dispatches.items() if now_ts - ts >= _RECENT_DISPATCH_TTL_SECONDS]
     for k in expired:
         _recent_dispatches.pop(k, None)
@@ -859,8 +859,8 @@ def _schedule_webhook_job(
             # banner instead. Now the timestamp travels with the Job,
             # the row renders the countdown natively, and the banner
             # becomes redundant (issue: webhook countdown UX, May 2026).
-            fire_at_ts = datetime.now(timezone.utc).timestamp() + delay
-            fire_at_iso = datetime.fromtimestamp(fire_at_ts, tz=timezone.utc).isoformat()
+            fire_at_ts = datetime.now(UTC).timestamp() + delay
+            fire_at_iso = datetime.fromtimestamp(fire_at_ts, tz=UTC).isoformat()
 
             if is_fresh_batch:
                 # Pull server-context resolution forward so the Job can be
@@ -2022,7 +2022,7 @@ def clear_webhook_history():
 @api_token_required
 def get_pending_webhooks():
     """Return currently pending (debouncing) webhook batches with countdown info."""
-    now = datetime.now(timezone.utc).timestamp()
+    now = datetime.now(UTC).timestamp()
     pending = []
     with _pending_lock:
         for key, batch in _pending_batches.items():
@@ -2035,7 +2035,7 @@ def get_pending_webhooks():
                     "source": batch.get("source", key),
                     "file_count": len(batch.get("file_paths", set())),
                     "first_title": titles[0] if titles else "",
-                    "fire_at": datetime.fromtimestamp(fire_at, tz=timezone.utc).isoformat() if fire_at else None,
+                    "fire_at": datetime.fromtimestamp(fire_at, tz=UTC).isoformat() if fire_at else None,
                     "remaining_seconds": round(remaining, 1),
                 }
             )

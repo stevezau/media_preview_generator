@@ -2,6 +2,7 @@
 
 import os
 import threading
+from datetime import UTC
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -164,12 +165,12 @@ class TestCreateIntroCreditsJob:
         start.assert_called_once_with("new-job-id")
 
     def test_retry_job_config_carries_its_attempt_and_due_time(self, monkeypatch):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         jm = MagicMock()
         jm.create_job.return_value = MagicMock(id="retry-1")
         monkeypatch.setattr(triggers, "get_job_manager", lambda: jm)
-        monkeypatch.setattr(triggers, "_utcnow", lambda: datetime(2026, 9, 14, 10, 0, tzinfo=timezone.utc))
+        monkeypatch.setattr(triggers, "_utcnow", lambda: datetime(2026, 9, 14, 10, 0, tzinfo=UTC))
         with patch.object(triggers, "start_intro_credits_job_async") as start:
             triggers.create_intro_credits_job(
                 library_name="Retry: a",
@@ -195,12 +196,12 @@ class TestCreateIntroCreditsJob:
         start.assert_called_once_with("retry-1")
 
     def test_verify_job_config_carries_its_due_time_and_no_attempt(self, monkeypatch):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         jm = MagicMock()
         jm.create_job.return_value = MagicMock(id="verify-1")
         monkeypatch.setattr(triggers, "get_job_manager", lambda: jm)
-        monkeypatch.setattr(triggers, "_utcnow", lambda: datetime(2026, 9, 14, 10, 0, tzinfo=timezone.utc))
+        monkeypatch.setattr(triggers, "_utcnow", lambda: datetime(2026, 9, 14, 10, 0, tzinfo=UTC))
         with patch.object(triggers, "start_intro_credits_job_async"):
             triggers.create_intro_credits_job(
                 library_name="Verify: a",

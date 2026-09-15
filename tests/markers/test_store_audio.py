@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -154,7 +154,7 @@ class TestRecordMember:
 
 
 class TestMemberProbeFailures:
-    AT = datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
+    AT = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 
     def test_recording_a_failure_forgets_entries_that_stopped_counting_for_any_path(self, store):
         gone = FileIdentity("/m/gone/S01E02.mkv", 100, 1)  # deleted since: never probed or recorded again
@@ -173,7 +173,7 @@ class TestMemberProbeFailures:
 
 
 class TestMemberFingerprintFailures:
-    AT = datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
+    AT = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
 
     def test_a_failure_counts_only_for_the_identity_it_was_recorded_with(self, store):
         store.record_member_fingerprint_failure(FileIdentity("/m/S01E02.mkv", 100, 1), self.AT, forget_before=self.AT)
@@ -228,7 +228,7 @@ class TestFingerprintChecks:
     def test_a_file_that_came_back_with_another_identity_after_its_check_keeps_its_new_fingerprint(self, store):
         a = _file(store, "/m/S01E01.mkv")
         _fp(store, a)
-        now = datetime(2026, 9, 13, tzinfo=timezone.utc)
+        now = datetime(2026, 9, 13, tzinfo=UTC)
         (check,) = store.fingerprint_checks(5)  # the sweep finds it gone...
         back = _file(store, "/m/S01E01.mkv", size=200, mtime=2)  # ...then a new file lands there and is fingerprinted
         _fp(store, back)

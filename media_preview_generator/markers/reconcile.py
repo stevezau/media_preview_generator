@@ -18,7 +18,7 @@ import os
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
 from loguru import logger
@@ -49,7 +49,7 @@ _queue_lock = threading.Lock()
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _runnable(path: str, configs: list[ServerConfig]) -> bool:

@@ -3,6 +3,7 @@
 import os
 import sqlite3
 import threading
+from datetime import UTC
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
@@ -2175,9 +2176,9 @@ class TestRetryWait:
         ids=["retry", "verify"],
     )
     def test_waits_until_the_retry_is_due_without_a_slot(self, env, monkeypatch, kind, waiting_for):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        start = datetime(2026, 9, 14, 10, 0, tzinfo=timezone.utc)
+        start = datetime(2026, 9, 14, 10, 0, tzinfo=UTC)
         now = self._clock(monkeypatch, start)
         due = start + timedelta(seconds=120)
         env.job.config = {
@@ -2206,9 +2207,9 @@ class TestRetryWait:
 
     @pytest.mark.parametrize("not_before", ["2026-09-14T09:00:00+00:00", "not a time", None])
     def test_due_or_unreadable_retry_time_starts_straight_away(self, env, monkeypatch, not_before):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        self._clock(monkeypatch, datetime(2026, 9, 14, 10, 0, tzinfo=timezone.utc))
+        self._clock(monkeypatch, datetime(2026, 9, 14, 10, 0, tzinfo=UTC))
         env.job.config = {"file_paths": ["/m/a.mkv"], "retry_attempt": 1, "retry_not_before": not_before}
         with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
             job_runner.run_intro_credits_job("j1")
@@ -2216,9 +2217,9 @@ class TestRetryWait:
         assert not any("retry_eta" in c.kwargs for c in env.jm.update_progress.call_args_list)
 
     def test_cancelled_while_waiting_never_takes_a_slot(self, env, monkeypatch):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        start = datetime(2026, 9, 14, 10, 0, tzinfo=timezone.utc)
+        start = datetime(2026, 9, 14, 10, 0, tzinfo=UTC)
         self._clock(monkeypatch, start)
         env.job.config = {
             "file_paths": ["/m/a.mkv"],
@@ -2251,7 +2252,7 @@ class TestLeftoverJobsAfterRestart:
     ]
 
     def _boot(self, tmp_path, monkeypatch, *, auto_requeue, age_hours):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from media_preview_generator.web import app as app_mod
         from media_preview_generator.web.jobs import JobManager
@@ -2275,7 +2276,7 @@ class TestLeftoverJobsAfterRestart:
 
         after = JobManager(config_dir=config_dir)
         # jobs.db never rewrites created_at, so age the loaded rows the way a long wait in the queue would.
-        stamp = (datetime.now(timezone.utc) - timedelta(hours=age_hours)).isoformat()
+        stamp = (datetime.now(UTC) - timedelta(hours=age_hours)).isoformat()
         for job in after.get_all_jobs():
             job.created_at = stamp
         monkeypatch.setattr(app_mod, "get_job_manager", lambda: after)

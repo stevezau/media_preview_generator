@@ -7,6 +7,7 @@ the web layer and the CLI processing pipeline.
 
 import threading
 from contextlib import ExitStack
+from datetime import UTC
 
 from loguru import logger
 
@@ -641,10 +642,10 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
             run_job_config = job_manager.get_job(job_id)
             if run_job_config and run_job_config.config.get("is_retry"):
                 import time as _time
-                from datetime import datetime, timedelta, timezone
+                from datetime import datetime, timedelta
 
                 delay_sec = max(1, int(run_job_config.config.get("retry_delay", 30)))
-                retry_eta = (datetime.now(timezone.utc) + timedelta(seconds=delay_sec)).isoformat()
+                retry_eta = (datetime.now(UTC) + timedelta(seconds=delay_sec)).isoformat()
                 _parent_job_id = (run_job_config.config or {}).get("parent_job_id")
                 _parent_job = job_manager.get_job(_parent_job_id) if _parent_job_id else None
                 _server_label = _format_retry_wait_server_label(_parent_job, run_job_config)
@@ -1135,7 +1136,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         ``published``/``skipped_output_exists``).
                         """
                         import os as _os
-                        from datetime import datetime, timedelta, timezone
+                        from datetime import datetime, timedelta
 
                         from media_preview_generator.processing.retry_queue import BACKOFF_SCHEDULE
 
@@ -1175,7 +1176,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         scale = max(0.5, retry_delay_sec / 30.0)
                         slow_idx = min(attempt - 1, len(BACKOFF_SCHEDULE) - 1)
                         backoff_delay = max(1, int(BACKOFF_SCHEDULE[slow_idx] * scale))
-                        scheduled_at = (datetime.now(timezone.utc) + timedelta(seconds=backoff_delay)).isoformat()
+                        scheduled_at = (datetime.now(UTC) + timedelta(seconds=backoff_delay)).isoformat()
                         parent_priority = current_job.priority if current_job else 2
                         # K1: preserve the originating server triple so retry
                         # jobs stay scoped to whichever server fired the

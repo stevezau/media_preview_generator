@@ -1,6 +1,6 @@
 import sqlite3
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -476,7 +476,7 @@ def test_tx_body_exception_rolls_back_earlier_statements_of_the_same_tx(store):
 
 
 def test_clock_is_used_for_every_written_timestamp(tmp_path):
-    fixed = datetime(2026, 9, 13, 12, 0, 0, tzinfo=timezone.utc)
+    fixed = datetime(2026, 9, 13, 12, 0, 0, tzinfo=UTC)
     s = MarkerStore(str(tmp_path / "markers.db"), clock=lambda: fixed)
     try:
         rec = s.upsert_file(_ident(), duration_ms=1_000_000, season_key=None, is_movie=False)
@@ -763,7 +763,7 @@ def test_migration_failure_leaves_version_and_schema_unchanged(tmp_path, monkeyp
 
 
 def test_publish_state_updated_at_uses_clock_when_markers_are_kept(tmp_path):
-    fixed = datetime(2026, 9, 13, 12, 0, 0, tzinfo=timezone.utc)
+    fixed = datetime(2026, 9, 13, 12, 0, 0, tzinfo=UTC)
     s = MarkerStore(str(tmp_path / "markers.db"), clock=lambda: fixed)
     try:
         rec = s.upsert_file(_ident(), duration_ms=1, season_key=None, is_movie=False)
@@ -1025,7 +1025,7 @@ class TestPublishedItems:
 class TestServerRechecks:
     """Decided files whose server answered "no markers", taken by Check servers on a backoff: 1, 2, 4, 8, 16 days."""
 
-    NOW = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
+    NOW = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
     CREDITS = Marker(MarkerType.CREDITS, 900_000, 1_000_000, ("introdb", "skipdb"))
     AFTER = tuple(timedelta(days=d) for d in (1, 2, 4, 8, 16))
 
@@ -1309,7 +1309,7 @@ class TestGoneItemsAndDriftTurns:
         assert store.get_item_publish_state("jf-1", "x") == before
 
     def test_drift_listing_times_per_server(self, tmp_path):
-        times = iter([datetime(2026, 9, 15, tzinfo=timezone.utc), datetime(2026, 9, 16, tzinfo=timezone.utc)])
+        times = iter([datetime(2026, 9, 15, tzinfo=UTC), datetime(2026, 9, 16, tzinfo=UTC)])
         store = MarkerStore(str(tmp_path / "t.db"), clock=lambda: next(times))
         try:
             store.record_drift_listed([("jf-1", "a"), ("plex-1", "a")])

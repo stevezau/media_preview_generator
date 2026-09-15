@@ -9,7 +9,7 @@ import hmac
 import json
 import logging  # stdlib logging only — required to mute werkzeug's own logger; app code must use loguru
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from flask import Flask
@@ -310,7 +310,7 @@ def _resume_interrupted_retry_chains_on_startup(config_dir: str) -> None:
         if not chains:
             return
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         max_chain_age = _MAX_CHAIN_AGE_FOR_RESUME
         all_jobs = job_manager.get_all_jobs()
         revived = 0
@@ -324,7 +324,7 @@ def _resume_interrupted_retry_chains_on_startup(config_dir: str) -> None:
                 started_str = chain.config.get("retry_started_at") or chain.created_at
                 started = datetime.fromisoformat(started_str.replace("Z", "+00:00")) if started_str else now
                 if started.tzinfo is None:
-                    started = started.replace(tzinfo=timezone.utc)
+                    started = started.replace(tzinfo=UTC)
             except (ValueError, AttributeError):
                 started = now
             if now - started > max_chain_age:

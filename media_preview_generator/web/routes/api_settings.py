@@ -2,6 +2,7 @@
 
 import os
 import uuid
+from datetime import UTC
 from urllib.parse import urlparse
 
 from flask import jsonify, request
@@ -1517,11 +1518,11 @@ def restore_backup():
     # snapshot in turn. Best-effort — never blocks the primary restore.
     if os.path.exists(live):
         try:
-            from datetime import datetime, timezone
+            from datetime import datetime
 
             from ...utils import _backup_max_age_days, _backup_retention, _prune_old_backups
 
-            ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
             shutil.copy2(live, f"{live}.{ts}.bak")
             _prune_old_backups(live, _backup_retention(), _backup_max_age_days())
         except OSError as exc:
