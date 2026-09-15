@@ -1,8 +1,8 @@
 """E2E: Servers → Edit → "Intro & Credits" tab and the Plex database-write confirmation.
 
 Every API the tab touches is mocked with ``page.route``: the server list and the single-server GET, the PUT the
-Save button sends (captured), ``GET /api/markers/servers/<id>/status`` (the capability matrix) and the existing
-Jellyfin ``POST /api/servers/<id>/install-plugin``. Save tests assert the ``markers`` block the page sends, not
+Save button sends (captured), ``GET /api/markers/servers/<id>/status`` (the capability matrix) and the shared
+Jellyfin/Emby ``POST /api/servers/<id>/install-plugin``. Save tests assert the ``markers`` block the page sends, not
 just that a PUT happened.
 """
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from datetime import datetime
 
 import pytest
@@ -143,9 +144,11 @@ def _mock_server_page(page: Page, server: dict, status: dict | None, *, status_c
         else:
             _fulfill(route, state["status"])
 
+    captured["install_answer"] = {"ok": True, "steps": []}
+
     def install_handler(route: Route) -> None:
         captured["installs"].append({"method": route.request.method, "url": route.request.url})
-        _fulfill(route, {"ok": True, "steps": []})
+        _fulfill(route, captured["install_answer"])
 
     mock_server_connection_probe(page, ok=True, server_name=server["name"])
     mock_server_previews_readiness(page, vendor=server["type"], critical_count=0)
@@ -663,26 +666,152 @@ class TestJellyfinTab:
 
 @pytest.mark.e2e
 class TestEmbyTab:
-    def test_emby_not_available_yet_and_save_sends_switch(self, authed_page: Page, app_url: str) -> None:
+    def test_needs_plugin_listed_in_the_catalog_installs_and_rechecks(self, authed_page: Page, app_url: str) -> None:
+        server = _vendor_server("emby", "emby-1")
+        captured = _mock_server_page(
+            authed_page, server,
+            _status(server, "needs_plugin", "Install the Media Preview Bridge for Emby plugin", {"catalog_listed": True}),
+        )  # fmt: skip
+        _open_tab(authed_page, app_url, server)
+        block = authed_page.locator("#markersStatusBlock")
+        expect(block).to_contain_text("Media Preview Bridge for Emby plugin", timeout=5000)
+        expect(block).to_contain_text("Not installed")
+        can_show = block.locator("div.markers-kv-label:text-is('Can show') + div")
+        expect(can_show).to_have_text("Intro · credits start")
+        expect(can_show).not_to_contain_text("left out")
+        tooltip = can_show.locator(".info-icon").evaluate(
+            "el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')"
+        )
+        assert tooltip == (
+            "Emby has no credits end: Skip Credits always skips to the end of the file, past any scene after the "
+            "credits."
+        )
+        authed_page.locator("#markersInstallPluginBtn").click()
+        expect(block).to_contain_text("Emby is restarting", timeout=5000)
+        assert captured["installs"] == [{"method": "POST", "url": f"{app_url}/api/servers/emby-1/install-plugin"}]
+
+    def test_needs_plugin_not_in_the_catalog_links_the_manual_install_guide(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        server = _vendor_server("emby", "emby-1")
+        _mock_server_page(
+            authed_page, server,
+            _status(server, "needs_plugin", "Install the Media Preview Bridge for Emby plugin", {"catalog_listed": False}),
+        )  # fmt: skip
+        _open_tab(authed_page, app_url, server)
+        link = authed_page.locator("#markersStatusBlock a.markers-manual-install")
+        expect(link).to_have_text("Install by hand", timeout=5000)
+        expect(link).to_have_attribute(
+            "href", re.compile(r"docs/guides\.md#emby-the-media-preview-bridge-for-emby-plugin$")
+        )
+        expect(authed_page.locator("#markersInstallPluginBtn")).to_have_count(0)
+
+    def test_catalog_unreadable_also_links_the_manual_install_guide(self, authed_page: Page, app_url: str) -> None:
+        # catalog_listed is null when Emby's own catalog couldn't be read (not False: the plugin just isn't
+        # confirmed listed) — same "no Install button, link the guide" treatment as a confirmed False.
+        server = _vendor_server("emby", "emby-1")
+        _mock_server_page(
+            authed_page, server,
+            _status(server, "needs_plugin", "Install the Media Preview Bridge for Emby plugin", {"catalog_listed": None}),
+        )  # fmt: skip
+        _open_tab(authed_page, app_url, server)
+        link = authed_page.locator("#markersStatusBlock a.markers-manual-install")
+        expect(link).to_have_text("Install by hand", timeout=5000)
+        expect(authed_page.locator("#markersInstallPluginBtn")).to_have_count(0)
+
+    def test_install_that_needs_a_manual_install_shows_the_answer(self, authed_page: Page, app_url: str) -> None:
+        server = _vendor_server("emby", "emby-1")
+        captured = _mock_server_page(
+            authed_page, server,
+            _status(server, "needs_plugin", "Install the Media Preview Bridge for Emby plugin", {"catalog_listed": True}),
+        )  # fmt: skip
+        error = "Media Preview Bridge for Emby isn't in the Emby plugin catalog yet; install it by hand (see the Intro & Credits guide)"
+        captured["install_answer"] = {
+            "ok": False,
+            "manual": True,
+            "error": error,
+            "steps": [{"step": "catalog", "ok": False, "detail": error}],
+        }
+        _open_tab(authed_page, app_url, server)
+        authed_page.locator("#markersInstallPluginBtn").click()
+        result = authed_page.locator("#markersInstallResult")
+        expect(result).to_contain_text(error, timeout=5000)
+        link = result.locator("a.markers-manual-install")
+        expect(link).to_have_text("Install by hand")
+        expect(link).to_have_attribute(
+            "href", re.compile(r"docs/guides\.md#emby-the-media-preview-bridge-for-emby-plugin$")
+        )
+
+    def test_install_that_fails_partway_shows_the_error_without_a_manual_link(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        # manual: false (the catalog listed the plugin fine; a later step — queueing the install or the restart —
+        # failed instead) must never get the "Install by hand" link: there's nothing to install by hand here.
+        server = _vendor_server("emby", "emby-1")
+        captured = _mock_server_page(
+            authed_page, server,
+            _status(server, "needs_plugin", "Install the Media Preview Bridge for Emby plugin", {"catalog_listed": True}),
+        )  # fmt: skip
+        error = "queue_install failed: ConnectionError"
+        captured["install_answer"] = {
+            "ok": False,
+            "manual": False,
+            "error": error,
+            "steps": [
+                {"step": "catalog", "ok": True, "detail": "listed"},
+                {"step": "queue_install", "ok": False, "detail": error},
+            ],
+        }
+        _open_tab(authed_page, app_url, server)
+        authed_page.locator("#markersInstallPluginBtn").click()
+        result = authed_page.locator("#markersInstallResult")
+        expect(result).to_have_text(error, timeout=5000)
+        expect(result.locator("a.markers-manual-install")).to_have_count(0)
+
+    def test_outdated_offers_update(self, authed_page: Page, app_url: str) -> None:
+        server = _vendor_server("emby", "emby-1")
+        status = _status(
+            server,
+            "plugin_outdated",
+            "Update Media Preview Bridge for Emby (installed 0.9.0.0) to get markers support",
+            {"plugin_version": "0.9.0.0"},
+        )
+        _mock_server_page(authed_page, server, status)
+        _open_tab(authed_page, app_url, server)
+        expect(authed_page.locator("#markersStatusBlock")).to_contain_text("Update needed", timeout=5000)
+        expect(authed_page.locator("#markersInstallPluginBtn")).to_have_text("Update")
+
+    def test_ready_shows_the_version_without_a_warning(self, authed_page: Page, app_url: str) -> None:
+        server = _vendor_server("emby", "emby-1")
+        _mock_server_page(
+            authed_page,
+            server,
+            _status(server, "ready", "Media Preview Bridge for Emby plugin", {"plugin_version": "1.0.0.0"}),
+        )
+        _open_tab(authed_page, app_url, server)
+        block = authed_page.locator("#markersStatusBlock")
+        expect(block).to_contain_text("1.0.0.0 ✓", timeout=5000)
+        expect(block.locator(".alert-warning")).to_have_count(0)
+        expect(authed_page.locator("#markersInstallPluginBtn")).to_have_count(0)
+
+    def test_emby_save_sends_switch_and_libraries(self, authed_page: Page, app_url: str) -> None:
         server = _vendor_server("emby", "emby-1")
         captured = _mock_server_page(
             authed_page,
             server,
-            _status(
-                server, "needs_plugin", "Emby needs the Media Preview Bridge for Emby plugin (coming in the next phase)"
-            ),
+            _status(server, "ready", "Media Preview Bridge for Emby plugin", {"plugin_version": "1.0.0.0"}),
         )
         _open_tab(authed_page, app_url, server)
-        block = authed_page.locator("#markersStatusBlock")
-        expect(block).to_contain_text("Media Preview Bridge for Emby plugin", timeout=5000)
-        expect(block).to_contain_text("Not available yet")
-        expect(block).to_contain_text("Intro · credits start (no credits end)")
-        expect(authed_page.locator("#markersInstallPluginBtn")).to_have_count(0)
-
+        expect(_lib_toggle(authed_page, "3")).not_to_be_checked(timeout=5000)  # Sports is unticked by default
+        authed_page.locator("#markersLibraryList label[for='markersLib-3']").click()
         _flip_switch_on(authed_page)
         expect(authed_page.locator("#markersPlexConfirmModal")).to_be_hidden()
         body = _save_and_get_put(authed_page, captured)
-        assert body["markers"] == {"enabled": True, "library_ids": None, "emby": {"on_emby_redetect": "restore"}}
+        assert body["markers"] == {
+            "enabled": True,
+            "library_ids": ["1", "2", "3"],
+            "emby": {"on_emby_redetect": "restore"},
+        }
 
     def test_emby_markers_setting_is_named_and_explained(self, authed_page: Page, app_url: str) -> None:
         server = _vendor_server("emby", "emby-1")
@@ -731,4 +860,4 @@ class TestEmbyTab:
         _open_tab(authed_page, app_url, server)
         block = authed_page.locator("#markersStatusBlock")
         expect(block.locator(".alert-warning")).to_contain_text("Couldn't check this server (ValueError)", timeout=5000)
-        expect(block).not_to_contain_text("Not available yet")
+        expect(block).not_to_contain_text("Not installed")

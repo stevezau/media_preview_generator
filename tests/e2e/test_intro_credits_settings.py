@@ -87,7 +87,24 @@ def _mock_usage(page: Page, body: object, status: int = 200) -> None:
     page.route("**/api/markers/sources/usage", handler)
 
 
-def _open_settings(page: Page, app_url: str, markers: dict, usage: object | None = None, usage_status: int = 200):
+def _mock_local_sources(page: Page, body: object, status: int = 200) -> None:
+    def handler(route: Route) -> None:
+        route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
+
+    page.route("**/api/markers/sources/local", handler)
+
+
+AVAILABLE = {"season_audio": {"available": True, "ffmpeg": "/usr/lib/jellyfin-ffmpeg/ffmpeg", "message": ""}}
+
+
+def _open_settings(
+    page: Page,
+    app_url: str,
+    markers: dict,
+    usage: object | None = None,
+    usage_status: int = 200,
+    local: object | None = None,
+) -> list[dict]:
     captured = _mock_settings(page, _settings_body(markers))
     mock_setup_status(page, complete=True, plex_authenticated=True)
     mock_system_status(page)
@@ -99,11 +116,45 @@ def _open_settings(page: Page, app_url: str, markers: dict, usage: object | None
         else {"theintrodb": {"day": "2026-09-14", "used": 83, "limit": 500, "has_key": False}},
         usage_status,
     )
+    _mock_local_sources(page, local if local is not None else AVAILABLE)
     page.goto(f"{app_url}/settings")
     page.wait_for_load_state("domcontentloaded")
     expect(page.locator("#section-markers")).to_be_visible(timeout=5000)
     # loadSettings() fills job history and Intro & Credits in one synchronous pass, so this value showing means the
     # mocked markers block is applied too (clicking earlier would race the load and be undone by it).
+    expect(page.locator("#jobHistoryDays")).to_have_value("31", timeout=5000)
+    return captured
+
+
+def _open_settings_and_wait_for_local(
+    page: Page,
+    app_url: str,
+    markers: dict,
+    *,
+    local: object | None = None,
+    local_status: int = 200,
+    local_abort: bool = False,
+) -> list[dict]:
+    """Like ``_open_settings``, but returns only once ``/api/markers/sources/local`` has actually answered (or
+    failed): a bare ``page.goto`` returns as soon as the page's own ``load`` event fires, which can be before that
+    fetch (started from a ``DOMContentLoaded`` handler) resolves. The caller still has to assert the row's resulting
+    state itself — this only removes the race against the fetch settling.
+    """
+    captured = _mock_settings(page, _settings_body(markers))
+    mock_setup_status(page, complete=True, plex_authenticated=True)
+    mock_system_status(page)
+    mock_settings_backups(page)
+    _mock_usage(page, {"theintrodb": {"day": "2026-09-14", "used": 83, "limit": 500, "has_key": False}})
+    if local_abort:
+        page.route("**/api/markers/sources/local", lambda route: route.abort())
+        with page.expect_event("requestfailed", lambda r: "/api/markers/sources/local" in r.url):
+            page.goto(f"{app_url}/settings")
+    else:
+        _mock_local_sources(page, local if local is not None else AVAILABLE, local_status)
+        with page.expect_response(lambda r: "/api/markers/sources/local" in r.url):
+            page.goto(f"{app_url}/settings")
+    page.wait_for_load_state("domcontentloaded")
+    expect(page.locator("#section-markers")).to_be_visible(timeout=5000)
     expect(page.locator("#jobHistoryDays")).to_have_value("31", timeout=5000)
     return captured
 
@@ -144,7 +195,7 @@ class TestIntroCreditsSettings:
         expect(authed_page.locator("#markersSourceList .markers-source .info-icon")).to_have_count(7)
         expect(authed_page.locator("#markersSourceList")).to_contain_text("Second opinion, never copied as-is")
 
-    @pytest.mark.parametrize("source_id", ["season_audio", "credits_text"])
+    @pytest.mark.parametrize("source_id", ["credits_text"])
     def test_coming_soon_sources_are_disabled_with_badge(self, authed_page: Page, app_url: str, source_id: str) -> None:
         _open_settings(authed_page, app_url, _default_markers())
         row = authed_page.locator(f"#markersSourceList .markers-source[data-id='{source_id}']")
@@ -173,6 +224,74 @@ class TestIntroCreditsSettings:
         authed_page.locator("label[for='markersDetectRecap']").click()
         sent = _wait_for_post(authed_page, captured, lambda m: m["detect"]["recap"] is True)
         assert sent["sources"] == markers["sources"]
+
+    def test_season_audio_is_switchable_and_explains_its_numbers(self, authed_page: Page, app_url: str) -> None:
+        captured = _open_settings_and_wait_for_local(authed_page, app_url, _default_markers())
+        row = authed_page.locator("#markersSourceList .markers-source[data-id='season_audio']")
+        switch = row.locator(".markers-source-enabled")
+        expect(switch).to_be_enabled()
+        expect(row.locator(".markers-source-soon-badge")).to_have_count(0)
+        expect(row.locator(".markers-source-unavailable")).to_be_hidden()
+        expect(row.locator(".markers-source-reason")).to_be_hidden()
+        # Bootstrap moves ``title`` into ``data-bs-original-title`` once the tooltip is initialised.
+        tooltip = row.locator(".info-icon").evaluate(
+            "el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')"
+        )
+        assert tooltip == (
+            "Finds the theme tune a season's episodes share. Tested alone on 118 episodes: 91 right, 13 wrong, 14 "
+            "missed — too error-prone to decide by itself, so it never publishes an intro alone; it only confirms "
+            "what another source already found."
+        )
+
+        switch.click()
+        sent = _wait_for_post(
+            authed_page,
+            captured,
+            lambda m: next(s for s in m["sources"] if s["id"] == "season_audio")["enabled"] is False,
+        )
+        assert [s["id"] for s in sent["sources"]] == SOURCE_ORDER
+
+    def test_season_audio_without_chromaprint_says_why(self, authed_page: Page, app_url: str) -> None:
+        reason = "Needs an ffmpeg with the chromaprint muxer (the Docker image's jellyfin-ffmpeg has it)"
+        captured = _open_settings_and_wait_for_local(
+            authed_page,
+            app_url,
+            _default_markers(),
+            local={"season_audio": {"available": False, "ffmpeg": None, "message": reason}},
+        )
+        row = authed_page.locator("#markersSourceList .markers-source[data-id='season_audio']")
+        expect(row.locator(".markers-source-unavailable")).to_be_visible(timeout=5000)
+        expect(row.locator(".markers-source-unavailable")).to_have_text("Not available")
+        expect(row.locator(".markers-source-reason")).to_be_visible()
+        expect(row.locator(".markers-source-reason")).to_have_text(reason)
+        expect(row.locator(".markers-source-enabled")).to_be_checked()
+
+        # An unavailable local check only flags the row; the stored choice round-trips.
+        authed_page.locator("label[for='markersDetectRecap']").click()
+        sent = _wait_for_post(authed_page, captured, lambda m: m["detect"]["recap"] is True)
+        assert next(s for s in sent["sources"] if s["id"] == "season_audio")["enabled"] is True
+
+    def test_local_source_check_failing_leaves_the_row_as_is(self, authed_page: Page, app_url: str) -> None:
+        _open_settings_and_wait_for_local(authed_page, app_url, _default_markers(), local={"error": "boom"})
+        row = authed_page.locator("#markersSourceList .markers-source[data-id='season_audio']")
+        expect(row.locator(".markers-source-enabled")).to_be_enabled()
+        expect(row.locator(".markers-source-unavailable")).to_be_hidden()
+
+    def test_local_source_check_500_leaves_the_row_as_is(self, authed_page: Page, app_url: str) -> None:
+        # Exercises loadMarkersLocalSources()'s ``if (!response.ok) throw ...`` path.
+        _open_settings_and_wait_for_local(
+            authed_page, app_url, _default_markers(), local={"error": "boom"}, local_status=500
+        )
+        row = authed_page.locator("#markersSourceList .markers-source[data-id='season_audio']")
+        expect(row.locator(".markers-source-enabled")).to_be_enabled()
+        expect(row.locator(".markers-source-unavailable")).to_be_hidden()
+
+    def test_local_source_check_network_failure_leaves_the_row_as_is(self, authed_page: Page, app_url: str) -> None:
+        # Exercises loadMarkersLocalSources()'s ``catch`` path: fetch() itself rejects, no response at all.
+        _open_settings_and_wait_for_local(authed_page, app_url, _default_markers(), local_abort=True)
+        row = authed_page.locator("#markersSourceList .markers-source[data-id='season_audio']")
+        expect(row.locator(".markers-source-enabled")).to_be_enabled()
+        expect(row.locator(".markers-source-unavailable")).to_be_hidden()
 
     def test_publish_when_tooltip_describes_high_and_medium(self, authed_page: Page, app_url: str) -> None:
         _open_settings(authed_page, app_url, _default_markers())

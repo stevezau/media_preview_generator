@@ -31,9 +31,12 @@
         ['introdb', 'IntroDB'],
         ['skipdb', 'SkipDB'],
         ['season_audio', 'Season audio'],
+        ['season_audio_previous', 'Previous season audio'],
         ['credits_text', 'Credit text'],
         ['user', 'Your marker'],
     ];
+    // Sources whose stored label is a match count ("10/10") worth showing on the bar.
+    const COUNTED_SOURCES = ['season_audio', 'season_audio_previous'];
     const PLANS = {
         will_add: ['Will add', 'text-bg-secondary'],
         will_replace: ['Will replace', 'text-bg-warning'],
@@ -191,9 +194,10 @@
         segments.forEach(function (seg) {
             const marker = decidedMarker(payload, seg.type);
             if (marker && !agrees(seg, marker, duration)) disagree = true;
-            const node = bar(seg, win, duration, 'mk-bar-evidence', laneRange(seg, duration));
+            const label = laneRange(seg, duration) + (COUNTED_SOURCES.indexOf(seg.source) !== -1 && seg.label ? ' · ' + seg.label : '');
+            const node = bar(seg, win, duration, 'mk-bar-evidence', label);
             if (node) l.track.appendChild(node);
-            else outside.push(laneRange(seg, duration));
+            else outside.push(label);
         });
         if (!segments.length) note(l.track, emptyText);
         if (outside.length) note(l.track, outside.join(', ') + ' · outside this view');
@@ -343,6 +347,10 @@
         }
         if (server.plan_reason) lines.push(server.plan_reason);
         if (current === null && !server.error) lines.push(CANT_READ);
+        // Owner decision R1: Emby always gets the decided credits start, even one that ends before the file does —
+        // never hidden here. Whether that credits marker runs to the true end (and what that means for viewers) is
+        // the backend's call (markers.inspect._plan / publishers.emby.credits_note), carried in plan_reason above;
+        // no copy of that wording lives here, so the two can't drift apart.
         if (server.server_type === 'emby' && wanted.some(function (m) { return m.type === 'credits'; })) {
             lines.push('Emby has no “credits end”');
         }

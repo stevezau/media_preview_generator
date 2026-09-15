@@ -4,11 +4,13 @@
 (function () {
     'use strict';
 
-    // Jellyfin restarts after a plugin install, so the status is checked again once it's likely back.
+    // Jellyfin and Emby restart after a plugin install, so the status is checked again once it's likely back.
     const INSTALL_RECHECK_MS = 20000;
     // Mirrors markers.settings.is_sports_library so the pills show before the status check returns; the status
     // response's default_selected replaces it when it arrives.
     const SPORTS_NAME_RE = /\bsports?\b/i;
+    const EMBY_MANUAL_GUIDE_URL = 'https://github.com/stevezau/media_preview_generator/blob/main/docs/guides.md#emby-the-media-preview-bridge-for-emby-plugin';
+    const RESTARTING = { jellyfin: 'Jellyfin', emby: 'Emby' };
 
     const $ = (sel, el) => (el || document).querySelector(sel);
     const $$ = (sel, el) => Array.from((el || document).querySelectorAll(sel));
@@ -181,12 +183,26 @@
 
     function renderEmbyStatus(status) {
         const capability = status.capability || {};
+        const details = capability.details || {};
         const rows = [kvRow('How markers get here', 'Media Preview Bridge for Emby plugin')];
-        if (capability.state === 'needs_plugin') {
-            rows.push(kvRow('Plugin', badge('off', 'Not available yet') + infoIcon(capability.message || '')));
+        const pluginStates = ['ready', 'plugin_outdated', 'needs_plugin'];
+        if (capability.state === 'ready') {
+            rows.push(kvRow('Plugin', badge('ok', details.plugin_version ? `${details.plugin_version} ✓` : 'Installed ✓')));
+        } else if (capability.state === 'plugin_outdated') {
+            rows.push(kvRow('Plugin', badge('warn', 'Update needed') + installButton('Update')));
+        } else if (capability.state === 'needs_plugin') {
+            // catalog_listed is false (not in Emby's catalog) or null (catalog couldn't be read, e.g. Emby
+            // unreachable for that one call): either way there's no Install button to offer, only the manual guide.
+            const action = details.catalog_listed === true
+                ? installButton('Install')
+                : ` · <a class="markers-manual-install" href="${EMBY_MANUAL_GUIDE_URL}" target="_blank" rel="noopener">Install by hand</a>`;
+            rows.push(kvRow('Plugin', badge('bad', 'Not installed') + action));
         }
-        rows.push(kvRow('Can show', 'Intro · credits start (no credits end)'));
-        return kvGrid(rows) + (['ready', 'needs_plugin'].includes(capability.state) ? '' : warningLine(capability));
+        // Owner decision R1: Emby always gets the decided credits start (even one that ends before the file does) —
+        // "Can show" never says otherwise; the info icon explains why viewers still see the whole file after it.
+        rows.push(kvRow('Can show', 'Intro · credits start'
+            + infoIcon('Emby has no credits end: Skip Credits always skips to the end of the file, past any scene after the credits.')));
+        return kvGrid(rows) + (pluginStates.includes(capability.state) ? '' : warningLine(capability));
     }
 
     function renderStatus(server, status) {
@@ -252,13 +268,22 @@
             button.textContent = label;
             if (result) {
                 result.className = 'small ms-2 text-danger';
-                result.textContent = (data && (data.error || data.message)) || `Install failed (HTTP ${httpStatus || '?'})`;
+                const primary = (data && (data.error || data.message)) || `Install failed (HTTP ${httpStatus || '?'})`;
+                if (data && data.manual) {
+                    // Catalog doesn't list the plugin: point at the same manual-install guide the "Not installed"
+                    // row links to.
+                    result.innerHTML = `${esc(primary)}`
+                        + ` · <a class="markers-manual-install" href="${EMBY_MANUAL_GUIDE_URL}" target="_blank" rel="noopener">Install by hand</a>`;
+                } else {
+                    result.textContent = primary;
+                }
             }
             return;
         }
         if (result) {
+            const restarting = RESTARTING[vendorOf(server)] || 'The server';
             result.className = 'small ms-2 text-muted';
-            result.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Jellyfin is restarting — checking again in 20 s…';
+            result.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>${esc(restarting)} is restarting — checking again in 20 s…`;
         }
         setTimeout(() => {
             if (seq === tab.loadSeq && tab.server) fetchStatus(tab.server);

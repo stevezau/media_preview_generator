@@ -114,6 +114,33 @@ def south_park() -> dict:
     }
 
 
+def _labelled(source: str, mtype: str, start: int, end: int, label: str) -> dict:
+    return {**_evidence(source, mtype, start, end), "label": label}
+
+
+def season_audio() -> dict:
+    payload = south_park()
+    payload["decisions"]["intro"] = _decision(
+        "decided", ("intro", 2_000, 29_000), decided_by=["season_audio", "theintrodb"]
+    )
+    payload["evidence"] = [
+        _labelled("season_audio", "intro", 2_000, 29_000, "10/10"),
+        _labelled("season_audio_previous", "intro", 2_500, 29_500, "4/4"),
+        _evidence("theintrodb", "intro", 1_000, 29_000),
+        # chapters isn't in COUNTED_SOURCES: a label here (some chapter title, not a match count) must never be
+        # appended to its bar the way season_audio's is.
+        _labelled("chapters", "intro", 5_000, 27_000, "Opening"),
+    ]
+    payload["decisions"]["credits"] = _decision("decided", ("credits", 1_250_000, 1_280_000))
+    # Owner decision R1: Emby still gets this credits marker (never hidden) — but the real backend
+    # (markers.inspect._plan / publishers.emby.credits_note) adds this note because it ends well before the file
+    # does. The frontend only ever displays plan_reason verbatim, so the fixture supplies it rather than the JS
+    # guessing at the wording.
+    emby = next(s for s in payload["servers"] if s["server_id"] == "emby-1")
+    emby["plan_reason"] = "Emby skips to the end of the file"
+    return payload
+
+
 def needs_review() -> dict:
     payload = south_park()
     payload["decisions"]["credits"] = _decision(
@@ -391,6 +418,55 @@ class TestIntroCreditsTab:
             expect(plex).to_contain_text("All versions of this item share one set of markers")
         else:
             expect(plex).not_to_contain_text("All versions")
+
+    def test_season_audio_lanes_carry_their_match_count(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, season_audio())
+        inspector.open_result()
+        page = inspector.open_tab()
+        expect(_lane(page, "opening", "Season audio").locator(".mk-bar")).to_have_text("0:02–0:29 · 10/10")
+        expect(_lane(page, "opening", "Previous season audio").locator(".mk-bar")).to_have_text("0:02–0:29 · 4/4")
+        expect(_lane(page, "opening", "TheIntroDB").locator(".mk-bar")).to_have_text("0:01–0:29")
+        # chapters isn't a counted source: its "Opening" label must not turn into " · Opening" on the bar.
+        expect(_lane(page, "opening", "Chapters").locator(".mk-bar")).to_have_text("0:05–0:27")
+
+    def test_emby_card_explains_credits_that_end_before_the_file(self, authed_page: Page, app_url: str) -> None:
+        # Owner decision R1: Emby always gets the decided credits start, even one that ends well before the file
+        # does — the card must still list it, alongside the backend's plan_reason note explaining the consequence.
+        inspector = _Inspector(authed_page, app_url, season_audio())
+        inspector.open_result()
+        page = inspector.open_tab()
+        card = _server_card(page, "emby-1")
+        expect(card).to_contain_text("Credits 20:50–21:20")
+        expect(card).to_contain_text("Emby skips to the end of the file")
+        # Not duplicated: the frontend has no copy of this wording of its own, only what plan_reason carries.
+        assert card.inner_text().count("Emby skips to the end of the file") == 1
+        expect(_server_card(page, "jf-1")).not_to_contain_text("Emby skips to the end of the file")
+
+    def test_emby_card_for_credits_to_the_end_keeps_the_no_end_note(self, authed_page: Page, app_url: str) -> None:
+        # plan_reason carries no note here (credits run to the end): the backend-specific text must not appear,
+        # only the evergreen "Emby has no credits end" structural note.
+        inspector = _Inspector(authed_page, app_url, south_park())
+        inspector.open_result()
+        page = inspector.open_tab()
+        card = _server_card(page, "emby-1")
+        expect(card).to_contain_text("Emby has no “credits end”")
+        expect(card).not_to_contain_text("Emby skips to the end of the file")
+
+    def test_emby_card_combines_kept_and_credits_notes(self, authed_page: Page, app_url: str) -> None:
+        # "Keep Emby's" row: plan_reason can carry both the kept-types note and the credits-before-end note
+        # together — markers.outcomes.with_kept_note joins them as "Keeping Emby's intro; Emby skips to the end
+        # of the file" (kept-types first, capitalised, since it's the message the credits note gets appended to).
+        payload = season_audio()
+        emby = next(s for s in payload["servers"] if s["server_id"] == "emby-1")
+        emby["plan"] = "keeps_emby"
+        emby["plan_reason"] = "Keeping Emby's intro; Emby skips to the end of the file"
+        inspector = _Inspector(authed_page, app_url, payload)
+        inspector.open_result()
+        page = inspector.open_tab()
+        card = _server_card(page, "emby-1")
+        expect(card.locator(".mk-plan")).to_have_text("Keeps Emby's")
+        expect(card).to_contain_text("Keeping Emby's intro")
+        expect(card).to_contain_text("Emby skips to the end of the file")
 
     def test_needs_review_shows_the_chip_and_a_dashed_proposal(self, authed_page: Page, app_url: str) -> None:
         inspector = _Inspector(authed_page, app_url, needs_review())
