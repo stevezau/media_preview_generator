@@ -5,8 +5,10 @@
 // it, and what each server shows now and what the next publish changes there. Loaded lazily when the tab is shown
 // and cached per file. Every piece of text goes through textContent.
 //
-// Exposes window.loadMarkersInspector({server_id, item_id, media_file}); a null item (a pasted preview path) shows
-// how to get a file instead. Depends on app.js globals: apiPost, showToast, getCsrfToken, _initBootstrapTooltips.
+// Exposes window.loadMarkersInspector({server_id, item_id, media_file, type}); a null item (a pasted preview path)
+// shows how to get a file instead. Depends on app.js globals: apiPost, showToast, getCsrfToken, _initBootstrapTooltips.
+// Forwards every item and the resolved canonical path to window.markersSeason (markers_season.js), which owns the
+// "This episode" / "Whole season" toggle.
 // =========================================================================
 (function () {
     'use strict';
@@ -402,6 +404,7 @@
     function render(payload, item) {
         const body = $('markersInspectorBody');
         $('markersInspectorPath').textContent = payload.canonical_path || item.media_file || '';
+        if (window.markersSeason) window.markersSeason.setPath(payload.canonical_path || item.media_file || '');
         $('markersRedetectBtn').disabled = !(payload.canonical_path || item.media_file);
         const parts = [];
         if (!payload.known) {
@@ -454,6 +457,7 @@
     }
 
     async function loadMarkersInspector(item) {
+        if (window.markersSeason) window.markersSeason.setItem(item);
         const body = $('markersInspectorBody');
         const button = $('markersRedetectBtn');
         if (!body || !button) return;

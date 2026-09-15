@@ -160,11 +160,23 @@
         <div class="tab-pane fade" id="inspector-tab-markers" role="tabpanel">
             <div class="row justify-content-center">
                 <div class="col-lg-10">
-                    <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
-                        <div class="small text-muted text-break" id="markersInspectorPath"></div>
-                        <button class="btn btn-sm btn-outline-secondary" id="markersRedetectBtn" type="button" disabled title="Look this file up and detect it again, asking every source. Runs as a job on the Dashboard."><i class="bi bi-arrow-repeat me-1"></i>Re-detect</button>
+                    <div class="d-flex align-items-center gap-2 mb-2" id="markersViewToggle" hidden>
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Show this episode or the whole season">
+                            <input type="radio" class="btn-check" name="markersView" id="markersViewEpisode" value="episode" autocomplete="off" checked>
+                            <label class="btn btn-outline-secondary" for="markersViewEpisode">This episode</label>
+                            <input type="radio" class="btn-check" name="markersView" id="markersViewSeason" value="season" autocomplete="off">
+                            <label class="btn btn-outline-secondary" for="markersViewSeason">Whole season</label>
+                        </div>
+                        <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Intros are found by comparing a season's episodes, so the whole season is the natural place to check and publish them."><i class="bi bi-info-circle"></i></button>
                     </div>
-                    <div id="markersInspectorBody"></div>
+                    <div id="markersEpisodeView">
+                        <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+                            <div class="small text-muted text-break" id="markersInspectorPath"></div>
+                            <button class="btn btn-sm btn-outline-secondary" id="markersRedetectBtn" type="button" disabled title="Look this file up and detect it again, asking every source. Runs as a job on the Dashboard."><i class="bi bi-arrow-repeat me-1"></i>Re-detect</button>
+                        </div>
+                        <div id="markersInspectorBody"></div>
+                    </div>
+                    <div id="markersSeasonBody" hidden></div>
                 </div>
             </div>
         </div>
@@ -184,6 +196,7 @@
 
 {% block scripts %}
 <script src="{{ url_for('static', filename='js/markers_inspector.js') }}"></script>
+<script src="{{ url_for('static', filename='js/markers_season.js') }}"></script>
 <script>
 (function() {
     const $ = id => document.getElementById(id);
@@ -325,6 +338,7 @@
             a.dataset.previewKind = r.preview_kind || 'bif';
             a.dataset.mediaFile = r.media_file || '';
             a.dataset.itemId = r.item_id || '';
+            a.dataset.resultType = r.type || '';
             a.dataset.previewExists = String(!!r.preview_exists);
             a.dataset.note = r.note || '';
             a.dataset.serverType = (serverType || '').toLowerCase();
@@ -367,6 +381,7 @@
             server_id: server ? server.id : '',
             item_id: meta.itemId || '',
             media_file: meta.mediaFile || '',
+            type: meta.resultType || '',
         });
         if (meta.previewExists !== 'true') {
             showNoPreview(title, meta.note);

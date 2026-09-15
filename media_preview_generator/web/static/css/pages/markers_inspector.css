@@ -229,3 +229,64 @@ html[data-bs-theme="light"] .mk-lane-decision .mk-lane-label {
     background: #52b54b;
     color: #fff;
 }
+
+/* Inspector → Season view (evidence/design/index.html "Inspector → Season view"). */
+
+/* Bootstrap's .d-flex sets display with !important, which otherwise beats the browser's plain [hidden] rule. */
+#markersViewToggle[hidden] {
+    display: none !important;
+}
+
+.mk-season-title {
+    font-size: 1.1rem;
+    font-weight: 650;
+}
+
+.mk-season-table td,
+.mk-season-table th {
+    white-space: nowrap;
+}
+
+.mk-season-time {
+    font-family: var(--bs-font-monospace);
+}
+
+.mk-chip {
+    margin-right: 4px;
+    border: 1px solid var(--bs-border-color);
+    background: transparent;
+    color: var(--bs-body-color);
+    font-weight: 500;
+}
+
+.mk-chip-locked {
+    background: var(--bs-secondary-bg);
+}
+
+.mk-dots {
+    display: flex;
+    gap: 6px;
+}
+
+.mk-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--bs-secondary-bg);
+    border: 1px solid var(--bs-border-color);
+}
+
+.mk-dot-ok {
+    background: var(--bs-success);
+    border-color: var(--bs-success);
+}
+
+.mk-dot-waiting {
+    background: var(--bs-warning);
+    border-color: var(--bs-warning);
+}
+
+.mk-dot-failed {
+    background: var(--bs-danger);
+    border-color: var(--bs-danger);
+}
