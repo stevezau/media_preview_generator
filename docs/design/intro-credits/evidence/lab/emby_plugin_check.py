@@ -6,11 +6,15 @@
                                                      run only these checks (9 before 10, 16 and 11), merged into
                                                      that container's results file
 
-Install the plugin first (emby-plugin/README.md). Checks 1-8, 12-15, 20 and 21 use Synth Chapters S01E01; 17 and 19
+Install the plugin first (emby-plugin/README.md). Checks 1-8, 12-15 and 20-22 use Synth Chapters S01E01; 17 and 19
 use S01E02; 9-11, 16 and 18 use a disposable copy of S01E01 inside the container's own config volume (library "Plugin
 Check" at /config/plugcheck), so the synth folder the other lab servers mount never changes. Check 17 stops the
 container once to add marker rows the plugin didn't write straight into Emby's library.db (Emby's own intro detection
-needs Emby Premiere, which the lab doesn't have). Prints one line per check and writes
+needs Emby Premiere, which the lab doesn't have). Check 22 stops it twice to add and remove a slow SQLite trigger on
+Emby's chapter table, which holds a POST's chapter write so the container can be killed half way (checks 1-21 don't
+need it: run it alone with --checks 22). If check 22 raises or leaves the trigger behind, the run drops it once more;
+if the process dies before that, run --checks 22 again: its "on" step drops any trigger and table left over before it
+creates them, and its "off" step drops them again. Prints one line per check and writes
 results/emby-plugin-<container>.json. Credentials come from ./env (EMBY_TOKEN/EMBY_UID, EMBY49_TOKEN/EMBY49_UID) and
 are scrubbed from everything printed or written. The script ends by removing the markers, the copy, its library and
 the sessions it created.
@@ -20,8 +24,10 @@ from __future__ import annotations
 
 import json
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 from datetime import datetime, timezone
@@ -66,6 +72,32 @@ CORRUPT_FORMS = {
     "text where a number goes": b'{"IntroStartTicks":"corrupt-probe","IntroEndTicks":400000000}',
     "valid JSON without markers": b'{"FileSize":6421799}',
 }
+# Check 22: a trigger on S01E01's first chapter row whose query counts HOLD_ROWS² pairs (about 15-25 s on storage),
+# so Emby's SaveChapters waits inside its write transaction; "off" removes it. Run only while the container is stopped.
+HOLD_ROWS = 20_000
+HOLD_TRIGGER = """
+import json, sqlite3, sys
+db = sqlite3.connect("/config/data/library.db")
+item, on = int(sys.argv[1]), sys.argv[2] == "on"
+db.execute("drop trigger if exists mpb_probe_hold")
+db.execute("drop table if exists mpb_probe_hold")
+if on:
+    db.execute("create table mpb_probe_hold (x integer) strict")
+    db.executemany("insert into mpb_probe_hold values (?)", [(i,) for i in range(int(sys.argv[3]))])
+    db.execute(
+        "create trigger mpb_probe_hold before insert on Chapters3 "
+        f"when new.ItemId = {item} and new.ChapterIndex = 0 "
+        "begin select count(*) from mpb_probe_hold a, mpb_probe_hold b where a.x + b.x >= 0; end"
+    )
+db.commit()
+rows = db.execute(
+    "select MarkerType, StartPositionTicks from Chapters3 where ItemId = ? and MarkerType != 0 order by StartPositionTicks",
+    (item,),
+).fetchall()
+left = db.execute("select count(*) from sqlite_master where name = 'mpb_probe_hold'").fetchone()[0]
+print(json.dumps({"marker_rows": rows, "hold_objects_left": left}))
+db.close()
+"""
 FOREIGN_WRITER = """
 import json, sqlite3, sys
 db = sqlite3.connect("/config/data/library.db")
@@ -279,8 +311,11 @@ class EmbyCheck:
         self.ok("POST", "/Library/VirtualFolders/LibraryOptions", {"Id": library["ItemId"], "LibraryOptions": options})
         return previous
 
-    def plant_foreign_rows(self, item_id: str, rows: list[tuple]) -> None:
-        """Add marker rows to Emby's library.db while the container is stopped, as another writer would leave them."""
+    def on_stopped_library_db(self, script: str, *args: str) -> str:
+        """Run a Python script against Emby's config volume (library.db) with the container stopped, then start it.
+
+        Stopping a container that is already stopped (killed) is not an error. Returns the script's output.
+        """
         volume = pm.sh(
             "docker",
             "inspect",
@@ -289,9 +324,9 @@ class EmbyCheck:
             '{{range .Mounts}}{{if eq .Destination "/config"}}{{.Name}}{{end}}{{end}}',
         ).strip()
         python_image = pm.sh("docker", "inspect", "mlab-app", "--format", "{{.Config.Image}}").strip()
-        pm.sh("docker", "stop", self.container, timeout=120)
         try:
-            pm.sh(
+            pm.sh("docker", "stop", self.container, timeout=120)
+            return pm.sh(
                 "docker",
                 "run",
                 "--rm",
@@ -303,13 +338,16 @@ class EmbyCheck:
                 f"{volume}:/config",
                 python_image,
                 "-c",
-                FOREIGN_WRITER,
-                item_id,
-                json.dumps(rows),
+                script,
+                *args,
             )
         finally:
             pm.sh("docker", "start", self.container)
             self.wait_ready()
+
+    def plant_foreign_rows(self, item_id: str, rows: list[tuple]) -> None:
+        """Add marker rows to Emby's library.db while the container is stopped, as another writer would leave them."""
+        self.on_stopped_library_db(FOREIGN_WRITER, item_id, json.dumps(rows))
 
     def web_skip(self, label: str) -> dict:
         """Play the item in Emby web (Playwright, emby_client.py) to 0:22 and report the Skip Intro button."""
@@ -1045,7 +1083,99 @@ class EmbyCheck:
         )
         return ok, {"steps": steps}
 
+    def check_22_killed_mid_write(self) -> tuple[bool, dict]:
+        # Check 21 plants the store file a stopped write leaves. Here the plugin writes it: a POST is held inside Emby's
+        # chapter write (a slow trigger), the store file is read while it waits, and the container is killed, so the
+        # store keeps the plugin's own serialised Replacing. After the restart, a POST without ReplaceOwn takes the
+        # killed write's old rows for ours only if Load read that Replacing back.
+        name = f"{self.item}.json"
+        self.bridge("POST", self.item, {**INTRO, "FileSize": self.size})
+        rows_before = self.marker_rows(self.chapters(self.item))
+        answer: dict[str, Any] = {}
+        seen, held_s = None, None
+        try:
+            self.on_stopped_library_db(HOLD_TRIGGER, self.item, "on", str(HOLD_ROWS))
+
+            def held_post() -> None:
+                started = time.monotonic()
+                try:
+                    answer["response"] = self.bridge("POST", self.item, {**INTRO_2, "FileSize": self.size})
+                except OSError as exc:  # the container is killed while the request waits
+                    answer["response"] = type(exc).__name__
+                answer["seconds"] = round(time.monotonic() - started, 1)
+
+            poster = threading.Thread(target=held_post, daemon=True)
+            poster.start()
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and poster.is_alive():
+                text = self.docker("cat", f"{self.store_dir()}/{name}", check=False)
+                if '"Replacing"' in text:
+                    seen = text
+                    break
+                time.sleep(0.2)
+            held_s = answer.get("seconds")
+            pm.sh("docker", "kill", self.container, timeout=60)
+            poster.join(timeout=60)
+        finally:
+            # The trigger and its table always come off Emby's database, whatever failed above (a stopped or killed
+            # container stops again without error).
+            after_kill = json.loads(self.on_stopped_library_db(HOLD_TRIGGER, self.item, "off").strip().splitlines()[-1])
+        db_rows = after_kill["marker_rows"]
+        _, get_after_restart = self.bridge("GET", self.item)
+        rows_after_restart = self.marker_rows(self.chapters(self.item))
+        status, data = self.bridge("POST", self.item, {**INTRO_2, "FileSize": self.size})
+        rows_after_post = self.marker_rows(self.chapters(self.item))
+        stored = self.read_store_file(self.item) if name in self.store_files() else None
+        chapters = self.chapters(self.item)
+        self.bridge("DELETE", self.item)
+        captured = json.loads(seen) if seen else None
+        ok = (
+            rows_before == ROWS_4
+            and after_kill["hold_objects_left"] == 0
+            # The kill came before Emby committed the chapter write: its database still holds the old rows (Emby's
+            # MarkerType numbers: IntroStart 1, IntroEnd 2, CreditsStart 3).
+            and db_rows == [[1, INTRO["IntroStartTicks"]], [2, INTRO["IntroEndTicks"]], [3, INTRO["CreditsStartTicks"]]]
+            and captured is not None
+            and held_s is None  # still waiting when the container was killed
+            and captured.get("IntroStartTicks") == INTRO_2["IntroStartTicks"]
+            and captured.get("IntroEndTicks") == INTRO_2["IntroEndTicks"]
+            and captured.get("CreditsStartTicks") is None
+            and (captured.get("Replacing") or {}).get("IntroStartTicks") == INTRO["IntroStartTicks"]
+            and (captured.get("Replacing") or {}).get("IntroEndTicks") == INTRO["IntroEndTicks"]
+            and (captured.get("Replacing") or {}).get("CreditsStartTicks") == INTRO["CreditsStartTicks"]
+            and rows_after_restart == ROWS_4
+            and get_after_restart.get("IntroStartTicks") == INTRO_2["IntroStartTicks"]
+            and status == 200
+            and data.get("Stored") == 2
+            and rows_after_post == ROWS_5
+            and stored is not None
+            and "Replacing" not in stored
+            and self.plain(chapters) == self.originals
+        )
+        return ok, {
+            "rows_before": rows_before,
+            "store_file_while_held": captured,
+            "post_answer_before_kill": answer,
+            "library_db_rows_after_kill": db_rows,
+            "hold_trigger_and_table_left": after_kill["hold_objects_left"],
+            "get_after_restart": get_after_restart,
+            "rows_after_restart": rows_after_restart,
+            "post_after_restart": {"status": status, "body": data, "rows": rows_after_post, "store_file": stored},
+        }
+
     # ------------------------------------------------------------------------------------------------------- run
+
+    def drop_hold_trigger_again(self) -> None:
+        """After check 22 raised or left its trigger behind: run the "off" script once more and record what is left."""
+        result = next((r for r in self.results if r["check"] == 22), {})
+        if "exception" not in result and result.get("hold_trigger_and_table_left") == 0:
+            return
+        try:
+            out = self.on_stopped_library_db(HOLD_TRIGGER, self.item, "off").strip().splitlines()[-1]
+            result["hold_trigger_retry"] = json.loads(out)
+        except Exception as exc:  # recorded; `--checks 22` heals a trigger this couldn't drop
+            result["hold_trigger_retry"] = {"exception": f"{type(exc).__name__}: {exc}"}
+        pm.say(f"{self.container} check 22 trigger dropped again: {result['hold_trigger_retry']}")
 
     def cleanup(self) -> dict:
         """Leave the server as it was: no markers, no copy library, store folder writable."""
@@ -1122,12 +1252,23 @@ class EmbyCheck:
                 self.check_21_stopped_write,
             ),
         ]
+        if only is not None and 22 in only:
+            checks.append(
+                (
+                    22,
+                    "Container killed while a POST waits in the chapter write: the store file holds the plugin's own "
+                    "Replacing, and after the restart a POST takes the old rows for ours",
+                    self.check_22_killed_mid_write,
+                )
+            )
         for number, title, fn in checks:
             if only is not None and number not in only:
                 continue
             if number in (10, 16, 11) and not self.copy:
                 continue
             self.run_check(number, title, fn)
+            if number == 22:
+                self.drop_hold_trigger_again()
         cleanup = self.cleanup()
         body = {
             "container": self.container,
@@ -1154,6 +1295,8 @@ class EmbyCheck:
 
 
 def main(argv: list[str]) -> int:
+    # A stopped run (SIGTERM) still runs the finally blocks that start Emby again and drop check 22's trigger.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     only = None
     if "--checks" in argv:
         at = argv.index("--checks")

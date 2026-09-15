@@ -387,3 +387,185 @@ API key: an empty `Items` list; and `tests/test_servers_jellyfin_vcr.py::TestJel
 Lab left clean: the fake row deleted; `DELETE /MediaPreviewBridge/Markers/{51..55}` on Emby (200, `Stored` 0, 0 store
 files, no marker chapters); Emby Intro & Credits off as found; `mlab-app` on `pr-241` with the same switches and no
 schedules; the Task 11 tables dropped from the lab `markers.db` again.
+
+## Task 17 — phase-2 lab matrix (2026-09-15, `feat/markers-detection` 93e5c60, image `ca49022ec1fd`)
+
+**22 pass, 0 fail, 1 needs owner (row 20).** Product fixes: none. Phase-1 regression: 16 of 16 rows pass.
+
+Runner: `./phase2_matrix.py configure`, then `./phase2_matrix.py run <rows>`. The lab scripts take the lab folder from
+`MLAB_DIR`, so a worktree runs against the long-lived lab. Raw evidence is in `results/p2-row-NN.json`,
+`results/p2-lab-setup.json` and `results/p2-note6-playbackinfo.json` (all git-ignored). Rows ran in this order: 23, 1,
+21, 17, 19, 22, 2, 3, 4, 18, 5, 6, 8, 7, 9, 10, 11, 12, 13, 14, 16, 15, 20. Rows 7, 10, 14 and 16 were re-run after
+their harness was corrected (see "Expectations changed"). Fix round 1 re-ran rows 1, 2, 3, 13, 14, 15 and 23, and
+phase-1 row 7 under row 19's conditions, with the checks below; all pass.
+
+### Lab setup
+
+- **App:** `mlab-app` on `media_preview_generator:intro-credits`, built from 93e5c60, on a fresh `mlab_app_config`.
+- **Servers:** all five are `ready`.
+  - Lab Plex (Plex Pass, ext4, lock holder).
+  - Jellyfin 10.11 (plugin 10.11.1.0) and Jellyfin 12.0 (plugin 12.0.1.0).
+  - Emby 4.10.0.40 and 4.9.1.90, plugin 1.0.0.0 built from the same tree: 4.10 sha256 `06d7a38e…`, 4.9 `4133a56f…` (manual).
+  - Intro & Credits is on for all five, with every library.
+- **Local sources:** `GET /api/markers/sources/local` answered `/usr/lib/jellyfin-ffmpeg/ffmpeg`, available.
+- **New mounts in `up.sh`:**
+  - `/media/synth-audio` and `/media/synth-movies` on every server and the app.
+  - `/media/plexonly` on `mlab-plex` only.
+- **Libraries created by `configure`:**
+
+  | Server | Synth Chapters | Synth Audio | Synth Movies |
+  |---|---|---|---|
+  | Plex (section keys) | 3, plus `/media/plexonly` as its second location | 4 | 5 |
+  | Jellyfin 10.11 and 12.0 | `962eee9a…` | `a347c26d…` | `fec5ae97…` |
+  | Emby 4.10 | 47 | 102 | 104 |
+  | Emby 4.9 | 3 | 80 | 82 |
+
+- **Synth media:**
+  - `synth_audio.sh`: Synth Audio (2022) S01E01–E04, S02E01 and a staged S02E02, each 300 s with a 30 s theme.
+  - `synth_chapters.sh` adds the two-version Synth Movie (2023) (1080p and 720p, End Credits 1:40–2:00) and a staged
+    116 s Plexonly cut of S01E03.
+  - Matcher check on Season 01 (manual): all four themes found, within 1 s of the start and 2 s of the end.
+
+### Lab reset used
+
+1. **On the old app (`pr-241`, old `markers.db`):** turn intro and credits detection off, then run one normal job over
+   Synth Chapters, Synth Show, Rick and Morty S01, South Park S01, Toy Story and Up. It removed only our markers: 28
+   files written. Plex's own rows stay (11 rows on those items).
+2. **Synth folder:** delete phase 1's `S01E01 - Extended` and `S01E03 - Copy` from the Synth Chapters season.
+3. **Containers:** remove `mlab-app` and `mlab_app_config`, then recreate the five servers with the new mounts (their
+   volumes are kept).
+   - The phase 1 scale mounts stay mounted.
+   - Lab Plex's detection prefs stay `never`. Only rows 3, 12, 13 and the phase-1 regression turned intro and credits
+     detection to `asap`, and each put it back.
+4. **Plugins:** install both Emby plugin builds; the earlier DLLs are backed up outside the repo.
+5. **App:** `./app.sh`, then `./phase2_matrix.py configure`.
+
+### Rows
+
+| Row | Result | Evidence |
+|---|---|---|
+| 1 Capability | pass | 5 of 5 `ready`. Both Embys report `plugin_version` 1.0.0.0, the csproj version; the evidence records no `MLAB_EMBY_PLUGIN_VERSION` override. That these are the DLLs built from this tree rests on the sha256 above (manual). Season audio is available with jellyfin-ffmpeg. |
+| 2 Season audio backfill, High then Medium | pass | Both runs, forced, on 5 servers: every S01 episode Needs review with season audio 3/3 near its theme (E01 19.4–48.3 s against 20–50 s). Nothing of ours is published: Plex serves the same intro rows as before each run (its own, from row 3), and Jellyfin and Emby serve none. High ran after the show's 5 fingerprints were deleted, so it fingerprinted: chromaprint ffmpeg peaked at 1 at once, with `-threads 2`. Medium ran no chromaprint ffmpeg (peak 0, no argv): a forced run reuses cached fingerprints, and High had cached them all. S02E01 gets no same-season answer. Its previous-season hint was empty in the first run and 4/4 at 14.1–43.7 s (theme 15–45 s) in the second. |
+| 3 High alone (G3) | pass | Plex's own forced season intro detection found all four themes: E01 17.7–47.0 s, E02 42.7–72.0 s, E03 2.6–31.9 s, E04 67.7–97.0 s. S01E02 has Plex's marker (42.7–72.0 s) and season audio (44.5–73.3 s) agreeing within 5 s (a pass condition) and stays Needs review: "Season audio and a server's own marker agree, but both come from matching audio; needs another source". |
+| 4 Weekly release | pass | Sonarr webhook for S02E02, then its follow-up job, then exactly one Season job at NORMAL: "Season: Synth Audio (2022) · Season 02", holding only S02E01. Afterwards S02E01 has season audio 1/1 at 14.5–43.6 s and S02E02 1/1 at 59.4–88.5 s, both Needs review, and nothing is served. |
+| 5 Rick and Morty S01 at High | pass | Normal job after row 18's forced run. Intro `decided_by` includes season_audio on 11 of 11. On the 11 online truth cases: 11 useful, 0 wrong, 0 missed (phase 1: 11 intros from online agreement). |
+| 6 Emby write and serve (4.10) | pass | Synth Chapters E01–E03 show IntroStart, IntroEnd and CreditsStart at the decisions, and keep their 4 plain chapters. Synth Audio S01 has no marker chapters. The Extended copy (130 s) is its own item (120) with its own CreditsStart 100 s; its Files row reads "2 marker(s); Emby skips to the end of the file". The old "can't show credits" text doesn't appear. |
+| 7 Emby wipe matrix and a replaced file | pass | S01E02 keeps its markers through FullRefresh with Replace all (healed), Default, ValidationOnly, a library scan and a restart. S01E03 replaced by a new encode (6,467,367 bytes; the file it replaced was 5,038,532, the first run's re-encode): plugin GET `Stale` true and no marker chapters. The next normal job writes it (`markers_written`), and `Stale` is false. |
+| 8 Emby web Skip Intro | pass | `skip found: True`, t 22.9 s, visible button "Skip Intro". Native Emby apps: needs owner. |
+| 9 Emby 4.9 | pass | Row 6's first part: marker chapters equal the decisions on 7 files, with 4 plain chapters kept. FullRefresh: markers back. |
+| 10 Check servers restores | pass | Our rows dropped on all three: Plex taggings deleted, Jellyfin 10.11 plugin DELETE, Emby plugin DELETE. One Check servers job listed S01E01 and E03 (2 published), wrote Plex, Jellyfin and Emby back, and all serve the times from before the drop. The second run listed 0 files: "0 published item(s) changed on servers". |
+| 11 Plex version drift | pass | The Plexonly cut was added as a second version of S01E03, which the app can't read. Check servers first: it listed E03, Plex then served none of ours, and the row read "Waiting for this item's other versions to agree on: intro, credits". A normal job kept it waiting. With the copy removed, a normal job wrote both markers again. |
+| 12 Plex P3 and P4 | pass | P3 answer below. P4 answer below. At the end Rick and Morty S01E01 and Synth S01E02 are written back. |
+| 13 L274 final flag | pass | With Keep Plex's, Plex's forced intro detection on the season changed the intro (129.0–156.8 s → 126.8–157.1 s; the row requires the times to differ) and left the credits rows alone (1298000–1320000, `final` true before and after). The next job reads "Keeping Plex's intro" and doesn't mention credits. A normal job over the season under "Use ours" put ours back. |
+| 14 L263 movie versions | pass | Jellyfin 10.11 and 12.0 list both versions (alternate MediaSources) with Outro 100–120 s each (start and end ticks checked). Each Emby version is its own item with CreditsStart 100 s, on 4.10 (115/116) and 4.9 (93/94). Plex: the row splits an earlier merge, so Plex lists two local items (1369, 1375). A job publishes both: each serves credits 100–120 s, and the app's record of each lists its one version file. The row then merges them in Plex, and a second job leaves one item with 2 versions serving credits 100–120 s. The app's record of the merged item lists both version files, and both files' Plex rows are written or up to date. |
+| 15 Cassettes with lab servers stopped | pass | `test_servers_markers_vcr.py`, `test_servers_emby_markers_vcr.py` and `test_servers_jellyfin_vcr.py`: 28 passed with `mlab-plex`, `mlab-jellyfin` and `mlab-emby` stopped; they were started again afterwards. |
+| 16 Season view in the real app | pass | Synth Chapters S01 (note 3): "Synth Chapters (2021) · Season 1", "3 episodes", "3 ready", "Publish 3 to 5 servers", 15 of 15 dots green. Publish queued "Intro & Credits: Synth Chapters (2021) · Season 1" at NORMAL, which completed. Screenshot: `../screenshots/phase2/task17-season-view-synth-chapters.png`. |
+| 17 Security | pass | Without the token, `GET /api/markers/season`, `POST /api/markers/season/publish`, `GET /api/markers/sources/local` and `POST /api/markers/reconcile` all answer 401. With it, `season?path=/etc/passwd` and `…/synth-audio/../../etc/passwd` answer 400. |
+| 18 Resources | pass | Forced job on Rick and Morty S01 with its 11 fingerprints deleted, 24 s. Chromaprint: at most 1 ffmpeg at once (sampled every 0.5 s), with `-threads 2`. `mlab-app` peaked at 303.6 % CPU and 242 MiB, against phase 1 row 15's 86 % and 99 MiB (no fingerprinting then). |
+| 19 Phase-1 regression | pass | Rows 14, 1, 2, 3, 13, 4, 6, 5, 7, 8, 9, 10, 16, 18, 19 and 17 all pass. Row 1: 5 Markers written and 9 Needs review; Rick and Morty credits sources disagree today, see the notes. Two expectations changed, see below. |
+| 20 Plex app | needs owner | Open Synth Chapters S01E02 on the lab Plex in a Plex app: Skip Intro at 0:17 and Skip Credits at 1:40. Synth Audio has no published intro (R2/G3). |
+| 21 Check servers schedule | pass | Fresh config: `GET /api/schedules` answers `[]`. A saved `{"job_type": "intro_credits", "reconcile": true}` schedule with Run now twice gave exactly one LOW "Intro & Credits · Check servers" job carrying the schedule's id. The schedule was then deleted. |
+| 22 Deleted Jellyfin item | pass | Phase 1's published `S01E01 - Extended` and `S01E03 - Copy` were removed and scanned. Check servers (E01, E02 and E03 listed) raised no "Couldn't read" warning, and the run after listed nothing. |
+| 23 Emby `Replacing` round trip (note 9) | pass | Check 22 on both Embys (`emby_plugin_check.py --checks 22`). S01E01 starts with markers at 10 s, 40 s and credits 100 s. A slow SQLite trigger on `Chapters3` held a POST of 12–42 s, no credits, inside Emby's chapter write. The store file, read while that POST still waited, held IntroStart 12 s, IntroEnd 42 s, no credits, and `Replacing` IntroStart 10 s, IntroEnd 40 s, CreditsStart 100 s. The container was then killed: `library.db` still held the three old marker rows (MarkerType 1, 2 and 3 at 10, 40 and 100 s). After the restart, Emby served the old markers and the plugin GET answered IntroStart 12 s. A POST without `ReplaceOwn` answered 200 with `Stored` 2. Emby then served only 12 s and 42 s, the store file had no `Replacing`, and the plain chapters were unchanged. The trigger and its table were dropped in a `finally` block; `hold_objects_left` is 0 on both. |
+
+**P3 (row 12).** Setup: our markers removed from Rick and Morty S01E01, then Plex's forced credits detection added its
+own credits (1297324–1321472 served, `final`). A job with credits detection off then published only our intro (129.0–156.8
+s).
+
+- **Served:** Plex serves both.
+- **`[index]`:** credits 0, intro 1. That is text order, then `time_offset`, the order the publisher writes.
+- **After Plex's forced credits detection again:** both rows are unchanged (same served times and `[index]`).
+
+**P4 (row 12).** Setup: our intro removed from Synth S01E02 (credits kept). The `pv:intros` key was deleted, so Plex
+served credits only. Then Plex's non-forced intro detection ran on the season.
+
+- **Part:** Plex analysed the part again; `pv:intros` came back on it.
+- **Rows:** Plex added no intro row of its own, and served nothing new.
+
+**Note 6, Emby `PlaybackInfo` of a grouped item** (`results/p2-note6-playbackinfo.json`).
+
+- **Both versions listed:** on 4.10 and 4.9, PlaybackInfo for S01E01's item and for the Extended item lists both
+  versions as MediaSources. The asked item's own file comes first.
+- **Chapters:** each MediaSource carries its own item's `Chapters`. Plain chapters are 4 on `mediasource_53`/`_11` and
+  5 on `mediasource_122`/`_100`, each with our marker chapters.
+
+### Expectations changed
+
+- **Synth audio unique parts.** The brief's pink and brown noise made the matcher check fail (BAD ×4).
+  - expectation changed: chromaprint hashes any stationary noise alike, so noise with different seeds matched across
+    episodes at every shift.
+  - The unique parts are now seeded pseudo-random melodies, and the theme is a fixed-seed melody (`synth_audio.sh`
+    header).
+- **Row 2 (note 1).**
+  - expectation changed: S02E01's previous-season hint uses the previous season's cached fingerprints only (spec §6.2
+    step 4; `test_no_cached_previous_season_gives_no_hint_and_fingerprints_nothing_else`).
+  - In a fresh show's first backfill, S02E01 ran before S01 was fingerprinted, so its hint was empty.
+  - The row checks "no same-season answer" in both runs, and "hint near the theme" on the second run.
+- **Row 5.**
+  - expectation changed: a normal job stops asking once the online sources agree, so season audio reaches `decided_by`
+    only after a run that asks every source.
+  - The row runs after row 18's forced job.
+- **Row 7.**
+  - expectation changed: a re-encode of S01E03 (`-b:v 250k`, audio copied) moved every chapter 7 ms later (Opus codec
+    delay), which changed the truth for later rows.
+  - The replacement is now a fresh `synth_chapters.sh` encode of S01E03: same chapters, another size.
+- **Row 10.**
+  - Plex's markers are dropped by deleting our taggings rows. Plex's forced credits detection fails on the synth files
+    (phase 1 row 5), so it would drop nothing.
+  - expectation changed: the restored Plex rows are compared in served times without the credits `final` flag. The
+    publisher leaves rows that already serve the wanted times alone, whatever flag a version with another runtime
+    stored, so a restored row can carry a different flag.
+  - In the first run, the dropped credits row carried `final` false, left from when S01E01 had its 130 s second version,
+    and the restored row carried `final` true. The first run's check compared the flag too.
+- **Row 11.**
+  - expectation changed: the row predates Plex version drift (Task 9). A version the app can't read now takes our
+    markers off the item ("Waiting for this item's other versions to agree").
+  - Checked with Check servers first, then a normal job, then the copy removed and a normal job.
+- **Row 14.**
+  - Plex's movie agent matches nothing for the synth movie, so Plex lists each version as its own local item.
+  - expectation changed: the row splits an earlier merge (`PUT /library/metadata/{id}/split`), publishes the two
+    separate items, merges them (`PUT /library/metadata/{id}/merge`) and checks the merged item with 2 versions and
+    the app's records of the item's version files before and after.
+- **Row 16 (note 3).** It uses Synth Chapters S01. The job name follows Task 12's code: "Season 1", not "Season 01".
+- **Row 19.**
+  - expectation changed: phase 1 row 7 B2 required every server row to be `markers_written`. A server whose rescan
+    left our markers in place is correctly Up to date: the Embys, which phase 1 didn't have (they don't re-read a file
+    whose mtime alone changed), and Plex when its own detection is off. B2 now requires Markers written where B1's
+    rescan dropped ours and written or Up to date elsewhere, as A3 and C2 do, and every server, the Embys included,
+    must serve the chapters.
+  - Fix round 1 re-ran phase 1 row 7 with Plex's detection on, as row 19 runs it: B1's rescan dropped ours on Plex and
+    both Jellyfins, and B2 wrote those three; the Embys were Up to date and served the chapters. Run with the lab's
+    detection `never`, Plex kept its markers and reported Up to date.
+  - expectation changed: phase 1 row 17 runs on S01E03 (`ROW17_EPISODE=3`). Row 9 sent S01E02's webhook minutes
+    earlier, and the app drops a repeat of the same file for 600 s.
+- **Rows 2, 3, 4 and 6** use controller notes 1 and 2 as written (R2, G3, R1, Emby per version).
+
+### Notes
+
+- **Rick and Morty credits changed since phase 1.** 8 of 11 are Needs review, against 2 of 11 in phase 1 run 2.
+  - SkipDB now answers some episodes with the short end card after the post-credits scene, e.g. S01E03 1308–1315 s
+    against IntroDB/TheIntroDB 1228 s. The sources disagree, so the files wait for review.
+  - The intros are unaffected.
+- **Preview jobs in row 4 failed in the lab.** This is lab configuration, not Intro & Credits.
+  - Jellyfin and Emby write their previews next to the media, which is mounted read-only.
+  - The two Plex libraries `configure` adds are off for previews.
+  - So S02E02's webhook preview job and its 3 retries failed. Its Intro & Credits follow-up ran and completed.
+
+### Open items for the owner
+
+- **Row 20 (ledger L276):** Plex app Skip Intro / Skip Credits on the lab Plex.
+- **Native Emby apps (note 6):** Skip Intro on a TV or mobile client.
+- **G3 and the harness gate (`evidence/eval/phase2-harness.md`, Task 15).**
+  - Eval lists, 118 intro episodes: Plex's own markers 23 useful / 15 wrong. Season audio alone 91 / 13 / 14.
+  - Shipped (G3 on), High and Medium: 0 useful / 0 wrong. The "Medium beats Plex" gate fails by construction; High
+    passes.
+  - With G3 off: 23 useful / 7 wrong (eval lists), 23 / 4 (full folder). The gate passes.
+  - The owner kept G3 on (§14, 2026-09-15). The lab agrees: row 3 is Needs review where Plex and season audio agree.
+- **Plex `final` flag (row 10; the controller is investigating).** After a longer version is deleted, a credits row
+  can keep `final` false: the publisher leaves a row that already serves the wanted times alone, so the flag stored
+  while S01E01 had its 130 s version stayed on the 120 s file.
+- **Spec note: a new season's lone opener gets its previous-season hint one run late** when the previous season is
+  fingerprinted in the same backfill.
+  - The hint uses cached fingerprints only, and nothing asks the opener again in that job. Its next run is due,
+    because the signature includes whether the previous season has fingerprints.
+  - Precision is unaffected; the effect is one run of delay.

@@ -9,15 +9,26 @@
 #   synth/Synth Chapters (2021)/Season 01/Synth Chapters (2021) - S01E0N.webm   120 s, chapters:
 #       Chapter 1 | Intro (30 s, start differs per episode) | Chapter 2 | Credits 1:40-2:00
 #   synth/_staging/Synth Chapters (2021) - S01E01 - Extended.webm               130 s: E01 plus a 10 s tail chapter
-# The staged file is mounted nowhere. The multi-version row copies it next to S01E01 so the Plex item gains a second
-# version whose duration differs by more than 2 s.
+#   synth/_staging/Synth Chapters (2021) - S01E03 - Plexonly.webm               116 s: another cut of E03 (credits to
+#                                                                                the end)
+#   synth/Synth Movie (2023)/Synth Movie (2023) - 1080p.webm and - 720p.webm    120 s each, two versions of one movie:
+#       Opening | Story | End Credits 1:40-2:00
+#   synth/_plexonly/Synth Chapters (2021)/Season 01/                             empty; up.sh mounts it into mlab-plex only
+# Staged files are mounted nowhere. The multi-version row copies Extended next to S01E01 so the Plex item gains a
+# second version whose duration differs by more than 2 s; the Plex version-drift row copies Plexonly into
+# synth/_plexonly, a folder only Plex sees (the version the app can't read).
+#
+# MLAB_DIR sets the lab folder that holds synth/ (default: this script's folder), so a checkout elsewhere writes into
+# the folder the running lab containers mount.
 set -euo pipefail
 
-readonly HERE="$(cd "$(dirname "$0")" && pwd)"
+readonly HERE="${MLAB_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 readonly SHOW="Synth Chapters (2021)"
 readonly SEASON_DIR="${HERE}/synth/${SHOW}/Season 01"
 readonly STAGING_DIR="${HERE}/synth/_staging"
 readonly WORK_DIR="${HERE}/synth/.work"
+readonly MOVIE_DIR="${HERE}/synth/Synth Movie (2023)"
+readonly PLEXONLY_DIR="${HERE}/synth/_plexonly/${SHOW}/Season 01"
 readonly FONT="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 readonly INTRO_LENGTH=30
 readonly CREDITS_START=100
@@ -32,7 +43,9 @@ declare -A INTRO_START=([1]=10 [2]=17 [3]=25)
 
 command -v ffmpeg >/dev/null || { echo "ffmpeg not found" >&2; exit 1; }
 [[ -f "$FONT" ]] || { echo "font not found: $FONT" >&2; exit 1; }
-mkdir -p "$SEASON_DIR" "$STAGING_DIR" "$WORK_DIR"
+[[ -d "${HERE}/synth" ]] || { echo "no synth folder in ${HERE} (set MLAB_DIR to the lab folder)" >&2; exit 1; }
+# The plex-only folder must exist before up.sh mounts it: Docker would create a missing bind source owned by root.
+mkdir -p "$SEASON_DIR" "$STAGING_DIR" "$WORK_DIR" "$MOVIE_DIR" "$PLEXONLY_DIR"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 # encode OUT EPISODE SEGMENT...   (SEGMENT = "title|start|end|kind", kind = chapter/intro/credits/tail)
@@ -49,7 +62,7 @@ encode() {
     local -a inputs=()
     local graph="" pads=""
     local n=0 seg title start end kind length vsrc freq
-    printf ';FFMETADATA1\ntitle=%s S01E%02d\n' "$SHOW" "$episode" >"$meta"
+    printf ';FFMETADATA1\ntitle=%s\n' "$(basename "$out" .webm)" >"$meta"
     for seg in "$@"; do
         IFS='|' read -r title start end kind <<<"$seg"
         length=$((end - start))
@@ -96,3 +109,14 @@ done
 mapfile -t segments < <(episode_segments 1)
 segments+=("Chapter 3|${CREDITS_END}|$((CREDITS_END + TAIL))|tail")
 encode "${STAGING_DIR}/${SHOW} - S01E01 - Extended.webm" 1 "${segments[@]}"
+
+# A 116 s cut of S01E03 that only Plex will see (the version-drift row copies it into synth/_plexonly and removes it).
+encode "${STAGING_DIR}/${SHOW} - S01E03 - Plexonly.webm" 3 \
+    "Chapter 1|0|25|chapter" "Intro|25|55|intro" "Chapter 2|55|100|chapter" "Credits|100|116|credits"
+
+# Two versions of one movie (Jellyfin 12.0 alternate versions, Emby version items, one Plex item): same chapters. The
+# title metadata names the version, so the files differ.
+for version in 1080p 720p; do
+    encode "${MOVIE_DIR}/Synth Movie (2023) - ${version}.webm" 1 \
+        "Opening|0|30|chapter" "Story|30|100|chapter" "End Credits|100|120|credits"
+done

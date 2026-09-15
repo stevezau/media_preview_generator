@@ -8,18 +8,22 @@
 #
 # Build the image first (from the repo root):
 #   nice -n 19 docker build --build-arg SETUPTOOLS_SCM_PRETEND_VERSION="$VER" -t media_preview_generator:intro-credits .
-# Then configure it with ./phase1_matrix.py configure.
+# Then configure it with ./phase1_matrix.py configure (phase 2: ./phase2_matrix.py configure).
+#
+# MLAB_DIR sets the lab folder that holds env and synth/ (default: this script's folder); see up.sh.
 set -euo pipefail
 
-readonly LAB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly LAB_DIR="${MLAB_DIR:-$SCRIPT_DIR}"
 readonly IMAGE="${MLAB_APP_IMAGE:-media_preview_generator:intro-credits}"
 readonly ENV_FILE="${LAB_DIR}/env"
 
 export MLAB_MOUNTS_ONLY=1
 # shellcheck source=up.sh
-source "${LAB_DIR}/up.sh"
+source "${SCRIPT_DIR}/up.sh"
 unset MLAB_MOUNTS_ONLY
 
+[[ -f "$ENV_FILE" ]] || { echo "no env file at ${ENV_FILE} (set MLAB_DIR to the lab folder)" >&2; exit 1; }
 if ! grep -q '^MLAB_APP_TOKEN=' "$ENV_FILE"; then
     printf 'MLAB_APP_TOKEN=%s\n' "$(openssl rand -hex 24)" >>"$ENV_FILE"
     chmod 600 "$ENV_FILE"

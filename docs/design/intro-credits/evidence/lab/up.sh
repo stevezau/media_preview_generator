@@ -9,15 +9,29 @@
 #
 # Plex: unclaimed = no Plex Pass = markers are NOT served. To test Plex end to end, get a claim token from
 # https://plex.tv/claim (valid 4 min) and run: PLEX_CLAIM=claim-xxxx ./up.sh recreate
+#
+# MLAB_DIR sets the lab folder that holds env, synth/ and scale_mounts.sh (default: this script's folder). Containers
+# outlive the checkout that created them, so a checkout elsewhere points MLAB_DIR at the long-lived lab folder.
 set -euo pipefail
 
-readonly HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly HERE="${MLAB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+# Bind-mount sources must be absolute, and a lab folder without synth/ or env is the wrong folder: Docker would create
+# the missing mount sources as empty root-owned folders.
+if [[ "$HERE" != /* || ! -d "${HERE}/synth" || ! -f "${HERE}/env" ]]; then
+    echo "not a lab folder: ${HERE} (needs an absolute path with synth/ and env; set MLAB_DIR)" >&2
+    exit 1
+fi
 MV=(-v "/data_16tb2/TV Shows/Rick and Morty (2013) {tvdb-275274}/Season 01:/media/tv/Rick and Morty (2013)/Season 01:ro"
     -v "/data_16tb/TV Shows/South Park (1997) {tvdb-75897}/Season 01:/media/tv/South Park (1997)/Season 01:ro"
     -v "/data_16tb/Movies/Toy Story (1995) {tmdb-862}:/media/movies/Toy Story (1995):ro"
     -v "/data_16tb/Movies/Up (2009) {tmdb-14160}:/media/movies/Up (2009):ro"
     -v "${HERE}/synth/Synth Show (2020):/media/synth/Synth Show (2020):ro"
-    -v "${HERE}/synth/Synth Chapters (2021):/media/synth-chapters/Synth Chapters (2021):ro")
+    -v "${HERE}/synth/Synth Chapters (2021):/media/synth-chapters/Synth Chapters (2021):ro"
+    -v "${HERE}/synth/Synth Audio (2022):/media/synth-audio/Synth Audio (2022):ro"
+    -v "${HERE}/synth/Synth Movie (2023):/media/synth-movies/Synth Movie (2023):ro")
+# A second location of the Synth Chapters library, for Plex only: a version of an episode the app can't read (phase 2
+# version-drift row). The app must never see it, so app.sh doesn't get it.
+PLEXONLY=(-v "${HERE}/synth/_plexonly:/media/plexonly:ro")
 # Phase 1 scale run (Task 20 Step 4): real seasons and movies with truth, picked by `./scale_score.py pick`, which writes
 # the mounts to scale_mounts.sh (git-ignored: it lists real library folders; results/scale/pick.json has each folder's
 # reason). Plex and both Jellyfins get them; Emby doesn't (its Intro & Credits is off until the phase 2 plugin, and
@@ -28,7 +42,9 @@ if [[ -f "${HERE}/scale_mounts.sh" ]]; then
     source "${HERE}/scale_mounts.sh"
 fi
 # Synth folders are mounted one show at a time: synth/_staging (files a test adds later) must stay invisible, and each
-# show belongs to one library only (synth = Synth Show, synth-chapters = synth_chapters.sh output).
+# show belongs to one library only (synth = Synth Show, synth-chapters = synth_chapters.sh output, synth-audio =
+# synth_audio.sh output, synth-movies = the two-version movie from synth_chapters.sh). Run synth_chapters.sh and
+# synth_audio.sh before this script: Docker creates a missing bind source as an empty root-owned folder.
 # app.sh sources this list (MLAB_MOUNTS_ONLY=1) so the app sees every file at the servers' paths.
 # MLAB_MOUNTS_ONLY=1 works only when sourced (`return`); run directly, it is not set.
 [[ "${MLAB_MOUNTS_ONLY:-}" == "1" ]] && return 0
@@ -52,5 +68,5 @@ exists mlab-jf12 || docker run -d --name mlab-jf12 --network mlab --user 1000:10
     -p 127.0.0.1:18098:8096 -v mlab_jf12_config:/config -v mlab_jf12_cache:/cache "${MV[@]}" "${MV_SCALE[@]}" jellyfin/jellyfin:12.0
 exists mlab-plex || docker run -d --name mlab-plex --network mlab -e TZ=UTC -e PLEX_UID=1000 -e PLEX_GID=1000 \
     -e "PLEX_CLAIM=${PLEX_CLAIM:-}" -p 127.0.0.1:32402:32400 -v mlab_plex_config:/config \
-    -v mlab_plex_transcode:/transcode "${MV[@]}" "${MV_SCALE[@]}" plexinc/pms-docker:latest
+    -v mlab_plex_transcode:/transcode "${MV[@]}" "${PLEXONLY[@]}" "${MV_SCALE[@]}" plexinc/pms-docker:latest
 docker ps --filter name=mlab- --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'

@@ -10,7 +10,8 @@ Each row writes results/row-NN.json (git-ignored: evidence/**/*.json) with its r
 from ./env and are scrubbed from everything written or printed. Rows change lab state; phase1-results.md lists the
 order used and how to reset the lab. Row 1 re-evaluates its recorded job while results/row-01.json exists. Row 17 runs
 in two calls (its verify job waits at least 600 s). REEVALUATE=1 re-checks row 7 from its recorded steps.
-MLAB_SHOTS sets where screenshots go.
+MLAB_SHOTS sets where screenshots go. MLAB_DIR sets the lab folder holding env, synth/ and results/ (default: this
+script's folder), so a checkout elsewhere runs against the long-lived lab.
 """
 
 from __future__ import annotations
@@ -31,7 +32,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-LAB = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent
+LAB = Path(os.environ.get("MLAB_DIR") or HERE).resolve()
 RESULTS = LAB / "results"
 APP = "http://127.0.0.1:18080"
 PLEX = "http://127.0.0.1:32402"
@@ -332,7 +334,7 @@ def source_usage() -> dict:
 
 
 def plex_db(sql: str) -> list[list[str]]:
-    out = sh(str(LAB / "plexdb.sh"), "-separator", "\t", sql)
+    out = sh(str(HERE / "plexdb.sh"), "-separator", "\t", sql)
     return [line.split("\t") for line in out.splitlines() if line]
 
 
@@ -715,7 +717,7 @@ def row_13_jellyfin_web_skip() -> dict:
         item = jf_items(sid)[path]
         shot = SHOTS / f"row13-{sid}.png"
         out = subprocess.run(
-            [VENV_PYTHON, str(LAB / "jf_client.py"), item["id"], str(shot), base],
+            [VENV_PYTHON, str(HERE / "jf_client.py"), item["id"], str(shot), base],
             capture_output=True,
             text=True,
             timeout=240,
@@ -1021,16 +1023,52 @@ def evidence_fetch_times(payload: dict) -> dict[str, str]:
     return {e["source"]: e["fetched_at"] for e in payload["evidence"] if e["source"] == "chapters"}
 
 
+# The lab Embys the app can send markers to (phase 2): server id -> (base URL, token key in ./env).
+EMBYS = {"mlab-emby": (EMBY, "EMBY_TOKEN"), "mlab-emby49": ("http://127.0.0.1:18099", "EMBY49_TOKEN")}
+
+
+def marker_embys() -> list[str]:
+    """The lab Embys with Intro & Credits on in the app (none in phase 1's lab)."""
+    _, data = app("GET", "/api/servers")
+    servers = data.get("servers", data) if isinstance(data, dict) else data
+    return [s["id"] for s in servers if s["id"] in EMBYS and (s.get("markers") or {}).get("enabled")]
+
+
+def emby_served(server_id: str, path: str) -> list[dict] | None:
+    """An Emby item's marker chapters (Emby keeps no end), or None when Emby doesn't list the file."""
+    base, key = EMBYS[server_id]
+    query = f"Recursive=true&IncludeItemTypes=Episode,Movie&Fields=Path,Chapters&api_key={ENV[key]}"
+    _, data = http("GET", f"{base}/emby/Items?{query}")
+    item = next((i for i in data["Items"] if i.get("Path") == path), None)
+    if item is None:
+        return None
+    return [
+        {"type": c["MarkerType"], "start": c["StartPositionTicks"] // TICKS_PER_MS, "end": None}
+        for c in item.get("Chapters") or []
+        if c.get("MarkerType") in ("IntroStart", "IntroEnd", "CreditsStart")
+    ]
+
+
 def served_everywhere(path: str) -> dict:
     parts = plex_parts()
     out = {"mlab-plex": plex_served(parts[path]["item"]) if path in parts else None}
     out.update({sid: segs for sid, segs in ((s, jf_state([path])[s][path]) for s in JELLYFINS)})
+    out.update({sid: emby_served(sid, path) for sid in marker_embys()})
     return out
 
 
 def truth_everywhere(episode: int) -> dict:
     t = SYNTH_TRUTH[episode]
+    embys = {
+        sid: [
+            {"type": "IntroStart", "start": t[0], "end": None},
+            {"type": "IntroEnd", "start": t[1], "end": None},
+            {"type": "CreditsStart", "start": t[2], "end": None},
+        ]
+        for sid in marker_embys()
+    }
     return {
+        **embys,
         "mlab-plex": [
             {"type": "credits", "start": t[2], "end": t[3], "final": False},
             {"type": "intro", "start": t[0], "end": t[1], "final": False},
@@ -1096,8 +1134,19 @@ def row_07_file_change() -> dict:
         say(f"  {step}: equals chapters {entry['equals_chapters']}")
         return entry
 
-    def all_written(entry: dict) -> bool:
-        return set(entry["per_server"].values()) == {"markers_written"} and all(entry["equals_chapters"].values())
+    def wrote_what_the_rescan_dropped(rescan: dict, entry: dict) -> bool:
+        # A server whose rescan dropped our markers must report Markers written. One that kept them is rightly Up to date
+        # (or written): the phase 2 lab's Embys don't re-read a file whose mtime alone changed, and Plex keeps them when
+        # its own detection is off (phase 2 row 19 runs this row with it on, and then Plex drops them). Every server
+        # must serve the chapters afterwards.
+        rows = entry["per_server"]
+        dropped = {sid for sid, same in rescan["equals_chapters"].items() if not same}
+        return (
+            bool(dropped)
+            and all(rows.get(sid) == "markers_written" for sid in dropped)
+            and all(rows[sid] in {"markers_written", "markers_up_to_date"} for sid in rows)
+            and all(entry["equals_chapters"].values())
+        )
 
     if os.environ.get("REEVALUATE") and (RESULTS / "row-07.json").exists():
         steps = json.loads((RESULTS / "row-07.json").read_text())["steps"]
@@ -1124,7 +1173,7 @@ def row_07_file_change() -> dict:
             a3["per_server"][sid] == "markers_written" for sid, same in a2["equals_chapters"].items() if not same
         )
         and all(a3["equals_chapters"].values()),
-        "B2 re-probed and wrote all three": b2["reprobed"] and all_written(b2),
+        "B2 re-probed and wrote what the rescan dropped": b2["reprobed"] and wrote_what_the_rescan_dropped(b1, b2),
         "C2 forced restore reported Markers written": all(
             c2["per_server"][sid] == "markers_written" for sid, same in c1["equals_chapters"].items() if not same
         )
@@ -1465,7 +1514,7 @@ def row_10_per_job_pause() -> dict:
 @row(11)
 def row_11_network_share() -> dict:
     """Plex DB on a network share is not reproducible in the lab without root: covered by unit tests only."""
-    repo = LAB.parents[4]
+    repo = HERE.parents[4]
     out = subprocess.run(
         [
             VENV_PYTHON,
