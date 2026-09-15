@@ -48,8 +48,8 @@ MAX_RETRY_FILES = 500
 MIN_VERIFY_DELAY_S = 600
 VERIFY_DELAY_FACTOR = 3
 _FINISHED = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED})
-# Job sources where the user chose the files (API/Start job dialog, Inspector re-detect).
-_USER_PICKED_SOURCES = frozenset({"manual", "inspector"})
+# Job sources where the user chose the files (API/Start job dialog, Inspector re-detect, Season view Publish).
+_USER_PICKED_SOURCES = frozenset({"manual", "inspector", "inspector_season"})
 
 
 def _utcnow() -> datetime:

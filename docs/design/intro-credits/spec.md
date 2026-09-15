@@ -856,3 +856,4 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   undecided file's reason notes the skipped source; Settings shows "Daily limit reached — lookups resume at …"; the log
   line is a WARNING once per source per job. No automatic retry: nothing is stored for a skipped lookup, so the next
   run asks again.
+- 2026-09-15 · Season view Publish queues a NORMAL-priority job of exactly the season's listed episodes (owner)

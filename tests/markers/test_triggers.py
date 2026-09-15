@@ -1,5 +1,6 @@
 """Creating Intro & Credits jobs: the markers switch, the job config, and webhook follow-ups."""
 
+import os
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -590,3 +591,116 @@ class TestRedetect:
             t.join(timeout=5)
         assert len(results) == 2 and results[0] == results[1]
         assert len(self._ic_jobs(jm)) == 1
+
+
+class TestSeasonPublish:
+    """Season view "Publish": one NORMAL-priority, not forced job over the season group's episodes while one is queued
+    or running."""
+
+    @pytest.fixture
+    def jm(self, tmp_path, monkeypatch):
+        from media_preview_generator.web.jobs import JobManager
+
+        jm = JobManager(config_dir=str(tmp_path / "config"))
+        monkeypatch.setattr(triggers, "get_job_manager", lambda: jm)
+        with patch.object(triggers, "start_intro_credits_job_async"):
+            yield jm
+
+    @staticmethod
+    def _files(folder, *names):
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (folder / name).write_bytes(b"x")
+        return [str(folder / name) for name in names]
+
+    @pytest.fixture
+    def season(self, tmp_path):
+        folder = tmp_path / "tv" / "Show" / "Season 01"
+        return self._files(folder, "Show - S01E01.mkv", "Show - S01E02.mkv", "Show - S01E03.mkv")
+
+    def _ic_jobs(self, jm):
+        return [j for j in jm.get_all_jobs() if j.kind == JOB_KIND_INTRO_CREDITS]
+
+    def test_creates_a_normal_priority_job_for_the_seasons_episodes(self, jm, season):
+        job_id = triggers.submit_season_publish(season[1])
+        (job,) = self._ic_jobs(jm)
+        assert (job.id, job.priority, job.library_name) == (job_id, 2, "Intro & Credits: Show · Season 1")
+        assert job.config["file_paths"] == season
+        assert job.config["source"] == "inspector_season"
+        assert job.config["force"] is False
+
+    def test_a_flat_folder_queues_only_the_asked_seasons_episodes(self, jm, tmp_path):
+        folder = tmp_path / "tv" / "Flat Show"
+        s01 = self._files(folder, "Flat Show - S01E01.mkv", "Flat Show - S01E02.mkv")
+        s02 = self._files(folder, "Flat Show - S02E01.mkv", "Flat Show - S02E02.mkv")
+        self._files(folder, "Flat Show - S01E01-trailer.mkv")
+
+        first = triggers.submit_season_publish(s01[1])
+        second = triggers.submit_season_publish(s02[0])
+
+        assert jm.get_job(first).config["file_paths"] == s01
+        assert jm.get_job(second).config["file_paths"] == s02
+        assert second != first
+        # Named by the parsed season, so the two jobs of one folder can be told apart.
+        assert jm.get_job(first).library_name == "Intro & Credits: Flat Show · Season 1"
+        assert jm.get_job(second).library_name == "Intro & Credits: Flat Show · Season 2"
+
+    @pytest.mark.parametrize(
+        ("folder", "name", "expected"),
+        [
+            ("Specials", "Show - S00E01.mkv", "Intro & Credits: Show · Specials"),
+            ("Season 00", "Show - S00E01.mkv", "Intro & Credits: Show · Specials"),
+            ("Series 3", "Show - S03E01.mkv", "Intro & Credits: Show · Season 3"),
+            (None, "Show - S00E01.mkv", "Intro & Credits: Show · Specials"),  # specials in a flat show folder
+        ],
+        ids=["specials-folder", "season-00-folder", "series-folder", "flat-specials"],
+    )
+    def test_job_name_is_the_show_and_the_parsed_season(self, jm, tmp_path, folder, name, expected):
+        show = tmp_path / "tv" / "Show"
+        (episode,) = self._files(show / folder if folder else show, name)
+        assert jm.get_job(triggers.submit_season_publish(episode)).library_name == expected
+
+    @pytest.mark.parametrize("state", ["pending", "running", "paused"])
+    def test_any_episode_of_the_season_clicked_again_while_queued_or_running_returns_the_same_job(
+        self, jm, season, state
+    ):
+        first = triggers.submit_season_publish(season[0])
+        if state != "pending":
+            jm.start_job(first)
+        if state == "paused":
+            jm.request_pause(first)
+        assert triggers.submit_season_publish(season[2]) == first
+        assert len(self._ic_jobs(jm)) == 1
+
+    def test_a_finished_job_is_not_reused(self, jm, season):
+        first = triggers.submit_season_publish(season[0])
+        jm.start_job(first)
+        jm.complete_job(first)
+        assert triggers.submit_season_publish(season[0]) != first
+
+    def test_a_season_whose_episodes_changed_since_gets_a_new_job(self, jm, season, tmp_path):
+        first = triggers.submit_season_publish(season[0])
+        (e04,) = self._files(tmp_path / "tv" / "Show" / "Season 01", "Show - S01E04.mkv")
+        second = triggers.submit_season_publish(season[0])
+        assert second != first
+        assert jm.get_job(second).config["file_paths"] == [*season, e04]
+
+    @pytest.mark.parametrize(
+        ("source", "paths", "force"),
+        [
+            ("manual", "season", False),  # an API job for the same files
+            ("inspector", "season", True),  # a re-detect
+            ("inspector_season", "folder", False),  # an older publish of the whole folder
+            ("inspector_season", "fewer", False),  # the season before an episode arrived
+        ],
+        ids=["api-job", "redetect", "folder", "other-paths"],
+    )
+    def test_other_queued_jobs_are_not_reused(self, jm, season, source, paths, force):
+        file_paths = {"season": season, "folder": [os.path.dirname(season[0])], "fewer": season[:2]}[paths]
+        config = {"kind": JOB_KIND_INTRO_CREDITS, "source": source, "file_paths": file_paths, "force": force}
+        existing = jm.create_job(library_name="x", kind=JOB_KIND_INTRO_CREDITS, config=config)
+        assert triggers.submit_season_publish(season[0]) != existing.id
+
+    def test_a_preview_job_is_never_reused(self, jm, season):
+        preview = jm.create_job(library_name="x", config={"source": "inspector_season", "file_paths": season})
+        assert triggers.submit_season_publish(season[0]) != preview.id

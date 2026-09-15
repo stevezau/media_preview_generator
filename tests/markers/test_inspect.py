@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -742,6 +744,7 @@ def test_known_file_decisions_and_evidence(store, factory):
             "confidence": 1.0,
             "detail": "",
             "fetched_at": FETCHED,
+            "label": "Opening",
         },
         {
             "source": "theintrodb",
@@ -752,6 +755,7 @@ def test_known_file_decisions_and_evidence(store, factory):
             "confidence": None,
             "detail": "no data",
             "fetched_at": FETCHED,
+            "label": "",
         },
     ]
 
@@ -1675,3 +1679,169 @@ def test_forget_capability_uses_the_shared_cache(factory):
     inspect.forget_capability("jf")
     inspect.server_status_payload(MagicMock(), cfg)
     assert len(factory.calls) == 2
+
+
+# --------------------------------------------------------------------------- season_payload
+
+
+class TestSeasonPayload:
+    @pytest.fixture
+    def season(self, tmp_path, store):
+        folder = tmp_path / "media" / "tv" / "Show (2020) {tvdb-1}" / "Season 01"
+        folder.mkdir(parents=True)
+        paths = []
+        for e in (1, 2, 3):
+            p = folder / f"Show (2020) - S01E{e:02d}.mkv"
+            p.write_bytes(b"x")
+            paths.append(str(p))
+        (folder / "Show (2020) - S01E01-sample.mkv").write_bytes(b"x")
+        root = str(tmp_path / "media")
+        reg = _registry(
+            server_config("plex-1", ServerType.PLEX, root=root),
+            server_config("jf-1", ServerType.JELLYFIN, root=root, markers={"enabled": False, "library_ids": None}),
+        )
+        return SimpleNamespace(folder=str(folder), paths=paths, root=root, reg=reg, store=store)
+
+    @staticmethod
+    def _decide(store, path, intro=None, *, credits_review=False, evidence=()):
+        st = os.stat(path)
+        rec = store.upsert_file(
+            FileIdentity(path, st.st_size, st.st_mtime_ns),
+            duration_ms=DURATION,
+            season_key=os.path.dirname(path),
+            is_movie=False,
+        )
+        for source in (Source.SEASON_AUDIO, Source.SKIPDB):
+            store.replace_evidence(rec.id, source, [c for c in evidence if c.source is source])
+        server = [c for c in evidence if c.source is Source.SERVER_MARKERS]
+        store.replace_evidence(rec.id, Source.SERVER_MARKERS, server, origin="plex-1")
+        credits = (
+            TypeDecision(T.CREDITS, DecisionStatus.NEEDS_REVIEW, None, Marker(T.CREDITS, 1_296_000, DURATION, ("skipdb",)), "disagree")
+            if credits_review
+            else _none(T.CREDITS)
+        )  # fmt: skip
+        store.save_decisions(
+            rec.id,
+            {T.INTRO: _decided(intro) if intro else _none(T.INTRO), T.CREDITS: credits},
+            settings_fingerprint="f",
+        )
+        return rec
+
+    def test_lists_the_folders_episodes_with_decisions_chips_dots_and_counts(self, season):
+        intro = Marker(T.INTRO, 127_000, 157_000, ("season_audio", "skipdb"))
+        audio = Candidate(T.INTRO, 127_000, 157_000, Source.SEASON_AUDIO, 1.0, "2/2")
+        skip = Candidate(T.INTRO, 128_000, 157_500, Source.SKIPDB, 0.9)
+        on_plex = Candidate(T.INTRO, 76_000, 112_000, Source.SERVER_MARKERS, 1.0)
+        e1 = self._decide(season.store, season.paths[0], intro, evidence=(audio, skip, on_plex))
+        season.store.set_publish_state(
+            e1.id, "plex-1", item_id="7", markers=[intro], status="written", message="1 marker(s)"
+        )
+        e2 = self._decide(season.store, season.paths[1], intro, credits_review=True, evidence=(audio,))
+        season.store.set_publish_state(
+            e2.id, "plex-1", item_id="8", markers=None, status="waiting", message="Not in this server's library yet"
+        )
+
+        payload = inspect.season_payload(season.paths[1], registry=season.reg, store=season.store)
+
+        assert payload["folder"] == season.folder
+        assert (payload["show"], payload["season"]) == ("Show (2020) {tvdb-1}", "Season 01")
+        assert payload["servers"] == [
+            {"server_id": "plex-1", "server_name": "PLEX-1", "server_type": "plex", "markers_enabled": True},
+            {"server_id": "jf-1", "server_name": "JF-1", "server_type": "jellyfin", "markers_enabled": False},
+        ]
+        eps = payload["episodes"]
+        assert [e["episode"] for e in eps] == ["E01", "E02", "E03"]  # the -sample extra isn't listed
+        assert [(e["path"], e["name"]) for e in eps] == [(p, os.path.basename(p)) for p in season.paths]
+        assert eps[0]["intro"] == {
+            "status": "decided",
+            "reason": "agreed",
+            "marker": {"type": "intro", "start_ms": 127_000, "end_ms": 157_000, "decided_by": ["season_audio", "skipdb"], "locked": False},
+            "proposed": None,
+        }  # fmt: skip
+        assert (eps[0]["known"], eps[0]["duration_ms"]) == (True, DURATION)
+        # Markers already on a server are the dots, not chips; only season audio carries its "2/2" label.
+        assert eps[0]["evidence"] == [{"source": "season_audio", "label": "2/2"}, {"source": "skipdb", "label": ""}]
+        assert eps[0]["servers"] == {
+            "plex-1": {"state": "ok", "message": "1 marker(s)"},
+            "jf-1": {"state": "off", "message": ""},
+        }
+        assert eps[1]["credits"] == {
+            "status": "needs_review",
+            "reason": "disagree",
+            "marker": None,
+            "proposed": {"start_ms": 1_296_000, "end_ms": DURATION},
+        }
+        assert eps[1]["servers"]["plex-1"] == {"state": "waiting", "message": "Not in this server's library yet"}
+        assert (eps[2]["known"], eps[2]["duration_ms"], eps[2]["evidence"]) == (False, None, [])
+        assert eps[2]["intro"] == {"status": None, "reason": "", "marker": None, "proposed": None}
+        assert eps[2]["servers"]["plex-1"] == {"state": "none", "message": ""}
+        assert payload["counts"] == {"episodes": 3, "ready": 1, "needs_review": 1}
+
+    @pytest.mark.parametrize(
+        ("status", "markers", "state"),
+        [("written", [], "none"), ("failed", None, "failed"), ("skipped", None, "skipped")],
+    )
+    def test_dot_states(self, season, status, markers, state):
+        rec = self._decide(season.store, season.paths[0])
+        season.store.set_publish_state(rec.id, "plex-1", item_id="7", markers=markers, status=status, message="m")
+        payload = inspect.season_payload(season.paths[0], registry=season.reg, store=season.store)
+        assert payload["episodes"][0]["servers"]["plex-1"] == {"state": state, "message": "m"}
+        # Known, but nothing decided: not ready.
+        assert payload["counts"] == {"episodes": 3, "ready": 0, "needs_review": 0}
+
+    def test_a_failed_publish_keeps_its_last_markers_but_is_failed(self, season):
+        intro = Marker(T.INTRO, 127_000, 157_000, ("skipdb",))
+        rec = self._decide(season.store, season.paths[0], intro)
+        season.store.set_publish_state(rec.id, "plex-1", item_id="7", markers=[intro], status="written", message="1")
+        season.store.set_publish_state(rec.id, "plex-1", item_id="7", markers=None, status="failed", message="boom")
+        payload = inspect.season_payload(season.paths[0], registry=season.reg, store=season.store)
+        assert payload["episodes"][0]["servers"]["plex-1"] == {"state": "failed", "message": "boom"}
+
+    def test_a_server_turned_off_on_the_servers_page_isnt_listed(self, season):
+        # Like the Inspector's episode tab: a disabled server owns nothing and is never shown.
+        season.reg.configs_by_id["plex-1"] = server_config("plex-1", ServerType.PLEX, root=season.root, enabled=False)
+        payload = inspect.season_payload(season.paths[0], registry=season.reg, store=season.store)
+        assert [s["server_id"] for s in payload["servers"]] == ["jf-1"]
+        assert {tuple(e["servers"]) for e in payload["episodes"]} == {("jf-1",)}
+
+    def test_a_library_not_selected_for_intro_and_credits_is_off(self, season):
+        markers = {"enabled": True, "library_ids": ["other"], "plex": {"db_write_confirmed_at": CONFIRMED}}
+        season.reg.configs_by_id["plex-1"] = server_config("plex-1", ServerType.PLEX, root=season.root, markers=markers)
+        rec = self._decide(season.store, season.paths[0])
+        season.store.set_publish_state(rec.id, "plex-1", item_id="7", markers=[INTRO], status="written", message="1")
+        payload = inspect.season_payload(season.paths[0], registry=season.reg, store=season.store)
+        assert payload["servers"][0] == {
+            "server_id": "plex-1", "server_name": "PLEX-1", "server_type": "plex", "markers_enabled": False,
+        }  # fmt: skip
+        assert {e["servers"]["plex-1"]["state"] for e in payload["episodes"]} == {"off"}
+
+    def test_an_episode_a_server_excludes_is_off_there_only(self, season):
+        excluded = [{"value": season.paths[1], "type": "path"}]
+        season.reg.configs_by_id["plex-1"] = server_config(
+            "plex-1", ServerType.PLEX, root=season.root, exclude_paths=excluded
+        )
+        payload = inspect.season_payload(season.paths[0], registry=season.reg, store=season.store)
+        assert [e["servers"]["plex-1"]["state"] for e in payload["episodes"]] == ["none", "off", "none"]
+
+    def test_chips_skip_markers_on_servers_and_types_the_view_doesnt_show(self, season):
+        st = os.stat(season.paths[0])
+        rec = season.store.upsert_file(
+            FileIdentity(season.paths[0], st.st_size, st.st_mtime_ns), duration_ms=DURATION, season_key=None, is_movie=False
+        )  # fmt: skip
+        store = season.store
+        store.replace_evidence(
+            rec.id, Source.CHAPTERS, [Candidate(T.INTRO, 1_000, 30_000, Source.CHAPTERS, origin="Opening")]
+        )
+        hint = Candidate(T.INTRO, 1_000, 30_000, Source.SEASON_AUDIO_PREVIOUS, 1.0, "4/4")
+        store.replace_evidence(rec.id, Source.SEASON_AUDIO, [])
+        store.replace_evidence(rec.id, Source.SEASON_AUDIO_PREVIOUS, [hint])
+        store.replace_evidence(rec.id, Source.SKIPDB, [Candidate(T.RECAP, 0, 9_000, Source.SKIPDB)])
+        store.replace_evidence(rec.id, Source.THEINTRODB, [], detail="no data")
+        imported = Candidate(T.INTRO, 1_000, 30_000, Source.SERVER_MARKERS_IMPORTED)
+        store.replace_evidence(rec.id, Source.SERVER_MARKERS_IMPORTED, [imported], origin="jf-1")
+        payload = inspect.season_payload(season.paths[0], registry=season.reg, store=store)
+        # The chapter's title isn't a chip label, the previous season's hint keeps its "4/4".
+        assert payload["episodes"][0]["evidence"] == [
+            {"source": "chapters", "label": ""},
+            {"source": "season_audio_previous", "label": "4/4"},
+        ]

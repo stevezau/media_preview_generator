@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from media_preview_generator.markers.external_ids import ids_from_path, ids_from_server_dict, is_extra, merge_ids
+from media_preview_generator.markers.external_ids import (
+    ids_from_path,
+    ids_from_server_dict,
+    is_extra,
+    is_season_folder,
+    merge_ids,
+)
 from media_preview_generator.markers.models import MediaIds
 
 
@@ -435,6 +441,24 @@ class TestIsExtra:
     )
     def test_features_and_episodes_are_not_extras(self, path):
         assert is_extra(path) is False
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("Season 01", True),
+        ("season1", True),
+        ("Series 3", True),
+        ("Staffel 2", True),
+        ("Saison 4", True),
+        ("Specials", True),
+        ("Rick and Morty (2013) {tvdb-275274}", False),
+        ("Season 01 Extras", False),
+        ("", False),
+    ],
+)
+def test_is_season_folder(name, expected):
+    assert is_season_folder(name) is expected
 
 
 class TestIdsFromServerDict:

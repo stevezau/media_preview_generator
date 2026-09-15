@@ -1,4 +1,5 @@
-"""Payloads for the server Edit tab (Intro & Credits status) and the Inspector tab (one file). No Flask here."""
+"""Payloads for the server Edit tab (Intro & Credits status) and the Inspector's Intro & Credits tab (one file, or the
+Season view of its season). No Flask here."""
 
 from __future__ import annotations
 
@@ -16,8 +17,10 @@ from loguru import logger
 
 from ..servers.base import ServerConfig, ServerType
 from ..servers.ownership import OwnershipMatch, apply_path_mappings
+from .audio.season import season_group
 from .decide import DecisionStatus, shortened_by
-from .models import Marker, MarkerType
+from .external_ids import ids_from_path
+from .models import SERVER_SOURCES, Marker, MarkerType, Source
 from .outcomes import kept_note, with_kept_note
 from .ownership import allowed_matches, owning_servers
 from .publishers.base import Capability, versions_agree
@@ -611,6 +614,22 @@ def _shortened_by(decision: Any, registry: Any) -> dict | None:
     return {"servers": names}
 
 
+def _decision_dict(decision: Any, marker: Marker | None) -> dict:
+    """One type's stored decision in the Inspector's shape (``status`` None when nothing is stored)."""
+    return {
+        "status": decision.status.value if decision else None,
+        "reason": decision.reason if decision else "",
+        "marker": {**_marker_dict(marker), "decided_by": list(marker.decided_by), "locked": marker.locked}
+        if marker
+        else None,
+        "proposed": (
+            {"start_ms": decision.proposed_start_ms, "end_ms": decision.proposed_end_ms}
+            if decision and decision.proposed_start_ms is not None
+            else None
+        ),
+    }
+
+
 def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> dict:
     """Decisions, evidence and per-server state for one file (the Inspector's Intro & Credits tab).
 
@@ -647,16 +666,8 @@ def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> d
     }
     for mtype in MarkerType:
         d = decisions.get(mtype)
-        m = markers.get(mtype)
         payload["decisions"][mtype.value] = {
-            "status": d.status.value if d else None,
-            "reason": d.reason if d else "",
-            "marker": {**_marker_dict(m), "decided_by": list(m.decided_by), "locked": m.locked} if m else None,
-            "proposed": (
-                {"start_ms": d.proposed_start_ms, "end_ms": d.proposed_end_ms}
-                if d and d.proposed_start_ms is not None
-                else None
-            ),
+            **_decision_dict(d, markers.get(mtype)),
             "shortened_by": _shortened_by(d, registry) if d else None,
         }
     if rec:
@@ -670,6 +681,7 @@ def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> d
                 "confidence": r.confidence,
                 "detail": r.detail,
                 "fetched_at": r.fetched_at,
+                "label": r.label,
             }
             for r in store.evidence_rows(rec.id)
         ]
@@ -682,3 +694,104 @@ def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> d
             row = _degraded_row(cfg, exc)
         payload["servers"].append(row)
     return payload
+
+
+_SEASON_TYPES = (MarkerType.INTRO, MarkerType.CREDITS)
+_SEASON_AUDIO_SOURCES = frozenset({Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS})
+_DOT_STATES = {"written": "ok", "waiting": "waiting", "failed": "failed", "skipped": "skipped"}
+
+
+def _episode_label(path: str) -> str | None:
+    ids = ids_from_path(path)
+    return f"E{ids.episode:02d}" if ids.is_episode and ids.episode is not None else None
+
+
+def _chips(rows: list[Any]) -> list[dict]:
+    """Evidence chips: each source with intro or credits evidence, once, in stored order.
+
+    Markers already on servers are the dots, not chips. Only season audio's label ("10/10") is shown; a chapter title
+    belongs to the episode tab.
+    """
+    chips: dict[str, str] = {}
+    for row in rows:
+        if row.type in _SEASON_TYPES and row.source not in SERVER_SOURCES:
+            chips.setdefault(row.source.value, row.label if row.source in _SEASON_AUDIO_SOURCES else "")
+    return [{"source": source, "label": label} for source, label in chips.items()]
+
+
+def _dot(cfg: ServerConfig, matches: list[OwnershipMatch], rec: FileRecord | None, store: MarkerStore) -> dict:
+    """One server's dot for one episode, from its last publish there."""
+    if not allowed_matches(cfg, matches):
+        return {"state": "off", "message": ""}
+    row = store.get_publish_state(rec.id, cfg.id) if rec else None
+    if row is None:
+        return {"state": "none", "message": ""}
+    state = _DOT_STATES.get(row.status, "none")
+    if state == "ok" and not row.markers:
+        state = "none"
+    return {"state": state, "message": row.message}
+
+
+def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> dict:
+    """The Season view: every episode of a file's season group, from markers.db only (no live server reads).
+
+    Args:
+        canonical_path: An episode's local path (already validated by the caller).
+        registry: The ``ServerRegistry``.
+        store: The markers store.
+
+    Returns:
+        ``folder``, ``show``, ``season`` (folder names), ``servers`` (the enabled servers owning the asked file, in
+        registry order, with ``markers_enabled``: Intro & Credits on there and its library selected), ``episodes``
+        (the season group's files, sorted; each with ``path``, ``name``, ``episode`` "E01", ``known``, ``duration_ms``,
+        ``intro`` and ``credits`` in ``item_payload``'s decision shape without ``shortened_by``, ``evidence`` chips
+        ``{source, label}``, and ``servers`` dots ``{server_id: {state, message}}``: ``off`` (Intro & Credits off
+        there, or this episode's library not selected or excluded), ``ok`` (last publish wrote markers of ours),
+        ``none`` (written with nothing of ours, or never published), ``waiting``, ``failed`` or ``skipped``) and
+        ``counts`` (``episodes``; ``ready``: at least one decided marker and no type in Needs review;
+        ``needs_review``).
+    """
+    group = season_group(canonical_path)
+    owners = list(_owners(canonical_path, registry))
+    servers = [
+        {
+            "server_id": cfg.id,
+            "server_name": cfg.name,
+            "server_type": cfg.type.value,
+            "markers_enabled": bool(allowed_matches(cfg, matches)),
+        }
+        for cfg, _server, matches in owners
+    ]
+    episodes, ready, review = [], 0, 0
+    for path in group.episodes:
+        rec = store.get_file(path)
+        decisions = store.get_decisions(rec.id) if rec else {}
+        markers = store.get_markers(rec.id) if rec else {}
+        types = {mtype.value: _decision_dict(decisions.get(mtype), markers.get(mtype)) for mtype in _SEASON_TYPES}
+        in_review = any(t["status"] == DecisionStatus.NEEDS_REVIEW.value for t in types.values())
+        review += int(in_review)
+        ready += int(not in_review and any(t["marker"] for t in types.values()))
+        # Per episode: a server's exclude rules can leave out single files.
+        matches_by_server = {cfg.id: matches for cfg, _server, matches in _owners(path, registry)}
+        episodes.append(
+            {
+                "path": path,
+                "name": os.path.basename(path),
+                "episode": _episode_label(path),
+                "known": rec is not None,
+                "duration_ms": rec.duration_ms if rec else None,
+                **types,
+                "evidence": _chips(store.evidence_rows(rec.id)) if rec else [],
+                "servers": {
+                    cfg.id: _dot(cfg, matches_by_server.get(cfg.id, []), rec, store) for cfg, _server, _m in owners
+                },
+            }
+        )
+    return {
+        "folder": group.folder,
+        "show": os.path.basename(os.path.dirname(group.folder)),
+        "season": os.path.basename(group.folder),
+        "servers": servers,
+        "episodes": episodes,
+        "counts": {"episodes": len(episodes), "ready": ready, "needs_review": review},
+    }

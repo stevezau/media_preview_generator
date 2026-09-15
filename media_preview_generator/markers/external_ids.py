@@ -70,6 +70,18 @@ def _is_extra(stem: str, folders: list[str]) -> bool:
     return any(folder.strip().lower() in _EXTRAS_FOLDER_NAMES for folder in folders[-1:])
 
 
+def is_season_folder(name: str) -> bool:
+    """Whether a folder name is a season folder: ``Season 01``, ``Series 2``, ``Staffel 3``, ``Saison 4`` or ``Specials``.
+
+    Args:
+        name: One folder name.
+
+    Returns:
+        True for a season folder.
+    """
+    return bool(_SEASON_DIR_RE.match(name))
+
+
 def is_extra(canonical_path: str) -> bool:
     """Whether a file is Plex-style extra content rather than an episode or a feature.
 
@@ -119,7 +131,7 @@ def ids_from_path(canonical_path: str) -> MediaIds:
         season, episode = int(m.group(1)), int(m.group(2))
         show_folder: str | None = None
         if folders:
-            if _SEASON_DIR_RE.match(folders[-1]):
+            if is_season_folder(folders[-1]):
                 show_folder = folders[-2] if len(folders) >= 2 else None
             else:
                 show_folder = folders[-1]

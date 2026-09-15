@@ -186,7 +186,10 @@ class FileRecord:
 
 @dataclass(frozen=True)
 class EvidenceRow:
-    """One stored evidence row; ``type`` is None for "looked it up, nothing there"."""
+    """One stored evidence row; ``type`` is None for "looked it up, nothing there".
+
+    ``label`` is the candidate's own title, e.g. a chapter name or season audio's "10/10" (empty when it has none).
+    """
 
     source: Source
     origin: str
@@ -196,6 +199,7 @@ class EvidenceRow:
     confidence: float | None
     detail: str
     fetched_at: str
+    label: str = ""
 
 
 @dataclass(frozen=True)
@@ -619,6 +623,7 @@ class MarkerStore:
                 confidence=r["confidence"],
                 detail=r["detail"],
                 fetched_at=r["fetched_at"],
+                label=r["label"] or "",
             )
             for r in self._evidence_query(file_id)
         ]

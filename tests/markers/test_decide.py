@@ -1707,6 +1707,10 @@ _REF_SERVER = (S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED)
 # not trusted alone yet.
 _REF_AGREEMENT_ONLY = (*_REF_SERVER, S.INTRODB, S.THEINTRODB, S.SEASON_AUDIO, S.SEASON_AUDIO_PREVIOUS)
 _REF_LONG_INTRO_CHAPTER = "Intro chapter is much longer than the rest of the season's"
+_REF_AUDIO = (S.SEASON_AUDIO, S.SEASON_AUDIO_PREVIOUS)
+_REF_AUDIO_WITH_SERVER = (
+    "Season audio and a server's own marker agree, but both come from matching audio; needs another source"
+)
 
 
 def _ref_group(source):
@@ -1898,10 +1902,16 @@ def _ref_decide_type(mtype, cands, x):
                 _ref_group(a.source) != _ref_group(b.source) and not _ref_agree(a, b, d)
                 for a, b in itertools.combinations(sane, 2)
             )
-            return review(
-                _ref_own_marker(ranked[0], x),
-                f"sources disagree: {', '.join(groups)}" if disagree else "sources don't agree yet",
+            kinds = {c.source for c in sane}
+            # ruling G3 again: only season audio and markers already on servers, and they agree
+            audio_with_server = (
+                kinds <= {*_REF_AUDIO, *_REF_SERVER} and kinds & set(_REF_AUDIO) and kinds & set(_REF_SERVER)
             )
+            if disagree:
+                reason = f"sources disagree: {', '.join(groups)}"
+            else:
+                reason = _REF_AUDIO_WITH_SERVER if audio_with_server else "sources don't agree yet"
+            return review(_ref_own_marker(ranked[0], x), reason)
         if not all(_ref_agree(a, b, d) for a, b in itertools.combinations(sane, 2)):
             return review(_ref_own_marker(proposal, x), "source disagrees with itself")
         result, _ = _ref_shorter(mtype, _ref_value(proposal, d), sane, x, {proposal.source})
@@ -2007,6 +2017,7 @@ _EVERY_REASON = (
     "intro and recap overlap",
     "preview overlaps credits",
     _REF_LONG_INTRO_CHAPTER,
+    _REF_AUDIO_WITH_SERVER,
 )
 
 
@@ -2181,6 +2192,27 @@ class TestSeasonAudioSources:
         ]
         d = decide(c, self._ctx(publish_when), {})[MarkerType.INTRO]
         assert (d.status, d.marker) == (DecisionStatus.NEEDS_REVIEW, None)
+        # Said plainly: "sources don't agree yet" would be wrong, they do agree.
+        assert d.reason == (
+            "Season audio and a server's own marker agree, but both come from matching audio; needs another source"
+        )
+
+    @pytest.mark.parametrize(
+        ("others", "reason"),
+        [
+            ([], "sources don't agree yet"),  # season audio alone (ruling R2)
+            ([(S.SEASON_AUDIO_PREVIOUS, 126_500)], "sources don't agree yet"),  # this season's audio and the hint
+            ([(S.SERVER_MARKERS, 140_000)], "sources disagree: season_audio, server_markers"),
+        ],
+        ids=["alone", "with-the-hint", "server-disagrees"],
+    )
+    def test_other_audio_reviews_keep_their_reasons(self, others, reason):
+        c = [
+            Candidate(MarkerType.INTRO, 126_000, 157_000, S.SEASON_AUDIO, 1.0, "9/9"),
+            *(Candidate(MarkerType.INTRO, start, start + 31_000, source, 1.0, "x") for source, start in others),
+        ]
+        d = decide(c, self._ctx("medium"), {})[MarkerType.INTRO]
+        assert (d.status, d.reason) == (DecisionStatus.NEEDS_REVIEW, reason)
 
     def test_season_audio_and_markers_on_servers_publish_once_an_outside_source_agrees(self):
         c = [

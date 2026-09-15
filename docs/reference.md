@@ -380,8 +380,11 @@ is `markers_skipped` before it is probed or looked up, whether it came from a fo
 | GET | `/api/markers/sources/usage` | Today's online-lookup usage per source |
 | GET | `/api/markers/item` | Inspector data for one file |
 | POST | `/api/markers/item/redetect` | Re-run Intro & Credits for one file, asking every source again |
+| GET | `/api/markers/season` | Inspector Season view data for one episode's season |
+| POST | `/api/markers/season/publish` | Queue an Intro & Credits job for the episodes of one episode's season |
+| GET | `/api/markers/sources/local` | Whether season audio matching can run in this container |
 
-All five require the same `X-Auth-Token` / `Authorization: Bearer` auth as the rest of the API. `POST
+All of them require the same `X-Auth-Token` / `Authorization: Bearer` auth as the rest of the API. `POST
 /api/markers/jobs` is CSRF-exempt (like `POST /api/jobs`) so token-authenticated scripts can call it directly without
 a browser session.
 
@@ -419,7 +422,7 @@ reset header (TheIntroDB's can't be trusted — see `ratelimit.py`).
 **Query:** either `path` (a file inside a server library), or `server_id` + `item_id`.
 
 **Response:** `200` with `known`, `canonical_path`, `duration_ms`, `is_movie`, `decisions` (by marker type),
-`evidence` rows, and `servers` (one row per owning server: `current` markers as read live, `published` markers that
+`evidence` rows (each with its `label`: a chapter's title, season audio's `"10/10"`, or `""`), and `servers` (one row per owning server: `current` markers as read live, `published` markers that
 are ours, `plan` — `will_add` / `will_replace` / `will_remove` / `up_to_date` / `waiting` / `keeps_plex` (Plex's own
 detection replaced ours and `on_plex_redetect` is `keep_plex`) / `keeps_emby` (the same for Emby and `keep_emby`) /
 `not_enabled` / `nothing_to_publish` / `unknown` — with `plan_reason` (names the types the server keeps, e.g. "Keeping
@@ -440,6 +443,47 @@ server is disabled. `500` with a JSON error when the file's data can't be built.
 re-detect queued or running, that job's id is returned instead of starting a second one (a double-click, or clicking
 again before the first finishes, doesn't spend the online sources' daily budget twice). `400` when the path isn't a
 file inside a server library. `503` when the config directory isn't writable.
+
+#### GET /api/markers/season
+
+**Query:** `path` (a TV episode file inside a server library; any episode of the season).
+
+Read from this app's own marker database only — no server is contacted, so a whole season is one quick request (the
+per-episode `GET /api/markers/item` stays the place for what a server shows right now).
+
+**Response:** `200` with:
+
+- `folder`, `show`, `season` — the season folder and the show and season folder names.
+- `servers` — the enabled servers holding the episode, in server order: `server_id`, `server_name`, `server_type`,
+  `markers_enabled` (Intro & Credits is on there and this library is selected).
+- `episodes` — the episodes matched as one season (same folder and season number; at most the 40 nearest in a flat
+  folder of hundreds; extras left out), each with `path`, `name`, `episode` (`"E01"`), `known` (the app has looked at
+  it), `duration_ms`, `intro` and `credits` (`{status, reason, marker, proposed}` as in `GET /api/markers/item`),
+  `evidence` chips (`[{source, label}]`: the sources with intro or credits evidence, markers already on servers left
+  out; only season audio has a `label`, e.g. `"10/10"`) and `servers` dots (`{server_id: {state, message}}`, `state`
+  one of `ok` — last publish wrote our markers, `none` — nothing of ours there or never published, `waiting`,
+  `failed`, `skipped`, or `off` — Intro & Credits off there, or this episode's library isn't selected or is excluded).
+- `counts` — `episodes`, `ready` (at least one decided marker and nothing in Needs review), `needs_review`.
+
+`400` when the path isn't a file inside a server library, or isn't a TV episode (`SxxEyy` in its name). `500` with a
+JSON error when the data can't be built.
+
+#### POST /api/markers/season/publish
+
+**Request:** `{"path"}` — any episode of the season.
+
+**Response:** `202` with `{"job_id"}` — a NORMAL-priority, not forced Intro & Credits job named "Intro & Credits:
+<show> · Season N" (or "· Specials") for exactly the episodes `GET /api/markers/season` lists for that path (same
+folder and season number, at most the 40 nearest), so a folder holding several seasons only sends this one: decided
+episodes are sent to every server that doesn't show them yet, undecided ones are checked again. While a Publish of the
+same episodes is still queued or running, its id is returned instead of starting a second one. `400` when the path
+isn't a TV episode inside a server library. `503` when the config directory isn't writable.
+
+#### GET /api/markers/sources/local
+
+**Response:** `200` with `{"season_audio": {"available", "ffmpeg", "message"}}` — season audio matching needs an
+ffmpeg with the chromaprint muxer (jellyfin-ffmpeg in the amd64 image; the arm64 image has none). `ffmpeg` is the
+binary found (`null` when none), and `message` says why it isn't available (`""` when it is).
 
 > [!NOTE]
 > There is no separate "install the Jellyfin plugin" route for Intro & Credits — the Edit tab's Install/Update button

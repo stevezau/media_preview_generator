@@ -53,6 +53,9 @@ _AGREEMENT_ONLY = SERVER_SOURCES | {
 # Season audio doesn't confirm markers already on a server on its own: a server's own intro detection matches audio across
 # episodes too (ruling G3, precision first). Agreement needs a source outside these.
 _AUDIO_OR_SERVER = SERVER_SOURCES | {Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}
+SEASON_AUDIO_WITH_SERVER_REASON = (
+    "Season audio and a server's own marker agree, but both come from matching audio; needs another source"
+)
 _START_SEGMENTS = (MarkerType.INTRO, MarkerType.RECAP)
 SHORTENED_NOTE = "shortened to the server's own marker"
 _SHORTENED_RE = re.compile(r"; start shortened to the server's own marker(?: \(([^)]*)\))?$")
@@ -487,8 +490,18 @@ def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: De
     disagree = any(
         _group(a.source) != _group(b.source) and not _agree(a, b, ctx.duration_ms) for a, b in combinations(sane, 2)
     )
-    reason = f"sources disagree: {', '.join(groups)}" if disagree else "sources don't agree yet"
+    if disagree:
+        reason = f"sources disagree: {', '.join(groups)}"
+    elif _only_audio_and_server_markers({c.source for c in sane}):
+        reason = SEASON_AUDIO_WITH_SERVER_REASON
+    else:
+        reason = "sources don't agree yet"
     return _review(mtype, _own_marker(ranked[0], ctx), reason)
+
+
+def _only_audio_and_server_markers(sources: set[Source]) -> bool:
+    """Whether the sources are season audio plus markers already on a server and nothing else (ruling G3)."""
+    return bool(sources <= _AUDIO_OR_SERVER and sources & SERVER_SOURCES and sources - SERVER_SOURCES)
 
 
 def _sane_of_type(mtype: MarkerType, candidates: list[Candidate], ctx: DecisionContext) -> list[Candidate]:

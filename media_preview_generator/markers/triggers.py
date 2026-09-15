@@ -14,6 +14,8 @@ from ..servers.ownership import webhook_path_candidates
 from ..servers.registry import UnsupportedServerTypeError, server_config_from_dict
 from ..web.jobs import PRIORITY_HIGH, PRIORITY_NORMAL, Job, get_job_manager
 from ..web.settings_manager import get_settings_manager
+from .audio.season import season_group
+from .external_ids import ids_from_path, is_season_folder
 from .job_runner import start_intro_credits_job_async
 from .ownership import marker_matches
 from .settings import load_server
@@ -23,6 +25,7 @@ _follow_up_lock = threading.Lock()
 # Same for Inspector re-detect, so a double-click queues one job.
 _redetect_lock = threading.Lock()
 _REDETECT_SOURCE = "inspector"
+_SEASON_PUBLISH_SOURCE = "inspector_season"
 
 
 def _utcnow() -> datetime:
@@ -253,5 +256,53 @@ def submit_redetect(path: str) -> str:
             source=_REDETECT_SOURCE,
             file_paths=[path],
             force=True,
+        )
+    return job.id
+
+
+def _season_job_name(episode: str, folder: str) -> str:
+    """The job title: the show and the parsed season, so two seasons of one flat show folder read apart."""
+    show_folder = os.path.dirname(folder) if is_season_folder(os.path.basename(folder)) else folder
+    show = os.path.basename(show_folder)
+    season = ids_from_path(episode).season
+    if season is None:
+        return f"Intro & Credits: {show}"
+    return f"Intro & Credits: {show} · {'Specials' if season == 0 else f'Season {season}'}"
+
+
+def submit_season_publish(episode: str) -> str:
+    """Queue the Season view's "Publish": a NORMAL-priority, not forced job over the episodes of an episode's season group.
+
+    The group is the one the Season view lists (``season_group``: same folder and season number, at most the 40 nearest),
+    so a flat folder holding several seasons sends only this season. Jobs publish every decided marker, so decided
+    episodes go to every server that doesn't show them yet and undecided ones are checked again (owner ruling R4, at
+    NORMAL priority since 2026-09-15). While a Publish of exactly these episodes is still queued or running, that job is
+    returned instead.
+
+    Args:
+        episode: The local path of any episode of the season, already validated by the caller.
+
+    Returns:
+        The id of the new or the reused job.
+    """
+    group = season_group(episode)
+    episodes = list(group.episodes)
+    jm = get_job_manager()
+    # Shared with re-detect: a double-click on either Inspector button queues one job.
+    with _redetect_lock:
+        for job in [*jm.get_pending_jobs(), *jm.get_running_jobs()]:
+            cfg = job.config or {}
+            if (
+                job.kind == JOB_KIND_INTRO_CREDITS
+                and cfg.get("source") == _SEASON_PUBLISH_SOURCE
+                and sorted(cfg.get("file_paths") or []) == episodes
+            ):
+                logger.info("Publish for {} is already queued as job {}", os.path.basename(group.folder), job.id[:8])
+                return job.id
+        job = create_intro_credits_job(
+            library_name=_season_job_name(episode, group.folder),
+            priority=PRIORITY_NORMAL,
+            source=_SEASON_PUBLISH_SOURCE,
+            file_paths=episodes,
         )
     return job.id

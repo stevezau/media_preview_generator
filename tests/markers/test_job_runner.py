@@ -1277,6 +1277,7 @@ class TestLibraryRetry:
             ("retry", ["/data/tv/a.mkv"], True),
             ("manual", ["/data/tv/a.mkv"], False),  # the user picked a file that isn't there; say so, don't retry
             ("inspector", ["/data/tv/a.mkv"], False),
+            ("inspector_season", ["/data/tv/Show/Season 01"], False),  # the Season view's Publish
             ("schedule", [], False),  # a library listing only names files the server already has
             ("manual", [], False),
         ],
@@ -1468,6 +1469,7 @@ class TestVerifyReplacedFilesLater:
             ("manual", [], False),
             ("manual", ["/data/tv/a.mkv"], False),
             ("inspector", ["/data/tv/a.mkv"], False),
+            ("inspector_season", ["/data/tv/Show/Season 01"], False),
         ],
     )
     def test_only_sent_files_are_checked_again_later(self, env, verify_env, source, file_paths, verified):

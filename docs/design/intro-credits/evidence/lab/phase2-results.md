@@ -253,3 +253,33 @@ Inspector after job 6: S01E01 `up_to_date`; Extended `up_to_date`, reason "Emby 
 Lab left clean: `DELETE /MediaPreviewBridge/Markers/{51..55}` (200, `Stored` 0), no store files on either Emby, no
 plugin rows on the synth episodes (plain chapters intact), Extended's credits row as before, Plex/Jellyfin switches
 back on, Emby off, `mlab-app` on `pr-241`.
+
+## Task 12 — Season view API and local source status (2026-09-15)
+
+**Setup.** Lane `p2-task-12` built as `media_preview_generator:p2-t12`. `mlab-app` was left alone on `pr-241` (Task 11
+ran in parallel): a throwaway `mlab-app-t12` ran the lane image on port 18082 with the lab mounts and a copy of
+`mlab_app_config` without `jobs.db` or `scheduler.db` (nothing revived or scheduled) and off the `mlab` network (no lab
+server reachable). Removed afterwards with its volume. Script: scratchpad `t12/app_t12.sh`, `t12/smoke_t12.py`
+(`smoke_t12.out`).
+
+The lab `markers.db` was written by `pr-241`: Task 7's season audio lab run hasn't happened on it, so no episode
+carries season audio evidence yet and no chip has a `"10/10"` label.
+
+```
+{'episodes': 11, 'needs_review': 2, 'ready': 9} ['E01', 'E02', 'E03', 'E04', 'E05', 'E06', 'E07', 'E08', 'E09', 'E10', 'E11']
+{'mlab-plex': True, 'mlab-jellyfin': True, 'mlab-jf12': True, 'mlab-emby': False}
+{'season_audio': {'available': True, 'ffmpeg': '/usr/lib/jellyfin-ffmpeg/ffmpeg', 'message': ''}}
+```
+
+| Check | Result |
+|---|---|
+| Episodes, counts | PASS: E01–E11; 9 ready, 2 Needs review (E02 and E09 credits: "sources disagree: introdb/theintrodb, server_markers, skipdb", "agreeing sources conflict: introdb/theintrodb") |
+| Servers | PASS: every lab server listed; Emby `markers_enabled` false (Intro & Credits off there since Task 10) |
+| Chips | PASS: `theintrodb`, `introdb`, `skipdb` on every episode, no `server_markers` chip |
+| Dots | PASS: Plex, Jellyfin 10.11 and 12.0 `ok` on all 11; Emby `off` |
+| Local sources | PASS: available, jellyfin-ffmpeg |
+| Refusals | PASS: a real movie file `400` "Not a TV episode" (GET and POST publish); `../` out of the season folder `400`; no token `401` |
+
+`POST /api/markers/season/publish` for an episode wasn't run on the lab: its job would look up online sources for the
+two undecided episodes. Its route, trigger and job reuse are covered by `tests/markers/test_api_markers.py` and
+`tests/markers/test_triggers.py` (real `JobManager`).

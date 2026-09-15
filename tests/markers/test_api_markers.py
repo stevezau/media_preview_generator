@@ -598,6 +598,122 @@ def test_redetect_refuses_when_config_is_unwritable(client, servers, media, crea
     assert created == []
 
 
+# --------------------------------------------------------------------------- season view
+
+
+@pytest.fixture
+def season_calls(monkeypatch):
+    from media_preview_generator.markers import inspect
+
+    calls = []
+    monkeypatch.setattr(inspect, "season_payload", lambda path, **kw: calls.append((path, kw)) or {"episodes": []})
+    return calls
+
+
+def test_season_payload_for_an_episode(client, servers, media, season_calls):
+    episode = str(media / "tv" / "Show" / "S01E01.mkv")
+    resp = client.get("/api/markers/season", query_string={"path": episode}, headers=_api_headers())
+    assert (resp.status_code, resp.get_json()) == (200, {"episodes": []})
+    ((path, kwargs),) = season_calls
+    assert path == episode and set(kwargs) == {"registry", "store"}
+
+
+def test_season_payload_never_carries_the_servers_credentials(client, servers, media, monkeypatch):
+    from media_preview_generator.markers import inspect
+
+    monkeypatch.setattr(inspect, "season_payload", lambda path, **kw: {"message": f"token={PLEX_TOKEN}"})
+    episode = str(media / "tv" / "Show" / "S01E01.mkv")
+    resp = _secret_free(client.get("/api/markers/season", query_string={"path": episode}, headers=_api_headers()))
+    assert resp.get_json() == {"message": "token=****"}
+
+
+@pytest.mark.parametrize(
+    ("relative", "error"),
+    [("../secret.mkv", "Path is not a file inside any server library"), ("movies/Film/Film.mkv", "Not a TV episode")],
+)
+def test_season_refuses_other_paths(client, servers, media, season_calls, relative, error):
+    resp = client.get("/api/markers/season", query_string={"path": str(media / relative)}, headers=_api_headers())
+    assert (resp.status_code, resp.get_json()) == (400, {"error": error})
+    assert season_calls == []
+
+
+def test_season_without_a_path_is_400(client, servers, season_calls):
+    resp = client.get("/api/markers/season", headers=_api_headers())
+    assert (resp.status_code, resp.get_json()) == (400, {"error": "Path is not a file inside any server library"})
+    assert season_calls == []
+
+
+def test_season_payload_crash_is_a_json_error_without_details(client, servers, media, monkeypatch):
+    from media_preview_generator.markers import inspect
+
+    monkeypatch.setattr(inspect, "season_payload", MagicMock(side_effect=RuntimeError(f"db at {PLEX_TOKEN}")))
+    resp = _secret_free(
+        client.get("/api/markers/season", query_string={"path": str(media / "tv" / "Show" / "S01E01.mkv")}, headers=_api_headers())
+    )  # fmt: skip
+    assert (resp.status_code, resp.get_json()) == (500, {"error": "Couldn't build the Season view for this file"})
+
+
+def test_season_publish_queues_a_normal_priority_job_for_the_seasons_episodes(client, servers, media, created):
+    # A flat show folder: Publish for an S01 episode sends S01's episodes, not S02's or the folder.
+    show = media / "tv" / "Show"
+    for name in ("S01E02.mkv", "S02E01.mkv", "S02E02.mkv"):
+        (show / name).write_bytes(b"x")
+    resp = client.post("/api/markers/season/publish", json={"path": str(show / "S01E02.mkv")}, headers=_api_headers())
+    assert (resp.status_code, resp.get_json()) == (202, {"job_id": "job-123"})
+    assert created == [
+        {
+            "library_name": "Intro & Credits: Show · Season 1",
+            "priority": 2,
+            "source": "inspector_season",
+            "file_paths": [str(show / "S01E01.mkv"), str(show / "S01E02.mkv")],
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("body", "error"),
+    [
+        ({"path": "MOVIE"}, "Not a TV episode"),
+        ({"path": "SECRET"}, "Path is not a file inside any server library"),
+        ({}, "Path is not a file inside any server library"),
+        ([1], "The request body must be a JSON object with a path"),
+    ],
+    ids=["movie", "outside-libraries", "no-path", "not-an-object"],
+)
+def test_season_publish_refuses_other_bodies(client, servers, media, tmp_path, created, body, error):
+    paths = {"MOVIE": str(media / "movies" / "Film" / "Film.mkv"), "SECRET": str(tmp_path / "secret.mkv")}
+    if isinstance(body, dict) and "path" in body:
+        body = {"path": paths[body["path"]]}
+    resp = client.post("/api/markers/season/publish", json=body, headers=_api_headers())
+    assert (resp.status_code, resp.get_json(), created) == (400, {"error": error}, [])
+
+
+def test_season_publish_refuses_when_config_is_unwritable(client, servers, media, created, monkeypatch):
+    import media_preview_generator.web.config_health as config_health
+
+    monkeypatch.setattr(
+        config_health, "probe_config_health", lambda config_dir: {"writable": False, "detail": "ro", "hint": "fix"}
+    )
+    body = {"path": str(media / "tv" / "Show" / "S01E01.mkv")}
+    resp = client.post("/api/markers/season/publish", json=body, headers=_api_headers())
+    assert resp.status_code == 503
+    assert created == []
+
+
+@pytest.mark.parametrize(("found", "reason"), [("/usr/lib/jellyfin-ffmpeg/ffmpeg", ""), (None, "no chromaprint")])
+def test_local_sources_status(client, servers, monkeypatch, found, reason):
+    from media_preview_generator.markers.audio import fingerprint
+
+    asked = []
+    monkeypatch.setattr(
+        fingerprint, "chromaprint_status", lambda configured: asked.append(configured) or (found, reason)
+    )
+    resp = client.get("/api/markers/sources/local", headers=_api_headers())
+    assert resp.get_json() == {"season_audio": {"available": found is not None, "ffmpeg": found, "message": reason}}
+    # The ffmpeg jobs use: jellyfin-ffmpeg, then PATH (config._resolve_ffmpeg_path has no setting to pass).
+    assert asked == [None]
+
+
 # --------------------------------------------------------------------------- auth
 
 
@@ -608,6 +724,9 @@ def test_redetect_refuses_when_config_is_unwritable(client, servers, media, crea
         ("get", "/api/markers/sources/usage"),
         ("get", "/api/markers/item?path=/x"),
         ("post", "/api/markers/item/redetect"),
+        ("get", "/api/markers/season?path=/x"),
+        ("post", "/api/markers/season/publish"),
+        ("get", "/api/markers/sources/local"),
     ],
 )
 def test_every_route_needs_authentication(app, servers, created, method, url):

@@ -305,3 +305,81 @@ def marker_item_redetect():
     if blocked is not None:
         return blocked
     return jsonify({"job_id": submit_redetect(safe)}), 202
+
+
+def _library_episode(path: object, registry: Any) -> tuple[str | None, tuple[Any, int] | None]:
+    """A TV episode inside a server library, or the 400 response saying why it isn't one."""
+    from ...markers.external_ids import ids_from_path
+
+    safe = _library_file(path, registry)
+    if safe is None:
+        return None, (jsonify({"error": "Path is not a file inside any server library"}), 400)
+    if not ids_from_path(safe).is_episode:
+        return None, (jsonify({"error": "Not a TV episode"}), 400)
+    return safe, None
+
+
+@api.route("/markers/season", methods=["GET"])
+@api_token_required
+def marker_season():
+    """Season view data for the season of one episode, from markers.db only (no server is contacted).
+
+    Query: ``path`` (an episode file inside a server library).
+
+    Returns:
+        200 with ``markers.inspect.season_payload``; 400 when the path isn't a file inside a server library or isn't a
+        TV episode; 500 with a JSON error when the data can't be built.
+    """
+    from ...markers import inspect
+    from ...markers.store import get_marker_store
+
+    registry = _registry()
+    safe, refused = _library_episode(request.args.get("path"), registry)
+    if refused is not None:
+        return refused
+    try:
+        payload = inspect.season_payload(safe, registry=registry, store=get_marker_store())
+    except Exception as exc:
+        logger.warning("Season view data failed: {}", type(exc).__name__)
+        return jsonify({"error": "Couldn't build the Season view for this file"}), 500
+    return jsonify(_without_secrets(payload, registry))
+
+
+@api.route("/markers/season/publish", methods=["POST"])
+@api_token_required
+def marker_season_publish():
+    """Queue the Season view's "Publish": a NORMAL-priority Intro & Credits job over the episodes the Season view lists.
+
+    Body: ``{"path"}`` (an episode of the season).
+
+    Returns:
+        202 with ``{"job_id"}`` (the Publish of the same episodes still queued or running when there is one); 400 when
+        the path isn't a TV episode inside a server library; 503 when the config directory isn't writable.
+    """
+    from ...markers.triggers import submit_season_publish
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "The request body must be a JSON object with a path"}), 400
+    safe, refused = _library_episode(data.get("path"), _registry())
+    if refused is not None:
+        return refused
+    blocked = _config_unwritable_response()
+    if blocked is not None:
+        return blocked
+    return jsonify({"job_id": submit_season_publish(safe)}), 202
+
+
+@api.route("/markers/sources/local", methods=["GET"])
+@api_token_required
+def marker_local_sources():
+    """Whether the local detectors can run in this container (season audio needs an ffmpeg with chromaprint).
+
+    Returns:
+        200 with ``{"season_audio": {"available", "ffmpeg", "message"}}``; ``message`` says why when it isn't available.
+    """
+    from ...markers.audio import fingerprint
+
+    # No setting to pass: jobs use jellyfin-ffmpeg, then ffmpeg on PATH, the order chromaprint_status tries with None.
+    found, reason = fingerprint.chromaprint_status(None)
+    return jsonify({"season_audio": {"available": found is not None, "ffmpeg": found, "message": reason}})
