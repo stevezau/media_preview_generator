@@ -1825,6 +1825,185 @@ class TestServerMarkersFromVendors:
         assert clients["theintrodb"].calls == []
         store.close()
 
+    @pytest.mark.parametrize(
+        ("recheck", "later", "first_answer", "read_again"),
+        [
+            (False, timedelta(days=2), "empty", False),
+            (True, timedelta(days=2), "empty", True),
+            (True, timedelta(hours=12), "empty", False),
+            (True, timedelta(days=1), "empty", False),
+            (True, timedelta(days=2), "unusable", True),
+            (True, timedelta(hours=12), "unusable", False),
+            (True, timedelta(days=2), "has-markers", False),
+        ],
+        ids=[
+            "normal-job", "check-servers", "check-servers-12h", "check-servers-exactly-a-day", "check-servers-unusable",
+            "check-servers-unusable-12h", "check-servers-markers-stored",
+        ],
+    )  # fmt: skip
+    def test_check_servers_asks_a_decided_files_server_again_once_its_empty_answer_is_a_day_old(
+        self, tmp_path, media, recheck, later, first_answer, read_again
+    ):
+        # A webhook import is checked before Plex's own credits detection runs. Check servers reads Plex again a day
+        # later, and Plex's credits then shorten the decided start (rule 7); a normal run never asks again.
+        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
+        reg = _registry(media, ServerType.PLEX, ServerType.JELLYFIN)
+        reg.configs_by_id["plex-1"].markers["enabled"] = False  # Plex only lends evidence
+        plex_server = reg.get("plex-1")
+        plex_server.get_part_durations.return_value = [DUR]
+        plex_credits = [{"type": "credits", "start_ms": 1_255_500, "end_ms": DUR, "final": True}]
+        plex_server.get_markers.return_value = {"empty": [], "unusable": None, "has-markers": plex_credits}[
+            first_answer
+        ]
+        jellyfin = ready_publisher("jellyfin_bridge")
+        clients = _clients(
+            introdb=LookupResult("ok", (Candidate(T.CREDITS, 1_239_000, None, Source.INTRODB),)),
+            skipdb=LookupResult("ok", (Candidate(T.CREDITS, 1_241_000, None, Source.SKIPDB),)),
+        )
+        ctx = _ctx(store, reg, clients=clients, settings_raw=CREDITS_DEFAULTS, now=lambda: clock["t"])
+        _run(ctx, media, {"jellyfin-1": jellyfin})
+        first = store.get_markers(store.get_file(media).id)[T.CREDITS]
+        clock["t"] += later
+        plex_server.get_markers.return_value = plex_credits  # Plex detected its credits since
+        ctx = _ctx(store, reg, clients=clients, settings_raw=CREDITS_DEFAULTS, now=lambda: clock["t"])
+        ctx.recheck_empty_server_markers = recheck
+        _run(ctx, media, {"jellyfin-1": jellyfin})
+        assert plex_server.get_markers.call_count == (2 if read_again else 1)
+        credits = store.get_markers(store.get_file(media).id)[T.CREDITS]
+        if read_again:
+            assert first.start_ms < 1_255_500 and credits.start_ms == 1_255_500
+            assert "server_markers" in credits.decided_by
+            assert jellyfin.write.call_args.args[1] == [credits]  # published through the pipeline
+        else:
+            assert credits == first
+        store.close()
+
+    @pytest.mark.parametrize("recheck", [False, True], ids=["normal-job", "check-servers"])
+    @pytest.mark.parametrize(("first_answer", "read_again"), [("unusable", True), ("empty", False)])
+    def test_with_a_type_still_undecided_check_servers_reads_a_server_like_a_normal_job(
+        self, tmp_path, media, recheck, first_answer, read_again
+    ):
+        # No source knows the credits, so they stay undecided. An unusable answer is read again on every run; an
+        # empty one only once it is a day old, whatever the job.
+        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
+        reg = _registry(media, ServerType.PLEX, ServerType.JELLYFIN)
+        reg.configs_by_id["plex-1"].markers["enabled"] = False  # Plex only lends evidence
+        plex_server = reg.get("plex-1")
+        plex_server.get_part_durations.return_value = [DUR]
+        plex_server.get_markers.return_value = {"empty": [], "unusable": None}[first_answer]
+        jellyfin = ready_publisher("jellyfin_bridge")
+        ctx = _ctx(store, reg, clients=_clients(), settings_raw=CREDITS_DEFAULTS, now=lambda: clock["t"])
+        _run(ctx, media, {"jellyfin-1": jellyfin})
+        assert store.get_markers(store.get_file(media).id).get(T.CREDITS) is None
+        clock["t"] += timedelta(hours=12)
+        ctx = _ctx(store, reg, clients=_clients(), settings_raw=CREDITS_DEFAULTS, now=lambda: clock["t"])
+        ctx.recheck_empty_server_markers = recheck
+        _run(ctx, media, {"jellyfin-1": jellyfin})
+        assert plex_server.get_markers.call_count == (2 if read_again else 1)
+        # Only Check servers counts a re-read that failed; a normal job's reads never move its backoff.
+        rereads = store._conn.execute(
+            "SELECT rereads FROM server_marker_rereads WHERE file_id=? AND server_id='plex-1'",
+            (store.get_file(media).id,),
+        ).fetchone()
+        assert (rereads[0] if rereads else None) == (1 if recheck and first_answer == "unusable" else None)
+        store.close()
+
+    @pytest.mark.parametrize(
+        ("recheck", "read_again"), [(False, True), (True, False)], ids=["normal-job", "check-servers"]
+    )
+    def test_with_a_type_still_undecided_an_empty_answer_read_again_once_waits_for_the_backoff_on_check_servers(
+        self, tmp_path, media, recheck, read_again
+    ):
+        # One re-read already counted, so Check servers' next step is 2 days; the answer is 36 h old. A normal job's
+        # empty-answer retry (1 day) reads it.
+        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
+        reg = _registry(media, ServerType.PLEX, ServerType.JELLYFIN)
+        reg.configs_by_id["plex-1"].markers["enabled"] = False
+        plex_server = reg.get("plex-1")
+        plex_server.get_part_durations.return_value = [DUR]
+        plex_server.get_markers.return_value = []
+        jellyfin = ready_publisher("jellyfin_bridge")
+        _run(_ctx(store, reg, clients=_clients(), settings_raw=CREDITS_DEFAULTS, now=lambda: clock["t"]), media,
+             {"jellyfin-1": jellyfin})  # fmt: skip
+        rec = store.get_file(media)
+        store.replace_evidence(
+            rec.id, Source.SERVER_MARKERS, [], origin="plex-1", version=pipeline.READER_VERSION
+        )  # read again
+        clock["t"] += timedelta(hours=36)
+        ctx = _ctx(store, reg, clients=_clients(), settings_raw=CREDITS_DEFAULTS, now=lambda: clock["t"])
+        ctx.recheck_empty_server_markers = recheck
+        _run(ctx, media, {"jellyfin-1": jellyfin})
+        assert plex_server.get_markers.call_count == (2 if read_again else 1)
+        store.close()
+
+    @pytest.mark.parametrize("cause", ["read-always-fails", "other-cut-on-the-item"])
+    def test_check_servers_stops_asking_a_server_whose_read_never_works_after_five_re_reads(
+        self, tmp_path, media, cause
+    ):
+        # Sixty daily Check servers runs: each takes the file only when its backoff is due, and the pipeline's failed
+        # re-read counts. Then Plex serves usable markers and a forced run reads them: the count starts again.
+        clock = {"t": datetime(2026, 9, 13, tzinfo=timezone.utc)}
+        store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
+        reg = _registry(media, ServerType.PLEX, ServerType.JELLYFIN)
+        reg.configs_by_id["plex-1"].markers["enabled"] = False  # Plex only lends evidence
+        plex_server = reg.get("plex-1")
+        plex_credits = [{"type": "credits", "start_ms": 1_255_500, "end_ms": DUR, "final": True}]
+        if cause == "read-always-fails":
+            plex_server.get_part_durations.return_value = [DUR]
+            plex_server.get_markers.return_value = None
+        else:
+            plex_server.get_part_durations.return_value = [DUR, DUR - 60_000]
+            plex_server.get_markers.return_value = plex_credits
+        jellyfin = ready_publisher("jellyfin_bridge")
+        clients = _clients(
+            introdb=LookupResult("ok", (Candidate(T.CREDITS, 1_239_000, None, Source.INTRODB),)),
+            skipdb=LookupResult("ok", (Candidate(T.CREDITS, 1_241_000, None, Source.SKIPDB),)),
+        )
+
+        def run(**kwargs):
+            ctx = _ctx(store, reg, clients=clients, settings_raw=CREDITS_DEFAULTS, now=lambda: clock["t"], **kwargs)
+            ctx.recheck_empty_server_markers = not kwargs
+            _run(ctx, media, {"jellyfin-1": jellyfin})
+
+        run(force=True)  # the webhook run: credits decided, Plex's answer unusable
+        rec = store.get_file(media)
+        [answer] = [r for r in store.evidence_rows(rec.id) if r.origin == "plex-1"]
+        assert answer.detail == pipeline.UNUSABLE_SERVER_MARKERS_DETAIL
+        reads = plex_server.get_markers.call_count
+        passes = []
+        for day in range(1, 61):
+            clock["t"] = datetime(2026, 9, 13, tzinfo=timezone.utc) + timedelta(days=day, minutes=day)
+            if store.take_server_rechecks(
+                ["plex-1", "jellyfin-1"], now=clock["t"], after=pipeline.RECHECK_AFTER, limit=10
+            ):
+                passes.append(day)
+                run()
+        assert passes == [1, 3, 7, 15, 31]
+        assert plex_server.get_markers.call_count == reads + 5
+        assert [r for r in store.evidence_rows(rec.id) if r.origin == "plex-1"] == [answer]  # the answer is kept
+        plex_server.get_part_durations.return_value = [DUR]
+        plex_server.get_markers.return_value = plex_credits
+        run(force=True)
+        assert (
+            store._conn.execute(
+                "SELECT COUNT(*) FROM server_marker_rereads WHERE file_id=? AND server_id='plex-1' AND rereads > 0",
+                (rec.id,),
+            ).fetchone()[0]
+            == 0
+        )
+        store.close()
+
+    def test_a_pipeline_context_doesnt_ask_servers_again_unless_the_job_checks_servers(self):
+        assert (
+            PipelineContext(
+                registry=None, config=None, settings=None, store=None, priority=lambda: 3, ffprobe="ffprobe"
+            ).recheck_empty_server_markers
+            is False
+        )
+
     @pytest.mark.parametrize("case", ["plex-cant-publish", "other-cut-item", "published-server"])
     def test_with_everything_decided_a_server_is_read_only_the_first_time(self, tmp_path, media, case):
         # Credits decided by IntroDB + SkipDB before the servers come up. Runs two days apart, so the empty-answer
@@ -4196,6 +4375,16 @@ class TestHandlersAndContext:
         assert (ctx.registry, ctx.config, ctx.settings, ctx.store) == (registry, config, settings, store)
         assert (ctx.priority(), ctx.force, ctx.ffprobe, ctx.clients) == (3, True, "/x/ffprobe", {"introdb": "client"})
         assert ctx.local_detectors == ()
+        assert ctx.recheck_empty_server_markers is False
+        with (
+            patch.object(pipeline, "get_global_settings", return_value=settings),
+            patch.object(pipeline, "get_marker_store", return_value=store),
+            patch.object(pipeline, "build_clients", return_value={}),
+        ):
+            ctx = pipeline.build_context(
+                registry=registry, config=config, priority=3, recheck_empty_server_markers=True
+            )
+        assert ctx.recheck_empty_server_markers is True
         live = {"priority": 3}
         with (
             patch.object(pipeline, "get_global_settings", return_value=settings),

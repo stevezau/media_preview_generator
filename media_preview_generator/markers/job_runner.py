@@ -36,14 +36,15 @@ from .outcomes import (
     ServerStatus,
 )
 from .ownership import marker_libraries
-from .pipeline import budget_exhausted_warnings, build_context, kind_handlers
+from .pipeline import _capability, budget_exhausted_warnings, build_context, kind_handlers
 from .settings import load_server
 
 _POLL_S = 1.0
 # Polls a PENDING preview job may go without a thread before its follow-up stops waiting for it. Covers the moment
 # between two starts of the pending drain or the restart requeue; a job not revived after a restart never gets one.
 _ORPHAN_GRACE_POLLS = 30
-# Largest retry (or verify) job; a bigger backlog of unindexed files (a new library) waits for the next run instead.
+# Largest retry (or verify) job, and the most files one Check servers run takes; a bigger backlog (a new library's
+# unindexed files, many drifted items) waits for a later run instead.
 MAX_RETRY_FILES = 500
 # A replaced file is checked again this long after its publish at the least (servers rescan it after the job).
 MIN_VERIFY_DELAY_S = 600
@@ -680,6 +681,49 @@ def _wait_releasing_slot_while_paused(
                 slot["held"] = True
 
 
+def _cancel_check_releasing_slot_while_paused(
+    *,
+    job_id: str,
+    slot: dict,
+    live_priority: Callable[[], int],
+    cancel_check: Callable[[], bool],
+    on_wait: Callable[[int, int, int], None],
+) -> Callable[[], bool]:
+    """A cancel check for work done on the job's own thread (Check servers' read-back): it doesn't return while the
+    job or all processing is paused, and gives the job's gate slot back while this job is paused on its own, taking a
+    slot again on resume (``_wait_releasing_slot_while_paused``).
+
+    Returns:
+        The check: True once the job is cancelled.
+    """
+    jm = get_job_manager()
+    gate = get_job_gate()
+
+    def check() -> bool:
+        while not cancel_check():
+            paused = jm.is_pause_requested(job_id)
+            if paused and slot["held"]:
+                gate.release(slot["priority"])
+                slot["held"] = False
+                jm.add_log(job_id, "INFO - Paused; active slot handed back until resume")
+            elif not paused and not slot["held"]:
+                priority = live_priority()
+                if gate.acquire(
+                    priority=priority,
+                    cancel_check=lambda: cancel_check() or jm.is_pause_requested(job_id),
+                    on_wait=on_wait,
+                ):
+                    slot["priority"] = priority
+                    slot["held"] = True
+                continue
+            elif not paused and not get_settings_manager().processing_paused:
+                return False
+            time.sleep(_POLL_S)
+        return True
+
+    return check
+
+
 def run_intro_credits_job(job_id: str) -> None:
     """Run one Intro & Credits job to completion (called on its own thread).
 
@@ -792,19 +836,47 @@ def run_intro_credits_job(job_id: str) -> None:
                     jm.complete_job(job_id, error="Couldn't load the media servers configuration")
                     return
                 cfg = _seal_files(jm, job_id, job, cfg)
-                items, warnings, sender_paths = build_items(
-                    cfg, registry=registry, cancel_check=cancel_check, progress_callback=progress_callback
+                ctx = build_context(
+                    registry=registry,
+                    config=config,
+                    priority=live_priority,
+                    force=bool(cfg.get("force")),
+                    recheck_empty_server_markers=bool(cfg.get("reconcile")),
                 )
+                listing = None
+                if cfg.get("reconcile"):
+                    from .reconcile import check_servers_listing
+
+                    listing = check_servers_listing(
+                        registry=registry,
+                        store=ctx.store,
+                        max_files=MAX_RETRY_FILES,
+                        capability=lambda server_cfg, publisher: _capability(ctx, server_cfg, publisher),
+                        cancel_check=_cancel_check_releasing_slot_while_paused(
+                            job_id=job_id,
+                            slot=slot,
+                            live_priority=live_priority,
+                            cancel_check=cancel_check,
+                            on_wait=on_wait,
+                        ),
+                        progress_callback=progress_callback,
+                    )
+                    items, warnings, sender_paths = listing.items, listing.warnings, {}
+                else:
+                    items, warnings, sender_paths = build_items(
+                        cfg, registry=registry, cancel_check=cancel_check, progress_callback=progress_callback
+                    )
                 if cancel_check():
                     jm.cancel_job(job_id)
                     return
                 if not items:
-                    jm.complete_job(job_id, warning=" ".join(["No files to check.", *warnings]))
+                    if listing is not None:
+                        jm.add_log(job_id, "INFO - Every server checked still shows what this app published")
+                        jm.complete_job(job_id, warning=" | ".join(warnings) or None)
+                    else:
+                        jm.complete_job(job_id, warning=" ".join(["No files to check.", *warnings]))
                     return
                 listed = {item.canonical_path for item in items}
-                ctx = build_context(
-                    registry=registry, config=config, priority=live_priority, force=bool(cfg.get("force"))
-                )
                 items, carried = _skip_finished_before_restart(jm, job_id, items, ctx.store)
                 if not items:
                     jm.set_job_outcome(job_id, carried)
@@ -836,6 +908,8 @@ def run_intro_credits_job(job_id: str) -> None:
                         if isinstance(row, dict) and row.get(READ_BACK_FAILED):
                             name = str(row.get("server_name") or row.get("server_id") or "a server")
                             unchecked.setdefault(name, set()).add(file_path)
+                    if listing is not None:
+                        listing.forget_gone_items(ctx.store, registry, file_path, servers or [])
                     jm.record_file_result(
                         job_id, file_path, outcome, reason, worker, servers=servers, server_messages=True
                     )
@@ -892,7 +966,8 @@ def run_intro_credits_job(job_id: str) -> None:
                 ]
                 _complete(jm, job_id, outcome, [*warnings, *unchecked_warnings, *budget_exhausted_warnings(ctx)])
                 _queue_season_followups_after(job, cfg, ctx, listed)
-                if waiting:
+                # Check servers queues no retry: anything still waiting is listed again by a later run.
+                if waiting and not cfg.get("reconcile"):
                     _queue_retry(job, cfg, waiting, sender_paths)
                 if replaced and checks_replaced_later:
                     _queue_verify(job, cfg, replaced, sender_paths)

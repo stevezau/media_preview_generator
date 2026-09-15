@@ -330,6 +330,17 @@ class EmbyMarkerPublisher(MarkerPublisher):
         logger.info("Emby {}: item {} now shows {} marker(s) of ours", self._config.name, item_id, len(ours))
         return ours
 
+    def item_missing(self, item_id: str) -> bool | None:
+        """Whether the server answers that it has no such item (``MediaServer.item_missing``: 404 or no match).
+
+        Args:
+            item_id: The server's item id.
+
+        Returns:
+            True when it doesn't exist, False when it does, None when the server couldn't be asked.
+        """
+        return self._server.item_missing(item_id)
+
     def shows(
         self,
         item_id: str,
@@ -348,11 +359,13 @@ class EmbyMarkerPublisher(MarkerPublisher):
             item_files: Ignored: each version is published on its own (see ``write``).
 
         Returns:
-            How Emby's markers compare with ``ours`` (credits by their start); None when they couldn't be read.
+            How Emby's markers compare with ``ours`` (credits by their start); GONE when Emby has no such item; None
+            when they couldn't be read.
         """
         rows = self._server.get_chapter_markers(item_id)
         if rows is None:
-            return None
+            # One more request only when the read failed: a deleted item is drift to fix, not a read to warn about.
+            return Shown.GONE if self.item_missing(item_id) is True else None
         if any(not _has_rows(rows, mtype) for mtype in kept_types):
             return Shown.MISSING
         if kept_types:

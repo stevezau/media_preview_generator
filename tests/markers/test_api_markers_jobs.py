@@ -1,4 +1,6 @@
-"""POST /api/markers/jobs — start an Intro & Credits job from the UI or the API."""
+"""POST /api/markers/jobs and /api/markers/reconcile — start Intro & Credits jobs from the UI or the API."""
+
+from types import SimpleNamespace
 
 import pytest
 
@@ -197,6 +199,7 @@ def test_file_inside_the_media_root_is_accepted(client, created, media, monkeypa
     ("url", "csrf_exempt"),
     [
         ("/api/markers/jobs", True),  # token API, exempt like POST /api/jobs
+        ("/api/markers/reconcile", True),  # Check servers from a script: the same token API
         ("/api/markers/item/redetect", False),  # browser-only: proves CSRF is really on in this test
     ],
 )
@@ -247,3 +250,91 @@ def test_creates_a_real_intro_credits_job(client, monkeypatch):
     assert job.priority == 2
     assert job.config["libraries"] == [{"server_id": "jf-1", "library_id": "abc"}]
     start.assert_called_once_with(job.id)
+
+
+class TestCheckServersRoute:
+    """POST /api/markers/reconcile — queue Intro & Credits · Check servers now."""
+
+    @pytest.fixture
+    def run(self, monkeypatch):
+        from media_preview_generator.markers import reconcile
+
+        state = SimpleNamespace(calls=[], job_id="r1", created=True)
+
+        def run_markers_reconcile(**kw):
+            state.calls.append(kw)
+            return reconcile.ReconcileQueued(state.job_id, state.job_id is not None and state.created)
+
+        monkeypatch.setattr(reconcile, "run_markers_reconcile", run_markers_reconcile)
+        return state
+
+    @pytest.mark.parametrize(
+        ("kwargs", "priority"),
+        [
+            ({}, 3),
+            ({"data": "", "headers": {"Authorization": "Bearer test-token-12345678"}}, 3),
+            ({"json": {}}, 3),
+            ({"json": {"priority": "high"}}, 1),
+            ({"json": {"priority": 2}}, 2),
+        ],
+        ids=["no-body", "empty-body", "empty-object", "high", "normal"],
+    )
+    def test_queues_the_check_servers_job(self, client, run, kwargs, priority):
+        kwargs.setdefault("headers", _api_headers())
+        resp = client.post("/api/markers/reconcile", **kwargs)
+        assert resp.status_code == 202 and resp.get_json() == {"job_id": "r1", "already_queued": False}
+        assert run.calls == [{"priority": priority}]
+
+    def test_a_job_already_queued_is_named_as_such(self, client, run):
+        run.created = False
+        resp = client.post("/api/markers/reconcile", json={"priority": "high"}, headers=_api_headers())
+        assert resp.status_code == 202 and resp.get_json() == {"job_id": "r1", "already_queued": True}
+
+    def test_a_pending_check_servers_job_in_the_job_manager_is_reused(self, client):
+        from media_preview_generator.job_kinds import JOB_KIND_INTRO_CREDITS
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        get_settings_manager().set(
+            "media_servers",
+            [{"id": "jf-1", "type": "jellyfin", "name": "JF", "enabled": True, "markers": {"enabled": True}}],
+        )
+        jm = get_job_manager()
+        pending = jm.create_job(
+            library_name="Intro & Credits · Check servers", config={"reconcile": True}, kind=JOB_KIND_INTRO_CREDITS
+        )
+        before = {job.id for job in jm.get_all_jobs()}
+        resp = client.post("/api/markers/reconcile", headers=_api_headers())
+        assert resp.status_code == 202 and resp.get_json() == {"job_id": pending.id, "already_queued": True}
+        assert {job.id for job in jm.get_all_jobs()} == before
+
+    def test_nothing_to_check_says_why(self, client, run):
+        run.job_id = None
+        resp = client.post("/api/markers/reconcile", headers=_api_headers())
+        assert resp.status_code == 200
+        assert resp.get_json() == {"job_id": None, "reason": "Intro & Credits is off on every server"}
+
+    @pytest.mark.parametrize(
+        ("data", "content_type"),
+        [('{"priority": "low",}', "application/json"), ("[1]", "application/json"), ('{"priority": "urgent"}',
+          "application/json"), ('{"priority": true}', "application/json"), ("priority=1", "text/plain")],
+        ids=["trailing-comma", "not-an-object", "unknown-priority", "bool-priority", "not-json"],
+    )  # fmt: skip
+    def test_bad_bodies_are_refused_without_queueing(self, client, run, data, content_type):
+        headers = {"Authorization": _api_headers()["Authorization"], "Content-Type": content_type}
+        resp = client.post("/api/markers/reconcile", data=data, headers=headers)
+        assert resp.status_code == 400 and resp.get_json()["error"]
+        assert run.calls == []
+
+    def test_refused_when_the_config_folder_isnt_writable(self, client, run, monkeypatch):
+        import media_preview_generator.web.config_health as config_health
+
+        monkeypatch.setattr(
+            config_health, "probe_config_health", lambda config_dir: {"writable": False, "detail": "ro", "hint": "fix"}
+        )
+        assert client.post("/api/markers/reconcile", headers=_api_headers()).status_code == 503
+        assert run.calls == []
+
+    def test_needs_auth(self, app, run):
+        assert app.test_client().post("/api/markers/reconcile").status_code == 401
+        assert run.calls == []

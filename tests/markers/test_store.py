@@ -1,6 +1,6 @@
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -964,3 +964,339 @@ class TestItemFiles:
     def test_rows_without_recorded_files_read_as_unknown(self, store):
         store.set_item_publish_state("jf-1", "abc", [self.MARKER], "written")
         assert store.get_item_publish_state("jf-1", "abc").item_files is None
+
+
+class TestPublishedItems:
+    MARKER = Marker(MarkerType.INTRO, 1_000, 30_000, ("chapters",))
+
+    def test_written_items_with_markers_or_kept_types_and_their_files(self, store):
+        m = self.MARKER
+        a = store.upsert_file(FileIdentity("/m/b.mkv", 1, 1), duration_ms=1, season_key=None, is_movie=False)
+        b = store.upsert_file(FileIdentity("/m/a.mkv", 1, 1), duration_ms=1, season_key=None, is_movie=False)
+        for rec in (a, b):
+            store.set_publish_state(rec.id, "plex-1", item_id="7", markers=[m], status="written")
+        store.set_item_publish_state("plex-1", "7", [m], "written", item_files=["/m/b.mkv", "/m/a.mkv"])
+        store.set_item_publish_state("plex-1", "8", [], "written", kept_types={MarkerType.CREDITS})
+        store.set_item_publish_state("plex-1", "9", [], "written")
+        store.set_item_publish_state("plex-1", "10", [m], "failed")
+        store.set_item_publish_state("jf-1", "11", [m], "written")
+        rows = store.published_items("plex-1")
+        assert rows == [store.get_item_publish_state("plex-1", "7"), store.get_item_publish_state("plex-1", "8")]
+        assert rows[0].item_files == ("/m/a.mkv", "/m/b.mkv") and rows[1].kept_types == frozenset({MarkerType.CREDITS})
+        assert store.files_for_item("plex-1", "7") == ["/m/a.mkv", "/m/b.mkv"]
+        assert store.files_for_item("plex-1", "8") == []
+        assert store.files_for_item("jf-1", "7") == []
+
+    def test_a_failed_write_after_a_success_is_not_listed(self, store):
+        store.set_item_publish_state("plex-1", "7", [self.MARKER], "written")
+        store.set_item_publish_state("plex-1", "7", None, "failed")
+        assert store.published_items("plex-1") == []
+
+    def test_files_for_an_item_are_looked_up_by_index(self, store):
+        plan = store._conn.execute(
+            "EXPLAIN QUERY PLAN SELECT f.canonical_path FROM publish_state p JOIN files f ON f.id = p.file_id "
+            "WHERE p.server_id=? AND p.item_id=?",
+            ("plex-1", "7"),
+        ).fetchall()
+        assert any("idx_publish_state_item" in str(tuple(row)) for row in plan)
+
+
+class TestServerRechecks:
+    """Decided files whose server answered "no markers", taken by Check servers on a backoff: 1, 2, 4, 8, 16 days."""
+
+    NOW = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
+    CREDITS = Marker(MarkerType.CREDITS, 900_000, 1_000_000, ("introdb", "skipdb"))
+    AFTER = tuple(timedelta(days=d) for d in (1, 2, 4, 8, 16))
+
+    @pytest.fixture
+    def clock(self):
+        return {"t": self.NOW - timedelta(days=2)}
+
+    @pytest.fixture
+    def cstore(self, tmp_path, clock):
+        s = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
+        yield s
+        s.close()
+
+    def _file(self, store, path, *, decisions=None, answers=None):
+        rec = store.upsert_file(FileIdentity(path, 1, 1), duration_ms=1_000_000, season_key=None, is_movie=True)
+        credits = {MarkerType.CREDITS: _decided(MarkerType.CREDITS, 900_000, 1_000_000)}
+        decisions = credits if decisions is None else decisions
+        if decisions:
+            store.save_decisions(rec.id, decisions, settings_fingerprint="f")
+        for server_id, candidates in (answers if answers is not None else {"jf-1": []}).items():
+            store.replace_evidence(rec.id, Source.SERVER_MARKERS, candidates, origin=server_id)
+        return rec
+
+    def _take(self, store, clock, servers=("jf-1",), limit=10):
+        return store.take_server_rechecks(list(servers), now=clock["t"], after=self.AFTER, limit=limit)
+
+    def _rereads(self, store, rec, server_id="jf-1"):
+        row = store._conn.execute(
+            "SELECT rereads FROM server_marker_rereads WHERE file_id=? AND server_id=?", (rec.id, server_id)
+        ).fetchone()
+        return None if row is None else row["rereads"]
+
+    def test_an_empty_answer_is_taken_again_after_1_2_4_8_and_16_days_then_never(self, cstore, clock):
+        # Each time the job reads the server again and it still has nothing, the next check waits twice as long.
+        start = self.NOW - timedelta(days=2)
+        clock["t"] = start
+        rec = self._file(cstore, "/m/a.mkv")
+        taken_on = []
+        for hour in range(0, 24 * 40, 6):
+            clock["t"] = start + timedelta(hours=hour)
+            if self._take(cstore, clock) == ["/m/a.mkv"]:
+                taken_on.append(hour / 24)
+                cstore.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1")  # read again: still empty
+        # The first read is the stored answer (day 0); re-reads land 1, 2, 4, 8 and 16 days after the one before.
+        assert [round(day - prev, 2) for prev, day in zip([0.0, *taken_on], taken_on, strict=False)] == [
+            1.25, 2.25, 4.25, 8.25, 16.25,
+        ]  # fmt: skip
+        assert self._rereads(cstore, rec) == 5
+
+    def test_being_taken_doesnt_count_as_a_re_read(self, cstore, clock):
+        # A file taken but not run (cancelled, gone from disk) is taken again a day later on the same step.
+        rec = self._file(cstore, "/m/a.mkv")
+        clock["t"] = self.NOW
+        assert self._take(cstore, clock) == ["/m/a.mkv"]
+        assert self._take(cstore, clock) == []
+        clock["t"] = self.NOW + timedelta(hours=23)
+        assert self._take(cstore, clock) == []
+        clock["t"] = self.NOW + timedelta(days=1, seconds=1)
+        assert self._take(cstore, clock) == ["/m/a.mkv"]
+        assert self._rereads(cstore, rec) == 0
+
+    def test_the_first_read_isnt_a_re_read(self, cstore, clock):
+        rec = self._file(cstore, "/m/a.mkv")
+        assert self._rereads(cstore, rec) is None
+        cstore.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1")
+        assert self._rereads(cstore, rec) == 1
+
+    @pytest.mark.parametrize("reset", ["server-answers-with-markers", "file-changed-on-disk"])
+    def test_the_count_starts_again(self, cstore, clock, reset):
+        rec = self._file(cstore, "/m/a.mkv")
+        for _ in range(5):
+            cstore.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1")
+        clock["t"] = self.NOW + timedelta(days=40)
+        assert self._take(cstore, clock) == []  # capped
+        if reset == "server-answers-with-markers":
+            found = [Candidate(MarkerType.CREDITS, 950_000, None, Source.SERVER_MARKERS)]
+            cstore.replace_evidence(rec.id, Source.SERVER_MARKERS, found, origin="jf-1")
+            assert self._rereads(cstore, rec) is None
+            cstore.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1")  # its detection went away
+            assert self._rereads(cstore, rec) is None  # the answer before had markers: not a re-read of "nothing"
+        else:
+            cstore.upsert_file(FileIdentity("/m/a.mkv", 2, 2), duration_ms=1_000_000, season_key=None, is_movie=True)
+            assert self._rereads(cstore, rec) is None
+            cstore.save_decisions(rec.id, {MarkerType.CREDITS: _decided(MarkerType.CREDITS, 900_000, 1_000_000)},
+                                  settings_fingerprint="f")  # fmt: skip
+            cstore.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1")
+        clock["t"] += timedelta(days=1, seconds=1)
+        assert self._take(cstore, clock) == ["/m/a.mkv"]
+
+    def test_a_re_read_that_fails_counts_and_moves_the_backoff_without_replacing_the_answer(self, cstore, clock):
+        # An unusable answer (another cut on the item, a read that always fails) is taken on the same steps and cap.
+        start = self.NOW - timedelta(days=2)
+        clock["t"] = start
+        rec = self._file(cstore, "/m/a.mkv", answers={})
+        cstore.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1", detail="unusable")
+        stored = cstore.evidence_rows(rec.id)
+        taken_on = []
+        for hour in range(0, 24 * 60, 6):
+            clock["t"] = start + timedelta(hours=hour)
+            if self._take(cstore, clock) == ["/m/a.mkv"]:
+                taken_on.append(hour / 24)
+                cstore.count_failed_server_reread(rec.id, "jf-1")  # read again: failed again
+                assert cstore.server_recheck_due(rec.id, "jf-1", now=clock["t"], after=self.AFTER) is False
+        assert [round(day - prev, 2) for prev, day in zip([0.0, *taken_on], taken_on, strict=False)] == [
+            1.25, 2.25, 4.25, 8.25, 16.25,
+        ]  # fmt: skip
+        assert self._rereads(cstore, rec) == 5
+        assert cstore.evidence_rows(rec.id) == stored  # the answer itself is kept as it was
+
+    def test_the_backoff_counts_from_a_failed_re_read_long_after_the_answer(self, cstore, clock):
+        # The answer is 30 days old when Check servers first gets to it (no schedule until then) and the read fails.
+        start = self.NOW - timedelta(days=2)
+        rec = self._file(cstore, "/m/a.mkv", answers={})
+        cstore.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1", detail="unusable")
+        clock["t"] = start + timedelta(days=30)
+        cstore.count_failed_server_reread(rec.id, "jf-1")
+        for at, due in ((timedelta(days=31), False), (timedelta(days=32, seconds=1), True)):
+            clock["t"] = start + at
+            assert cstore.server_recheck_due(rec.id, "jf-1", now=clock["t"], after=self.AFTER) is due
+            assert (self._take(cstore, clock) == ["/m/a.mkv"]) is due
+
+    @pytest.mark.parametrize(
+        ("later", "rereads", "taken_after_a_day"),
+        [("markers", None, True), ("empty", 3, False)],
+        ids=["answer-with-markers-resets", "empty-answer-counts-on"],
+    )
+    def test_after_failed_re_reads_a_readable_answer(self, cstore, clock, later, rereads, taken_after_a_day):
+        rec = self._file(cstore, "/m/a.mkv", answers={})
+        cstore.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1", detail="unusable")
+        cstore.count_failed_server_reread(rec.id, "jf-1")
+        cstore.count_failed_server_reread(rec.id, "jf-1")
+        clock["t"] = self.NOW
+        found = [Candidate(MarkerType.CREDITS, 950_000, None, Source.SERVER_MARKERS)] if later == "markers" else []
+        cstore.replace_evidence(rec.id, Source.SERVER_MARKERS, found, origin="jf-1")
+        assert self._rereads(cstore, rec) == rereads
+        if later == "markers":
+            cstore.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1")  # its detection went away
+            assert self._rereads(cstore, rec) is None  # the count starts again from the first step
+        clock["t"] = self.NOW + timedelta(days=1, seconds=1)
+        # A fresh count waits 1 day; 3 re-reads wait 8.
+        assert (self._take(cstore, clock) == ["/m/a.mkv"]) is taken_after_a_day
+
+    def test_due_for_the_pipeline_follows_the_same_steps(self, cstore, clock):
+        rec = self._file(cstore, "/m/a.mkv")  # answered at NOW - 2 days
+        due = lambda t: cstore.server_recheck_due(rec.id, "jf-1", now=t, after=self.AFTER)  # noqa: E731
+        assert due(self.NOW) is True
+        clock["t"] = self.NOW
+        cstore.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1")  # re-read 1
+        assert due(self.NOW + timedelta(days=2)) is False
+        assert due(self.NOW + timedelta(days=2, seconds=1)) is True
+        for _ in range(4):
+            cstore.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1")
+        assert due(self.NOW + timedelta(days=400)) is False
+        assert cstore.server_recheck_due(rec.id, "emby-1", now=self.NOW, after=self.AFTER) is False  # never asked
+
+    @pytest.mark.parametrize(
+        ("change", "taken"),
+        [
+            ("none", True),
+            ("answer-a-day-old-exactly", False),
+            ("answer-12h-old", False),
+            ("answer-has-a-marker", False),
+            ("imported-answer-has-a-marker", False),
+            ("unusable-answer", True),
+            ("credits-needs-review", False),
+            ("intro-decided-only", False),
+            ("preview-decided", True),
+            ("other-server", False),
+            ("file-published-to-server", False),
+            ("item-shows-ours-from-another-version", False),
+            ("item-kept-plexs-own", False),
+            ("file-published-elsewhere", True),
+        ],
+    )
+    def test_which_files_are_taken(self, cstore, clock, change, taken):
+        decisions, answers = None, None
+        if change == "answer-has-a-marker":
+            answers = {"jf-1": [Candidate(MarkerType.CREDITS, 950_000, None, Source.SERVER_MARKERS)]}
+        elif change == "credits-needs-review":
+            proposed = Marker(MarkerType.CREDITS, 900_000, 1_000_000, ("chapters",))
+            review = TypeDecision(MarkerType.CREDITS, DecisionStatus.NEEDS_REVIEW, None, proposed, "x")
+            decisions = {MarkerType.CREDITS: review}
+        elif change == "intro-decided-only":
+            decisions = {MarkerType.INTRO: _decided(MarkerType.INTRO, 10_000, 40_000)}
+        elif change == "preview-decided":
+            decisions = {MarkerType.PREVIEW: _decided(MarkerType.PREVIEW, 950_000, 1_000_000)}
+        elif change == "other-server":
+            answers = {"plex-1": []}
+        elif change == "unusable-answer":
+            answers = {}  # the server's first answer is the unusable one, stored below
+        answered = {"answer-a-day-old-exactly": timedelta(days=1), "answer-12h-old": timedelta(hours=12)}
+        clock["t"] = self.NOW - answered.get(change, timedelta(days=2))
+        rec = self._file(cstore, "/m/a.mkv", decisions=decisions, answers=answers)
+        if change == "unusable-answer":
+            cstore.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1", detail="Couldn't read")
+        elif change == "imported-answer-has-a-marker":
+            # Stored apart from the empty server answer: a marker under either server source makes the answer not empty.
+            imported = [Candidate(MarkerType.CREDITS, 950_000, None, Source.SERVER_MARKERS_IMPORTED)]
+            cstore.replace_evidence(rec.id, Source.SERVER_MARKERS_IMPORTED, imported, origin="jf-1")
+        elif change == "file-published-to-server":
+            cstore.set_publish_state(rec.id, "jf-1", item_id="x", markers=[self.CREDITS], status="written")
+        elif change in ("item-shows-ours-from-another-version", "item-kept-plexs-own"):
+            cstore.set_publish_state(rec.id, "jf-1", item_id="42", markers=[], status="written")
+            mine = [self.CREDITS] if change == "item-shows-ours-from-another-version" else []
+            kept = {MarkerType.CREDITS} if change == "item-kept-plexs-own" else None
+            cstore.set_item_publish_state("jf-1", "42", mine, "written", kept_types=kept)
+        elif change == "file-published-elsewhere":
+            cstore.set_publish_state(rec.id, "plex-1", item_id="7", markers=[self.CREDITS], status="written")
+        clock["t"] = self.NOW
+        assert self._take(cstore, clock) == (["/m/a.mkv"] if taken else [])
+
+    def test_each_limit_takes_the_least_recently_taken_then_the_oldest_answers(self, cstore, clock):
+        self._file(cstore, "/m/new.mkv")
+        clock["t"] -= timedelta(hours=1)
+        self._file(cstore, "/m/old.mkv")
+        clock["t"] = self.NOW
+        assert self._take(cstore, clock, limit=1) == ["/m/old.mkv"]
+        assert self._take(cstore, clock, limit=1) == ["/m/new.mkv"]
+        assert self._take(cstore, clock, limit=1) == []
+        # A day later both are due again (neither ran): the one taken first goes first.
+        clock["t"] = self.NOW + timedelta(days=1, minutes=1)
+        assert self._take(cstore, clock, limit=1) == ["/m/old.mkv"]
+        self._file(cstore, "/m/never.mkv")  # answered just now: not due
+        assert self._take(cstore, clock, limit=5) == ["/m/new.mkv"]
+
+    def test_a_file_never_taken_goes_before_one_taken_before_whose_server_still_had_nothing(self, cstore, clock):
+        # The one taken before may be gone from disk or from the server's library: it mustn't starve the others.
+        clock["t"] = self.NOW - timedelta(days=3)
+        self._file(cstore, "/m/unrefreshable.mkv")
+        clock["t"] = self.NOW - timedelta(days=1, minutes=5)
+        assert self._take(cstore, clock) == ["/m/unrefreshable.mkv"]
+        clock["t"] = self.NOW - timedelta(days=2)
+        self._file(cstore, "/m/waiting.mkv")
+        clock["t"] = self.NOW
+        assert self._take(cstore, clock, limit=1) == ["/m/waiting.mkv"]
+        assert self._take(cstore, clock, limit=1) == ["/m/unrefreshable.mkv"]
+
+    def test_a_file_asked_of_two_servers_is_listed_once_and_each_pair_counts(self, cstore, clock):
+        self._file(cstore, "/m/a.mkv", answers={"jf-1": [], "emby-1": []})
+        self._file(cstore, "/m/b.mkv", answers={"jf-1": []})
+        clock["t"] = self.NOW
+        assert self._take(cstore, clock, servers=("jf-1", "emby-1"), limit=2) == ["/m/a.mkv"]
+        assert self._take(cstore, clock, servers=("jf-1", "emby-1"), limit=2) == ["/m/b.mkv"]
+
+    def test_no_servers_takes_nothing(self, cstore, clock):
+        self._file(cstore, "/m/a.mkv")
+        clock["t"] = self.NOW
+        assert self._take(cstore, clock, servers=()) == []
+
+    def test_a_changed_file_forgets_when_it_was_taken(self, cstore, clock):
+        self._file(cstore, "/m/a.mkv")
+        clock["t"] = self.NOW
+        assert self._take(cstore, clock) == ["/m/a.mkv"]
+        assert cstore._conn.execute("SELECT COUNT(*) FROM server_marker_rereads").fetchone()[0] == 1
+        cstore.upsert_file(FileIdentity("/m/a.mkv", 2, 2), duration_ms=1_000_000, season_key=None, is_movie=True)
+        assert cstore._conn.execute("SELECT COUNT(*) FROM server_marker_rereads").fetchone()[0] == 0
+
+
+class TestGoneItemsAndDriftTurns:
+    MARKER = Marker(MarkerType.INTRO, 1_000, 30_000, ("chapters",))
+
+    def test_a_gone_item_leaves_published_items_until_this_app_writes_it_again(self, store):
+        v1 = store.set_item_publish_state("jf-1", "x", [self.MARKER], "written")
+        store.mark_item_gone("jf-1", "x")
+        row = store.get_item_publish_state("jf-1", "x")
+        assert (row.status, row.markers, row.version > v1) == ("gone", (self.MARKER,), True)
+        assert store.published_items("jf-1") == []
+        store.mark_item_gone("jf-1", "missing")  # no row: nothing to do
+        store.set_item_publish_state("jf-1", "x", [self.MARKER], "written")
+        assert [r.item_id for r in store.published_items("jf-1")] == ["x"]
+
+    @pytest.mark.parametrize("status", ["failed", "gone"])
+    def test_only_a_written_item_is_marked_gone(self, store, status):
+        store.set_item_publish_state("jf-1", "x", [self.MARKER], "written")
+        if status == "failed":
+            store.set_item_publish_state("jf-1", "x", None, "failed")
+        else:
+            store.mark_item_gone("jf-1", "x")
+        before = store.get_item_publish_state("jf-1", "x")
+        store.mark_item_gone("jf-1", "x")
+        assert store.get_item_publish_state("jf-1", "x") == before
+
+    def test_drift_listing_times_per_server(self, tmp_path):
+        times = iter([datetime(2026, 9, 15, tzinfo=timezone.utc), datetime(2026, 9, 16, tzinfo=timezone.utc)])
+        store = MarkerStore(str(tmp_path / "t.db"), clock=lambda: next(times))
+        try:
+            store.record_drift_listed([("jf-1", "a"), ("plex-1", "a")])
+            store.record_drift_listed([("jf-1", "b")])
+            assert store.drift_listed_at("jf-1", ["a", "b", "c"]) == {
+                "a": "2026-09-15T00:00:00+00:00",
+                "b": "2026-09-16T00:00:00+00:00",
+            }
+            assert store.drift_listed_at("plex-1", ["b"]) == {}
+        finally:
+            store.close()

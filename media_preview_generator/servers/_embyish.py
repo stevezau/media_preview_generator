@@ -574,6 +574,33 @@ class EmbyApiClient(MediaServer):
             return None
         return data if isinstance(data, dict) else None
 
+    def item_missing(self, item_id: str) -> bool | None:
+        """Whether the server says it has no item with this id (deleted, or its file moved to a new item).
+
+        Args:
+            item_id: Server item id.
+
+        Returns:
+            True when the server answers that the item doesn't exist, False when it lists it, None when it couldn't be
+            asked (a timeout, an error answer).
+        """
+        user_id = self._user_id()
+        try:
+            if user_id:
+                quoted = urllib.parse.quote(str(item_id), safe="")
+                resp = self._request("GET", f"/Users/{user_id}/Items/{quoted}")
+                if resp.status_code == 404:
+                    return True
+                return False if resp.status_code == 200 else None
+            resp = self._request("GET", "/Items", params={"Ids": item_id})
+            if resp.status_code != 200:
+                return None
+            items = resp.json().get("Items")
+        except (requests.RequestException, ValueError, AttributeError) as exc:
+            logger.debug("{} item lookup failed for {}: {}", self.vendor_name, item_id, type(exc).__name__)
+            return None
+        return not items if isinstance(items, list) else None
+
     def get_chapter_markers(self, item_id: str) -> list[dict[str, Any]] | None:
         """Chapter rows with Emby's marker types (``IntroStart``/``IntroEnd``/``CreditsStart``/``Chapter``).
 

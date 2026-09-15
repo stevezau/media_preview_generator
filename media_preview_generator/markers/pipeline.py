@@ -81,6 +81,10 @@ from .store import EvidenceRow, FileRecord, ItemPublishStateRow, MarkerStore, ge
 NO_DATA_RETRY = timedelta(days=14)
 # Servers detect their own markers on a schedule (Plex overnight), so "none there" is asked again a day later.
 EMPTY_SERVER_MARKERS_RETRY = timedelta(days=1)
+# Check servers asks a server again for a decided file it had no markers for once the answer is this old, a step further
+# after each re-read that stays empty, and never after the last step (a server without detection of its own is asked 5
+# times in a month).
+RECHECK_AFTER = tuple(timedelta(days=days) for days in (1, 2, 4, 8, 16))
 # A file replaced while it is analysed is detected again from scratch; one that keeps changing is being written.
 MAX_ATTEMPTS = 3
 _ONLINE_LABELS = {Source.THEINTRODB: "TheIntroDB", Source.INTRODB: "IntroDB", Source.SKIPDB: "SkipDB"}
@@ -192,6 +196,10 @@ class PipelineContext:
         capability_ttl_s: How long a server's capability answer is reused.
         live_config: A server's saved config right now (None once it was removed). The registry is a snapshot from
             when the job started; consent is read from here before every write.
+        recheck_empty_server_markers: Check servers: a server whose stored answer for a file is empty (or unusable) is
+            read again on its backoff even when everything is decided, since its own detection may have run since
+            (spec §5.5 rule 7 shortening). With a type still undecided, an unusable answer is read again as on any run,
+            and an empty one a day old waits for the backoff too; a re-read that fails still counts.
     """
 
     registry: Any
@@ -206,6 +214,7 @@ class PipelineContext:
     now: Callable[[], datetime] = _utcnow
     capability_ttl_s: float = 300.0
     live_config: Callable[[str], ServerConfig | None] = live_server_config
+    recheck_empty_server_markers: bool = False
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
     _capability_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -386,7 +395,12 @@ def default_local_detectors(settings: GlobalMarkersSettings, config: Any) -> tup
 
 
 def build_context(
-    *, registry: Any, config: Any, priority: int | Callable[[], int], force: bool = False
+    *,
+    registry: Any,
+    config: Any,
+    priority: int | Callable[[], int],
+    force: bool = False,
+    recheck_empty_server_markers: bool = False,
 ) -> PipelineContext:
     """Context from live settings (used by the job runner).
 
@@ -395,6 +409,7 @@ def build_context(
         config: The job's ``Config``.
         priority: The job's priority, or a callable returning its current value.
         force: Re-detect.
+        recheck_empty_server_markers: Check servers (``PipelineContext.recheck_empty_server_markers``).
 
     Returns:
         A context for one job.
@@ -410,6 +425,7 @@ def build_context(
         force=force,
         clients=build_clients(settings),
         local_detectors=default_local_detectors(settings, config),
+        recheck_empty_server_markers=recheck_empty_server_markers,
     )
 
 
@@ -833,7 +849,8 @@ def _read_server_markers(
         refresh: A forced run: read every server we never published to.
         first_read_only: Every wanted type is already decided, so only a server never asked for this file (or asked by
             an older reader) is read -- its own markers can still shorten decided credits (spec §5.5 rule 7). An empty
-            or unusable answer isn't asked again on such a run.
+            or unusable answer isn't asked again on such a run, unless the job checks servers
+            (``ctx.recheck_empty_server_markers``): then it is on its backoff (``MarkerStore.server_recheck_due``).
     """
     for owner in servers.owning:
         cfg = owner.config
@@ -864,6 +881,10 @@ def _read_server_markers(
                     detail=UNUSABLE_SERVER_MARKERS_DETAIL,
                     version=READER_VERSION,
                 )
+            elif ctx.recheck_empty_server_markers:
+                # The stored answer stays, but the re-read counts: a read that always fails (another cut on a Plex
+                # item, a server that can't serve markers) stops being asked after the last backoff step too.
+                ctx.store.count_failed_server_reread(rec.id, cfg.id)
             continue
         if item_wide and ctx.store.published_to_item(cfg.id, item_id):
             continue  # another version of this item was published while the read was out: it may show ours
@@ -896,11 +917,19 @@ def _server_markers_due(ctx: PipelineContext, rec: FileRecord, server_id: str, *
     if not rows or ctx.store.evidence_version(rec.id, rows[0].source, server_id) != READER_VERSION:
         return True
     if first_read_only:
-        return False
+        if not ctx.recheck_empty_server_markers:
+            return False
+        # Check servers: an empty answer is asked again on its backoff (RECHECK_AFTER), then no more.
+        return ctx.store.server_recheck_due(rec.id, server_id, now=ctx.now(), after=RECHECK_AFTER)
     if any(r.detail == UNUSABLE_SERVER_MARKERS_DETAIL for r in rows):
         return True  # unreadable or another cut last time: asked again on every run that still needs evidence
     fetched = max(datetime.fromisoformat(r.fetched_at) for r in rows)
-    return all(r.type is None for r in rows) and ctx.now() - fetched > EMPTY_SERVER_MARKERS_RETRY
+    if not all(r.type is None for r in rows) or ctx.now() - fetched <= EMPTY_SERVER_MARKERS_RETRY:
+        return False
+    if ctx.recheck_empty_server_markers:
+        # Check servers keeps to its backoff for an empty answer it already read again.
+        return ctx.store.server_recheck_due(rec.id, server_id, now=ctx.now(), after=RECHECK_AFTER)
+    return True
 
 
 def _row(
@@ -1175,6 +1204,7 @@ def _publish_to(
                 reason = {
                     Shown.OURS: "set to restore this app's markers",
                     Shown.VERSIONS_CHANGED: "the item's versions changed since last run",
+                    Shown.GONE: "the server no longer has this item",
                 }.get(shown, f"markers {shown.value} since last run")
             logger.info("{} item {}: {}; publishing again", cfg.name, item_id, reason)
         previous = _previous_on_item(item_row, publisher)

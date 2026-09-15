@@ -256,3 +256,42 @@ class TestCatalogInstall:
             result = server.install_plugin()
         assert req.call_count == 2
         assert result["ok"] is False and result["error"] == "queue_install failed: HTTPError"
+
+
+class TestItemMissing:
+    """Check servers tells a deleted item (drift to fix) apart from a read that failed (a warning)."""
+
+    @pytest.mark.parametrize(
+        ("answer", "missing"),
+        [
+            (_resp(200, {"Items": []}), True),
+            (_resp(200, {"Items": [{"Id": "55"}]}), False),
+            (_resp(500, {"error": "boom"}), None),
+            (_resp(200, ["not", "an", "object"]), None),
+            (requests.ConnectionError("down"), None),
+        ],
+        ids=["gone", "there", "error-answer", "unreadable-answer", "no-connection"],
+    )
+    @pytest.mark.parametrize(("cls", "stype"), [(EmbyServer, ServerType.EMBY), (JellyfinServer, ServerType.JELLYFIN)])
+    def test_api_key_servers_look_the_id_up(self, cls, stype, answer, missing):
+        server = _server(cls, stype)
+        kwargs = {"side_effect": answer} if isinstance(answer, Exception) else {"return_value": answer}
+        with patch.object(server, "_request", **kwargs) as req:
+            assert server.item_missing("55") is missing
+        assert req.call_args.args == ("GET", "/Items")
+        assert req.call_args.kwargs == {"params": {"Ids": "55"}}
+
+    @pytest.mark.parametrize(
+        ("answer", "missing"),
+        [(_resp(404, None), True), (_resp(200, {"Id": "55"}), False), (_resp(503, None), None),
+         (requests.Timeout("slow"), None)],
+        ids=["gone", "there", "unavailable", "timeout"],
+    )  # fmt: skip
+    def test_a_server_with_a_user_asks_for_that_users_item(self, answer, missing):
+        server = EmbyServer(ServerConfig(id="e1", type=ServerType.EMBY, name="Emby", enabled=True,
+                                         url="http://emby:8096", auth={"method": "api_key", "api_key": "k",
+                                                                       "user_id": "u1"}, libraries=[]))  # fmt: skip
+        kwargs = {"side_effect": answer} if isinstance(answer, Exception) else {"return_value": answer}
+        with patch.object(server, "_request", **kwargs) as req:
+            assert server.item_missing("5/5") is missing
+        assert req.call_args.args == ("GET", "/Users/u1/Items/5%2F5")

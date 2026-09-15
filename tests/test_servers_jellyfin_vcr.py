@@ -124,3 +124,30 @@ class TestJellyfinTriggerPathRefreshContract:
         # No return value to assert on — the cassette interaction IS
         # the assertion. A future regression that changes the URL or
         # body shape gets a cassette miss on replay.
+
+
+@pytest.fixture
+def jellyfin_lab():
+    """Jellyfin 10.11 of the storage lab (``mlab-jellyfin``); recording: tests/cassettes/README.md → "Markers (lab)"."""
+    cfg = ServerConfig(
+        id="jellyfin-vcr-lab",
+        type=ServerType.JELLYFIN,
+        name="Jellyfin VCR lab",
+        enabled=True,
+        url=os.environ.get("JELLYFIN_URL", "http://fake-jellyfin.local:8096"),
+        auth={"method": "api_key", "api_key": os.environ.get("JELLYFIN_TOKEN", "fake-token")},
+        verify_ssl=False,
+        libraries=[Library(id="1", name="Synth Chapters", remote_paths=("/media/synth-chapters",), enabled=True)],
+    )
+    return JellyfinServer(cfg)
+
+
+class TestJellyfinItemMissingContract:
+    """Check servers' read-back of an item Jellyfin deleted: the segments read fails, then Jellyfin confirms it."""
+
+    UNKNOWN_ITEM = "0badc0de0badc0de0badc0de0badc0de"
+    SYNTH_E02 = "/media/synth-chapters/Synth Chapters (2021)/Season 01/Synth Chapters (2021) - S01E02.webm"
+
+    def test_an_id_jellyfin_doesnt_have_is_missing(self, jellyfin_lab):
+        assert jellyfin_lab.get_media_segments(self.UNKNOWN_ITEM) is None
+        assert jellyfin_lab.item_missing(self.UNKNOWN_ITEM) is True

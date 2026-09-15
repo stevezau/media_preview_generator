@@ -428,6 +428,8 @@ function updateScheduleList() {
         let typeBadge = '';
         if (isRecentlyAdded) {
             typeBadge = ' <span class="badge bg-primary bg-opacity-25 text-primary" title="Scans items added in the last ' + (cfg.lookback_hours || 1) + 'h"><i class="bi bi-arrow-repeat me-1"></i>Recently Added</span>';
+        } else if (isMarkers && cfg.reconcile) {
+            typeBadge = ' <span class="badge text-bg-dark schedule-kind-badge" title="Checks that servers still show the markers this app sent">Intro &amp; Credits · Check servers</span>';
         } else if (isMarkers) {
             typeBadge = ' <span class="badge text-bg-dark schedule-kind-badge" title="Checks the libraries for intro and credits markers">Intro &amp; Credits</span>';
         }

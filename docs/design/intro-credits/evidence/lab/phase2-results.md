@@ -283,3 +283,78 @@ carries season audio evidence yet and no chip has a `"10/10"` label.
 `POST /api/markers/season/publish` for an episode wasn't run on the lab: its job would look up online sources for the
 two undecided episodes. Its route, trigger and job reuse are covered by `tests/markers/test_api_markers.py` and
 `tests/markers/test_triggers.py` (real `JobManager`).
+
+## Task 11 — Intro & Credits · Check servers (2026-09-15)
+
+**Setup.** `mlab-app` rebuilt from lane `p2-task-11` (`media_preview_generator:p2-t11`), then put back on `pr-241`.
+Intro & Credits on for `mlab-plex`, `mlab-jellyfin` and `mlab-jf12` (as found), `mlab-emby` off except in check 5.
+Published items in `markers.db`: Plex 546, Jellyfin 10.11 548, Jellyfin 12.0 548, Emby 5. Script and raw results:
+scratchpad `t11/lab/lab_t11.py` (`fresh`, `dry`, `baseline`, `recheck`, `drift`, `emby`, `schedule`, `cleanup` `.json`,
+scrubbed).
+
+| # | Check | Result |
+|---|---|---|
+| 1 | Schedules after the app started on the lane image | PASS: `[]`, no built-in job |
+| 2 | Dry run inside the app on a copy of `markers.db` | PASS: no drift, no warnings, 0 files to ask servers again; read-back of all 1 642 items on the three servers with Intro & Credits on took 28.9 s |
+| 3 | `POST /api/markers/reconcile`, nothing changed | PASS: 202, LOW job "Intro & Credits · Check servers" completed in 31 s with no files; log "Every server checked still shows what this app published" |
+| 4 | Emby's empty answer for Rick and Morty S01E03 (credits decided) aged to two days, then Check servers | PASS: the file alone listed ("1 decided file(s) to ask servers again"), Emby read again (answer's `fetched_at` Sep 14 07:43 → Sep 15 01:00), taken time recorded; Plex/Jellyfin rows up to date; the next run lists nothing |
+| 5 | Our taggings rows deleted from Plex item 64 (Synth S01E02) and the Jellyfin 10.11 plugin's markers deleted (204), then Check servers | PASS: "2 published item(s) changed on servers (1 file(s))"; S01E02 `markers_written` on Plex and Jellyfin 10.11, up to date on Jellyfin 12.0; Plex rows (text, offsets, `extra_data`), Plex-served markers and Jellyfin segments equal to before; the next run finds nothing |
+| 6 | Emby on: its 5 version items were published before and the plugin store emptied since | PASS: all 5 `markers_written` on Emby (per version: items 51–55), Plex and both Jellyfins up to date; chapters show IntroStart/IntroEnd/CreditsStart |
+| 7 | Plugin markers of S01E01 - Extended (item 55) deleted, then Check servers | PASS: only item 55 listed and written; S01E01 (53, the other version) untouched; the next run finds nothing |
+| 8 | Saved schedule `{"job_type": "intro_credits", "reconcile": true}` every 720 min, "Run now" twice 1 s apart | PASS: one LOW job with `parent_schedule_id` and `reconcile`; log "Check servers job dc10fe0e hasn't finished; not queueing another"; `last_run` set |
+
+Plex read-back lock hold, measured on a copy of the lab Plex database (Plex's lock proof stubbed): a single-item
+read-back holds this process's lock 2.0–2.4 ms median, 2.4–2.8 ms max (mostly SQLite loading Plex's schema on the new
+connection); a Check servers slice 2.1 ms median, 3.6–5.4 ms max, about one item per connection on this database, 1.8 s
+for 516 items (three runs each, `t11/hold-measure-2ms-predictive.txt`). Holding one connection for a 500-item chunk
+would hold it about 90 ms.
+
+Lab left clean: schedule deleted, `DELETE /MediaPreviewBridge/Markers/{51..55}` on Emby (200, `Stored` 0, 0 store
+files, no marker chapters), Emby Intro & Credits off, S01E02's Plex rows and Jellyfin segments as before, `mlab-app` on
+`pr-241` with the same switches. Left in the lab `markers.db`: the new `server_marker_rechecks` table (one row) and
+`idx_publish_state_item` index (the `pr-241` build ignores both), and Rick and Morty S01E03's Plex item now has its
+version files recorded (the pipeline's one recording write).
+
+## Task 11 — fix round 1: rotation, backoff, deleted items (2026-09-15)
+
+**Setup.** `mlab-app` rebuilt from lane `p2-task-11` after fix round 1 (`media_preview_generator:p2-t11`), then put
+back on `pr-241`. Switches as found (Intro & Credits on for `mlab-plex`, `mlab-jellyfin`, `mlab-jf12`; `mlab-emby` off;
+no schedules). Script and raw results: scratchpad `t11/lab-r1/lab_r1.py` (`dry`, `unchanged`, `already-queued`,
+`drift`, `gone` `.json`, scrubbed).
+
+| # | Check | Result |
+|---|---|---|
+| 1 | Listing inside the app on a copy of `markers.db` | PASS: published Plex 546, Jellyfin 10.11 548, Jellyfin 12.0 548, Emby 5; nothing listed, no warnings; 25 s |
+| 2 | `POST /api/markers/reconcile` twice, nothing changed | PASS: both 202 `already_queued: false`, LOW, completed in 25 s and 26 s with no files and no warning; log "0 published item(s) changed on servers (0 file(s) this run); 0 decided file(s) to ask servers again" |
+| 3 | Two POSTs back to back (low, then high) | PASS: second answer `{"already_queued": true}` with the first job's id; one job, LOW |
+| 4 | Our taggings rows deleted from Plex item 64 (Synth S01E02) and the Jellyfin 10.11 plugin's markers deleted (204), then Check servers | PASS: "2 published item(s) changed on servers (1 file(s) this run)"; `markers_written` on Plex and Jellyfin 10.11, up to date on Jellyfin 12.0; Plex rows, Plex-served markers and Jellyfin segments equal to before; the next run lists nothing |
+| 5 | S01E02's Jellyfin 10.11 publish rows pointed at item `0badc0de…` (Jellyfin has no such item; the real item's row kept), then Check servers three times | PASS: run 1 lists the file with no warning ("1 published item(s) changed"), Jellyfin 10.11 up to date on the real item, publish row back on the real item id; run 2 marks the missing item `gone` quietly, no files, no warning; run 3 lists nothing; segments on the real item unchanged. The fake row was deleted afterwards |
+
+Screenshots retaken with the new tooltip copy: `task11-schedule-modal-check-servers-tooltip.png` and
+`task11-start-job-check-servers-tooltip.png`.
+
+The Plex read-back no longer has the 2 ms time budget measured above: it reads one item per connection, the single
+read-back's lock footprint, with the settings, database files and lock proof checked once per call and the schema on
+its first connection.
+
+Lab left clean: `mlab-app` on `pr-241` with the same switches, no schedules, S01E02's Plex rows and Jellyfin segments
+as before. The Task 11 tables were dropped from the lab `markers.db` (`server_marker_rechecks` from the first build,
+`server_marker_rereads`, `drift_listings`); `idx_publish_state_item` stays (ignored by `pr-241`).
+
+## Task 11 — fix round 2: a deleted Emby item (2026-09-15)
+
+**Setup.** `mlab-app` rebuilt from lane `p2-task-11` after fix round 2, then put back on `pr-241`. Script and raw
+results: scratchpad `t11/lab-r2/lab_r2.py` (`emby-gone`, `cleanup` `.json`, scrubbed).
+
+| # | Check | Result |
+|---|---|---|
+| 1 | Emby Intro & Credits on (its plugin store was emptied by round 0's cleanup), Check servers twice | PASS: first run "5 published item(s) changed", all 5 version items `markers_written`; second run lists nothing |
+| 2 | S01E02's Emby publish rows pointed at item `999999999997` (Emby has no such item; item 51's row kept), then Check servers three times | PASS: run 1 lists the file with no warning and the publish row goes back to item 51 (up to date); run 2 marks `999999999997` `gone` with no files and no warning; run 3 lists nothing; the marker chapters on all 5 items unchanged |
+
+Cassettes for the same lookups (`tests/test_servers_emby_markers_vcr.py::TestEmbyItemMissingContract`, per user: 404;
+API key: an empty `Items` list; and `tests/test_servers_jellyfin_vcr.py::TestJellyfinItemMissingContract`, Jellyfin
+10.11: `/MediaSegments` 404 then an empty `Items` list) were recorded from `mlab-emby` and `mlab-jellyfin`.
+
+Lab left clean: the fake row deleted; `DELETE /MediaPreviewBridge/Markers/{51..55}` on Emby (200, `Stored` 0, 0 store
+files, no marker chapters); Emby Intro & Credits off as found; `mlab-app` on `pr-241` with the same switches and no
+schedules; the Task 11 tables dropped from the lab `markers.db` again.

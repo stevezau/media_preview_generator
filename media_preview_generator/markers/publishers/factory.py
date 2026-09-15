@@ -22,6 +22,7 @@ def publisher_for(
     sibling_markers: Callable[[str], dict[MarkerType, Marker] | None] | None = None,
     settings: ServerMarkersSettings | None = None,
     settings_provider: Callable[[], ServerMarkersSettings] | None = None,
+    ui_details: bool = True,
 ) -> MarkerPublisher | None:
     """Build the publisher for ``config.type`` with that server's markers settings.
 
@@ -34,6 +35,8 @@ def publisher_for(
             started earlier can't write after Intro & Credits was turned off, and Emby reads "When Emby has its own
             markers" from them before each write. Jellyfin needs no such guard: its writes go through the server's
             own API and the pipeline checks the saved settings first.
+        ui_details: Include details only the Edit dialog shows in ``capability()`` (Plex's own detection settings, one
+            more Plex request).
 
     Returns:
         The publisher, or None for a server type without one.
@@ -44,7 +47,12 @@ def publisher_for(
         from .plex_db import PlexMarkerPublisher
 
         return PlexMarkerPublisher(
-            server, config, settings, sibling_markers=sibling_markers, settings_provider=settings_provider
+            server,
+            config,
+            settings,
+            sibling_markers=sibling_markers,
+            settings_provider=settings_provider,
+            ui_details=ui_details,
         )
     if config.type is ServerType.JELLYFIN:
         from .jellyfin import JellyfinMarkerPublisher

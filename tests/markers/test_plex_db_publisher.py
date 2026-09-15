@@ -2385,3 +2385,226 @@ class TestServedTimesDecideWhatIsAlreadyThere:
         assert "BEGIN IMMEDIATE" in sql_log
         assert "COMMIT" not in sql_log
         assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 1
+
+
+class TestReadBackMany:
+    """Check servers reads every published Plex item back: one connection per item, the lock proof once per call."""
+
+    def _items(self, keys, ours=(INTRO,)):
+        return [(str(k), list(ours), frozenset(), None) for k in keys]
+
+    def test_shows_many_answers_what_shows_answers(self, tmp_path):
+        folder = tmp_path / "Plex Media Server"
+        _make_db(folder)
+        pub = _publisher(tmp_path, folder)
+        _write_one(pub, [INTRO, CREDITS_FINAL])
+        files = ("/data/tv/S01E01.mkv",)
+        items = [("7", [INTRO, CREDITS_FINAL], frozenset(), files), ("not-a-key", [INTRO], frozenset(), None)]
+        assert pub.shows_many(items) == {"7": Shown.OURS, "not-a-key": None}
+        assert pub.shows("7", [INTRO, CREDITS_FINAL], item_files=files) is Shown.OURS
+        assert pub.shows_many([("7", [INTRO], frozenset(), ("/data/tv/other.mkv",))]) == {"7": Shown.VERSIONS_CHANGED}
+        other_intro = Marker(T.INTRO, 12_000, 37_000, ("chapters",))
+        assert pub.shows_many([("7", [other_intro], frozenset(), None)]) == {"7": Shown.REPLACED}
+        assert pub.shows_many([("7", [], frozenset({T.CREDITS}), None), ("8", [INTRO], frozenset(), None)]) == {
+            "7": Shown.OURS,
+            "8": Shown.GONE,  # Plex has no item 8
+        }
+        assert pub.shows("8", [INTRO]) is Shown.GONE
+
+    def test_one_connection_per_item_and_the_checks_once_per_call(self, tmp_path, monkeypatch):
+        folder = tmp_path / "Plex Media Server"
+        _make_db(folder)
+        pub = _publisher(tmp_path, folder)
+        opened, local_checks, schema_checks = [], [], []
+        real_database, real_local, real_schema = (
+            PlexMarkerPublisher._database,
+            PlexMarkerPublisher._local_checks,
+            (PlexMarkerPublisher._check_schema),
+        )
+
+        def counting_database(self, **kwargs):
+            opened.append(kwargs["read_only"])
+            return real_database(self, **kwargs)
+
+        monkeypatch.setattr(PlexMarkerPublisher, "_database", counting_database)
+        monkeypatch.setattr(
+            PlexMarkerPublisher, "_local_checks", lambda self, **kw: local_checks.append(1) or real_local(self, **kw)
+        )
+        monkeypatch.setattr(
+            PlexMarkerPublisher,
+            "_check_schema",
+            staticmethod(lambda conn: schema_checks.append(1) or real_schema(conn)),
+        )
+        out = pub.shows_many(self._items([7, 8, "x", 9, 10]))
+        assert out == {"7": Shown.MISSING, "8": Shown.GONE, "x": None, "9": Shown.GONE, "10": Shown.GONE}
+        assert opened == [True, True, True, True]  # no connection for an id that isn't a rating key
+        assert (len(local_checks), len(schema_checks)) == (1, 1)
+
+    def test_a_row_this_code_cant_read_skips_only_that_item(self, tmp_path):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=(("/data/tv/S01E01.mkv", None),))
+        pub = _publisher(tmp_path, folder)
+        _write_one(pub, [INTRO])
+        _exec(db, "INSERT INTO metadata_items (id, metadata_type, title) VALUES (8, 4, 'Ep 2')")
+        _exec(db, "INSERT INTO metadata_items (id, metadata_type, title) VALUES (9, 4, 'Ep 3')")
+        _exec(db, "INSERT INTO taggings (metadata_item_id, tag_id, text, time_offset, end_time_offset) "
+                  "VALUES (8, 563, 'credits', NULL, 1320000)")  # fmt: skip
+        out = pub.shows_many(self._items([7, 8, 9]))
+        assert out == {"7": Shown.OURS, "8": None, "9": Shown.MISSING}
+
+    def test_an_sqlite_error_on_one_item_answers_none_for_it_and_the_next_item_is_still_read(
+        self, tmp_path, monkeypatch
+    ):
+        folder = tmp_path / "Plex Media Server"
+        _make_db(folder)
+        pub = _publisher(tmp_path, folder)
+        _write_one(pub, [INTRO])
+        real_shown = PlexMarkerPublisher._shown_in
+        calls = []
+
+        def failing_second(self, *args):
+            calls.append(args[2])  # the rating key
+            if len(calls) == 2:
+                raise sqlite3.OperationalError("disk I/O error")
+            return real_shown(self, *args)
+
+        monkeypatch.setattr(PlexMarkerPublisher, "_shown_in", failing_second)
+        assert pub.shows_many(self._items(["7", "8", "7"])) == {"7": Shown.OURS, "8": None}
+        assert calls == [7, 8, 7]
+
+    def test_once_the_database_cant_be_read_at_all_the_rest_are_none(self, tmp_path, monkeypatch):
+        folder = tmp_path / "Plex Media Server"
+        _make_db(folder)
+        pub = _publisher(tmp_path, folder)
+        _write_one(pub, [INTRO])
+        real_database = PlexMarkerPublisher._database
+        opened = []
+
+        def busy_after_the_first(self, **kwargs):
+            opened.append(1)
+            if len(opened) == 2:
+                raise PublishError("Another Intro & Credits task is still using this Plex database",
+                                   state=Capability.UNREACHABLE)  # fmt: skip
+            return real_database(self, **kwargs)
+
+        monkeypatch.setattr(PlexMarkerPublisher, "_database", busy_after_the_first)
+        assert pub.shows_many(self._items(["7", "8", "9"])) == {"7": Shown.OURS, "8": None, "9": None}
+        assert len(opened) == 2
+
+    @pytest.mark.parametrize(
+        "problem", ["settings-off", "no-lock-holder", "schema"], ids=["off", "plex-stopped", "schema-changed"]
+    )
+    def test_nothing_is_read_when_the_database_cant_be_shared(self, tmp_path, monkeypatch, problem):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder)
+        pub = _publisher(tmp_path, folder, enabled=problem != "settings-off")
+        if problem == "no-lock-holder":
+            monkeypatch.setattr(plex_db, "shm_lock_held_elsewhere", lambda _db, **_kw: False)
+        elif problem == "schema":
+            _exec(db, "CREATE TRIGGER t AFTER INSERT ON taggings BEGIN SELECT 1; END")
+        connected = []
+        monkeypatch.setattr(
+            PlexMarkerPublisher, "_connect", lambda self, **kw: connected.append(kw) or sqlite3.connect(db)
+        )
+        assert pub.shows_many(self._items(["7", "8"])) == {"7": None, "8": None}
+        assert len(connected) == (1 if problem == "schema" else 0)  # a changed schema stops the call after one look
+
+    @pytest.mark.parametrize(
+        ("case", "missing"),
+        [("item-there", False), ("item-deleted", True), ("not-a-rating-key", None), ("plex-stopped", None),
+         ("database-busy", None)],
+    )  # fmt: skip
+    def test_item_missing_asks_plexs_database(self, tmp_path, monkeypatch, case, missing):
+        folder = tmp_path / "Plex Media Server"
+        _make_db(folder)  # item 7
+        pub = _publisher(tmp_path, folder)
+        item_id = {"item-deleted": "8", "not-a-rating-key": "x"}.get(case, "7")
+        if case == "plex-stopped":
+            monkeypatch.setattr(plex_db, "shm_lock_held_elsewhere", lambda _db, **_kw: False)
+        elif case == "database-busy":
+
+            def busy(self, **kwargs):
+                raise PublishError("Another Intro & Credits task is still using this Plex database",
+                                   state=Capability.UNREACHABLE)  # fmt: skip
+
+            monkeypatch.setattr(PlexMarkerPublisher, "_database", busy)
+        assert pub.item_missing(item_id) is missing
+
+    def test_a_write_waiting_for_the_database_gets_it_between_items(self, tmp_path, monkeypatch):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder)
+        reader, writer = _publisher(tmp_path, folder), _publisher(tmp_path, folder)
+        real_shown = PlexMarkerPublisher._shown_in
+        reading = threading.Event()
+
+        def slow(self, *args):
+            reading.set()
+            time.sleep(0.01)
+            return real_shown(self, *args)
+
+        monkeypatch.setattr(PlexMarkerPublisher, "_shown_in", slow)
+        monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 0.5)  # the write gives up if it never gets the lock
+        finished = {}
+
+        def read_back():
+            reader.shows_many(self._items(range(1, 101)))
+            finished["read"] = time.monotonic()
+
+        thread = threading.Thread(target=read_back)
+        thread.start()
+        assert reading.wait(5)
+        _write_one(writer, [INTRO])
+        finished["write"] = time.monotonic()
+        thread.join(20)
+        assert finished["write"] < finished["read"] - 0.3  # the write didn't wait for the whole read-back
+        assert _served(db) == [(T.INTRO, INTRO.start_ms, INTRO.end_ms)]
+
+    def test_between_two_items_it_pauses_with_the_lock_free(self, tmp_path, monkeypatch):
+        # A released threading.Lock can be taken again by the same thread before a waiting writer wakes (Python before
+        # 3.13 hands it to no one in particular); the pause gives the writer the moment to take it.
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder)
+        pub = _publisher(tmp_path, folder)
+        pauses = []
+        real_sleep = time.sleep
+        monkeypatch.setattr(
+            plex_db.time,
+            "sleep",
+            lambda s: (
+                pauses.append((s, plex_db._db_lock(str(db)).locked()))
+                if s == plex_db.READ_BACK_PAUSE_S
+                else real_sleep(s)
+            ),
+        )
+        pub.shows_many(self._items([7, "x", 8, 9]))
+        assert pauses == [(plex_db.READ_BACK_PAUSE_S, False)] * 2  # before items 8 and 9; none before the first read
+
+    def test_a_cancel_stops_before_the_next_item(self, tmp_path):
+        folder = tmp_path / "Plex Media Server"
+        _make_db(folder)
+        pub = _publisher(tmp_path, folder)
+        answers = iter([False, False, True])
+        out = pub.shows_many(self._items(["1", "2", "3", "4"]), cancel_check=lambda: next(answers))
+        assert list(out) == ["1", "2"]
+
+    def test_shows_is_a_read_back_of_one_item(self, tmp_path, monkeypatch):
+        folder = tmp_path / "Plex Media Server"
+        _make_db(folder)
+        pub = _publisher(tmp_path, folder)
+        many = MagicMock(return_value={"7": Shown.REPLACED})
+        monkeypatch.setattr(pub, "shows_many", many)
+        assert pub.shows("7", (INTRO,), kept_types={T.CREDITS}, item_files=("/a.mkv",)) is Shown.REPLACED
+        assert many.call_args.args == ([("7", [INTRO], frozenset({T.CREDITS}), ("/a.mkv",))],)
+
+    @pytest.mark.parametrize("ui_details", [True, False])
+    def test_detection_settings_are_asked_only_for_the_edit_dialog(self, tmp_path, ui_details):
+        folder = tmp_path / "Plex Media Server"
+        _make_db(folder)
+        pub = _publisher(tmp_path, folder)
+        pub._ui_details = ui_details
+        report = pub.capability()
+        assert report.ready
+        assert pub._server.get_marker_detection_prefs.called is ui_details
+        assert report.details["detection"] == (
+            {"intro": "never", "credits": "never"} if ui_details else {"intro": None, "credits": None}
+        )

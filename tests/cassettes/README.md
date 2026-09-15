@@ -106,8 +106,23 @@ EMBY_URL=http://127.0.0.1:18096 EMBY_USER_ID="$EMBY_UID" \
 grep -rlF -e "$EMBY_TOKEN" -e "$EMBY_UID" tests/cassettes/test_servers_emby_markers_vcr/ && echo "LEAK" || echo "clean"
 ```
 
-Expected: `10 passed`, `clean`. The user id is recorded as `/Users/FAKE_USER_ID/` (`_scrub_request_uri`), which is what
+Expected: `13 passed`, `clean`. The user id is recorded as `/Users/FAKE_USER_ID/` (`_scrub_request_uri`), which is what
 the test sends on replay; the per-user route answers a single item, so the `Items`-list collapse above doesn't apply.
+`TestEmbyItemMissingContract` pins how Emby answers an item id it doesn't have (per user: 404; API key: an empty
+`Items` list), which Check servers uses to tell a deleted item from a failed read.
+
+`tests/test_servers_jellyfin_vcr.py::TestJellyfinItemMissingContract` is recorded against the storage lab's Jellyfin
+10.11 (`mlab-jellyfin`), not the Docker-Compose stack; it asks for an item id Jellyfin doesn't have:
+
+```bash
+cd /home/data/workspace/plex_generate_vid_previews
+set -a; . docs/design/intro-credits/evidence/lab/env; set +a
+JELLYFIN_URL=http://127.0.0.1:18097 JELLYFIN_TOKEN="$JF_TOKEN" \
+  /home/data/.venv/bin/python -m pytest --no-cov -n 0 tests/test_servers_jellyfin_vcr.py -k ItemMissing --record-mode=once
+grep -rlF -e "$JF_TOKEN" tests/cassettes/test_servers_jellyfin_vcr/ && echo "LEAK" || echo "clean"
+```
+
+Expected: `1 passed`, `clean`.
 The API-key read answers an `Items` list whose item has no `Path` (it asks for other fields): the scrubber keeps it
 when every one of its `MediaSources` paths is synthetic.
 

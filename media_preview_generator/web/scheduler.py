@@ -358,6 +358,34 @@ def _start_scheduled_intro_credits_job(
         )
 
 
+def _start_scheduled_check_servers(manager: "ScheduleManager", schedule_id: str, priority: int | str | None) -> None:
+    """Queue Intro & Credits · Check servers for a schedule tick (LOW unless the schedule sets a priority).
+
+    Nothing is queued while a Check servers job from anywhere is still queued or running; the schedule's last run is
+    stamped only when this tick queued the job.
+    """
+    try:
+        from ..markers.reconcile import run_markers_reconcile
+        from .jobs import PRIORITY_LOW, parse_priority
+
+        queued = run_markers_reconcile(
+            priority=parse_priority(priority) if priority is not None else PRIORITY_LOW,
+            parent_schedule_id=schedule_id,
+        )
+        if queued.created:
+            manager._update_last_run(schedule_id)
+        elif queued.job_id is not None:
+            logger.info(
+                "Schedule {}: Check servers job {} hasn't finished; not queueing another",
+                schedule_id,
+                queued.job_id[:8],
+            )
+    except Exception:
+        logger.exception(
+            "Scheduled Check servers {} could not start. It will try again on its next scheduled tick.", schedule_id
+        )
+
+
 # Module-level function for APScheduler to call
 # Must be at module level to be picklable
 def execute_scheduled_job(
@@ -382,7 +410,8 @@ def execute_scheduled_job(
       Uses ``config["lookback_hours"]`` (default 1). Plex-only.
     * ``"intro_credits"`` — creates an Intro & Credits job for the schedule's
       libraries (every library Intro & Credits goes to when none are chosen),
-      LOW priority unless the schedule sets one.
+      LOW priority unless the schedule sets one. With ``config["reconcile"]``
+      it queues Check servers instead (every server; libraries don't apply).
     * anything else (including missing) — legacy **full library** scan via
       ``manager.run_job_callback``, which creates a job processing every
       item in the targeted libraries.
@@ -457,11 +486,16 @@ def execute_scheduled_job(
             from ..job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_PREVIEWS
             from .jobs import JobStatus, get_job_manager
 
-            # A schedule switched between previews and Intro & Credits must not resume the other kind's job.
+            # A schedule switched between previews and Intro & Credits (or between finding markers and checking
+            # servers) must not resume the other kind's job.
             schedule_kind = JOB_KIND_INTRO_CREDITS if job_type == "intro_credits" else JOB_KIND_PREVIEWS
             job_manager = get_job_manager()
             for job in job_manager.get_all_jobs():
                 if job.parent_schedule_id != schedule_id or job.kind != schedule_kind:
+                    continue
+                if schedule_kind == JOB_KIND_INTRO_CREDITS and bool((job.config or {}).get("reconcile")) != bool(
+                    cfg.get("reconcile")
+                ):
                     continue
                 if not job.paused or job.status is not JobStatus.RUNNING:
                     continue
@@ -484,6 +518,9 @@ def execute_scheduled_job(
                 schedule_id,
             )
 
+    if job_type == "intro_credits" and cfg.get("reconcile"):
+        _start_scheduled_check_servers(manager, schedule_id, priority)
+        return
     if job_type == "intro_credits":
         _start_scheduled_intro_credits_job(manager, schedule_id, library_ids, library_name, priority, server_id)
         return

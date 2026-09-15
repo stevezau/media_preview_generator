@@ -214,6 +214,17 @@ class JellyfinMarkerPublisher(MarkerPublisher):
         state = self._server.get_bridge_marker_state(item_id)
         return size is not None and state is not None and not state["stale"] and state["fileSize"] == size
 
+    def item_missing(self, item_id: str) -> bool | None:
+        """Whether the server answers that it has no such item (``MediaServer.item_missing``: 404 or no match).
+
+        Args:
+            item_id: The server's item id.
+
+        Returns:
+            True when it doesn't exist, False when it does, None when the server couldn't be asked.
+        """
+        return self._server.item_missing(item_id)
+
     def shows(
         self,
         item_id: str,
@@ -231,12 +242,13 @@ class JellyfinMarkerPublisher(MarkerPublisher):
             item_files: Ignored (see ``write``).
 
         Returns:
-            Whether Jellyfin still serves each of ``ours`` (another provider's segments may sit alongside); None when
-            the segments couldn't be read.
+            Whether Jellyfin still serves each of ``ours`` (another provider's segments may sit alongside); GONE when
+            Jellyfin has no such item; None when the segments couldn't be read.
         """
         rows = self._server.get_media_segments(item_id)
         if rows is None:
-            return None
+            # One more request only when the read failed: a deleted item is drift to fix, not a read to warn about.
+            return Shown.GONE if self.item_missing(item_id) is True else None
         served: dict[MarkerType, list[tuple[int, int]]] = {}
         for row in rows:
             converted = segment_times(*core_key(row))

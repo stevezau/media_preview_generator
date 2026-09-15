@@ -13,17 +13,20 @@ import json
 import os
 import sqlite3
 import threading
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from loguru import logger
 
 from .decide import DecisionStatus, TypeDecision
-from .models import Candidate, FileIdentity, Marker, MarkerType, Source
+from .models import SERVER_SOURCES, Candidate, FileIdentity, Marker, MarkerType, Source
 
 SCHEMA_VERSION = 1
+_SERVER_SOURCE_VALUES = (Source.SERVER_MARKERS.value, Source.SERVER_MARKERS_IMPORTED.value)
+# A file Check servers took for a server isn't taken for it again sooner (it may not have run: gone from disk, cancelled).
+_RECHECK_TAKEN_AGAIN = timedelta(days=1)
 
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -97,6 +100,7 @@ _SCHEMA = (
         updated_at TEXT NOT NULL,
         verified_at TEXT,
         PRIMARY KEY (file_id, server_id))""",
+    "CREATE INDEX IF NOT EXISTS idx_publish_state_item ON publish_state(server_id, item_id)",
     # What this app last left on a server item, whichever file published it: Plex serves one marker set per item
     # across all its versions. Not tied to a file row, so replacing or removing a file keeps it.
     """CREATE TABLE IF NOT EXISTS item_publish_state (
@@ -171,6 +175,23 @@ _SCHEMA = (
         size INTEGER NOT NULL,
         mtime_ns INTEGER NOT NULL,
         failed_at TEXT NOT NULL)""",
+    # A server's empty (or unusable) answer for a file, asked again by Check servers: how many times it was read again
+    # without markers (the backoff step; gone once the answer has markers or the file changes), when the last re-read
+    # that couldn't replace the answer happened (the backoff counts from it), and when Check servers last took the
+    # file for it, so files it can't run (gone from disk, not in that library) take turns with the rest.
+    """CREATE TABLE IF NOT EXISTS server_marker_rereads (
+        file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        server_id TEXT NOT NULL,
+        rereads INTEGER NOT NULL DEFAULT 0,
+        taken_at TEXT,
+        failed_reread_at TEXT,
+        PRIMARY KEY (file_id, server_id))""",
+    # When Check servers last listed a drifted server item's files, so items it can't fix take turns with the rest.
+    """CREATE TABLE IF NOT EXISTS drift_listings (
+        server_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        listed_at TEXT NOT NULL,
+        PRIMARY KEY (server_id, item_id))""",
     """CREATE TABLE IF NOT EXISTS source_usage (
         source TEXT NOT NULL,
         day TEXT NOT NULL,
@@ -443,6 +464,7 @@ class MarkerStore:
                         "detector_runs",
                         "detector_failures",
                         "intro_chapter_limits",
+                        "server_marker_rereads",
                     ):
                         conn.execute(f"DELETE FROM {table} WHERE file_id=?", (file_id,))
                     conn.execute("DELETE FROM season_pairs WHERE file_a=? OR file_b=?", (file_id, file_id))
@@ -557,7 +579,28 @@ class MarkerStore:
         """
         now = self._now()
         with self._tx() as conn:
+            if source in SERVER_SOURCES and origin:
+                self._count_server_reread(conn, file_id, origin, has_markers=bool(candidates))
             self._write_evidence(conn, file_id, source, candidates, origin, detail, version, also_replaces, now)
+
+    @staticmethod
+    def _count_server_reread(conn: sqlite3.Connection, file_id: int, server_id: str, *, has_markers: bool) -> None:
+        """Before a server's new answer for a file is stored: an answer with markers forgets the re-reads; an empty one
+        that replaces an empty one counts one more (``take_server_rechecks`` backs off by that count)."""
+        if has_markers:
+            conn.execute("DELETE FROM server_marker_rereads WHERE file_id=? AND server_id=?", (file_id, server_id))
+            return
+        marks = ",".join("?" * len(SERVER_SOURCES))
+        stored, typed = conn.execute(
+            f"SELECT COUNT(*), COUNT(type) FROM evidence WHERE file_id=? AND origin=? AND source IN ({marks})",  # noqa: S608
+            (file_id, server_id, *_SERVER_SOURCE_VALUES),
+        ).fetchone()
+        if stored and not typed:
+            conn.execute(
+                "INSERT INTO server_marker_rereads (file_id, server_id, rereads) VALUES (?,?,1) "
+                "ON CONFLICT(file_id, server_id) DO UPDATE SET rereads = rereads + 1",
+                (file_id, server_id),
+            )
 
     @staticmethod
     def _write_evidence(
@@ -1066,7 +1109,7 @@ class MarkerStore:
             item_id: The server's item id.
             markers: Ours on the item now (sorted by start when stored); None keeps the markers recorded before (a
                 failed write), or none for a new row.
-            status: ``written`` or ``failed``.
+            status: ``written``, ``failed``, or ``gone`` (the server no longer has the item; ``mark_item_gone``).
             kept_types: Types whose rows on the item are the server's own and kept there; None keeps the recorded
                 ones. A change bumps the version like a change of markers.
             item_files: The item's version files the write computed the set for; None keeps the recorded ones.
@@ -1122,6 +1165,211 @@ class MarkerStore:
         """
         row = self.get_item_publish_state(server_id, item_id)
         return bool(row and (row.markers or row.kept_types))
+
+    def published_items(self, server_id: str) -> list[ItemPublishStateRow]:
+        """Server items where this app's last write succeeded and left markers of ours (or kept the server's own).
+
+        Args:
+            server_id: The server.
+
+        Returns:
+            The items' rows, by item id (text order).
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM item_publish_state WHERE server_id=? AND status='written' ORDER BY item_id", (server_id,)
+            ).fetchall()
+            kept: dict[str, set[MarkerType]] = {}
+            for r in self._conn.execute("SELECT item_id, type FROM item_kept_types WHERE server_id=?", (server_id,)):
+                kept.setdefault(r["item_id"], set()).add(MarkerType(r["type"]))
+            files = {
+                r["item_id"]: tuple(json.loads(r["files_json"]))
+                for r in self._conn.execute(
+                    "SELECT item_id, files_json FROM item_versions WHERE server_id=?", (server_id,)
+                )
+            }
+        out = []
+        for r in rows:
+            markers = self._markers_from_json(r["markers_json"])
+            kept_types = frozenset(kept.get(r["item_id"], ()))
+            if markers or kept_types:
+                out.append(
+                    ItemPublishStateRow(
+                        r["server_id"],
+                        r["item_id"],
+                        markers,
+                        r["status"],
+                        r["version"],
+                        r["updated_at"],
+                        kept_types,
+                        files.get(r["item_id"]),
+                    )
+                )
+        return out
+
+    def files_for_item(self, server_id: str, item_id: str) -> list[str]:
+        """Local files whose last publish to this server went to this item.
+
+        Args:
+            server_id: The server.
+            item_id: The server's item id.
+
+        Returns:
+            Their canonical paths, sorted.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT f.canonical_path FROM publish_state p JOIN files f ON f.id = p.file_id "
+                "WHERE p.server_id=? AND p.item_id=? ORDER BY f.canonical_path",
+                (server_id, item_id),
+            ).fetchall()
+        return [r["canonical_path"] for r in rows]
+
+    def take_server_rechecks(
+        self, server_ids: Iterable[str], *, now: datetime, after: Sequence[timedelta], limit: int
+    ) -> list[str]:
+        """Take decided files to ask a server again for its own markers, and remember when they were taken.
+
+        A file qualifies for a server when its credits or preview are decided (the types a server's own markers can
+        shorten, spec §5.5 rule 7), nothing of ours is on the server item it last published to, and that server's
+        stored answer for it is empty (or unusable) and old enough: at least ``after[n]`` old after ``n`` re-reads
+        without markers (counted from the last re-read that failed, when that is later), never once it was read again
+        ``len(after)`` times. A file taken for a server in the last day
+        isn't taken again for it. Pairs never taken come first, then the least recently taken, then the oldest answers.
+
+        Args:
+            server_ids: Servers whose answers count.
+            now: The current time.
+            after: How old the answer must be before each re-read (the backoff steps).
+            limit: Most (file, server) pairs to take.
+
+        Returns:
+            The taken files' canonical paths, sorted, each once.
+        """
+        ids = sorted(set(server_ids))
+        if not ids or limit <= 0 or not after:
+            return []
+        steps = " ".join("WHEN ? THEN ?" for _ in after)
+        marks = ",".join("?" * len(ids))
+        with self._tx() as conn:
+            rows = conn.execute(
+                "WITH answers AS ("
+                "  SELECT file_id, origin AS server_id, MAX(fetched_at) AS fetched_at FROM evidence"
+                f"  WHERE source IN (?, ?) AND origin IN ({marks})"  # noqa: S608 - placeholders only
+                "  GROUP BY origin, file_id HAVING COUNT(type) = 0"
+                ") "
+                "SELECT a.file_id, a.server_id, f.canonical_path FROM answers a "
+                "JOIN files f ON f.id = a.file_id "
+                "LEFT JOIN server_marker_rereads r ON r.file_id = a.file_id AND r.server_id = a.server_id "
+                "WHERE MAX(a.fetched_at, COALESCE(r.failed_reread_at, '')) "
+                f"< (CASE COALESCE(r.rereads, 0) {steps} END) "  # noqa: S608 - placeholders only
+                "AND (r.taken_at IS NULL OR r.taken_at < ?) "
+                "AND EXISTS (SELECT 1 FROM decisions d WHERE d.file_id = a.file_id AND d.status = ? "
+                "            AND d.type IN (?, ?)) "
+                "AND NOT EXISTS (SELECT 1 FROM publish_state p WHERE p.file_id = a.file_id "
+                "                AND p.server_id = a.server_id AND p.markers_json != '[]') "
+                "AND NOT EXISTS (SELECT 1 FROM publish_state p JOIN item_publish_state i "
+                "                ON i.server_id = p.server_id AND i.item_id = p.item_id "
+                "                WHERE p.file_id = a.file_id AND p.server_id = a.server_id "
+                "                AND (i.markers_json != '[]' OR EXISTS (SELECT 1 FROM item_kept_types k "
+                "                     WHERE k.server_id = i.server_id AND k.item_id = i.item_id))) "
+                "ORDER BY r.taken_at IS NOT NULL, r.taken_at, a.fetched_at, f.canonical_path LIMIT ?",
+                (
+                    *_SERVER_SOURCE_VALUES,
+                    *ids,
+                    *(value for n, step in enumerate(after) for value in (n, (now - step).isoformat())),
+                    (now - _RECHECK_TAKEN_AGAIN).isoformat(),
+                    DecisionStatus.DECIDED.value,
+                    MarkerType.CREDITS.value,
+                    MarkerType.PREVIEW.value,
+                    int(limit),
+                ),
+            ).fetchall()
+            taken_at = self._now()
+            conn.executemany(
+                "INSERT INTO server_marker_rereads (file_id, server_id, taken_at) VALUES (?,?,?) "
+                "ON CONFLICT(file_id, server_id) DO UPDATE SET taken_at = excluded.taken_at",
+                [(r["file_id"], r["server_id"], taken_at) for r in rows],
+            )
+        return sorted({r["canonical_path"] for r in rows})
+
+    def server_recheck_due(self, file_id: int, server_id: str, *, now: datetime, after: Sequence[timedelta]) -> bool:
+        """Whether a server's stored answer for a file is empty and due to be read again (``take_server_rechecks``).
+
+        Args:
+            file_id: The file.
+            server_id: The server.
+            now: The current time.
+            after: The backoff steps.
+
+        Returns:
+            True when every stored row is empty and the answer (or the last failed re-read) is older than the step its
+            re-reads so far reached.
+        """
+        marks = ",".join("?" * len(SERVER_SOURCES))
+        with self._lock:
+            stored, typed, fetched = self._conn.execute(
+                "SELECT COUNT(*), COUNT(type), MAX(fetched_at) FROM evidence "
+                f"WHERE file_id=? AND origin=? AND source IN ({marks})",  # noqa: S608 - placeholders only
+                (file_id, server_id, *_SERVER_SOURCE_VALUES),
+            ).fetchone()
+            row = self._conn.execute(
+                "SELECT rereads, failed_reread_at FROM server_marker_rereads WHERE file_id=? AND server_id=?",
+                (file_id, server_id),
+            ).fetchone()
+        rereads = int(row["rereads"]) if row else 0
+        if not stored or typed or rereads >= len(after):
+            return False
+        answered = max(fetched, (row["failed_reread_at"] if row else None) or "")
+        return datetime.fromisoformat(answered) < now - after[rereads]
+
+    def mark_item_gone(self, server_id: str, item_id: str) -> None:
+        """Take a server item that no longer exists there out of ``published_items`` until this app writes it again.
+
+        Its row keeps what was ours on it; the status becomes ``gone`` (a new version, so the next publish of any file
+        to that item writes instead of trusting its basis). Only a ``written`` row changes.
+        """
+        with self._tx() as conn:
+            conn.execute(
+                "UPDATE item_publish_state SET status='gone', version=version+1, updated_at=? "
+                "WHERE server_id=? AND item_id=? AND status='written'",
+                (self._now(), server_id, item_id),
+            )
+
+    def count_failed_server_reread(self, file_id: int, server_id: str) -> None:
+        """Count a Check servers re-read of a stored answer that failed (an unreadable read, another cut on the item).
+
+        The stored answer stays; the re-read moves the backoff on like one that stayed empty (``take_server_rechecks``).
+
+        Args:
+            file_id: The file.
+            server_id: The server whose read failed.
+        """
+        now = self._now()
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO server_marker_rereads (file_id, server_id, rereads, failed_reread_at) VALUES (?,?,1,?) "
+                "ON CONFLICT(file_id, server_id) DO UPDATE SET rereads = rereads + 1, failed_reread_at = excluded.failed_reread_at",
+                (file_id, server_id, now),
+            )
+
+    def drift_listed_at(self, server_id: str, item_ids: Iterable[str]) -> dict[str, str]:
+        """When Check servers last listed each of these drifted items' files (items never listed are left out)."""
+        wanted = set(item_ids)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT item_id, listed_at FROM drift_listings WHERE server_id=?", (server_id,)
+            ).fetchall()
+        return {r["item_id"]: r["listed_at"] for r in rows if r["item_id"] in wanted}
+
+    def record_drift_listed(self, pairs: Iterable[tuple[str, str]]) -> None:
+        """Remember that Check servers listed the files of these ``(server_id, item_id)`` drifted items now."""
+        now = self._now()
+        with self._tx() as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO drift_listings (server_id, item_id, listed_at) VALUES (?,?,?)",
+                [(server_id, item_id, now) for server_id, item_id in pairs],
+            )
 
     def set_publish_basis(self, file_id: int, server_id: str, *, decided_hash: str, item_version: int) -> None:
         """Remember what a file's publish to a server was based on (cleared when the file changes)."""

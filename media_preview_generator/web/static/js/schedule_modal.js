@@ -33,8 +33,22 @@ function onScheduleTypeChange() {
     }
 }
 
+// Intro & Credits · Check servers reads back every server, so the server and library pickers don't apply.
+function _scheduleChecksServers() {
+    const markers = document.getElementById('scanModeMarkers');
+    const checkServers = document.getElementById('scheduleMarkersCheckServers');
+    return !!(markers && markers.checked && checkServers && checkServers.checked);
+}
+
 function onScanModeChange() {
     const selected = document.querySelector('input[name="scanMode"]:checked').value;
+    const markersMode = document.getElementById('scheduleMarkersModeGroup');
+    if (markersMode) markersMode.hidden = selected !== 'intro_credits';
+    const checksServers = _scheduleChecksServers();
+    ['scheduleServerGroup', 'scheduleLibrariesGroup'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.hidden = checksServers;
+    });
     const lookbackGroup = document.getElementById('scheduleLookbackGroup');
     if (lookbackGroup) {
         lookbackGroup.style.display = selected === 'recently_added' ? '' : 'none';
@@ -86,6 +100,8 @@ function _resetScheduleForm() {
 
     // Reset scan mode to Full library and hide lookback group
     document.getElementById('scanModeFull').checked = true;
+    const findMarkers = document.getElementById('scheduleMarkersFind');
+    if (findMarkers) findMarkers.checked = true;
     document.getElementById('scheduleLookback').value = '1';
     const sortByEl = document.getElementById('scheduleSortBy');
     if (sortByEl) sortByEl.value = '';
@@ -186,6 +202,7 @@ function showEditScheduleModal(scheduleId) {
     const cfg = schedule.config || {};
     if (cfg.job_type === 'intro_credits') {
         document.getElementById('scanModeMarkers').checked = true;
+        document.getElementById(cfg.reconcile ? 'scheduleMarkersCheckServers' : 'scheduleMarkersFind').checked = true;
     } else if (cfg.job_type === 'recently_added') {
         document.getElementById('scanModeRecent').checked = true;
         const lookbackSelect = document.getElementById('scheduleLookback');
@@ -263,11 +280,12 @@ async function saveSchedule() {
     }
 
     const scheduleType = _getSelectedScheduleType();
+    const checksServers = _scheduleChecksServers();
     // Phase H7: collect selected library_ids from the checkbox group.
     // Empty list → "All Libraries" master is checked → backend treats as None.
     const allLibsCb = document.getElementById('scheduleLibraryAll');
     let selectedLibraryIds = [];
-    if (allLibsCb && !allLibsCb.checked) {
+    if (!checksServers && allLibsCb && !allLibsCb.checked) {
         selectedLibraryIds = Array.from(document.querySelectorAll('.schedule-library-checkbox:checked'))
             .map(cb => cb.value);
         if (selectedLibraryIds.length === 0) {
@@ -276,7 +294,7 @@ async function saveSchedule() {
         }
     }
     // Display name: a single library uses its name; multi shows count.
-    let libraryDisplay = 'All Libraries';
+    let libraryDisplay = checksServers ? 'All servers' : 'All Libraries';
     if (selectedLibraryIds.length === 1) {
         const lib = libraries.find(l => String(l.id) === String(selectedLibraryIds[0]));
         libraryDisplay = lib ? lib.name : 'Selected Library';
@@ -289,7 +307,9 @@ async function saveSchedule() {
     // lookback_hours value through the same config dict that user
     // schedules already use.
     const scheduleConfig = { job_type: scanMode };
-    if (scanMode === 'recently_added') {
+    if (checksServers) {
+        scheduleConfig.reconcile = true;
+    } else if (scanMode === 'recently_added') {
         scheduleConfig.lookback_hours = parseFloat(document.getElementById('scheduleLookback').value) || 1;
     } else if (scanMode === 'full_library') {
         // Processing order only applies to full-library scans
@@ -301,7 +321,7 @@ async function saveSchedule() {
     }
 
     const serverSelect = document.getElementById('scheduleServer');
-    const serverId = serverSelect ? serverSelect.value : '';
+    const serverId = serverSelect && !checksServers ? serverSelect.value : '';
 
     // D20 — stop_time only applies to time-of-day triggers; for
     // interval triggers we always send an empty string so the backend

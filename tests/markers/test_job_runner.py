@@ -4,7 +4,7 @@ import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -319,9 +319,14 @@ def env(monkeypatch):
 
 class TestRun:
     def _run(self, items=None, warnings=None):
-        with patch.object(
-            job_runner, "build_items", return_value=([_item()] if items is None else items, warnings or [], {})
-        ) as build:
+        from media_preview_generator.markers import reconcile
+
+        items = [_item()] if items is None else items
+        listing = reconcile.CheckServersListing(list(items), list(warnings or []))
+        with (
+            patch.object(job_runner, "build_items", return_value=(items, warnings or [], {})) as build,
+            patch.object(reconcile, "check_servers_listing", return_value=listing) as self.listing,
+        ):
             job_runner.run_intro_credits_job("j1")
         return build
 
@@ -810,6 +815,115 @@ class TestRun:
         assert all(w in warning for w in warnings)
         env.gate.release.assert_called_once_with(3)
 
+    @pytest.mark.parametrize(
+        ("warnings", "expected"),
+        [([], None), (["Skipped PLEX-1: Plex is stopped", "Couldn't read what 2 item(s) show on JF-1"],
+                      "Skipped PLEX-1: Plex is stopped | Couldn't read what 2 item(s) show on JF-1")],
+        ids=["clean", "with-warnings"],
+    )  # fmt: skip
+    def test_check_servers_with_nothing_drifted_completes_at_once_with_a_log_line(self, env, warnings, expected):
+        env.job.config = {"reconcile": True, "source": "reconcile"}
+        self._run([], warnings)
+        env.dispatcher.submit_items.assert_not_called()
+        env.jm.add_log.assert_any_call("j1", "INFO - Every server checked still shows what this app published")
+        env.jm.complete_job.assert_called_once_with("j1", warning=expected)
+
+    @pytest.mark.parametrize(("config", "recheck"), [({"reconcile": True}, True), ({"libraries": []}, False)])
+    def test_only_check_servers_asks_servers_again_for_their_own_markers(self, env, config, recheck):
+        env.job.config = config
+        build = self._run()
+        assert env.build_context.call_args.kwargs["recheck_empty_server_markers"] is recheck
+        assert (self.listing.called, build.called) == (recheck, not recheck)
+
+    def test_check_servers_lists_its_files_with_the_jobs_store_capability_cache_and_cancel(self, env, monkeypatch):
+        env.job.config = {"reconcile": True, "source": "reconcile"}
+        self._run()
+        kwargs = self.listing.call_args.kwargs
+        assert set(kwargs) == {"registry", "store", "max_files", "capability", "cancel_check", "progress_callback"}
+        assert (kwargs["registry"], kwargs["store"], kwargs["max_files"]) == (env.registry, env.ctx.store, 500)
+        cached = MagicMock(return_value="report")
+        monkeypatch.setattr(job_runner, "_capability", cached)
+        assert kwargs["capability"]("cfg", "pub") == "report"
+        cached.assert_called_once_with(env.ctx, "cfg", "pub")
+        assert kwargs["cancel_check"]() is False
+        env.jm.is_cancellation_requested.return_value = True
+        assert kwargs["cancel_check"]() is True
+
+    def test_a_pause_during_the_read_back_hands_the_slot_back_until_resume(self, env, monkeypatch):
+        env.job.config = {"reconcile": True, "source": "reconcile"}
+        env.job.priority = 2
+        paused = iter([True, True, False])
+        env.jm.is_pause_requested.side_effect = lambda job_id: next(paused, False)
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            env.job.priority = 1  # raised while paused: the slot taken on resume is a HIGH one
+
+        monkeypatch.setattr(job_runner, "time", SimpleNamespace(sleep=sleep))
+        seen = []
+
+        def listing(**kwargs):
+            seen.append((kwargs["cancel_check"](), env.gate.release.call_args_list[:], env.gate.acquire.call_count))
+            from media_preview_generator.markers import reconcile
+
+            return reconcile.CheckServersListing([], [])
+
+        from media_preview_generator.markers import reconcile
+
+        with patch.object(reconcile, "check_servers_listing", side_effect=listing):
+            job_runner.run_intro_credits_job("j1")
+        [(cancelled, released, acquired)] = seen
+        assert cancelled is False
+        assert released == [call(2)]  # handed back while paused
+        assert acquired == 2  # the job's first slot, then again on resume
+        assert env.gate.acquire.call_args_list[1].kwargs["priority"] == 1
+        assert len(sleeps) == 2
+        assert env.gate.release.call_args_list == [call(2), call(1)]  # the job's end gives back the slot it holds
+        env.jm.add_log.assert_any_call("j1", "INFO - Paused; active slot handed back until resume")
+
+    def test_all_processing_paused_waits_during_the_read_back_keeping_the_slot(self, env, monkeypatch):
+        env.job.config = {"reconcile": True, "source": "reconcile"}
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            env.sm.processing_paused = False  # resumed
+
+        monkeypatch.setattr(job_runner, "time", SimpleNamespace(sleep=sleep))
+        from media_preview_generator.markers import reconcile
+
+        answers = []
+
+        def listing(**kwargs):
+            env.sm.processing_paused = True
+            answers.append((kwargs["cancel_check"](), env.gate.release.called))
+            return reconcile.CheckServersListing([], [])
+
+        with patch.object(reconcile, "check_servers_listing", side_effect=listing):
+            job_runner.run_intro_credits_job("j1")
+        assert answers == [(False, False)]  # waited, slot kept (every job is paused)
+        assert len(sleeps) == 1
+
+    def test_a_cancel_while_paused_during_the_read_back_ends_the_wait(self, env, monkeypatch):
+        env.job.config = {"reconcile": True, "source": "reconcile"}
+        env.jm.is_pause_requested.return_value = True
+        cancels = iter([False, False, True])
+        env.jm.is_cancellation_requested.side_effect = lambda job_id: next(cancels, True)
+        monkeypatch.setattr(job_runner, "time", SimpleNamespace(sleep=lambda s: None))
+        from media_preview_generator.markers import reconcile
+
+        answers = []
+
+        def listing(**kwargs):
+            answers.append(kwargs["cancel_check"]())
+            return reconcile.CheckServersListing([], [])
+
+        with patch.object(reconcile, "check_servers_listing", side_effect=listing):
+            job_runner.run_intro_credits_job("j1")
+        assert answers == [True]
+        env.jm.cancel_job.assert_called_once_with("j1")
+
     def test_cancel_during_enumeration_cancels_without_submitting(self, env):
         def build(cfg, **kwargs):
             env.jm.is_cancellation_requested.return_value = True
@@ -1156,8 +1270,15 @@ class TestLibraryRetry:
         monkeypatch.setattr(job_runner, "set_file_result_callback", set_cb)
         return SimpleNamespace(settings=settings, create=create, results=results)
 
-    def _run(self, paths=("/m/a.mkv", "/m/b.mkv")):
-        with patch.object(job_runner, "build_items", return_value=([_item(p) for p in paths], [], {})):
+    def _run(self, paths=("/m/a.mkv", "/m/b.mkv"), listing=None):
+        from media_preview_generator.markers import reconcile
+
+        items = [_item(p) for p in paths]
+        listing = listing or reconcile.CheckServersListing(items, [])
+        with (
+            patch.object(job_runner, "build_items", return_value=(items, [], {})),
+            patch.object(reconcile, "check_servers_listing", return_value=listing),
+        ):
             job_runner.run_intro_credits_job("j1")
 
     @pytest.mark.parametrize(
@@ -1365,6 +1486,27 @@ class TestLibraryRetry:
         )
         self._run(["/m/a.mkv"])
         retry_env.create.assert_called_once()
+
+    @pytest.mark.parametrize("row", [NOT_IN_LIBRARY_ROW, PLEX_PASS_UNKNOWN_ROW], ids=["not-in-library", "plex-pass"])
+    def test_check_servers_queues_no_retry_and_hands_the_rows_to_the_listing(self, env, retry_env, row):
+        # A retry chain on every run would pile up; a later Check servers run lists the file again instead.
+        from media_preview_generator.markers import reconcile
+
+        env.job.config = {"reconcile": True, "source": "reconcile"}
+        retry_env.results.append(("/m/a.mkv", "markers_waiting", [row]))
+        listing = MagicMock(spec=reconcile.CheckServersListing, items=[_item("/m/a.mkv")], warnings=[])
+        self._run(listing=listing)
+        retry_env.create.assert_not_called()
+        env.jm.complete_job.assert_called_once_with("j1", warning=None)
+        listing.forget_gone_items.assert_called_once_with(env.ctx.store, env.registry, "/m/a.mkv", [row])
+
+    def test_other_jobs_forget_no_items(self, env, retry_env):
+        from media_preview_generator.markers import reconcile
+
+        retry_env.results.append(("/m/a.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]))
+        with patch.object(reconcile.CheckServersListing, "forget_gone_items") as forget:
+            self._run()
+        forget.assert_not_called()
 
     def test_cancelled_job_gets_no_retry(self, env, retry_env):
         retry_env.results.append(("/m/a.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]))

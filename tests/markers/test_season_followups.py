@@ -657,7 +657,7 @@ class TestSeasonJobThroughTheRealEngine:
         monkeypatch.setattr(
             job_runner,
             "build_context",
-            lambda *, registry, config, priority, force=False: PipelineContext(
+            lambda *, registry, config, priority, force=False, recheck_empty_server_markers=False: PipelineContext(
                 registry=registry,
                 config=config,
                 settings=marker_settings,
@@ -667,6 +667,7 @@ class TestSeasonJobThroughTheRealEngine:
                 force=force,
                 clients={},
                 live_config=registry.get_config,
+                recheck_empty_server_markers=recheck_empty_server_markers,
             ),
         )
         monkeypatch.setattr(triggers, "start_intro_credits_job_async", lambda job_id: None)

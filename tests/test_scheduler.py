@@ -1,6 +1,7 @@
 """Tests for media_preview_generator.web.scheduler."""
 
 import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1461,7 +1462,9 @@ class TestExecuteScheduledIntroCreditsJob:
 
         schedule = self._schedule(scheduler_manager)
         env["jobs"].append(
-            MagicMock(id="old", parent_schedule_id=schedule["id"], kind=kind, status=JobStatus.RUNNING, paused=True)
+            MagicMock(
+                id="old", parent_schedule_id=schedule["id"], kind=kind, status=JobStatus.RUNNING, paused=True, config={}
+            )
         )
         execute_scheduled_job(schedule["id"], None, "", {"job_type": job_type}, None, None)
 
@@ -1479,7 +1482,12 @@ class TestExecuteScheduledIntroCreditsJob:
         schedule = self._schedule(scheduler_manager)
         env["jobs"].append(
             MagicMock(
-                id="old", parent_schedule_id=schedule["id"], kind=paused_kind, status=JobStatus.RUNNING, paused=True
+                id="old",
+                parent_schedule_id=schedule["id"],
+                kind=paused_kind,
+                status=JobStatus.RUNNING,
+                paused=True,
+                config={},
             )
         )
         execute_scheduled_job(schedule["id"], None, "", {"job_type": job_type}, None, None)
@@ -1508,6 +1516,172 @@ class TestExecuteScheduledIntroCreditsJob:
 
         env["callback"].assert_not_called()
         assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is None
+
+
+class TestExecuteScheduledCheckServers:
+    """An Intro & Credits schedule set to "Check servers" queues the reconcile job (LOW unless pinned)."""
+
+    CONFIG = {"job_type": "intro_credits", "reconcile": True}
+
+    @pytest.fixture
+    def env(self, scheduler_manager, monkeypatch):
+        from media_preview_generator.markers import reconcile
+
+        jobs = {"pending": [], "running": [], "all": []}
+        fake_jm = MagicMock()
+        fake_jm.get_pending_jobs.side_effect = lambda: list(jobs["pending"])
+        fake_jm.get_running_jobs.side_effect = lambda: list(jobs["running"])
+        fake_jm.get_all_jobs.side_effect = lambda: [*jobs["pending"], *jobs["running"], *jobs["all"]]
+        fake_jm.request_resume.return_value = True
+        monkeypatch.setattr("media_preview_generator.web.jobs.get_job_manager", lambda: fake_jm)
+        monkeypatch.setattr(reconcile, "get_job_manager", lambda: fake_jm)
+        fake_sm = MagicMock(processing_paused=False)
+        fake_sm.get.side_effect = lambda key, default=None: default
+        monkeypatch.setattr("media_preview_generator.web.settings_manager.get_settings_manager", lambda: fake_sm)
+        callback = MagicMock()
+        scheduler_manager.set_run_job_callback(callback)
+        create = MagicMock(return_value=MagicMock(id="rc-1"))
+        monkeypatch.setattr("media_preview_generator.markers.triggers.create_intro_credits_job", create)
+        enabled = MagicMock(return_value=True)
+        monkeypatch.setattr("media_preview_generator.markers.triggers.markers_enabled_anywhere", enabled)
+        return SimpleNamespace(jobs=jobs, jm=fake_jm, sm=fake_sm, callback=callback, create=create, enabled=enabled)
+
+    def _schedule(self, scheduler_manager):
+        return scheduler_manager.create_schedule(
+            name="Check servers", interval_minutes=720, config=dict(self.CONFIG), library_name="All servers"
+        )
+
+    @staticmethod
+    def _created(schedule, priority=3):
+        return {
+            "library_name": "Intro & Credits · Check servers",
+            "priority": priority,
+            "source": "reconcile",
+            "reconcile": True,
+            "parent_schedule_id": schedule["id"],
+        }
+
+    @pytest.mark.parametrize(("priority", "expected"), [(None, 3), (1, 1), ("high", 1), (2, 2)])
+    def test_a_saved_check_servers_schedule_queues_one_job(self, scheduler_manager, env, priority, expected):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        execute_scheduled_job(schedule["id"], [], "All servers", dict(self.CONFIG), priority, None)
+
+        env.create.assert_called_once_with(**self._created(schedule, expected))
+        env.callback.assert_not_called()
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is not None
+
+    @pytest.mark.parametrize("state", ["pending", "running"])
+    @pytest.mark.parametrize("parent", ["this-schedule", "on-demand"])
+    def test_none_while_a_check_servers_job_is_queued_or_running(self, scheduler_manager, env, state, parent):
+        from media_preview_generator.web.jobs import JobStatus
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        env.jobs[state].append(
+            MagicMock(
+                id="rc-0",
+                kind="intro_credits",
+                config={"reconcile": True},
+                status=JobStatus(state),
+                paused=False,
+                parent_schedule_id=schedule["id"] if parent == "this-schedule" else "",
+            )
+        )
+        execute_scheduled_job(schedule["id"], [], "All servers", dict(self.CONFIG), None, None)
+
+        env.create.assert_not_called()
+        env.jm.request_resume.assert_not_called()
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is None
+
+    def test_a_finished_check_servers_job_doesnt_block_the_next_run(self, scheduler_manager, env):
+        from media_preview_generator.web.jobs import JobStatus
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        env.jobs["all"].append(
+            MagicMock(id="rc-0", kind="intro_credits", config={"reconcile": True}, status=JobStatus.COMPLETED,
+                      paused=False, parent_schedule_id=schedule["id"])
+        )  # fmt: skip
+        execute_scheduled_job(schedule["id"], [], "All servers", dict(self.CONFIG), None, None)
+        env.create.assert_called_once_with(**self._created(schedule))
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is not None
+
+    def test_nothing_is_queued_while_intro_and_credits_is_off_everywhere(self, scheduler_manager, env):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env.enabled.return_value = False
+        schedule = self._schedule(scheduler_manager)
+        execute_scheduled_job(schedule["id"], [], "All servers", dict(self.CONFIG), None, None)
+
+        env.create.assert_not_called()
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is None
+
+    def test_processing_paused_skips_the_tick(self, scheduler_manager, env):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env.sm.processing_paused = True
+        schedule = self._schedule(scheduler_manager)
+        execute_scheduled_job(schedule["id"], [], "All servers", dict(self.CONFIG), None, None)
+        env.create.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("tick_config", "paused_config", "resumed"),
+        [
+            ({"job_type": "intro_credits", "reconcile": True}, {"reconcile": True}, True),
+            ({"job_type": "intro_credits", "reconcile": True}, {"libraries": []}, False),
+            ({"job_type": "intro_credits"}, {"reconcile": True}, False),
+            ({"job_type": "intro_credits"}, {"libraries": []}, True),
+        ],
+        ids=["check-resumes-check", "check-skips-find", "find-skips-check", "find-resumes-find"],
+    )
+    def test_a_paused_job_is_resumed_only_by_a_tick_of_its_own_mode(
+        self, scheduler_manager, env, tick_config, paused_config, resumed
+    ):
+        from media_preview_generator.web.jobs import JobStatus
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        # A paused job still counts as running; the other mode's tick creates nothing while it waits either.
+        env.jobs["all"].append(
+            MagicMock(id="old", kind="intro_credits", config=paused_config, status=JobStatus.RUNNING, paused=True,
+                      parent_schedule_id=schedule["id"])
+        )  # fmt: skip
+        with patch("media_preview_generator.web.scheduler._start_scheduled_intro_credits_job") as find_markers:
+            execute_scheduled_job(schedule["id"], [], "All servers", dict(tick_config), None, None)
+
+        assert env.jm.request_resume.called is resumed
+        if resumed:
+            env.jm.request_resume.assert_called_once_with("old")
+            env.create.assert_not_called()
+            find_markers.assert_not_called()
+        elif tick_config.get("reconcile"):
+            env.create.assert_called_once_with(**self._created(schedule))
+            find_markers.assert_not_called()
+        else:
+            find_markers.assert_called_once_with(scheduler_manager, schedule["id"], [], "All servers", None, None)
+            env.create.assert_not_called()
+
+    def test_a_create_failure_is_logged_and_the_tick_ends_quietly(self, scheduler_manager, env):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env.create.side_effect = RuntimeError("jobs.db locked")
+        schedule = self._schedule(scheduler_manager)
+        execute_scheduled_job(schedule["id"], [], "All servers", dict(self.CONFIG), None, None)
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is None
+
+
+def test_nothing_is_scheduled_after_a_fresh_start(tmp_path):
+    """Check servers runs only on a schedule the user saves: a new install has no schedule and no built-in job."""
+    manager = ScheduleManager(config_dir=str(tmp_path / "config"), run_job_callback=None)
+    manager.start()
+    try:
+        manager.apply_quiet_hours({})
+        assert manager.get_all_schedules() == []
+        assert manager.scheduler.get_jobs() == []
+    finally:
+        manager.stop()
 
 
 class TestMultiLibrarySchedules:

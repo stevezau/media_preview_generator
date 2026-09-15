@@ -123,6 +123,23 @@ class TestEmbyBridgeMarkersContract:
         }
 
 
+class TestEmbyItemMissingContract:
+    """Check servers' read-back of an item Emby deleted: the chapter read fails, then Emby confirms the id is gone."""
+
+    UNKNOWN_ITEM = "999999999997"
+
+    @pytest.mark.parametrize("per_user", [False, True], ids=["api-key", "per-user"])
+    def test_an_id_emby_doesnt_have_is_missing(self, per_user):
+        emby = _emby_lab(per_user=per_user)
+        assert emby.get_chapter_markers(self.UNKNOWN_ITEM) is None
+        assert emby.item_missing(self.UNKNOWN_ITEM) is True
+
+    def test_an_item_emby_has_is_not_missing(self, emby_lab):
+        item_id = emby_lab._uncached_resolve_remote_path_to_item_id(SYNTH_E02)
+        assert item_id
+        assert emby_lab.item_missing(item_id) is False
+
+
 class TestEmbyVersionsContract:
     @pytest.mark.parametrize("per_user", [False, True], ids=["api-key", "per-user"])
     def test_a_grouped_item_lists_every_version_with_its_own_item(self, per_user):

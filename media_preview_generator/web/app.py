@@ -724,6 +724,7 @@ def create_app(config_dir: str | None = None) -> Flask:
         "api.get_job_stats",
         # Intro & Credits jobs — @api_token_required, the token API for starting them
         "api.create_marker_job",
+        "api.marker_reconcile",
         # Schedules — @api_token_required
         "api.get_schedules",
         "api.get_schedule",

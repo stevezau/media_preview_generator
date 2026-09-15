@@ -331,8 +331,19 @@
                                 <button type="button" class="info-icon ms-1" id="jobKindMarkersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds Skip Intro / Skip Credits markers for the chosen libraries and sends them to every server with Intro &amp; Credits turned on. Runs at low priority on the same workers as previews."><i class="bi bi-info-circle"></i></button>
                             </div>
                         </div>
+                        <div class="mt-2 ms-4" id="jobMarkersModeGroup" hidden><div class="d-flex flex-wrap gap-3">
+                            <div class="form-check mb-0">
+                                <input class="form-check-input" type="radio" name="jobMarkersMode" id="jobMarkersModeFind" value="find" checked onchange="_showJobKindControls()">
+                                <label class="form-check-label" for="jobMarkersModeFind">Find markers</label>
+                            </div>
+                            <div class="form-check mb-0 d-flex align-items-center">
+                                <input class="form-check-input" type="radio" name="jobMarkersMode" id="jobMarkersModeCheckServers" value="check_servers" onchange="_showJobKindControls()">
+                                <label class="form-check-label ms-1" for="jobMarkersModeCheckServers">Check servers</label>
+                                <button type="button" class="info-icon ms-1" id="jobMarkersCheckServersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Checks that every server with Intro &amp; Credits on still shows the markers this app sent, and sends them again where they're missing or changed (unless that server is set to keep its own). Covers all servers and libraries."><i class="bi bi-info-circle"></i></button>
+                            </div>
+                        </div></div>
                     </div>
-                    <div class="mb-3">
+                    <div class="mb-3" id="jobLibrariesGroup">
                         <label class="form-label">Run against these libraries
                             <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Per-run scope — picks which libraries this specific job will process. Independent of the server-level 'Libraries to monitor' setting (Servers → Edit → Libraries), which gates everything an installed server is allowed to touch."><i class="bi bi-info-circle"></i></button>
                         </label>

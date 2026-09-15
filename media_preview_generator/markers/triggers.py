@@ -97,6 +97,7 @@ def create_intro_credits_job(
     verify: bool = False,
     verify_chain: bool = False,
     chain_attempt: int = 0,
+    reconcile: bool = False,
 ) -> Job:
     """Create and start an Intro & Credits job.
 
@@ -117,6 +118,8 @@ def create_intro_credits_job(
         verify: A later check of files published after they were replaced (``job_runner._queue_verify``).
         verify_chain: For a retry that follows a verify job (directly or through other retries): it queues no verify.
         chain_attempt: For a verify job: the retries its chain already used, so a retry it queues goes on counting.
+        reconcile: Check servers: list the files of drifted published items instead of libraries or paths
+            (``reconcile.find_drift``).
 
     Returns:
         The created job.
@@ -132,6 +135,8 @@ def create_intro_credits_job(
     }
     if verify:
         config["verify"] = True
+    if reconcile:
+        config["reconcile"] = True
     if chain_attempt:
         config["chain_attempt"] = int(chain_attempt)
     if verify_chain:

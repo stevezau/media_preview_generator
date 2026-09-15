@@ -99,7 +99,7 @@ class TestRetryThroughThePipeline:
                 for sid, stype in servers
             }
 
-            def build_context(*, registry, config, priority, force=False):
+            def build_context(*, registry, config, priority, force=False, recheck_empty_server_markers=False):
                 return PipelineContext(
                     registry=registry,
                     config=config,
@@ -110,6 +110,7 @@ class TestRetryThroughThePipeline:
                     force=force,
                     clients={},
                     live_config=registry.get_config,  # the fake registry stands in for the saved servers
+                    recheck_empty_server_markers=recheck_empty_server_markers,
                 )
 
             monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda config: registry)
@@ -117,7 +118,7 @@ class TestRetryThroughThePipeline:
             monkeypatch.setattr(triggers, "start_intro_credits_job_async", lambda job_id: None)
             return registry, publishers
 
-        yield SimpleNamespace(path=str(media), make=make)
+        yield SimpleNamespace(path=str(media), make=make, store=store)
         store.close()
 
     def _run_pipeline(self, publishers):
@@ -273,6 +274,119 @@ class TestRetryThroughThePipeline:
             job_runner.run_intro_credits_job(job)
         assert [cfg.id for cfg in enumerate_items.call_args.args[0]] == ["jf-1"]
         self._assert_only_the_episode_was_checked(engine, job, setup.path, extras, publishers["jf-1"], server)
+
+
+class TestCheckServersThroughThePipeline(TestRetryThroughThePipeline):
+    """Check servers on the real runner and pipeline: only a server that dropped our markers is written again."""
+
+    # The retry tests aren't run again under this class.
+    test_file_the_server_adds_later_is_published_by_the_retry = None
+    test_retry_for_one_server_does_not_write_the_server_that_already_has_the_markers = None
+    test_a_failed_server_on_the_file_still_retries_the_server_that_hasnt_indexed_it = None
+    test_a_folder_job_skips_its_extras_and_queues_no_retry_for_them = None
+    test_a_library_job_skips_the_extras_the_listing_returns = None
+
+    def _check_servers(self, engine, setup, monkeypatch, publishers):
+        from media_preview_generator.markers import reconcile
+        from media_preview_generator.markers.publishers.base import MarkerPublisher
+
+        for pub in publishers.values():
+            pub.shows_many.side_effect = lambda items, cancel_check=None, pub=pub: MarkerPublisher.shows_many(
+                pub, items, cancel_check=cancel_check
+            )
+        monkeypatch.setattr(reconcile, "publisher_for", lambda server, cfg, **kw: publishers[cfg.id])
+        monkeypatch.setattr(reconcile, "get_job_manager", lambda: engine.jm)
+        monkeypatch.setattr("media_preview_generator.markers.store.get_marker_store", lambda: setup.store)
+        monkeypatch.setattr(triggers, "markers_enabled_anywhere", lambda: True)
+        queued = reconcile.run_markers_reconcile()
+        assert queued.created
+        job_runner.run_intro_credits_job(queued.job_id)
+        return engine.jm.get_job(queued.job_id)
+
+    def test_a_server_that_dropped_our_markers_gets_them_again_and_nothing_else_is_written(
+        self, engine, setup, monkeypatch
+    ):
+        from media_preview_generator.markers.publishers.base import Shown
+
+        registry, publishers = setup.make([("plex-1", ServerType.PLEX), ("jf-1", ServerType.JELLYFIN)])
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            first = triggers.create_intro_credits_job(library_name="TV", priority=2, source="manual",
+                                                      file_paths=[setup.path]).id  # fmt: skip
+            job_runner.run_intro_credits_job(first)
+            assert _outcome(engine.jm, first) == {"markers_published": 1}
+
+            jellyfin = publishers["jf-1"]
+            jellyfin.shows.return_value = Shown.MISSING  # a Jellyfin rescan dropped the segments
+
+            def rewrite(item_id, markers, **kwargs):
+                jellyfin.last_write_changed = True  # the plugin serves them again
+                return jellyfin.project(markers)
+
+            jellyfin.write.side_effect = rewrite
+            job = self._check_servers(engine, setup, monkeypatch, publishers)
+
+        assert job.library_name == "Intro & Credits · Check servers" and job.priority == 3
+        assert job.status is JobStatus.COMPLETED and job.error is None  # a warning would be kept in error
+        assert _outcome(engine.jm, job.id) == {"markers_published": 1}
+        [row] = engine.jm.get_file_results(job.id)
+        assert row["file"] == setup.path
+        assert {s["id"]: s["status"] for s in row["servers"]} == {
+            "plex-1": "markers_up_to_date",
+            "jf-1": "markers_written",
+        }
+        assert publishers["plex-1"].write.call_count == 1
+        assert publishers["jf-1"].write.call_count == 2
+        assert publishers["jf-1"].write.call_args.args[0] == "item-jf-1"
+        assert {j.id for j in engine.jm.get_all_jobs()} == {job.id, first}  # no retry, no verify
+
+    @pytest.mark.parametrize("confirmed", [True, False], ids=["server-confirms-it-is-gone", "lookup-failed"])
+    def test_an_item_the_server_dropped_leaves_check_servers_only_once_the_server_confirms_it(
+        self, engine, setup, monkeypatch, confirmed
+    ):
+        from media_preview_generator.markers.publishers.base import Shown
+
+        registry, publishers = setup.make([("plex-1", ServerType.PLEX), ("jf-1", ServerType.JELLYFIN)])
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            first = triggers.create_intro_credits_job(library_name="TV", priority=2, source="manual",
+                                                      file_paths=[setup.path]).id  # fmt: skip
+            job_runner.run_intro_credits_job(first)
+            # Jellyfin no longer lists the file; its old item reads back empty.
+            publishers["jf-1"].shows.return_value = Shown.MISSING
+            registry.get("jf-1").resolve_remote_path_to_item_id.return_value = None
+            if confirmed:
+                publishers["jf-1"].item_missing.return_value = True
+            else:
+                publishers["jf-1"].item_missing.side_effect = TimeoutError("read timed out")
+            job = self._check_servers(engine, setup, monkeypatch, publishers)
+            [row] = engine.jm.get_file_results(job.id)
+            assert {s["id"]: (s["status"], s.get("reason_code")) for s in row["servers"]} == {
+                "plex-1": ("markers_up_to_date", None),
+                "jf-1": ("markers_waiting", "not_in_library"),
+            }
+            publishers["jf-1"].item_missing.assert_called_once_with("item-jf-1")
+            status = setup.store.get_item_publish_state("jf-1", "item-jf-1").status
+            assert status == ("gone" if confirmed else "written")
+            again = self._check_servers(engine, setup, monkeypatch, publishers)
+        assert again.status is JobStatus.COMPLETED and again.error is None
+        assert [r["file"] for r in engine.jm.get_file_results(again.id)] == ([] if confirmed else [setup.path])
+        assert publishers["jf-1"].write.call_count == 1
+        assert {j.id for j in engine.jm.get_all_jobs()} == {first, job.id, again.id}  # no retry either way
+
+    def test_nothing_drifted_completes_at_once(self, engine, setup, monkeypatch):
+        registry, publishers = setup.make([("jf-1", ServerType.JELLYFIN)])
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            first = triggers.create_intro_credits_job(library_name="TV", priority=2, source="manual",
+                                                      file_paths=[setup.path]).id  # fmt: skip
+            job_runner.run_intro_credits_job(first)
+            job = self._check_servers(engine, setup, monkeypatch, publishers)
+        assert job.status is JobStatus.COMPLETED and job.error is None
+        assert engine.jm.get_file_results(job.id) == []
+        logs = engine.jm.get_logs(job.id)
+        assert any("INFO - Every server checked still shows what this app published" in line for line in logs), logs
+        assert publishers["jf-1"].write.call_count == 1
 
 
 @pytest.mark.real_job_async

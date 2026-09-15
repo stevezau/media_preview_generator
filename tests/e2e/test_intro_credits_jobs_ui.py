@@ -326,6 +326,92 @@ class TestStartJobModalIntroCredits:
             }
         ]
 
+    def test_check_servers_hides_the_libraries_and_posts_to_the_reconcile_route(self, dashboard) -> None:
+        page = dashboard()
+        reconcile_posts = _capture_posts(
+            page, "**/api/markers/reconcile", {"job_id": "rc-1", "already_queued": False}, status=202
+        )
+        markers_posts = _capture_posts(page, "**/api/markers/jobs", {"id": "ic-1"})
+        _open_start_modal(page)
+        expect(page.locator("#jobMarkersModeGroup")).to_be_hidden()
+        page.locator("#jobKindMarkers").check()
+        expect(page.locator("#jobMarkersModeGroup")).to_be_visible()
+        expect(page.locator("#jobMarkersModeFind")).to_be_checked()
+        expect(page.locator("#jobLibrariesGroup")).to_be_visible()
+
+        page.locator("#jobMarkersModeCheckServers").check()
+
+        expect(page.locator("#jobLibrariesGroup")).to_be_hidden()
+        expect(page.locator("#jobMarkersForce")).to_be_hidden()
+        expect(page.locator("#jobProcessingModeGroup")).to_be_hidden()
+        expect(page.locator("#jobPriority")).to_have_value("3")
+        tip = page.locator("#jobMarkersCheckServersInfo.info-icon")
+        assert (tip.get_attribute("data-bs-original-title") or tip.get_attribute("title")) == (
+            "Checks that every server with Intro & Credits on still shows the markers this app sent, and sends them again "
+            "where they're missing or changed (unless that server is set to keep its own). Covers all servers and libraries."
+        )
+        page.locator("#jobPriority").select_option("2")
+        with page.expect_request("**/api/markers/reconcile"):
+            _start_button(page).click()
+
+        expect(page.locator("#newJobModal")).to_be_hidden(timeout=3000)
+        assert reconcile_posts == [{"priority": 2}]
+        assert markers_posts == []
+        expect(page.locator("#toastBody")).to_have_text("Intro & Credits · Check servers has been queued", timeout=3000)
+
+    def test_check_servers_already_queued_says_so_whatever_priority_was_picked(self, dashboard) -> None:
+        page = dashboard()
+        reconcile_posts = _capture_posts(
+            page, "**/api/markers/reconcile", {"job_id": "rc-0", "already_queued": True}, status=202
+        )
+        _open_start_modal(page)
+        page.locator("#jobKindMarkers").check()
+        page.locator("#jobMarkersModeCheckServers").check()
+        page.locator("#jobPriority").select_option("1")
+        with page.expect_request("**/api/markers/reconcile"):
+            _start_button(page).click()
+        expect(page.locator("#newJobModal")).to_be_hidden(timeout=3000)
+        assert reconcile_posts == [{"priority": 1}]
+        expect(page.locator("#toastBody")).to_have_text("A Check servers job is already queued", timeout=3000)
+
+    def test_check_servers_with_intro_and_credits_off_everywhere_says_why(self, dashboard) -> None:
+        page = dashboard()
+        _capture_posts(
+            page,
+            "**/api/markers/reconcile",
+            {"job_id": None, "reason": "Intro & Credits is off on every server"},
+            status=200,
+        )
+        _open_start_modal(page)
+        page.locator("#jobKindMarkers").check()
+        page.locator("#jobMarkersModeCheckServers").check()
+        with page.expect_request("**/api/markers/reconcile"):
+            _start_button(page).click()
+        expect(page.locator("#toastBody")).to_have_text("Intro & Credits is off on every server", timeout=3000)
+        expect(page.locator("#newJobModal")).to_be_hidden(timeout=3000)
+
+    def test_find_markers_again_shows_the_libraries_and_reopening_resets_the_mode(self, dashboard) -> None:
+        page = dashboard()
+        _open_start_modal(page)
+        page.locator("#jobKindMarkers").check()
+        page.locator("#jobMarkersModeCheckServers").check()
+        page.locator("#jobMarkersModeFind").check()
+        expect(page.locator("#jobLibrariesGroup")).to_be_visible()
+        expect(page.locator("#jobMarkersForce")).to_be_visible()
+        page.locator("#jobMarkersModeCheckServers").check()
+        page.locator("#jobKindPreviews").check()
+        expect(page.locator("#jobMarkersModeGroup")).to_be_hidden()
+        expect(page.locator("#jobLibrariesGroup")).to_be_visible()
+        page.locator("#jobKindMarkers").check()
+        page.locator("#newJobModal .btn-close").click()
+        expect(page.locator("#newJobModal")).to_be_hidden(timeout=3000)
+
+        _open_start_modal(page)
+        page.locator("#jobKindMarkers").check()
+
+        expect(page.locator("#jobMarkersModeFind")).to_be_checked()
+        expect(page.locator("#jobLibrariesGroup")).to_be_visible()
+
     def test_reopening_the_modal_resets_the_job_type_to_previews(self, dashboard) -> None:
         page = dashboard()
         _open_start_modal(page)

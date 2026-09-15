@@ -2850,6 +2850,8 @@ function showNewJobModal() {
     if (previewsKind) previewsKind.checked = true;
     const markersForce = document.getElementById('jobMarkersForce');
     if (markersForce) markersForce.checked = false;
+    const findMarkers = document.getElementById('jobMarkersModeFind');
+    if (findMarkers) findMarkers.checked = true;
     _showJobKindControls();
     if (wasMarkers) document.getElementById('jobPriority').value = '2';
 
@@ -2996,17 +2998,26 @@ function _jobKindIsMarkers() {
     return !!(radio && radio.checked);
 }
 
+// Intro & Credits · Check servers reads back every server, so it has no libraries and no "re-check" switch.
+function _jobChecksServers() {
+    const radio = document.getElementById('jobMarkersModeCheckServers');
+    return _jobKindIsMarkers() && !!(radio && radio.checked);
+}
+
 // Intro & Credits has no processing mode or order (every file is checked, season by season), a "re-check" switch
 // instead.
 function _showJobKindControls() {
     const markers = _jobKindIsMarkers();
+    const checksServers = _jobChecksServers();
     const toggle = function (id, hidden) {
         const el = document.getElementById(id);
         if (el) el.hidden = hidden;
     };
+    toggle('jobMarkersModeGroup', !markers);
+    toggle('jobLibrariesGroup', checksServers);
     toggle('jobProcessingModeGroup', markers);
     toggle('jobSortByGroup', markers);
-    toggle('jobMarkersForceGroup', !markers);
+    toggle('jobMarkersForceGroup', !markers || checksServers);
     _updateJobScopeBadge();
 }
 
@@ -3099,7 +3110,35 @@ async function _startMarkersJob() {
     await _submitNewJob('/api/markers/jobs', payload, 'Intro & Credits job has been started');
 }
 
+// Check servers: one job for every server; the answer's job_id is null when Intro & Credits is off everywhere.
+async function _startCheckServersJob() {
+    const payload = { priority: parseInt(document.getElementById('jobPriority').value, 10) || 3 };
+    let result;
+    try {
+        result = await apiPost('/api/markers/reconcile', payload);
+    } catch (error) {
+        showToast('Error', 'Failed to start job: ' + error.message, 'danger');
+        return;
+    }
+    bootstrap.Modal.getInstance(document.getElementById('newJobModal')).hide();
+    if (!result || !result.job_id) {
+        showToast('Nothing to check', (result && result.reason) || 'Intro & Credits is off on every server', 'warning');
+        return;
+    }
+    loadJobs();
+    loadJobStats();
+    if (result.already_queued) {
+        showToast('Already queued', 'A Check servers job is already queued', 'info');
+        return;
+    }
+    showToast('Job Started', 'Intro & Credits · Check servers has been queued', 'success');
+}
+
 async function startNewJob() {
+    if (_jobChecksServers()) {
+        await _startCheckServersJob();
+        return;
+    }
     if (_jobKindIsMarkers()) {
         await _startMarkersJob();
         return;

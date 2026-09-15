@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+
+from loguru import logger
 
 from ..models import Marker, MarkerType
 
@@ -53,6 +55,7 @@ class Shown(str, Enum):
     # The item's versions aren't the ones our last write agreed on (Plex: one marker set for every version, and a
     # version added since hasn't been decided the same way).
     VERSIONS_CHANGED = "versions_changed"
+    GONE = "gone"  # the server no longer has the item (deleted, or its file moved to a new item)
 
 
 def compare_shown(
@@ -133,6 +136,28 @@ def agreed_across_versions(
     return agreed
 
 
+# One item for ``MarkerPublisher.shows_many``: item id, what this app last left there, the types kept as the server's
+# own, and the item's version files recorded at the last write (None: not recorded).
+ReadBackItem = tuple[str, list[Marker], frozenset[MarkerType], tuple[str, ...] | None]
+# Failed reads in a row after which ``MarkerPublisher.shows_many`` stops reading a server for the call.
+UNREADABLE_IN_A_ROW = 20
+
+
+def stopped_unreadable(items: list[ReadBackItem], answers: dict[str, Shown | None]) -> bool:
+    """Whether a ``shows_many`` call stopped early because the server's reads kept failing (not for a cancel).
+
+    Args:
+        items: The items asked about.
+        answers: What the call returned, in the order the items were read.
+
+    Returns:
+        True when items were left unread right after ``UNREADABLE_IN_A_ROW`` failed reads.
+    """
+    if len(answers) >= len({item_id for item_id, *_ in items}) or len(answers) < UNREADABLE_IN_A_ROW:
+        return False
+    return all(shown is None for shown in list(answers.values())[-UNREADABLE_IN_A_ROW:])
+
+
 class PublishError(Exception):
     """A publisher call failed; ``state`` says which capability problem caused it (if any).
 
@@ -198,8 +223,50 @@ class MarkerPublisher(ABC):
                 compared.
 
         Returns:
-            How the server's markers compare with ``ours``; None when they couldn't be read.
+            How the server's markers compare with ``ours``; GONE when the server says it has no such item; None when
+            they couldn't be read (a timeout, an error answer).
         """
+
+    def item_missing(self, item_id: str) -> bool | None:
+        """Whether the server confirms it has no item with this id (deleted, or its file moved to a new item).
+
+        Args:
+            item_id: The server's item id.
+
+        Returns:
+            True only when the server answers that the item doesn't exist; False when it has it; None when that
+            couldn't be asked (this default: a publisher that can't tell).
+        """
+        return None
+
+    def shows_many(
+        self, items: list[ReadBackItem], *, cancel_check: Callable[[], bool] | None = None
+    ) -> dict[str, Shown | None]:
+        """``shows`` for many items (Check servers). A server with a cheaper bulk read overrides it.
+
+        Stops after ``UNREADABLE_IN_A_ROW`` failed reads in a row: a server that went down would otherwise cost every
+        item left its request timeouts (``stopped_unreadable`` tells the caller).
+
+        Args:
+            items: ``(item_id, ours, kept_types, item_files)`` per item.
+            cancel_check: True once the job is cancelled; items not read by then are left out.
+
+        Returns:
+            What ``shows`` answers, per item id read; None for an item whose read failed.
+        """
+        out: dict[str, Shown | None] = {}
+        failed_in_a_row = 0
+        for item_id, ours, kept_types, item_files in items:
+            if failed_in_a_row >= UNREADABLE_IN_A_ROW or (cancel_check and cancel_check()):
+                break
+            try:
+                out[item_id] = self.shows(item_id, ours, kept_types=kept_types, item_files=item_files)
+            except Exception as exc:
+                # Counted as unreadable by the caller: a transport error mustn't stop the other items' reads.
+                logger.debug("Couldn't read back item {}: {}", item_id, type(exc).__name__)
+                out[item_id] = None
+            failed_in_a_row = failed_in_a_row + 1 if out[item_id] is None else 0
+        return out
 
     @abstractmethod
     def write(

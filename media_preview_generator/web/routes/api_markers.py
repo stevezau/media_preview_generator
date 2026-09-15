@@ -105,6 +105,39 @@ def create_marker_job():
     return jsonify(job.to_dict()), 201
 
 
+@api.route("/markers/reconcile", methods=["POST"])
+@api_token_required
+def marker_reconcile():
+    """Queue Intro & Credits · Check servers now: read back what servers show and publish again where they changed.
+
+    Body (optional): ``priority`` (1-3 or high/normal/low, default low).
+
+    Returns:
+        202 with ``{"job_id", "already_queued"}`` (a new job, or the one already queued or running, whatever priority
+        was asked for); 200 with ``{"job_id": null, "reason"}`` when Intro & Credits is off on every server; 400 for an
+        invalid body; 503 when the config directory isn't writable.
+    """
+    from ...markers.reconcile import run_markers_reconcile
+
+    blocked = _config_unwritable_response()
+    if blocked is not None:
+        return blocked
+    data = request.get_json(silent=True)
+    if data is None:
+        if request.content_length or request.get_data(cache=True):
+            return jsonify({"error": "The request body must be JSON"}), 400
+        data = {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "The request body must be a JSON object"}), 400
+    priority = _parse_job_priority(data["priority"]) if "priority" in data else PRIORITY_LOW
+    if priority is None:
+        return jsonify({"error": "priority must be 1, 2, 3, high, normal or low"}), 400
+    queued = run_markers_reconcile(priority=priority)
+    if queued.job_id is None:
+        return jsonify({"job_id": None, "reason": "Intro & Credits is off on every server"}), 200
+    return jsonify({"job_id": queued.job_id, "already_queued": not queued.created}), 202
+
+
 def _registry() -> Any:
     from ...servers import ServerRegistry
     from ..settings_manager import get_settings_manager

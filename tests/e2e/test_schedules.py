@@ -301,6 +301,112 @@ class TestScheduleIntroCredits:
         assert [method for method, _ in captured] == ["PUT"]
         assert captured[0][1]["config"] == {"job_type": "intro_credits"}
 
+    def test_check_servers_hides_the_server_and_library_pickers_and_saves_its_mode(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        _seed_servers_for_schedule_modal(authed_page)
+        captured = _capture_schedule_writes(authed_page, [])
+        authed_page.goto(f"{app_url}/automation#schedules")
+        authed_page.wait_for_load_state("domcontentloaded")
+        authed_page.locator('button:has-text("Add Schedule")').first.click()
+        expect(authed_page.locator("#newScheduleForm")).to_be_visible(timeout=2000)
+        authed_page.locator("#scheduleName").fill("Check servers nightly")
+        expect(authed_page.locator("#scheduleMarkersModeGroup")).to_be_hidden()
+
+        authed_page.locator("#scanModeMarkers").check()
+        expect(authed_page.locator("#scheduleMarkersModeGroup")).to_be_visible()
+        expect(authed_page.locator("#scheduleMarkersFind")).to_be_checked()
+        expect(authed_page.locator("#scheduleServerGroup")).to_be_visible()
+        expect(authed_page.locator("#scheduleLibrariesGroup")).to_be_visible()
+
+        authed_page.locator("#scheduleMarkersCheckServers").check()
+        expect(authed_page.locator("#scheduleServerGroup")).to_be_hidden()
+        expect(authed_page.locator("#scheduleLibrariesGroup")).to_be_hidden()
+        info = authed_page.locator("#scheduleMarkersCheckServersInfo.info-icon")
+        assert (info.get_attribute("data-bs-original-title") or info.get_attribute("title")) == (
+            "Checks that every server with Intro & Credits on still shows the markers this app sent, and sends them again "
+            "where they're missing or changed (unless that server is set to keep its own). "
+            "Covers all servers and libraries. Low priority unless you pick otherwise."
+        )
+        # A library pick left from before doesn't block the save: Check servers has no libraries.
+        authed_page.evaluate("document.getElementById('scheduleLibraryAll').checked = false")
+        _save_schedule(authed_page, "**/api/schedules")
+
+        assert [method for method, _ in captured] == ["POST"]
+        body = captured[0][1]
+        assert body["config"] == {"job_type": "intro_credits", "reconcile": True}
+        assert (body["library_ids"], body["library_id"], body["server_id"]) == ([], None, None)
+        assert body["library_name"] == "All servers"
+        assert body["priority"] is None
+
+    def test_leaving_intro_and_credits_hides_its_modes_and_shows_the_pickers_again(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        _seed_servers_for_schedule_modal(authed_page)
+        _capture_schedule_writes(authed_page, [])
+        authed_page.goto(f"{app_url}/automation#schedules")
+        authed_page.wait_for_load_state("domcontentloaded")
+        authed_page.locator('button:has-text("Add Schedule")').first.click()
+        expect(authed_page.locator("#newScheduleForm")).to_be_visible(timeout=2000)
+        authed_page.locator("#scanModeMarkers").check()
+        authed_page.locator("#scheduleMarkersCheckServers").check()
+
+        authed_page.locator("#scanModeFull").check()
+
+        expect(authed_page.locator("#scheduleMarkersModeGroup")).to_be_hidden()
+        expect(authed_page.locator("#scheduleServerGroup")).to_be_visible()
+        expect(authed_page.locator("#scheduleLibrariesGroup")).to_be_visible()
+
+    def test_check_servers_badge_and_edit_round_trip_keep_the_mode(self, authed_page: Page, app_url: str) -> None:
+        _seed_servers_for_schedule_modal(authed_page)
+        schedule = {
+            **_MARKERS_SCHEDULE,
+            "name": "Check servers nightly",
+            "library_name": "All servers",
+            "config": {"job_type": "intro_credits", "reconcile": True},
+        }
+        captured = _capture_schedule_writes(authed_page, [schedule])
+        authed_page.goto(f"{app_url}/automation#schedules")
+        authed_page.wait_for_load_state("domcontentloaded")
+        row = authed_page.locator("#scheduleList tr", has_text="Check servers nightly")
+        expect(row.locator(".schedule-kind-badge")).to_have_text("Intro & Credits · Check servers", timeout=3000)
+
+        row.locator('button[aria-label="Edit schedule"]').click()
+        expect(authed_page.locator("#newScheduleForm")).to_be_visible(timeout=2000)
+        expect(authed_page.locator("#scanModeMarkers")).to_be_checked()
+        expect(authed_page.locator("#scheduleMarkersCheckServers")).to_be_checked()
+        expect(authed_page.locator("#scheduleServerGroup")).to_be_hidden()
+        expect(authed_page.locator("#scheduleLibrariesGroup")).to_be_hidden()
+        _save_schedule(authed_page, "**/api/schedules/sch-ic")
+
+        assert [method for method, _ in captured] == ["PUT"]
+        assert captured[0][1]["config"] == {"job_type": "intro_credits", "reconcile": True}
+
+    def test_a_new_schedule_after_editing_check_servers_starts_on_find_markers(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        _seed_servers_for_schedule_modal(authed_page)
+        schedule = {**_MARKERS_SCHEDULE, "config": {"job_type": "intro_credits", "reconcile": True}}
+        _capture_schedule_writes(authed_page, [schedule])
+        authed_page.goto(f"{app_url}/automation#schedules")
+        authed_page.wait_for_load_state("domcontentloaded")
+        row = authed_page.locator("#scheduleList tr", has_text="Weekly Intro & Credits")
+        row.locator('button[aria-label="Edit schedule"]').click()
+        expect(authed_page.locator("#scheduleMarkersCheckServers")).to_be_checked(timeout=2000)
+        # Bootstrap ignores a close click while the modal is still fading in.
+        authed_page.wait_for_function(
+            "() => getComputedStyle(document.getElementById('newScheduleModal')).opacity === '1'"
+        )
+        authed_page.locator("#newScheduleModal .btn-close").click()
+        expect(authed_page.locator("#newScheduleModal")).to_be_hidden(timeout=3000)
+
+        authed_page.locator('button:has-text("Add Schedule")').first.click()
+        expect(authed_page.locator("#newScheduleForm")).to_be_visible(timeout=2000)
+        authed_page.locator("#scanModeMarkers").check()
+
+        expect(authed_page.locator("#scheduleMarkersFind")).to_be_checked()
+        expect(authed_page.locator("#scheduleLibrariesGroup")).to_be_visible()
+
     def test_full_library_schedule_still_saves_its_sort_order(self, authed_page: Page, app_url: str) -> None:
         _seed_servers_for_schedule_modal(authed_page)
         captured = _capture_schedule_writes(authed_page, [])
