@@ -1386,7 +1386,7 @@
         row = row || {};
         const tbody = $('#editPathMappingsTable tbody');
         const tr = document.createElement('tr');
-        const remoteVal = row.plex_prefix || row.remote_prefix || '';
+        const remoteVal = row.remote_prefix || row.plex_prefix || '';
         const localVal = row.local_prefix || '';
         const webhookAliases = Array.isArray(row.webhook_prefixes)
             ? row.webhook_prefixes.join('; ')
@@ -1508,7 +1508,8 @@
                 ? webhookRaw.split(/[;,]/).map((s) => s.trim()).filter(Boolean)
                 : [];
             if (!remote && !local && !webhook_prefixes.length) return null;
-            return { plex_prefix: remote, local_prefix: local, webhook_prefixes };
+            // Both keys: this build reads remote_prefix first; older builds' path resolvers read only plex_prefix.
+            return { remote_prefix: remote, plex_prefix: remote, local_prefix: local, webhook_prefixes };
         }).filter(Boolean);
     }
 

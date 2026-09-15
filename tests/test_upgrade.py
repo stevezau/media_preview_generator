@@ -1311,6 +1311,73 @@ class TestMigrateToV9:
         servers = settings_manager.get("media_servers")
         assert len(servers[0]["path_mappings"]) == 2
 
+    @pytest.mark.parametrize(
+        "rows",
+        [
+            pytest.param(
+                [
+                    {"remote_prefix": "/data_16tb", "local_prefix": "/data", "webhook_prefixes": []},
+                    {"remote_prefix": "/data_16tb2", "local_prefix": "/data", "webhook_prefixes": []},
+                ],
+                id="remote_prefix_only",
+            ),
+            pytest.param(
+                [
+                    {"plex_prefix": "/data_16tb", "local_prefix": "/data", "webhook_prefixes": []},
+                    {"plex_prefix": "/data_16tb2", "local_prefix": "/data", "webhook_prefixes": []},
+                ],
+                id="plex_prefix_only",
+            ),
+            pytest.param(
+                [
+                    {"remote_prefix": "/data_16tb", "plex_prefix": "/old", "local_prefix": "/data"},
+                    {"remote_prefix": "/data_16tb2", "plex_prefix": "/old", "local_prefix": "/data"},
+                ],
+                id="both_remote_wins",
+            ),
+        ],
+    )
+    def test_dedupe_keeps_rows_with_different_server_prefixes(self, settings_manager, rows):
+        """Rows that share a local prefix but map different server prefixes are not duplicates."""
+        from media_preview_generator.upgrade import _migrate_to_v9
+
+        settings_manager.apply_changes(
+            updates={"media_servers": [{"id": "plex", "type": "plex", "path_mappings": rows}]}
+        )
+
+        _migrate_to_v9(settings_manager)
+        assert settings_manager.get("media_servers")[0]["path_mappings"] == rows
+
+    def test_dedupe_collapses_same_prefix_written_under_either_key(self, settings_manager):
+        """``remote_prefix`` and legacy ``plex_prefix`` name the same field, so these rows are duplicates."""
+        from media_preview_generator.upgrade import _migrate_to_v9
+
+        rows = [
+            {"remote_prefix": "/m", "local_prefix": "/l", "webhook_prefixes": []},
+            {"plex_prefix": "/m", "local_prefix": "/l", "webhook_prefixes": []},
+        ]
+        settings_manager.apply_changes(
+            updates={"media_servers": [{"id": "plex", "type": "plex", "path_mappings": rows}]}
+        )
+
+        _migrate_to_v9(settings_manager)
+        assert settings_manager.get("media_servers")[0]["path_mappings"] == rows[:1]
+
+    def test_dedupe_collapses_same_remote_prefix_with_different_plex_prefix(self, settings_manager):
+        """``remote_prefix`` wins, so rows that differ only in a shadowed ``plex_prefix`` map identically."""
+        from media_preview_generator.upgrade import _migrate_to_v9
+
+        rows = [
+            {"remote_prefix": "/m", "plex_prefix": "/old-a", "local_prefix": "/l", "webhook_prefixes": []},
+            {"remote_prefix": "/m", "plex_prefix": "/old-b", "local_prefix": "/l", "webhook_prefixes": []},
+        ]
+        settings_manager.apply_changes(
+            updates={"media_servers": [{"id": "plex", "type": "plex", "path_mappings": rows}]}
+        )
+
+        _migrate_to_v9(settings_manager)
+        assert settings_manager.get("media_servers")[0]["path_mappings"] == rows[:1]
+
     def test_dedupes_exclude_paths(self, settings_manager):
         from media_preview_generator.upgrade import _migrate_to_v9
 

@@ -935,9 +935,9 @@ def _migrate_to_v9(sm) -> list:
 
     v9 walks every server entry and dedupes both lists in place,
     preserving the first occurrence of each row. For
-    ``path_mappings`` the dedupe key is the (plex_prefix, local_prefix,
-    sorted webhook_prefixes) triple — two rows with the same prefixes
-    but different webhook aliases are kept distinct. For
+    ``path_mappings`` the dedupe key is the (remote_prefix or legacy
+    plex_prefix, local_prefix, sorted webhook_prefixes) triple — two rows
+    with the same prefixes but different webhook aliases are kept distinct. For
     ``exclude_paths`` the key is the (value, type) pair.
 
     Idempotent (re-running on a clean v9 file is a no-op) and harmless
@@ -968,7 +968,7 @@ def _migrate_to_v9(sm) -> list:
                     deduped_pm.append(row)
                     continue
                 key = (
-                    (row.get("plex_prefix") or "").strip(),
+                    (row.get("remote_prefix") or row.get("plex_prefix") or "").strip(),
                     (row.get("local_prefix") or "").strip(),
                     tuple(sorted([str(w).strip() for w in (row.get("webhook_prefixes") or [])])),
                 )

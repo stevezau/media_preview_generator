@@ -175,6 +175,23 @@ class TestResolveBaseClassContract:
         assert srv.resolve_calls == ["/data/x.mkv", "/mnt/x.mkv"]
         assert srv.resolve_scopes == [library_ids, library_ids]
 
+    @pytest.mark.parametrize(
+        "row",
+        [
+            pytest.param({"remote_prefix": "/mnt", "local_prefix": "/data"}, id="remote_prefix_only"),
+            pytest.param({"plex_prefix": "/mnt", "local_prefix": "/data"}, id="plex_prefix_only"),
+            pytest.param(
+                {"remote_prefix": "/mnt", "plex_prefix": "/stale", "local_prefix": "/data"},
+                id="both_remote_wins",
+            ),
+        ],
+    )
+    def test_mapped_candidate_comes_from_remote_prefix_or_legacy_plex_prefix(self, row):
+        """The documented ``remote_prefix`` key maps paths for item lookup, like legacy ``plex_prefix``."""
+        srv = _StubServer(path_mappings=[row], resolve_returns={"/mnt/x.mkv": "item-1"})
+        assert srv.resolve_remote_path_to_item_id("/data/x.mkv") == "item-1"
+        assert srv.resolve_calls == ["/data/x.mkv", "/mnt/x.mkv"]
+
 
 # ---------------------------------------------------------------------------
 # trigger_refresh contract — multi-mount nudge fan-out
