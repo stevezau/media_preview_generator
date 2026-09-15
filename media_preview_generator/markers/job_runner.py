@@ -22,7 +22,7 @@ from ..processing.retry_queue import BACKOFF_SCHEDULE, retry_policy
 from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig
 from ..web.job_gate import format_wait_message, get_job_gate
-from ..web.jobs import PRIORITY_LOW, PRIORITY_NORMAL, JobStatus, WorkerStatus, get_job_manager
+from ..web.jobs import PAUSED_BY_SCHEDULE, PRIORITY_LOW, PRIORITY_NORMAL, JobStatus, WorkerStatus, get_job_manager
 from ..web.routes.job_runner import _build_selected_gpus, _format_eta, _inflight_jobs, _inflight_lock
 from ..web.settings_manager import get_settings_manager
 from .external_ids import is_season_folder
@@ -596,16 +596,18 @@ def _wait_for_preceding_job(job_id: str, follows_job_id: str | None, cancel_chec
 
 
 def _hold_pause_from_before_restart(job_id: str, cancel_check: Callable[[], bool]) -> bool:
-    """Keep a job the user paused before a restart paused, holding no slot, until they resume it.
+    """Keep a job paused before a restart paused, holding no slot, until it is resumed.
 
-    The pause and resume routes only act on running jobs, so the job is marked running and paused again.
+    The pause and resume routes only act on running jobs, so the job is marked running and paused again. A pause from
+    the schedule's stop time is held as one, so that schedule's next start still resumes it.
 
     Returns:
         False if the job was cancelled while paused.
     """
     jm = get_job_manager()
+    job = jm.get_job(job_id)
     jm.start_job(job_id)
-    jm.request_pause(job_id)
+    jm.request_pause(job_id, by_schedule=bool(job and (job.config or {}).get(PAUSED_BY_SCHEDULE)))
     jm.add_log(job_id, "INFO - Still paused from before the restart; resume the job to continue")
     jm.update_progress(job_id, current_item="Paused — resume this job to continue")
     while jm.is_pause_requested(job_id):

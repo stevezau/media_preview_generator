@@ -374,6 +374,53 @@ class TestStartJobModalIntroCredits:
         assert reconcile_posts == [{"priority": 1}]
         expect(page.locator("#toastBody")).to_have_text("A Check servers job is already queued", timeout=3000)
 
+    def test_check_servers_already_there_but_paused_says_how_to_go_on(self, dashboard) -> None:
+        page = dashboard()
+        _capture_posts(
+            page, "**/api/markers/reconcile", {"job_id": "rc-0", "already_queued": True, "paused": True}, status=202
+        )
+        _open_start_modal(page)
+        page.locator("#jobKindMarkers").check()
+        page.locator("#jobMarkersModeCheckServers").check()
+        with page.expect_request("**/api/markers/reconcile"):
+            _start_button(page).click()
+        expect(page.locator("#newJobModal")).to_be_hidden(timeout=3000)
+        expect(page.locator("#toastBody")).to_have_text(
+            "A Check servers job is paused. Resume or cancel it on the dashboard.", timeout=3000
+        )
+
+    @pytest.mark.parametrize(
+        ("answer", "toast"),
+        [
+            ({"job_id": "rc-1", "already_queued": False}, "Intro & Credits · Check servers has been queued"),
+            ({"job_id": "rc-0", "already_queued": True}, "A Check servers job is already queued"),
+            (
+                {"job_id": "rc-0", "already_queued": True, "paused": True},
+                "A Check servers job is paused. Resume or cancel it on the dashboard.",
+            ),
+        ],
+        ids=["queued", "already-queued", "paused"],
+    )
+    def test_rerun_of_a_check_servers_job_answers_like_the_modal(self, dashboard, answer, toast) -> None:
+        finished = _markers_job(
+            library_name="Intro & Credits · Check servers",
+            config={
+                "kind": "intro_credits",
+                "source": "reconcile",
+                "reconcile": True,
+                "libraries": [],
+                "file_paths": [],
+            },
+        )
+        page = dashboard([finished])
+        posts = _capture_posts(page, f"**/api/jobs/{finished['id']}/reprocess", answer, status=202)
+        rerun = page.locator(f"#job-row-{finished['id']} button[aria-label='Re-run job']")
+        expect(rerun).to_be_visible(timeout=5000)
+        with page.expect_request(f"**/api/jobs/{finished['id']}/reprocess"):
+            rerun.click()
+        expect(page.locator("#toastBody")).to_have_text(toast, timeout=3000)
+        assert posts == [{}]
+
     def test_check_servers_with_intro_and_credits_off_everywhere_says_why(self, dashboard) -> None:
         page = dashboard()
         _capture_posts(

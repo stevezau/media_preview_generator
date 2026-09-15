@@ -14,7 +14,7 @@ from ..jobs import PRIORITY_FROM_LABEL, PRIORITY_LABELS, PRIORITY_LOW
 from . import api
 from ._helpers import MEDIA_ROOT, _param_to_bool, _safe_resolve_within
 from .api_bif import _validate_path_under_any_server
-from .api_jobs import _config_unwritable_response
+from .api_jobs import _check_servers_answer, _config_unwritable_response
 
 _ONLINE_SOURCE_IDS = ("theintrodb", "introdb", "skipdb")
 _AUTH_SECRET_KEYS = ("token", "api_key", "password", "access_token")
@@ -114,8 +114,8 @@ def marker_reconcile():
 
     Returns:
         202 with ``{"job_id", "already_queued"}`` (a new job, or the one already queued or running, whatever priority
-        was asked for); 200 with ``{"job_id": null, "reason"}`` when Intro & Credits is off on every server; 400 for an
-        invalid body; 503 when the config directory isn't writable.
+        was asked for; ``"paused": true`` when that one is paused); 200 with ``{"job_id": null, "reason"}`` when
+        Intro & Credits is off on every server; 400 for an invalid body; 503 when the config directory isn't writable.
     """
     from ...markers.reconcile import run_markers_reconcile
 
@@ -132,10 +132,7 @@ def marker_reconcile():
     priority = _parse_job_priority(data["priority"]) if "priority" in data else PRIORITY_LOW
     if priority is None:
         return jsonify({"error": "priority must be 1, 2, 3, high, normal or low"}), 400
-    queued = run_markers_reconcile(priority=priority)
-    if queued.job_id is None:
-        return jsonify({"job_id": None, "reason": "Intro & Credits is off on every server"}), 200
-    return jsonify({"job_id": queued.job_id, "already_queued": not queued.created}), 202
+    return _check_servers_answer(run_markers_reconcile(priority=priority))
 
 
 def _registry() -> Any:

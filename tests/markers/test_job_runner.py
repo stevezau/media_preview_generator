@@ -1168,11 +1168,16 @@ class TestRestart:
             job_runner.run_intro_credits_job("j1")
         assert env.dispatcher.submit_items.call_args.kwargs["items"] == [_item("/m/a.mkv")]
 
-    def test_job_paused_before_the_restart_stays_paused_without_a_slot_until_resumed(self, env, monkeypatch):
+    @pytest.mark.parametrize("by_schedule", [False, True], ids=["paused-by-hand", "paused-by-stop-time"])
+    def test_job_paused_before_the_restart_stays_paused_without_a_slot_until_resumed(
+        self, env, monkeypatch, by_schedule
+    ):
         env.job.paused = True
+        if by_schedule:
+            env.job.config["paused_by_schedule"] = True
         order = []
         env.jm.start_job.side_effect = lambda jid: order.append("start")
-        env.jm.request_pause.side_effect = lambda jid: order.append("pause") or True
+        env.jm.request_pause.side_effect = lambda jid, **kw: order.append("pause") or True
         state = {"paused": True}
         env.jm.is_pause_requested.side_effect = lambda jid: state["paused"]
         sleeps = []
@@ -1187,7 +1192,8 @@ class TestRestart:
         with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
             job_runner.run_intro_credits_job("j1")
         assert order[:2] == ["start", "pause"]
-        env.jm.request_pause.assert_called_once_with("j1")
+        # A stop-time pause is held as one, so the schedule's next start still resumes it; a pause by hand isn't.
+        env.jm.request_pause.assert_called_once_with("j1", by_schedule=by_schedule)
         assert len(sleeps) == 2
         env.gate.acquire.assert_called_once()
         env.dispatcher.submit_items.assert_called_once()
@@ -1207,14 +1213,17 @@ class TestRestart:
         env.dispatcher.submit_items.assert_not_called()
 
     @pytest.mark.parametrize(("kind", "keeps_pause"), [(JOB_KIND_INTRO_CREDITS, True), (JOB_KIND_PREVIEWS, False)])
-    def test_requeue_after_restart_keeps_only_an_intro_credits_jobs_own_pause(self, tmp_path, kind, keeps_pause):
+    @pytest.mark.parametrize("by_schedule", [False, True], ids=["by-hand", "by-stop-time"])
+    def test_requeue_after_restart_keeps_only_an_intro_credits_jobs_own_pause(
+        self, tmp_path, kind, keeps_pause, by_schedule
+    ):
         from media_preview_generator.web.jobs import JobManager, JobStatus
 
         config_dir = str(tmp_path)
         before = JobManager(config_dir=config_dir)
         job = before.create_job(library_name="Backfill", kind=kind, config={"kind": kind, "libraries": []})
         before.start_job(job.id)
-        assert before.request_pause(job.id)
+        assert before.request_pause(job.id, by_schedule=by_schedule)
 
         after = JobManager(config_dir=config_dir)
         revived = after.requeue_interrupted_jobs()
@@ -1223,6 +1232,8 @@ class TestRestart:
         assert revived[0].status is JobStatus.PENDING
         assert revived[0].paused is keeps_pause
         assert JobManager(config_dir=config_dir).get_job(job.id).paused is keeps_pause
+        # Where the pause came from outlives the restart with the job's config.
+        assert revived[0].config.get("paused_by_schedule", False) is by_schedule
 
     def test_startup_revival_runs_each_intro_credits_job_once_and_creates_no_jobs(self, tmp_path, monkeypatch):
         from media_preview_generator.web import app as app_mod

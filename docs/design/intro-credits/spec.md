@@ -984,3 +984,11 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   belongs to it, or when the server confirms it missing after a "not in library" row; that file gets the one normal
   retry, and the item is dropped only once the retry is queued (a cancelled or failed run, or retries off, drops
   nothing). It queues no other retries.
+- 2026-09-15 · Phase 2 milestone audit, jobs and Season view (§6.2 step 6, §6.4 item 8, §7.4): a Re-run of a finished
+  Check servers job is queued like `POST /api/markers/reconcile` (one at a time, `already_queued`); other Intro &
+  Credits Re-runs keep their schedule. Both answers add `"paused": true` when the Check servers job already there is
+  paused; a Check servers Re-run clears Pause all like any Re-run. A schedule's start tick (or Run now) resumes the
+  Intro & Credits jobs its stop time paused (`paused_by_schedule`; never a pause by hand) whichever mode they are, and
+  then queues nothing that tick; otherwise it applies its own mode's "unfinished" check (Find markers ignores Check
+  servers jobs). Deleting a schedule leaves its paused jobs paused with a WARNING. Season view: "Publish N" counts episodes with at least one decided marker of any type,
+  `needs_review` any type in review; the header's show and season are the Publish job's.

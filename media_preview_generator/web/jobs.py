@@ -30,6 +30,10 @@ from ..job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_PREVIEWS, parse_job_kin
 # Message shown in UI when a job's log file was removed by retention policy.
 LOG_RETENTION_CLEARED_MESSAGE = "Log file was cleared due to log retention policy."
 
+# Job config key set while a job's pause came from its schedule's stop time. Only such a pause is resumed by that
+# schedule's next start (or Run now); a pause by hand, or Pause all, overwrites it and any resume clears it.
+PAUSED_BY_SCHEDULE = "paused_by_schedule"
+
 # Every key ``upsert_retry_chain_job`` and ``_spawn_retry_job`` write
 # onto a Job's config to mark it as part of a retry chain. Single
 # source of truth — imported by ``reprocess_job`` to strip stale
@@ -2546,8 +2550,17 @@ class JobManager:
     # Pause / Resume Management
     # ========================================================================
 
-    def request_pause(self, job_id: str) -> bool:
-        """Request pause for a running job."""
+    def request_pause(self, job_id: str, *, by_schedule: bool = False) -> bool:
+        """Request pause for a running job.
+
+        Args:
+            job_id: Job identifier.
+            by_schedule: The pause comes from the job's schedule's stop time (``PAUSED_BY_SCHEDULE``), so that
+                schedule's next start resumes it. Any other pause replaces that record.
+
+        Returns:
+            True when the job was running and is now paused.
+        """
         paused = False
         status_val = ""
         with self._lock:
@@ -2561,6 +2574,9 @@ class JobManager:
                 self._pause_events[job_id] = event
             event.clear()
             job.paused = True
+            job.config = {key: value for key, value in (job.config or {}).items() if key != PAUSED_BY_SCHEDULE}
+            if by_schedule:
+                job.config[PAUSED_BY_SCHEDULE] = True
             status_val = job.status.value
             self._persist_job(job)
             self._emit_event("job_paused", {"job_id": job_id, "paused": True})
@@ -2588,6 +2604,7 @@ class JobManager:
                 self._pause_events[job_id] = event
             event.set()
             job.paused = False
+            job.config = {key: value for key, value in (job.config or {}).items() if key != PAUSED_BY_SCHEDULE}
             status_val = job.status.value
             self._persist_job(job)
             self._emit_event("job_resumed", {"job_id": job_id, "paused": False})

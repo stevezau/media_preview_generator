@@ -360,7 +360,8 @@ episode doesn't wait for its own preview job: markers don't need previews.
 **Check servers** (`reconcile: true`, `source: "reconcile"`, named "Intro & Credits · Check servers") is created by
 `POST /api/markers/reconcile`, the Dashboard's Start New Job dialog, or a schedule with `config.reconcile` (see
 [Schedules](#post-apischedules)); nothing schedules it by default. LOW priority unless the request or schedule sets one.
-Only one is queued or running at a time: asking again returns that job. It reads back every item this app published
+Only one is queued or running at a time: asking again (a **Re-run** of a finished one included) returns that job. It
+reads back every item this app published
 (`item_publish_state`) on each enabled server with Intro & Credits on, 500 items per call (Plex one item per connection
 under the lock proof; Jellyfin and Emby one request per item, stopping a server after 20 failed reads in a row), and
 lists only the files of items that aren't `ours` any more (`missing`, `replaced`, `versions_changed`, `gone`, or a kept
@@ -494,18 +495,23 @@ per-episode `GET /api/markers/item` stays the place for what a server shows righ
 
 **Response:** `200` with:
 
-- `folder`, `show`, `season` — the season folder and the show and season folder names.
+- `folder`, `show`, `season` — the season folder, and the show and season as the Publish job names them: the show
+  folder's name (the folder itself when episodes sit straight in it) and `"Season N"` or `"Specials"` from the
+  episode's name.
 - `servers` — the enabled servers holding the episode, in server order: `server_id`, `server_name`, `server_type`,
   `markers_enabled` (Intro & Credits is on there and this library is selected).
 - `episodes` — the episodes matched as one season (same folder and season number; at most the 40 nearest in a flat
   folder of hundreds; extras left out), each with `path`, `name`, `episode` (`"E01"`), `known` (the app has looked at
   it), `duration_ms`, `intro` and `credits` (`{status, reason, marker, proposed}` as in `GET /api/markers/item`),
+  `needs_review` (any marker type in Needs review, recap and preview included) with `review_reason` (the first such
+  type's reason, `""` when none),
   `evidence` chips (`[{source, label}]`: the sources with intro or credits evidence, markers already on servers left
   out; only season audio has a `label`, e.g. `"10/10"`) and `servers` dots (`{server_id: {state, message}}`, `state`
   one of `ok` — last publish wrote our markers, `none` — nothing of ours there or never published, `waiting`,
   `failed`, `skipped`, or `off` — Intro & Credits off there, or this episode's library isn't selected or is excluded).
 - `counts` — `episodes` (the episodes listed), `total_episodes` (the season's size before the 40-nearest cap), `ready`
-  (at least one decided marker and nothing in Needs review), `needs_review`.
+  (at least one decided marker of any type: what Publish sends, even when another type is in Needs review) and
+  `needs_review` (any type in Needs review).
 
 `400` `{"error": "Path is not a file inside any server library"}` (also for a missing `path`) or `{"error": "Not a TV
 episode"}` (no `SxxEyy` in its name). `500` `{"error": "Couldn't build the Season view for this file"}`.
@@ -536,7 +542,8 @@ binary found (`null` when none), and `message` says why it isn't available (`""`
 **Request:** optional JSON body `{"priority"}` (`1`-`3` or `high`/`normal`/`low`, default `low`); no body is fine.
 
 **Response:** `202` `{"job_id": "…", "already_queued": false}` for a new Intro & Credits · Check servers job, or
-`{"job_id": "…", "already_queued": true}` with the one already queued or running (whatever priority was asked for).
+`{"job_id": "…", "already_queued": true}` with the one already queued or running (whatever priority was asked for),
+plus `"paused": true` when that job is paused.
 `200` `{"job_id": null, "reason": "Intro & Credits is off on every server"}`. `400` `{"error": "The request body must
 be JSON"}`, `{"error": "The request body must be a JSON object"}` or `{"error": "priority must be 1, 2, 3, high, normal
 or low"}`. `503` when the config directory isn't writable (checked before the body).
@@ -855,8 +862,8 @@ Test Plex connection. Request: `{"url": "...", "token": "..."}`. Returns `{"succ
 | POST | `/api/jobs` | Create new job |
 | GET | `/api/jobs/{id}` | Get job details |
 | POST | `/api/jobs/{id}/cancel` | Cancel job |
-| POST | `/api/jobs/{id}/pause` | Global pause (delegates to `/api/processing/pause`) |
-| POST | `/api/jobs/{id}/resume` | Global resume (delegates to `/api/processing/resume`) |
+| POST | `/api/jobs/{id}/pause` | Intro & Credits job: pauses that job only (`200` with the job; `409` `{"error": "Only running jobs can be paused"}` when it isn't running). Preview job: global pause (delegates to `/api/processing/pause`). `404` for an unknown id. |
+| POST | `/api/jobs/{id}/resume` | Intro & Credits job: resumes that job only (`200` with the job plus `processing_paused`, true while **Pause all** still holds it; `409` `{"error": "Only running jobs can be resumed"}` when it isn't running). Preview job: global resume (delegates to `/api/processing/resume`). `404` for an unknown id. |
 | DELETE | `/api/jobs/{id}` | Delete job |
 
 #### GET /api/jobs
@@ -968,7 +975,7 @@ explicit `null` clears it.
 
 - `"full_library"` *(default — optional, omit to get the same behaviour)* — schedule runs a full library scan via the standard job pipeline, processing every item in `library_id` that's missing previews.
 - `"recently_added"` — schedule runs a Recently Added scan instead. Requires `config.lookback_hours` (float, clamped to 0.25–720). Scans only items added within the lookback window (Plex `addedAt`, Emby/Jellyfin `DateCreated`), queuing each through the webhook job pipeline. When `library_id` is `null`, the scan falls back to the globally selected libraries in Settings (or every supported library when no global filter is set); when set, only that section is scanned. Works for Plex, Emby, and Jellyfin — each vendor's processor implements `scan_recently_added` against its native API.
-- `"intro_credits"` — schedule creates an [Intro & Credits](#intro--credits) job (`kind=intro_credits`) instead of a preview job, for the schedule's libraries (every library Intro & Credits goes to when none are chosen). LOW priority unless the schedule sets one. Skipped while an earlier Intro & Credits job from the same schedule is still pending or running. With `config.reconcile: true` it queues Intro & Credits · Check servers instead (every server; libraries and server don't apply; the UI shows it as "All servers"), skipped while any Check servers job is still pending or running.
+- `"intro_credits"` — schedule creates an [Intro & Credits](#intro--credits) job (`kind=intro_credits`) instead of a preview job, for the schedule's libraries (every library Intro & Credits goes to when none are chosen). LOW priority unless the schedule sets one. Skipped while an earlier Find markers job from the same schedule is still pending or running. With `config.reconcile: true` it queues Intro & Credits · Check servers instead (every server; libraries and server don't apply; the UI shows it as "All servers"), skipped while any Check servers job is still pending or running. A start tick (or `POST /api/schedules/{id}/run`) first resumes every Intro & Credits job of the schedule that its stop time paused, whichever of the two it is (the schedule may have been switched since), and then queues nothing that tick; the check above applies only when it resumed nothing. A job paused by hand (`POST /api/jobs/{id}/pause`) is never resumed by a tick; the job's config carries `paused_by_schedule: true` only while a stop-time pause holds. Deleting a schedule leaves its paused jobs paused and logs a WARNING naming each.
 
 ### System Endpoints
 
@@ -1273,7 +1280,7 @@ unless noted.
 | POST | `/api/jobs/manual` | Submit one or more absolute paths — `{"file_paths": ["/a.mkv", "/tv/Show"], "force_regenerate": false, "priority": 2, "server_id": "..."}`. Directories are expanded to the video files inside; bypasses library scan. |
 | GET | `/api/media/search` | Backs the Manual Generation typeahead. `?q=` (min 2 chars), optional `?server_id=` to scope to one server. Fans across enabled servers and returns `{results: [{kind: "show"\|"movie"\|"episode", title, year, paths: [local container paths], child_count, servers: [{id, name, type}]}]}`. Shows resolve to their folder(s); the same item reported by several servers is merged into one row (union of paths + servers). |
 | POST | `/api/jobs/{id}/priority` | Change a pending/running job's priority (`{"priority": 1\|2\|3}`; 1 = high) |
-| POST | `/api/jobs/{id}/reprocess` | Re-run a finished job with the same config |
+| POST | `/api/jobs/{id}/reprocess` | Re-run a finished job with the same config: `201` with the new job (an Intro & Credits job keeps its schedule), `409` while it's pending or running. A Check servers job is queued like `POST /api/markers/reconcile` and answers the same way (`202` `{"job_id", "already_queued"}`, reusing one already queued or running). A Re-run clears the global pause. |
 | POST | `/api/jobs/{id}/retry-now` | Skip the retry back-off on a chain-head job whose next attempt is currently in the back-off countdown. Returns 200 + `{"fired": true, ...}` on success, 409 when no retry is pending, 400 if the job isn't a chain head. |
 | POST | `/api/jobs/{id}/fire-webhook-now` | Skip the debounce window on a webhook-batch job that's still waiting to dispatch. Looks up the in-memory batch by `job_id` and cancels its threading timer, then dispatches the same callback synchronously. 202 on success, 404 when the job has no live pending batch (already fired, never had one, or container restart cleared the in-memory dict). |
 | GET | `/api/jobs/{id}/logs` | Paginated log stream — `?offset=&limit=` (limit capped at 5000); or legacy `?last=N` for the tail |

@@ -308,6 +308,25 @@ class TestCheckServersRoute:
         assert resp.status_code == 202 and resp.get_json() == {"job_id": pending.id, "already_queued": True}
         assert {job.id for job in jm.get_all_jobs()} == before
 
+    def test_a_paused_check_servers_job_is_named_as_paused(self, client):
+        from media_preview_generator.job_kinds import JOB_KIND_INTRO_CREDITS
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        get_settings_manager().set(
+            "media_servers",
+            [{"id": "jf-1", "type": "jellyfin", "name": "JF", "enabled": True, "markers": {"enabled": True}}],
+        )
+        jm = get_job_manager()
+        paused = jm.create_job(
+            library_name="Intro & Credits · Check servers", config={"reconcile": True}, kind=JOB_KIND_INTRO_CREDITS
+        )
+        jm.start_job(paused.id)
+        jm.request_pause(paused.id)
+        resp = client.post("/api/markers/reconcile", headers=_api_headers())
+        assert resp.status_code == 202
+        assert resp.get_json() == {"job_id": paused.id, "already_queued": True, "paused": True}
+
     def test_nothing_to_check_says_why(self, client, run):
         run.job_id = None
         resp = client.post("/api/markers/reconcile", headers=_api_headers())
@@ -338,3 +357,166 @@ class TestCheckServersRoute:
     def test_needs_auth(self, app, run):
         assert app.test_client().post("/api/markers/reconcile").status_code == 401
         assert run.calls == []
+
+
+class TestRerunIntroCreditsJobs:
+    """POST /api/jobs/<id>/reprocess on a finished Intro & Credits job (real JobManager)."""
+
+    @pytest.fixture
+    def jm(self, client):
+        from unittest.mock import patch
+
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        get_settings_manager().set(
+            "media_servers",
+            [{"id": "jf-1", "type": "jellyfin", "name": "JF", "enabled": True, "markers": {"enabled": True}}],
+        )
+        with (
+            patch("media_preview_generator.markers.triggers.start_intro_credits_job_async"),
+            patch("media_preview_generator.web.routes.api_jobs._start_job_async"),
+        ):
+            yield get_job_manager()
+
+    @staticmethod
+    def _finished(jm, *, config, priority=3, parent_schedule_id="", kind="intro_credits"):
+        job = jm.create_job(
+            library_name="finished", config=config, priority=priority, parent_schedule_id=parent_schedule_id, kind=kind
+        )
+        jm.start_job(job.id)
+        jm.complete_job(job.id)
+        return job
+
+    @staticmethod
+    def _check_servers_config():
+        return {"kind": "intro_credits", "source": "reconcile", "libraries": [], "file_paths": [], "reconcile": True}
+
+    @pytest.mark.parametrize("state", ["pending", "running", "paused"])
+    def test_a_check_servers_rerun_while_one_is_queued_or_running_creates_nothing(self, client, jm, state):
+        finished = self._finished(jm, config=self._check_servers_config(), priority=1)
+        live = jm.create_job(library_name="Intro & Credits · Check servers", config=self._check_servers_config(),
+                             priority=3, kind="intro_credits")  # fmt: skip
+        if state != "pending":
+            jm.start_job(live.id)
+        if state == "paused":
+            jm.request_pause(live.id)
+        before = {job.id for job in jm.get_all_jobs()}
+
+        resp = client.post(f"/api/jobs/{finished.id}/reprocess", headers=_api_headers())
+
+        expected = {"job_id": live.id, "already_queued": True, **({"paused": True} if state == "paused" else {})}
+        assert resp.status_code == 202 and resp.get_json() == expected
+        assert {job.id for job in jm.get_all_jobs()} == before
+
+    def test_a_check_servers_rerun_with_none_queued_queues_one_at_the_jobs_priority(self, client, jm):
+        finished = self._finished(jm, config=self._check_servers_config(), priority=1, parent_schedule_id="sch-1")
+
+        resp = client.post(f"/api/jobs/{finished.id}/reprocess", headers=_api_headers())
+
+        body = resp.get_json()
+        assert resp.status_code == 202 and body["already_queued"] is False and "paused" not in body
+        new = jm.get_job(body["job_id"])
+        assert new.id != finished.id and new.status.value == "pending"
+        assert (new.library_name, new.priority, new.config["source"], new.config["reconcile"]) == (
+            "Intro & Credits · Check servers",
+            1,
+            "reconcile",
+            True,
+        )
+        # Queued like a click: the schedule's stop time doesn't pause a run the user asked for.
+        assert new.parent_schedule_id == ""
+
+    def test_a_check_servers_rerun_with_intro_and_credits_off_everywhere_says_why(self, client, jm):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        finished = self._finished(jm, config=self._check_servers_config())
+        get_settings_manager().set("media_servers", [])
+
+        resp = client.post(f"/api/jobs/{finished.id}/reprocess", headers=_api_headers())
+
+        assert resp.status_code == 200
+        assert resp.get_json() == {"job_id": None, "reason": "Intro & Credits is off on every server"}
+
+    @pytest.mark.parametrize("state", ["none-queued", "already-queued", "off-everywhere"])
+    def test_a_check_servers_rerun_clears_pause_all_like_any_rerun(self, client, jm, state):
+        from unittest.mock import patch
+
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        finished = self._finished(jm, config=self._check_servers_config())
+        if state == "already-queued":
+            jm.create_job(library_name="waiting", config=self._check_servers_config(), kind="intro_credits")
+        sm = get_settings_manager()
+        if state == "off-everywhere":
+            sm.set("media_servers", [])
+        sm.processing_paused = True
+        try:
+            live_at_drain = []
+
+            def drain_side_effect():
+                live_at_drain.extend(j.id for j in jm.get_pending_jobs() if (j.config or {}).get("reconcile"))
+
+            with patch(
+                "media_preview_generator.web.routes.job_runner.resume_running_and_drain_pending",
+                side_effect=drain_side_effect,
+            ) as drain:
+                resp = client.post(f"/api/jobs/{finished.id}/reprocess", headers=_api_headers())
+            if state == "off-everywhere":
+                # Nothing was queued to run, so the pause stays.
+                assert resp.status_code == 200 and sm.processing_paused is True
+                drain.assert_not_called()
+            else:
+                assert resp.status_code == 202 and resp.get_json()["already_queued"] is (state == "already-queued")
+                assert sm.processing_paused is False
+                drain.assert_called_once_with()
+                if state == "none-queued":
+                    # Pause all is cleared before the job exists, so its own start isn't swallowed by the pause.
+                    assert live_at_drain == []
+        finally:
+            sm.processing_paused = False
+
+    def test_a_rerun_doesnt_carry_a_stop_time_pause_record(self, client, jm):
+        config = {"kind": "intro_credits", "source": "schedule", "libraries": [], "paused_by_schedule": True}
+        finished = self._finished(jm, config=config, parent_schedule_id="sch-1")
+
+        resp = client.post(f"/api/jobs/{finished.id}/reprocess", headers=_api_headers())
+
+        new = jm.get_job(resp.get_json()["id"])
+        assert new.parent_schedule_id == "sch-1" and "paused_by_schedule" not in new.config
+
+    @pytest.mark.parametrize(
+        ("kind", "schedule_id", "kept"),
+        [("intro_credits", "sch-1", "sch-1"), ("intro_credits", "", ""), ("previews", "sch-1", "")],
+        ids=["scheduled-find-markers", "on-demand-find-markers", "scheduled-previews"],
+    )
+    def test_a_rerun_keeps_an_intro_and_credits_jobs_schedule(self, client, jm, kind, schedule_id, kept):
+        config = {"kind": kind, "source": "schedule", "libraries": [], "file_paths": []}
+        finished = self._finished(jm, config=config, parent_schedule_id=schedule_id, kind=kind)
+
+        resp = client.post(f"/api/jobs/{finished.id}/reprocess", headers=_api_headers())
+
+        assert resp.status_code == 201
+        new = jm.get_job(resp.get_json()["id"])
+        assert (new.kind, new.parent_schedule_id, new.priority) == (kind, kept, 3)
+
+    @pytest.mark.parametrize(
+        "source",
+        ["inspector_season", "inspector", "reconcile"],
+        # A Check servers run's retry keeps source "reconcile" but lists files, not drift: it isn't Check servers.
+        ids=["season-publish", "re-detect", "check-servers-retry"],
+    )
+    def test_a_season_publish_redetect_or_retry_rerun_creates_a_job_even_beside_an_identical_one(
+        self, client, jm, source
+    ):
+        config = {"kind": "intro_credits", "source": source, "libraries": [], "file_paths": ["/m/tv/S01E01.mkv"]}
+        finished = self._finished(jm, config=dict(config), priority=2)
+        jm.create_job(library_name="waiting", config=dict(config), priority=2, kind="intro_credits")
+        before = {job.id for job in jm.get_all_jobs()}
+
+        resp = client.post(f"/api/jobs/{finished.id}/reprocess", headers=_api_headers())
+
+        assert resp.status_code == 201
+        new = jm.get_job(resp.get_json()["id"])
+        assert new.id not in before
+        assert (new.config["source"], new.config["file_paths"], new.priority) == (source, ["/m/tv/S01E01.mkv"], 2)

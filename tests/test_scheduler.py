@@ -6,6 +6,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Imported before any test patches ``web.jobs.get_job_manager``: both bind it at import time, and a first import under
+# that patch would keep the fake for every later test in the worker.
+from media_preview_generator.markers import reconcile, triggers
 from media_preview_generator.web.scheduler import (
     ScheduleManager,
     get_schedule_manager,
@@ -712,7 +715,7 @@ class TestExecuteScheduleStop:
 
         sched_mod.execute_schedule_stop(sid)
 
-        fake_jm.request_pause.assert_called_once_with("job-1")
+        fake_jm.request_pause.assert_called_once_with("job-1", by_schedule=True)
         # Sibling-schedule and already-paused jobs MUST NOT be touched.
         assert all(call.args[0] != "job-2" for call in fake_jm.request_pause.call_args_list)
         assert all(call.args[0] != "job-3" for call in fake_jm.request_pause.call_args_list)
@@ -1244,7 +1247,7 @@ class TestExecuteScheduledIntroCreditsJob:
         callback = MagicMock()
         scheduler_manager.set_run_job_callback(callback)
         create = MagicMock(return_value=MagicMock(id="ic-1"))
-        monkeypatch.setattr("media_preview_generator.markers.triggers.create_intro_credits_job", create)
+        monkeypatch.setattr(triggers, "create_intro_credits_job", create)
         return {
             "jobs": jobs,
             "jm": fake_jm,
@@ -1424,6 +1427,7 @@ class TestExecuteScheduledIntroCreditsJob:
                 kind="intro_credits",
                 status=JobStatus(status),
                 paused=False,
+                config={"libraries": []},
             )
         )
         execute_scheduled_job(schedule["id"], None, "", {"job_type": "intro_credits"}, None, None)
@@ -1440,6 +1444,7 @@ class TestExecuteScheduledIntroCreditsJob:
             ({"status": "cancelled"}, True),
             ({"status": "running", "parent_schedule_id": "another-schedule"}, True),
             ({"status": "running", "kind": "previews"}, True),  # the schedule used to scan previews
+            ({"status": "running", "config": {"reconcile": True}}, True),  # the schedule used to check servers
         ],
     )
     def test_other_jobs_do_not_block_a_new_run(self, scheduler_manager, env, other, starts):
@@ -1447,7 +1452,8 @@ class TestExecuteScheduledIntroCreditsJob:
         from media_preview_generator.web.scheduler import execute_scheduled_job
 
         schedule = self._schedule(scheduler_manager)
-        fields = {"id": "old", "parent_schedule_id": schedule["id"], "kind": "intro_credits", "paused": False, **other}
+        fields = {"id": "old", "parent_schedule_id": schedule["id"], "kind": "intro_credits", "paused": False,
+                  "config": {"libraries": []}, **other}  # fmt: skip
         fields["status"] = JobStatus(fields["status"])
         env["jobs"].append(MagicMock(**fields))
         execute_scheduled_job(schedule["id"], None, "", {"job_type": "intro_credits"}, None, None)
@@ -1456,21 +1462,34 @@ class TestExecuteScheduledIntroCreditsJob:
         env["jm"].request_resume.assert_not_called()
 
     @pytest.mark.parametrize(("job_type", "kind"), [("intro_credits", "intro_credits"), ("full_library", "previews")])
-    def test_paused_job_from_this_schedule_is_resumed_instead(self, scheduler_manager, env, job_type, kind):
+    @pytest.mark.parametrize("by_stop_time", [True, False], ids=["stop-time-pause", "pause-by-hand"])
+    def test_paused_job_from_this_schedule_is_resumed_instead_only_when_its_stop_time_paused_it(
+        self, scheduler_manager, env, job_type, kind, by_stop_time
+    ):
         from media_preview_generator.web.jobs import JobStatus
         from media_preview_generator.web.scheduler import execute_scheduled_job
 
         schedule = self._schedule(scheduler_manager)
+        config = {"libraries": [], **({"paused_by_schedule": True} if by_stop_time else {})}
         env["jobs"].append(
             MagicMock(
-                id="old", parent_schedule_id=schedule["id"], kind=kind, status=JobStatus.RUNNING, paused=True, config={}
+                id="old", parent_schedule_id=schedule["id"], kind=kind, status=JobStatus.RUNNING, paused=True,
+                config=config,
             )
-        )
+        )  # fmt: skip
         execute_scheduled_job(schedule["id"], None, "", {"job_type": job_type}, None, None)
 
-        env["jm"].request_resume.assert_called_once_with("old")
-        env["create"].assert_not_called()
-        env["callback"].assert_not_called()
+        if by_stop_time:
+            env["jm"].request_resume.assert_called_once_with("old")
+            env["create"].assert_not_called()
+            env["callback"].assert_not_called()
+            return
+        env["jm"].request_resume.assert_not_called()
+        if job_type == "intro_credits":
+            # Its own Find markers job, paused by hand, is still unfinished: nothing new either.
+            env["create"].assert_not_called()
+        else:
+            env["callback"].assert_called_once()
 
     @pytest.mark.parametrize(
         ("job_type", "paused_kind"), [("intro_credits", "previews"), ("full_library", "intro_credits")]
@@ -1487,7 +1506,7 @@ class TestExecuteScheduledIntroCreditsJob:
                 kind=paused_kind,
                 status=JobStatus.RUNNING,
                 paused=True,
-                config={},
+                config={"paused_by_schedule": True},
             )
         )
         execute_scheduled_job(schedule["id"], None, "", {"job_type": job_type}, None, None)
@@ -1525,8 +1544,6 @@ class TestExecuteScheduledCheckServers:
 
     @pytest.fixture
     def env(self, scheduler_manager, monkeypatch):
-        from media_preview_generator.markers import reconcile
-
         jobs = {"pending": [], "running": [], "all": []}
         fake_jm = MagicMock()
         fake_jm.get_pending_jobs.side_effect = lambda: list(jobs["pending"])
@@ -1541,9 +1558,9 @@ class TestExecuteScheduledCheckServers:
         callback = MagicMock()
         scheduler_manager.set_run_job_callback(callback)
         create = MagicMock(return_value=MagicMock(id="rc-1"))
-        monkeypatch.setattr("media_preview_generator.markers.triggers.create_intro_credits_job", create)
+        monkeypatch.setattr(triggers, "create_intro_credits_job", create)
         enabled = MagicMock(return_value=True)
-        monkeypatch.setattr("media_preview_generator.markers.triggers.markers_enabled_anywhere", enabled)
+        monkeypatch.setattr(triggers, "markers_enabled_anywhere", enabled)
         return SimpleNamespace(jobs=jobs, jm=fake_jm, sm=fake_sm, callback=callback, create=create, enabled=enabled)
 
     def _schedule(self, scheduler_manager):
@@ -1626,41 +1643,55 @@ class TestExecuteScheduledCheckServers:
         execute_scheduled_job(schedule["id"], [], "All servers", dict(self.CONFIG), None, None)
         env.create.assert_not_called()
 
+    STOPPED = {"paused_by_schedule": True}
+
     @pytest.mark.parametrize(
-        ("tick_config", "paused_config", "resumed"),
+        ("tick_config", "paused_configs", "resumed", "queues"),
         [
-            ({"job_type": "intro_credits", "reconcile": True}, {"reconcile": True}, True),
-            ({"job_type": "intro_credits", "reconcile": True}, {"libraries": []}, False),
-            ({"job_type": "intro_credits"}, {"reconcile": True}, False),
-            ({"job_type": "intro_credits"}, {"libraries": []}, True),
+            (CONFIG, [{"reconcile": True, **STOPPED}], ["old-0"], None),
+            (CONFIG, [{"libraries": [], **STOPPED}], ["old-0"], None),
+            ({"job_type": "intro_credits"}, [{"reconcile": True, **STOPPED}], ["old-0"], None),
+            ({"job_type": "intro_credits"}, [{"libraries": [], **STOPPED}], ["old-0"], None),
+            (CONFIG, [{"reconcile": True, **STOPPED}, {"libraries": [], **STOPPED}], ["old-0", "old-1"], None),
+            (CONFIG, [{"libraries": []}], [], "check servers"),
+            ({"job_type": "intro_credits"}, [{"reconcile": True}], [], "find markers"),
+            ({"job_type": "intro_credits"}, [{"libraries": []}], [], None),
+            (CONFIG, [{"reconcile": True}], [], None),
         ],
-        ids=["check-resumes-check", "check-skips-find", "find-skips-check", "find-resumes-find"],
-    )
-    def test_a_paused_job_is_resumed_only_by_a_tick_of_its_own_mode(
-        self, scheduler_manager, env, tick_config, paused_config, resumed
+        ids=[
+            "check-resumes-check", "check-resumes-find", "find-resumes-check", "find-resumes-find",
+            "resumes-one-of-each-mode", "check-leaves-find-paused-by-hand", "find-leaves-check-paused-by-hand",
+            "find-paused-by-hand-still-unfinished", "check-paused-by-hand-still-unfinished",
+        ],
+    )  # fmt: skip
+    def test_a_stop_time_pause_of_either_mode_is_resumed_and_the_tick_queues_nothing_else(
+        self, scheduler_manager, env, tick_config, paused_configs, resumed, queues
     ):
         from media_preview_generator.web.jobs import JobStatus
         from media_preview_generator.web.scheduler import execute_scheduled_job
 
         schedule = self._schedule(scheduler_manager)
-        # A paused job still counts as running; the other mode's tick creates nothing while it waits either.
-        env.jobs["all"].append(
-            MagicMock(id="old", kind="intro_credits", config=paused_config, status=JobStatus.RUNNING, paused=True,
-                      parent_schedule_id=schedule["id"])
-        )  # fmt: skip
-        with patch("media_preview_generator.web.scheduler._start_scheduled_intro_credits_job") as find_markers:
-            execute_scheduled_job(schedule["id"], [], "All servers", dict(tick_config), None, None)
+        # A job its stop time paused is resumed even after a switch to the other mode (nothing else would resume it),
+        # and the tick then returns: a new job would compete for a slot and could run past the stop time. A job paused
+        # by hand isn't the schedule's to resume; it counts as unfinished for its own mode only.
+        for n, config in enumerate(paused_configs):
+            env.jobs["running"].append(
+                MagicMock(id=f"old-{n}", kind="intro_credits", config=config, status=JobStatus.RUNNING, paused=True,
+                          parent_schedule_id=schedule["id"])
+            )  # fmt: skip
+        execute_scheduled_job(schedule["id"], [], "All servers", dict(tick_config), None, None)
 
-        assert env.jm.request_resume.called is resumed
-        if resumed:
-            env.jm.request_resume.assert_called_once_with("old")
-            env.create.assert_not_called()
-            find_markers.assert_not_called()
-        elif tick_config.get("reconcile"):
+        assert [c.args[0] for c in env.jm.request_resume.call_args_list] == resumed
+        last_run = scheduler_manager.get_schedule(schedule["id"])["last_run"]
+        assert (last_run is not None) is bool(resumed or queues)
+        if queues == "check servers":
             env.create.assert_called_once_with(**self._created(schedule))
-            find_markers.assert_not_called()
+        elif queues == "find markers":
+            env.create.assert_called_once_with(
+                library_name="Intro & Credits: All servers", priority=3, source="schedule", libraries=[],
+                parent_schedule_id=schedule["id"],
+            )  # fmt: skip
         else:
-            find_markers.assert_called_once_with(scheduler_manager, schedule["id"], [], "All servers", None, None)
             env.create.assert_not_called()
 
     def test_a_create_failure_is_logged_and_the_tick_ends_quietly(self, scheduler_manager, env):
@@ -1670,6 +1701,165 @@ class TestExecuteScheduledCheckServers:
         schedule = self._schedule(scheduler_manager)
         execute_scheduled_job(schedule["id"], [], "All servers", dict(self.CONFIG), None, None)
         assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is None
+
+
+class TestPausedIntroCreditsJobsAfterAScheduleChanges:
+    """Jobs a schedule's stop time paused, by hand, or not at all, after the schedule switches mode or is deleted.
+
+    Real JobManager and ScheduleManager, one job slot (``max_concurrent_jobs`` 1).
+    """
+
+    FIND = {"job_type": "intro_credits"}
+    CHECK = {"job_type": "intro_credits", "reconcile": True}
+
+    @pytest.fixture
+    def jm(self, scheduler_manager, tmp_path, monkeypatch):
+        from media_preview_generator.web.jobs import JobManager
+
+        jm = JobManager(config_dir=str(tmp_path / "jobs"))
+        monkeypatch.setattr("media_preview_generator.web.jobs.get_job_manager", lambda: jm)
+        monkeypatch.setattr(reconcile, "get_job_manager", lambda: jm)
+        monkeypatch.setattr(triggers, "get_job_manager", lambda: jm)
+        monkeypatch.setattr(triggers, "start_intro_credits_job_async", lambda job_id: None)
+        monkeypatch.setattr(triggers, "markers_enabled_anywhere", lambda: True)
+        settings = {"max_concurrent_jobs": 1}
+        sm = MagicMock(processing_paused=False)
+        sm.get.side_effect = lambda key, default=None: settings.get(key, default)
+        monkeypatch.setattr("media_preview_generator.web.settings_manager.get_settings_manager", lambda: sm)
+        return jm
+
+    @staticmethod
+    def _tick(schedule_id, config):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        execute_scheduled_job(schedule_id, [], "All", dict(config), None, None)
+
+    @staticmethod
+    def _paused_by_stop_time(jm, schedule_id, job_id):
+        from media_preview_generator.web.scheduler import execute_schedule_stop
+
+        jm.start_job(job_id)
+        execute_schedule_stop(schedule_id)
+        assert jm.get_job(job_id).paused and jm.get_job(job_id).config["paused_by_schedule"] is True
+
+    @staticmethod
+    def _live(jm):
+        return [job for job in jm.get_all_jobs() if job.status.value in ("pending", "running")]
+
+    def _schedule(self, scheduler_manager, config):
+        return scheduler_manager.create_schedule(
+            name="nightly", cron_expression="0 2 * * *", config=dict(config), stop_time="06:00"
+        )
+
+    @pytest.mark.parametrize(
+        ("before", "after"), [("CHECK", "FIND"), ("FIND", "CHECK")], ids=["check-to-find", "find-to-check"]
+    )
+    def test_a_switched_schedule_resumes_the_other_modes_job_then_runs_its_own_once_that_finished(
+        self, scheduler_manager, jm, before, after
+    ):
+        before, after = getattr(self, before), getattr(self, after)
+        schedule = self._schedule(scheduler_manager, before)
+        self._tick(schedule["id"], before)
+        (old,) = jm.get_all_jobs()
+        self._paused_by_stop_time(jm, schedule["id"], old.id)
+        scheduler_manager.update_schedule(schedule["id"], config=dict(after))
+
+        self._tick(schedule["id"], after)
+
+        # One slot: the resumed job has it to itself, and nothing that could run past the stop time is queued.
+        assert [(job.id, job.paused) for job in self._live(jm)] == [(old.id, False)]
+        assert "paused_by_schedule" not in jm.get_job(old.id).config
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is not None
+
+        jm.complete_job(old.id)
+        self._tick(schedule["id"], after)
+
+        (new,) = self._live(jm)
+        assert new.id != old.id and new.parent_schedule_id == schedule["id"]
+        assert bool(new.config.get("reconcile")) is bool(after.get("reconcile"))
+
+    @pytest.mark.parametrize("mode", ["FIND", "CHECK"])
+    @pytest.mark.parametrize("trigger", ["start-tick", "run-now"])
+    @pytest.mark.parametrize("pause", ["stop-time", "by-hand", "stop-time-then-by-hand"])
+    def test_only_a_stop_time_pause_is_resumed_by_a_start_tick_or_run_now(
+        self, scheduler_manager, jm, mode, trigger, pause
+    ):
+        config = getattr(self, mode)
+        schedule = self._schedule(scheduler_manager, config)
+        self._tick(schedule["id"], config)
+        (job,) = jm.get_all_jobs()
+        if pause == "by-hand":
+            jm.start_job(job.id)
+            assert jm.request_pause(job.id)  # POST /api/jobs/<id>/pause
+        else:
+            self._paused_by_stop_time(jm, schedule["id"], job.id)
+            if pause == "stop-time-then-by-hand":
+                assert jm.request_pause(job.id)
+
+        if trigger == "run-now":
+            assert scheduler_manager.run_now(schedule["id"]) is True
+        else:
+            self._tick(schedule["id"], config)
+
+        resumed = pause == "stop-time"
+        assert jm.get_job(job.id).paused is not resumed
+        assert jm.get_job(job.id).config.get("paused_by_schedule", False) is False
+        # Either way the job is still this mode's unfinished job, so no second one is queued beside it.
+        assert [j.id for j in self._live(jm)] == [job.id]
+        resume_lines = [line for line in jm.get_logs(job.id) if "Resumed by schedule" in line]
+        assert len(resume_lines) == int(resumed)
+
+    def test_a_check_servers_tick_with_nothing_paused_reuses_the_queued_job_and_leaves_last_run_unset(
+        self, scheduler_manager, jm
+    ):
+        manual = reconcile.run_markers_reconcile()  # POST /api/markers/reconcile
+        schedule = scheduler_manager.create_schedule(
+            name="checks", cron_expression="0 3 * * *", config=dict(self.CHECK)
+        )
+
+        self._tick(schedule["id"], self.CHECK)
+
+        assert [job.id for job in jm.get_all_jobs()] == [manual.job_id]
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is None
+
+    def test_the_pause_record_follows_the_last_pause_and_any_resume_clears_it(self, jm):
+        job = jm.create_job(library_name="x", config={"libraries": []}, kind="intro_credits")
+        jm.start_job(job.id)
+
+        assert jm.request_pause(job.id, by_schedule=True)
+        assert jm.get_job(job.id).config == {"libraries": [], "paused_by_schedule": True}
+        assert jm.request_pause(job.id)
+        assert jm.get_job(job.id).config == {"libraries": []}
+        assert jm.request_pause(job.id, by_schedule=True)
+        assert jm.request_resume(job.id)
+        assert jm.get_job(job.id).config == {"libraries": []}
+
+    def test_deleting_a_schedule_names_its_paused_job_and_leaves_it_paused(self, scheduler_manager, jm):
+        from loguru import logger
+
+        schedule = self._schedule(scheduler_manager, self.CHECK)
+        self._tick(schedule["id"], self.CHECK)
+        (check,) = jm.get_all_jobs()
+        self._paused_by_stop_time(jm, schedule["id"], check.id)
+        other = jm.create_job(library_name="done", config={"libraries": []}, parent_schedule_id=schedule["id"],
+                              kind="intro_credits")  # fmt: skip
+        jm.start_job(other.id)
+        jm.complete_job(other.id)
+        warnings: list[str] = []
+        handler = logger.add(warnings.append, level="WARNING", format="{message}")
+        try:
+            assert scheduler_manager.delete_schedule(schedule["id"]) is True
+        finally:
+            logger.remove(handler)
+
+        assert [w.strip() for w in warnings] == [
+            f"Schedule 'nightly' ({schedule['id']}) was deleted while its job {check.id[:8]} "
+            "(Intro & Credits · Check servers) is paused; no later start tick of this schedule will resume it. Resume "
+            "or cancel it on the dashboard."
+        ]
+        assert jm.get_job(check.id).paused and jm.get_job(check.id).status.value == "running"
+        # Still the one Check servers job: a manual request gets it back (the API adds "paused": true).
+        assert reconcile.run_markers_reconcile() == (check.id, False)
 
 
 def test_nothing_is_scheduled_after_a_fresh_start(tmp_path):

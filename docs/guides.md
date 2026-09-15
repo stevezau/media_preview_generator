@@ -654,7 +654,10 @@ once; **This episode** stays the place for what a server shows right now. An epi
 
 **Publish N to M servers** queues a Normal-priority Intro & Credits job named `Intro & Credits: <show> · Season N`
 (or `· Specials`) for exactly the listed episodes: decided episodes go to every server that doesn't show them yet,
-and the rest are checked again. Clicking it again while that job is still queued or running reuses it.
+and the rest are checked again. Clicking it again while that job is still queued or running reuses it. N (and
+**N ready**) counts the episodes with at least one decided marker, since the job sends those even when another type
+of the same episode is in Needs review; **N need review** counts the episodes with any type in review, recaps and
+previews included. The header names the show and season the way the job does.
 
 ### Plex: writing straight into Plex's database
 
@@ -773,8 +776,13 @@ Credits · Check servers**: **Start New Job → Intro & Credits → Check server
 `POST /api/markers/reconcile`, or a schedule in **Automation → Schedules** (type **Intro & Credits → Check servers**;
 the server and library pickers don't apply). Nothing is scheduled by default. It runs at Low priority unless you pick
 another, and only one runs at a time: asking again while one is queued or running reuses it ("A Check servers job is
-already queued"), and a schedule tick then queues nothing. With Intro & Credits off on every server there's nothing
-to check.
+already queued"), and a schedule tick then queues nothing. **Re-run** on a finished Check servers job asks the same
+way. When the job already there is paused, the message is "A Check servers job is paused. Resume or cancel it on the
+dashboard." A job paused by its schedule's stop time is resumed by that schedule's next start (or **Run now**), even
+if you've switched the schedule between **Find markers** and **Check servers** since. That start queues nothing else;
+the schedule's own mode queues on a later start, once the resumed job has finished. A job you paused yourself stays
+paused until you resume it, and deleting the schedule leaves a paused job paused. **Re-run** clears **Pause all**, as
+it does for any job. With Intro & Credits off on every server there's nothing to check.
 
 Its tooltip sums it up: "Checks that every server with Intro & Credits on still shows the markers this app sent, and
 sends them again where they're missing or changed (unless that server is set to keep its own). Covers all servers and
@@ -830,7 +838,8 @@ episode's preview job has finished, and markers don't need previews.
 
 A new episode can change what the season's other episodes should get (for example, an intro chapter that looked
 normal turns out far longer than the rest of the season). The job then queues a **Season: …** job that checks those
-other episodes again. It runs at Low priority, or Normal right after a webhook import. Once it has run, the season has
+other episodes again. It runs at Low priority, or Normal right after a webhook import, unless those episodes are
+already waiting in a Low Season job, which then checks them. Once it has run, the season has
 the same markers whatever order the episodes arrived in, as if they had all been checked together. A Season job holds
 at most 500 episodes; any beyond that, and any request lost to a restart before the job finished, are picked up the
 next time an episode of that season is checked.

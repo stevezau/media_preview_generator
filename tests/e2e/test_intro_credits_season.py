@@ -31,11 +31,11 @@ def _complete_setup(complete_setup) -> None:
     return complete_setup
 
 
-def _type(status, start=None, end=None, *, locked=False, proposed=None):
+def _type(status, start=None, end=None, *, locked=False, proposed=None, reason=""):
     marker = None
     if status == "decided":
         marker = {"type": "x", "start_ms": start, "end_ms": end, "decided_by": ["season_audio"], "locked": locked}
-    return {"status": status, "reason": "", "marker": marker, "proposed": proposed}
+    return {"status": status, "reason": reason, "marker": marker, "proposed": proposed}
 
 
 def _dots(plex, jf, message=""):
@@ -46,7 +46,9 @@ def _dots(plex, jf, message=""):
     }
 
 
-def _episode(n, intro, credits, evidence, dots, *, known=True):
+def _episode(n, intro, credits, evidence, dots, *, known=True, review_reason=None):
+    """``review_reason`` None: in review exactly when intro or credits is (a recap or preview in review passes one)."""
+    in_review = [t for t in (intro, credits) if t["status"] == "needs_review"]
     return {
         "path": f"{_FOLDER}/South Park S01E{n:02d}.mkv",
         "name": f"South Park S01E{n:02d}.mkv",
@@ -55,6 +57,8 @@ def _episode(n, intro, credits, evidence, dots, *, known=True):
         "duration_ms": _DURATION if known else None,
         "intro": intro,
         "credits": credits,
+        "needs_review": bool(in_review) or review_reason is not None,
+        "review_reason": review_reason if review_reason is not None else next((t["reason"] for t in in_review), ""),
         "evidence": evidence,
         "servers": dots,
     }
@@ -74,7 +78,7 @@ def season() -> dict:
             _episode(3, _type("decided", 2_000, 29_000), _type("needs_review", proposed={"start_ms": 1_230_000, "end_ms": _DURATION}), [audio], _dots("ok", "failed", "HTTP 500 from the plugin")),
             _episode(4, _type(None), _type(None), [], _dots("none", "none"), known=False),
         ],
-        "counts": {"episodes": 4, "total_episodes": 4, "ready": 2, "needs_review": 1},
+        "counts": {"episodes": 4, "total_episodes": 4, "ready": 3, "needs_review": 1},
     }  # fmt: skip
 
 
@@ -137,9 +141,9 @@ class TestSeasonView:
         body = page.locator("#markersSeasonBody")
         expect(body.locator(".mk-season-title")).to_have_text("South Park (1997) · Season 01")
         expect(body.locator(".mk-season-sub")).to_have_text("4 episodes")
-        expect(body.locator(".mk-season-ready")).to_have_text("2 ready")
+        expect(body.locator(".mk-season-ready")).to_have_text("3 ready")
         expect(body.locator(".mk-season-review")).to_have_text("1 need review")
-        expect(body.locator("#markersSeasonPublishBtn")).to_have_text("Publish 2 to 2 servers")
+        expect(body.locator("#markersSeasonPublishBtn")).to_have_text("Publish 3 to 2 servers")
         expect(body.locator("thead th.mk-season-servers")).to_have_text("Plex · Jellyfin · Emby")
 
         expect(_row(page, "E01").locator("td").nth(1)).to_have_text("2:07 – 2:37")
@@ -197,6 +201,43 @@ class TestSeasonView:
         page = view.whole_season()
         expect(page.locator("#markersSeasonPublishBtn")).to_be_disabled()
         expect(page.locator("#markersSeasonPublishBtn")).to_have_text("Publish 0 to 2 servers")
+
+    def test_a_season_all_in_review_shows_the_count_and_publishes_nothing(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        payload = season()
+        review = _type("needs_review", reason="Only one source found it")
+        payload["episodes"] = [_episode(n, review, _type("no_evidence"), [], _dots("none", "none")) for n in (1, 2, 3)]
+        payload["counts"] = {"episodes": 3, "ready": 0, "needs_review": 3}
+        view = _Season(authed_page, app_url, payload)
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        body = page.locator("#markersSeasonBody")
+        expect(body.locator(".mk-season-ready")).to_have_text("0 ready")
+        expect(body.locator(".mk-season-review")).to_have_text("3 need review")
+        expect(body.locator("#markersSeasonPublishBtn")).to_have_text("Publish 0 to 2 servers")
+        expect(body.locator("#markersSeasonPublishBtn")).to_be_disabled()
+        expect(body.locator(".mk-season-action button")).to_have_text(["Review", "Review", "Review"])
+
+    def test_a_recap_in_review_gets_a_review_button_with_its_reason(self, authed_page: Page, app_url: str) -> None:
+        payload = season()
+        payload["episodes"][0] = _episode(
+            1, _type("decided", 127_000, 157_000), _type("decided", 1_295_000, _DURATION), [], _dots("ok", "ok"),
+            review_reason="intro and recap overlap",
+        )  # fmt: skip
+        payload["counts"] = {"episodes": 4, "ready": 3, "needs_review": 2}
+        view = _Season(authed_page, app_url, payload)
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        button = _row(page, "E01").locator(".mk-season-action button")
+        expect(button).to_have_text("Review")
+        assert (button.get_attribute("data-bs-original-title") or button.get_attribute("title")) == (
+            "intro and recap overlap"
+        )
+        expect(page.locator("#markersSeasonBody .mk-season-review")).to_have_text("2 need review")
+        expect(page.locator("#markersSeasonPublishBtn")).to_have_text("Publish 3 to 2 servers")
 
     def test_review_opens_that_episode(self, authed_page: Page, app_url: str) -> None:
         view = _Season(authed_page, app_url, season())

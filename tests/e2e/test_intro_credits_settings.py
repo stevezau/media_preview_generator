@@ -240,7 +240,7 @@ class TestIntroCreditsSettings:
         assert tooltip == (
             "Finds the theme tune a season's episodes share. Tested alone on 118 episodes: 91 right, 13 wrong, 14 "
             "missed — too error-prone to decide by itself, so it never publishes an intro alone; it only confirms "
-            "what another source already found."
+            "what another source already found. A server's own intro marker doesn't count as that other source."
         )
 
         switch.click()

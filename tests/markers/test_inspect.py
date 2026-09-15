@@ -1744,7 +1744,7 @@ class TestSeasonPayload:
         payload = inspect.season_payload(season.paths[1], registry=season.reg, store=season.store)
 
         assert payload["folder"] == season.folder
-        assert (payload["show"], payload["season"]) == ("Show (2020) {tvdb-1}", "Season 01")
+        assert (payload["show"], payload["season"]) == ("Show (2020) {tvdb-1}", "Season 1")
         assert payload["servers"] == [
             {"server_id": "plex-1", "server_name": "PLEX-1", "server_type": "plex", "markers_enabled": True},
             {"server_id": "jf-1", "server_name": "JF-1", "server_type": "jellyfin", "markers_enabled": False},
@@ -1759,6 +1759,7 @@ class TestSeasonPayload:
             "proposed": None,
         }  # fmt: skip
         assert (eps[0]["known"], eps[0]["duration_ms"]) == (True, DURATION)
+        assert [(e["needs_review"], e["review_reason"]) for e in eps] == [(False, ""), (True, "disagree"), (False, "")]
         # Markers already on a server are the dots, not chips; only season audio carries its "2/2" label.
         assert eps[0]["evidence"] == [{"source": "season_audio", "label": "2/2"}, {"source": "skipdb", "label": ""}]
         assert eps[0]["servers"] == {
@@ -1775,7 +1776,79 @@ class TestSeasonPayload:
         assert (eps[2]["known"], eps[2]["duration_ms"], eps[2]["evidence"]) == (False, None, [])
         assert eps[2]["intro"] == {"status": None, "reason": "", "marker": None, "proposed": None}
         assert eps[2]["servers"]["plex-1"] == {"state": "none", "message": ""}
-        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": 1, "needs_review": 1}
+        # E02's decided intro is published although its credits are in review: it counts in both.
+        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": 2, "needs_review": 1}
+
+    @pytest.mark.parametrize(
+        ("decisions", "ready", "review", "reason"),
+        [
+            ({T.INTRO: "decided"}, 1, 0, ""),
+            ({T.INTRO: "decided", T.CREDITS: "review"}, 1, 1, "credits review"),
+            ({T.INTRO: "decided", T.RECAP: "review"}, 1, 1, "recap review"),
+            ({T.RECAP: "decided"}, 1, 0, ""),
+            ({T.PREVIEW: "review"}, 0, 1, "preview review"),
+            ({T.INTRO: "review", T.RECAP: "review"}, 0, 1, "intro review"),
+            ({T.CREDITS: "no_evidence"}, 0, 0, ""),
+        ],
+        ids=["intro", "intro-credits-review", "intro-recap-review", "recap-only", "preview-review", "two-reviews",
+             "nothing"],
+    )  # fmt: skip
+    def test_counts_take_every_marker_type_as_a_job_publishes_them(self, season, decisions, ready, review, reason):
+        st = os.stat(season.paths[0])
+        rec = season.store.upsert_file(
+            FileIdentity(season.paths[0], st.st_size, st.st_mtime_ns), duration_ms=DURATION, season_key=None, is_movie=False
+        )  # fmt: skip
+        markers = {
+            T.INTRO: INTRO,
+            T.CREDITS: CREDITS,
+            T.RECAP: RECAP,
+            T.PREVIEW: Marker(T.PREVIEW, 1_300_000, DURATION, ("skipdb",)),
+        }
+        stored = {}
+        for mtype, state in decisions.items():
+            if state == "decided":
+                stored[mtype] = _decided(markers[mtype])
+            elif state == "review":
+                stored[mtype] = _none(mtype, DecisionStatus.NEEDS_REVIEW, f"{mtype.value} review")
+            else:
+                stored[mtype] = _none(mtype)
+        season.store.save_decisions(rec.id, stored, settings_fingerprint="f")
+
+        payload = inspect.season_payload(season.paths[0], registry=season.reg, store=season.store)
+
+        assert payload["counts"] == {"episodes": 3, "total_episodes": 3, "ready": ready, "needs_review": review}
+        first = payload["episodes"][0]
+        assert (first["needs_review"], first["review_reason"]) == (bool(review), reason)
+
+    @pytest.mark.parametrize(
+        ("folder_parts", "name", "season_label"),
+        [
+            (("Show (2020) {tvdb-1}",), "Show (2020) - S02E01.mkv", "Season 2"),
+            (("Show (2020) {tvdb-1}",), "Show (2020) - S00E01.mkv", "Specials"),
+            (("Show (2020) {tvdb-1}", "Season 02"), "Show (2020) - S02E01.mkv", "Season 2"),
+            (("Show (2020) {tvdb-1}", "Specials"), "Show (2020) - S00E01.mkv", "Specials"),
+        ],
+        ids=["flat", "flat-specials", "season-folder", "specials-folder"],
+    )
+    def test_the_header_names_the_show_and_season_as_the_publish_job_does(
+        self, tmp_path, store, folder_parts, name, season_label
+    ):
+        from media_preview_generator.markers import triggers
+
+        folder = tmp_path.joinpath("media", "tv", *folder_parts)
+        folder.mkdir(parents=True)
+        for other in ("Show (2020) - S01E01.mkv", "Show (2020) - S01E02.mkv", name):
+            (folder / other).write_bytes(b"x")
+        asked = str(folder / name)
+        reg = _registry(server_config("plex-1", ServerType.PLEX, root=str(tmp_path / "media")))
+
+        payload = inspect.season_payload(asked, registry=reg, store=store)
+
+        assert (payload["show"], payload["season"]) == ("Show (2020) {tvdb-1}", season_label)
+        assert [e["name"] for e in payload["episodes"]] == [name]
+        assert triggers._season_job_name(asked, payload["folder"]) == (
+            f"Intro & Credits: {payload['show']} · {payload['season']}"
+        )
 
     @pytest.mark.parametrize(
         ("status", "markers", "state"),

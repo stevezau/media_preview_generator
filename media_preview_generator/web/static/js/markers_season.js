@@ -112,23 +112,15 @@
         return td;
     }
 
-    // The reason a type is in Needs review (e.g. ruling G3: season audio and a server's own marker only agree
-    // because both come from matching audio) — shown verbatim, never paraphrased.
-    function reviewReason(episode) {
-        for (const t of ['intro', 'credits']) {
-            const d = episode[t];
-            if (d && d.status === 'needs_review' && d.reason) return d.reason;
-        }
-        return '';
-    }
-
     function actionCell(episode, servers) {
         const td = el('td', 'mk-season-action');
-        const review = ['intro', 'credits'].some(function (t) { return episode[t] && episode[t].status === 'needs_review'; });
-        if (review) {
+        // Any type in Needs review, recap and preview included (they have no column), as counts.needs_review counts.
+        if (episode.needs_review) {
             const button = el('button', 'btn btn-sm btn-outline-secondary py-0', 'Review');
             button.type = 'button';
-            const reason = reviewReason(episode);
+            // e.g. ruling G3: season audio and a server's own marker only agree because both come from matching
+            // audio. Shown verbatim, never paraphrased.
+            const reason = episode.review_reason;
             if (reason) {
                 button.setAttribute('data-bs-toggle', 'tooltip');
                 button.setAttribute('data-bs-placement', 'top');

@@ -235,7 +235,7 @@ def execute_schedule_stop(schedule_id: str) -> None:
             continue
         if job.status is not JobStatus.RUNNING or job.paused:
             continue
-        if job_manager.request_pause(job.id):
+        if job_manager.request_pause(job.id, by_schedule=True):
             job_manager.add_log(
                 job.id,
                 f"INFO - Paused by schedule {name!r} stop time ({stop_time})",
@@ -257,6 +257,34 @@ def execute_schedule_stop(schedule_id: str) -> None:
         )
 
 
+def _warn_paused_jobs_of_deleted_schedule(schedule_id: str, name: str) -> None:
+    """Log a WARNING for each paused job of a deleted schedule: no start tick of it will resume the job any more.
+
+    The jobs are left paused; a paused Check servers job keeps every other Check servers run from queueing.
+
+    Args:
+        schedule_id: The deleted schedule's id.
+        name: Its name.
+    """
+    from .jobs import JobStatus, get_job_manager
+
+    try:
+        jobs = get_job_manager().get_all_jobs()
+    except Exception:
+        logger.exception("Schedule {} was deleted, but its paused jobs couldn't be listed", schedule_id)
+        return
+    for job in jobs:
+        if job.parent_schedule_id == schedule_id and job.paused and job.status is JobStatus.RUNNING:
+            logger.warning(
+                "Schedule {!r} ({}) was deleted while its job {} ({}) is paused; no later start tick of this schedule "
+                "will resume it. Resume or cancel it on the dashboard.",
+                name,
+                schedule_id,
+                job.id[:8],
+                job.library_name,
+            )
+
+
 def _start_scheduled_intro_credits_job(
     manager: "ScheduleManager",
     schedule_id: str,
@@ -267,9 +295,11 @@ def _start_scheduled_intro_credits_job(
 ) -> None:
     """Create the Intro & Credits job for a schedule tick (LOW unless the schedule sets a priority).
 
-    Library ids are only meaningful with their server, so ids without one are pinned to the server that owns them
-    and a tick that can't be pinned starts nothing rather than checking every library. Chosen libraries outside the
-    server's Intro & Credits selection are left out; a schedule with only a server takes that server's selection.
+    Nothing is created while a Find markers job of this schedule is still pending or running (a Check servers job it
+    queued before a switch doesn't count). Library ids are only meaningful with their server, so ids without one are
+    pinned to the server that owns them and a tick that can't be pinned starts nothing rather than checking every
+    library. Chosen libraries outside the server's Intro & Credits selection are left out; a schedule with only a
+    server takes that server's selection.
     """
     try:
         from ..job_kinds import JOB_KIND_INTRO_CREDITS
@@ -285,6 +315,7 @@ def _start_scheduled_intro_credits_job(
                 for job in get_job_manager().get_all_jobs()
                 if job.parent_schedule_id == schedule_id
                 and job.kind == JOB_KIND_INTRO_CREDITS
+                and not (job.config or {}).get("reconcile")
                 and job.status in (JobStatus.PENDING, JobStatus.RUNNING)
             ),
             None,
@@ -476,41 +507,45 @@ def execute_scheduled_job(
             exc_info=True,
         )
 
-    # D20 — auto-resume an existing paused job from this same schedule
+    # D20 — auto-resume the jobs this schedule's stop time paused
     # instead of spawning a fresh one. Lets a multi-night library scan
     # span across stop_time pauses with the same Job ID and progress.
     # Applies to every job type except recently_added (a fast, idempotent
-    # scan that can re-run cheaply), matched by job kind.
+    # scan that can re-run cheaply), matched by job kind. A job paused by
+    # hand (or by Pause all) isn't this schedule's to resume.
     if job_type != "recently_added":
         try:
             from ..job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_PREVIEWS
-            from .jobs import JobStatus, get_job_manager
+            from .jobs import PAUSED_BY_SCHEDULE, JobStatus, get_job_manager
 
-            # A schedule switched between previews and Intro & Credits (or between finding markers and checking
-            # servers) must not resume the other kind's job.
+            # A schedule switched between previews and Intro & Credits must not resume the other kind's job. Between
+            # finding markers and checking servers it does: nothing else would resume the other mode's job.
             schedule_kind = JOB_KIND_INTRO_CREDITS if job_type == "intro_credits" else JOB_KIND_PREVIEWS
             job_manager = get_job_manager()
+            resumed = []
             for job in job_manager.get_all_jobs():
                 if job.parent_schedule_id != schedule_id or job.kind != schedule_kind:
                     continue
-                if schedule_kind == JOB_KIND_INTRO_CREDITS and bool((job.config or {}).get("reconcile")) != bool(
-                    cfg.get("reconcile")
-                ):
-                    continue
                 if not job.paused or job.status is not JobStatus.RUNNING:
+                    continue
+                if not (job.config or {}).get(PAUSED_BY_SCHEDULE):
                     continue
                 if job_manager.request_resume(job.id):
                     job_manager.add_log(
                         job.id,
                         f"INFO - Resumed by schedule {schedule_id!r} start tick",
                     )
-                    logger.info(
-                        "Schedule {}: resumed paused job {} instead of spawning a new one",
-                        schedule_id,
-                        job.id[:8],
-                    )
-                    manager._update_last_run(schedule_id)
-                    return
+                    resumed.append(job.id[:8])
+            if resumed:
+                # Nothing else is queued on this tick, whatever the schedule's mode now: a new job would compete with
+                # the resumed ones for a slot and could run past the stop time. It queues on a later tick.
+                logger.info(
+                    "Schedule {}: resumed paused job(s) {} instead of spawning a new one",
+                    schedule_id,
+                    ", ".join(resumed),
+                )
+                manager._update_last_run(schedule_id)
+                return
         except Exception:
             logger.exception(
                 "Could not check for resumable paused jobs for schedule {} — falling back "
@@ -1468,11 +1503,13 @@ class ScheduleManager:
                 logger.debug("No existing scheduler job to remove for {}", schedule_id)
             self._remove_stop_job(schedule_id)
 
+            name = self._schedules[schedule_id].get("name", schedule_id)
             del self._schedules[schedule_id]
             self._save_schedules()
 
             logger.info("Deleted schedule {}", schedule_id)
-            return True
+        _warn_paused_jobs_of_deleted_schedule(schedule_id, name)
+        return True
 
     def get_schedule(self, schedule_id: str) -> dict | None:
         """Get a schedule by ID."""

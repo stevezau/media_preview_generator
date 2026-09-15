@@ -19,7 +19,7 @@ from ..servers.base import ServerConfig, ServerType
 from ..servers.ownership import OwnershipMatch, apply_path_mappings
 from .audio.season import folder_videos, season_group, season_size
 from .decide import DecisionStatus, shortened_by
-from .external_ids import ids_from_path
+from .external_ids import ids_from_path, is_season_folder
 from .models import SERVER_SOURCES, Marker, MarkerType, Source
 from .outcomes import kept_note, with_kept_note
 from .ownership import allowed_matches, owning_servers
@@ -719,6 +719,21 @@ def _chips(rows: list[Any]) -> list[dict]:
     return [{"source": source, "label": label} for source, label in chips.items()]
 
 
+def _season_header(episode: str, folder: str) -> tuple[str, str]:
+    """The show and season the Season view names, as the Publish job names them (``triggers._season_job_name``).
+
+    The show is the season folder's parent, or the folder itself when episodes sit straight in the show folder; the
+    season comes from the episode's name ("Season 2" / "Specials"), so two seasons of one flat folder read apart.
+    """
+    show_folder = os.path.dirname(folder) if is_season_folder(os.path.basename(folder)) else folder
+    season = ids_from_path(episode).season
+    if season is None:
+        label = os.path.basename(folder)
+    else:
+        label = "Specials" if season == 0 else f"Season {season}"
+    return os.path.basename(show_folder), label
+
+
 def _dot(cfg: ServerConfig, matches: list[OwnershipMatch], rec: FileRecord | None, store: MarkerStore) -> dict:
     """One server's dot for one episode, from its last publish there."""
     if not allowed_matches(cfg, matches):
@@ -741,15 +756,18 @@ def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) ->
         store: The markers store.
 
     Returns:
-        ``folder``, ``show``, ``season`` (folder names), ``servers`` (the enabled servers owning the asked file, in
-        registry order, with ``markers_enabled``: Intro & Credits on there and its library selected), ``episodes``
-        (the season group's files, sorted; each with ``path``, ``name``, ``episode`` "E01", ``known``, ``duration_ms``,
-        ``intro`` and ``credits`` in ``item_payload``'s decision shape without ``shortened_by``, ``evidence`` chips
+        ``folder``; ``show`` and ``season`` as the Publish job names them (the show folder's name; "Season N" or
+        "Specials"); ``servers`` (the enabled servers owning the asked file, in registry order, with
+        ``markers_enabled``: Intro & Credits on there and its library selected); ``episodes`` (the season group's
+        files, sorted; each with ``path``, ``name``, ``episode`` "E01", ``known``, ``duration_ms``, ``intro`` and
+        ``credits`` in ``item_payload``'s decision shape without ``shortened_by``, ``needs_review`` (any marker type
+        in Needs review) with ``review_reason`` (the first such type's reason, intro first), ``evidence`` chips
         ``{source, label}``, and ``servers`` dots ``{server_id: {state, message}}``: ``off`` (Intro & Credits off
         there, or this episode's library not selected or excluded), ``ok`` (last publish wrote markers of ours),
-        ``none`` (written with nothing of ours, or never published), ``waiting``, ``failed`` or ``skipped``) and
-        ``counts`` (``episodes``: the files listed; ``total_episodes``: the season's size before the 40-nearest cap;
-        ``ready``: at least one decided marker and no type in Needs review; ``needs_review``).
+        ``none`` (written with nothing of ours, or never published), ``waiting``, ``failed`` or ``skipped``); and
+        ``counts``: ``episodes`` (the files listed), ``total_episodes`` (the season's size before the 40-nearest
+        cap), ``ready`` (at least one decided marker of any type: what Publish sends, even when another type is in
+        Needs review) and ``needs_review`` (any type in Needs review).
     """
     videos = folder_videos(os.path.dirname(canonical_path))
     group = season_group(canonical_path, videos)
@@ -769,9 +787,15 @@ def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) ->
         decisions = store.get_decisions(rec.id) if rec else {}
         markers = store.get_markers(rec.id) if rec else {}
         types = {mtype.value: _decision_dict(decisions.get(mtype), markers.get(mtype)) for mtype in _SEASON_TYPES}
-        in_review = any(t["status"] == DecisionStatus.NEEDS_REVIEW.value for t in types.values())
-        review += int(in_review)
-        ready += int(not in_review and any(t["marker"] for t in types.values()))
+        # Counted over every type, not only the two columns: a job publishes each decided type of a file even while
+        # another type (a recap, say) is in Needs review, and that file's job row then says Needs review.
+        in_review = [
+            decisions[mtype]
+            for mtype in MarkerType
+            if mtype in decisions and decisions[mtype].status is DecisionStatus.NEEDS_REVIEW
+        ]
+        review += int(bool(in_review))
+        ready += int(bool(markers))
         # Per episode: a server's exclude rules can leave out single files.
         matches_by_server = {cfg.id: matches for cfg, _server, matches in _owners(path, registry)}
         episodes.append(
@@ -782,16 +806,19 @@ def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) ->
                 "known": rec is not None,
                 "duration_ms": rec.duration_ms if rec else None,
                 **types,
+                "needs_review": bool(in_review),
+                "review_reason": next((d.reason for d in in_review if d.reason), ""),
                 "evidence": _chips(store.evidence_rows(rec.id)) if rec else [],
                 "servers": {
                     cfg.id: _dot(cfg, matches_by_server.get(cfg.id, []), rec, store) for cfg, _server, _m in owners
                 },
             }
         )
+    show, season = _season_header(canonical_path, group.folder)
     return {
         "folder": group.folder,
-        "show": os.path.basename(os.path.dirname(group.folder)),
-        "season": os.path.basename(group.folder),
+        "show": show,
+        "season": season,
         "servers": servers,
         "episodes": episodes,
         "counts": {

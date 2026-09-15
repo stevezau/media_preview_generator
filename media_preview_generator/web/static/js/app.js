@@ -3110,7 +3110,26 @@ async function _startMarkersJob() {
     await _submitNewJob('/api/markers/jobs', payload, 'Intro & Credits job has been started');
 }
 
-// Check servers: one job for every server; the answer's job_id is null when Intro & Credits is off everywhere.
+// The answer to a Check servers request (POST /api/markers/reconcile, or Re-run on a Check servers job): job_id is
+// null when Intro & Credits is off everywhere; only one Check servers job is queued or running at a time.
+function _showCheckServersAnswer(result) {
+    if (!result || !result.job_id) {
+        showToast('Nothing to check', (result && result.reason) || 'Intro & Credits is off on every server', 'warning');
+        return;
+    }
+    loadJobs();
+    loadJobStats();
+    if (result.paused) {
+        showToast('Already queued', 'A Check servers job is paused. Resume or cancel it on the dashboard.', 'warning');
+        return;
+    }
+    if (result.already_queued) {
+        showToast('Already queued', 'A Check servers job is already queued', 'info');
+        return;
+    }
+    showToast('Job Started', 'Intro & Credits · Check servers has been queued', 'success');
+}
+
 async function _startCheckServersJob() {
     const payload = { priority: parseInt(document.getElementById('jobPriority').value, 10) || 3 };
     let result;
@@ -3121,17 +3140,7 @@ async function _startCheckServersJob() {
         return;
     }
     bootstrap.Modal.getInstance(document.getElementById('newJobModal')).hide();
-    if (!result || !result.job_id) {
-        showToast('Nothing to check', (result && result.reason) || 'Intro & Credits is off on every server', 'warning');
-        return;
-    }
-    loadJobs();
-    loadJobStats();
-    if (result.already_queued) {
-        showToast('Already queued', 'A Check servers job is already queued', 'info');
-        return;
-    }
-    showToast('Job Started', 'Intro & Credits · Check servers has been queued', 'success');
+    _showCheckServersAnswer(result);
 }
 
 async function startNewJob() {
@@ -3698,6 +3707,10 @@ async function deleteJob(jobId) {
 async function reprocessJob(jobId) {
     try {
         const job = await apiPost(`/api/jobs/${jobId}/reprocess`);
+        if (job && 'job_id' in job) {
+            _showCheckServersAnswer(job);
+            return;
+        }
         loadJobs();
         loadJobStats();
         showToast('Reprocess Started', `Job ${job.id.substring(0, 8)} created`, 'success');
