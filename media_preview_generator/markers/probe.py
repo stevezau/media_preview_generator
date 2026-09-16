@@ -1,4 +1,4 @@
-"""ffprobe wrapper for duration and chapters."""
+"""ffprobe wrapper for duration, chapters and the container's first timestamp."""
 
 from __future__ import annotations
 
@@ -24,10 +24,18 @@ class Chapter:
 
 @dataclass(frozen=True)
 class MediaProbe:
-    """What the marker pipeline needs from ffprobe."""
+    """What the marker pipeline needs from ffprobe.
+
+    Attributes:
+        duration_ms: Container duration, None when ffprobe reports none.
+        chapters: Chapters in container order.
+        start_time_ms: The container's first timestamp. Recorded-TV ``.ts`` files carry a PCR base (30000 s measured),
+            and frame timestamps read with ``-copyts`` are that much later than the file's own seconds.
+    """
 
     duration_ms: int | None
     chapters: tuple[Chapter, ...]
+    start_time_ms: int | None = None
 
 
 def ffprobe_path_for(ffmpeg_path: str | None) -> str:
@@ -49,7 +57,7 @@ def _ms(value: object) -> int | None:
 
 
 def probe_media(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> MediaProbe:
-    """Read duration and chapters.
+    """Read duration, chapters and the container's first timestamp.
 
     Args:
         path: Media file.
@@ -57,7 +65,8 @@ def probe_media(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> MediaPro
         timeout_s: Hard timeout (hung mounts must not hold a check thread forever).
 
     Returns:
-        Duration (None if unknown) and chapters in container order.
+        Duration (None if unknown), chapters in container order, and the container's first timestamp (None if the file
+        reports none; recordings carry a large one, which credits frame times are read against).
 
     Raises:
         ProbeError: ffprobe missing, timed out, failed or returned invalid JSON.
@@ -82,4 +91,7 @@ def probe_media(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> MediaPro
         if start is None:
             continue
         chapters.append(Chapter(start, _ms(raw.get("end_time")), str(tags.get("title") or "")))
-    return MediaProbe(duration_ms=_ms((data.get("format") or {}).get("duration")), chapters=tuple(chapters))
+    fmt = data.get("format") or {}
+    return MediaProbe(
+        duration_ms=_ms(fmt.get("duration")), chapters=tuple(chapters), start_time_ms=_ms(fmt.get("start_time"))
+    )

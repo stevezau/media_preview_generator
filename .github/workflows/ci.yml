@@ -356,7 +356,7 @@ jobs:
       - name: Run integration tests
         env:
           PLEX_CLAIM: ${{ secrets.PLEX_CLAIM_TOKEN }}
-        run: pytest -m integration --no-cov --tb=short tests/integration/
+        run: pytest -m integration --no-cov --tb=short tests/integration/ tests/markers/credits/
         timeout-minutes: 15
 
       - name: Vendor stack logs on failure

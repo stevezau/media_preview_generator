@@ -46,6 +46,22 @@ def test_parses_duration_and_chapters_and_passes_exact_args():
     )
 
 
+@pytest.mark.parametrize(
+    ("fmt", "expected"),
+    [
+        ({"start_time": "30000.000000"}, 30_000_000),  # a recorded-TV .ts with a PCR base
+        ({"start_time": "0.000000"}, 0),
+        ({"start_time": "-0.023000"}, -23),
+        ({}, None),
+        ({"start_time": "N/A"}, None),
+    ],
+)
+def test_container_start_time(fmt, expected):
+    # Credits timestamps are read with -copyts, so the container's own start has to be subtracted from them.
+    with patch(RUN, return_value=_ok({"format": fmt, "chapters": []})):
+        assert probe_media("/m/a.ts", ffprobe="ffprobe").start_time_ms == expected
+
+
 def test_missing_duration_is_none():
     with patch(RUN, return_value=_ok({"format": {}, "chapters": []})):
         assert probe_media("/m/a.mkv", ffprobe="ffprobe").duration_ms is None

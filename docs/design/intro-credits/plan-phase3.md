@@ -138,10 +138,14 @@ are repeated so an implementer who sees only one task has them.
 - T-R5 · Keyframe rows are **not sorted**: rule J reads them in ffmpeg's output order, as measured. Dropping
   non-increasing rows (284 of 20,829) changed one answer (59 → 58 within 10 s). Cost if wrong: none measured.
 - T-R6 · Mean luma is rounded to 0.1 and pts to 0.001 before rule J, as the prototype recorded them (rule J compares
-  luma against 30 and 12). `-copyts` keeps a file's own start time in `pts_time` while `-ss` seeks from zero: a file
-  whose streams start late (MPEG-TS recordings) gets answers later by that offset, and its refine windows sit that much
-  early; the prototype measured the same way on files that start at 0. Cost if wrong: such files' credits text answers
-  are late (the safe direction) or missed.
+  luma against 30 and 12). `-copyts` keeps a file's own start time in `pts_time` while `-ss` seeks from the start of
+  the file, so Task 6 subtracts the container's `format.start_time` from every row. `decode_rows` probes the file
+  itself for it; a caller passes `start_time_s` **only** when it holds a probe taken this run. `pipeline._attempt`
+  (pipeline.py:1456-1461) leaves `probe` None for an unchanged file with a stored `duration_ms`, and the store never
+  keeps a start time, so Task 8 must not pass 0.0 (or `probe.start_time_ms`) on that path: that is exactly the re-run
+  path, and it would put every recording's answers back out by the container's offset. This is not a small late shift: a measured MPEG-TS recording with a PCR base reports `pts_time` 30000 s into a
+  40 s file, which would put the tail window, rule J and the published marker completely out of range. Files that
+  start at 0 (what the prototype measured) are unchanged. Cost if wrong: recordings get nonsense credits answers.
 - T-R7 · A GPU decode that exits non-zero or yields no frames is a GPU failure (`GpuDecodeError` → worker CPU rerun);
   a decode timeout (600 s, on either worker: `DecodeTimeoutError`) is "no answer" and waits a day (Global Constraints);
   a CPU decode failure is "no answer this time" (`DetectorUnavailableError`, asked again next run); a CPU decode that
