@@ -8,7 +8,7 @@ and the GET /api/jobs/{id}/files API endpoint.
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -82,20 +82,20 @@ class TestFileResultRecording:
         Audit fix — original assertion was just ``assert results[0]["ts"]``
         which passes for any truthy value (including a stale fixture
         string, an exception message, or "{}"). Production format at
-        web/jobs.py:1394 is ``datetime.now(timezone.utc).strftime("%H:%M:%S")``
+        web/jobs.py:1394 is ``datetime.now(UTC).strftime("%H:%M:%S")``
         — pin the regex shape AND verify the recorded timestamp falls
         within ±5 seconds of "now" (otherwise a clock-skew or
         wrong-format regression slips through).
         """
         import re
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         os.makedirs(config_dir, exist_ok=True)
         jm = JobManager(config_dir=config_dir)
         job = jm.create_job(library_name="Test")
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         jm.record_file_result(job.id, "/media/a.mkv", "generated")
-        after = datetime.now(timezone.utc)
+        after = datetime.now(UTC)
         results = jm.get_file_results(job.id)
         ts = results[0]["ts"]
 
@@ -207,7 +207,7 @@ class TestFileResultRetention:
         results_path = jm._file_results_path(job.id)
         assert os.path.isfile(results_path)
 
-        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        old_time = (datetime.now(UTC) - timedelta(days=60)).isoformat()
         jm._jobs[job.id].completed_at = old_time
         jm._persist_job(jm._jobs[job.id])
 
@@ -544,6 +544,135 @@ class TestFileResultServerAttribution:
             {"id": "plex-default", "name": "My Plex", "type": "plex", "status": "published"},
             # frame_source kept only when it differs from "extracted"
             {"id": "emby-1", "name": "Emby", "type": "emby", "status": "published", "frame_source": "cache_hit"},
+        ]
+
+    def test_reason_code_kept_on_server_entry_when_the_row_has_one(self, config_dir):
+        """Intro & Credits waiting rows say *why* (the server hasn't indexed the file); the Files panel reads it."""
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Intro & Credits: Movies")
+
+        jm.record_file_result(
+            job.id,
+            "/media/foo.mkv",
+            "markers_waiting",
+            "intro 0:11–0:37 (chapters)",
+            "Intro & Credits",
+            servers=[
+                {
+                    "server_id": "plex-1",
+                    "server_name": "Plex",
+                    "server_type": "plex",
+                    "status": "markers_waiting",
+                    "message": "Not in this server's library yet",
+                    "reason_code": "not_in_library",
+                },
+                {
+                    "server_id": "jf-1",
+                    "server_name": "Jellyfin",
+                    "server_type": "jellyfin",
+                    "status": "markers_waiting",
+                    "message": "versions don't agree yet",
+                },
+            ],
+            server_messages=True,
+        )
+
+        assert jm.get_file_results(job.id)[0]["servers"] == [
+            {
+                "id": "plex-1",
+                "name": "Plex",
+                "type": "plex",
+                "status": "markers_waiting",
+                "reason_code": "not_in_library",
+                "message": "Not in this server's library yet",
+            },
+            {
+                "id": "jf-1",
+                "name": "Jellyfin",
+                "type": "jellyfin",
+                "status": "markers_waiting",
+                "message": "versions don't agree yet",
+            },
+        ]
+
+    def test_server_message_kept_when_the_row_reason_does_not_say_it(self, config_dir):
+        """Each server's own words ("Keeping Plex's credits") reach the Files panel; one matching the reason is dropped."""
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Intro & Credits: TV")
+
+        jm.record_file_result(
+            job.id,
+            "/media/show/S01E02.mkv",
+            "markers_up_to_date",
+            "",
+            "Intro & Credits",
+            servers=[
+                {
+                    "server_id": "plex-1",
+                    "server_name": "Plex",
+                    "server_type": "plex",
+                    "status": "markers_up_to_date",
+                    "message": "Keeping Plex's credits",
+                },
+                {
+                    "server_id": "jf-1",
+                    "server_name": "Jellyfin",
+                    "server_type": "jellyfin",
+                    "status": "markers_written",
+                    "message": "2 marker(s)",
+                },
+            ],
+            server_messages=True,
+        )
+
+        row = jm.get_file_results(job.id)[0]
+        assert row["reason"] == "Keeping Plex's credits"
+        assert row["servers"] == [
+            {"id": "plex-1", "name": "Plex", "type": "plex", "status": "markers_up_to_date"},
+            {
+                "id": "jf-1",
+                "name": "Jellyfin",
+                "type": "jellyfin",
+                "status": "markers_written",
+                "message": "2 marker(s)",
+            },
+        ]
+
+    def test_preview_rows_leave_out_each_servers_message(self, config_dir):
+        """A preview's per-server "Published" never matches its "Published to 2 servers" reason; rows stay slim."""
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Movies")
+
+        jm.record_file_result(
+            job.id,
+            "/media/foo.mkv",
+            "generated",
+            "Published to 2 servers",
+            "GPU 1",
+            servers=[
+                {
+                    "server_id": "plex-1",
+                    "server_name": "Plex",
+                    "server_type": "plex",
+                    "status": "published",
+                    "message": "Published",
+                },
+                {
+                    "server_id": "emby-1",
+                    "server_name": "Emby",
+                    "server_type": "emby",
+                    "status": "skipped",
+                    "message": "Already has a preview",
+                },
+            ],
+        )
+
+        assert jm.get_file_results(job.id)[0]["servers"] == [
+            {"id": "plex-1", "name": "Plex", "type": "plex", "status": "published"},
+            {"id": "emby-1", "name": "Emby", "type": "emby", "status": "skipped"},
         ]
 
     def test_reason_derived_from_publisher_message_when_blank(self, config_dir):

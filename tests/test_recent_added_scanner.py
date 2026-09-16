@@ -5,7 +5,7 @@ scheduler dispatch path is covered in test_scheduler.py.
 """
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -60,7 +60,7 @@ def _make_plex(sections):
 def test_scan_submits_in_window_items(mock_schedule, tmp_path, monkeypatch):
     monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
     mock_schedule.return_value = True
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     in_window = _make_item("New Movie", ["/data/movies/New.mkv"], now - timedelta(minutes=30))
     out_of_window = _make_item("Old Movie", ["/data/movies/Old.mkv"], now - timedelta(hours=4))
     section = _make_section("Movies", "movie", "1", [in_window, out_of_window])
@@ -79,7 +79,7 @@ def test_scan_submits_in_window_items(mock_schedule, tmp_path, monkeypatch):
 def test_scan_handles_episode_titles(mock_schedule, tmp_path, monkeypatch):
     monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
     mock_schedule.return_value = True
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ep = _make_item(
         "Pilot",
         ["/data/tv/Show/S01E01.mkv"],
@@ -102,7 +102,7 @@ def test_scan_with_explicit_library_ids_scans_only_those_sections(mock_schedule,
     """When library_ids=[...], only sections with matching keys are scanned."""
     monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
     mock_schedule.return_value = True
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     movie_item = _make_item("Movie", ["/data/movies/M.mkv"], now)
     ep_item = _make_item(
         "Pilot",
@@ -134,7 +134,7 @@ def test_scan_empty_library_ids_falls_back_to_global_selected_libraries(mock_sch
     sm = get_settings_manager()
     sm.set("selected_libraries", ["Only This One"])
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     item = _make_item("Movie", ["/data/movies/M.mkv"], now)
     skipped = _make_section("Skipped", "movie", "1", [item])
     matched = _make_section("Only This One", "movie", "2", [item])
@@ -150,7 +150,7 @@ def test_scan_fractional_lookback_hours(mock_schedule, tmp_path, monkeypatch):
     """lookback_hours=0.25 should translate to a 15-minute window."""
     monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
     mock_schedule.return_value = True
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     in_window = _make_item("Just added", ["/data/movies/New.mkv"], now - timedelta(minutes=5))
     out_of_window = _make_item("20 min ago", ["/data/movies/Old.mkv"], now - timedelta(minutes=20))
     section = _make_section("Movies", "movie", "1", [in_window, out_of_window])
@@ -178,7 +178,7 @@ def test_scan_handles_search_filter_unsupported(mock_schedule, tmp_path, monkeyp
     """If section.search raises with the addedAt filter, fall back to client-side filter."""
     monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
     mock_schedule.return_value = True
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     item = _make_item("Movie", ["/data/movies/A.mkv"], now - timedelta(minutes=30))
 
     section = MagicMock()
@@ -210,7 +210,7 @@ def test_scan_skips_items_with_existing_bifs(mock_schedule, tmp_path, monkeypatc
     sm = get_settings_manager()
     sm.set("plex_config_folder", str(plex_config))
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     item = _make_item("Already Processed", ["/data/movies/A.mkv"], now)
     item.key = "/library/metadata/42"
     section = _make_section("Movies", "movie", "1", [item])
@@ -251,7 +251,7 @@ def test_scan_submits_items_missing_bif(mock_schedule, tmp_path, monkeypatch):
     sm = get_settings_manager()
     sm.set("plex_config_folder", str(plex_config))
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     item = _make_item("New Movie", ["/data/movies/N.mkv"], now)
     item.key = "/library/metadata/99"
     section = _make_section("Movies", "movie", "1", [item])
@@ -276,7 +276,7 @@ def test_scan_submits_items_missing_bif(mock_schedule, tmp_path, monkeypatch):
 def test_scan_logs_history_when_items_submitted(mock_schedule, tmp_path, monkeypatch):
     monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
     mock_schedule.return_value = True
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     item = _make_item("Movie", ["/data/movies/M.mkv"], now)
     section = _make_section("Movies", "movie", "1", [item])
     plex = _make_plex([section])
@@ -356,7 +356,7 @@ def test_to_utc_naive_handles_naive_local_input():
     # must equal the equivalent UTC-naive datetime regardless of host tz.
     unix_ts = 1777352608  # 2026-04-28 05:03:28 UTC (the issue reporter's example)
     local_naive = datetime.fromtimestamp(unix_ts)
-    expected_utc_naive = datetime.fromtimestamp(unix_ts, tz=timezone.utc).replace(tzinfo=None)
+    expected_utc_naive = datetime.fromtimestamp(unix_ts, tz=UTC).replace(tzinfo=None)
     assert to_utc_naive(local_naive) == expected_utc_naive
 
 

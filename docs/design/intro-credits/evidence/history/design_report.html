@@ -1,0 +1,611 @@
+<!doctype html>
+<title>Skip Markers Design</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+
+:root{
+  --ground:#eef0f4; --paper:#ffffff; --ink:#1b2130; --ink-soft:#4a5368; --rule:#d7dbe4;
+  --accent:#a86f00; --accent-soft:#f6ead0; --tag-before:#6b7385; --tag-after:#a86f00;
+  --shadow:0 1px 2px rgba(20,24,40,.06),0 8px 24px rgba(20,24,40,.06);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#11121c; --paper:#171826; --ink:#e6e8ef; --ink-soft:#9aa1b5; --rule:#2a2c3e;
+    --accent:#e5a00d; --accent-soft:#2e2615; --tag-before:#8d94a8; --tag-after:#e5a00d;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.25);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#11121c; --paper:#171826; --ink:#e6e8ef; --ink-soft:#9aa1b5; --rule:#2a2c3e;
+  --accent:#e5a00d; --accent-soft:#2e2615; --tag-before:#8d94a8; --tag-after:#e5a00d;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.25);
+}
+*{box-sizing:border-box}
+body{background:var(--ground);color:var(--ink);font:15px/1.55 "Instrument Sans",system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;padding:40px 20px 80px}
+.wrap{max-width:1180px;margin:0 auto;display:flex;flex-direction:column;gap:56px}
+h1,h2,h3{text-wrap:balance;margin:0}
+h1{font-size:34px;line-height:1.15;font-weight:700;letter-spacing:-.01em}
+h2{font-size:22px;font-weight:650}
+.lede{max-width:68ch;color:var(--ink-soft);margin:10px 0 0}
+.mono{font-family:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace}
+header .kicker{font:600 12px/1 "JetBrains Mono",monospace;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);margin-bottom:12px}
+.changes{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+.changes span{background:var(--accent-soft);color:var(--ink);border-radius:999px;padding:4px 12px;font-size:13px}
+section.screen{display:flex;flex-direction:column;gap:18px}
+.screen-head{display:grid;grid-template-columns:1fr;gap:6px}
+.screen-head p{margin:0;color:var(--ink-soft);max-width:75ch}
+.pair{display:grid;grid-template-columns:1fr;gap:14px}
+.label{font:600 11px/1 "JetBrains Mono",monospace;letter-spacing:.14em;text-transform:uppercase;display:flex;align-items:center;gap:10px}
+.label.before{color:var(--tag-before)} .label.after{color:var(--tag-after)}
+.label::after{content:"";flex:1;height:1px;background:var(--rule)}
+.shot{border-radius:10px;overflow:hidden;box-shadow:var(--shadow);border:1px solid var(--rule);max-width:100%}
+.shot img{display:block;width:100%;height:auto}
+.note{font-size:13px;color:var(--ink-soft);margin:0}
+.why{border-left:3px solid var(--accent);padding:4px 0 4px 14px;color:var(--ink);max-width:80ch;margin:0}
+.why b{font-weight:650}
+
+/* ---------- App mock (the app's own dark palette, single theme on purpose) ---------- */
+.app{--a-bg:#1b1c2d;--a-card:#23243a;--a-card2:#2a2c44;--a-line:#35374f;--a-text:#e3e5ec;--a-muted:#9aa0b4;
+  --a-amber:#e5a00d;--a-green:#1f9d55;--a-green-t:#6fdc9d;--a-red:#e0525f;--a-blue:#3d8bfd;--a-cyan:#0dcaf0;--a-warn:#f0ad3a;
+  background:var(--a-bg);color:var(--a-text);font:14px/1.45 system-ui,-apple-system,"Segoe UI","Noto Sans",sans-serif;
+  border-radius:10px;border:1px solid #2c2e45;box-shadow:var(--shadow);overflow:hidden}
+.app .nav{display:flex;align-items:center;gap:22px;padding:12px 18px;border-bottom:1px solid #6b5212;background:#15162a;font-size:14px;color:#c9ccd8;flex-wrap:wrap}
+.app .nav b{color:var(--a-amber);font-size:16px}
+.app .nav .on{background:#3a2f17;color:var(--a-amber);padding:4px 10px;border-radius:6px}
+.app .body{padding:20px;display:flex;flex-direction:column;gap:16px}
+.app .row{display:flex;gap:16px;flex-wrap:wrap}
+.app .card{background:var(--a-card);border:1px solid var(--a-line);border-radius:10px}
+.app .card-h{padding:12px 16px;border-bottom:1px solid var(--a-line);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#c3c7d4;display:flex;align-items:center;gap:8px;justify-content:space-between}
+.app .card-b{padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+.app .muted{color:var(--a-muted)}
+.app .badge{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:650;border-radius:5px;padding:2px 7px;white-space:nowrap}
+.b-green{background:#16452e;color:var(--a-green-t)} .b-amber{background:var(--a-amber);color:#1b1407}
+.b-red{background:#4a1d24;color:#ff9aa5} .b-warn{background:#47381a;color:#ffd27a} .b-grey{background:#383a52;color:#c9ccd8}
+.b-cyan{background:var(--a-cyan);color:#062b33} .b-outline{border:1px solid var(--a-line);color:#c9ccd8}
+.app .btn{display:inline-flex;align-items:center;gap:6px;border-radius:6px;padding:5px 11px;font-size:13px;border:1px solid var(--a-line);color:#d4d7e2;background:transparent;white-space:nowrap}
+.app .btn.pri{background:var(--a-amber);border-color:var(--a-amber);color:#1b1407;font-weight:650}
+.app .btn.amber{border-color:#8a6310;color:var(--a-amber)}
+.app .i{display:inline-grid;place-items:center;width:15px;height:15px;border-radius:50%;border:1px solid #6d7390;color:#aab0c4;font:600 10px/1 system-ui;cursor:help}
+.app .toggle{width:32px;height:18px;border-radius:9px;background:var(--a-blue);position:relative;flex:none}
+.app .toggle::after{content:"";position:absolute;right:3px;top:3px;width:12px;height:12px;border-radius:50%;background:#fff}
+.app .toggle.off{background:#454862}.app .toggle.off::after{left:3px;right:auto;background:#aab0c4}
+.app .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;align-items:center}
+.app .t{font-family:"JetBrains Mono",ui-monospace,Menlo,monospace;font-size:12.5px;font-variant-numeric:tabular-nums}
+.app hr{border:0;border-top:1px solid var(--a-line);margin:2px 0}
+.app .scroll{overflow-x:auto}
+
+/* servers */
+.srv{flex:1 1 300px;min-width:0}
+.srv .name{font-size:18px;display:flex;align-items:center;gap:8px}
+.srv .logo{width:18px;height:18px;border-radius:4px;display:inline-grid;place-items:center;font:700 11px/1 system-ui;color:#1b1407}
+.mk{background:var(--a-card2);border:1px solid var(--a-line);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+.mk-top{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.mk-title{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#c3c7d4;display:flex;gap:6px;align-items:center}
+
+/* settings */
+.set-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+.opt{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+.opt .lbl{display:flex;flex-direction:column;gap:2px}
+.opt .lbl span:first-child{display:flex;gap:6px;align-items:center}
+.src{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--a-line)}
+.src:first-child{border-top:0}
+.grip{color:#6d7390;font-size:13px}
+.seg{display:inline-flex;border:1px solid var(--a-line);border-radius:6px;overflow:hidden;font-size:12.5px}
+.seg span{padding:4px 10px;color:#aab0c4}.seg span.on{background:#3a2f17;color:var(--a-amber)}
+
+/* inspector */
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--a-line)}
+.tabs span{padding:8px 14px;color:#aab0c4;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tabs span.on{color:var(--a-amber);border-color:var(--a-amber)}
+.zooms{display:grid;grid-template-columns:1fr;gap:16px}
+.zoom{min-width:640px}
+.axis{position:relative;height:18px;margin-left:132px;border-bottom:1px solid var(--a-line)}
+.axis span{position:absolute;transform:translateX(-50%);font:11px "JetBrains Mono",monospace;color:#8a90a6;top:0}
+.lane{display:grid;grid-template-columns:124px 1fr;gap:8px;align-items:center;height:30px}
+.lane .ln{font-size:12px;color:#c3c7d4;display:flex;gap:6px;align-items:center;white-space:nowrap;overflow:hidden}
+.lane .track{position:relative;height:18px;background:repeating-linear-gradient(90deg,transparent 0 calc(16.66% - 1px),#2f3148 calc(16.66% - 1px) 16.66%);border-radius:3px}
+.bar{position:absolute;top:1px;bottom:1px;border-radius:3px;font:600 11px/16px "JetBrains Mono",monospace;padding:0 5px;white-space:nowrap;overflow:visible;color:#101118}
+.bar.result{background:var(--a-amber);top:-2px;bottom:-2px;box-shadow:0 0 0 2px #1b1c2d,0 0 0 3px #e5a00d55}
+.bar.ok{background:#5fcf93}.bar.bad{background:#e0525f;color:#fff}.bar.part{background:#7c86a8}
+.bar.open{border-right:2px dashed #101118}
+.lane.res{height:36px}
+.lane.res .ln{color:var(--a-amber);font-weight:650}
+.verdict{display:flex;gap:6px;align-items:center;font-size:12px}
+.pub{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.pubc{background:var(--a-card2);border:1px solid var(--a-line);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:4px}
+
+/* season table */
+table.season{color:var(--a-text);border-collapse:collapse;width:100%;min-width:860px;font-size:13px}
+table.season th{text-align:left;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#9aa0b4;font-weight:600;padding:8px 10px;border-bottom:1px solid var(--a-line)}
+table.season td{padding:8px 10px;border-bottom:1px solid #2d2f46;vertical-align:middle}
+.dots{display:flex;gap:5px}
+.dot{width:9px;height:9px;border-radius:50%}
+.d-ok{background:#5fcf93}.d-wait{background:#f0ad3a}.d-off{background:#555872}
+
+/* job row */
+.jobrow{display:grid;grid-template-columns:80px 1fr auto auto auto;gap:14px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--a-line);min-width:760px}
+.jobx{background:#1f2b27;padding:12px 24px 16px;display:flex;flex-direction:column;gap:10px;min-width:760px}
+.chain{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:5px;background:#f3f4f7;color:#1b1c2d;border-radius:5px;padding:2px 8px;font-size:12px;font-weight:650}
+
+@media (max-width:600px){ body{padding-inline:16px} h1{font-size:27px} }
+@media (prefers-reduced-motion:no-preference){ .bar.result{transition:filter .2s} .bar.result:hover{filter:brightness(1.1)} }
+
+/* ---------- report additions ---------- */
+.toc{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+.toc a{color:var(--ink);text-decoration:none;background:var(--accent-soft);border-radius:999px;padding:4px 12px;font-size:13px}
+.toc a:hover,.toc a:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.part{display:flex;flex-direction:column;gap:16px;scroll-margin-top:16px}
+.part>h2{display:flex;align-items:baseline;gap:12px}
+.part>h2 small{font:600 11px/1 "JetBrains Mono",monospace;letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
+.plain{max-width:75ch;margin:0;color:var(--ink)}
+.plain+ .plain{margin-top:-6px}
+.panel{background:var(--paper);border:1px solid var(--rule);border-radius:12px;padding:18px 20px;box-shadow:var(--shadow)}
+.tldr{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+.tldr div{background:var(--paper);border:1px solid var(--rule);border-radius:10px;padding:14px 16px}
+.tldr b{display:block;font-size:15px;margin-bottom:4px}
+.tldr span{color:var(--ink-soft);font-size:14px}
+.flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:10px}
+.step{flex:1 1 150px;background:var(--paper);border:1px solid var(--rule);border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:4px;position:relative}
+.step .n{font:600 11px/1 "JetBrains Mono",monospace;color:var(--accent);letter-spacing:.08em}
+.step b{font-size:14.5px}
+.step span{font-size:13px;color:var(--ink-soft)}
+.step.key{border-color:var(--accent);background:var(--accent-soft)}
+.arrow{align-self:center;color:var(--ink-soft);font-size:18px}
+@media (max-width:760px){.arrow{display:none}}
+.fan{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1.3fr);gap:14px;align-items:center}
+@media (max-width:760px){.fan{grid-template-columns:1fr}.fan .arrow{display:none}}
+.store{background:var(--paper);border:2px solid var(--accent);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:6px}
+.store .mono{font-size:13px;color:var(--ink-soft)}
+.targets{display:flex;flex-direction:column;gap:8px}
+.target{background:var(--paper);border:1px solid var(--rule);border-radius:10px;padding:10px 14px;display:grid;grid-template-columns:auto 1fr;gap:4px 12px;align-items:center}
+.tile{width:26px;height:26px;border-radius:6px;display:grid;place-items:center;font:700 13px/1 system-ui;grid-row:span 2}
+.t-plex{background:#e5a00d;color:#1b1407}.t-jf{background:#8b6ff0;color:#fff}.t-emby{background:#52b54b;color:#fff}
+.target b{font-size:14px}.target span{font-size:13px;color:var(--ink-soft)}
+.tbl{overflow-x:auto;border:1px solid var(--rule);border-radius:10px;background:var(--paper)}
+.tbl table{border-collapse:collapse;width:100%;min-width:720px;font-size:14px;color:var(--ink)}
+.tbl th{text-align:left;font:600 11px/1.3 "JetBrains Mono",monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-soft);padding:10px 12px;border-bottom:1px solid var(--rule);background:var(--ground)}
+.tbl td{padding:10px 12px;border-bottom:1px solid var(--rule);vertical-align:top}
+.tbl tr:last-child td{border-bottom:0}
+.tbl td:first-child{font-weight:600;white-space:nowrap}
+.yes{color:#0f7a45;font-weight:600}.no{color:#b3261e;font-weight:600}.meh{color:#9a6200;font-weight:600}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .yes{color:#6fdc9d}:root:not([data-theme="light"]) .no{color:#ff9aa5}:root:not([data-theme="light"]) .meh{color:#ffd27a}}
+:root[data-theme="dark"] .yes{color:#6fdc9d}:root[data-theme="dark"] .no{color:#ff9aa5}:root[data-theme="dark"] .meh{color:#ffd27a}
+.rules{display:flex;flex-direction:column;gap:8px;margin:0;padding:0;list-style:none;counter-reset:r}
+.rules li{counter-increment:r;display:grid;grid-template-columns:28px 1fr;gap:10px;align-items:baseline;max-width:80ch}
+.rules li::before{content:counter(r);font:600 12px/22px "JetBrains Mono",monospace;text-align:center;border-radius:50%;background:var(--accent-soft);color:var(--ink);width:22px;height:22px}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+.cols .panel h3{font-size:15px;margin-bottom:6px}
+.cols .panel p{margin:0;color:var(--ink-soft);font-size:14px}
+.decide{display:flex;flex-direction:column;gap:8px}
+.dec{display:grid;grid-template-columns:120px 1fr;gap:12px;align-items:start;background:var(--paper);border:1px solid var(--rule);border-radius:10px;padding:12px 14px}
+@media (max-width:560px){.dec{grid-template-columns:1fr}}
+.chip{justify-self:start;font:600 11px/1 "JetBrains Mono",monospace;letter-spacing:.06em;text-transform:uppercase;padding:5px 8px;border-radius:5px}
+.c-ok{background:#d8f3e4;color:#0f5a35}.c-you{background:var(--accent-soft);color:var(--ink);outline:1px solid var(--accent)}.c-risk{background:#fbe2e0;color:#8c1d18}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]) .c-ok{background:#16452e;color:#6fdc9d}:root:not([data-theme="light"]) .c-risk{background:#4a1d24;color:#ff9aa5}}
+:root[data-theme="dark"] .c-ok{background:#16452e;color:#6fdc9d}:root[data-theme="dark"] .c-risk{background:#4a1d24;color:#ff9aa5}
+.dec b{display:block}.dec span{color:var(--ink-soft);font-size:14px}
+.modal-mock{max-width:560px;margin:0 auto;background:var(--a-card);border:1px solid var(--a-line);border-radius:12px;box-shadow:0 20px 50px rgba(0,0,0,.45)}
+.modal-mock .mh{padding:14px 18px;border-bottom:1px solid var(--a-line);font-weight:650;font-size:16px}
+.modal-mock .mb{padding:16px 18px;display:flex;flex-direction:column;gap:10px;font-size:14px}
+.modal-mock .mf{padding:12px 18px;border-top:1px solid var(--a-line);display:flex;justify-content:flex-end;gap:8px}
+.modal-mock ul{margin:0;padding-left:18px;color:#c9ccd8;display:flex;flex-direction:column;gap:4px}
+</style>
+
+<div class="wrap">
+
+<header>
+  <div class="kicker">Media Preview Generator · design for approval</div>
+  <h1>Skip intro &amp; skip credits, for Plex, Jellyfin and Emby</h1>
+  <p class="lede">How it works, where the data lives, how one detection is shared across all your servers, what needs a plugin, and what you’ll see in the app. Everything here was tested on lab servers against your real library. Approve it or tell me what to change.</p>
+  <nav class="toc" aria-label="Sections">
+    <a href="#short">The short version</a><a href="#how">How it works</a><a href="#previews">Fit with previews</a><a href="#sources">Where answers come from</a><a href="#store">How it’s stored</a><a href="#share">Sharing across servers</a><a href="#plugins">Plugin or not</a><a href="#plex">Why Plex works this way</a><a href="#changes">When things change</a><a href="#ux">What you’ll see</a><a href="#phases">Rollout</a><a href="#decide">Decisions</a>
+  </nav>
+</header>
+
+<section class="part" id="short">
+  <h2>The short version</h2>
+  <div class="tldr">
+    <div><b>Detect once per file</b><span>Every server that has the same file gets the same markers. No repeat work.</span></div>
+    <div><b>Check before publishing</b><span>Markers only go out when evidence agrees. Plex’s own markers and online databases are sometimes wrong for your files.</span></div>
+    <div><b>Plex: database write, no plugin possible</b><span>Plex has no plugin system and no API for this. We write into Plex’s database. Only works on Plex Pass servers (proven).</span></div>
+    <div><b>Jellyfin: existing plugin</b><span>Media Preview Bridge (already used for previews) gets an update.</span></div>
+    <div><b>Emby: new plugin</b><span>A small plugin that also puts markers back when Emby wipes them. Works without Premiere.</span></div>
+    <div><b>Off by default</b><span>You turn it on per server. Nothing is written until you do.</span></div>
+  </div>
+</section>
+
+<section class="part" id="how">
+  <h2>How it works <small>per file</small></h2>
+  <div class="flow">
+    <div class="step"><span class="n">1 · TRIGGER</span><b>A file needs markers</b><span>Scan, schedule, or Sonarr/Radarr/server webhook — same triggers as previews.</span></div><span class="arrow">→</span>
+    <div class="step"><span class="n">2 · WHO HAS IT</span><b>Find every server with this file</b><span>Uses the existing path matching the app already does for previews.</span></div><span class="arrow">→</span>
+    <div class="step key"><span class="n">3 · ALREADY KNOWN?</span><b>Markers stored for this exact file?</b><span>Yes → skip to step 5. Nothing is detected twice.</span></div><span class="arrow">→</span>
+    <div class="step"><span class="n">4 · DETECT</span><b>Gather evidence, decide</b><span>Chapters → TheIntroDB → audio match → credit text. Save the answer.</span></div><span class="arrow">→</span>
+    <div class="step"><span class="n">5 · PUBLISH</span><b>Write to each server</b><span>Plex database, Jellyfin plugin, Emby plugin. Skip servers already up to date.</span></div><span class="arrow">→</span>
+    <div class="step"><span class="n">6 · KEEP IT RIGHT</span><b>Check back later</b><span>If a server lost or changed our markers, put them back.</span></div>
+  </div>
+  <p class="plain">This runs as its own job type next to previews. See <a href="#previews" style="color:var(--accent)">how it fits with previews</a>.</p>
+</section>
+
+
+<section class="part" id="previews">
+  <h2>How it fits with previews</h2>
+  <p class="plain"><b>Separate jobs, shared plumbing.</b> Intro &amp; Credits gets its own job type with its own queue, schedules, priority, pause and retries. It reuses what previews already have: triggers, server and path matching, the frame cache, the job list and per-server results.</p>
+  <div class="flow">
+    <div class="step"><span class="n">TRIGGER</span><b>Webhook · scan · schedule</b><span>Same triggers as today.</span></div><span class="arrow">→</span>
+    <div class="step"><span class="n">PREVIEW JOB</span><b>Unchanged</b><span>GPU / CPU workers, as today.</span></div><span class="arrow">+</span>
+    <div class="step key"><span class="n">INTRO &amp; CREDITS JOB</span><b>Waits a few minutes, groups by season</b><span>10 episodes arriving together = one job for that season.</span></div><span class="arrow">→</span>
+    <div class="step"><span class="n">SHARED</span><b>Frame cache</b><span>Credit text reuses frames the preview job just made (kept 60 min).</span></div><span class="arrow">→</span>
+    <div class="step"><span class="n">DASHBOARD</span><b>Linked rows</b><span>Marker job shown under the preview job it followed.</span></div>
+  </div>
+  <div class="tbl"><table>
+    <thead><tr><th>Situation</th><th>What happens</th></tr></thead>
+    <tbody>
+      <tr><td>New episodes arrive (webhook)</td><td>Preview job runs as today. An Intro &amp; Credits job for that season starts a few minutes later (so a whole season’s batch lands in one job), reuses fresh preview frames for credits, and gets first call on the online lookup quota.</td></tr>
+      <tr><td>Turning it on for your existing library</td><td>“Start job → Intro &amp; Credits” for chosen libraries, or a low-priority schedule. Never touches previews. Progress is saved, so it can pause and resume. Uses leftover online quota; local detection for the rest.</td></tr>
+      <tr><td>Scheduled scans</td><td>Separate schedules: e.g. previews nightly, Intro &amp; Credits weekly. Each skips files already done.</td></tr>
+      <tr><td>Previews already existed</td><td>Marker job samples small frames itself for credits (a minute or two per movie).</td></tr>
+      <tr><td>You fix a marker in the Inspector</td><td>No job. Saved, locked, sent to every server immediately.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="cols">
+    <div class="panel"><h3>More control</h3><p>Pause a long backfill without touching previews. Give markers low priority. Retry failures on their own.</p></div>
+    <div class="panel"><h3>Safer to build</h3><p>The preview job engine was just unified (#243). Markers stay out of its internals, so they can’t break previews.</p></div>
+    <div class="panel"><h3>The cost</h3><p>A webhook creates two jobs. The dashboard links them so it still reads as one event.</p></div>
+  </div>
+</section>
+<section class="part" id="sources">
+  <h2>Where the answers come from</h2>
+  <p class="plain">Checked in this order. Numbers are measured on your library.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Source</th><th>Finds</th><th>How good</th><th>Cost</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Chapters inside the file</td><td>Intro, credits, recap</td><td class="yes">Exact</td><td>Free</td><td>Streaming releases name chapters “Intro”, “Title Sequence”, “End Credits”. About 1 in 9 seasons.</td></tr>
+      <tr><td>TheIntroDB (online)</td><td>Intro, credits, recap</td><td>When it has data: intros 35 of 43 right, credits 23 right / 4 wrong. Has data for ~1 in 4 of your TV episodes, ~1 in 100 movies.</td><td>1 web lookup</td><td>Each user pastes their own free API key. Used without written permission — your decision; keys can be revoked.</td></tr>
+      <tr><td>Matching audio across a season</td><td>TV intros</td><td>77% right, 12% missed, 11% wrong</td><td>~2 s per episode</td><td>Finds the theme tune episodes share. Needs 2+ episodes.</td></tr>
+      <tr><td>On-screen credit text</td><td>Credits (movies and TV)</td><td class="meh">Prototype works, needs tuning</td><td>2–5 min per movie</td><td>Lands on the credit roll, not on epilogue text cards. Phase 3.</td></tr>
+      <tr><td>Markers already on your servers</td><td>Second opinion</td><td class="no">Not trusted alone</td><td>Free</td><td>Plex’s South Park S01 intros are ~80 s late on your files. Used only to confirm.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3 style="font-size:17px;margin-top:6px">Coverage on your actual library</h3>
+  <p class="plain">Random sample from your Plex: 200 TV episodes and 120 movies. Online data is thin for your mix, so local detection does most of the work.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Source</th><th>TV episodes (200)</th><th>Movies (120)</th></tr></thead>
+    <tbody>
+      <tr><td>TheIntroDB</td><td>26% (intro 22%, credits 10%)</td><td class="no">1%</td></tr>
+      <tr><td>IntroDB.app</td><td>20% intro · 18% credits</td><td>TV only</td></tr>
+      <tr><td>SkipDB</td><td>12% intro · 19% credits</td><td>12% credits</td></tr>
+      <tr><td>Chapters in the file</td><td>10% intro · 14% credits</td><td>21% credits</td></tr>
+      <tr><td>All online sources together</td><td>32% intro · 34% credits</td><td>0% intro · 12% credits</td></tr>
+      <tr><td>Online + chapters</td><td>34% intro · 41% credits</td><td>29% credits</td></tr>
+    </tbody>
+  </table></div>
+  <p class="plain">Searched far and wide for more: only four other live sources exist (Crunchyroll skip data, IntroHater, Open Anime Timestamps, SkipMe.db) — mostly anime or locked down. Nothing anywhere covers sports, talk, reality or most Asian dramas. Your Sports library should be excluded.</p>
+  <div class="panel">
+    <h3 style="font-size:16px;margin-bottom:10px">How it decides</h3>
+    <ol class="rules">
+      <li><span>A marker <b>you adjusted</b> always wins and is never overwritten.</span></li>
+      <li><span><b>Chapters</b> in the file win.</span></li>
+      <li><span><b>Two sources agree</b> (intro end within 5 s, credits start within 10 s) → publish.</span></li>
+      <li><span><b>Only one source</b> → shown as “Needs review”, not published (unless you pick the looser setting).</span></li>
+      <li><span><b>Sanity checks</b> always apply: inside the file, intro near the start, credits near the end.</span></li>
+    </ol>
+  </div>
+</section>
+
+<section class="part" id="store">
+  <h2>How it’s stored</h2>
+  <p class="plain">One new database file in the app’s config folder: <span class="mono">/config/markers.db</span>. Nothing is ever written into your media folders.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>What</th><th>Holds</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>Files</td><td>Path, size, modified time, length, season folder</td><td>Identifies the exact file. If size or modified time changes (upgrade, replace), markers are redone.</td></tr>
+      <tr><td>Fingerprints</td><td>Audio fingerprint of each episode’s opening</td><td>A new episode only processes itself and compares against the stored ones.</td></tr>
+      <tr><td>Evidence</td><td>What each source said, with times</td><td>Shown in the Inspector so you can see why a decision was made.</td></tr>
+      <tr><td>Markers</td><td>The final intro and credits times per file, who decided, locked or not</td><td>The single source of truth. Servers are copies of this.</td></tr>
+      <tr><td>Server status</td><td>Per file per server: item id, what we sent, when it was checked, result</td><td>Skips servers already up to date; spots servers that lost markers.</td></tr>
+    </tbody>
+  </table></div>
+  <p class="plain">Each server also holds a copy the way it natively needs: Plex in its own database, Jellyfin and Emby inside our plugin’s data folder (so the plugin can restore them on its own).</p>
+</section>
+
+<section class="part" id="share">
+  <h2>Sharing across servers</h2>
+  <p class="plain">Same file on disk means same timestamps on every server. So the file is the unit, not the server.</p>
+  <div class="fan">
+    <div class="store">
+      <b>Rick and Morty S01E01</b>
+      <span class="mono">/data_16tb2/TV Shows/Rick and Morty (2013)/Season 01/…Pilot…NTb.mkv</span>
+      <span>Detected once: intro <span class="mono">2:07–2:37</span> · credits <span class="mono">21:35 →</span></span>
+      <span style="font-size:13px;color:var(--ink-soft)">Audio match (10 of 10 episodes) + TheIntroDB agree</span>
+    </div>
+    <span class="arrow">→</span>
+    <div class="targets">
+      <div class="target"><span class="tile t-plex">P</span><b>Plex</b><span>Written to Plex database · verified via Plex API</span></div>
+      <div class="target"><span class="tile t-jf">J</span><b>Jellyfin</b><span>Sent to Media Preview Bridge · reused, no new work</span></div>
+      <div class="target"><span class="tile t-emby">E</span><b>Emby</b><span>Sent to Emby plugin · reused, no new work</span></div>
+    </div>
+  </div>
+  <div class="cols">
+    <div class="panel"><h3>Webhook from a second server</h3><p>Emby reports the same file an hour later → markers already stored → published straight away. No detection.</p></div>
+    <div class="panel"><h3>Add a new server later</h3><p>It gets markers for every file it shares with your other servers, straight from the store.</p></div>
+    <div class="panel"><h3>Plex already detected it</h3><p>Plex’s marker counts as one agreeing source. If Plex is wrong, ours replaces it (Plex write on) or is shown as a disagreement.</p></div>
+  </div>
+</section>
+
+<section class="part" id="plugins">
+  <h2>What needs a plugin, and what doesn’t</h2>
+  <p class="plain">None of the three servers has an API to add intro/credits markers. Checked online, in their API specs, and tested live.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Server</th><th>Plugin?</th><th>How we write</th><th>What can undo it</th><th>Viewers need</th></tr></thead>
+    <tbody>
+      <tr><td>Plex</td><td class="yes">No plugin (none possible)</td><td>Into Plex’s database (both places Plex keeps markers). Same Plex folder the app already uses for previews. Opt-in with a warning; Plex Pass servers only.</td><td>Plex forced re-detection (e.g. “Analyze” on an item). We notice and re-apply. Scans and refreshes don’t touch it.</td><td>Plex Pass (or Plex Home)</td></tr>
+      <tr><td>Jellyfin</td><td class="meh">Yes · existing</td><td>Media Preview Bridge gets a markers endpoint. Built for Jellyfin 10.11 and 12.0. One-click update from the app.</td><td>Only replacing the file (then we redo it). Survives scans, full refreshes, restarts.</td><td>Nothing</td></tr>
+      <tr><td>Emby</td><td class="no">Yes · new</td><td>New “Media Preview Bridge for Emby”. Built for Emby 4.9 and 4.10. One-click install once Emby accepts it in their catalog; manual install until then.</td><td>“Replace all metadata” refresh wipes markers — the plugin puts them back instantly.</td><td>Nothing (no Premiere needed)</td></tr>
+    </tbody>
+  </table></div>
+  <div class="cols">
+    <div class="panel"><h3>What each server can show</h3><p><b>Plex:</b> intro, credits. <b>Jellyfin:</b> intro, credits, recap, preview. <b>Emby:</b> intro start/end and credits start only (no “credits end”).</p></div>
+    <div class="panel"><h3>Proven in the lab</h3><p>Skip Intro button appeared in the Jellyfin and Emby web players. Plex serves our markers identically to its own (still to check in a real Plex app).</p></div>
+  </div>
+</section>
+
+
+<section class="part" id="plex">
+  <h2>Why Plex works this way</h2>
+  <p class="plain">Plex removed its plugin system years ago, so a Plex plugin isn’t an option. We looked for any other door before settling on the database. The old PR #241 design also used a database write.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Route</th><th>Result</th><th>How we know</th></tr></thead>
+    <tbody>
+      <tr><td>Plex API “create marker”</td><td class="no">Bookmarks only</td><td>Tested every type: 400. Edit/delete: 404. Converting a bookmark: ignored.</td></tr>
+      <tr><td>Hidden routes in Plex itself</td><td class="no">None</td><td>Plex’s server program contains only the two bookmark routes. Plex Web’s code only reads markers.</td></tr>
+      <tr><td>Custom metadata provider (new in Plex)</td><td class="no">Can’t carry markers</td><td>Official spec has no marker fields.</td></tr>
+      <tr><td>Redirect Plex’s cloud credits lookup</td><td class="no">Didn’t work</td><td>Hidden setting found in Plex; tested in the lab — Plex ignored it. Would only ever cover credits.</td></tr>
+      <tr><td>Chapter names in files</td><td class="no">Ignored by Plex</td><td>Plex staff and code; Plex never turns chapters into markers.</td></tr>
+      <tr><td>Plex database</td><td class="yes">Works</td><td>Served instantly, identical to Plex’s own markers.</td></tr>
+    </tbody>
+  </table></div>
+  <div class="cols">
+    <div class="panel"><h3>No extra setup for most people</h3><p>The app already needs Plex’s data folder for previews, and the database sits in that same folder. One rule: the app must run on the same machine as Plex. Preview files are fine over a network share, but Plex’s database isn’t — SQLite’s own docs: “all processes using a database must be on the same host… WAL does not work over a network filesystem.” Writing it from another machine can corrupt it, so the app checks and says so. (Your setup is local: fine.)</p></div>
+    <div class="panel"><h3>Why Plex Pass</h3><p>Plex locks skip intro/credits behind Plex Pass. Tested: with no Pass, Plex hides all markers — even ones already in its database. Viewers also need Pass or to be in your Plex Home.</p></div>
+    <div class="panel"><h3>If you don’t want database writes</h3><p>Plex can stay read-only: Plex’s own markers are used as evidence and sent to Jellyfin and Emby. Plex viewers just keep Plex’s markers.</p></div>
+  </div>
+</section>
+<section class="part" id="changes">
+  <h2>When things change</h2>
+  <div class="cols">
+    <div class="panel"><h3>File upgraded or replaced</h3><p>Size or modified time differs → old markers dropped → detected again → republished everywhere.</p></div>
+    <div class="panel"><h3>New episode in a season</h3><p>Only that episode is fingerprinted; compared with stored siblings. Seconds, not a season rescan.</p></div>
+    <div class="panel"><h3>A server loses markers</h3><p>The periodic check sees the difference and puts them back. Emby’s plugin does this on its own.</p></div>
+    <div class="panel"><h3>You fix a marker</h3><p>It’s locked and pushed to every server. Re-detection shows its answer beside yours but never replaces it.</p></div>
+  </div>
+</section>
+
+<section class="part" id="ux">
+  <h2>What you’ll see in the app</h2>
+  <p class="plain">Before = screenshots of your running app. After = mockups in the app’s own theme, with real timestamps from your library. The Servers page stays as it is; all controls live in Settings.</p>
+</section>
+
+<!-- ============ 2. SETTINGS ============ -->
+<section class="screen">
+  <div class="screen-head">
+    <h2>Settings → Intro &amp; Credits</h2>
+    <p>One new Settings section holds everything, including the per-server switches. The defaults favour “missing marker” over “wrong marker”.</p>
+  </div>
+  <div class="pair">
+    <div class="label after">After · new section</div>
+    <div class="app">
+      <div class="nav"><b>▣ Media Preview Generator</b><span>Dashboard</span><span>Servers</span><span>Automation</span><span class="on">Settings</span><span>Tools</span></div>
+      <div class="body">
+        <div class="set-grid">
+          <div class="card" style="grid-column:1/-1">
+            <div class="card-h">Send to servers <span class="i" title="Which of your servers get intro and credits markers, and whether each one is ready.">i</span></div>
+            <div class="card-b" style="gap:0">
+              <div class="src" style="grid-template-columns:auto 1fr auto auto"><span class="logo" style="background:#e5a00d;width:18px;height:18px;border-radius:4px;display:inline-grid;place-items:center;font:700 11px system-ui;color:#1b1407">P</span><div><div>Plex <span class="i" title="Plex has no API for markers, so they are written into Plex's database. Plex only shows markers on Plex Pass servers.">i</span></div><div class="muted">Writes to Plex database · Plex Pass <span class="badge b-green">✓ active</span> · 3,412 files sent</div></div><span class="badge b-warn">Plex’s own detection may overwrite</span><span class="toggle"></span></div>
+              <div class="src" style="grid-template-columns:auto 1fr auto auto"><span class="logo" style="background:#8b6ff0;width:18px;height:18px;border-radius:4px;display:inline-grid;place-items:center;font:700 11px system-ui;color:#fff">J</span><div><div>Jellyfin <span class="i" title="Jellyfin needs the Media Preview Bridge plugin (the same one used for previews).">i</span></div><div class="muted">Media Preview Bridge plugin · <span class="badge b-warn">update to 12.0.1.0</span></div></div><span class="btn pri">Update plugin</span><span class="toggle off"></span></div>
+              <div class="src" style="grid-template-columns:auto 1fr auto auto"><span class="logo" style="background:#52b54b;width:18px;height:18px;border-radius:4px;display:inline-grid;place-items:center;font:700 11px system-ui;color:#fff">E</span><div><div>Emby <span class="i" title="Emby needs our small plugin. It also puts markers back if an Emby metadata refresh wipes them. No Premiere needed.">i</span></div><div class="muted">Media Preview Bridge for Emby · <span class="badge b-red">not installed</span></div></div><span class="btn pri">Install plugin</span><span class="toggle off"></span></div>
+              <div class="src" style="grid-template-columns:auto 1fr auto"><span class="grip">⊘</span><div><div>Skip these libraries <span class="i" title="Libraries where intros and credits make no sense, like sports events.">i</span></div><div class="muted">Sports</div></div><span class="btn">Edit</span></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-h">What to detect</div>
+            <div class="card-b">
+              <div class="opt"><div class="lbl"><span>Intros <span class="i" title="The repeating opening sequence of a TV episode.">i</span></span><span class="muted">TV episodes</span></div><span class="toggle"></span></div>
+              <div class="opt"><div class="lbl"><span>Credits <span class="i" title="Where Skip Credits jumps from. Lands on the credit roll, not on epilogue text cards like 'After 42 years in prison…'.">i</span></span><span class="muted">TV episodes and movies</span></div><span class="toggle"></span></div>
+              <div class="opt"><div class="lbl"><span>Recaps <span class="i" title="Only when the file's chapters or TheIntroDB say where the recap is. Jellyfin shows these; Plex and Emby have no recap button.">i</span></span><span class="muted">Jellyfin only</span></div><span class="toggle off"></span></div>
+              <hr>
+              <div class="opt"><div class="lbl"><span>Publish when <span class="i" title="High: at least two sources agree, or the file's own chapters say so. Medium: one strong source.">i</span></span><span class="muted">Stricter means fewer, safer markers</span></div><span class="seg"><span class="on">High</span><span>Medium</span></span></div>
+              <div class="opt"><div class="lbl"><span>Never overwrite my edits <span class="i" title="Markers you adjust in the Inspector are locked; re-detection shows its answer beside yours but never replaces it.">i</span></span></div><span class="toggle"></span></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-h">Where evidence comes from <span class="muted" style="text-transform:none;letter-spacing:0">drag to reorder</span></div>
+            <div class="card-b" style="gap:0">
+              <div class="src"><span class="grip">⋮⋮</span><div><div>Chapters inside the file <span class="i" title="Streaming releases often name chapters 'Intro', 'Title Sequence', 'End Credits'. Exact and free. Found in about 1 in 9 seasons of your library.">i</span></div><div class="muted">Free · exact when present</div></div><span class="toggle"></span></div>
+              <div class="src"><span class="grip">⋮⋮</span><div><div>Online: TheIntroDB <span class="i" title="Community timestamps looked up by TMDB id and your file's duration. Covers about 1 in 4 of your TV episodes, very few movies. Paste your own free key from theintrodb.org.">i</span></div><div class="muted">Your API key <span class="t">••••••ab12</span> · 83 / 1,000 lookups today</div></div><span class="toggle"></span></div>
+              <div class="src"><span class="grip">⋮⋮</span><div><div>Matching audio across a season <span class="i" title="Finds the theme tune shared by episodes. 88% precision on 118 episodes of your library.">i</span></div><div class="muted">CPU · about 2 s per episode</div></div><span class="toggle"></span></div>
+              <div class="src"><span class="grip">⋮⋮</span><div><div>On-screen credit text <span class="i" title="Samples the last 15 minutes and looks for rolling credit text. The slow one.">i</span></div><div class="muted">CPU · 2–5 min per movie</div></div><span class="toggle"></span></div>
+              <div class="src"><span class="grip">⋮⋮</span><div><div>Markers already on your servers <span class="i" title="Used as a second opinion only. Plex's markers for South Park S01 are ~80 s off on your files, so they are never copied as-is.">i</span></div><div class="muted">Second opinion, never copied as-is</div></div><span class="toggle"></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="why"><b>Why the source list is ordered, not a pipeline diagram:</b> people understand “where does it look, and in what order”; the confidence rule does the rest. The ⓘ copy carries the measured numbers so the trade-offs are visible where the choice is made.</p>
+  </div>
+</section>
+
+<!-- ============ 3. INSPECTOR ============ -->
+<section class="screen">
+  <div class="screen-head">
+    <h2>Inspector → Intro &amp; Credits tab</h2>
+    <p>The Preview Inspector gains a tab. It shows what we decided, the evidence behind it, and what each server has right now. The example is real: <span class="mono">South Park S01E03</span>, where Plex’s existing intro is 80 seconds late.</p>
+  </div>
+  <div class="pair">
+    <div class="label before">Before · today (frames only)</div>
+    <div class="shot"><img src="before_inspector.jpg" alt="Current Preview Inspector: frame player and overview grid for Rick and Morty S01E01"></div>
+    <div class="label after">After</div>
+    <div class="app">
+      <div class="nav"><b>▣ Media Preview Generator</b><span>Dashboard</span><span>Servers</span><span>Automation</span><span>Settings</span><span class="on">Tools</span></div>
+      <div class="body">
+        <div class="row" style="justify-content:space-between;align-items:center">
+          <div><div style="font-size:18px;font-weight:650">South Park · S01E03 · Weight Gain 4000</div><div class="muted t">/data_16tb/TV Shows/South Park (1997)/Season 01/…S01E03…[AMZN][WEBDL-2160p]-MZABI.mkv · 22:02</div></div>
+          <div class="row" style="gap:8px"><span class="btn">✎ Adjust</span><span class="btn">🔒 Lock</span><span class="btn">↻ Re-detect</span><span class="btn pri">Publish to 3 servers</span></div>
+        </div>
+        <div class="tabs"><span>Frames</span><span class="on">Intro &amp; Credits</span><span>Season</span></div>
+        <div class="zooms">
+          <div class="card scroll"><div class="card-h">Opening · 0:00 – 3:00</div><div class="card-b zoom">
+            <div class="axis"><span style="left:0%">0:00</span><span style="left:33.3%">1:00</span><span style="left:66.6%">2:00</span><span style="left:98%">3:00</span></div>
+            <div class="lane res"><span class="ln">Decision</span><div class="track"><span class="bar result" style="left:6.1%;width:14.4%">Intro 0:11–0:37</span></div></div>
+            <div class="lane"><span class="ln">Chapters</span><div class="track"><span class="bar ok" style="left:6.1%;width:14.4%">“Title Sequence”</span></div></div>
+            <div class="lane"><span class="ln">Season audio</span><div class="track"><span class="bar ok" style="left:0%;width:18.9%">0:00–0:34 · 11/12</span></div></div>
+            <div class="lane"><span class="ln">TheIntroDB</span><div class="track"><span class="bar ok" style="left:0%;width:19.4%">→ 0:35</span></div></div>
+            <div class="lane"><span class="ln">Plex now <span class="badge b-red">✕</span></span><div class="track"><span class="bar bad" style="left:42.5%;width:20.1%">1:16–1:52</span></div></div>
+            <div class="lane"><span class="ln">Emby / Jellyfin</span><div class="track"><span class="muted" style="font-size:12px;line-height:18px;padding-left:4px">none yet</span></div></div>
+          </div></div>
+          <div class="card scroll"><div class="card-h">Ending · 19:02 – 22:02 (end of file)</div><div class="card-b zoom">
+            <div class="axis"><span style="left:0%">19:02</span><span style="left:33.3%">20:02</span><span style="left:66.6%">21:02</span><span style="left:98%">22:02</span></div>
+            <div class="lane res"><span class="ln">Decision</span><div class="track"><span class="bar result" style="left:87.6%;width:12.4%">Credits 21:39 →</span></div></div>
+            <div class="lane"><span class="ln">Chapters</span><div class="track"><span class="bar ok" style="left:87.6%;width:12.4%">“End Credits”</span></div></div>
+            <div class="lane"><span class="ln">Credit text</span><div class="track"><span class="muted" style="font-size:12px;line-height:18px;padding-left:4px">skipped · chapters already agree</span></div></div>
+            <div class="lane"><span class="ln">TheIntroDB</span><div class="track"><span class="bar ok open" style="left:90.4%;width:9.6%">21:44</span></div></div>
+            <div class="lane"><span class="ln">Plex now <span class="badge b-red">✕</span></span><div class="track"><span class="bar part" style="left:64.7%;width:17.8%">21:05–21:37</span><span class="bar part" style="left:95%;width:5%"></span></div></div>
+            <div class="lane"><span class="ln"></span><div class="track" style="background:none"><span class="muted" style="font-size:11.5px">Plex also has a third credits marker at 23:03, past the end of this file</span></div></div>
+          </div></div>
+        </div>
+        <div class="card"><div class="card-h">On your servers <span class="i" title="What each server shows viewers today, and what Publish will change.">i</span></div><div class="card-b">
+          <div class="pub">
+            <div class="pubc"><div class="row" style="gap:6px;align-items:center"><span class="logo" style="background:#e5a00d;width:16px;height:16px;border-radius:4px;display:inline-grid;place-items:center;font:700 10px system-ui;color:#1b1407">P</span><b>Plex</b><span class="badge b-warn">Will replace</span></div><span class="muted">Intro 1:16–1:52 → <span class="t" style="color:#e3e5ec">0:11–0:37</span></span><span class="muted">Credits (3 markers) → <span class="t" style="color:#e3e5ec">21:39</span></span></div>
+            <div class="pubc"><div class="row" style="gap:6px;align-items:center"><span style="background:#a78bfa;width:16px;height:16px;border-radius:4px;display:inline-grid;place-items:center;font:700 10px system-ui;color:#fff">J</span><b>Jellyfin</b><span class="badge b-grey">Will add</span></div><span class="muted">Intro, Outro</span><span class="muted">Same file, detected once</span></div>
+            <div class="pubc"><div class="row" style="gap:6px;align-items:center"><span style="background:#52b54b;width:16px;height:16px;border-radius:4px;display:inline-grid;place-items:center;font:700 10px system-ui;color:#fff">E</span><b>Emby</b><span class="badge b-grey">Will add</span></div><span class="muted">Intro start/end, Credits start</span><span class="muted">Emby has no “credits end”</span></div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+    <p class="why"><b>Why two zoom windows instead of one full-length bar:</b> an intro is 26 seconds of a 22-minute file, about 2% of the width. Zooming the first and last three minutes makes a 1-second disagreement visible, which is the whole point of the page.</p>
+  </div>
+</section>
+
+<!-- ============ 4. SEASON ============ -->
+<section class="screen">
+  <div class="screen-head">
+    <h2>Inspector → Season view</h2>
+    <p>New. Intros are found by comparing a season’s episodes, so the season is the natural unit to review, lock and publish. Real values from Rick and Morty S01; the three “needs review” credits are the episodes where our audio match found no answer.</p>
+  </div>
+  <div class="pair">
+    <div class="label after">After · new view</div>
+    <div class="app">
+      <div class="body">
+        <div class="row" style="justify-content:space-between;align-items:center">
+          <div><div style="font-size:18px;font-weight:650">Rick and Morty · Season 1</div><div class="muted">11 episodes · 2 releases (NTb, Absinth) · intros agree across both</div></div>
+          <div class="row" style="gap:8px"><span class="badge b-green">8 ready</span><span class="badge b-warn">3 need review</span><span class="btn pri">Publish 8 to 3 servers</span></div>
+        </div>
+        <div class="card scroll">
+          <table class="season">
+            <thead><tr><th>Ep</th><th>Intro</th><th>Credits</th><th>Evidence</th><th>Plex · Jellyfin · Emby</th><th></th></tr></thead>
+            <tbody>
+              <tr><td class="t">E01</td><td class="t">2:07 – 2:37</td><td class="t">21:35 →</td><td><span class="badge b-outline">Audio 10/10</span> <span class="badge b-outline">TheIntroDB</span></td><td><div class="dots"><span class="dot d-ok" title="Plex matches"></span><span class="dot d-ok"></span><span class="dot d-ok"></span></div></td><td class="muted">Published</td></tr>
+              <tr><td class="t">E02</td><td class="t">0:01 – 0:30</td><td class="t">20:46 →</td><td><span class="badge b-outline">Audio 10/10</span> <span class="badge b-outline">TheIntroDB</span></td><td><div class="dots"><span class="dot d-ok"></span><span class="dot d-ok"></span><span class="dot d-ok"></span></div></td><td class="muted">Published</td></tr>
+              <tr><td class="t">E03</td><td class="t">0:02 – 0:29</td><td class="t">20:28 →</td><td><span class="badge b-outline">Audio 10/10</span> <span class="badge b-outline">TheIntroDB</span></td><td><div class="dots"><span class="dot d-ok"></span><span class="dot d-ok"></span><span class="dot d-ok"></span></div></td><td class="muted">Published</td></tr>
+              <tr><td class="t">E04</td><td class="t">0:01 – 0:29</td><td><span class="badge b-warn">Needs review</span></td><td><span class="badge b-outline">Audio 10/10</span></td><td><div class="dots"><span class="dot d-ok"></span><span class="dot d-wait" title="Intro published, credits waiting"></span><span class="dot d-wait"></span></div></td><td><span class="btn">Review</span></td></tr>
+              <tr><td class="t">E07</td><td class="t">1:06 – 1:38</td><td class="t">20:39 →</td><td><span class="badge b-outline">Audio 10/10</span> <span class="badge b-outline">TheIntroDB</span></td><td><div class="dots"><span class="dot d-ok"></span><span class="dot d-ok"></span><span class="dot d-ok"></span></div></td><td class="muted">Published</td></tr>
+              <tr><td class="t">E10</td><td class="t">0:27 – 0:57</td><td><span class="badge b-warn">Needs review</span></td><td><span class="badge b-outline">Audio 10/10</span></td><td><div class="dots"><span class="dot d-ok"></span><span class="dot d-wait"></span><span class="dot d-wait"></span></div></td><td><span class="btn">Review</span></td></tr>
+              <tr><td class="t">E11</td><td class="t">1:17 – 1:48</td><td class="t">21:15 →</td><td><span class="badge b-outline">Audio 10/10</span> <span class="badge b-grey">🔒 Locked by you</span></td><td><div class="dots"><span class="dot d-ok"></span><span class="dot d-ok"></span><span class="dot d-ok"></span></div></td><td class="muted">Published</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <span class="muted" style="font-size:12px">Showing 7 of 11 · dots: green = server shows this marker, amber = waiting, grey = server not enabled</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 5. JOB DETAILS ============ -->
+<section class="screen">
+  <div class="screen-head">
+    <h2>Dashboard → job queue</h2>
+    <p>Intro &amp; Credits jobs appear in the same queue, linked under the preview job that triggered them, with the same per-server breakdown.</p>
+  </div>
+  <div class="pair">
+    <div class="label before">Before · today</div>
+    <div class="shot"><img src="before_job.jpg" alt="Current expanded job row: Servers, Plex, Generated times 1"></div>
+    <div class="label after">After</div>
+    <div class="app scroll">
+      <div class="jobrow"><span class="t" style="color:#e5a00d">e64567e1</span><span>Rick and Morty S01 · 11 files <span class="badge b-cyan">Sonarr</span></span><span style="color:#6fdc9d">● Completed</span><span class="badge b-amber">Normal</span><span class="badge b-green">100.0%</span></div>
+      <div class="jobx" style="background:#222336">
+        <div class="chain"><span class="pill">› Plex</span>→<span class="badge b-green">Generated × 11</span><span class="pill" style="background:#e9e3ff">◆ Jellyfin</span>→<span class="badge b-grey">Reused × 11</span><span class="pill" style="background:#dff3dd">▶ Emby</span>→<span class="badge b-grey">Reused × 11</span></div>
+      </div>
+      <div class="jobrow" style="padding-left:40px"><span class="t" style="color:#e5a00d">↳ 7c1f09aa</span><span>Intro &amp; Credits · Rick and Morty S01 · 11 files <span class="badge b-outline">follows e64567e1</span></span><span style="color:#6fdc9d">● Completed</span><span class="badge b-grey">Low</span><span class="badge b-green">100.0%</span></div>
+      <div class="jobx">
+        <div style="font-weight:650">Servers</div>
+        <div class="chain"><span class="pill">› Plex</span>→<span class="badge b-green">Markers written × 8</span><span class="badge b-warn">Needs review × 3</span></div>
+        <div class="chain"><span class="pill" style="background:#e9e3ff">◆ Jellyfin</span>→<span class="badge b-green">Markers written × 8</span><span class="muted" style="font-size:12px">detected once, reused</span></div>
+        <div class="chain"><span class="pill" style="background:#dff3dd">▶ Emby</span>→<span class="badge b-red">Skipped × 11 · Emby plugin not installed</span><span class="btn amber" style="padding:2px 8px;font-size:12px">Install</span></div>
+        <div class="chain"><span class="muted" style="font-size:12px">Sources: chapters 0 · TheIntroDB 6 · IntroDB 2 · audio match 11 · credits from preview frames 8</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+
+<section class="screen">
+  <div class="screen-head">
+    <h2>Turning on Plex</h2>
+    <p>Turning Plex on in Settings → Intro &amp; Credits asks for a clear yes first, because it means writing to Plex’s database.</p>
+  </div>
+  <div class="pair">
+    <div class="label after">After · confirmation</div>
+    <div class="app" style="padding:28px 16px;background:#11121f">
+      <div class="modal-mock">
+        <div class="mh">Send intro &amp; credits markers to Plex?</div>
+        <div class="mb">
+          <span>Plex has no way for apps to add intro or credits markers, so they are written straight into Plex’s database — the same place Plex stores its own.</span>
+          <ul>
+            <li>Tested on Plex 1.43. A future Plex update could change this; we stop writing if the database looks different.</li>
+            <li>The app must run on the same machine as Plex. Checked: <span class="t">local disk ✓</span></li>
+            <li>If Plex re-detects an item itself, it replaces ours. We put them back on the next check.</li>
+            <li>Viewers need Plex Pass (or Plex Home) to see skip buttons.</li>
+          </ul>
+        </div>
+        <div class="mf"><span class="btn">Cancel</span><span class="btn pri">Enable for Plex</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="part" id="phases">
+  <h2>Rollout</h2>
+  <div class="tbl"><table>
+    <thead><tr><th>Phase</th><th>Delivers</th><th>Useful on its own because</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>Markers store · Intro &amp; Credits job type · chapters · TheIntroDB, IntroDB, SkipDB · Plex and Jellyfin publishing · Bridge plugin update · Servers card · Settings · Inspector tab (view) · job outcomes</td><td>Files with chapters or TheIntroDB coverage get correct markers on Plex and Jellyfin.</td></tr>
+      <tr><td>2</td><td>Season audio matching for TV intros · Emby plugin + catalog submission · Season view · keep-it-right checks · accuracy test set in the repo</td><td>Most TV intros covered, on all three servers.</td></tr>
+      <tr><td>3</td><td>On-screen credit text detection (movies and TV), tuned on a hand-checked set</td><td>Credits for files nobody online has covered.</td></tr>
+      <tr><td>4</td><td>Adjust / lock editor · anime source (AniSkip) · Setup Health checks · helper container for Plex on another machine · docs</td><td>Fixing the leftovers by hand.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section class="part" id="decide">
+  <h2>Decisions</h2>
+  <div class="decide">
+    <div class="dec"><span class="chip c-ok">Agreed</span><div><b>Emby: our own plugin, submitted to the Emby catalog</b><span>Self-heals after Emby wipes markers.</span></div></div>
+    <div class="dec"><span class="chip c-ok">Agreed</span><div><b>Skip credits lands on the real credit roll</b><span>Not on epilogue text cards before it.</span></div></div>
+    <div class="dec"><span class="chip c-risk">Your call</span><div><b>Use TheIntroDB with each user’s own key, without written permission</b><span>Their terms forbid server-side use; keys can be revoked. Everything must still work without it.</span></div></div>
+    <div class="dec"><span class="chip c-ok">Agreed</span><div><b>Plex: database write on Plex Pass servers</b><span>Opt-in with confirmation. Only when the app runs on the same machine as Plex (database can’t be safely written over a network). If Plex re-detects an item itself it replaces ours; the app notices and puts ours back.</span></div></div>
+    <div class="dec"><span class="chip c-ok">Agreed</span><div><b>Name: “Intro &amp; Credits”, controls in Settings</b><span>Servers page unchanged.</span></div></div>
+    <div class="dec"><span class="chip c-ok">Agreed</span><div><b>Separate Intro &amp; Credits jobs, shared plumbing</b><span>Own queue, schedules, priority; season-grouped after webhooks; linked to the preview job on the dashboard; reuses preview frames.</span></div></div>
+    <div class="dec"><span class="chip c-ok">Agreed</span><div><b>Online: TheIntroDB + IntroDB + SkipDB</b><span>All checked against the file before use. AniSkip for anime later.</span></div></div>
+    <div class="dec"><span class="chip c-ok">Agreed</span><div><b>Publish rule is a setting, default “two sources agree”</b><span>Chapters alone also count. Users can loosen it.</span></div></div>
+    <div class="dec"><span class="chip c-ok">Agreed</span><div><b>Off until turned on</b><span>Nothing detected or written after an upgrade until enabled; sports libraries excluded.</span></div></div>
+    <div class="dec"><span class="chip c-ok">Agreed</span><div><b>App on a different machine than Plex</b><span>Later phase: a tiny helper container next to Plex does the database write. Until then Plex is read-only for that setup, with a clear message.</span></div></div>
+  </div>
+</section>
+
+<footer class="note">Tested on lab servers on storage: Plex 1.43.4, Emby 4.10.0.40, Jellyfin 10.11.11 and 12.0.0, with your library mounted read-only. Full technical spec: docs/superpowers/specs/2026-09-13-skip-markers-design.md.</footer>
+</div>

@@ -7,7 +7,8 @@ run_scheduled_job, and create_app configuration.
 
 import json
 import os
-from unittest.mock import patch
+from datetime import UTC
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -453,7 +454,10 @@ class TestRequeueInterruptedOnStartup:
 
         _requeue_interrupted_on_startup("/tmp/config")
 
-        mock_get_job_manager.assert_not_called()
+        jm = mock_get_job_manager.return_value
+        jm.requeue_interrupted_jobs.assert_not_called()
+        # Nothing is revived, so Intro & Credits jobs left PENDING are settled instead of blocking their schedule.
+        jm.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
         mock_start_job.assert_not_called()
 
     @patch("media_preview_generator.web.routes._start_job_async")
@@ -471,6 +475,7 @@ class TestRequeueInterruptedOnStartup:
         _requeue_interrupted_on_startup("/tmp/config")
 
         mock_get_job_manager.return_value.requeue_interrupted_jobs.assert_called_once_with(max_age_minutes=45)
+        mock_get_job_manager.return_value.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
         mock_start_job.assert_called_once_with("job-123", {"foo": "bar"})
 
     @patch("media_preview_generator.web.routes._start_job_async")
@@ -494,6 +499,48 @@ class TestRequeueInterruptedOnStartup:
 
         assert sm.processing_paused is True, "an explicit pause must survive the restart"
         mock_start_job.assert_called_once_with("job-456", {})
+
+
+class TestLeftoverIntroCreditsJobsBeforeSchedulesStart:
+    """A schedule tick that fires as the scheduler starts must not see a leftover job from before the restart."""
+
+    def test_tick_fired_during_startup_creates_a_job(self, tmp_path):
+        from media_preview_generator.web import scheduler as sched_mod
+        from media_preview_generator.web.app import create_app
+        from media_preview_generator.web.jobs import JobManager
+
+        config_dir = str(tmp_path / "config")
+        os.makedirs(config_dir, exist_ok=True)
+        with open(os.path.join(config_dir, "settings.json"), "w") as f:
+            json.dump({"setup_complete": True, "auto_requeue_on_restart": False}, f)
+        before = JobManager(config_dir=config_dir)
+        before.create_job(
+            library_name="weekly",
+            kind="intro_credits",
+            priority=3,
+            parent_schedule_id="sched-1",
+            config={"kind": "intro_credits", "libraries": [], "file_paths": []},
+        )
+
+        created = []
+        real_start = sched_mod.ScheduleManager.start
+
+        def start_and_tick(manager):
+            real_start(manager)
+            # APScheduler can run a missed tick the moment it starts.
+            with patch(
+                "media_preview_generator.markers.triggers.create_intro_credits_job",
+                side_effect=lambda **kw: created.append(kw) or MagicMock(id="new"),
+            ):
+                sched_mod._start_scheduled_intro_credits_job(manager, "sched-1", [], "TV", None, None)
+
+        with (
+            patch.dict(os.environ, {"CONFIG_DIR": config_dir, "WEB_AUTH_TOKEN": "test-token-12345678"}),
+            patch.object(sched_mod.ScheduleManager, "start", start_and_tick),
+        ):
+            create_app(config_dir=config_dir)
+
+        assert len(created) == 1 and created[0]["parent_schedule_id"] == "sched-1"
 
 
 class TestResumeInterruptedRetryChains:
@@ -539,7 +586,7 @@ class TestResumeInterruptedRetryChains:
         clobber such chains (which would orphan the still-living
         retry).
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from media_preview_generator.web.jobs import JobStatus
 
@@ -550,12 +597,12 @@ class TestResumeInterruptedRetryChains:
                 "id": "originating-uuid",
                 "library_name": "Foo",
                 "server_id": "jelly-1",
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
                 "config": {
                     "is_retry_chain": True,
                     "retry_attempt": 2,
                     "retry_max_attempts": 5,
-                    "retry_started_at": datetime.now(timezone.utc).isoformat(),
+                    "retry_started_at": datetime.now(UTC).isoformat(),
                     "source": "sonarr",
                 },
                 "status": JobStatus.PENDING,
@@ -588,7 +635,7 @@ class TestResumeInterruptedRetryChains:
         """Without a child to drive the chain, the head would sit
         PENDING forever. Mark FAILED so the user knows to re-trigger.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from media_preview_generator.web.jobs import JobStatus
 
@@ -599,11 +646,11 @@ class TestResumeInterruptedRetryChains:
                 "id": "stuck-uuid",
                 "library_name": "Foo",
                 "server_id": "jelly-1",
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
                 "config": {
                     "is_retry_chain": True,
                     "retry_attempt": 1,
-                    "retry_started_at": datetime.now(timezone.utc).isoformat(),
+                    "retry_started_at": datetime.now(UTC).isoformat(),
                 },
                 "status": JobStatus.PENDING,
                 "error": None,
@@ -650,11 +697,11 @@ class TestResumeInterruptedRetryChains:
         ancient chains PENDING and re-fire against potentially-deleted
         media. Boundary: 25h must be stale.
         """
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from media_preview_generator.web.jobs import JobStatus
 
-        old_started = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+        old_started = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
         chain = type(
             "Chain",
             (),

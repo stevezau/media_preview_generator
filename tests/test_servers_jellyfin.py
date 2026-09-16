@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import requests
@@ -56,6 +56,20 @@ def _jelly_config(
 @pytest.fixture
 def jelly():
     return JellyfinServer(_jelly_config())
+
+
+@pytest.fixture
+def make_server():
+    """Build a :class:`JellyfinServer` with an explicit ``token``/``user_id`` auth shape.
+
+    ``user_id=None`` exercises the ``/Items?Ids=`` fallback path; a truthy
+    ``user_id`` exercises the per-user ``/Users/{id}/Items/{id}`` endpoint.
+    """
+
+    def _make(*, user_id=None):
+        return JellyfinServer(_jelly_config(auth={"token": "t", "user_id": user_id}))
+
+    return _make
 
 
 class TestConstruction:
@@ -440,11 +454,11 @@ class TestListItems:
             list(jelly.list_items("lib-1"))
 
         assert req.call_count == _LIST_ITEMS_MAX_ATTEMPTS
-        for i, call in enumerate(req.call_args_list, start=1):
-            assert call.kwargs.get("timeout") == _LIST_ITEMS_TIMEOUT_S, (
+        for i, req_call in enumerate(req.call_args_list, start=1):
+            assert req_call.kwargs.get("timeout") == _LIST_ITEMS_TIMEOUT_S, (
                 f"Attempt {i}/{_LIST_ITEMS_MAX_ATTEMPTS} dropped the extended timeout — "
                 f"a transient that recovers on retry-2 would still hit the short timeout. "
-                f"Got kwargs: {call.kwargs!r}"
+                f"Got kwargs: {req_call.kwargs!r}"
             )
 
     def test_first_page_retries_on_transient_timeout_then_succeeds(self, jelly):
@@ -778,6 +792,33 @@ class TestResolveRemotePathToItemIdViaPlugin:
                 f"{req.call_count} requests: {[c.args for c in req.call_args_list]!r}"
             )
             assert req.call_args_list[0].args == ("GET", "/MediaPreviewBridge/ResolvePath")
+
+
+class TestResolveWithMarkersLibraryScope:
+    """Intro & Credits passes the libraries holding the file (audit C MED-1). Jellyfin resolves by exact path, so the
+    preview opt-in never mattered; the answer is the same with or without the scope."""
+
+    PATH = "/tv/Show/Season 01/Show S01E01.mkv"
+
+    @pytest.mark.parametrize("previews", [False, True], ids=["previews-off", "previews-on"])
+    @pytest.mark.parametrize("library_ids", [None, ["2"]], ids=["preview-caller", "markers-caller"])
+    def test_found_whatever_the_preview_opt_in(self, previews, library_ids):
+        server = JellyfinServer(_jelly_config(libraries=[Library("2", "TV Shows", ("/tv",), enabled=previews)]))
+        plugin_resp = MagicMock(status_code=200)
+        plugin_resp.json.return_value = {"itemId": "abc123"}
+        with patch.object(JellyfinServer, "_request", return_value=plugin_resp) as req:
+            assert server.resolve_remote_path_to_item_id(self.PATH, library_ids=library_ids) == "abc123"
+        assert req.call_args.args == ("GET", "/MediaPreviewBridge/ResolvePath")
+        assert req.call_args.kwargs["params"] == {"path": self.PATH}
+
+    def test_positive_cache_is_keyed_by_the_library_scope(self, jelly):
+        with patch.object(JellyfinServer, "_uncached_resolve_remote_path_to_item_id", return_value="abc") as uncached:
+            assert jelly._resolve_one_path(self.PATH, library_ids=["2"]) == "abc"
+            assert jelly._resolve_one_path(self.PATH, library_ids=("2",)) == "abc"
+            assert uncached.call_count == 1
+            assert jelly._resolve_one_path(self.PATH) == "abc"
+            assert jelly._resolve_one_path(self.PATH, library_ids=["1"]) == "abc"
+        assert [c.args for c in uncached.call_args_list] == [(self.PATH,)] * 3
 
 
 class TestResolveOnePathCacheSemantics:
@@ -2677,3 +2718,513 @@ class TestPathMappedItemResolution:
 
         assert item_id == "found"
         assert queried == ["/jf-a/Movies/Foo.mkv", "/jf-b/Movies/Foo.mkv"]
+
+
+@pytest.mark.parametrize(
+    ("user_id", "item_path", "item_params", "series_path", "series_params"),
+    [
+        (
+            None,
+            "/Items",
+            {"Ids": "ep-1", "Fields": "ProviderIds,ParentIndexNumber,IndexNumber,SeriesId"},
+            "/Items",
+            {"Ids": "series-9", "Fields": "ProviderIds"},
+        ),
+        (
+            "u1",
+            "/Users/u1/Items/ep-1",
+            {"Fields": "ProviderIds,ParentIndexNumber,IndexNumber,SeriesId"},
+            "/Users/u1/Items/series-9",
+            {"Fields": "ProviderIds"},
+        ),
+    ],
+)
+def test_get_external_ids_episode_fetches_series_provider_ids(
+    make_server, user_id, item_path, item_params, series_path, series_params
+):
+    """Mocks `_request` (not `_fetch_item_fields`) so both the item AND series
+
+    HTTP calls — path and params — are asserted for both the API-key
+    (no user_id) and user-login (with user_id) auth shapes."""
+    server = make_server(user_id=user_id)
+    episode = {
+        "Type": "Episode",
+        "ParentIndexNumber": 1,
+        "IndexNumber": 2,
+        "SeriesId": "series-9",
+        "ProviderIds": {"Imdb": "tt7777777"},
+    }
+    series = {"Type": "Series", "ProviderIds": {"Tmdb": "60625", "Imdb": "tt2861424", "Tvdb": "275274"}}
+
+    def _resp(body):
+        return MagicMock(status_code=200, json=MagicMock(return_value=body))
+
+    item_body = {"Items": [episode]} if user_id is None else episode
+    series_body = {"Items": [series]} if user_id is None else series
+    server._request = MagicMock(side_effect=[_resp(item_body), _resp(series_body)])
+
+    assert server.get_external_ids("ep-1") == {
+        "kind": "episode",
+        "tmdb": "60625",
+        "imdb": "tt2861424",
+        "tvdb": "275274",
+        "season": 1,
+        "episode": 2,
+    }
+    assert server._request.call_args_list == [
+        call("GET", item_path, params=item_params),
+        call("GET", series_path, params=series_params),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("user_id", "expected_path", "expected_params"),
+    [
+        (None, "/Items", {"Ids": "x", "Fields": "ProviderIds"}),
+        ("u1", "/Users/u1/Items/x", {"Fields": "ProviderIds"}),
+    ],
+)
+def test_fetch_item_fields_endpoint_by_auth_shape(make_server, user_id, expected_path, expected_params):
+    server = make_server(user_id=user_id)
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"Items": [{"Id": "x"}]} if user_id is None else {"Id": "x"}
+    server._request = MagicMock(return_value=resp)
+    assert server._fetch_item_fields("x", "ProviderIds") == {"Id": "x"}
+    server._request.assert_called_once_with("GET", expected_path, params=expected_params)
+
+
+class TestGetExternalIdsEdgeCases:
+    """Cover every branch cell: movie / episode / unknown kind, and failure paths.
+
+    Jellyfin shares this implementation with Emby via ``EmbyApiClient`` — the
+    duplication here (not just in test_servers_emby.py) proves it works
+    through the Jellyfin subclass too, not only via a mocked base class.
+    """
+
+    def test_movie_uses_own_provider_ids_with_single_fetch(self, make_server):
+        server = make_server()
+        movie = {"Type": "Movie", "ProviderIds": {"Tmdb": "862", "Imdb": "tt0114709"}}
+        server._fetch_item_fields = MagicMock(return_value=movie)
+        assert server.get_external_ids("m-1") == {
+            "kind": "movie",
+            "tmdb": "862",
+            "imdb": "tt0114709",
+            "tvdb": None,
+            "season": None,
+            "episode": None,
+        }
+        server._fetch_item_fields.assert_called_once_with("m-1", "ProviderIds,ParentIndexNumber,IndexNumber,SeriesId")
+
+    def test_movie_never_reports_season_episode_even_if_fields_present(self, make_server):
+        server = make_server()
+        movie = {"Type": "Movie", "ParentIndexNumber": 1, "IndexNumber": 2, "ProviderIds": {"Tmdb": "1"}}
+        server._fetch_item_fields = MagicMock(return_value=movie)
+        result = server.get_external_ids("m")
+        assert result["season"] is None
+        assert result["episode"] is None
+
+    def test_movie_never_reports_tvdb_even_if_present(self, make_server):
+        # RULING (fix round 1, LOW): movies never report a tvdb id — different id space.
+        server = make_server()
+        movie = {"Type": "Movie", "ProviderIds": {"Tmdb": "862", "Tvdb": "999"}}
+        server._fetch_item_fields = MagicMock(return_value=movie)
+        result = server.get_external_ids("m")
+        assert result["tvdb"] is None
+        assert result["tmdb"] == "862"
+
+    def test_unknown_type_maps_to_unknown_kind_with_no_ids(self, make_server):
+        # RULING (fix round 1, MED-3): an unrecognised kind reports NO ids at
+        # all, not just kind="unknown" with the item's own ProviderIds leaking through.
+        server = make_server()
+        item = {"Type": "MusicVideo", "ProviderIds": {"Tmdb": "1"}}
+        server._fetch_item_fields = MagicMock(return_value=item)
+        result = server.get_external_ids("x")
+        assert result == {"kind": "unknown", "tmdb": None, "imdb": None, "tvdb": None, "season": None, "episode": None}
+        server._fetch_item_fields.assert_called_once()  # no series re-fetch for an unrecognised kind
+
+    def test_trailer_item_type_not_treated_as_movie(self, make_server):
+        # A server-reported "Trailer" item type must fall to the unknown-kind
+        # default, not be silently added to the Movie/Episode mapping.
+        server = make_server()
+        item = {"Type": "Trailer", "ProviderIds": {"Tmdb": "1"}}
+        server._fetch_item_fields = MagicMock(return_value=item)
+        result = server.get_external_ids("x")
+        assert result["kind"] == "unknown"
+        assert result["tmdb"] is None
+
+    def test_returns_none_when_item_fetch_fails(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(return_value=None)
+        assert server.get_external_ids("x") is None
+
+    def test_series_id_missing_keeps_season_episode_no_ids(self, make_server):
+        # RULING (fix round 1, HIGH-1): no SeriesId at all must not fall back
+        # to the episode's own ProviderIds, and must not attempt a series re-fetch.
+        server = make_server()
+        episode = {
+            "Type": "Episode",
+            "ParentIndexNumber": 1,
+            "IndexNumber": 1,
+            "ProviderIds": {"Imdb": "tt1111111"},
+        }
+        server._fetch_item_fields = MagicMock(return_value=episode)
+        result = server.get_external_ids("ep")
+        assert result == {"kind": "episode", "tmdb": None, "imdb": None, "tvdb": None, "season": 1, "episode": 1}
+        server._fetch_item_fields.assert_called_once()
+
+    def test_series_fetch_failure_keeps_season_episode_no_ids(self, make_server):
+        # RULING (fix round 1, HIGH-1, lab-verified on Jellyfin): a failed/empty
+        # series re-fetch must NEVER fall back to the episode's own (wrong,
+        # per-episode) ProviderIds — that leaks an episode id into the series-id
+        # slot. kind/season/episode are still reported; ids stay None.
+        server = make_server()
+        episode = {
+            "Type": "Episode",
+            "ParentIndexNumber": 1,
+            "IndexNumber": 1,
+            "SeriesId": "s1",
+            "ProviderIds": {"Imdb": "tt1111111"},
+        }
+        server._fetch_item_fields = MagicMock(side_effect=[episode, None])
+        result = server.get_external_ids("ep")
+        assert result == {"kind": "episode", "tmdb": None, "imdb": None, "tvdb": None, "season": 1, "episode": 1}
+
+    def test_season_episode_always_read_from_the_episode_item_not_the_series(self, make_server):
+        # Season/episode numbers must come from the episode's own fields even
+        # if the series dict happens to define same-named fields too.
+        server = make_server()
+        episode = {"Type": "Episode", "ParentIndexNumber": 1, "IndexNumber": 2, "SeriesId": "s1", "ProviderIds": {}}
+        series = {"Type": "Series", "ParentIndexNumber": 99, "IndexNumber": 99, "ProviderIds": {"Tmdb": "1"}}
+        server._fetch_item_fields = MagicMock(side_effect=[episode, series])
+        result = server.get_external_ids("ep")
+        assert result["season"] == 1
+        assert result["episode"] == 2
+
+    def test_empty_provider_value_treated_as_missing(self, make_server):
+        server = make_server()
+        movie = {"Type": "Movie", "ProviderIds": {"Tmdb": "", "Imdb": "tt1"}}
+        server._fetch_item_fields = MagicMock(return_value=movie)
+        result = server.get_external_ids("m")
+        assert result["tmdb"] is None
+        assert result["imdb"] == "tt1"
+
+
+@pytest.mark.parametrize(
+    ("user_id", "expected_path", "expected_params"),
+    [
+        (None, "/Items", {"Ids": "../../System/Configuration?x=", "Fields": "Path,MediaSources"}),
+        ("u1", "/Users/u1/Items/..%2F..%2FSystem%2FConfiguration%3Fx%3D", {"Fields": "Path,MediaSources"}),
+    ],
+)
+def test_item_lookup_quotes_the_item_id_in_the_url_path(make_server, user_id, expected_path, expected_params):
+    # An item id from an API caller must never change which Jellyfin endpoint the app's credentials reach.
+    server = make_server(user_id=user_id)
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"Items": [{"Path": "/m.mkv"}]} if user_id is None else {"Path": "/m.mkv"}
+    server._request = MagicMock(return_value=resp)
+    assert server.resolve_item_to_remote_path("../../System/Configuration?x=") == "/m.mkv"
+    server._request.assert_called_once_with("GET", expected_path, params=expected_params)
+
+
+class TestFetchItemFieldsEdgeCases:
+    @pytest.mark.parametrize("user_id", [None, "u1"])
+    def test_returns_none_on_http_error(self, make_server, user_id):
+        # Parametrised over both auth shapes: raise_for_status is called
+        # separately on each branch's response, so a mutant that drops it
+        # from only one branch must still be caught.
+        server = make_server(user_id=user_id)
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = requests.HTTPError("404")
+        # A truthy, dict-shaped body proves the None comes from raise_for_status
+        # being honoured, not just from an unconfigured mock falling through
+        # the "not a dict" guard.
+        resp.json.return_value = {"Id": "x"} if user_id else {"Items": [{"Id": "x"}]}
+        server._request = MagicMock(return_value=resp)
+        assert server._fetch_item_fields("x", "ProviderIds") is None
+
+    def test_empty_items_list_returns_none(self, make_server):
+        server = make_server(user_id=None)
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"Items": []}
+        server._request = MagicMock(return_value=resp)
+        assert server._fetch_item_fields("x", "ProviderIds") is None
+
+    def test_non_dict_response_returns_none(self, make_server):
+        server = make_server(user_id="u1")
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = ["not", "a", "dict"]
+        server._request = MagicMock(return_value=resp)
+        assert server._fetch_item_fields("x", "ProviderIds") is None
+
+
+def _bridge_resp(status, body=None, *, json_error=False):
+    resp = MagicMock(status_code=status)
+    if json_error:
+        resp.json.side_effect = ValueError("no JSON")
+    else:
+        resp.json.return_value = body
+    return resp
+
+
+class TestBridgeInfo:
+    """``get_bridge_info``: installed/outdated vs not installed vs unreachable (drives the markers capability)."""
+
+    def test_ping_ok_reports_version_and_features(self, make_server):
+        server = make_server()
+        server._request = MagicMock(
+            return_value=_bridge_resp(
+                200,
+                {
+                    "plugin": "MediaPreviewBridge",
+                    "version": "10.11.1.0",
+                    "ok": True,
+                    "features": ["trickplay", "markers"],
+                },
+            )
+        )
+        assert server.get_bridge_info() == {
+            "installed": True,
+            "version": "10.11.1.0",
+            "features": ["trickplay", "markers"],
+        }
+        server._request.assert_called_once_with("GET", "/MediaPreviewBridge/Ping", timeout=10)
+
+    def test_old_plugin_without_features_reports_empty_features(self, make_server):
+        server = make_server()
+        server._request = MagicMock(return_value=_bridge_resp(200, {"version": "10.11.0.3", "ok": True}))
+        assert server.get_bridge_info() == {"installed": True, "version": "10.11.0.3", "features": []}
+
+    @pytest.mark.parametrize(
+        ("resp", "expected_installed"),
+        [
+            pytest.param(_bridge_resp(404, None, json_error=True), False, id="404-no-plugin"),
+            pytest.param(_bridge_resp(200, None, json_error=True), False, id="200-not-json"),
+            pytest.param(_bridge_resp(200, ["not", "a", "dict"]), False, id="200-json-list"),
+            pytest.param(
+                _bridge_resp(200, {"version": "x", "ok": False, "features": ["markers"]}), False, id="ok-false"
+            ),
+        ],
+    )
+    def test_not_installed_shapes(self, make_server, resp, expected_installed):
+        server = make_server()
+        server._request = MagicMock(return_value=resp)
+        info = server.get_bridge_info()
+        assert info is not None
+        assert info["installed"] is expected_installed
+
+    def test_features_not_a_list_is_empty(self, make_server):
+        server = make_server()
+        server._request = MagicMock(return_value=_bridge_resp(200, {"version": "1", "ok": True, "features": "markers"}))
+        assert server.get_bridge_info()["features"] == []
+
+    @pytest.mark.parametrize(
+        ("side_effect", "status"),
+        [
+            pytest.param(requests.ConnectionError("refused"), None, id="connection-error"),
+            pytest.param(requests.Timeout("slow"), None, id="timeout"),
+            # Jellyfin answers 503 to every route while it starts up: that's "can't reach", not "no plugin".
+            pytest.param(None, 503, id="503-starting-up"),
+            pytest.param(None, 500, id="500"),
+        ],
+    )
+    def test_unreachable_is_none(self, make_server, side_effect, status):
+        server = make_server()
+        server._request = MagicMock(side_effect=side_effect, return_value=_bridge_resp(status, None, json_error=True))
+        assert server.get_bridge_info() is None
+
+
+class TestBridgeMarkers:
+    """Marker push/read/delete against the Bridge plugin, and the core /MediaSegments read."""
+
+    def test_get_bridge_markers_returns_stored_segments(self, make_server):
+        server = make_server()
+        body = {
+            "itemId": "abc",
+            "fileSize": 123,
+            "stale": False,
+            "segments": [{"type": "Intro", "startTicks": 1, "endTicks": 2}, "junk"],
+        }
+        server._request = MagicMock(return_value=_bridge_resp(200, body))
+        assert server.get_bridge_markers("abc") == [{"type": "Intro", "startTicks": 1, "endTicks": 2}]
+        server._request.assert_called_once_with("GET", "/MediaPreviewBridge/Markers/abc")
+
+    def test_get_bridge_markers_route_missing_means_nothing_stored(self, make_server):
+        # A plugin without the markers feature (or none at all) can't have stored anything for us.
+        server = make_server()
+        server._request = MagicMock(return_value=_bridge_resp(404, None, json_error=True))
+        assert server.get_bridge_markers("abc") == []
+
+    @pytest.mark.parametrize(
+        ("side_effect", "resp"),
+        [
+            pytest.param(None, _bridge_resp(404, {"error": "item not found"}), id="item-not-found"),
+            pytest.param(None, _bridge_resp(500, None, json_error=True), id="500"),
+            pytest.param(None, _bridge_resp(401, None, json_error=True), id="401"),
+            pytest.param(None, _bridge_resp(200, None, json_error=True), id="200-not-json"),
+            pytest.param(None, _bridge_resp(200, ["x"]), id="200-json-list"),
+            pytest.param(None, _bridge_resp(200, {"segments": "x"}), id="segments-not-a-list"),
+            pytest.param(requests.ConnectionError("x"), None, id="connection-error"),
+        ],
+    )
+    def test_get_bridge_markers_unknown_is_none(self, make_server, side_effect, resp):
+        server = make_server()
+        server._request = MagicMock(side_effect=side_effect, return_value=resp)
+        assert server.get_bridge_markers("abc") is None
+        assert server.get_bridge_marker_state("abc") is None
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            pytest.param(
+                {"itemId": "abc", "fileSize": 655778272, "stale": True, "segments": [{"type": "Intro"}, 3]},
+                {"segments": [{"type": "Intro"}], "fileSize": 655778272, "stale": True},
+                id="stale-with-size",
+            ),
+            # Jellyfin drops null values from JSON, so a push without a size has no fileSize key at all.
+            pytest.param(
+                {"itemId": "abc", "stale": False, "segments": []},
+                {"segments": [], "fileSize": None, "stale": False},
+                id="no-size",
+            ),
+            pytest.param(
+                {"segments": [], "fileSize": "12", "stale": "true"},
+                {"segments": [], "fileSize": None, "stale": False},
+                id="odd-types",
+            ),
+        ],
+    )
+    def test_get_bridge_marker_state(self, make_server, body, expected):
+        server = make_server()
+        server._request = MagicMock(return_value=_bridge_resp(200, body))
+        assert server.get_bridge_marker_state("abc") == expected
+        server._request.assert_called_once_with("GET", "/MediaPreviewBridge/Markers/abc")
+
+    def test_get_bridge_marker_state_route_missing_is_empty(self, make_server):
+        server = make_server()
+        server._request = MagicMock(return_value=_bridge_resp(404, None, json_error=True))
+        assert server.get_bridge_marker_state("abc") == {"segments": [], "fileSize": None, "stale": False}
+
+    def test_get_bridge_markers_wraps_state(self, make_server):
+        server = make_server()
+        server.get_bridge_marker_state = MagicMock(
+            return_value={"segments": [{"type": "Outro"}], "fileSize": 1, "stale": True}
+        )
+        assert server.get_bridge_markers("abc") == [{"type": "Outro"}]
+        server.get_bridge_marker_state.assert_called_once_with("abc")
+
+    def test_put_bridge_markers_sends_segments_and_file_size(self, make_server):
+        server = make_server()
+        ok = MagicMock(status_code=200)
+        server._request = MagicMock(return_value=ok)
+        segments = [{"type": "Intro", "startTicks": 1, "endTicks": 2}]
+        assert server.put_bridge_markers("abc", segments, file_size=987654321) is ok
+        server._request.assert_called_once_with(
+            "POST", "/MediaPreviewBridge/Markers/abc", json_body={"segments": segments, "fileSize": 987654321}
+        )
+
+    def test_put_bridge_markers_omits_unknown_file_size(self, make_server):
+        server = make_server()
+        server._request = MagicMock(return_value=MagicMock(status_code=200))
+        segments = [{"type": "Outro", "startTicks": 3, "endTicks": 4}]
+        server.put_bridge_markers("abc", segments)
+        server._request.assert_called_once_with(
+            "POST", "/MediaPreviewBridge/Markers/abc", json_body={"segments": segments}
+        )
+
+    def test_delete_bridge_markers(self, make_server):
+        server = make_server()
+        gone = MagicMock(status_code=204)
+        server._request = MagicMock(return_value=gone)
+        assert server.delete_bridge_markers("abc") is gone
+        server._request.assert_called_once_with("DELETE", "/MediaPreviewBridge/Markers/abc")
+
+    def test_get_media_segments(self, make_server):
+        server = make_server()
+        body = {"Items": [{"Type": "Intro", "StartTicks": 1, "EndTicks": 2}, 7], "TotalRecordCount": 1}
+        server._request = MagicMock(return_value=_bridge_resp(200, body))
+        assert server.get_media_segments("abc") == [{"Type": "Intro", "StartTicks": 1, "EndTicks": 2}]
+        server._request.assert_called_once_with("GET", "/MediaSegments/abc")
+
+    @pytest.mark.parametrize(
+        ("side_effect", "resp"),
+        [
+            pytest.param(None, _bridge_resp(404, None, json_error=True), id="404"),
+            pytest.param(None, _bridge_resp(200, None, json_error=True), id="200-not-json"),
+            pytest.param(None, _bridge_resp(200, ["x"]), id="200-json-list"),
+            pytest.param(None, _bridge_resp(200, {"Items": {}}), id="items-not-a-list"),
+            pytest.param(requests.Timeout("x"), None, id="timeout"),
+        ],
+    )
+    def test_get_media_segments_unknown_is_none(self, make_server, side_effect, resp):
+        server = make_server()
+        server._request = MagicMock(side_effect=side_effect, return_value=resp)
+        assert server.get_media_segments("abc") is None
+
+    @pytest.mark.parametrize(
+        ("side_effect", "resp", "raises"),
+        [
+            pytest.param(requests.Timeout("x"), None, True, id="timeout"),
+            pytest.param(requests.ConnectionError("x"), None, True, id="refused"),
+            pytest.param(None, _bridge_resp(404, None, json_error=True), False, id="404"),
+            pytest.param(None, _bridge_resp(200, None, json_error=True), False, id="200-not-json"),
+        ],
+    )
+    def test_raise_no_answer_raises_only_when_jellyfin_gave_no_http_answer(
+        self, make_server, side_effect, resp, raises
+    ):
+        server = make_server()
+        server._request = MagicMock(side_effect=side_effect, return_value=resp)
+        if raises:
+            with pytest.raises(type(side_effect)):
+                server.get_media_segments("abc", raise_no_answer=True)
+        else:
+            assert server.get_media_segments("abc", raise_no_answer=True) is None
+
+
+class TestPluginNames:
+    """``get_plugin_names`` on Jellyfin (``GET /Plugins`` needs an administrator there)."""
+
+    def test_lists_the_installed_plugin_names(self, make_server):
+        server = make_server()
+        body = [{"Name": "Intro Skipper", "Version": "1.10.11.4"}, {"Name": "TheIntroDB", "Version": "1.1.0.1"}]
+        server._request = MagicMock(return_value=_bridge_resp(200, body))
+        assert server.get_plugin_names() == ["Intro Skipper", "TheIntroDB"]
+        server._request.assert_called_once_with("GET", "/Plugins", timeout=10)
+
+    @pytest.mark.parametrize(
+        ("side_effect", "resp"),
+        [
+            pytest.param(None, _bridge_resp(403, None, json_error=True), id="403-not-admin"),
+            pytest.param(None, _bridge_resp(503, None, json_error=True), id="503-starting"),
+            pytest.param(requests.ConnectionError("x"), None, id="unreachable"),
+        ],
+    )
+    def test_unknown_is_none(self, make_server, side_effect, resp):
+        server = make_server()
+        server._request = MagicMock(side_effect=side_effect, return_value=resp)
+        assert server.get_plugin_names() is None
+
+
+class TestBridgeAccess:
+    """Markers capability input: whether our credentials may use the admin-only Bridge markers routes."""
+
+    @pytest.mark.parametrize(
+        ("side_effect", "resp", "expected"),
+        [
+            pytest.param(None, _bridge_resp(404, {"error": "item not found"}), "ok", id="authorised-404"),
+            pytest.param(None, _bridge_resp(200, {"segments": []}), "ok", id="authorised-200"),
+            pytest.param(None, _bridge_resp(403, None, json_error=True), "forbidden", id="403-not-admin"),
+            pytest.param(None, _bridge_resp(401, None, json_error=True), "unauthorized", id="401-bad-credentials"),
+            pytest.param(None, _bridge_resp(404, None, json_error=True), None, id="bare-404-no-route"),
+            pytest.param(None, _bridge_resp(404, {"title": "Not Found"}), None, id="404-problem-details"),
+            pytest.param(None, _bridge_resp(500, None, json_error=True), None, id="500"),
+            pytest.param(requests.Timeout("x"), None, None, id="timeout"),
+        ],
+    )
+    def test_get_bridge_markers_access(self, make_server, side_effect, resp, expected):
+        server = make_server()
+        server._request = MagicMock(side_effect=side_effect, return_value=resp)
+        assert server.get_bridge_markers_access() == expected
+        server._request.assert_called_once_with(
+            "GET", "/MediaPreviewBridge/Markers/ffffffffffffffffffffffffffffffff", timeout=10
+        )

@@ -45,7 +45,7 @@ def app_js() -> str:
 class TestSocketReconnectNullGuards:
     def test_update_job_queue_guards_missing_tbody(self, app_js):
         """``updateJobQueue`` must early-return when ``#jobQueue`` is absent."""
-        snippet = app_js.split("function updateJobQueue()", 1)[1].split("\n}", 1)[0]
+        snippet = app_js.split("function updateJobQueue(", 1)[1].split("\n}", 1)[0]
         assert "if (!tbody)" in snippet, (
             "updateJobQueue must short-circuit when document.getElementById('jobQueue') is null. "
             "Without the guard, SocketIO reconnect from /settings or /servers crashes with "

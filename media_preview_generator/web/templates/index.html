@@ -319,6 +319,31 @@
             <div class="modal-body">
                 <form id="newJobForm">
                     <div class="mb-3">
+                        <label class="form-label">Job type</label>
+                        <div class="d-flex flex-wrap gap-3">
+                            <div class="form-check mb-0">
+                                <input class="form-check-input" type="radio" name="jobKind" id="jobKindPreviews" value="previews" checked onchange="onJobKindChange()">
+                                <label class="form-check-label" for="jobKindPreviews">Previews</label>
+                            </div>
+                            <div class="form-check mb-0 d-flex align-items-center">
+                                <input class="form-check-input" type="radio" name="jobKind" id="jobKindMarkers" value="intro_credits" onchange="onJobKindChange()">
+                                <label class="form-check-label ms-1" for="jobKindMarkers">Intro &amp; Credits</label>
+                                <button type="button" class="info-icon ms-1" id="jobKindMarkersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds Skip Intro / Skip Credits markers for the chosen libraries and sends them to every server with Intro &amp; Credits turned on. Runs at low priority on the same workers as previews."><i class="bi bi-info-circle"></i></button>
+                            </div>
+                        </div>
+                        <div class="mt-2 ms-4" id="jobMarkersModeGroup" hidden><div class="d-flex flex-wrap gap-3">
+                            <div class="form-check mb-0">
+                                <input class="form-check-input" type="radio" name="jobMarkersMode" id="jobMarkersModeFind" value="find" checked onchange="_showJobKindControls()">
+                                <label class="form-check-label" for="jobMarkersModeFind">Find markers</label>
+                            </div>
+                            <div class="form-check mb-0 d-flex align-items-center">
+                                <input class="form-check-input" type="radio" name="jobMarkersMode" id="jobMarkersModeCheckServers" value="check_servers" onchange="_showJobKindControls()">
+                                <label class="form-check-label ms-1" for="jobMarkersModeCheckServers">Check servers</label>
+                                <button type="button" class="info-icon ms-1" id="jobMarkersCheckServersInfo" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Checks that every server with Intro &amp; Credits on still shows the markers this app sent, and sends them again where they're missing or changed (unless that server is set to keep its own). Covers all servers and libraries."><i class="bi bi-info-circle"></i></button>
+                            </div>
+                        </div></div>
+                    </div>
+                    <div class="mb-3" id="jobLibrariesGroup">
                         <label class="form-label">Run against these libraries
                             <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Per-run scope — picks which libraries this specific job will process. Independent of the server-level 'Libraries to monitor' setting (Servers → Edit → Libraries), which gates everything an installed server is allowed to touch."><i class="bi bi-info-circle"></i></button>
                         </label>
@@ -345,7 +370,14 @@
                              a multi-server fan-out message instead. -->
                         <div id="jobScopeBadge" class="mt-2 small"></div>
                     </div>
-                    <div class="mb-3">
+                    <div class="mb-3" id="jobMarkersForceGroup" hidden>
+                        <div class="form-check d-flex align-items-center">
+                            <input class="form-check-input" type="checkbox" id="jobMarkersForce">
+                            <label class="form-check-label ms-1" for="jobMarkersForce">Re-check files already done</label>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Looks every file up and detects it again, even files already checked. Leave it off to skip files that are already done."><i class="bi bi-info-circle"></i></button>
+                        </div>
+                    </div>
+                    <div class="mb-3" id="jobProcessingModeGroup">
                         <label class="form-label">Processing Mode
                             <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Missing only: skip files that already have a preview. Regenerate all: re-process every file even if it already has one (use after changing thumbnail quality)."><i class="bi bi-info-circle"></i></button>
                         </label>
@@ -372,7 +404,7 @@
                             <option value="3">Low</option>
                         </select>
                     </div>
-                    <div class="mb-3">
+                    <div class="mb-3" id="jobSortByGroup">
                         <label for="jobSortBy" class="form-label">Processing Order
                             <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="What order workers pick files in. Default = server order. Random is useful when your media is spread across multiple disks, so workers don't all pile onto one disk."><i class="bi bi-info-circle"></i></button>
                         </label>
@@ -600,15 +632,22 @@
                                     style="width: auto;" onchange="onFileOutcomeFilterChanged(this)"
                                     title="Filter by outcome">
                                 <option value="">All outcomes</option>
-                                <option value="generated">Generated</option>
-                                <option value="skipped_bif_exists">Already existed</option>
-                                <option value="skipped_not_indexed">Not indexed</option>
+                                <option value="generated" data-kind="previews">Generated</option>
+                                <option value="skipped_bif_exists" data-kind="previews">Already existed</option>
+                                <option value="skipped_not_indexed" data-kind="previews">Not indexed</option>
+                                <option value="markers_published" data-kind="intro_credits">Markers written</option>
+                                <option value="markers_up_to_date" data-kind="intro_credits">Up to date</option>
+                                <option value="markers_needs_review" data-kind="intro_credits">Needs review</option>
+                                <option value="markers_waiting" data-kind="intro_credits">Waiting</option>
+                                <option value="markers_skipped" data-kind="intro_credits">Skipped</option>
+                                <option value="markers_none" data-kind="intro_credits">No markers found</option>
+                                <option value="markers_no_owners" data-kind="intro_credits">No server with Intro &amp; Credits on</option>
                                 <option value="failed">Failed</option>
-                                <option value="no_media_parts">No media parts</option>
-                                <option value="skipped_excluded">Excluded</option>
+                                <option value="no_media_parts" data-kind="previews">No media parts</option>
+                                <option value="skipped_excluded" data-kind="previews">Excluded</option>
                                 <option value="skipped_file_not_found">File not found</option>
-                                <option value="skipped_invalid_hash">Invalid hash</option>
-                                <option value="unresolved_plex">Unresolved</option>
+                                <option value="skipped_invalid_hash" data-kind="previews">Invalid hash</option>
+                                <option value="unresolved_plex" data-kind="previews">Unresolved</option>
                             </select>
                             <div class="input-group input-group-sm" style="max-width: 350px;">
                                 <span class="input-group-text"><i class="bi bi-search"></i></span>

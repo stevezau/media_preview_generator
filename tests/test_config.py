@@ -297,6 +297,53 @@ class TestExpandPathMappingCandidates:
         assert "F:/Videos/TV Shows/Show/S01E01.mkv" in candidates
         assert "/data/tv/Show/S01E01.mkv" in candidates
 
+    @pytest.mark.parametrize(
+        "row",
+        [
+            pytest.param({"remote_prefix": "/mnt", "local_prefix": "/data"}, id="remote_prefix_only"),
+            pytest.param({"plex_prefix": "/mnt", "local_prefix": "/data"}, id="plex_prefix_only"),
+            pytest.param(
+                {"remote_prefix": "/mnt", "plex_prefix": "/stale", "local_prefix": "/data"},
+                id="both_remote_wins",
+            ),
+        ],
+    )
+    def test_expand_candidates_reads_remote_prefix_or_legacy_plex_prefix(self, row):
+        """The server-side prefix key can be ``remote_prefix`` (documented) or legacy ``plex_prefix``.
+
+        Per-server rows reach this helper raw from settings.json, so a
+        ``remote_prefix``-only row used to produce no mapped candidate and
+        item lookups silently missed.
+        """
+        assert expand_path_mapping_candidates("/data/x.mkv", [row]) == ["/data/x.mkv", "/mnt/x.mkv"]
+        assert expand_path_mapping_candidates("/mnt/x.mkv", [row]) == ["/mnt/x.mkv", "/data/x.mkv"]
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            pytest.param(
+                {"remote_prefix": "/mnt", "local_prefix": "/data", "webhook_prefixes": ["/hook"]},
+                id="remote_prefix_only",
+            ),
+            pytest.param(
+                {"plex_prefix": "/mnt", "local_prefix": "/data", "webhook_prefixes": ["/hook"]},
+                id="plex_prefix_only",
+            ),
+            pytest.param(
+                {
+                    "remote_prefix": "/mnt",
+                    "plex_prefix": "/stale",
+                    "local_prefix": "/data",
+                    "webhook_prefixes": ["/hook"],
+                },
+                id="both_remote_wins",
+            ),
+        ],
+    )
+    def test_expand_candidates_webhook_alias_fans_out_to_remote_prefix(self, row):
+        """A webhook alias expands to the local form and the server-side form from either key."""
+        assert expand_path_mapping_candidates("/hook/x.mkv", [row]) == ["/hook/x.mkv", "/data/x.mkv", "/mnt/x.mkv"]
+
 
 class TestNormalizePathMappings:
     """Test path_mappings normalization from settings (new format and legacy)."""
@@ -650,6 +697,23 @@ class TestPathToCanonicalLocal:
             }
         ]
         assert path_to_canonical_local("F:\\Videos\\Movies\\film.mkv", mappings) == "/data/movies/film.mkv"
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            pytest.param({"remote_prefix": "/mnt", "local_prefix": "/data"}, id="remote_prefix_only"),
+            pytest.param({"plex_prefix": "/mnt", "local_prefix": "/data"}, id="plex_prefix_only"),
+            pytest.param(
+                {"remote_prefix": "/mnt", "plex_prefix": "/stale", "local_prefix": "/data"},
+                id="both_remote_wins",
+            ),
+        ],
+    )
+    def test_server_path_maps_to_local_when_row_uses_either_prefix_key(self, row):
+        """PlexServer hands raw per-server rows to this helper, so it must read ``remote_prefix`` too."""
+        assert path_to_canonical_local("/mnt/Movies/foo.mkv", [row]) == "/data/Movies/foo.mkv"
+        # No cell maps /stale: the "both" row's legacy value is shadowed by remote_prefix.
+        assert path_to_canonical_local("/stale/Movies/foo.mkv", [row]) == "/stale/Movies/foo.mkv"
 
 
 class TestLocalPathToWebhookAliases:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import requests
@@ -53,6 +53,20 @@ def _emby_config(
 @pytest.fixture
 def emby():
     return EmbyServer(_emby_config())
+
+
+@pytest.fixture
+def make_server():
+    """Build an :class:`EmbyServer` with an explicit ``token``/``user_id`` auth shape.
+
+    ``user_id=None`` exercises the ``/Items?Ids=`` fallback path; a truthy
+    ``user_id`` exercises the per-user ``/Users/{id}/Items/{id}`` endpoint.
+    """
+
+    def _make(*, user_id=None):
+        return EmbyServer(_emby_config(auth={"token": "t", "user_id": user_id}))
+
+    return _make
 
 
 class TestConstruction:
@@ -573,6 +587,41 @@ class TestResolveItemToRemotePath:
             # Verify the call hit the per-user endpoint.
             call_args = req.call_args
             assert call_args.args[1] == "/Users/u-1/Items/42", call_args
+
+
+@pytest.mark.parametrize(
+    ("user_id", "expected_path", "expected_params"),
+    [
+        (None, "/Items", {"Ids": "1/../../System", "Fields": "ProviderIds"}),
+        ("u-1", "/Users/u-1/Items/1%2F..%2F..%2FSystem", {"Fields": "ProviderIds"}),
+    ],
+)
+def test_item_field_lookup_quotes_the_item_id_in_the_url_path(make_server, user_id, expected_path, expected_params):
+    server = make_server(user_id=user_id)
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"Items": [{"Id": "1"}]} if user_id is None else {"Id": "1"}
+    server._request = MagicMock(return_value=resp)
+    assert server._fetch_item_fields("1/../../System", "ProviderIds") == {"Id": "1"}
+    server._request.assert_called_once_with("GET", expected_path, params=expected_params)
+
+
+class TestResolveWithMarkersLibraryScope:
+    """Intro & Credits passes the libraries holding the file (audit C MED-1). Emby resolves by exact path, so the
+    preview opt-in never mattered; the answer is the same with or without the scope."""
+
+    PATH = "/tv/Show/Season 01/Show S01E01.mkv"
+
+    @pytest.mark.parametrize("previews", [False, True], ids=["previews-off", "previews-on"])
+    @pytest.mark.parametrize("library_ids", [None, ["2"]], ids=["preview-caller", "markers-caller"])
+    def test_found_whatever_the_preview_opt_in(self, previews, library_ids):
+        server = EmbyServer(_emby_config(libraries=[Library("2", "TV Shows", ("/tv",), enabled=previews)]))
+        path_resp = MagicMock()
+        path_resp.json.return_value = {"Items": [{"Id": "1234", "Path": self.PATH}]}
+        path_resp.raise_for_status.return_value = None
+        with patch.object(EmbyServer, "_request", return_value=path_resp) as req:
+            assert server.resolve_remote_path_to_item_id(self.PATH, library_ids=library_ids) == "1234"
+        assert req.call_args.args == ("GET", "/Items")
+        assert req.call_args.kwargs["params"]["Path"] == self.PATH
 
 
 class TestResolveRemotePathToItemIdViaExactPath:
@@ -1729,3 +1778,363 @@ class TestRegistryWiring:
         cfg = registry.get_config("emby-1")
         assert cfg is not None
         assert cfg.url == "http://emby:8096"
+
+
+@pytest.mark.parametrize(
+    ("user_id", "item_path", "item_params", "series_path", "series_params"),
+    [
+        (
+            None,
+            "/Items",
+            {"Ids": "ep-1", "Fields": "ProviderIds,ParentIndexNumber,IndexNumber,SeriesId"},
+            "/Items",
+            {"Ids": "series-9", "Fields": "ProviderIds"},
+        ),
+        (
+            "u1",
+            "/Users/u1/Items/ep-1",
+            {"Fields": "ProviderIds,ParentIndexNumber,IndexNumber,SeriesId"},
+            "/Users/u1/Items/series-9",
+            {"Fields": "ProviderIds"},
+        ),
+    ],
+)
+def test_get_external_ids_episode_fetches_series_provider_ids(
+    make_server, user_id, item_path, item_params, series_path, series_params
+):
+    """Mocks `_request` (not `_fetch_item_fields`) so both the item AND series
+
+    HTTP calls — path and params — are asserted for both the API-key
+    (no user_id) and user-login (with user_id) auth shapes."""
+    server = make_server(user_id=user_id)
+    episode = {
+        "Type": "Episode",
+        "ParentIndexNumber": 1,
+        "IndexNumber": 2,
+        "SeriesId": "series-9",
+        "ProviderIds": {"Imdb": "tt7777777"},
+    }
+    series = {"Type": "Series", "ProviderIds": {"Tmdb": "60625", "Imdb": "tt2861424", "Tvdb": "275274"}}
+
+    def _resp(body):
+        return MagicMock(status_code=200, json=MagicMock(return_value=body))
+
+    item_body = {"Items": [episode]} if user_id is None else episode
+    series_body = {"Items": [series]} if user_id is None else series
+    server._request = MagicMock(side_effect=[_resp(item_body), _resp(series_body)])
+
+    assert server.get_external_ids("ep-1") == {
+        "kind": "episode",
+        "tmdb": "60625",
+        "imdb": "tt2861424",
+        "tvdb": "275274",
+        "season": 1,
+        "episode": 2,
+    }
+    assert server._request.call_args_list == [
+        call("GET", item_path, params=item_params),
+        call("GET", series_path, params=series_params),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("user_id", "expected_path", "expected_params"),
+    [
+        (None, "/Items", {"Ids": "x", "Fields": "ProviderIds"}),
+        ("u1", "/Users/u1/Items/x", {"Fields": "ProviderIds"}),
+    ],
+)
+def test_fetch_item_fields_endpoint_by_auth_shape(make_server, user_id, expected_path, expected_params):
+    server = make_server(user_id=user_id)
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"Items": [{"Id": "x"}]} if user_id is None else {"Id": "x"}
+    server._request = MagicMock(return_value=resp)
+    assert server._fetch_item_fields("x", "ProviderIds") == {"Id": "x"}
+    server._request.assert_called_once_with("GET", expected_path, params=expected_params)
+
+
+class TestGetExternalIdsEdgeCases:
+    """Cover every branch cell: movie / episode / unknown kind, and failure paths."""
+
+    def test_movie_uses_own_provider_ids_with_single_fetch(self, make_server):
+        server = make_server()
+        movie = {"Type": "Movie", "ProviderIds": {"Tmdb": "862", "Imdb": "tt0114709"}}
+        server._fetch_item_fields = MagicMock(return_value=movie)
+        assert server.get_external_ids("m-1") == {
+            "kind": "movie",
+            "tmdb": "862",
+            "imdb": "tt0114709",
+            "tvdb": None,
+            "season": None,
+            "episode": None,
+        }
+        server._fetch_item_fields.assert_called_once_with("m-1", "ProviderIds,ParentIndexNumber,IndexNumber,SeriesId")
+
+    def test_movie_never_reports_season_episode_even_if_fields_present(self, make_server):
+        server = make_server()
+        movie = {"Type": "Movie", "ParentIndexNumber": 1, "IndexNumber": 2, "ProviderIds": {"Tmdb": "1"}}
+        server._fetch_item_fields = MagicMock(return_value=movie)
+        result = server.get_external_ids("m")
+        assert result["season"] is None
+        assert result["episode"] is None
+
+    def test_movie_never_reports_tvdb_even_if_present(self, make_server):
+        # RULING (fix round 1, LOW): movies never report a tvdb id — different id space.
+        server = make_server()
+        movie = {"Type": "Movie", "ProviderIds": {"Tmdb": "862", "Tvdb": "999"}}
+        server._fetch_item_fields = MagicMock(return_value=movie)
+        result = server.get_external_ids("m")
+        assert result["tvdb"] is None
+        assert result["tmdb"] == "862"
+
+    def test_unknown_type_maps_to_unknown_kind_with_no_ids(self, make_server):
+        # RULING (fix round 1, MED-3): an unrecognised kind reports NO ids at
+        # all, not just kind="unknown" with the item's own ProviderIds leaking through.
+        server = make_server()
+        item = {"Type": "MusicVideo", "ProviderIds": {"Tmdb": "1"}}
+        server._fetch_item_fields = MagicMock(return_value=item)
+        result = server.get_external_ids("x")
+        assert result == {"kind": "unknown", "tmdb": None, "imdb": None, "tvdb": None, "season": None, "episode": None}
+        server._fetch_item_fields.assert_called_once()  # no series re-fetch for an unrecognised kind
+
+    def test_trailer_item_type_not_treated_as_movie(self, make_server):
+        # A server-reported "Trailer" item type must fall to the unknown-kind
+        # default, not be silently added to the Movie/Episode mapping.
+        server = make_server()
+        item = {"Type": "Trailer", "ProviderIds": {"Tmdb": "1"}}
+        server._fetch_item_fields = MagicMock(return_value=item)
+        result = server.get_external_ids("x")
+        assert result["kind"] == "unknown"
+        assert result["tmdb"] is None
+
+    def test_returns_none_when_item_fetch_fails(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(return_value=None)
+        assert server.get_external_ids("x") is None
+
+    def test_series_id_missing_keeps_season_episode_no_ids(self, make_server):
+        # RULING (fix round 1, HIGH-1): no SeriesId at all must not fall back
+        # to the episode's own ProviderIds, and must not attempt a series re-fetch.
+        server = make_server()
+        episode = {
+            "Type": "Episode",
+            "ParentIndexNumber": 1,
+            "IndexNumber": 1,
+            "ProviderIds": {"Imdb": "tt1111111"},
+        }
+        server._fetch_item_fields = MagicMock(return_value=episode)
+        result = server.get_external_ids("ep")
+        assert result == {"kind": "episode", "tmdb": None, "imdb": None, "tvdb": None, "season": 1, "episode": 1}
+        server._fetch_item_fields.assert_called_once()
+
+    def test_series_fetch_failure_keeps_season_episode_no_ids(self, make_server):
+        # RULING (fix round 1, HIGH-1, lab-verified on Jellyfin): a failed/empty
+        # series re-fetch must NEVER fall back to the episode's own (wrong,
+        # per-episode) ProviderIds — that leaks an episode id into the series-id
+        # slot. kind/season/episode are still reported; ids stay None.
+        server = make_server()
+        episode = {
+            "Type": "Episode",
+            "ParentIndexNumber": 1,
+            "IndexNumber": 1,
+            "SeriesId": "s1",
+            "ProviderIds": {"Imdb": "tt1111111"},
+        }
+        server._fetch_item_fields = MagicMock(side_effect=[episode, None])
+        result = server.get_external_ids("ep")
+        assert result == {"kind": "episode", "tmdb": None, "imdb": None, "tvdb": None, "season": 1, "episode": 1}
+
+    def test_season_episode_always_read_from_the_episode_item_not_the_series(self, make_server):
+        # Season/episode numbers must come from the episode's own fields even
+        # if the series dict happens to define same-named fields too.
+        server = make_server()
+        episode = {"Type": "Episode", "ParentIndexNumber": 1, "IndexNumber": 2, "SeriesId": "s1", "ProviderIds": {}}
+        series = {"Type": "Series", "ParentIndexNumber": 99, "IndexNumber": 99, "ProviderIds": {"Tmdb": "1"}}
+        server._fetch_item_fields = MagicMock(side_effect=[episode, series])
+        result = server.get_external_ids("ep")
+        assert result["season"] == 1
+        assert result["episode"] == 2
+
+    def test_empty_provider_value_treated_as_missing(self, make_server):
+        server = make_server()
+        movie = {"Type": "Movie", "ProviderIds": {"Tmdb": "", "Imdb": "tt1"}}
+        server._fetch_item_fields = MagicMock(return_value=movie)
+        result = server.get_external_ids("m")
+        assert result["tmdb"] is None
+        assert result["imdb"] == "tt1"
+
+
+class TestFetchItemFieldsEdgeCases:
+    @pytest.mark.parametrize("user_id", [None, "u1"])
+    def test_returns_none_on_http_error(self, make_server, user_id):
+        # Parametrised over both auth shapes: raise_for_status is called
+        # separately on each branch's response, so a mutant that drops it
+        # from only one branch must still be caught.
+        server = make_server(user_id=user_id)
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = requests.HTTPError("404")
+        # A truthy, dict-shaped body proves the None comes from raise_for_status
+        # being honoured, not just from an unconfigured mock falling through
+        # the "not a dict" guard.
+        resp.json.return_value = {"Id": "x"} if user_id else {"Items": [{"Id": "x"}]}
+        server._request = MagicMock(return_value=resp)
+        assert server._fetch_item_fields("x", "ProviderIds") is None
+
+    @pytest.mark.parametrize("user_id", [None, "u1"])
+    @pytest.mark.parametrize(
+        ("failure", "raises"),
+        [
+            (requests.Timeout("read timed out"), True),
+            (requests.ConnectionError("refused"), True),
+            (requests.HTTPError("500"), False),
+            (ValueError("not json"), False),
+        ],
+        ids=["timeout", "refused", "http-error", "not-json"],
+    )
+    def test_raise_no_answer_raises_only_when_the_server_gave_no_http_answer(
+        self, make_server, user_id, failure, raises
+    ):
+        # A caller that would ask the same server again (the read-back's "is the item gone?") skips that on no answer.
+        server = make_server(user_id=user_id)
+        if raises:
+            server._request = MagicMock(side_effect=failure)
+        else:
+            resp = MagicMock(status_code=200)
+            resp.raise_for_status.side_effect = failure if isinstance(failure, requests.HTTPError) else None
+            resp.json.side_effect = failure if isinstance(failure, ValueError) else None
+            server._request = MagicMock(return_value=resp)
+        assert server._fetch_item_fields("x", "Chapters") is None
+        if raises:
+            with pytest.raises(type(failure)):
+                server._fetch_item_fields("x", "Chapters", raise_no_answer=True)
+        else:
+            assert server._fetch_item_fields("x", "Chapters", raise_no_answer=True) is None
+
+    def test_empty_items_list_returns_none(self, make_server):
+        server = make_server(user_id=None)
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"Items": []}
+        server._request = MagicMock(return_value=resp)
+        assert server._fetch_item_fields("x", "ProviderIds") is None
+
+    def test_non_dict_response_returns_none(self, make_server):
+        server = make_server(user_id="u1")
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = ["not", "a", "dict"]
+        server._request = MagicMock(return_value=resp)
+        assert server._fetch_item_fields("x", "ProviderIds") is None
+
+
+class TestChapterMarkers:
+    """``get_chapter_markers``: Emby's intro/credits markers live in the item's Chapters (spec §3.3)."""
+
+    def test_maps_chapters_to_marker_rows(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(
+            return_value={
+                "Chapters": [
+                    {"StartPositionTicks": 1_267_710_000, "MarkerType": "IntroStart", "Name": "Intro"},
+                    {"StartPositionTicks": 0, "Name": "Chapter 1"},
+                    {"StartPositionTicks": 12_950_004_999, "MarkerType": "CreditsStart"},
+                ]
+            }
+        )
+        assert server.get_chapter_markers("42") == [
+            {"marker_type": "IntroStart", "start_ms": 126_771, "name": "Intro"},
+            {"marker_type": "Chapter", "start_ms": 0, "name": "Chapter 1"},
+            {"marker_type": "CreditsStart", "start_ms": 1_295_000, "name": ""},
+        ]
+        server._fetch_item_fields.assert_called_once_with("42", "Chapters", raise_no_answer=False)
+        server.get_chapter_markers("42", raise_no_answer=True)
+        assert server._fetch_item_fields.call_args == call("42", "Chapters", raise_no_answer=True)
+
+    def test_lookup_failure_is_none(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(return_value=None)
+        assert server.get_chapter_markers("42") is None
+
+    def test_no_chapters_is_empty(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(return_value={"Chapters": None})
+        assert server.get_chapter_markers("42") == []
+
+    def test_malformed_rows_are_skipped(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(
+            return_value={
+                "Chapters": [
+                    "junk",
+                    {"MarkerType": "IntroStart", "Name": "no start"},
+                    {"StartPositionTicks": "abc", "MarkerType": "IntroEnd"},
+                    {"StartPositionTicks": True, "MarkerType": "IntroEnd"},
+                    {"StartPositionTicks": 20_000, "MarkerType": "IntroEnd", "Name": "ok"},
+                ]
+            }
+        )
+        assert server.get_chapter_markers("42") == [{"marker_type": "IntroEnd", "start_ms": 2, "name": "ok"}]
+
+
+def _json_resp(status, body=None, *, json_error=False):
+    resp = MagicMock(status_code=status)
+    if json_error:
+        resp.json.side_effect = ValueError("no JSON")
+    else:
+        resp.json.return_value = body
+    return resp
+
+
+class TestPluginNames:
+    """``get_plugin_names``: which plugins are installed (an intro-DB importer makes the server's markers crowd copies)."""
+
+    def test_lists_the_installed_plugin_names(self, make_server):
+        server = make_server()
+        body = [{"Name": "TheIntroDB", "Version": "1.1.0.1"}, {"Name": "Trakt"}, {"Version": "no name"}, "junk"]
+        server._request = MagicMock(return_value=_json_resp(200, body))
+        assert server.get_plugin_names() == ["TheIntroDB", "Trakt"]
+        server._request.assert_called_once_with("GET", "/Plugins", timeout=10)
+
+    @pytest.mark.parametrize(
+        ("side_effect", "resp"),
+        [
+            pytest.param(None, _json_resp(401, None, json_error=True), id="401"),
+            pytest.param(None, _json_resp(403, None, json_error=True), id="403-not-admin"),
+            pytest.param(None, _json_resp(500, None, json_error=True), id="500"),
+            pytest.param(None, _json_resp(200, None, json_error=True), id="200-not-json"),
+            pytest.param(None, _json_resp(200, {"Items": []}), id="200-not-a-list"),
+            pytest.param(requests.Timeout("x"), None, id="timeout"),
+        ],
+    )
+    def test_unknown_is_none(self, make_server, side_effect, resp):
+        server = make_server()
+        server._request = MagicMock(side_effect=side_effect, return_value=resp)
+        assert server.get_plugin_names() is None
+
+
+class TestMediaSourceDurations:
+    """``get_media_source_durations``: one duration per version of an item (Emby markers are one set per item)."""
+
+    def test_one_duration_per_media_source(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(
+            return_value={
+                "MediaSources": [
+                    {"Id": "a", "RunTimeTicks": 14_445_740_000},
+                    {"Id": "b", "RunTimeTicks": 13_845_749_999},
+                    {"Id": "c"},
+                    {"Id": "d", "RunTimeTicks": True},
+                    "junk",
+                ]
+            }
+        )
+        assert server.get_media_source_durations("42") == [1_444_574, 1_384_574, None, None]
+        server._fetch_item_fields.assert_called_once_with("42", "MediaSources")
+
+    def test_no_media_sources_is_empty(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(return_value={"MediaSources": None})
+        assert server.get_media_source_durations("42") == []
+
+    def test_lookup_failure_is_none(self, make_server):
+        server = make_server()
+        server._fetch_item_fields = MagicMock(return_value=None)
+        assert server.get_media_source_durations("42") is None

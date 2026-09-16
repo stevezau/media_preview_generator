@@ -1,10 +1,15 @@
 """Tests for media_preview_generator.web.scheduler."""
 
 import os
+from datetime import UTC
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Imported before any test patches ``web.jobs.get_job_manager``: both bind it at import time, and a first import under
+# that patch would keep the fake for every later test in the worker.
+from media_preview_generator.markers import reconcile, triggers
 from media_preview_generator.web.scheduler import (
     ScheduleManager,
     get_schedule_manager,
@@ -711,7 +716,7 @@ class TestExecuteScheduleStop:
 
         sched_mod.execute_schedule_stop(sid)
 
-        fake_jm.request_pause.assert_called_once_with("job-1")
+        fake_jm.request_pause.assert_called_once_with("job-1", by_schedule=True)
         # Sibling-schedule and already-paused jobs MUST NOT be touched.
         assert all(call.args[0] != "job-2" for call in fake_jm.request_pause.call_args_list)
         assert all(call.args[0] != "job-3" for call in fake_jm.request_pause.call_args_list)
@@ -945,14 +950,13 @@ class TestSchedulePersistence:
         # (the canary observed "Next: 3 days ago" because next_run wasn't
         # re-computed on load, only when the cron actually fired).
         from datetime import datetime as _dt
-        from datetime import timezone as _tz
 
         s1_after = manager2.get_schedule(s1["id"])
         assert s1_after["next_run"] is not None, "next_run not refreshed during re-registration"
         nr = _dt.fromisoformat(s1_after["next_run"])
         if nr.tzinfo is None:
-            nr = nr.replace(tzinfo=_tz.utc)
-        assert nr > _dt.now(_tz.utc), f"next_run {nr.isoformat()} is in the past — UI would show stale"
+            nr = nr.replace(tzinfo=UTC)
+        assert nr > _dt.now(UTC), f"next_run {nr.isoformat()} is in the past — UI would show stale"
 
         manager2.stop()
 
@@ -1224,6 +1228,650 @@ class TestExecuteScheduledJobDispatch:
 
         updated = scheduler_manager.get_schedule(schedule["id"])
         assert updated["last_run"] is not None
+
+
+class TestExecuteScheduledIntroCreditsJob:
+    """``config.job_type == "intro_credits"`` schedules create Intro & Credits jobs (LOW unless pinned)."""
+
+    @pytest.fixture
+    def env(self, scheduler_manager, monkeypatch):
+        jobs = []
+        fake_jm = MagicMock()
+        fake_jm.get_all_jobs.side_effect = lambda: list(jobs)
+        fake_jm.request_resume.return_value = True
+        monkeypatch.setattr("media_preview_generator.web.jobs.get_job_manager", lambda: fake_jm)
+        settings = {"media_servers": []}
+        fake_sm = MagicMock(processing_paused=False)
+        fake_sm.get.side_effect = lambda key, default=None: settings.get(key, default)
+        monkeypatch.setattr("media_preview_generator.web.settings_manager.get_settings_manager", lambda: fake_sm)
+        callback = MagicMock()
+        scheduler_manager.set_run_job_callback(callback)
+        create = MagicMock(return_value=MagicMock(id="ic-1"))
+        monkeypatch.setattr(triggers, "create_intro_credits_job", create)
+        return {
+            "jobs": jobs,
+            "jm": fake_jm,
+            "settings": settings,
+            "sm": fake_sm,
+            "callback": callback,
+            "create": create,
+        }
+
+    def _schedule(self, scheduler_manager, **kwargs):
+        return scheduler_manager.create_schedule(
+            name="Markers", cron_expression="0 3 * * 0", config={"job_type": "intro_credits"}, **kwargs
+        )
+
+    PLEX_1 = {
+        "id": "plex-1",
+        "type": "plex",
+        "enabled": True,
+        "markers": {"enabled": True, "plex": {"db_write_confirmed_at": "2026-09-13T00:00:00+00:00"}},
+        "libraries": [
+            {"id": "1", "name": "TV Shows", "remote_paths": ["/m/tv"]},
+            {"id": "2", "name": "Anime", "remote_paths": ["/m/anime"], "enabled": False},
+            {"id": "3", "name": "Sports", "remote_paths": ["/m/sports"]},
+        ],
+    }
+
+    @pytest.mark.parametrize(("priority", "expected"), [(None, 3), (1, 1), (2, 2), ("high", 1)])
+    def test_dispatches_intro_credits_job(self, scheduler_manager, env, priority, expected):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env["settings"]["media_servers"] = [self.PLEX_1]
+        schedule = self._schedule(
+            scheduler_manager, library_ids=["1", "2"], library_name="TV Shows", server_id="plex-1"
+        )
+        execute_scheduled_job(schedule["id"], ["1", "2"], "TV Shows", {"job_type": "intro_credits"}, priority, "plex-1")
+
+        env["callback"].assert_not_called()
+        env["create"].assert_called_once_with(
+            library_name="Intro & Credits: TV Shows",
+            priority=expected,
+            source="schedule",
+            libraries=[{"server_id": "plex-1", "library_id": "1"}, {"server_id": "plex-1", "library_id": "2"}],
+            parent_schedule_id=schedule["id"],
+        )
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is not None
+
+    def test_intro_credits_schedule_without_server_checks_every_enabled_server(self, scheduler_manager, env):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        execute_scheduled_job(schedule["id"], None, "", {"job_type": "intro_credits"}, None, None)
+
+        kwargs = env["create"].call_args.kwargs
+        assert kwargs["libraries"] == []
+        assert kwargs["library_name"] == "Intro & Credits: all libraries"
+        assert kwargs["priority"] == 3 and kwargs["parent_schedule_id"] == schedule["id"]
+
+    def test_server_pinned_schedule_without_libraries_takes_that_servers_marker_libraries(self, scheduler_manager, env):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env["settings"]["media_servers"] = [
+            {
+                "id": "jf-1",
+                "type": "jellyfin",
+                "enabled": True,
+                "markers": {"enabled": True},
+                "libraries": [
+                    {"id": "tv", "name": "TV Shows", "remote_paths": ["/m/tv"], "enabled": False},
+                    {"id": "sp", "name": "Sports", "remote_paths": ["/m/sp"], "enabled": True},
+                ],
+            },
+            {"id": "jf-2", "type": "jellyfin", "enabled": True, "markers": {"enabled": True}, "libraries": []},
+        ]
+        schedule = self._schedule(scheduler_manager, server_id="jf-1")
+        execute_scheduled_job(schedule["id"], [], "Jellyfin", {"job_type": "intro_credits"}, None, "jf-1")
+
+        assert env["create"].call_args.kwargs["libraries"] == [{"server_id": "jf-1", "library_id": "tv"}]
+
+    @pytest.mark.parametrize(
+        "servers",
+        [
+            [],
+            [{"id": "jf-1", "type": "jellyfin", "enabled": True, "markers": {"enabled": False}, "libraries": []}],
+            [
+                {
+                    "id": "jf-1",
+                    "type": "jellyfin",
+                    "enabled": True,
+                    "markers": {"enabled": True},
+                    "libraries": [{"id": "sp", "name": "Sports", "remote_paths": ["/m/sp"]}],
+                }
+            ],
+        ],
+    )
+    def test_server_pinned_schedule_with_nothing_to_check_starts_no_job(self, scheduler_manager, env, servers):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env["settings"]["media_servers"] = servers
+        schedule = self._schedule(scheduler_manager, server_id="jf-1")
+        execute_scheduled_job(schedule["id"], None, "", {"job_type": "intro_credits"}, None, "jf-1")
+
+        env["create"].assert_not_called()
+        env["callback"].assert_not_called()
+
+    def test_libraries_without_a_server_are_pinned_to_the_server_that_owns_them(self, scheduler_manager, env):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env["settings"]["media_servers"] = [
+            self.PLEX_1,
+            {"id": "jf-1", "type": "jellyfin", "enabled": True, "libraries": [{"id": "abc"}]},
+        ]
+        schedule = self._schedule(scheduler_manager, library_ids=["1", "2"])
+        execute_scheduled_job(schedule["id"], ["1", "2"], "TV", {"job_type": "intro_credits"}, None, None)
+
+        assert env["create"].call_args.kwargs["libraries"] == [
+            {"server_id": "plex-1", "library_id": "1"},
+            {"server_id": "plex-1", "library_id": "2"},
+        ]
+
+    def test_schedule_libraries_outside_the_markers_selection_are_left_out(self, scheduler_manager, env):
+        from media_preview_generator.web import scheduler as sched_mod
+
+        env["settings"]["media_servers"] = [self.PLEX_1]
+        schedule = self._schedule(scheduler_manager, library_ids=["1", "3", "9"], server_id="plex-1")
+        with patch.object(sched_mod, "logger") as log:
+            sched_mod.execute_scheduled_job(
+                schedule["id"], ["1", "3", "9"], "TV", {"job_type": "intro_credits"}, None, "plex-1"
+            )
+
+        assert env["create"].call_args.kwargs["libraries"] == [{"server_id": "plex-1", "library_id": "1"}]
+        warned = [c.args for c in log.warning.call_args_list]
+        assert any("isn't on" in args[0] and ["Sports", "9"] in args for args in warned), warned
+
+    @pytest.mark.parametrize("library_ids", [["3"], ["9"]], ids=["sports", "unknown"])
+    def test_schedule_with_no_library_markers_go_to_starts_no_job(self, scheduler_manager, env, library_ids):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env["settings"]["media_servers"] = [self.PLEX_1]
+        schedule = self._schedule(scheduler_manager, library_ids=library_ids, server_id="plex-1")
+        execute_scheduled_job(schedule["id"], library_ids, "TV", {"job_type": "intro_credits"}, None, "plex-1")
+
+        env["create"].assert_not_called()
+        env["callback"].assert_not_called()
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is None
+
+    @pytest.mark.parametrize(
+        "servers",
+        [
+            [],  # unknown id
+            [
+                {"id": "plex-1", "type": "plex", "enabled": True, "libraries": [{"id": "1"}]},
+                {"id": "plex-2", "type": "plex", "enabled": True, "libraries": [{"id": "1"}]},
+            ],  # ambiguous id across two Plex servers
+        ],
+    )
+    def test_libraries_that_cant_be_pinned_to_one_server_start_no_job(self, scheduler_manager, env, servers):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env["settings"]["media_servers"] = servers
+        schedule = self._schedule(scheduler_manager, library_ids=["1"])
+        execute_scheduled_job(schedule["id"], ["1"], "TV", {"job_type": "intro_credits"}, None, None)
+
+        env["create"].assert_not_called()
+        env["callback"].assert_not_called()
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is None
+
+    @pytest.mark.parametrize("status", ["pending", "running"])
+    def test_unfinished_job_from_the_last_run_is_not_started_again(self, scheduler_manager, env, status):
+        from media_preview_generator.web.jobs import JobStatus
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        env["jobs"].append(
+            MagicMock(
+                id="old",
+                parent_schedule_id=schedule["id"],
+                kind="intro_credits",
+                status=JobStatus(status),
+                paused=False,
+                config={"libraries": []},
+            )
+        )
+        execute_scheduled_job(schedule["id"], None, "", {"job_type": "intro_credits"}, None, None)
+
+        env["create"].assert_not_called()
+        env["callback"].assert_not_called()
+        env["jm"].request_resume.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("other", "starts"),
+        [
+            ({"status": "completed"}, True),
+            ({"status": "failed"}, True),
+            ({"status": "cancelled"}, True),
+            ({"status": "running", "parent_schedule_id": "another-schedule"}, True),
+            ({"status": "running", "kind": "previews"}, True),  # the schedule used to scan previews
+            ({"status": "running", "config": {"reconcile": True}}, True),  # the schedule used to check servers
+        ],
+    )
+    def test_other_jobs_do_not_block_a_new_run(self, scheduler_manager, env, other, starts):
+        from media_preview_generator.web.jobs import JobStatus
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        fields = {"id": "old", "parent_schedule_id": schedule["id"], "kind": "intro_credits", "paused": False,
+                  "config": {"libraries": []}, **other}  # fmt: skip
+        fields["status"] = JobStatus(fields["status"])
+        env["jobs"].append(MagicMock(**fields))
+        execute_scheduled_job(schedule["id"], None, "", {"job_type": "intro_credits"}, None, None)
+
+        assert env["create"].called is starts
+        env["jm"].request_resume.assert_not_called()
+
+    @pytest.mark.parametrize(("job_type", "kind"), [("intro_credits", "intro_credits"), ("full_library", "previews")])
+    @pytest.mark.parametrize("by_stop_time", [True, False], ids=["stop-time-pause", "pause-by-hand"])
+    def test_paused_job_from_this_schedule_is_resumed_instead_only_when_its_stop_time_paused_it(
+        self, scheduler_manager, env, job_type, kind, by_stop_time
+    ):
+        from media_preview_generator.web.jobs import JobStatus
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        config = {"libraries": [], **({"paused_by_schedule": True} if by_stop_time else {})}
+        env["jobs"].append(
+            MagicMock(
+                id="old", parent_schedule_id=schedule["id"], kind=kind, status=JobStatus.RUNNING, paused=True,
+                config=config,
+            )
+        )  # fmt: skip
+        execute_scheduled_job(schedule["id"], None, "", {"job_type": job_type}, None, None)
+
+        if by_stop_time:
+            env["jm"].request_resume.assert_called_once_with("old")
+            env["create"].assert_not_called()
+            env["callback"].assert_not_called()
+            return
+        env["jm"].request_resume.assert_not_called()
+        if job_type == "intro_credits":
+            # Its own Find markers job, paused by hand, is still unfinished: nothing new either.
+            env["create"].assert_not_called()
+        else:
+            env["callback"].assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("job_type", "paused_kind"), [("intro_credits", "previews"), ("full_library", "intro_credits")]
+    )
+    def test_paused_job_of_the_other_kind_is_not_resumed(self, scheduler_manager, env, job_type, paused_kind):
+        from media_preview_generator.web.jobs import JobStatus
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        env["jobs"].append(
+            MagicMock(
+                id="old",
+                parent_schedule_id=schedule["id"],
+                kind=paused_kind,
+                status=JobStatus.RUNNING,
+                paused=True,
+                config={"paused_by_schedule": True},
+            )
+        )
+        execute_scheduled_job(schedule["id"], None, "", {"job_type": job_type}, None, None)
+
+        env["jm"].request_resume.assert_not_called()
+        if job_type == "intro_credits":
+            env["create"].assert_called_once()
+        else:
+            env["callback"].assert_called_once()
+
+    def test_processing_paused_skips_the_tick(self, scheduler_manager, env):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env["sm"].processing_paused = True
+        schedule = self._schedule(scheduler_manager)
+        execute_scheduled_job(schedule["id"], None, "", {"job_type": "intro_credits"}, None, None)
+
+        env["create"].assert_not_called()
+
+    def test_create_failure_is_logged_and_the_tick_ends_quietly(self, scheduler_manager, env):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env["create"].side_effect = RuntimeError("jobs.db locked")
+        schedule = self._schedule(scheduler_manager)
+        execute_scheduled_job(schedule["id"], None, "", {"job_type": "intro_credits"}, None, None)
+
+        env["callback"].assert_not_called()
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is None
+
+
+class TestExecuteScheduledCheckServers:
+    """An Intro & Credits schedule set to "Check servers" queues the reconcile job (LOW unless pinned)."""
+
+    CONFIG = {"job_type": "intro_credits", "reconcile": True}
+
+    @pytest.fixture
+    def env(self, scheduler_manager, monkeypatch):
+        jobs = {"pending": [], "running": [], "all": []}
+        fake_jm = MagicMock()
+        fake_jm.get_pending_jobs.side_effect = lambda: list(jobs["pending"])
+        fake_jm.get_running_jobs.side_effect = lambda: list(jobs["running"])
+        fake_jm.get_all_jobs.side_effect = lambda: [*jobs["pending"], *jobs["running"], *jobs["all"]]
+        fake_jm.request_resume.return_value = True
+        monkeypatch.setattr("media_preview_generator.web.jobs.get_job_manager", lambda: fake_jm)
+        monkeypatch.setattr(reconcile, "get_job_manager", lambda: fake_jm)
+        fake_sm = MagicMock(processing_paused=False)
+        fake_sm.get.side_effect = lambda key, default=None: default
+        monkeypatch.setattr("media_preview_generator.web.settings_manager.get_settings_manager", lambda: fake_sm)
+        callback = MagicMock()
+        scheduler_manager.set_run_job_callback(callback)
+        create = MagicMock(return_value=MagicMock(id="rc-1"))
+        monkeypatch.setattr(triggers, "create_intro_credits_job", create)
+        enabled = MagicMock(return_value=True)
+        monkeypatch.setattr(triggers, "markers_enabled_anywhere", enabled)
+        return SimpleNamespace(jobs=jobs, jm=fake_jm, sm=fake_sm, callback=callback, create=create, enabled=enabled)
+
+    def _schedule(self, scheduler_manager):
+        return scheduler_manager.create_schedule(
+            name="Check servers", interval_minutes=720, config=dict(self.CONFIG), library_name="All servers"
+        )
+
+    @staticmethod
+    def _created(schedule, priority=3):
+        return {
+            "library_name": "Intro & Credits · Check servers",
+            "priority": priority,
+            "source": "reconcile",
+            "reconcile": True,
+            "parent_schedule_id": schedule["id"],
+        }
+
+    @pytest.mark.parametrize(("priority", "expected"), [(None, 3), (1, 1), ("high", 1), (2, 2)])
+    def test_a_saved_check_servers_schedule_queues_one_job(self, scheduler_manager, env, priority, expected):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        execute_scheduled_job(schedule["id"], [], "All servers", dict(self.CONFIG), priority, None)
+
+        env.create.assert_called_once_with(**self._created(schedule, expected))
+        env.callback.assert_not_called()
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is not None
+
+    @pytest.mark.parametrize("state", ["pending", "running"])
+    @pytest.mark.parametrize("parent", ["this-schedule", "on-demand"])
+    def test_none_while_a_check_servers_job_is_queued_or_running(self, scheduler_manager, env, state, parent):
+        from media_preview_generator.web.jobs import JobStatus
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        env.jobs[state].append(
+            MagicMock(
+                id="rc-0",
+                kind="intro_credits",
+                config={"reconcile": True},
+                status=JobStatus(state),
+                paused=False,
+                parent_schedule_id=schedule["id"] if parent == "this-schedule" else "",
+            )
+        )
+        execute_scheduled_job(schedule["id"], [], "All servers", dict(self.CONFIG), None, None)
+
+        env.create.assert_not_called()
+        env.jm.request_resume.assert_not_called()
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is None
+
+    def test_a_finished_check_servers_job_doesnt_block_the_next_run(self, scheduler_manager, env):
+        from media_preview_generator.web.jobs import JobStatus
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        env.jobs["all"].append(
+            MagicMock(id="rc-0", kind="intro_credits", config={"reconcile": True}, status=JobStatus.COMPLETED,
+                      paused=False, parent_schedule_id=schedule["id"])
+        )  # fmt: skip
+        execute_scheduled_job(schedule["id"], [], "All servers", dict(self.CONFIG), None, None)
+        env.create.assert_called_once_with(**self._created(schedule))
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is not None
+
+    def test_nothing_is_queued_while_intro_and_credits_is_off_everywhere(self, scheduler_manager, env):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env.enabled.return_value = False
+        schedule = self._schedule(scheduler_manager)
+        execute_scheduled_job(schedule["id"], [], "All servers", dict(self.CONFIG), None, None)
+
+        env.create.assert_not_called()
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is None
+
+    def test_processing_paused_skips_the_tick(self, scheduler_manager, env):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env.sm.processing_paused = True
+        schedule = self._schedule(scheduler_manager)
+        execute_scheduled_job(schedule["id"], [], "All servers", dict(self.CONFIG), None, None)
+        env.create.assert_not_called()
+
+    STOPPED = {"paused_by_schedule": True}
+
+    @pytest.mark.parametrize(
+        ("tick_config", "paused_configs", "resumed", "queues"),
+        [
+            (CONFIG, [{"reconcile": True, **STOPPED}], ["old-0"], None),
+            (CONFIG, [{"libraries": [], **STOPPED}], ["old-0"], None),
+            ({"job_type": "intro_credits"}, [{"reconcile": True, **STOPPED}], ["old-0"], None),
+            ({"job_type": "intro_credits"}, [{"libraries": [], **STOPPED}], ["old-0"], None),
+            (CONFIG, [{"reconcile": True, **STOPPED}, {"libraries": [], **STOPPED}], ["old-0", "old-1"], None),
+            (CONFIG, [{"libraries": []}], [], "check servers"),
+            ({"job_type": "intro_credits"}, [{"reconcile": True}], [], "find markers"),
+            ({"job_type": "intro_credits"}, [{"libraries": []}], [], None),
+            (CONFIG, [{"reconcile": True}], [], None),
+        ],
+        ids=[
+            "check-resumes-check", "check-resumes-find", "find-resumes-check", "find-resumes-find",
+            "resumes-one-of-each-mode", "check-leaves-find-paused-by-hand", "find-leaves-check-paused-by-hand",
+            "find-paused-by-hand-still-unfinished", "check-paused-by-hand-still-unfinished",
+        ],
+    )  # fmt: skip
+    def test_a_stop_time_pause_of_either_mode_is_resumed_and_the_tick_queues_nothing_else(
+        self, scheduler_manager, env, tick_config, paused_configs, resumed, queues
+    ):
+        from media_preview_generator.web.jobs import JobStatus
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        schedule = self._schedule(scheduler_manager)
+        # A job its stop time paused is resumed even after a switch to the other mode (nothing else would resume it),
+        # and the tick then returns: a new job would compete for a slot and could run past the stop time. A job paused
+        # by hand isn't the schedule's to resume; it counts as unfinished for its own mode only.
+        for n, config in enumerate(paused_configs):
+            env.jobs["running"].append(
+                MagicMock(id=f"old-{n}", kind="intro_credits", config=config, status=JobStatus.RUNNING, paused=True,
+                          parent_schedule_id=schedule["id"])
+            )  # fmt: skip
+        execute_scheduled_job(schedule["id"], [], "All servers", dict(tick_config), None, None)
+
+        assert [c.args[0] for c in env.jm.request_resume.call_args_list] == resumed
+        last_run = scheduler_manager.get_schedule(schedule["id"])["last_run"]
+        assert (last_run is not None) is bool(resumed or queues)
+        if queues == "check servers":
+            env.create.assert_called_once_with(**self._created(schedule))
+        elif queues == "find markers":
+            env.create.assert_called_once_with(
+                library_name="Intro & Credits: All servers", priority=3, source="schedule", libraries=[],
+                parent_schedule_id=schedule["id"],
+            )  # fmt: skip
+        else:
+            env.create.assert_not_called()
+
+    def test_a_create_failure_is_logged_and_the_tick_ends_quietly(self, scheduler_manager, env):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        env.create.side_effect = RuntimeError("jobs.db locked")
+        schedule = self._schedule(scheduler_manager)
+        execute_scheduled_job(schedule["id"], [], "All servers", dict(self.CONFIG), None, None)
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is None
+
+
+class TestPausedIntroCreditsJobsAfterAScheduleChanges:
+    """Jobs a schedule's stop time paused, by hand, or not at all, after the schedule switches mode or is deleted.
+
+    Real JobManager and ScheduleManager, one job slot (``max_concurrent_jobs`` 1).
+    """
+
+    FIND = {"job_type": "intro_credits"}
+    CHECK = {"job_type": "intro_credits", "reconcile": True}
+
+    @pytest.fixture
+    def jm(self, scheduler_manager, tmp_path, monkeypatch):
+        from media_preview_generator.web.jobs import JobManager
+
+        jm = JobManager(config_dir=str(tmp_path / "jobs"))
+        monkeypatch.setattr("media_preview_generator.web.jobs.get_job_manager", lambda: jm)
+        monkeypatch.setattr(reconcile, "get_job_manager", lambda: jm)
+        monkeypatch.setattr(triggers, "get_job_manager", lambda: jm)
+        monkeypatch.setattr(triggers, "start_intro_credits_job_async", lambda job_id: None)
+        monkeypatch.setattr(triggers, "markers_enabled_anywhere", lambda: True)
+        settings = {"max_concurrent_jobs": 1}
+        sm = MagicMock(processing_paused=False)
+        sm.get.side_effect = lambda key, default=None: settings.get(key, default)
+        monkeypatch.setattr("media_preview_generator.web.settings_manager.get_settings_manager", lambda: sm)
+        return jm
+
+    @staticmethod
+    def _tick(schedule_id, config):
+        from media_preview_generator.web.scheduler import execute_scheduled_job
+
+        execute_scheduled_job(schedule_id, [], "All", dict(config), None, None)
+
+    @staticmethod
+    def _paused_by_stop_time(jm, schedule_id, job_id):
+        from media_preview_generator.web.scheduler import execute_schedule_stop
+
+        jm.start_job(job_id)
+        execute_schedule_stop(schedule_id)
+        assert jm.get_job(job_id).paused and jm.get_job(job_id).config["paused_by_schedule"] is True
+
+    @staticmethod
+    def _live(jm):
+        return [job for job in jm.get_all_jobs() if job.status.value in ("pending", "running")]
+
+    def _schedule(self, scheduler_manager, config):
+        return scheduler_manager.create_schedule(
+            name="nightly", cron_expression="0 2 * * *", config=dict(config), stop_time="06:00"
+        )
+
+    @pytest.mark.parametrize(
+        ("before", "after"), [("CHECK", "FIND"), ("FIND", "CHECK")], ids=["check-to-find", "find-to-check"]
+    )
+    def test_a_switched_schedule_resumes_the_other_modes_job_then_runs_its_own_once_that_finished(
+        self, scheduler_manager, jm, before, after
+    ):
+        before, after = getattr(self, before), getattr(self, after)
+        schedule = self._schedule(scheduler_manager, before)
+        self._tick(schedule["id"], before)
+        (old,) = jm.get_all_jobs()
+        self._paused_by_stop_time(jm, schedule["id"], old.id)
+        scheduler_manager.update_schedule(schedule["id"], config=dict(after))
+
+        self._tick(schedule["id"], after)
+
+        # One slot: the resumed job has it to itself, and nothing that could run past the stop time is queued.
+        assert [(job.id, job.paused) for job in self._live(jm)] == [(old.id, False)]
+        assert "paused_by_schedule" not in jm.get_job(old.id).config
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is not None
+
+        jm.complete_job(old.id)
+        self._tick(schedule["id"], after)
+
+        (new,) = self._live(jm)
+        assert new.id != old.id and new.parent_schedule_id == schedule["id"]
+        assert bool(new.config.get("reconcile")) is bool(after.get("reconcile"))
+
+    @pytest.mark.parametrize("mode", ["FIND", "CHECK"])
+    @pytest.mark.parametrize("trigger", ["start-tick", "run-now"])
+    @pytest.mark.parametrize("pause", ["stop-time", "by-hand", "stop-time-then-by-hand"])
+    def test_only_a_stop_time_pause_is_resumed_by_a_start_tick_or_run_now(
+        self, scheduler_manager, jm, mode, trigger, pause
+    ):
+        config = getattr(self, mode)
+        schedule = self._schedule(scheduler_manager, config)
+        self._tick(schedule["id"], config)
+        (job,) = jm.get_all_jobs()
+        if pause == "by-hand":
+            jm.start_job(job.id)
+            assert jm.request_pause(job.id)  # POST /api/jobs/<id>/pause
+        else:
+            self._paused_by_stop_time(jm, schedule["id"], job.id)
+            if pause == "stop-time-then-by-hand":
+                assert jm.request_pause(job.id)
+
+        if trigger == "run-now":
+            assert scheduler_manager.run_now(schedule["id"]) is True
+        else:
+            self._tick(schedule["id"], config)
+
+        resumed = pause == "stop-time"
+        assert jm.get_job(job.id).paused is not resumed
+        assert jm.get_job(job.id).config.get("paused_by_schedule", False) is False
+        # Either way the job is still this mode's unfinished job, so no second one is queued beside it.
+        assert [j.id for j in self._live(jm)] == [job.id]
+        resume_lines = [line for line in jm.get_logs(job.id) if "Resumed by schedule" in line]
+        assert len(resume_lines) == int(resumed)
+
+    def test_a_check_servers_tick_with_nothing_paused_reuses_the_queued_job_and_leaves_last_run_unset(
+        self, scheduler_manager, jm
+    ):
+        manual = reconcile.run_markers_reconcile()  # POST /api/markers/reconcile
+        schedule = scheduler_manager.create_schedule(
+            name="checks", cron_expression="0 3 * * *", config=dict(self.CHECK)
+        )
+
+        self._tick(schedule["id"], self.CHECK)
+
+        assert [job.id for job in jm.get_all_jobs()] == [manual.job_id]
+        assert scheduler_manager.get_schedule(schedule["id"])["last_run"] is None
+
+    def test_the_pause_record_follows_the_last_pause_and_any_resume_clears_it(self, jm):
+        job = jm.create_job(library_name="x", config={"libraries": []}, kind="intro_credits")
+        jm.start_job(job.id)
+
+        assert jm.request_pause(job.id, by_schedule=True)
+        assert jm.get_job(job.id).config == {"libraries": [], "paused_by_schedule": True}
+        assert jm.request_pause(job.id)
+        assert jm.get_job(job.id).config == {"libraries": []}
+        assert jm.request_pause(job.id, by_schedule=True)
+        assert jm.request_resume(job.id)
+        assert jm.get_job(job.id).config == {"libraries": []}
+
+    def test_deleting_a_schedule_names_its_paused_job_and_leaves_it_paused(self, scheduler_manager, jm):
+        from loguru import logger
+
+        schedule = self._schedule(scheduler_manager, self.CHECK)
+        self._tick(schedule["id"], self.CHECK)
+        (check,) = jm.get_all_jobs()
+        self._paused_by_stop_time(jm, schedule["id"], check.id)
+        other = jm.create_job(library_name="done", config={"libraries": []}, parent_schedule_id=schedule["id"],
+                              kind="intro_credits")  # fmt: skip
+        jm.start_job(other.id)
+        jm.complete_job(other.id)
+        warnings: list[str] = []
+        handler = logger.add(warnings.append, level="WARNING", format="{message}")
+        try:
+            assert scheduler_manager.delete_schedule(schedule["id"]) is True
+        finally:
+            logger.remove(handler)
+
+        assert [w.strip() for w in warnings] == [
+            f"Schedule 'nightly' ({schedule['id']}) was deleted while its job {check.id[:8]} "
+            "(Intro & Credits · Check servers) is paused; no later start tick of this schedule will resume it. Resume "
+            "or cancel it on the dashboard."
+        ]
+        assert jm.get_job(check.id).paused and jm.get_job(check.id).status.value == "running"
+        # Still the one Check servers job: a manual request gets it back (the API adds "paused": true).
+        assert reconcile.run_markers_reconcile() == (check.id, False)
+
+
+def test_nothing_is_scheduled_after_a_fresh_start(tmp_path):
+    """Check servers runs only on a schedule the user saves: a new install has no schedule and no built-in job."""
+    manager = ScheduleManager(config_dir=str(tmp_path / "config"), run_job_callback=None)
+    manager.start()
+    try:
+        manager.apply_quiet_hours({})
+        assert manager.get_all_schedules() == []
+        assert manager.scheduler.get_jobs() == []
+    finally:
+        manager.stop()
 
 
 class TestMultiLibrarySchedules:

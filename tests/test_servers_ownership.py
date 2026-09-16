@@ -233,6 +233,111 @@ class TestFindOwningServers:
         assert [m.server_id for m in matches] == ["plex-a"]
 
 
+class TestWebhookPathCandidates:
+    """The local forms of a sender (Sonarr) or server path, shared by webhook resolution and Intro & Credits triggers."""
+
+    def test_raw_path_first_then_each_servers_translations_deduped_in_order(self):
+        from media_preview_generator.servers.ownership import webhook_path_candidates
+
+        plex = _server(
+            server_id="plex",
+            path_mappings=[
+                {"remote_prefix": "/plexmedia", "local_prefix": "/media", "webhook_prefixes": ["/data"]},
+                {"remote_prefix": "/plexmedia", "local_prefix": "/media2", "webhook_prefixes": ["/data"]},
+            ],
+        )
+        jf = _server(
+            server_id="jf",
+            path_mappings=[
+                {"remote_prefix": "/data", "local_prefix": "/jf-local"},
+                {"remote_prefix": "/x", "local_prefix": "/media", "webhook_prefixes": ["/data"]},
+            ],
+        )
+        assert webhook_path_candidates("/data/tv/a.mkv", [plex, jf]) == [
+            "/data/tv/a.mkv",
+            "/media/tv/a.mkv",
+            "/media2/tv/a.mkv",
+            "/jf-local/tv/a.mkv",
+        ]
+
+    def test_server_view_path_is_translated_with_path_mappings(self):
+        from media_preview_generator.servers.ownership import webhook_path_candidates
+
+        jf = _server(path_mappings=[{"remote_prefix": "/jfmedia", "local_prefix": "/media"}])
+        assert webhook_path_candidates("/jfmedia/tv/a.mkv", [jf]) == ["/jfmedia/tv/a.mkv", "/media/tv/a.mkv"]
+
+    @pytest.mark.parametrize("servers", [[], [_server()]], ids=["no-servers", "no-mappings"])
+    def test_untranslatable_path_is_its_only_candidate(self, servers):
+        from media_preview_generator.servers.ownership import webhook_path_candidates
+
+        assert webhook_path_candidates("/data/tv/a.mkv", servers) == ["/data/tv/a.mkv"]
+
+
+class TestFindLibraryMatches:
+    """Intro & Credits ownership: every covering library, whatever the preview opt-in says."""
+
+    def test_library_with_previews_off_still_matches(self):
+        from media_preview_generator.servers.ownership import find_library_matches
+
+        server = _server(libraries=[Library(id="1", name="TV Shows", remote_paths=("/data/tv",), enabled=False)])
+        assert server_owns_path("/data/tv/Show/S01E01.mkv", server) is None  # previews unchanged
+        assert find_library_matches("/data/tv/Show/S01E01.mkv", [server]) == [
+            OwnershipMatch(server_id="s1", library_id="1", library_name="TV Shows", local_prefix="/data/tv")
+        ]
+
+    def test_overlapping_libraries_all_match_in_library_order(self):
+        from media_preview_generator.servers.ownership import find_library_matches
+
+        server = _server(
+            libraries=[
+                Library(id="1", name="Movies", remote_paths=("/data/movies",)),
+                Library(id="2", name="Elsewhere", remote_paths=("/data/other",)),
+                Library(id="3", name="4K Movies", remote_paths=("/data/movies/4k",), enabled=False),
+            ]
+        )
+        matches = find_library_matches("/data/movies/4k/Foo (2024)/Foo (2024).mkv", [server])
+        assert [(m.library_id, m.local_prefix) for m in matches] == [("1", "/data/movies"), ("3", "/data/movies/4k")]
+
+    def test_servers_in_order_and_disabled_servers_excluded(self):
+        from media_preview_generator.servers.ownership import find_library_matches
+
+        lib = Library(id="1", name="TV", remote_paths=("/tv",))
+        mapped = _server(
+            server_id="jf",
+            libraries=[Library(id="9", name="TV", remote_paths=("/jf-tv",))],
+            path_mappings=[{"remote_prefix": "/jf-tv", "local_prefix": "/tv"}],
+        )
+        servers = [
+            _server(server_id="a", libraries=[lib]),
+            _server(server_id="off", enabled=False, libraries=[lib]),
+            mapped,
+        ]
+        assert [(m.server_id, m.library_id) for m in find_library_matches("/tv/Show/S01E01.mkv", servers)] == [
+            ("a", "1"),
+            ("jf", "9"),
+        ]
+
+    def test_library_with_several_covering_folders_matches_once(self):
+        from media_preview_generator.servers.ownership import find_library_matches
+
+        server = _server(libraries=[Library(id="1", name="TV", remote_paths=("/data", "/data/tv"))])
+        assert [(m.library_id, m.local_prefix) for m in find_library_matches("/data/tv/Show/S01E01.mkv", [server])] == [
+            ("1", "/data")
+        ]
+
+    @pytest.mark.parametrize("remote_paths", [(), ("",), ("   ",)])
+    def test_empty_remote_paths_and_other_folders_never_match(self, remote_paths):
+        from media_preview_generator.servers.ownership import find_library_matches
+
+        server = _server(
+            libraries=[
+                Library(id="1", name="Blank", remote_paths=remote_paths),
+                Library(id="2", name="Movies", remote_paths=("/data/movies",)),
+            ]
+        )
+        assert find_library_matches("/data/movies-archive/Foo.mkv", [server]) == []
+
+
 class TestEdgeCases:
     @pytest.mark.parametrize(
         "remote_paths",

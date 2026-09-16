@@ -7,9 +7,11 @@ the web layer and the CLI processing pipeline.
 
 import threading
 from contextlib import ExitStack
+from datetime import UTC
 
 from loguru import logger
 
+from ...job_kinds import JOB_KIND_INTRO_CREDITS
 from ..job_gate import format_wait_message
 from ..jobs import PRIORITY_NORMAL, WorkerStatus, get_job_manager, incoming_job_priority, parse_priority
 
@@ -264,7 +266,9 @@ def _is_force_fire_now_set(job_manager, job_id: str) -> bool:
 
 
 def resume_running_and_drain_pending() -> None:
-    """Resume paused running jobs and start every PENDING job, in priority order.
+    """Resume paused running preview jobs and start every PENDING job, in priority order.
+
+    Intro & Credits jobs keep their own per-job pause; "Pause all" holds them through the global flag instead.
 
     The shared body for ALL resume paths — manual resume
     (``api_jobs.resume_processing``), worker-availability auto-resume
@@ -282,6 +286,10 @@ def resume_running_and_drain_pending() -> None:
 
     jm = get_job_manager()
     for running in jm.get_running_jobs():
+        # A global resume must not clear an Intro & Credits job's own pause; Pause all holds those jobs through
+        # the global flag, which the caller has already cleared.
+        if running.kind == JOB_KIND_INTRO_CREDITS:
+            continue
         jm.request_resume(running.id)
     pending = sorted(jm.get_pending_jobs(), key=lambda j: (j.priority, j.created_at or ""))
     for pj in pending:
@@ -294,7 +302,21 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
     If a thread is already in-flight for *job_id* (e.g. still scanning
     libraries after a revive), the call is silently skipped to avoid
     duplicate work.
+
+    Intro & Credits jobs are handed to their own runner, so every start path (manual resume, pending drain,
+    restart requeue, reprocess) runs them with the marker pipeline.
     """
+    try:
+        queued = get_job_manager().get_job(job_id)
+    except Exception as exc:
+        # The preview thread below reads the job again and reports the failure on the job.
+        logger.debug("Could not read job {} to pick its runner: {}", job_id, exc)
+        queued = None
+    if queued is not None and queued.kind == JOB_KIND_INTRO_CREDITS:
+        from ...markers.job_runner import start_intro_credits_job_async
+
+        start_intro_credits_job_async(job_id, config_overrides)
+        return
     with _inflight_lock:
         if job_id in _inflight_jobs:
             logger.info("Skipping duplicate _start_job_async for {} — already in flight", job_id)
@@ -620,10 +642,10 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
             run_job_config = job_manager.get_job(job_id)
             if run_job_config and run_job_config.config.get("is_retry"):
                 import time as _time
-                from datetime import datetime, timedelta, timezone
+                from datetime import datetime, timedelta
 
                 delay_sec = max(1, int(run_job_config.config.get("retry_delay", 30)))
-                retry_eta = (datetime.now(timezone.utc) + timedelta(seconds=delay_sec)).isoformat()
+                retry_eta = (datetime.now(UTC) + timedelta(seconds=delay_sec)).isoformat()
                 _parent_job_id = (run_job_config.config or {}).get("parent_job_id")
                 _parent_job = job_manager.get_job(_parent_job_id) if _parent_job_id else None
                 _server_label = _format_retry_wait_server_label(_parent_job, run_job_config)
@@ -1114,7 +1136,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         ``published``/``skipped_output_exists``).
                         """
                         import os as _os
-                        from datetime import datetime, timedelta, timezone
+                        from datetime import datetime, timedelta
 
                         from media_preview_generator.processing.retry_queue import BACKOFF_SCHEDULE
 
@@ -1154,7 +1176,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         scale = max(0.5, retry_delay_sec / 30.0)
                         slow_idx = min(attempt - 1, len(BACKOFF_SCHEDULE) - 1)
                         backoff_delay = max(1, int(BACKOFF_SCHEDULE[slow_idx] * scale))
-                        scheduled_at = (datetime.now(timezone.utc) + timedelta(seconds=backoff_delay)).isoformat()
+                        scheduled_at = (datetime.now(UTC) + timedelta(seconds=backoff_delay)).isoformat()
                         parent_priority = current_job.priority if current_job else 2
                         # K1: preserve the originating server triple so retry
                         # jobs stay scoped to whichever server fired the

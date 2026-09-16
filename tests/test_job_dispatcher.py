@@ -1169,3 +1169,87 @@ class TestEmitWorkerUpdatesStateChangeBypass:
             )
         finally:
             dispatcher.shutdown()
+
+
+class TestGetOrCreateDispatcher:
+    """The shared dispatcher for callers that don't build their own pool (Intro & Credits jobs)."""
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        reset_dispatcher()
+        yield
+        reset_dispatcher()
+
+    @pytest.mark.parametrize(("gpus", "expected_gpu_workers"), [([], 0), (_make_gpu_list(1), 2)])
+    def test_creates_pool_sized_from_worker_settings_when_none_exists(self, gpus, expected_gpu_workers):
+        from media_preview_generator.jobs import dispatcher as dispatcher_mod
+
+        with patch.object(dispatcher_mod, "WorkerPool") as pool_cls:
+            created = dispatcher_mod.get_or_create_dispatcher(_make_config(cpu_threads=3, gpu_threads=2), gpus)
+
+        pool_cls.assert_called_once_with(gpu_workers=expected_gpu_workers, cpu_workers=3, selected_gpus=gpus)
+        assert created.worker_pool is pool_cls.return_value
+        assert dispatcher_mod.get_dispatcher() is created
+
+    def test_existing_dispatcher_is_reused_and_reconciled_to_the_gpu_selection(self):
+        from media_preview_generator.jobs import dispatcher as dispatcher_mod
+
+        pool = MagicMock()
+        pool._snapshot_workers.return_value = []
+        existing = dispatcher_mod.get_dispatcher(pool)
+        gpus = _make_gpu_list(2)
+        with patch.object(dispatcher_mod, "WorkerPool") as pool_cls:
+            got = dispatcher_mod.get_or_create_dispatcher(_make_config(cpu_threads=3, gpu_threads=2), gpus)
+
+        assert got is existing
+        pool_cls.assert_not_called()
+        pool.reconcile_gpu_workers.assert_called_once_with(gpus)
+
+    def test_existing_dispatcher_with_no_gpu_selection_is_not_reconciled(self):
+        from media_preview_generator.jobs import dispatcher as dispatcher_mod
+
+        pool = MagicMock()
+        pool._snapshot_workers.return_value = []
+        existing = dispatcher_mod.get_dispatcher(pool)
+
+        assert dispatcher_mod.get_or_create_dispatcher(_make_config(), []) is existing
+        pool.reconcile_gpu_workers.assert_not_called()
+
+    def test_reconcile_failure_still_returns_the_dispatcher(self):
+        from media_preview_generator.jobs import dispatcher as dispatcher_mod
+
+        pool = MagicMock()
+        pool._snapshot_workers.return_value = []
+        pool.reconcile_gpu_workers.side_effect = RuntimeError("device vanished")
+        existing = dispatcher_mod.get_dispatcher(pool)
+
+        assert dispatcher_mod.get_or_create_dispatcher(_make_config(), _make_gpu_list(1)) is existing
+
+    def test_two_threads_starting_jobs_at_once_share_one_dispatcher_and_build_one_pool(self):
+        from media_preview_generator.jobs import dispatcher as dispatcher_mod
+
+        built = []
+        both_checking = threading.Barrier(2)
+
+        def slow_pool(**kwargs):
+            built.append(kwargs)
+            time.sleep(0.05)  # widen the window between "no dispatcher yet" and "dispatcher stored"
+            pool = MagicMock()
+            pool._snapshot_workers.return_value = []
+            return pool
+
+        results = []
+
+        def start_job():
+            both_checking.wait()
+            results.append(dispatcher_mod.get_or_create_dispatcher(_make_config(cpu_threads=1), []))
+
+        with patch.object(dispatcher_mod, "WorkerPool", side_effect=slow_pool):
+            threads = [threading.Thread(target=start_job) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5)
+
+        assert len(results) == 2 and results[0] is results[1]
+        assert len(built) == 1, f"a second WorkerPool was built and leaked: {built}"

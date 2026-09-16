@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -34,6 +34,8 @@ from .base import (
 )
 
 if TYPE_CHECKING:
+    import xml.etree.ElementTree as ET
+
     from ..config import Config
 
 
@@ -1910,7 +1912,7 @@ class PlexServer(MediaServer):
         ]
         return [(bare, f) for f in files]
 
-    def _resolve_one_path(self, server_view_path: str) -> str | None:
+    def _resolve_one_path(self, server_view_path: str, *, library_ids: Collection[str] | None = None) -> str | None:
         """Return the Plex ratingKey for the file at ``server_view_path``.
 
         Uses Plex's per-section ``type=<media_type>&file=<basename>``
@@ -1934,6 +1936,10 @@ class PlexServer(MediaServer):
         The base class :meth:`MediaServer.resolve_remote_path_to_item_id`
         loops mapped candidates through this hook so callers can pass
         canonical paths.
+
+        ``library_ids`` (section keys) replaces the preview-library filter
+        below: Intro & Credits passes the libraries that hold the file,
+        which can have previews turned off.
         """
         import os as _os
         import urllib.parse
@@ -1977,8 +1983,11 @@ class PlexServer(MediaServer):
         selected_library_titles: set[str] = {
             str(n).strip().lower() for n in (getattr(self._config, "plex_libraries", None) or []) if str(n).strip()
         }
+        scoped_library_ids = None if library_ids is None else {str(s).strip() for s in library_ids}
 
         def _is_selected(section) -> bool:
+            if scoped_library_ids is not None:
+                return str(getattr(section, "key", "")).strip() in scoped_library_ids
             if selected_library_ids:
                 return str(getattr(section, "key", "")).strip() in selected_library_ids
             if selected_library_titles:
@@ -2090,6 +2099,186 @@ class PlexServer(MediaServer):
             if bundle_hash and file_path:
                 results.append((bundle_hash, file_path))
         return results
+
+    def get_external_ids(self, item_id: str) -> dict[str, Any] | None:
+        """Plex guids (``includeGuids=1``).
+
+        Episodes take tmdb/imdb/tvdb ONLY from the show's own guids (via ``grandparentRatingKey``);
+        if that key is missing, or the show lookup fails or returns nothing, the ids stay ``None``
+        (season/episode are still reported) — the episode's own guids are never used as a stand-in
+        for the show's, since a wrong id would route another show's markers to this file. Movies
+        never report a ``tvdb`` id (different id space to tmdb/imdb). Unrecognised item types
+        report no ids at all.
+        """
+        from ..plex_client import retry_plex_call
+
+        bare_id = str(item_id or "").strip().rsplit("/", 1)[-1]
+        if not bare_id:
+            return None
+
+        def _first_node(key: str) -> ET.Element | None:
+            root = retry_plex_call(self._connect().query, f"/library/metadata/{key}?includeGuids=1")
+            return next(iter(root), None) if root is not None else None
+
+        try:
+            node = _first_node(bare_id)
+        except Exception as exc:
+            logger.debug("Plex external-id lookup failed for {}: {}", bare_id, exc)
+            return None
+        if node is None:
+            return None
+
+        kind = node.get("type")
+        kind_norm = kind if kind in ("movie", "episode") else "unknown"
+        out: dict[str, Any] = {
+            "kind": kind_norm,
+            "tmdb": None,
+            "imdb": None,
+            "tvdb": None,
+            "season": None,
+            "episode": None,
+        }
+        if kind_norm == "unknown":
+            return out
+
+        if kind_norm == "episode":
+            out["season"] = int(node.get("parentIndex")) if (node.get("parentIndex") or "").isdigit() else None
+            out["episode"] = int(node.get("index")) if (node.get("index") or "").isdigit() else None
+            grandparent_key = node.get("grandparentRatingKey")
+            if not grandparent_key:
+                return out
+            try:
+                guid_node = _first_node(grandparent_key)
+            except Exception as exc:
+                logger.debug("Plex show-guid lookup failed for {}: {}", grandparent_key, exc)
+                return out
+            if guid_node is None:
+                return out
+            allowed_schemes = ("tmdb", "imdb", "tvdb")
+        else:
+            guid_node = node
+            allowed_schemes = ("tmdb", "imdb")  # movies: tvdb is a different id space
+
+        for guid in guid_node.findall("Guid"):
+            scheme, _, value = (guid.get("id") or "").partition("://")
+            if scheme in allowed_schemes and value:
+                out[scheme] = value
+        return out
+
+    def get_server_status(self) -> dict[str, Any] | None:
+        """Plex Pass and version, read fresh from ``GET /``; None when unreachable.
+
+        plexapi only reads ``myPlexSubscription`` and ``version`` when it connects, so its attributes would miss a
+        claim, a lapsed Pass or an upgrade until the app restarts.
+
+        Returns:
+            ``{"plex_pass": bool, "version": str | None}``, or None when Plex can't be reached.
+        """
+        try:
+            root = self._connect().query("/")
+        except Exception as exc:
+            logger.debug("Plex status check failed for {}: {}", self.name, exc)
+            return None
+        if root is None:
+            return None
+        return {"plex_pass": root.get("myPlexSubscription") in ("1", "true"), "version": root.get("version")}
+
+    def get_marker_detection_prefs(self) -> dict[str, str | None]:
+        """Plex's own intro/credits detection prefs, read fresh (Plex hides them on servers without Plex Pass)."""
+        from plexapi.exceptions import NotFound
+        from plexapi.settings import Settings
+
+        out: dict[str, str | None] = {"intro": None, "credits": None}
+        try:
+            conn = self._connect()
+            # A new Settings object: plexapi caches server.settings for the connection's lifetime.
+            settings = Settings(conn, conn.query(Settings.key))
+        except Exception as exc:
+            logger.debug("Plex marker prefs unavailable for {}: {}", self.name, exc)
+            return out
+        for key, pref in (("intro", "GenerateIntroMarkerBehavior"), ("credits", "GenerateCreditsMarkerBehavior")):
+            try:
+                out[key] = str(settings.get(pref).value)
+            except NotFound:
+                out[key] = None
+        return out
+
+    def get_markers(self, item_id: str) -> list[dict] | None:
+        """Intro/credits markers Plex serves for an item (``includeMarkers=1``); None on error."""
+        from ..plex_client import retry_plex_call
+
+        bare_id = str(item_id or "").strip().rsplit("/", 1)[-1]
+        try:
+            root = retry_plex_call(self._connect().query, f"/library/metadata/{bare_id}?includeMarkers=1")
+        except Exception as exc:
+            logger.debug("Plex marker read failed for {}: {}", bare_id, exc)
+            return None
+        node = next(iter(root), None) if root is not None else None
+        if node is None:
+            return None
+        out = []
+        for m in node.findall("Marker"):
+            if m.get("type") not in ("intro", "credits"):
+                continue
+            out.append(
+                {
+                    "type": m.get("type"),
+                    "start_ms": int(m.get("startTimeOffset") or 0),
+                    "end_ms": int(m.get("endTimeOffset") or 0),
+                    "final": m.get("final") in ("1", "true"),
+                }
+            )
+        return out
+
+    def get_part_durations(self, item_id: str) -> list[int | None] | None:
+        """Duration of every part of every version of an item (Plex serves one marker set per item).
+
+        Args:
+            item_id: Rating key or metadata key.
+
+        Returns:
+            Milliseconds per ``Media/Part`` in Plex's order (None for a part without a duration), or None on error.
+        """
+        from ..plex_client import retry_plex_call
+
+        bare_id = str(item_id or "").strip().rsplit("/", 1)[-1]
+        try:
+            root = retry_plex_call(self._connect().query, f"/library/metadata/{bare_id}")
+        except Exception as exc:
+            logger.debug("Plex part read failed for {}: {}", bare_id, exc)
+            return None
+        node = next(iter(root), None) if root is not None else None
+        if node is None:
+            return None
+        durations: list[int | None] = []
+        for part in node.findall("Media/Part"):
+            raw = part.get("duration")
+            durations.append(int(raw) if raw and raw.isdigit() else None)
+        return durations
+
+    def get_version_count(self, item_id: str) -> int | None:
+        """How many versions an item has: its ``Media`` nodes, leaving out Plex's optimized copies.
+
+        A stacked version has several parts but is one version; an "Optimize" copy carries ``proxyType``.
+
+        Args:
+            item_id: Rating key or metadata key.
+
+        Returns:
+            The number of versions, or None on error or when Plex has no such item.
+        """
+        from ..plex_client import retry_plex_call
+
+        bare_id = str(item_id or "").strip().rsplit("/", 1)[-1]
+        try:
+            root = retry_plex_call(self._connect().query, f"/library/metadata/{bare_id}")
+        except Exception as exc:
+            logger.debug("Plex version read failed for {}: {}", bare_id, exc)
+            return None
+        node = next(iter(root), None) if root is not None else None
+        if node is None:
+            return None
+        return sum(1 for media in node.findall("Media") if not media.get("proxyType"))
 
     def parse_webhook(self, payload: dict[str, Any] | bytes, headers: dict[str, str]) -> WebhookEvent | None:
         """Normalise a Plex webhook payload to a :class:`WebhookEvent`.

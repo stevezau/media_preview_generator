@@ -10,7 +10,7 @@ import shutil
 import tempfile
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -34,8 +34,8 @@ def to_utc_naive(value: datetime) -> datetime:
     See GitHub #226 for the silent zero-items repro on UTC-behind hosts.
     """
     if value.tzinfo is not None:
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
-    return datetime.fromtimestamp(value.timestamp(), tz=timezone.utc).replace(tzinfo=None)
+        return value.astimezone(UTC).replace(tzinfo=None)
+    return datetime.fromtimestamp(value.timestamp(), tz=UTC).replace(tzinfo=None)
 
 
 def calculate_title_width():
@@ -320,9 +320,9 @@ def atomic_json_save_with_backup(filepath: str, data: Any, *, permissions: int |
         IOError: If the primary write or replace fails. Backup failures do not raise.
     """
     if os.path.exists(filepath):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         bak_path = f"{filepath}.{ts}.bak"
         try:
             shutil.copy2(filepath, bak_path)

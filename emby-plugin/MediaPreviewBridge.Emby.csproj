@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Build per Emby ABI: `dotnet build -c Release -p:EmbyAbi=4.9` (4.9 and 4.10 plugins aren't interchangeable). -->
+    <EmbyAbi Condition="'$(EmbyAbi)' == ''">4.10</EmbyAbi>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <RootNamespace>MediaPreviewBridge.Emby</RootNamespace>
+    <AssemblyName>MediaPreviewBridge.Emby</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <Version>1.0.0.0</Version>
+    <FileVersion>$(Version)</FileVersion>
+    <AssemblyVersion>$(Version)</AssemblyVersion>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(EmbyAbi)' == '4.9'">
+    <EmbyServerCoreVersion>4.9.1.90</EmbyServerCoreVersion>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(EmbyAbi)' == '4.10'">
+    <EmbyServerCoreVersion>4.10.0.24-beta2</EmbyServerCoreVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Emby supplies these at runtime; never copy them next to the plugin. -->
+    <PackageReference Include="MediaBrowser.Server.Core" Version="$(EmbyServerCoreVersion)" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+</Project>

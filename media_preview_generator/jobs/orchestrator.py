@@ -12,7 +12,7 @@ import shutil
 from loguru import logger
 
 from ..processing.generator import ProcessingResult, clear_failures, log_failure_summary
-from ..servers.ownership import apply_path_mappings, apply_webhook_prefixes, find_owning_servers
+from ..servers.ownership import find_owning_servers, webhook_path_candidates
 from .worker import WorkerPool
 
 
@@ -63,26 +63,8 @@ def _resolve_webhook_path_to_canonical(
     if not path or not server_configs:
         return path, []
 
-    candidate_paths: list[str] = [path]
-    seen_candidates: set[str] = {path}
-    for cfg in server_configs:
-        # Two namespaces can arrive here, and each needs its own translator:
-        #   * Sonarr/Radarr/Tdarr send their own view (``/data/...``) →
-        #     apply_webhook_prefixes maps the configured webhook_prefixes to
-        #     local.
-        #   * A Plex/Emby/Jellyfin ``library.new`` webhook resolves the file
-        #     via the server's API, so the path arrives in the MEDIA-SERVER's
-        #     own view (``/mnt/Media/...``) → apply_path_mappings does the
-        #     same remote→local translation we already apply to a library's
-        #     remote_paths. Without this, an install with a path mapping
-        #     never matched its own server's webhooks (issue #254): the
-        #     ownership check translated the library prefix to ``/media`` but
-        #     compared it against the untranslated ``/mnt/Media`` path.
-        for translator in (apply_webhook_prefixes, apply_path_mappings):
-            for translated in translator(path, cfg.path_mappings or []):
-                if translated not in seen_candidates:
-                    seen_candidates.add(translated)
-                    candidate_paths.append(translated)
+    # Shared with the Intro & Credits triggers (markers/triggers.py) so the two can't drift apart.
+    candidate_paths = webhook_path_candidates(path, server_configs)
 
     # Aggregate owners across ALL candidates that match. Track which
     # candidate each owner came from so we can pick a canonical path
@@ -292,6 +274,12 @@ _FRAME_PROVENANCE_STATUSES: frozenset[str] = frozenset(
     {"published", "published_pending_registration", "skipped_output_exists"}
 )
 
+# Statuses whose rows share one server-wide reason (Intro & Credits skips: plugin missing, Plex database not
+# writable). The aggregate keeps that reason once per server so the job row can say why, instead of every file row
+# repeating it. Failure text is left out: it can carry exception detail. Preview statuses aren't listed, so the
+# preview aggregate keeps its shape.
+_AGGREGATE_MESSAGE_STATUSES: frozenset[str] = frozenset({"markers_skipped"})
+
 
 def _best_publisher_status(statuses: list[str]) -> str:
     """Return the most informative status from a list of attempts.
@@ -385,6 +373,10 @@ def fold_publisher_rows_into_aggregate(aggregate: dict[str, dict], rows: list[di
         {server_id: {"server_id": ..., "server_name": ...,
                      "server_type": ..., "counts": {status: count}}}
 
+    plus ``frame_sources`` for preview publishes and ``messages``
+    (``{status: shared message or None}``) for the statuses in
+    ``_AGGREGATE_MESSAGE_STATUSES``.
+
     Mutates ``aggregate`` in place. Both job-dispatch paths (legacy
     WorkerPool dispatcher and the multi-server full-scan / webhook
     ThreadPoolExecutor) feed this so they cannot drift again — commit
@@ -419,6 +411,14 @@ def fold_publisher_rows_into_aggregate(aggregate: dict[str, dict], rows: list[di
                 entry["server_type"] = row["server_type"].lower()
         status = row.get("status") or "unknown"
         entry["counts"][status] = entry["counts"].get(status, 0) + 1
+        if status in _AGGREGATE_MESSAGE_STATUSES:
+            # None once two rows disagree: there is no single reason to show.
+            messages = entry.setdefault("messages", {})
+            message = row.get("message") or ""
+            if status not in messages:
+                messages[status] = message
+            elif messages[status] != message:
+                messages[status] = None
         # Per-server frame provenance, additive alongside the status counts so
         # existing consumers of ``counts`` are untouched. Lets the Job UI show
         # each server's "Generated (extracted) / Reused (cache_hit) / Already

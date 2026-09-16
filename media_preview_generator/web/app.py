@@ -9,7 +9,7 @@ import hmac
 import json
 import logging  # stdlib logging only — required to mute werkzeug's own logger; app code must use loguru
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from flask import Flask
@@ -19,6 +19,7 @@ from flask_wtf.csrf import CSRFProtect
 from loguru import logger
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from ..job_kinds import JOB_KIND_INTRO_CREDITS
 from .auth import log_token_on_startup
 from .jobs import JobStatus, get_job_manager
 from .scheduler import get_schedule_manager
@@ -309,7 +310,7 @@ def _resume_interrupted_retry_chains_on_startup(config_dir: str) -> None:
         if not chains:
             return
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         max_chain_age = _MAX_CHAIN_AGE_FOR_RESUME
         all_jobs = job_manager.get_all_jobs()
         revived = 0
@@ -323,7 +324,7 @@ def _resume_interrupted_retry_chains_on_startup(config_dir: str) -> None:
                 started_str = chain.config.get("retry_started_at") or chain.created_at
                 started = datetime.fromisoformat(started_str.replace("Z", "+00:00")) if started_str else now
                 if started.tzinfo is None:
-                    started = started.replace(tzinfo=timezone.utc)
+                    started = started.replace(tzinfo=UTC)
             except (ValueError, AttributeError):
                 started = now
             if now - started > max_chain_age:
@@ -448,6 +449,7 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
         )
         if not auto_requeue_enabled:
             logger.info("Auto-requeue on restart is disabled")
+            get_job_manager().fail_unrevived_interrupted_jobs(JOB_KIND_INTRO_CREDITS)
             return
 
         # A pause from the previous session is honored across the restart —
@@ -461,6 +463,8 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
         max_age = int(settings.get("requeue_max_age_minutes", 720))
         job_manager = get_job_manager()
         revived = job_manager.requeue_interrupted_jobs(max_age_minutes=max_age)
+        # Intro & Credits jobs left PENDING would block their schedule and absorb webhook follow-ups for good.
+        job_manager.fail_unrevived_interrupted_jobs(JOB_KIND_INTRO_CREDITS)
 
         if not revived:
             return
@@ -718,6 +722,9 @@ def create_app(config_dir: str | None = None) -> Flask:
         "api.delete_job",
         "api.clear_jobs",
         "api.get_job_stats",
+        # Intro & Credits jobs — @api_token_required, the token API for starting them
+        "api.create_marker_job",
+        "api.marker_reconcile",
         # Schedules — @api_token_required
         "api.get_schedules",
         "api.get_schedule",
@@ -872,6 +879,10 @@ def create_app(config_dir: str | None = None) -> Flask:
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         return response
 
+    # Auto-requeue jobs that were interrupted by the server restart. Kept ahead of schedule ticks; leftover Intro &
+    # Credits jobs that aren't revived are settled by fail_unrevived_interrupted_jobs, so no tick skips on them.
+    _requeue_interrupted_on_startup(config_dir)
+
     # Start scheduler
     schedule_manager.start()
 
@@ -890,9 +901,6 @@ def create_app(config_dir: str | None = None) -> Flask:
 
     # Log token on startup
     log_token_on_startup()
-
-    # Auto-requeue jobs that were interrupted by the server restart
-    _requeue_interrupted_on_startup(config_dir)
 
     # Re-arm Timers for retry-chain Jobs that were mid-backoff at restart.
     # Must run AFTER settings/config are accessible (load_config + registry

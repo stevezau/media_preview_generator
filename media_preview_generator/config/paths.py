@@ -4,9 +4,10 @@ The path-mapping layer translates between a file's path inside Plex
 (``/media/movies/foo.mkv``) and its path on the local filesystem where
 this tool can read it (``/data/movies/foo.mkv``). Different deployment
 topologies (NAS-as-Plex, Docker bind mounts, mergefs unions) need
-different mapping shapes — all of them normalise into the same
-``[{plex_prefix, local_prefix, webhook_prefixes?}]`` list used by the
-rest of the codebase.
+different mapping shapes. ``normalize_path_mappings`` turns them into
+``[{plex_prefix, local_prefix, webhook_prefixes?}]`` rows; the resolvers
+here also take raw per-server rows, whose server prefix is
+``remote_prefix`` or legacy ``plex_prefix``.
 
 Also holds ``split_library_selectors`` which sorts user-provided library
 strings into IDs vs. titles.
@@ -84,11 +85,10 @@ def normalize_path_mappings(settings: dict[str, Any]) -> list[dict[str, Any]]:
     Legacy: settings has plex_videos_path_mapping and plex_local_videos_path_mapping
     (semicolon-separated); converted to mapping rows with empty webhook_prefixes.
 
-    The output always uses the legacy ``plex_prefix`` key so downstream
-    callers (config/paths.py resolvers, plex_client.py) keep working
-    unchanged. ``ownership.py`` reads the on-disk shape directly and
-    handles both keys there — this normalizer is only the bridge into
-    the legacy resolver, which never grew ``remote_prefix`` awareness.
+    The output always uses the legacy ``plex_prefix`` key. The resolvers
+    in this module also accept raw per-server rows (either key), because
+    ``MediaServer`` and ``PlexServer`` pass ``settings.json`` rows through
+    without normalising them.
 
     Args:
         settings: Dict from settings.json or equivalent (e.g. ui_settings).
@@ -262,13 +262,14 @@ def detect_unhealthy_media_mounts(path_mappings: list[dict[str, Any]]) -> list[d
 def path_to_canonical_local(path: str, path_mappings: list[dict[str, Any]]) -> str:
     """Map any path (Plex, webhook, or local) to canonical local path.
 
-    Uses the first matching mapping: plex_prefix or any webhook_prefix is
-    replaced by local_prefix. If no mapping matches, the path is returned
-    unchanged (treated as already local).
+    Uses the first matching mapping: the server prefix (``remote_prefix``,
+    or legacy ``plex_prefix``) or any webhook_prefix is replaced by
+    local_prefix. If no mapping matches, the path is returned unchanged
+    (treated as already local).
 
     Args:
         path: Absolute path as seen by Plex, webhook, or this app.
-        path_mappings: List from normalize_path_mappings().
+        path_mappings: Normalized rows or raw per-server rows (``remote_prefix`` or legacy ``plex_prefix``).
 
     Returns:
         Path in the form this app can use for file access / comparison.
@@ -278,7 +279,7 @@ def path_to_canonical_local(path: str, path_mappings: list[dict[str, Any]]) -> s
         return path or ""
     path = (path or "").strip().replace("\\", "/")
     for m in path_mappings:
-        plex_prefix = _normalize_prefix(m.get("plex_prefix") or "")
+        plex_prefix = _normalize_prefix(m.get("remote_prefix") or m.get("plex_prefix") or "")
         local_prefix = _normalize_prefix(m.get("local_prefix") or "")
         if plex_prefix and _path_matches_prefix(path, plex_prefix):
             rest = path[len(plex_prefix) :].lstrip("/")
@@ -301,7 +302,7 @@ def expand_path_mapping_candidates(path: str, path_mappings: list[dict[str, Any]
 
     Args:
         path: Absolute path reported by webhook/Plex/app.
-        path_mappings: List from normalize_path_mappings().
+        path_mappings: Normalized rows or raw per-server rows (``remote_prefix`` or legacy ``plex_prefix``).
 
     Returns:
         Ordered unique list of candidate paths. The original input path is first.
@@ -333,7 +334,7 @@ def expand_path_mapping_candidates(path: str, path_mappings: list[dict[str, Any]
             candidates.append(candidate)
 
     for mapping in path_mappings:
-        plex_prefix = mapping.get("plex_prefix") or ""
+        plex_prefix = mapping.get("remote_prefix") or mapping.get("plex_prefix") or ""
         local_prefix = mapping.get("local_prefix") or ""
         webhook_prefixes = mapping.get("webhook_prefixes") or []
 

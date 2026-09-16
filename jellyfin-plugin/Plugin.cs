@@ -12,9 +12,10 @@ namespace Jellyfin.Plugin.MediaPreviewBridge;
 /// Bridge plugin that lets an external trickplay generator (the Media
 /// Preview Generator app) tell Jellyfin "I just wrote tiles to disk for
 /// item X — please register them" without going through Jellyfin's own
-/// ffmpeg pipeline. Exposes a single REST endpoint
-/// (<see cref="Api.TrickplayBridgeController" />) that internally calls
-/// <c>ITrickplayManager.SaveTrickplayInfo</c>.
+/// ffmpeg pipeline (<see cref="Api.TrickplayBridgeController" />, which
+/// internally calls <c>ITrickplayManager.SaveTrickplayInfo</c>), and push
+/// Skip Intro / Skip Credits markers that Jellyfin serves as media segments
+/// (<see cref="Api.MarkersController" /> + <see cref="Markers.BridgeSegmentProvider" />).
 ///
 /// Why this exists: Jellyfin's only public path for trickplay
 /// registration is <c>RefreshTrickplayDataAsync</c>, gated by
@@ -52,8 +53,10 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public override string Description =>
         "Lets external preview-generator tools (e.g. Media Preview Generator) " +
         "register pre-written trickplay tiles with Jellyfin without spawning " +
-        "ffmpeg. POST /MediaPreviewBridge/Trickplay/{itemId} after writing " +
-        "tiles to <basename>.trickplay/<width> - <tileW>x<tileH>/<n>.jpg.";
+        "ffmpeg, and publish Skip Intro / Skip Credits markers as media segments. " +
+        "POST /MediaPreviewBridge/Trickplay/{itemId} after writing tiles to " +
+        "<basename>.trickplay/<width> - <tileW>x<tileH>/<n>.jpg; " +
+        "POST /MediaPreviewBridge/Markers/{itemId} with intro, credits, recap and preview times.";
 
     /// <inheritdoc />
     public IEnumerable<PluginPageInfo> GetPages()

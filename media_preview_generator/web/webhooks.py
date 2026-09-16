@@ -12,13 +12,14 @@ import re
 import secrets
 import threading
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request
 from loguru import logger
 
+from ..processing.retry_queue import retry_policy
 from .auth import api_token_required, validate_token
 from .jobs import get_job_manager, incoming_job_priority
 from .settings_manager import get_settings_manager
@@ -244,7 +245,7 @@ def _add_history_entry(
     query param on inbound webhook URLs).
     """
     entry: dict[str, object] = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "source": source,
         "event_type": event_type,
         "title": title,
@@ -354,7 +355,7 @@ def _check_and_record_dedup(source: str, server_id: str | None, canonical_path: 
 
     Caller must hold ``_pending_lock``.
     """
-    now_ts = datetime.now(timezone.utc).timestamp()
+    now_ts = datetime.now(UTC).timestamp()
     expired = [k for k, ts in _recent_dispatches.items() if now_ts - ts >= _RECENT_DISPATCH_TTL_SECONDS]
     for k in expired:
         _recent_dispatches.pop(k, None)
@@ -364,6 +365,21 @@ def _check_and_record_dedup(source: str, server_id: str | None, canonical_path: 
         return int(now_ts - last)
     _recent_dispatches[dedup_key] = now_ts
     return None
+
+
+def _queue_intro_credits_follow_up(
+    preview_job_id: str, paths: list[str], source: str, *, item_id_hints: dict[str, dict[str, str]] | None = None
+) -> None:
+    """Queue the Intro & Credits job for a webhook's files after its preview job has started.
+
+    Never raises: a markers problem must not cost the batch its previews or its history entry.
+    """
+    try:
+        from ..markers.triggers import submit_webhook_follow_up
+
+        submit_webhook_follow_up(preview_job_id=preview_job_id, paths=paths, source=source, item_id_hints=item_id_hints)
+    except Exception:
+        logger.exception("Could not queue the Intro & Credits job that follows webhook job {}", preview_job_id)
 
 
 def create_vendor_webhook_job(
@@ -449,11 +465,7 @@ def create_vendor_webhook_job(
     )
 
     settings = get_settings_manager()
-    # Global retry policy — key name is historical (these used to live on
-    # the webhook settings panel), but the values now apply to every job
-    # type. UI surface: Settings → Processing → Job Execution.
-    retry_count = max(0, min(10, int(settings.get("webhook_retry_count", 3))))
-    retry_delay = max(10, min(300, int(settings.get("webhook_retry_delay", 30))))
+    retry_count, retry_delay = retry_policy(settings)
 
     overrides: dict[str, object] = {
         "sort_by": "newest",
@@ -483,6 +495,9 @@ def create_vendor_webhook_job(
     from .routes import _start_job_async
 
     _start_job_async(job.id, overrides)
+    _queue_intro_credits_follow_up(
+        job.id, [canonical_path], safe_source, item_id_hints=overrides.get("webhook_item_id_hints") or None
+    )
     _add_history_entry(
         safe_source,
         "Webhook",
@@ -844,8 +859,8 @@ def _schedule_webhook_job(
             # banner instead. Now the timestamp travels with the Job,
             # the row renders the countdown natively, and the banner
             # becomes redundant (issue: webhook countdown UX, May 2026).
-            fire_at_ts = datetime.now(timezone.utc).timestamp() + delay
-            fire_at_iso = datetime.fromtimestamp(fire_at_ts, tz=timezone.utc).isoformat()
+            fire_at_ts = datetime.now(UTC).timestamp() + delay
+            fire_at_iso = datetime.fromtimestamp(fire_at_ts, tz=UTC).isoformat()
 
             if is_fresh_batch:
                 # Pull server-context resolution forward so the Job can be
@@ -1142,10 +1157,7 @@ def _execute_webhook_job(debounce_key: str) -> None:
             raw_libs = plex_view.get("selected_libraries") or settings.get("selected_libraries", [])
             if isinstance(raw_libs, list):
                 selected_libraries = [str(name).strip() for name in raw_libs if str(name).strip()]
-        # Global retry policy — key name is historical; see settings.html
-        # "Job Execution" sub-section. Values apply to every job type.
-        retry_count = max(0, min(10, int(settings.get("webhook_retry_count", 3))))
-        retry_delay = max(10, min(300, int(settings.get("webhook_retry_delay", 30))))
+        retry_count, retry_delay = retry_policy(settings)
 
         # NOTE: dedup entries were already written by
         # ``_check_and_record_dedup`` inside ``_schedule_webhook_job`` at
@@ -1178,6 +1190,7 @@ def _execute_webhook_job(debounce_key: str) -> None:
         if webhook_deleted_paths:
             overrides["webhook_deleted_paths"] = webhook_deleted_paths
         _start_job_async(job.id, overrides)
+        _queue_intro_credits_follow_up(job.id, list(webhook_paths), source)
         _add_history_entry(
             source,
             "Download",
@@ -2009,7 +2022,7 @@ def clear_webhook_history():
 @api_token_required
 def get_pending_webhooks():
     """Return currently pending (debouncing) webhook batches with countdown info."""
-    now = datetime.now(timezone.utc).timestamp()
+    now = datetime.now(UTC).timestamp()
     pending = []
     with _pending_lock:
         for key, batch in _pending_batches.items():
@@ -2022,7 +2035,7 @@ def get_pending_webhooks():
                     "source": batch.get("source", key),
                     "file_count": len(batch.get("file_paths", set())),
                     "first_title": titles[0] if titles else "",
-                    "fire_at": datetime.fromtimestamp(fire_at, tz=timezone.utc).isoformat() if fire_at else None,
+                    "fire_at": datetime.fromtimestamp(fire_at, tz=UTC).isoformat() if fire_at else None,
                     "remaining_seconds": round(remaining, 1),
                 }
             )

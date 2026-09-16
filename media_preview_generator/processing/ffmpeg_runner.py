@@ -18,10 +18,8 @@ callable with the same signature as the original nested
 
 Keeping the factory-function shape (rather than a class) means the
 call sites in ``generate_images``' retry cascade don't need to change
-— every ``_run_ffmpeg(...)`` call becomes ``run(...)``.  The three
-inner helpers (``_gpu_scale_segment``, ``_assemble_vf``, ``_run_ffmpeg``)
-are bit-for-bit what they used to be; only the indentation level and
-home address changed.
+— every ``_run_ffmpeg(...)`` call becomes ``run(...)``.  The
+``-hwaccel`` decode arguments come from ``processing/hwaccel.py``.
 """
 
 from __future__ import annotations
@@ -41,6 +39,7 @@ from .filter_chain import (
     DV5_PATH_LIBPLACEBO,
     DV5_PATH_VAAPI_VULKAN,
 )
+from .hwaccel import hwaccel_decode_args
 
 
 def create_ffmpeg_runner(
@@ -277,23 +276,9 @@ def create_ffmpeg_runner(
 
         hw_decode_active = False
         if use_gpu and effective_gpu == "NVIDIA":
-            args += ["-hwaccel", "cuda"]
-            # On multi-GPU hosts each NVIDIA card is registered with a
-            # device path of ``cuda:<index>`` (see gpu/detect.py).  Pass
-            # the index through to FFmpeg via ``-hwaccel_device`` so
-            # work actually lands on the selected GPU (issue #221).
-            if effective_gpu_device_path and effective_gpu_device_path.startswith("cuda:"):
-                cuda_idx = effective_gpu_device_path.split(":", 1)[1]
-                if cuda_idx:
-                    args += ["-hwaccel_device", cuda_idx]
-            if keep_on_gpu:
-                # Keep decoded CUDA surfaces on the GPU so scale_cuda
-                # can downscale there and only the 320x240 frame is
-                # hwdownloaded to the mjpeg encoder.  Without this,
-                # FFmpeg silently downloads every 4K frame to host
-                # RAM (~990 MB RSS per worker on 4K HDR10, issue #218).
-                args += ["-hwaccel_output_format", "cuda"]
-            hw_decode_active = True
+            decode = hwaccel_decode_args(effective_gpu, effective_gpu_device_path, keep_on_gpu=keep_on_gpu)
+            args += list(decode.args)
+            hw_decode_active = decode.active
         elif use_intel_opencl_dv5 or use_vaapi_dv5:
             # Intel DV5 via VAAPI decode + OpenCL tonemap, OR AMD DV5 via
             # VAAPI decode + Vulkan libplacebo.  Same hwaccel flags (VAAPI
@@ -309,26 +294,9 @@ def create_ffmpeg_runner(
             ]
             hw_decode_active = True
         elif use_gpu and not init_vulkan:
-            if effective_gpu == "WINDOWS_GPU":
-                args += ["-hwaccel", "d3d11va"]
-                hw_decode_active = True
-            elif effective_gpu == "APPLE":
-                args += ["-hwaccel", "videotoolbox"]
-                hw_decode_active = True
-            elif effective_gpu_device_path and effective_gpu_device_path.startswith("/dev/dri/"):
-                # -hwaccel_device (not the deprecated -vaapi_device)
-                # pairs with -hwaccel_output_format vaapi so decoded
-                # frames stay in VAAPI surfaces for scale_vaapi; the
-                # 320x240 frame is hwdownloaded at the end (issue #218).
-                args += [
-                    "-hwaccel",
-                    "vaapi",
-                    "-hwaccel_device",
-                    effective_gpu_device_path,
-                ]
-                if keep_on_gpu:
-                    args += ["-hwaccel_output_format", "vaapi"]
-                hw_decode_active = True
+            decode = hwaccel_decode_args(effective_gpu, effective_gpu_device_path, keep_on_gpu=keep_on_gpu)
+            args += list(decode.args)
+            hw_decode_active = decode.active
         elif use_gpu and init_vulkan:
             logger.debug(
                 "Skipping HW decode for DV Profile 5 ({}) on {}: no VAAPI render device available; using software decode + Vulkan/libplacebo tone mapping",

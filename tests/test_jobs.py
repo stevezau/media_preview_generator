@@ -8,7 +8,7 @@ or cleared.
 """
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -126,7 +126,7 @@ class TestLogRetentionEnforcement:
         assert os.path.isfile(log_path)
 
         # Backdate completed_at to 60 days ago
-        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        old_time = (datetime.now(UTC) - timedelta(days=60)).isoformat()
         jm._jobs[job.id].completed_at = old_time
         jm._persist_job(jm._jobs[job.id])
 
@@ -164,7 +164,7 @@ class TestLogRetentionEnforcement:
         jm.add_log(job.id, "INFO - test")
 
         # Backdate created_at to 90 days ago
-        old_time = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        old_time = (datetime.now(UTC) - timedelta(days=90)).isoformat()
         jm._jobs[job.id].created_at = old_time
 
         with patch("media_preview_generator.web.settings_manager.get_settings_manager") as m:
@@ -368,7 +368,7 @@ class TestRequeueInterruptedJobs:
         os.makedirs(config_dir, exist_ok=True)
         jm = JobManager(config_dir=config_dir)
         job = jm.create_job(library_name="Old Job")
-        job.created_at = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        job.created_at = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
         jm._interrupted_jobs = [job]
 
         result = jm.requeue_interrupted_jobs(max_age_minutes=60)
@@ -381,8 +381,8 @@ class TestRequeueInterruptedJobs:
         os.makedirs(config_dir, exist_ok=True)
         jm = JobManager(config_dir=config_dir)
         job = jm.create_job(library_name="Long Runner")
-        job.created_at = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
-        job.started_at = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        job.created_at = (datetime.now(UTC) - timedelta(hours=5)).isoformat()
+        job.started_at = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
         job.status = JobStatus.FAILED
         job.error = "Job was interrupted by server restart"
         jm._interrupted_jobs = [job]
@@ -399,8 +399,8 @@ class TestRequeueInterruptedJobs:
         os.makedirs(config_dir, exist_ok=True)
         jm = JobManager(config_dir=config_dir)
         job = jm.create_job(library_name="Very Old Runner")
-        job.created_at = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()
-        job.started_at = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+        job.created_at = (datetime.now(UTC) - timedelta(hours=10)).isoformat()
+        job.started_at = (datetime.now(UTC) - timedelta(hours=5)).isoformat()
         job.status = JobStatus.FAILED
         jm._interrupted_jobs = [job]
 
@@ -433,7 +433,7 @@ class TestRequeueInterruptedJobs:
         original_created = job.created_at
         job.status = JobStatus.FAILED
         job.error = "Job was interrupted by server restart"
-        job.completed_at = datetime.now(timezone.utc).isoformat()
+        job.completed_at = datetime.now(UTC).isoformat()
         jm._interrupted_jobs = [job]
 
         result = jm.requeue_interrupted_jobs()
@@ -784,7 +784,7 @@ class TestSqliteJobsBackend:
         # Create 50 fat completed jobs, backdate them past retention,
         # then run the retention tick manually.
         fat_publishers = [{"server_id": f"s{i}", "counts": {"published": 9999}} for i in range(200)]
-        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        old_time = (datetime.now(UTC) - timedelta(days=60)).isoformat()
         for i in range(50):
             j = jm.create_job(library_name=f"old-{i}")
             jm.start_job(j.id)
@@ -1085,3 +1085,98 @@ class TestSetJobOutcome:
         jm = JobManager(config_dir=config_dir)
         job = jm.create_job(library_name="Test")
         assert job.progress.outcome is None
+
+
+class TestUpdateJobConfigIfPending:
+    """Intro & Credits joins write a waiting job's files only while it is still pending."""
+
+    def test_a_pending_job_takes_the_config(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test", config={"file_paths": ["/a"]})
+
+        assert jm.update_job_config_if_pending(job.id, {"file_paths": ["/a", "/b"]}) is True
+        assert jm.get_job(job.id).config == {"file_paths": ["/a", "/b"]}
+
+    @pytest.mark.parametrize("state", ["running", "completed", "cancelled"])
+    def test_a_job_no_longer_pending_keeps_its_config(self, config_dir, state):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test", config={"file_paths": ["/a"]})
+        if state == "cancelled":
+            jm.cancel_job(job.id)
+        else:
+            jm.start_job(job.id)
+        if state == "completed":
+            jm.complete_job(job.id)
+
+        assert jm.update_job_config_if_pending(job.id, {"file_paths": ["/a", "/b"]}) is False
+        assert jm.get_job(job.id).config == {"file_paths": ["/a"]}
+
+    def test_a_missing_job_is_refused(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        assert jm.update_job_config_if_pending("nope", {"file_paths": ["/b"]}) is False
+
+
+class TestPendingJobsUnderConcurrentCreation:
+    """Webhook threads create jobs while other threads list the pending ones (Intro & Credits follow-up dedupe)."""
+
+    def test_listing_pending_jobs_while_jobs_are_created_never_raises(self, config_dir):
+        import threading
+
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        jm._persist_job = lambda job: None  # keep creation fast so the dict grows during the listing loop
+        for i in range(3000):
+            jm.create_job(library_name=f"seed {i}")
+        stop = threading.Event()
+        created = []
+
+        def create_jobs():
+            while not stop.is_set():
+                created.append(jm.create_job(library_name="webhook").id)
+
+        errors = []
+        creator = threading.Thread(target=create_jobs)
+        creator.start()
+        try:
+            for _ in range(400):
+                try:
+                    pending = jm.get_pending_jobs()
+                except RuntimeError as exc:  # "dictionary changed size during iteration"
+                    errors.append(exc)
+                    continue
+                assert all(job.status is JobStatus.PENDING for job in pending)
+        finally:
+            stop.set()
+            creator.join(timeout=5)
+        assert errors == []
+        assert created, "the creator thread must have run during the listing"
+        assert {j.id for j in jm.get_pending_jobs()} >= set(created)
+
+
+class TestFailUnrevivedInterruptedJobs:
+    """Interrupted jobs a restart didn't revive are settled per kind."""
+
+    def test_only_pending_jobs_of_the_kind_left_behind_are_failed(self, config_dir):
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        stale_ic = jm.create_job(library_name="old backfill", kind="intro_credits")
+        stale_preview = jm.create_job(library_name="old scan")
+        finished_ic = jm.create_job(library_name="interrupted while running", kind="intro_credits")
+        finished_ic.status = JobStatus.FAILED
+        fresh_ic = jm.create_job(library_name="fresh", kind="intro_credits")
+        stale_ic.created_at = stale_preview.created_at = finished_ic.created_at = (
+            datetime.now(UTC) - timedelta(hours=3)
+        ).isoformat()
+        jm._interrupted_jobs = [stale_ic, stale_preview, finished_ic, fresh_ic]
+
+        revived = jm.requeue_interrupted_jobs(max_age_minutes=60)
+        failed = jm.fail_unrevived_interrupted_jobs("intro_credits")
+
+        assert [j.id for j in revived] == [fresh_ic.id]
+        assert finished_ic.status is JobStatus.FAILED and finished_ic.error is None  # already settled at load
+        assert [j.id for j in failed] == [stale_ic.id]
+        assert stale_ic.status is JobStatus.FAILED and stale_ic.error == "Interrupted by a restart and not resumed"
+        assert stale_preview.status is JobStatus.PENDING
+        assert fresh_ic.status is JobStatus.PENDING
+        assert jm.fail_unrevived_interrupted_jobs("intro_credits") == []
+        assert JobManager(config_dir=config_dir).get_job(stale_ic.id).status is JobStatus.FAILED

@@ -204,3 +204,79 @@ class TestEditExistingServer:
             f"Edit-save flipped the server type from 'plex' to {target['type']!r}. "
             "The PUT body's type field was either set wrong or merged in incorrectly."
         )
+
+
+def _seeded_server_with_mapping_row(row: dict) -> dict:
+    """Same Plex entry with one path mapping row in the given server-prefix key shape."""
+    server = _seeded_server()
+    server["path_mappings"] = [{**row, "local_prefix": "/tmp", "webhook_prefixes": []}]
+    return server
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize(
+    "backend_real_app",
+    [
+        pytest.param(
+            {"media_servers": [_seeded_server_with_mapping_row({"remote_prefix": "/media/current"})]},
+            id="remote_prefix_only",
+        ),
+        pytest.param(
+            {"media_servers": [_seeded_server_with_mapping_row({"plex_prefix": "/media/current"})]},
+            id="plex_prefix_only",
+        ),
+        pytest.param(
+            {
+                "media_servers": [
+                    _seeded_server_with_mapping_row({"remote_prefix": "/media/current", "plex_prefix": "/media/stale"})
+                ]
+            },
+            id="both_remote_wins",
+        ),
+    ],
+    indirect=True,
+)
+class TestEditPathMappingPrefixKeys:
+    def test_edit_form_shows_remote_prefix_and_saves_edit_to_both_keys(
+        self,
+        backend_real_page,
+        backend_real_app: tuple[str, str],
+    ) -> None:
+        """The form shows the value the backend maps with (``remote_prefix``, else legacy ``plex_prefix``).
+
+        Saving writes the edit to both keys. Showing ``plex_prefix`` and saving only
+        ``plex_prefix`` left a stale ``remote_prefix`` in charge, so the edit had no effect.
+        """
+        app_url, config_dir = backend_real_app
+
+        backend_real_page.goto(f"{app_url}/servers")
+        backend_real_page.wait_for_load_state("domcontentloaded")
+        edit_btn = backend_real_page.locator(".edit-server-btn[data-id='plex-edit-test']")
+        edit_btn.wait_for(state="visible", timeout=10000)
+        edit_btn.click()
+        expect(backend_real_page.locator("#editServerModal")).to_be_visible(timeout=5000)
+        backend_real_page.locator("button[data-bs-target='#edit-tab-paths']").click()
+
+        remote_input = backend_real_page.locator("#editPathMappingsTable tbody tr .pm-remote").first
+        expect(remote_input).to_have_value("/media/current", timeout=5000)
+
+        remote_input.fill("/media/edited")
+        with backend_real_page.expect_request(
+            lambda req: req.method == "PUT" and req.url.endswith("/api/servers/plex-edit-test"), timeout=10000
+        ) as put_info:
+            backend_real_page.locator("#editServerSave").click()
+        expect(backend_real_page.locator("#editServerModal")).to_be_hidden(timeout=10000)
+
+        sent_rows = put_info.value.post_data_json["path_mappings"]
+        assert sent_rows == [
+            {
+                "remote_prefix": "/media/edited",
+                "plex_prefix": "/media/edited",
+                "local_prefix": "/tmp",
+                "webhook_prefixes": [],
+            }
+        ]
+        with open(f"{config_dir}/settings.json") as f:
+            on_disk = json.load(f)
+        target = next(s for s in on_disk["media_servers"] if s.get("id") == "plex-edit-test")
+        assert target["path_mappings"] == sent_rows

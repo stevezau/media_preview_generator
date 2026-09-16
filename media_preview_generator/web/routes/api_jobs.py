@@ -5,10 +5,12 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from typing import TYPE_CHECKING
 
-from flask import current_app, jsonify, request, session
+from flask import Response, current_app, jsonify, request, session
 from loguru import logger
 
+from ...job_kinds import JOB_KIND_INTRO_CREDITS
 from ..auth import (
     api_token_required,
     get_auth_method,
@@ -17,6 +19,7 @@ from ..auth import (
     validate_token,
 )
 from ..jobs import (
+    PAUSED_BY_SCHEDULE,
     PRIORITY_NORMAL,
     RETRY_STATE_CONFIG_KEYS,
     JobStatus,
@@ -35,6 +38,9 @@ from ._helpers import (
     limiter,
 )
 from .job_runner import _start_job_async
+
+if TYPE_CHECKING:
+    from ...markers.reconcile import ReconcileQueued
 
 
 def _parse_worker_request(data: dict) -> tuple[str, int] | tuple[None, tuple]:
@@ -624,6 +630,25 @@ def _config_unwritable_response():
     return jsonify({"error": health["detail"], "hint": health["hint"], "config_health": health}), 503
 
 
+def _check_servers_answer(queued: "ReconcileQueued") -> tuple[Response, int]:
+    """The answer to a Check servers request: ``POST /api/markers/reconcile`` and a Check servers job's Re-run.
+
+    Args:
+        queued: What ``run_markers_reconcile`` did.
+
+    Returns:
+        202 with ``{"job_id", "already_queued"}`` plus ``"paused": true`` when the job already there is paused, or
+        200 with ``{"job_id": null, "reason"}`` when Intro & Credits is off on every server.
+    """
+    if queued.job_id is None:
+        return jsonify({"job_id": None, "reason": "Intro & Credits is off on every server"}), 200
+    body = {"job_id": queued.job_id, "already_queued": not queued.created}
+    existing = get_job_manager().get_job(queued.job_id) if not queued.created else None
+    if existing is not None and existing.paused:
+        body["paused"] = True
+    return jsonify(body), 202
+
+
 @api.route("/jobs", methods=["POST"])
 @api_token_required
 def create_job():
@@ -1094,20 +1119,35 @@ def fire_webhook_now(job_id):
 @api.route("/jobs/<job_id>/pause", methods=["POST"])
 @api_token_required
 def pause_job(job_id):
-    """Pause processing (global). Kept for backward compatibility; delegates to global pause."""
+    """Pause a job. Intro & Credits jobs pause on their own; preview jobs pause all processing (legacy)."""
     job_manager = get_job_manager()
-    if not job_manager.get_job(job_id):
+    job = job_manager.get_job(job_id)
+    if not job:
         return jsonify({"error": "Job not found"}), 404
+    if job.kind == JOB_KIND_INTRO_CREDITS:
+        if not job_manager.request_pause(job_id):
+            return jsonify({"error": "Only running jobs can be paused"}), 409
+        return jsonify(job_manager.get_job(job_id).to_dict())
     return pause_processing()
 
 
 @api.route("/jobs/<job_id>/resume", methods=["POST"])
 @api_token_required
 def resume_job(job_id):
-    """Resume processing (global). Kept for backward compatibility; delegates to global resume."""
+    """Resume a job. Intro & Credits jobs resume on their own; preview jobs resume all processing (legacy)."""
     job_manager = get_job_manager()
-    if not job_manager.get_job(job_id):
+    job = job_manager.get_job(job_id)
+    if not job:
         return jsonify({"error": "Job not found"}), 404
+    if job.kind == JOB_KIND_INTRO_CREDITS:
+        from ..settings_manager import get_settings_manager
+
+        if not job_manager.request_resume(job_id):
+            return jsonify({"error": "Only running jobs can be resumed"}), 409
+        # Pause all still holds the job while the global flag is set; the UI says so.
+        body = job_manager.get_job(job_id).to_dict()
+        body["processing_paused"] = bool(get_settings_manager().processing_paused)
+        return jsonify(body)
     return resume_processing()
 
 
@@ -1164,6 +1204,9 @@ def pause_processing():
     job_manager = get_job_manager()
     sm.processing_paused = True
     for running in job_manager.get_running_jobs():
+        # Intro & Credits jobs are held by the global flag itself; their per-job flag is the user's own pause.
+        if running.kind == JOB_KIND_INTRO_CREDITS:
+            continue
         job_manager.request_pause(running.id)
     job_manager.emit_processing_paused_changed(True)
     logger.info("Global processing paused")
@@ -1173,7 +1216,7 @@ def pause_processing():
 @api.route("/processing/resume", methods=["POST"])
 @api_token_required
 def resume_processing():
-    """Clear global processing pause and resume all running jobs."""
+    """Clear the global pause and resume running preview jobs (Intro & Credits jobs keep their own pause)."""
     from ..settings_manager import get_settings_manager
     from .job_runner import resume_running_and_drain_pending
 
@@ -1667,7 +1710,9 @@ def reprocess_job(job_id):
 
     When reprocessing a retry job, recovers the full file set and library
     name from the original parent job so every file is retried — not just
-    the subset that remained unresolved.
+    the subset that remained unresolved. An Intro & Credits job keeps its
+    schedule; a Check servers job is queued like ``POST /api/markers/reconcile``
+    and answers the same way (202, reusing one already queued or running).
     """
     job_manager = get_job_manager()
     job = job_manager.get_job(job_id)
@@ -1678,6 +1723,15 @@ def reprocess_job(job_id):
             jsonify({"error": "Cannot reprocess job that is running or pending"}),
             409,
         )
+    if job.kind == JOB_KIND_INTRO_CREDITS and (job.config or {}).get("reconcile"):
+        # Check servers runs one at a time: a Re-run goes through the same queueing as a click or a schedule tick.
+        # Pause all is cleared first: a job started while it's still on returns at once and could be left PENDING.
+        from ...markers.reconcile import run_markers_reconcile
+        from ...markers.triggers import markers_enabled_anywhere
+
+        if markers_enabled_anywhere():
+            _clear_pause_all_for_rerun()
+        return _check_servers_answer(run_markers_reconcile(priority=job.priority))
     new_config = dict(job.config or {})
 
     # When reprocessing a retry, restore the original job's full file set
@@ -1707,6 +1761,14 @@ def reprocess_job(job_id):
     # and ``_spawn_retry_job`` perform.
     for key in RETRY_STATE_CONFIG_KEYS:
         new_config.pop(key, None)
+    from ...markers.job_runner import FILES_SEALED
+
+    # The seal belongs to the old run's read of its files. Copied, it would keep a reprocessed webhook follow-up from
+    # taking the episodes that arrive while it waits (they'd get jobs of their own), and a reprocessed Season job from
+    # counting as waiting, so a Season request would list its files in another job too.
+    new_config.pop(FILES_SEALED, None)
+    # The new job was never paused by its schedule's stop time, so that schedule's start doesn't resume it.
+    new_config.pop(PAUSED_BY_SCHEDULE, None)
     new_job = job_manager.create_job(
         library_id=job.library_id,
         library_name=library_name,
@@ -1715,26 +1777,38 @@ def reprocess_job(job_id):
         server_id=job.server_id,
         server_name=job.server_name,
         server_type=job.server_type,
+        # A scheduled Intro & Credits job's Re-run stays the schedule's: its "unfinished" check and stop time see it.
+        parent_schedule_id=job.parent_schedule_id if job.kind == JOB_KIND_INTRO_CREDITS else "",
+        kind=job.kind,
     )
-    from ..settings_manager import get_settings_manager
-
-    sm = get_settings_manager()
-    if sm.processing_paused:
-        # Reprocess clears the global pause (the user's explicit intent to run).
-        # Clearing it must fully resume the queue — draining every PENDING job,
-        # not just the new one — or jobs revived PENDING-while-paused at boot
-        # (pause now survives restarts) would strand. resume_running_and_drain_
-        # pending starts the new job too (it's PENDING; _start_job_async is
-        # idempotent), so no double-start.
-        from .job_runner import resume_running_and_drain_pending
-
-        sm.processing_paused = False
-        job_manager.emit_processing_paused_changed(False)
-        logger.info("Processing auto-resumed — user requested reprocess")
-        resume_running_and_drain_pending()
-    else:
+    if not _clear_pause_all_for_rerun():
         _start_job_async(new_job.id, new_job.config)
     return jsonify(new_job.to_dict()), 201
+
+
+def _clear_pause_all_for_rerun() -> bool:
+    """Clear Pause all for a Re-run (the user's explicit intent to run) and resume the whole queue.
+
+    Clearing it must fully resume the queue — draining every PENDING job,
+    not just the new one — or jobs revived PENDING-while-paused at boot
+    (pause now survives restarts) would strand. resume_running_and_drain_
+    pending starts the new job too (it's PENDING; job starts are
+    idempotent), so no double-start.
+
+    Returns:
+        True when Pause all was on and is now cleared; False when it was off (the caller starts its job itself).
+    """
+    from ..settings_manager import get_settings_manager
+    from .job_runner import resume_running_and_drain_pending
+
+    sm = get_settings_manager()
+    if not sm.processing_paused:
+        return False
+    sm.processing_paused = False
+    get_job_manager().emit_processing_paused_changed(False)
+    logger.info("Processing auto-resumed — user requested reprocess")
+    resume_running_and_drain_pending()
+    return True
 
 
 @api.route("/jobs/clear", methods=["POST"])

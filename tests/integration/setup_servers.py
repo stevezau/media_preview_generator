@@ -34,6 +34,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import UTC
 from pathlib import Path
 
 import requests
@@ -339,7 +340,7 @@ def setup_jellyfin_via_api_key_injection(*, base_url: str = JELLYFIN_URL) -> Ser
     """
     import secrets
     import subprocess
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     _install_plugin()  # drop the DLL in before deciding whether a restart is needed
 
@@ -355,7 +356,7 @@ def setup_jellyfin_via_api_key_injection(*, base_url: str = JELLYFIN_URL) -> Ser
                 import sqlite3
 
                 token = f"integration-{secrets.token_hex(16)}"
-                now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
+                now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
                 con = sqlite3.connect(str(_JF_DB))
                 con.execute(
                     "INSERT INTO ApiKeys (DateCreated, DateLastActivity, Name, AccessToken) VALUES (?,?,?,?)",

@@ -1311,6 +1311,73 @@ class TestMigrateToV9:
         servers = settings_manager.get("media_servers")
         assert len(servers[0]["path_mappings"]) == 2
 
+    @pytest.mark.parametrize(
+        "rows",
+        [
+            pytest.param(
+                [
+                    {"remote_prefix": "/data_16tb", "local_prefix": "/data", "webhook_prefixes": []},
+                    {"remote_prefix": "/data_16tb2", "local_prefix": "/data", "webhook_prefixes": []},
+                ],
+                id="remote_prefix_only",
+            ),
+            pytest.param(
+                [
+                    {"plex_prefix": "/data_16tb", "local_prefix": "/data", "webhook_prefixes": []},
+                    {"plex_prefix": "/data_16tb2", "local_prefix": "/data", "webhook_prefixes": []},
+                ],
+                id="plex_prefix_only",
+            ),
+            pytest.param(
+                [
+                    {"remote_prefix": "/data_16tb", "plex_prefix": "/old", "local_prefix": "/data"},
+                    {"remote_prefix": "/data_16tb2", "plex_prefix": "/old", "local_prefix": "/data"},
+                ],
+                id="both_remote_wins",
+            ),
+        ],
+    )
+    def test_dedupe_keeps_rows_with_different_server_prefixes(self, settings_manager, rows):
+        """Rows that share a local prefix but map different server prefixes are not duplicates."""
+        from media_preview_generator.upgrade import _migrate_to_v9
+
+        settings_manager.apply_changes(
+            updates={"media_servers": [{"id": "plex", "type": "plex", "path_mappings": rows}]}
+        )
+
+        _migrate_to_v9(settings_manager)
+        assert settings_manager.get("media_servers")[0]["path_mappings"] == rows
+
+    def test_dedupe_collapses_same_prefix_written_under_either_key(self, settings_manager):
+        """``remote_prefix`` and legacy ``plex_prefix`` name the same field, so these rows are duplicates."""
+        from media_preview_generator.upgrade import _migrate_to_v9
+
+        rows = [
+            {"remote_prefix": "/m", "local_prefix": "/l", "webhook_prefixes": []},
+            {"plex_prefix": "/m", "local_prefix": "/l", "webhook_prefixes": []},
+        ]
+        settings_manager.apply_changes(
+            updates={"media_servers": [{"id": "plex", "type": "plex", "path_mappings": rows}]}
+        )
+
+        _migrate_to_v9(settings_manager)
+        assert settings_manager.get("media_servers")[0]["path_mappings"] == rows[:1]
+
+    def test_dedupe_collapses_same_remote_prefix_with_different_plex_prefix(self, settings_manager):
+        """``remote_prefix`` wins, so rows that differ only in a shadowed ``plex_prefix`` map identically."""
+        from media_preview_generator.upgrade import _migrate_to_v9
+
+        rows = [
+            {"remote_prefix": "/m", "plex_prefix": "/old-a", "local_prefix": "/l", "webhook_prefixes": []},
+            {"remote_prefix": "/m", "plex_prefix": "/old-b", "local_prefix": "/l", "webhook_prefixes": []},
+        ]
+        settings_manager.apply_changes(
+            updates={"media_servers": [{"id": "plex", "type": "plex", "path_mappings": rows}]}
+        )
+
+        _migrate_to_v9(settings_manager)
+        assert settings_manager.get("media_servers")[0]["path_mappings"] == rows[:1]
+
     def test_dedupes_exclude_paths(self, settings_manager):
         from media_preview_generator.upgrade import _migrate_to_v9
 
@@ -2322,7 +2389,7 @@ class TestMigrateToV14:
 
         _migrate_schema(settings_manager)
         assert settings_manager.get(_V14_RETRY_KEY) == 1
-        assert settings_manager.get("_schema_version") == 14
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION
 
         # The user restores the file; the next boot must pick it up despite
         # the version gate already being closed.
@@ -2342,7 +2409,7 @@ class TestMigrateToV14:
         """
         from media_preview_generator.upgrade import _V14_RETRY_KEY, _migrate_schema
 
-        settings_manager.apply_changes(updates={"_schema_version": 14, _V14_RETRY_KEY: 1})
+        settings_manager.apply_changes(updates={"_schema_version": _CURRENT_SCHEMA_VERSION, _V14_RETRY_KEY: 1})
 
         _migrate_schema(settings_manager)
 
@@ -2397,7 +2464,7 @@ class TestMigrateToV14:
 
         assert self._read_by_id(path)["sweep"]["priority"] == 2, "nothing should have been written"
         assert settings_manager.get(_V14_RETRY_KEY) == 1
-        assert settings_manager.get("_schema_version") == 14
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION
 
         # Next boot: the version gate says "done", the retry marker says otherwise.
         _migrate_schema(settings_manager)
@@ -2428,7 +2495,7 @@ class TestMigrateToV14:
         _migrate_schema(settings_manager)
 
         assert self._read_by_id(path)["sweep"]["priority"] is None
-        assert settings_manager.get("_schema_version") == 14
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION
 
         # The user deliberately pins it back to Normal, then restarts.
         data = json.loads(path.read_text())
@@ -2492,29 +2559,55 @@ class TestIterScheduleRecords:
 
 
 class TestMigrationNoticeRetryBoot:
-    """A retry boot finishes a migration whose schema bump already happened.
+    """An undismissed migration notice must survive both a retry boot and a real version move.
 
-    Reported naively that renders "Your settings were migrated from schema
-    v14 to v14", and — where the original boot did leave a notice — replaces
-    it, dropping v12/v13 notes the user never opened the bell to read.
+    Reported naively, a retry boot (the schema bump already happened; only a pending v14 retry
+    ran) renders "Your settings were migrated from schema v14 to v14". A real version move (an
+    ordinary upgrade, e.g. v13/v14 -> v15) has a different naive bug: replacing the notice
+    wholesale instead of merging into it drops notes the user never opened the bell to read yet —
+    which fires on every upgrade, since a migration can bump the schema without producing any
+    *user-facing* note of its own (v15 has none).
     """
 
-    def test_notes_merge_into_an_undismissed_notice(self, settings_manager):
+    @pytest.mark.parametrize(
+        ("schema_seed", "retry_pending", "expected_to", "expect_priority_note"),
+        [
+            # HIGH regression: a real v14 upgrader (no retry pending) hitting the actual v14->v15
+            # version move must not have its undismissed notice wiped. Before the fix, the
+            # "current != _CURRENT_SCHEMA_VERSION" branch replaced the notice wholesale — and v15
+            # always produces a (dev-facing) log note with no _USER_FACING_NOTES[15] entry to gate
+            # on, so this fired on every v14 upgrader the moment v15 shipped. v14 itself already
+            # ran in an earlier release here, so this boot adds no new user-facing note.
+            (14, False, 15, False),
+            # A real upgrader who is behind on BOTH v14 and v15: this boot has to merge an
+            # existing unread note AND append a genuinely new one in the same pass — the case a
+            # single-note test can't distinguish from "replace" (a regression that appends without
+            # preserving `existing["notes"]` first would still pass a test with only one note).
+            (13, False, 15, True),
+            # Retry-only boot: the version gate was already closed (schema at current) and only a
+            # pending v14 retry ran. Kept as its own row — this was already correct.
+            (None, True, 14, True),
+        ],
+    )
+    def test_notes_merge_into_an_undismissed_notice(
+        self, settings_manager, schema_seed, retry_pending, expected_to, expect_priority_note
+    ):
         from media_preview_generator.upgrade import _V14_RETRY_KEY, _migrate_schema
 
-        settings_manager.apply_changes(
-            updates={
-                "_schema_version": 14,
-                _V14_RETRY_KEY: 1,
-                "_pending_migration_notice": {
-                    "from": 11,
-                    "to": 14,
-                    "at": "2026-01-01T00:00:00+00:00",
-                    "backup": "/config/settings.json.bak",
-                    "notes": ["An earlier note the user has not read yet."],
-                },
-            }
-        )
+        schema_version = schema_seed if schema_seed is not None else _CURRENT_SCHEMA_VERSION
+        updates = {
+            "_schema_version": schema_version,
+            "_pending_migration_notice": {
+                "from": 11,
+                "to": 14,
+                "at": "2026-01-01T00:00:00+00:00",
+                "backup": "/config/settings.json.bak",
+                "notes": ["An earlier note the user has not read yet."],
+            },
+        }
+        if retry_pending:
+            updates[_V14_RETRY_KEY] = 1
+        settings_manager.apply_changes(updates=updates)
         TestMigrateToV14._write_via_manager(
             settings_manager.config_dir,
             [TestMigrateToV14._sched("sweep", "recently_added", 2)],
@@ -2523,9 +2616,13 @@ class TestMigrationNoticeRetryBoot:
         _migrate_schema(settings_manager)
 
         notice = settings_manager.get("_pending_migration_notice")
-        assert notice["from"] == 11 and notice["to"] == 14, f"header must survive the merge: {notice!r}"
+        assert notice["from"] == 11, f"original 'from' must survive the merge: {notice!r}"
+        assert notice["to"] == expected_to, notice
         assert notice["notes"][0] == "An earlier note the user has not read yet."
-        assert any("Incoming job priority" in n for n in notice["notes"]), notice
+        if expect_priority_note:
+            assert any("Incoming job priority" in n for n in notice["notes"]), notice
+        else:
+            assert not any("Incoming job priority" in n for n in notice["notes"]), notice
 
     @pytest.mark.parametrize(
         ("notice", "expect_sentence"),
@@ -2544,3 +2641,64 @@ class TestMigrationNoticeRetryBoot:
 
         assert ("migrated from schema" in card["body_html"]) is expect_sentence, card["body_html"]
         assert "v?" not in card["body_html"], f"placeholder leaked into the card: {card['body_html']}"
+
+
+class TestMigrateToV15:
+    def test_seeds_global_and_per_server_blocks(self, settings_manager):
+        from media_preview_generator.markers.settings import DEFAULT_GLOBAL_MARKERS, default_server_markers
+        from media_preview_generator.upgrade import _migrate_to_v15
+
+        settings_manager.apply_changes(
+            updates={
+                "media_servers": [
+                    {"id": "p1", "type": "plex", "name": "P"},
+                    {"id": "j1", "type": "jellyfin", "name": "J"},
+                    {"id": "e1", "type": "emby", "name": "E", "markers": {"enabled": False, "library_ids": ["9"]}},
+                ]
+            }
+        )
+        notes = _migrate_to_v15(settings_manager)
+        assert settings_manager.get("markers") == DEFAULT_GLOBAL_MARKERS
+        servers = {s["id"]: s for s in settings_manager.get("media_servers")}
+        assert servers["p1"]["markers"] == default_server_markers("plex")
+        assert servers["j1"]["markers"] == default_server_markers("jellyfin")
+        assert servers["e1"]["markers"] == {"enabled": False, "library_ids": ["9"]}  # untouched
+        assert len(notes) == 2
+
+    def test_idempotent(self, settings_manager):
+        from media_preview_generator.upgrade import _migrate_to_v15
+
+        settings_manager.apply_changes(updates={"media_servers": [{"id": "p1", "type": "plex", "name": "P"}]})
+        _migrate_to_v15(settings_manager)
+
+        # Customise both blocks so the second run can prove it leaves user changes alone, not
+        # just that it happens to return no notes.
+        customised_markers = {**settings_manager.get("markers"), "publish_when": "medium"}
+        settings_manager.set("markers", customised_markers)
+        servers_before = settings_manager.get("media_servers")
+
+        assert _migrate_to_v15(settings_manager) == []
+        assert settings_manager.get("markers") == customised_markers
+        assert settings_manager.get("media_servers") == servers_before
+
+    def test_no_media_servers_key_only_seeds_global_markers(self, settings_manager):
+        from media_preview_generator.markers.settings import DEFAULT_GLOBAL_MARKERS
+        from media_preview_generator.upgrade import _migrate_to_v15
+
+        assert settings_manager.get("media_servers") is None  # fresh install: key never set
+
+        notes = _migrate_to_v15(settings_manager)
+
+        assert settings_manager.get("markers") == DEFAULT_GLOBAL_MARKERS
+        assert len(notes) == 1
+        assert _migrate_to_v15(settings_manager) == []
+
+    def test_schema_chain_reaches_15_without_user_note(self, settings_manager):
+        from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION, _migrate_schema
+
+        settings_manager.apply_changes(updates={"_schema_version": 14})
+        _migrate_schema(settings_manager)
+        assert _CURRENT_SCHEMA_VERSION == 15
+        assert settings_manager.get("_schema_version") == 15
+        notice = settings_manager.get("_pending_migration_notice") or {}
+        assert notice.get("notes", []) == []

@@ -7,12 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version (e.g. 10.11.0.0). Leave blank to use the .csproj's <Version> verbatim."
+        description: "10.11 build version (e.g. 10.11.1.0); the 12.0 build becomes 12.0.<last two parts>. Leave blank to use the .csproj's 10.11 <Version>."
         required: false
         default: ""
 
 # Two jobs run in sequence:
-#   1. build-release  → DLL + zip + GitHub release attachment
+#   1. build-release  → one row per Jellyfin ABI (10.11/net9, 12.0/net10):
+#      DLL + zip + attachment on ONE GitHub release (tag plugin-v<10.11 version>)
 #   2. publish-pages  → uploads manifest.json via the official Pages
 #      Actions API (no branch push, so repo branch-protection rules
 #      don't apply). Requires Pages → "Build and deployment" set to
@@ -29,69 +30,116 @@ concurrency:
 
 jobs:
   build-release:
+    name: Build for Jellyfin ${{ matrix.abi }}
     runs-on: ubuntu-latest
+    strategy:
+      # Rows run one at a time: both attach to the same GitHub release, and two
+      # parallel "create release" calls race each other.
+      max-parallel: 1
+      matrix:
+        include:
+          - abi: "10.11"
+            dotnet: "9.0.x"
+            tfm: "net9.0"
+            key: "10_11"
+          - abi: "12.0"
+            dotnet: "10.0.x"
+            tfm: "net10.0"
+            key: "12_0"
+    # Each row writes only its own output names, so the merged job outputs carry both rows.
     outputs:
-      version: ${{ steps.ver.outputs.version }}
-      sha: ${{ steps.pack.outputs.sha }}
+      release_version: ${{ steps.ver.outputs.release_version }}
+      version_10_11: ${{ steps.pack.outputs.version_10_11 }}
+      checksum_10_11: ${{ steps.pack.outputs.checksum_10_11 }}
+      zip_10_11: ${{ steps.pack.outputs.zip_10_11 }}
+      version_12_0: ${{ steps.pack.outputs.version_12_0 }}
+      checksum_12_0: ${{ steps.pack.outputs.checksum_12_0 }}
+      zip_12_0: ${{ steps.pack.outputs.zip_12_0 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET 9
+      - name: Setup .NET ${{ matrix.dotnet }}
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "9.0.x"
+          dotnet-version: ${{ matrix.dotnet }}
 
       - name: Resolve version
         id: ver
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          ABI: ${{ matrix.abi }}
         run: |
           set -euo pipefail
-          INPUT_VERSION="${{ github.event.inputs.version }}"
           REF_TAG="${GITHUB_REF##*/}"
           if [[ -n "$INPUT_VERSION" ]]; then
             VERSION="$INPUT_VERSION"
           elif [[ "$REF_TAG" == plugin-v* ]]; then
             VERSION="${REF_TAG#plugin-v}"
           else
-            VERSION=$(grep -oP '<Version>\K[^<]+' jellyfin-plugin/Jellyfin.Plugin.MediaPreviewBridge.csproj)
+            VERSION=$(grep -oP '<Version>\K10\.11\.[^<]+' jellyfin-plugin/Jellyfin.Plugin.MediaPreviewBridge.csproj)
           fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Plugin version resolved: $VERSION"
+          # The tag names the 10.11 build; the 12.0 build is derived from it.
+          if [[ ! "$VERSION" =~ ^10\.11\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Plugin version must look like 10.11.X.Y (got '$VERSION')"
+            exit 1
+          fi
+          if [[ "$ABI" == "10.11" ]]; then
+            ROW_VERSION="$VERSION"
+          else
+            ROW_VERSION="12.0.$(echo "$VERSION" | cut -d. -f3-4)"
+          fi
+          echo "release_version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "row_version=$ROW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Release $VERSION → Jellyfin $ABI build $ROW_VERSION"
 
       - name: Build
         working-directory: jellyfin-plugin
+        env:
+          ABI: ${{ matrix.abi }}
+          ROW_VERSION: ${{ steps.ver.outputs.row_version }}
         run: |
-          dotnet restore
-          dotnet build -c Release \
-            -p:Version=${{ steps.ver.outputs.version }} \
-            -p:FileVersion=${{ steps.ver.outputs.version }} \
-            -p:AssemblyVersion=${{ steps.ver.outputs.version }} \
-            --no-restore
+          set -euo pipefail
+          dotnet restore -p:JellyfinAbi="$ABI"
+          dotnet build -c Release --no-restore \
+            -p:JellyfinAbi="$ABI" \
+            -p:Version="$ROW_VERSION" \
+            -p:FileVersion="$ROW_VERSION" \
+            -p:AssemblyVersion="$ROW_VERSION"
 
       - name: Pack zip
         id: pack
         working-directory: jellyfin-plugin
+        env:
+          TFM: ${{ matrix.tfm }}
+          KEY: ${{ matrix.key }}
+          ROW_VERSION: ${{ steps.ver.outputs.row_version }}
         run: |
           set -euo pipefail
-          ZIP="media-preview-bridge_${{ steps.ver.outputs.version }}.zip"
-          (cd bin/Release/net9.0 && zip -j "../../../$ZIP" Jellyfin.Plugin.MediaPreviewBridge.dll)
+          ZIP="media-preview-bridge_${ROW_VERSION}.zip"
+          (cd "bin/Release/$TFM" && zip -j "../../../$ZIP" Jellyfin.Plugin.MediaPreviewBridge.dll)
           # Jellyfin's InstallationManager verifies the download with MD5
           # (MediaBrowser.Controller/Plugins/InstallationManager.cs uses
           # MD5.HashData()) — publishing SHA-256 here fails every install
           # with "The checksum of the received data doesn't match".
           # The Jellyfin official plugin repo also uses MD5 (32 hex chars).
           CHECKSUM=$(md5sum "$ZIP" | awk '{print toupper($1)}')
-          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
-          echo "sha=$CHECKSUM" >> "$GITHUB_OUTPUT"
+          {
+            echo "zip=$ZIP"
+            echo "version_${KEY}=$ROW_VERSION"
+            echo "checksum_${KEY}=$CHECKSUM"
+            echo "zip_${KEY}=$ZIP"
+          } >> "$GITHUB_OUTPUT"
           echo "$ZIP → MD5 $CHECKSUM"
 
       - name: Create / update GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: plugin-v${{ steps.ver.outputs.version }}
-          name: "Media Preview Bridge ${{ steps.ver.outputs.version }}"
+          tag_name: plugin-v${{ steps.ver.outputs.release_version }}
+          name: "Media Preview Bridge ${{ steps.ver.outputs.release_version }}"
           body: |
-            Jellyfin plugin DLL — install via Jellyfin admin → Plugins → Repositories.
+            Jellyfin plugin DLLs — install via Jellyfin admin → Plugins → Repositories.
+            Two builds: `10.11.x` for Jellyfin 10.11 and `12.0.x` for Jellyfin 12.0; Jellyfin picks the right one.
 
             Repository URL (paste this once):
             `https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json`
@@ -113,10 +161,22 @@ jobs:
 
       - name: Build manifest site
         env:
-          VERSION: ${{ needs.build-release.outputs.version }}
-          SHA: ${{ needs.build-release.outputs.sha }}
+          RELEASE_VERSION: ${{ needs.build-release.outputs.release_version }}
+          VERSION_10_11: ${{ needs.build-release.outputs.version_10_11 }}
+          CHECKSUM_10_11: ${{ needs.build-release.outputs.checksum_10_11 }}
+          ZIP_10_11: ${{ needs.build-release.outputs.zip_10_11 }}
+          VERSION_12_0: ${{ needs.build-release.outputs.version_12_0 }}
+          CHECKSUM_12_0: ${{ needs.build-release.outputs.checksum_12_0 }}
+          ZIP_12_0: ${{ needs.build-release.outputs.zip_12_0 }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          for v in RELEASE_VERSION VERSION_10_11 CHECKSUM_10_11 ZIP_10_11 VERSION_12_0 CHECKSUM_12_0 ZIP_12_0; do
+            if [[ -z "${!v}" ]]; then
+              echo "::error::build-release output $v is empty"
+              exit 1
+            fi
+          done
           SITE_DIR=_site/jellyfin-plugin
           mkdir -p "$SITE_DIR"
 
@@ -132,35 +192,42 @@ jobs:
             echo "First publish — seeded from template."
           fi
 
-          SOURCE_URL="https://github.com/${{ github.repository }}/releases/download/plugin-v${VERSION}/media-preview-bridge_${VERSION}.zip"
-          TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-          python3 <<PY
+          SITE_DIR="$SITE_DIR" TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)" python3 <<'PY'
           import json
+          import os
           from pathlib import Path
 
+          env = os.environ
+          template = json.loads(Path("jellyfin-plugin/manifest.template.json").read_text())
           data = json.loads(Path("existing.json").read_text())
           # The fetched JSON might have stale MIME shenanigans — guard
           # against unexpected shapes and reseed from the template.
           if not isinstance(data, list) or not data:
-              data = json.loads(Path("jellyfin-plugin/manifest.template.json").read_text())
+              data = template
 
           plugin = data[0]
+          plugin["description"] = template[0]["description"]
           plugin.setdefault("versions", [])
 
-          new_version = {
-              "version": "$VERSION",
-              "changelog": "Automated release for plugin-v$VERSION.",
-              "targetAbi": "10.11.0.0",
-              "sourceUrl": "$SOURCE_URL",
-              "checksum": "$SHA",
-              "timestamp": "$TIMESTAMP"
-          }
+          download = f"https://github.com/{env['REPOSITORY']}/releases/download/plugin-v{env['RELEASE_VERSION']}"
+          # Jellyfin only offers versions whose targetAbi is <= the server version,
+          # so 10.11 servers see the 10.11 build and 12.0 servers the (newer) 12.0 build.
+          new_versions = [
+              {
+                  "version": env[f"VERSION_{key}"],
+                  "changelog": f"Automated release for plugin-v{env['RELEASE_VERSION']}.",
+                  "targetAbi": target_abi,
+                  "sourceUrl": f"{download}/{env[f'ZIP_{key}']}",
+                  "checksum": env[f"CHECKSUM_{key}"],
+                  "timestamp": env["TIMESTAMP"],
+              }
+              for key, target_abi in (("12_0", "12.0.0.0"), ("10_11", "10.11.0.0"))
+          ]
           # De-dupe same-version on re-runs; newest first.
-          plugin["versions"] = [v for v in plugin["versions"] if v.get("version") != new_version["version"]]
-          plugin["versions"].insert(0, new_version)
+          replaced = {v["version"] for v in new_versions}
+          plugin["versions"] = new_versions + [v for v in plugin["versions"] if v.get("version") not in replaced]
 
-          out = Path("$SITE_DIR/manifest.json")
+          out = Path(env["SITE_DIR"]) / "manifest.json"
           out.write_text(json.dumps(data, indent=4) + "\n")
           PY
 
@@ -173,7 +240,7 @@ jobs:
             <h1>Media Preview Bridge — Jellyfin plugin</h1>
             <p>Add this URL to Jellyfin → Dashboard → Plugins → Repositories:</p>
             <p><code>https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json</code></p>
-            <p>Source: <a href="https://github.com/${{ github.repository }}">github.com/${{ github.repository }}</a></p>
+            <p>Source: <a href="https://github.com/${REPOSITORY}">github.com/${REPOSITORY}</a></p>
           </body>
           </html>
           HTML
@@ -196,10 +263,11 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "## Media Preview Bridge ${{ needs.build-release.outputs.version }} published"
+            echo "## Media Preview Bridge ${{ needs.build-release.outputs.release_version }} published"
             echo ""
-            echo "- Release: https://github.com/${{ github.repository }}/releases/tag/plugin-v${{ needs.build-release.outputs.version }}"
+            echo "- Release: https://github.com/${{ github.repository }}/releases/tag/plugin-v${{ needs.build-release.outputs.release_version }}"
             echo "- Manifest: https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json"
             echo "- Pages URL: ${{ steps.deploy.outputs.page_url }}"
-            echo "- MD5: \`${{ needs.build-release.outputs.sha }}\`"
+            echo "- Jellyfin 10.11 build ${{ needs.build-release.outputs.version_10_11 }}: MD5 \`${{ needs.build-release.outputs.checksum_10_11 }}\`"
+            echo "- Jellyfin 12.0 build ${{ needs.build-release.outputs.version_12_0 }}: MD5 \`${{ needs.build-release.outputs.checksum_12_0 }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
