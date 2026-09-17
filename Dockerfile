@@ -14,6 +14,11 @@ RUN apt-get update && \
 WORKDIR /build
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
+# Credit text detection model (Intro & Credits, spec §5.4): PP-OCRv4 detection from the pinned rapidocr_onnxruntime
+# 1.4.4 wheel, wheel and model both verified by sha256 (scripts/fetch_textdet_model.py).
+COPY scripts/fetch_textdet_model.py /tmp/fetch_textdet_model.py
+RUN python3 /tmp/fetch_textdet_model.py --out /models && rm /tmp/fetch_textdet_model.py
+
 # ---------------------------------------------------------------------------
 # Layer A: pre-cache DEPENDENCY wheels via a stub package.
 #
@@ -139,6 +144,9 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN pip3 install --no-cache-dir --no-index /tmp/wheels/*.whl \
     --ignore-installed blinker && \
     rm -rf /tmp/wheels
+
+# Loaded only by the credit text detection helper process (markers/credits/textdet_helper.py).
+COPY --from=builder /models/ch_PP-OCRv4_det_infer.onnx /app/models/ch_PP-OCRv4_det_infer.onnx
 
 # Replace init-adduser with clean version (no branding)
 COPY docker-init-user.sh /etc/s6-overlay/s6-rc.d/init-adduser/run
