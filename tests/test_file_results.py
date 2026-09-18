@@ -596,6 +596,25 @@ class TestFileResultServerAttribution:
             },
         ]
 
+    @pytest.mark.parametrize(("flag", "kept"), [(True, True), (False, False), (None, False)])
+    def test_verify_later_kept_on_server_entry_so_a_revived_job_still_queues_its_verify(self, config_dir, flag, kept):
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Intro & Credits · S01E01.mkv")
+        server = {
+            "server_id": "jf-1",
+            "server_name": "Jellyfin",
+            "server_type": "jellyfin",
+            "status": "markers_written",
+        }
+        if flag is not None:
+            server["verify_later"] = flag
+
+        jm.record_file_result(job.id, "/media/S01E01.mkv", "markers_published", "", "Intro & Credits", servers=[server])
+
+        expected = {"id": "jf-1", "name": "Jellyfin", "type": "jellyfin", "status": "markers_written"}
+        assert jm.get_file_results(job.id)[0]["servers"] == [{**expected, "verify_later": True} if kept else expected]
+
     def test_server_message_kept_when_the_row_reason_does_not_say_it(self, config_dir):
         """Each server's own words ("Keeping Plex's credits") reach the Files panel; one matching the reason is dropped."""
         os.makedirs(config_dir, exist_ok=True)

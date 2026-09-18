@@ -37,6 +37,9 @@ from .store import MarkerStore
 
 RECONCILE_SOURCE = "reconcile"
 RECONCILE_JOB_NAME = "Intro & Credits · Check servers"
+# Job config key holding a run's listing (``CheckServersListing.to_config``). Taking it counts server rechecks and
+# failed-item retries as used, so a run revived after a restart checks these files instead of listing again.
+LISTING_CONFIG_KEY = "check_servers_listing"
 # Items per read-back call, so the job's progress moves and a cancel stops between calls.
 READ_BACK_BATCH = 500
 # Files of a run kept for decided files to ask servers again about while more drifted files wait than a run takes.
@@ -283,6 +286,47 @@ class CheckServersListing:
     warnings: list[str]
     drifted: dict[str, frozenset[tuple[str, str]]] = field(default_factory=dict)
 
+    def to_config(self) -> dict[str, Any]:
+        """The listing as JSON for the job's config (``LISTING_CONFIG_KEY``).
+
+        Returns:
+            ``files`` (in order), ``warnings`` and ``drifted`` (per file, its sorted ``[server_id, item_id]`` pairs).
+        """
+        return {
+            "files": [item.canonical_path for item in self.items],
+            "warnings": list(self.warnings),
+            "drifted": {path: sorted([list(pair) for pair in pairs]) for path, pairs in self.drifted.items()},
+        }
+
+    @classmethod
+    def from_config(cls, stored: object) -> CheckServersListing | None:
+        """The listing a run kept on its job (:meth:`to_config`).
+
+        Args:
+            stored: The job config's ``LISTING_CONFIG_KEY`` value.
+
+        Returns:
+            The listing, or None when nothing usable is stored (the run lists its files again).
+        """
+        if not isinstance(stored, dict):
+            return None
+        files, warnings, drifted = stored.get("files"), stored.get("warnings", []), stored.get("drifted", {})
+        if not isinstance(files, list) or not all(isinstance(path, str) for path in files):
+            return None
+        if not isinstance(warnings, list) or not all(isinstance(text, str) for text in warnings):
+            return None
+        if not isinstance(drifted, dict):
+            return None
+        pairs: dict[str, frozenset[tuple[str, str]]] = {}
+        for path, items in drifted.items():
+            if not isinstance(items, list) or not all(
+                isinstance(pair, list) and len(pair) == 2 and all(isinstance(part, str) for part in pair)
+                for pair in items
+            ):
+                return None
+            pairs[path] = frozenset((server_id, item_id) for server_id, item_id in items)
+        return cls(_listed_items(files), list(warnings), pairs)
+
     def confirmed_gone_items(self, registry: Any, path: str, rows: Iterable[object]) -> set[tuple[str, str]]:
         """After a listed file ran: the drifted items it was listed for that the server confirms no longer exist, where
         the file's row for that server says "not in this server's library". Nothing is written here: the job marks them
@@ -385,10 +429,16 @@ def check_servers_listing(
         len(asked_again),
     )
     paths = sorted(set(drifted) | set(retried) | set(asked_again), key=lambda p: (os.path.dirname(p), p))
-    items = [
+    return CheckServersListing(
+        _listed_items(paths), warnings, {path: frozenset(pairs) for path, pairs in drifted.items()}
+    )
+
+
+def _listed_items(paths: Iterable[str]) -> list[ProcessableItem]:
+    # No item id hints: a drifted item may be gone or merged, so each file's item is looked up again.
+    return [
         ProcessableItem(canonical_path=p, server_id="", item_id_by_server={}, title=os.path.basename(p)) for p in paths
     ]
-    return CheckServersListing(items, warnings, {path: frozenset(pairs) for path, pairs in drifted.items()})
 
 
 def _take_drifts(store: MarkerStore, drifts: list[Drift], max_files: int) -> tuple[list[Drift], int]:

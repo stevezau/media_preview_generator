@@ -146,7 +146,7 @@ class TestSeasonFollowUpJob:
 
     def test_files_the_job_skipped_as_finished_before_a_restart_still_count_as_its_own(self, env, monkeypatch):
         monkeypatch.setattr(
-            job_runner, "_skip_finished_before_restart", lambda jm, job_id, items, store: (items[1:], {"x": 1})
+            job_runner, "_skip_finished_before_restart", lambda jm, job_id, items, store: (items[1:], {"x": 1}, set())
         )
         create = self._run(env, [_item(ep(S1, 1)), _item(ep(S1, 2))], [ep(S1, 1), ep(S1, 3)])
         assert create.call_args.kwargs["file_paths"] == [ep(S1, 3)]
@@ -336,7 +336,9 @@ class TestFollowUpConfigIsReadWhenItsFilesAreListed:
             job_runner.run_intro_credits_job("j1")
         listed = build.call_args.args[0]
         assert listed["file_paths"] == [ep(S1, 1), ep(S1, 2)] and listed[job_runner.FILES_SEALED] is True
-        env.jm.update_job_config.assert_called_once_with("j1", listed)
+        # Only the seal is written: a key another thread set on the job meanwhile stays.
+        env.jm.merge_job_config.assert_called_once_with("j1", {job_runner.FILES_SEALED: True})
+        env.jm.update_job_config.assert_not_called()
 
     def test_a_season_job_reads_the_episodes_later_requests_added_and_is_sealed(self, env):
         env.job.config = {"file_paths": [ep(S1, 1)], "source": "season"}
@@ -352,6 +354,7 @@ class TestFollowUpConfigIsReadWhenItsFilesAreListed:
         with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
             job_runner.run_intro_credits_job("j1")
         env.jm.update_job_config.assert_not_called()
+        env.jm.merge_job_config.assert_not_called()
 
     def test_an_episode_joining_while_the_runner_reads_the_files_is_listed(self, env, monkeypatch):
         env.job.config = {"file_paths": [ep(S1, 1)], "follows_job_id": "p1", "source": "plex"}
@@ -528,13 +531,15 @@ class TestNoDuplicateSeasonJobs:
 
 
 def _slow_config_updates(jm, monkeypatch):
-    real = jm.update_job_config
+    # Every config writer the joins and the seal use: widen the read-then-write window.
+    for name in ("update_job_config", "update_job_config_if_pending", "merge_job_config"):
+        real = getattr(jm, name)
 
-    def slow(job_id, config):
-        time.sleep(0.002)  # widen the read-then-write window
-        real(job_id, config)
+        def slow(*args, _real=real, **kwargs):
+            time.sleep(0.002)
+            return _real(*args, **kwargs)
 
-    monkeypatch.setattr(jm, "update_job_config", slow)
+        monkeypatch.setattr(jm, name, slow)
 
 
 def _run_threads(threads):

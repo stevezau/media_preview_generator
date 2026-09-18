@@ -1631,6 +1631,30 @@ class JobManager:
                 self._persist_job(job)
                 self._emit_event("job_updated", job.to_dict())
 
+    def merge_job_config(self, job_id: str, updates: dict[str, Any], *, remove: tuple[str, ...] = ()) -> bool:
+        """Set (or remove) some keys of a job's stored config, keeping every other key as it is now.
+
+        The read and the write happen under one hold of the manager's lock, so a key another thread writes meanwhile
+        (``request_pause`` records a stop-time pause in the config) isn't lost the way a read-then-write would lose it.
+
+        Args:
+            job_id: Job identifier.
+            updates: Keys to set.
+            remove: Keys to take out.
+
+        Returns:
+            True when the config was written; False when the job is missing.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return False
+            config = {**(job.config or {}), **updates}
+            job.config = {key: value for key, value in config.items() if key not in remove}
+            self._persist_job(job)
+            self._emit_event("job_updated", job.to_dict())
+            return True
+
     def update_job_config_if_pending(self, job_id: str, config: dict[str, Any]) -> bool:
         """Update stored config for a job only while it is still PENDING.
 
@@ -2372,6 +2396,10 @@ class JobManager:
                 # Why a row is waiting (e.g. the server hasn't indexed the file yet); preview rows carry none.
                 if s.get("reason_code"):
                     entry["reason_code"] = s["reason_code"]
+                # An Intro & Credits row published after its file was replaced (markers.outcomes.VERIFY_LATER): a job
+                # revived after a restart reads it back to still queue that file's later check.
+                if s.get("verify_later"):
+                    entry["verify_later"] = True
                 message = s.get("message") or ""
                 if server_messages and message and message != derived_reason:
                     entry["message"] = message

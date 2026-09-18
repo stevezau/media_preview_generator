@@ -1116,6 +1116,35 @@ class TestUpdateJobConfigIfPending:
         assert jm.update_job_config_if_pending("nope", {"file_paths": ["/b"]}) is False
 
 
+class TestMergeJobConfig:
+    """A running job adds keys to its config without losing what other threads wrote there (a stop-time pause)."""
+
+    def test_the_keys_join_the_live_config_and_are_persisted(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test", config={"reconcile": True})
+        jm.start_job(job.id)
+        jm.request_pause(job.id, by_schedule=True)  # written after the runner read its config
+
+        assert jm.merge_job_config(job.id, {"check_servers_listing": {"files": ["/a"]}}) is True
+
+        expected = {"reconcile": True, "paused_by_schedule": True, "check_servers_listing": {"files": ["/a"]}}
+        assert jm.get_job(job.id).config == expected
+        assert JobManager(config_dir=config_dir).get_job(job.id).config == expected
+
+    def test_keys_can_be_taken_out(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test", config={"reconcile": True, "check_servers_listing": {"files": []}})
+
+        assert jm.merge_job_config(job.id, {}, remove=("check_servers_listing", "absent")) is True
+
+        assert jm.get_job(job.id).config == {"reconcile": True}
+        assert JobManager(config_dir=config_dir).get_job(job.id).config == {"reconcile": True}
+
+    def test_a_missing_job_is_refused(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        assert jm.merge_job_config("nope", {"a": 1}) is False
+
+
 class TestPendingJobsUnderConcurrentCreation:
     """Webhook threads create jobs while other threads list the pending ones (Intro & Credits follow-up dedupe)."""
 

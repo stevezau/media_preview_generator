@@ -40,7 +40,7 @@ from .outcomes import (
 )
 from .ownership import marker_libraries
 from .pipeline import budget_exhausted_warnings, build_context, cached_capability, kind_handlers
-from .reconcile import RECONCILE_SOURCE
+from .reconcile import LISTING_CONFIG_KEY, RECONCILE_SOURCE, CheckServersListing
 from .settings import load_server
 from .store import MarkerStore
 
@@ -366,10 +366,10 @@ def _seal_files(jm, job_id: str, job, cfg: dict) -> dict:
     if not (cfg.get("follows_job_id") or cfg.get("source") == SEASON_SOURCE):
         return cfg
     with FOLLOW_UP_LOCK:
+        # Only the seal is written (under the job manager's lock): a key another thread set meanwhile stays.
+        jm.merge_job_config(job_id, {FILES_SEALED: True})
         latest = jm.get_job(job_id) or job
-        sealed = {**(latest.config or {}), FILES_SEALED: True}
-        jm.update_job_config(job_id, sealed)
-    return sealed
+        return {**(latest.config or {}), FILES_SEALED: True}
 
 
 def _wait_for_retry_time(job_id: str, cfg: dict, cancel_check: Callable[[], bool]) -> bool:
@@ -660,7 +660,7 @@ def _unchanged_since_analysed(store, path: str) -> bool:
 
 def _skip_finished_before_restart(
     jm, job_id: str, items: list[ProcessableItem], store
-) -> tuple[list[ProcessableItem], dict[str, int]]:
+) -> tuple[list[ProcessableItem], dict[str, int], set[str]]:
     """Drop files this job settled before a restart revived it, so they aren't looked up or published twice.
 
     Their outcomes come from the job's own Files-panel rows (only a revived job has any) and are carried into the
@@ -668,40 +668,44 @@ def _skip_finished_before_restart(
     server still waiting for it, runs again.
 
     Returns:
-        The items still to do, and the carried outcome counts.
+        The items still to do, the carried outcome counts, and the carried files published after they were replaced
+        (a row flagged ``VERIFY_LATER``): the job still owes them their later check.
     """
     try:
         rows = jm.get_file_results(job_id)
     except Exception as exc:
         logger.warning("Couldn't read the files this job already finished ({}); checking every file", exc)
-        return items, {}
-    settled = {
-        row.get("file"): row.get("outcome")
-        for row in (rows if isinstance(rows, list) else [])
-        if isinstance(row, dict)
-        and row.get("file")
-        and row.get("outcome") in _SETTLED_OUTCOMES
+        return items, {}, set()
+    settled: dict[str, str] = {}
+    to_verify: set[str] = set()
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or not row.get("file") or row.get("outcome") not in _SETTLED_OUTCOMES:
+            continue
+        servers = [server for server in row.get("servers") or [] if isinstance(server, dict)]
         # A file published to one server while another hadn't indexed it yet still needs its retry.
-        and not any(
-            isinstance(server, dict) and server.get("status") == ServerStatus.WAITING.value
-            for server in row.get("servers") or []
-        )
-    }
+        if any(server.get("status") == ServerStatus.WAITING.value for server in servers):
+            continue
+        settled[row["file"]] = row["outcome"]
+        if any(server.get(VERIFY_LATER) for server in servers):
+            to_verify.add(row["file"])
     if not settled:
-        return items, {}
+        return items, {}, set()
     carried: Counter[str] = Counter()
+    carried_to_verify: set[str] = set()
     remaining = []
     for item in items:
         outcome = settled.get(item.canonical_path)
         if outcome is not None and _unchanged_since_analysed(store, item.canonical_path):
             carried[outcome] += 1
+            if item.canonical_path in to_verify:
+                carried_to_verify.add(item.canonical_path)
         else:
             remaining.append(item)
     if carried:
         logger.info(
             "Resuming after a restart: {} file(s) finished before it are not checked again", sum(carried.values())
         )
-    return remaining, dict(carried)
+    return remaining, dict(carried), carried_to_verify
 
 
 def _start_fingerprint_sweep(cfg: dict, store: MarkerStore) -> None:
@@ -841,6 +845,9 @@ def run_intro_credits_job(job_id: str) -> None:
     dispatcher = None
     # Set once the job completes: the fingerprint cache sweep starts after the slot is given back.
     sweep_store = None
+    # While the config holds the Check servers listing: only a revive needs it, so the teardown takes it off the ended
+    # job (the config ships in every job payload).
+    listing_on_job = False
 
     def cancel_check() -> bool:
         return jm.is_cancellation_requested(job_id)
@@ -935,20 +942,27 @@ def run_intro_credits_job(job_id: str) -> None:
                 if cfg.get("reconcile"):
                     from .reconcile import check_servers_listing
 
-                    listing = check_servers_listing(
-                        registry=registry,
-                        store=ctx.store,
-                        max_files=MAX_RETRY_FILES,
-                        capability=lambda server_cfg, publisher: cached_capability(ctx, server_cfg, publisher),
-                        cancel_check=_cancel_check_releasing_slot_while_paused(
-                            job_id=job_id,
-                            slot=slot,
-                            live_priority=live_priority,
-                            cancel_check=cancel_check,
-                            on_wait=on_wait,
-                        ),
-                        progress_callback=progress_callback,
-                    )
+                    # A run revived after a restart checks the files its first run listed: taking them counted the
+                    # server rechecks and failed-item retries among them as used, so listing again would skip those.
+                    listing = CheckServersListing.from_config(cfg.get(LISTING_CONFIG_KEY))
+                    listing_on_job = listing is not None
+                    if listing is None:
+                        listing = check_servers_listing(
+                            registry=registry,
+                            store=ctx.store,
+                            max_files=MAX_RETRY_FILES,
+                            capability=lambda server_cfg, publisher: cached_capability(ctx, server_cfg, publisher),
+                            cancel_check=_cancel_check_releasing_slot_while_paused(
+                                job_id=job_id,
+                                slot=slot,
+                                live_priority=live_priority,
+                                cancel_check=cancel_check,
+                                on_wait=on_wait,
+                            ),
+                            progress_callback=progress_callback,
+                        )
+                        if not cancel_check():
+                            listing_on_job = jm.merge_job_config(job_id, {LISTING_CONFIG_KEY: listing.to_config()})
                     items, warnings, sender_paths = listing.items, listing.warnings, {}
                 else:
                     items, warnings, sender_paths = build_items(
@@ -965,17 +979,6 @@ def run_intro_credits_job(job_id: str) -> None:
                         jm.complete_job(job_id, warning=" ".join(["No files to check.", *warnings]))
                     sweep_store = ctx.store
                     return
-                listed = {item.canonical_path for item in items}
-                items, carried = _skip_finished_before_restart(jm, job_id, items, ctx.store)
-                if not items:
-                    jm.set_job_outcome(job_id, carried)
-                    _complete(jm, job_id, carried, warnings)
-                    sweep_store = ctx.store
-                    return
-                waiting: dict[str, set[str]] = {}
-                replaced: set[str] = set()
-                unchecked: dict[str, set[str]] = {}
-                gone_items: dict[str, set[tuple[str, str]]] = {}
                 # Webhook paths (and their retries) can arrive before the file is visible here (an import still
                 # copying over NFS); the preview job retries those too. A file the user picked, or a library
                 # listing, that isn't on disk won't appear by waiting; a verify job's file was there already, and a
@@ -985,6 +988,20 @@ def run_intro_credits_job(job_id: str) -> None:
                 # Only files just sent were just replaced: a listing's replaced file may have changed days ago, and
                 # servers rescanned it long since. A verify chain checks once.
                 checks_replaced_later = sent_files and not (cfg.get("verify") or cfg.get("verify_chain"))
+                listed = {item.canonical_path for item in items}
+                # A revived job still owes the later check of the replaced files it published before the restart.
+                items, carried, replaced_before_restart = _skip_finished_before_restart(jm, job_id, items, ctx.store)
+                if not items:
+                    jm.set_job_outcome(job_id, carried)
+                    _complete(jm, job_id, carried, warnings)
+                    if replaced_before_restart and checks_replaced_later:
+                        _queue_verify(job, cfg, replaced_before_restart, sender_paths)
+                    sweep_store = ctx.store
+                    return
+                waiting: dict[str, set[str]] = {}
+                replaced: set[str] = set(replaced_before_restart)
+                unchecked: dict[str, set[str]] = {}
+                gone_items: dict[str, set[tuple[str, str]]] = {}
 
                 def on_file_result(file_path, outcome, reason, worker, servers=None):
                     # Any server that can take the file later, even when another server was written. Check servers
@@ -1105,6 +1122,11 @@ def run_intro_credits_job(job_id: str) -> None:
         jm.clear_pause_flag(job_id)
         jm.clear_cancellation_flag(job_id)
         jm.clear_active_worker_pool(job_id)
+        if listing_on_job:
+            try:
+                jm.merge_job_config(job_id, {}, remove=(LISTING_CONFIG_KEY,))
+            except Exception as exc:
+                logger.debug("Could not drop the Check servers listing of {}: {}", job_id, exc)
         try:
             if not jm.get_running_jobs():
                 jm.clear_worker_statuses()

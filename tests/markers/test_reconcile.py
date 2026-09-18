@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 from datetime import UTC, datetime, timedelta
@@ -708,6 +709,25 @@ class TestCheckServersListing:
         # Failed items' files count against the run's files (drifted e1, e2), then e3 does.
         retry.assert_called_once_with(registry="reg", store=store, limit=500 - 2)
         ask.assert_called_once_with(registry="reg", store=store, limit=500 - 3)
+
+    def test_the_listing_survives_a_round_trip_through_the_jobs_config(self, store):
+        drifts = [reconcile.Drift("plex-1", "2", Shown.REPLACED, ("/tv/S/e2.mkv", "/tv/S/e1.mkv")),
+                  reconcile.Drift("jf-1", "x", Shown.MISSING, ("/tv/S/e1.mkv",))]  # fmt: skip
+        listing, *_ = self._listing(store, drifts, rechecks=["/tv/S 1/b.mkv"], warnings=["Couldn't check X"])
+        stored = json.loads(json.dumps(listing.to_config()))  # what jobs.db keeps
+        again = reconcile.CheckServersListing.from_config(stored)
+        assert again == listing
+        assert [(i.canonical_path, i.item_id_by_server, i.server_id, i.title) for i in again.items] == [
+            (i.canonical_path, i.item_id_by_server, i.server_id, i.title) for i in listing.items
+        ]
+
+    @pytest.mark.parametrize(
+        "stored",
+        [None, "files", [], {}, {"files": "x"}, {"files": [1]}, {"files": [], "drifted": {"/a": [["x"]]}},
+         {"files": [], "warnings": [None]}],
+    )  # fmt: skip
+    def test_a_missing_or_unusable_stored_listing_reads_as_none(self, stored):
+        assert reconcile.CheckServersListing.from_config(stored) is None
 
     def test_a_cancel_during_the_read_back_takes_no_server_rechecks_or_failed_items(self, store):
         _listing, _find, retry, ask = self._listing(store, [], cancel_check=lambda: True)

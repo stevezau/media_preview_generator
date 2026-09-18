@@ -937,6 +937,59 @@ class TestRun:
         assert env.build_context.call_args.kwargs["recheck_empty_server_markers"] is recheck
         assert (self.listing.called, build.called) == (recheck, not recheck)
 
+    def test_check_servers_keeps_its_listing_on_the_job_for_a_run_revived_after_a_restart(self, env):
+        from media_preview_generator.markers import reconcile
+
+        env.job.config = {"reconcile": True, "source": "reconcile"}
+        self._run([_item("/m/a.mkv"), _item("/m/b.mkv")], ["Couldn't check X"])
+        # Kept whole while the job runs: rechecks and failed items this run took are counted as taken, so a new listing
+        # would skip them. Taken off again once the job has ended (only a revive needs it).
+        order = [c for c in env.jm.mock_calls if c[0] in ("merge_job_config", "complete_job")]
+        assert order == [
+            call.merge_job_config(
+                "j1",
+                {
+                    reconcile.LISTING_CONFIG_KEY: {
+                        "files": ["/m/a.mkv", "/m/b.mkv"],
+                        "warnings": ["Couldn't check X"],
+                        "drifted": {},
+                    }
+                },
+            ),
+            call.complete_job("j1", warning="Couldn't check X"),
+            call.merge_job_config("j1", {}, remove=(reconcile.LISTING_CONFIG_KEY,)),
+        ]
+
+    def test_a_revived_check_servers_job_checks_the_files_its_first_run_listed(self, env):
+        from media_preview_generator.markers import reconcile
+
+        stored = reconcile.CheckServersListing(
+            [_item("/m/a.mkv"), _item("/m/b.mkv")], ["Couldn't check X"], {"/m/a.mkv": frozenset({("jf-1", "x")})}
+        ).to_config()
+        env.job.config = {"reconcile": True, "source": "reconcile", reconcile.LISTING_CONFIG_KEY: stored}
+        with (
+            patch.object(job_runner, "build_items") as build,
+            patch.object(reconcile, "check_servers_listing") as listing,
+        ):
+            job_runner.run_intro_credits_job("j1")
+        listing.assert_not_called()
+        build.assert_not_called()
+        env.jm.merge_job_config.assert_called_once_with("j1", {}, remove=(reconcile.LISTING_CONFIG_KEY,))
+        submitted = env.dispatcher.submit_items.call_args.kwargs["items"]
+        assert [(i.canonical_path, i.server_id, i.item_id_by_server, i.title) for i in submitted] == [
+            ("/m/a.mkv", "", {}, "a.mkv"),
+            ("/m/b.mkv", "", {}, "b.mkv"),
+        ]
+        env.jm.complete_job.assert_called_once_with("j1", warning="Couldn't check X")
+
+    def test_a_check_servers_run_cancelled_during_its_read_back_keeps_no_listing(self, env):
+        env.job.config = {"reconcile": True, "source": "reconcile"}
+        env.jm.is_cancellation_requested.return_value = True
+        self._run()
+        assert self.listing.called  # the read-back ran and was cut short
+        env.jm.merge_job_config.assert_not_called()
+        env.jm.cancel_job.assert_called_once_with("j1")
+
     def test_check_servers_lists_its_files_with_the_jobs_store_capability_cache_and_cancel(self, env, monkeypatch):
         env.job.config = {"reconcile": True, "source": "reconcile"}
         self._run()
@@ -1997,6 +2050,54 @@ class TestVerifyReplacedFilesLater:
         verify_env.results.append(("/m/a.mkv", "markers_published", [self.WRITTEN_LATER]))
         env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "cancelled": True}
         self._run(verify_env)
+        verify_env.create.assert_not_called()
+
+    @pytest.fixture
+    def before_restart(self, env, tmp_path):
+        """Files this job published before a restart revived it, with their Files-panel rows (as the JSONL keeps
+        them) and the markers store's identity of each."""
+        records = {}
+
+        def make(name, *, verify_later):
+            path = tmp_path / name
+            path.write_bytes(b"x" * 10)
+            st = os.stat(path)
+            records[str(path)] = SimpleNamespace(size=st.st_size, mtime_ns=st.st_mtime_ns)
+            server = {"id": "jf-1", "status": "markers_written", **({"verify_later": True} if verify_later else {})}
+            env.jm.get_file_results.return_value.append(
+                {"file": str(path), "outcome": "markers_published", "servers": [server]}
+            )
+            return str(path)
+
+        env.jm.get_file_results.return_value = []
+        env.ctx.store.get_file.side_effect = records.get
+        return make
+
+    @pytest.mark.parametrize("others", [False, True], ids=["every-file-carried", "some-files-left"])
+    def test_a_revived_job_queues_the_verify_of_replaced_files_it_published_before_the_restart(
+        self, env, verify_env, before_restart, others
+    ):
+        replaced = before_restart("a.mkv", verify_later=True)
+        plain = before_restart("b.mkv", verify_later=False)
+        paths = [replaced, plain] + (["/m/c.mkv"] if others else [])
+        verify_env.sent = {replaced: "/data/tv/a.mkv", plain: "/data/tv/b.mkv"}
+        self._run(verify_env, paths)
+        assert env.dispatcher.submit_items.called is others
+        verify_env.create.assert_called_once()
+        kwargs = verify_env.create.call_args.kwargs
+        assert (kwargs["library_name"], kwargs["file_paths"], kwargs["verify"]) == (
+            "Verify: Show - S01E01.mkv",
+            ["/data/tv/a.mkv"],
+            True,
+        )
+
+    @pytest.mark.parametrize("config", [{"verify": True}, {"source": "manual"}], ids=["verify-job", "manual-job"])
+    def test_a_revived_job_that_checks_nothing_later_queues_no_verify_for_carried_files(
+        self, env, verify_env, before_restart, config
+    ):
+        env.job.config.update(config)
+        path = before_restart("a.mkv", verify_later=True)
+        self._run(verify_env, [path])
         verify_env.create.assert_not_called()
 
 
