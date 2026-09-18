@@ -23,7 +23,7 @@ from ..processing.generator import (
     _notify_file_result,
     failure_scope,
 )
-from ..utils import format_display_title
+from ..utils import format_display_title, redact_secrets, redacted_traceback
 
 # Map thread_id -> job_id. The previous implementation stored a flat set
 # of "is a job thread" booleans; that broke as soon as multiple jobs ran
@@ -33,6 +33,9 @@ from ..utils import format_display_title
 # dict-with-job-id lookup gives each handler its own scoped filter.
 _job_thread_to_job_id: dict[int, str] = {}
 _job_thread_ids_lock = threading.Lock()
+# Loguru ``extra`` key: a record bound with it stays out of a job's own log (the app log still has it) — a traceback,
+# say, that belongs in the log file but would bury the job's Logs panel. Honoured by the Intro & Credits job log.
+JOB_LOG_SKIP = "job_log_skip"
 
 
 def register_job_thread(job_id: str = "") -> None:
@@ -718,6 +721,16 @@ class Worker:
                     pause_check=self.pause_check,
                 )
 
+            # Exception text reaches the file's row (served by the jobs API) and the log, and can carry a server URL
+            # with its token: masked, and the traceback kept out of the job's own log.
+            def _failed(message: str, exc: Exception) -> ItemOutcome:
+                text = redact_secrets(message)
+                logger.error("{} failed on {}; other items keep processing: {}", self.display_name, display_name, text)
+                logger.bind(**{JOB_LOG_SKIP: True}).error(
+                    "Traceback of {} on {}:\n{}", self.display_name, display_name, redacted_traceback(exc)
+                )
+                return ItemOutcome("failed", text)
+
             try:
                 outcome = _run(self.gpu, self.gpu_device)
             except CancellationError:
@@ -725,7 +738,7 @@ class Worker:
             except CodecNotSupportedError as exc:
                 if self.worker_type == "GPU" and not (self.cancel_check and self.cancel_check()):
                     self.fallback_active = True
-                    self.fallback_reason = str(exc) or "GPU processing failed"
+                    self.fallback_reason = redact_secrets(str(exc)) or "GPU processing failed"
                     logger.warning(
                         "{} couldn't process {} on the GPU and is retrying on CPU. Reason: {}",
                         self.display_name,
@@ -737,13 +750,11 @@ class Worker:
                     except CancellationError:
                         outcome = ItemOutcome("failed", "cancelled during CPU fallback")
                     except Exception as fallback_exc:
-                        logger.exception("{} also failed on CPU for {}", self.display_name, display_name)
-                        outcome = ItemOutcome("failed", f"CPU fallback failed: {fallback_exc}")
+                        outcome = _failed(f"CPU fallback failed: {fallback_exc}", fallback_exc)
                 else:
-                    outcome = ItemOutcome("failed", f"codec error: {exc}")
+                    outcome = ItemOutcome("failed", redact_secrets(f"codec error: {exc}"))
             except Exception as exc:
-                logger.exception("{} failed on {}; other items keep processing.", self.display_name, display_name)
-                outcome = ItemOutcome("failed", str(exc) or type(exc).__name__)
+                outcome = _failed(str(exc) or type(exc).__name__, exc)
 
             valid = normalize_outcome(outcome, self.outcome_keys)
             if valid is not outcome:

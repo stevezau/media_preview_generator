@@ -6,12 +6,52 @@ different modules in the application.
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
+import traceback
 import uuid
 from datetime import UTC, datetime
 from typing import Any
+
+# A secret written as ``name=value`` / ``name: value`` (a URL query, a header dict's repr, a MediaBrowser header): the
+# name, then ``=`` or ``:`` (quoted keys and values allowed), an optional Bearer/Basic scheme, then the value up to a
+# separator. "MediaBrowser" is no scheme here: its header's ``Token="…"`` comes first and is matched by its own name.
+_SECRET_RE = re.compile(
+    r"(?i)(\b(?:x-plex-token|x-emby-token|x-mediabrowser-token|api[_-]?key|access[_-]?token|auth[_-]?token|token"
+    r"|password|passwd|secret|authorization)['\"]?\s*[=:]\s*['\"]?(?:(?:bearer|basic)\s+)?)"
+    r"[^\s&'\",;)\]}]+"
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Mask tokens, API keys and passwords in text shown on a job or written to a log.
+
+    Exception text from an HTTP client can carry the request's URL or headers (``?X-Plex-Token=…``, ``api_key=…``).
+
+    Args:
+        text: Any text.
+
+    Returns:
+        The text with each secret's value replaced by ``****``.
+    """
+    return _SECRET_RE.sub(lambda match: f"{match.group(1)}****", text or "")
+
+
+def redacted_traceback(exc: BaseException) -> str:
+    """An exception's traceback for the log, secrets masked (:func:`redact_secrets`).
+
+    Formatted by the standard library rather than loguru's ``logger.exception``, whose traceback repeats the
+    exception's text unmasked and, with loguru's ``diagnose``, shows each frame's local values.
+
+    Args:
+        exc: The exception.
+
+    Returns:
+        The traceback text, without a trailing newline.
+    """
+    return redact_secrets("".join(traceback.format_exception(exc))).rstrip()
 
 
 def to_utc_naive(value: datetime) -> datetime:

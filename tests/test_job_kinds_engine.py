@@ -287,6 +287,38 @@ def test_worker_outcome_with_unknown_key_counts_as_failed():
     assert notify.call_args.args[1].value == "failed"
 
 
+@pytest.mark.parametrize("stage", ["first-run", "cpu-rerun"])
+def test_a_worker_failure_whose_text_carries_a_token_is_masked_on_the_file_row_and_in_the_log(stage):
+    from loguru import logger
+
+    from media_preview_generator.jobs.worker import Worker
+
+    leak = ConnectionError("GET http://jf:8096/Items?api_key=s3cr3t&Ids=1 timed out")
+    effects = [leak] if stage == "first-run" else [CodecNotSupportedError("hevc"), leak]
+
+    def process(item, **kwargs):
+        raise effects.pop(0)
+
+    w = Worker(1, "GPU", gpu="NVIDIA", gpu_device="cuda:0")
+    done = threading.Event()
+    w._done_event = done
+    lines: list[str] = []
+    handler = logger.add(lambda m: lines.append(m), level="DEBUG", format="{message}\n{exception}")
+    try:
+        with patch("media_preview_generator.jobs.worker._notify_file_result") as notify:
+            w.assign_task(_items("/m/t.mkv")[0], _config(), MagicMock(), job_id="jt", process_fn=process,
+                          outcome_keys=KEYS)  # fmt: skip
+            assert done.wait(timeout=10)
+            w.current_thread.join(timeout=5)
+    finally:
+        logger.remove(handler)
+    prefix = "" if stage == "first-run" else "CPU fallback failed: "
+    assert notify.call_args.args[2] == f"{prefix}GET http://jf:8096/Items?api_key=****&Ids=1 timed out"
+    assert w.last_ms_message == notify.call_args.args[2]
+    logged = "".join(lines)
+    assert "s3cr3t" not in logged and "api_key=****" in logged and "Traceback" in logged
+
+
 def test_normalize_outcome_matrix():
     from media_preview_generator.job_kinds import normalize_outcome
 

@@ -17,9 +17,51 @@ from media_preview_generator.utils import (
     format_display_title,
     is_docker_environment,
     is_windows,
+    redact_secrets,
+    redacted_traceback,
     sanitize_path,
     setup_working_directory,
 )
+
+
+class TestRedactSecrets:
+    """Exception text shown on a job or logged can carry a server's URL or headers; secrets in it are masked."""
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("GET http://plex:32400/a?X-Plex-Token=abc123&type=4 failed",
+             "GET http://plex:32400/a?X-Plex-Token=****&type=4 failed"),
+            ("http://jf:8096/Items?api_key=abc123", "http://jf:8096/Items?api_key=****"),
+            ("http://emby/Items?ApiKey=abc123&Ids=1", "http://emby/Items?ApiKey=****&Ids=1"),
+            ("url=http://x/?access_token=abc123)", "url=http://x/?access_token=****)"),
+            ("{'X-Emby-Token': 'abc123', 'Accept': 'json'}", "{'X-Emby-Token': '****', 'Accept': 'json'}"),
+            ('MediaBrowser Client="app", Token="abc123"', 'MediaBrowser Client="app", Token="****"'),
+            # The header this app sends (servers/_mediabrowser_auth.py) puts the token first.
+            ('Authorization: MediaBrowser Token="abc123", Client="app"',
+             'Authorization: **** Token="****", Client="app"'),
+            ("Authorization: Bearer abc123", "Authorization: Bearer ****"),
+            ("password=hunter2 user=bob", "password=**** user=bob"),
+            ("nothing secret here: 42 files", "nothing secret here: 42 files"),
+            ("", ""),
+        ],
+        ids=["plex-query", "api_key", "ApiKey", "access_token", "header-dict", "mediabrowser", "mediabrowser-token-first",
+             "bearer", "password", "clean", "empty"],
+    )  # fmt: skip
+    def test_masks_the_value_and_keeps_the_rest(self, text, expected):
+        assert redact_secrets(text) == expected
+
+    def test_a_traceback_is_formatted_without_locals_and_masked(self):
+        def fetch(token):
+            raise ConnectionError(f"GET http://plex/?X-Plex-Token={token}")
+
+        secret = "abc" + "123"  # not a literal: the traceback quotes the calling line's source
+        try:
+            fetch(secret)
+        except ConnectionError as exc:
+            text = redacted_traceback(exc)
+        assert text.startswith("Traceback (most recent call last):")
+        assert "in fetch" in text and "X-Plex-Token=****" in text and "abc123" not in text
 
 
 class TestCalculateTitleWidth:

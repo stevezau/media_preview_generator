@@ -1153,6 +1153,29 @@ class TestRun:
         self._run()
         env.jm.complete_job.assert_called_once_with("j1", error="RuntimeError: wait exploded")
 
+    def test_a_crash_whose_text_carries_a_token_leaks_it_neither_to_the_job_nor_to_the_log(self, env):
+        from loguru import logger
+
+        url = "http://plex:32400/library/sections/1/all?X-Plex-Token=s3cr3t-t0ken&type=4"
+        lines: list[str] = []
+        handler = logger.add(lambda m: lines.append(m), level="DEBUG", format="{message}\n{exception}")
+        try:
+            with patch.object(job_runner, "build_items", side_effect=ConnectionError(f"Max retries exceeded: {url}")):
+                job_runner.run_intro_credits_job("j1")
+        finally:
+            logger.remove(handler)
+        error = env.jm.complete_job.call_args.kwargs["error"]
+        assert error == (
+            "ConnectionError: Max retries exceeded: http://plex:32400/library/sections/1/all?X-Plex-Token=****&type=4"
+        )
+        logged = "".join(lines)
+        assert "s3cr3t" not in logged and "s3cr3t" not in str(env.jm.add_log.call_args_list)
+        # The traceback still reaches the app log (redacted), but not the job's own log.
+        assert "Traceback" in logged and "X-Plex-Token=****" in logged
+        job_log = [c.args[1] for c in env.jm.add_log.call_args_list]
+        assert f"ERROR - Intro & Credits job j1 failed: {error}" in job_log
+        assert not any("Traceback" in line for line in job_log)
+
 
 ALL_OUTCOMES = [
     ("markers_published", True),

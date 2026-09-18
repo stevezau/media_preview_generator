@@ -16,11 +16,12 @@ from ..config import load_config
 from ..job_kinds import JOB_KIND_INTRO_CREDITS
 from ..jobs.dispatcher import get_or_create_dispatcher
 from ..jobs.orchestrator import _build_multi_server_registry
-from ..jobs.worker import is_job_thread_for, register_job_thread, unregister_job_thread
+from ..jobs.worker import JOB_LOG_SKIP, is_job_thread_for, register_job_thread, unregister_job_thread
 from ..processing.generator import clear_failures, failure_scope, set_file_result_callback
 from ..processing.retry_queue import BACKOFF_SCHEDULE, retry_policy
 from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig
+from ..utils import redact_secrets, redacted_traceback
 from ..web.job_gate import format_wait_message, get_job_gate
 from ..web.jobs import PAUSED_BY_SCHEDULE, PRIORITY_LOW, PRIORITY_NORMAL, JobStatus, WorkerStatus, get_job_manager
 from ..web.routes.job_runner import _build_selected_gpus, _format_eta, _inflight_jobs, _inflight_lock
@@ -830,7 +831,7 @@ def run_intro_credits_job(job_id: str) -> None:
         lambda message: jm.add_log(job_id, f"{message.record['level'].name} - {message.record['message']}"),
         level=str(settings.get("log_level", "INFO")).upper(),
         format="{message}",
-        filter=lambda record: is_job_thread_for(record["thread"].id, job_id),
+        filter=lambda record: not record["extra"].get(JOB_LOG_SKIP) and is_job_thread_for(record["thread"].id, job_id),
         enqueue=True,
     )
     # "priority" is the value the slot was admitted at: the user can re-prioritise the job, and release() must
@@ -1072,7 +1073,12 @@ def run_intro_credits_job(job_id: str) -> None:
             finally:
                 clear_failures()
     except Exception as exc:
-        logger.exception("Intro & Credits job {} failed", job_id)
+        # The job's error is served by GET /api/jobs, and exception text can carry a server URL with its token.
+        detail = redact_secrets(f"{type(exc).__name__}: {exc}")
+        logger.error("Intro & Credits job {} failed: {}", job_id, detail)
+        logger.bind(**{JOB_LOG_SKIP: True}).error(
+            "Traceback of Intro & Credits job {}:\n{}", job_id, redacted_traceback(exc)
+        )
         if dispatcher is not None:
             # Its checks would otherwise go on publishing for a failed job, without a slot or Files-panel rows.
             try:
@@ -1080,7 +1086,7 @@ def run_intro_credits_job(job_id: str) -> None:
             except Exception as cancel_exc:
                 logger.warning("Could not stop the remaining files of Intro & Credits job {}: {}", job_id, cancel_exc)
         try:
-            jm.complete_job(job_id, error=f"{type(exc).__name__}: {exc}")
+            jm.complete_job(job_id, error=detail)
         except Exception as complete_exc:
             logger.warning("Could not mark Intro & Credits job {} failed: {}", job_id, complete_exc)
     finally:
