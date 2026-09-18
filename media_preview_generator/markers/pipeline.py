@@ -34,6 +34,8 @@ from ..servers.registry import server_config_from_dict
 from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import ChromaprintState, chromaprint_state
 from .audio.season import season_audio_spec, season_intro_chapter_limits
+from .credits.detector import credits_text_spec
+from .credits.textdet_helper import TextDetState, text_detection_state
 from .decide import (
     DecisionContext,
     DecisionStatus,
@@ -216,6 +218,9 @@ class PipelineContext:
         chromaprint: What the job's check for an ffmpeg with chromaprint found. Without a registered season audio
             detector, any state but UNKNOWN keeps stored season audio answers from helping decide (``_decide``);
             UNKNOWN (ffmpeg didn't answer) still registers no detector, but stored answers count as if it were there.
+        credits_text: What the job's check for credit text detection found. ABSENT keeps stored credits text answers
+            from helping decide (they may still hold a type in review); UNKNOWN (the check didn't answer) registers no
+            detector, but stored answers count as if it were there.
     """
 
     registry: Any
@@ -232,6 +237,7 @@ class PipelineContext:
     live_config: Callable[[str], ServerConfig | None] = live_server_config
     recheck_empty_server_markers: bool = False
     chromaprint: ChromaprintState = ChromaprintState.AVAILABLE
+    credits_text: TextDetState = TextDetState.AVAILABLE
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
     _capability_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -413,14 +419,19 @@ def build_clients(settings: GlobalMarkersSettings) -> dict[str, Any]:
 
 
 def default_local_detectors(
-    settings: GlobalMarkersSettings, config: Any, chromaprint: ChromaprintState = ChromaprintState.ABSENT
+    settings: GlobalMarkersSettings,
+    config: Any,
+    chromaprint: ChromaprintState = ChromaprintState.ABSENT,
+    credits_text: TextDetState = TextDetState.ABSENT,
 ) -> tuple[LocalDetectorSpec, ...]:
-    """The local detectors a job uses: season audio when its source is on and an ffmpeg with chromaprint exists.
+    """The local detectors a job uses: season audio when its source is on and an ffmpeg with chromaprint exists, and
+    credit text when its source and credits detection are on and text detection can run here.
 
     Args:
         settings: Global detection settings.
         config: The job's ``Config`` (its ``ffmpeg_path``).
         chromaprint: The job's :func:`chromaprint_state`, for the warning when no detector can be registered.
+        credits_text: The job's :func:`text_detection_state`, for the same reason.
 
     Returns:
         The detector specs, in no particular order (the pipeline runs them at their source's place).
@@ -438,6 +449,22 @@ def default_local_detectors(
         else:
             logger.warning(
                 "Season audio matching is on, but no ffmpeg with chromaprint was found; TV intros come from the other "
+                "sources only"
+            )
+    if settings.detect_credits and settings.source_enabled(Source.CREDITS_TEXT.value):
+        if credits_text is TextDetState.AVAILABLE:
+            detectors.append(credits_text_spec())
+        elif credits_text is TextDetState.UNKNOWN:
+            logger.warning(
+                "On-screen credit text is on, but the text detection check didn't answer; this job reads no credit "
+                "text, saved credit text answers still count, and the check runs again in 10 minutes"
+            )
+        else:
+            # TODO(task-10): point at Settings → Intro & Credits for the reason once that page renders
+            # ``textdet_helper.text_detection_status()``; it has no caller yet, so naming it here would send the user
+            # to a reason that isn't shown.
+            logger.warning(
+                "On-screen credit text is on, but text detection isn't available here; credits come from the other "
                 "sources only"
             )
     return tuple(detectors)
@@ -470,6 +497,11 @@ def build_context(
         if settings.source_enabled(Source.SEASON_AUDIO.value)
         else ChromaprintState.ABSENT
     )
+    credits_text = (
+        text_detection_state()
+        if settings.detect_credits and settings.source_enabled(Source.CREDITS_TEXT.value)
+        else TextDetState.ABSENT
+    )
     return PipelineContext(
         registry=registry,
         config=config,
@@ -479,9 +511,10 @@ def build_context(
         ffprobe=ffprobe_path_for(ffmpeg_path),
         force=force,
         clients=build_clients(settings),
-        local_detectors=default_local_detectors(settings, config, chromaprint),
+        local_detectors=default_local_detectors(settings, config, chromaprint, credits_text),
         recheck_empty_server_markers=recheck_empty_server_markers,
         chromaprint=chromaprint,
+        credits_text=credits_text,
     )
 
 
@@ -608,10 +641,11 @@ def _decide(
 ) -> dict[MarkerType, TypeDecision]:
     """Decide from everything stored for the enabled sources, so a forced and a normal run always agree.
 
-    Stored answers of a local detector this job doesn't have (season audio without an ffmpeg with chromaprint) can't be
-    matched again as the season changes, so they may hold a type in review but never help decide it: a type the
-    decision with them decides is decided again without them. When the chromaprint check didn't answer
-    (``ctx.chromaprint`` UNKNOWN), stored season audio answers count as usual until it does.
+    Stored answers of a local detector this job doesn't have can't be produced again by this job (season audio can't be
+    re-matched as the season changes; credit text can't be re-read at all), so they may hold a type in review but never
+    help decide it: a type the decision with them decides is decided again without them. When the chromaprint check
+    didn't answer (``ctx.chromaprint`` UNKNOWN), stored season audio answers count as usual until it does, and the same
+    for credit text while ``ctx.credits_text`` is UNKNOWN.
     ``intro_chapter_limit`` is the season's limit on an intro chapter deciding alone (``season_intro_chapter_limits``).
     """
     order = _decision_order(ctx.settings)
@@ -631,6 +665,8 @@ def _decide(
     unavailable = {source.value for source in _LOCAL_DETECTOR_SOURCES} - registered
     if ctx.chromaprint is ChromaprintState.UNKNOWN:
         unavailable -= {Source.SEASON_AUDIO.value, Source.SEASON_AUDIO_PREVIOUS.value}
+    if ctx.credits_text is TextDetState.UNKNOWN:
+        unavailable -= {Source.CREDITS_TEXT.value}
     if not any(c.source.value in unavailable and c.source.value in order for c in evidence):
         return decisions
     without = decide_from(tuple(source_id for source_id in order if source_id not in unavailable))

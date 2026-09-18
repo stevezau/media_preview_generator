@@ -89,3 +89,15 @@ def _reset_marker_singletons():
         pass
     else:
         clear_capability_cache()
+
+
+@pytest.fixture(autouse=True)
+def _no_text_detection_check(monkeypatch, request):
+    """Jobs these tests build don't start the text detection check (a subprocess); tests of the check itself live in
+    tests/markers/credits and patch what they need."""
+    if request.node.get_closest_marker("integration"):
+        return
+    from media_preview_generator.markers import pipeline
+    from media_preview_generator.markers.credits.textdet_helper import TextDetState
+
+    monkeypatch.setattr(pipeline, "text_detection_state", lambda: TextDetState.ABSENT)

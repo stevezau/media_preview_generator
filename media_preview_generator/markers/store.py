@@ -186,6 +186,14 @@ _SCHEMA = (
         size INTEGER NOT NULL,
         mtime_ns INTEGER NOT NULL,
         failed_at TEXT NOT NULL)""",
+    # A file whose credit text decode timed out (a stalled read, spec §5.4), with the identity it had then: its credit
+    # text isn't decoded again (up to 600 s on a worker) until that identity changes, the entry is a day old, or a
+    # forced re-detect. Not tied to a file row, like the member failures above.
+    """CREATE TABLE IF NOT EXISTS credits_text_timeouts (
+        canonical_path TEXT PRIMARY KEY,
+        size INTEGER NOT NULL,
+        mtime_ns INTEGER NOT NULL,
+        failed_at TEXT NOT NULL)""",
     # A server's empty (or unusable) answer for a file, asked again by Check servers: how many times it was read again
     # without markers (the backoff step; gone once the answer has markers or the file changes), when the last re-read
     # that couldn't replace the answer happened (the backoff counts from it), and when Check servers last took the
@@ -1240,6 +1248,35 @@ class MarkerStore:
         with self._lock:
             r = self._conn.execute(
                 "SELECT failed_at FROM member_fingerprint_failures WHERE canonical_path=? AND size=? AND mtime_ns=?",
+                (identity.canonical_path, identity.size, identity.mtime_ns),
+            ).fetchone()
+        return datetime.fromisoformat(r["failed_at"]) if r else None
+
+    def record_credits_text_timeout(
+        self, identity: FileIdentity, failed_at: datetime, *, forget_before: datetime
+    ) -> None:
+        """Remember that a file with this identity timed out decoding its credit text (replaces the path's older entry).
+
+        Entries that no longer hold a file back are forgotten in the same write, as for member failures.
+
+        Args:
+            identity: The file as it was when the decode timed out.
+            failed_at: When (the job's clock).
+            forget_before: Entries of any path that timed out before this are removed.
+        """
+        with self._tx() as conn:
+            conn.execute("DELETE FROM credits_text_timeouts WHERE failed_at < ?", (forget_before.isoformat(),))
+            conn.execute(
+                "INSERT OR REPLACE INTO credits_text_timeouts (canonical_path, size, mtime_ns, failed_at) "
+                "VALUES (?,?,?,?)",
+                (identity.canonical_path, identity.size, identity.mtime_ns, failed_at.isoformat()),
+            )
+
+    def credits_text_timed_out_at(self, identity: FileIdentity) -> datetime | None:
+        """When decoding this identity's credit text last timed out, or None (never, or another identity)."""
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT failed_at FROM credits_text_timeouts WHERE canonical_path=? AND size=? AND mtime_ns=?",
                 (identity.canonical_path, identity.size, identity.mtime_ns),
             ).fetchone()
         return datetime.fromisoformat(r["failed_at"]) if r else None
