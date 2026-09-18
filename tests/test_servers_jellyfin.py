@@ -3161,6 +3161,23 @@ class TestBridgeMarkers:
         assert server.get_media_segments("abc") is None
 
     @pytest.mark.parametrize(
+        ("call_it", "request_args"),
+        [
+            pytest.param(lambda s, i: s.get_bridge_marker_state(i), ("GET", "/MediaPreviewBridge/Markers/{q}"), id="get"),
+            pytest.param(lambda s, i: s.put_bridge_markers(i, []), ("POST", "/MediaPreviewBridge/Markers/{q}"), id="post"),
+            pytest.param(lambda s, i: s.delete_bridge_markers(i), ("DELETE", "/MediaPreviewBridge/Markers/{q}"), id="delete"),
+            pytest.param(lambda s, i: s.get_media_segments(i), ("GET", "/MediaSegments/{q}"), id="segments"),
+        ],
+    )  # fmt: skip
+    def test_item_ids_are_quoted_into_the_url(self, make_server, call_it, request_args):
+        # Ids arrive from webhook hints and API callers: "../" or "?" must not reach another Jellyfin route.
+        server = make_server()
+        server._request = MagicMock(return_value=_bridge_resp(200, {"segments": [], "Items": []}))
+        call_it(server, "../System/Restart?x=")
+        method, path = request_args
+        assert server._request.call_args.args == (method, path.format(q="..%2FSystem%2FRestart%3Fx%3D"))
+
+    @pytest.mark.parametrize(
         ("side_effect", "resp", "raises"),
         [
             pytest.param(requests.Timeout("x"), None, True, id="timeout"),

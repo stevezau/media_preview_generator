@@ -24,6 +24,7 @@ import json
 import os
 import threading
 import time
+import urllib.parse
 from typing import Any
 
 import requests
@@ -472,6 +473,15 @@ class JellyfinServer(EmbyApiClient):
             self._media_preview_bridge_installed = False
             return {"installed": False, "version": "", "error": f"bad JSON: {exc}"[:200]}
 
+    # Ids reach these routes from webhook hints and API callers: quoted, so "../" or "?" can't reach another route.
+    @staticmethod
+    def _bridge_markers_path(item_id: str) -> str:
+        return f"/MediaPreviewBridge/Markers/{urllib.parse.quote(str(item_id), safe='')}"
+
+    @staticmethod
+    def _media_segments_path(item_id: str) -> str:
+        return f"/MediaSegments/{urllib.parse.quote(str(item_id), safe='')}"
+
     def get_bridge_marker_state(self, item_id: str) -> dict[str, Any] | None:
         """What the Bridge plugin stores for an item, served or not.
 
@@ -486,7 +496,7 @@ class JellyfinServer(EmbyApiClient):
         """
         empty: dict[str, Any] = {"segments": [], "fileSize": None, "stale": False}
         try:
-            resp = self._request("GET", f"/MediaPreviewBridge/Markers/{item_id}")
+            resp = self._request("GET", self._bridge_markers_path(item_id))
             if resp.status_code == 404:
                 try:
                     body = resp.json()
@@ -542,7 +552,7 @@ class JellyfinServer(EmbyApiClient):
         body: dict[str, Any] = {"segments": segments}
         if file_size is not None:
             body["fileSize"] = file_size
-        return self._request("POST", f"/MediaPreviewBridge/Markers/{item_id}", json_body=body)
+        return self._request("POST", self._bridge_markers_path(item_id), json_body=body)
 
     def delete_bridge_markers(self, item_id: str) -> requests.Response:
         """Remove the Bridge plugin's markers for an item (other providers' segments stay).
@@ -556,7 +566,7 @@ class JellyfinServer(EmbyApiClient):
         Raises:
             requests.RequestException: Transport failure.
         """
-        return self._request("DELETE", f"/MediaPreviewBridge/Markers/{item_id}")
+        return self._request("DELETE", self._bridge_markers_path(item_id))
 
     def get_media_segments(self, item_id: str, *, raise_no_answer: bool = False) -> list[dict[str, Any]] | None:
         """Segments Jellyfin serves for an item, from every registered provider.
@@ -572,7 +582,7 @@ class JellyfinServer(EmbyApiClient):
             requests.RequestException: With ``raise_no_answer``: one of ``NO_ANSWER_ERRORS``.
         """
         try:
-            resp = self._request("GET", f"/MediaSegments/{item_id}")
+            resp = self._request("GET", self._media_segments_path(item_id))
             if resp.status_code != 200:
                 return None
             body = resp.json()
