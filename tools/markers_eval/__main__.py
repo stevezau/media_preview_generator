@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -76,6 +77,29 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0 if passed else 1
 
 
+def cmd_credits_text(args: argparse.Namespace) -> int:
+    from .credits_text import run_credits_text
+
+    ffmpeg = args.ffmpeg or shutil.which("ffmpeg")
+    if ffmpeg is None:
+        sys.exit("No ffmpeg found (pass --ffmpeg)")
+    root = Path(args.cache or os.environ.get("MARKERS_EVAL_CACHE") or Path.home() / ".cache/markers_eval")
+    baseline = Path(args.plex_baseline) if args.plex_baseline else evidence_dir() / DEFAULT_BASELINE
+    try:
+        summary, details, passed = run_credits_text(
+            decode=args.decode, gpu_device=args.gpu_device, sets=tuple(args.sets.split(",")), online=args.online,
+            cache_root=root, ffmpeg=ffmpeg, ffprobe=ffprobe_path_for(ffmpeg), baseline_path=baseline,
+            sheets_dir=Path(args.sheets) if args.sheets else None,
+        )  # fmt: skip
+    except ValueError as exc:
+        # A set that never ran must never look like a set that passed.
+        sys.exit(str(exc))
+    print(json.dumps(summary, indent=2))
+    if args.json:
+        Path(args.json).write_text(json.dumps({**summary, "details": details}, indent=1, default=str))
+    return 0 if passed else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m tools.markers_eval")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -99,6 +123,21 @@ def main(argv: list[str] | None = None) -> int:
         "--full-folder", action="store_true", help="match each whole season folder (the app) instead of the eval lists"
     )
     full.set_defaults(func=cmd_report)
+    text = sub.add_parser("credits-text", help="credit text (rule J) on the 80- and 205-file credits sets vs Plex")
+    text.add_argument("--decode", choices=("gpu", "cpu"), default="gpu")
+    text.add_argument("--gpu-device", default="cuda:0")
+    text.add_argument("--sets", default="80,205", help="comma-separated: 80, 205")
+    text.add_argument("--online", action="store_true", help="also the 43 verified online cases")
+    text.add_argument(
+        "--sheets",
+        help="write frame-check sheets (answers >10 s early, >30 s late, epilogue-like, with an end) to this "
+        "local-only folder",
+    )
+    text.add_argument("--ffmpeg")
+    text.add_argument("--cache")
+    text.add_argument("--plex-baseline")
+    text.add_argument("--json", help="write details (local-only: holds file paths)")
+    text.set_defaults(func=cmd_credits_text)
     args = parser.parse_args(argv)
     return args.func(args)
 

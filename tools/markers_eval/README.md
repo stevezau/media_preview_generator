@@ -10,7 +10,8 @@ Every run uses `nice -n 19`, one heavy job at a time on storage. Media files are
 Fingerprints are cached under `$MARKERS_EVAL_CACHE` (default `~/.cache/markers_eval`), never under `/data*`. The
 truth files are local-only (git-ignored) in the main checkout's `docs/design/intro-credits/evidence/`; in a git
 worktree, set `MARKERS_EVAL_EVIDENCE` to that folder. Committed summaries hold counts and show names only, never file
-paths. Summaries go to `docs/design/intro-credits/evidence/eval/phase2-harness.md`.
+paths. Summaries go to `docs/design/intro-credits/evidence/eval/phase2-harness.md` and, for the credit text rows,
+`phase3-harness.md` beside it.
 
 ## `reproduce`: the season matcher gate
 
@@ -126,3 +127,94 @@ containing `|` would split wrongly; the prod library has none. A fresh export on
 so the online cases find no file in it. Their Plex and season audio rows then fall back to the online answers alone.
 Plex keeps one marker set per item. None of the files the report reads belong to an item with a second version, so
 the app's "another cut" rule never drops Plex's markers here.
+
+## `credits-text`: on-screen credit text against Plex's own credits markers
+
+Runs the app's own credit text detector (`markers/credits/detector.find_credits`, rule J) over the credits truth sets
+and puts what the pipeline would publish with it beside Plex's own credits markers. Results:
+`docs/design/intro-credits/evidence/eval/phase3-harness.md`.
+
+The truth is each file's last credits chapter (3 movies corrected by frame checks, `credits/adjudicated.json`), so
+**chapters are left out of every row**: these files stand for files without usable chapters. The rows mirror the
+pipeline (C7), which reads credit text only for credits the other sources leave undecided, and Plex's markers never
+decide alone (rule 7) — so on these sets every file asks credit text, and no chapter-veto row exists.
+
+Rows per set:
+
+- `plex`: Plex's first credits marker.
+- `text`: credits text alone, the detector's answer with no decision rules.
+- `high` and `medium`: what the pipeline publishes from credits text plus Plex's markers at each level.
+
+Verdicts are `credits.judge_credits`: `wrong` is more than 10 s early (it skips story), `late` is more than 30 s late,
+`missed` is no answer, everything else is `useful`. Also reported per set: `text_and_server_only` (High decisions
+resting only on credits text and a server's own marker, Q2), `ends_found` (answers with an end, Q3) and
+`ends_published` (decisions whose skip stops before the end of the file).
+
+`rule_j_80` is spec §5.4's own metric for credits text alone on the 80 files — within 5 / 10 / 30 s, early or late by
+more than 30 s, no answer — with `rule_j_80_by_kind` repeating it per HDR kind (`sdr`, `hdr10`, `dv5`, `dv_other`).
+
+**The gate** (`gate_checks`, the owner's Q4 ruling of 2026-09-16: precision first, never looser than Plex) is judged
+per set — the 80 (movies40 + tv40 merged) and the 205 movies — and every check is named in `summary["gate"]`:
+
+- Medium useful ≥ Plex useful
+- Medium wrong ≤ 2 % of the set's files, rounded up (80 → 2, 205 → 5)
+- Medium wrong ≤ Plex wrong
+- High wrong ≤ 1 % of the set's files, rounded up (80 → 1, 205 → 3)
+- High wrong ≤ Plex wrong
+
+Exit 0 means every chosen set passed and `rule_j_80` met the spec (59 within 10 s, at most 1 early). A failing check is
+never tuned away: the numbers go to the owner as they are measured.
+
+```bash
+cd /home/data/workspace/plex_generate_vid_previews
+export MEDIA_PREVIEW_TEXTDET_MODEL="$MARKERS_BENCH_DIR/textdet-model/ch_PP-OCRv4_det_infer.onnx"
+nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval credits-text --decode gpu --sets 80,205 --online \
+  --sheets "$HOME/.cache/markers_eval/sheets-phase3" \
+  --json docs/design/intro-credits/evidence/eval/phase3_credits_gpu.json
+nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval credits-text --decode cpu --sets 80 \
+  --json docs/design/intro-credits/evidence/eval/phase3_credits_cpu.json
+```
+
+The GPU run reads 285 files plus the online cases' 43 and takes about an hour on storage; the CPU run on the 80 files
+takes about 25 minutes. Both are the reported runs: `--decode gpu` is the product path (NVIDIA decode, text detection
+through the helper pool), `--decode cpu` proves the CPU worker path gives the same gate. Answers are cached under
+`$MARKERS_EVAL_CACHE/credits_text` per file identity, detector version, decode path and kind, so a re-run is free.
+
+- `--online`: also the 43 verified online cases at the app's three source settings, with credit text added the way the
+  pipeline adds it — only to cases whose credits the online answers and Plex's markers leave undecided. The count is
+  reported as `credits_text_asked`.
+- `--sheets DIR`: a 4×2 contact sheet of the 80 s around every credits text answer worth a look (more than 10 s early,
+  more than 30 s late, shaped like epilogue cards, or with an end, which gets a second sheet around the end) for Q5's
+  adjudication. The summary always lists which files and why, sheets or not. The sheets hold real frames: keep the
+  folder local, never under `/data*`.
+- `--decode`, `--gpu-device`, `--sets`, `--ffmpeg`, `--cache`, `--plex-baseline`, `--json` work as in `report`.
+
+## Text detection bench
+
+The vendored detector (`markers/credits/textdet.py`) must find the same boxes as `rapidocr_onnxruntime` 1.4.4 on all
+289 bench frames, counts and corners:
+
+```bash
+python -m tools.markers_eval.textdet_bench extract
+python -m tools.markers_eval.textdet_bench counts --impl rapidocr --model M --out rapidocr.json
+python -m tools.markers_eval.textdet_bench counts --impl vendored --model M --out vendored.json
+python -m tools.markers_eval.textdet_bench compare rapidocr.json vendored.json
+```
+
+`compare` exits 0 only when both runs cover all 289 frames and no frame differs. The frames come from every 10th file
+of `credits/f3.jsonl` (8 files), CPU keyframes of the 120 s around each credits truth at 320×180 grey, and live in
+`$MARKERS_BENCH_DIR` (default: the git-ignored `evidence/credits/bench/`), never committed. `--impl rapidocr` needs
+Python ≤ 3.12: run it in `$MARKERS_BENCH_DIR/py312` with this repo on `PYTHONPATH`.
+
+## Rule J fixture
+
+```bash
+python -m tools.markers_eval.credits_fixture
+```
+
+Rebuilds `tests/fixtures/markers/credits_rule_j_80.json.gz` from the local-only evidence, so rule J's 80-file
+regression runs in CI without any media. It anonymises: files become `movie-01…`/`tv-01…` in the evidence order, every
+time is shifted by a whole number of seconds so the item's tail window starts at 1000 s, rows keep only
+`[pts, boxes, luma]`, and the frame-check truth (`credits/adjudicated.json`) replaces the chapter truth. Each item is
+checked against the prototype (`credits/eval_rules3.py`) before it is written; the seven items in
+`ANCHOR_DIVERGENCES`, where the port's anchor deliberately differs, are reported instead of stopping the build.
