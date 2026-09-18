@@ -26,6 +26,36 @@ _TEST_CONFIG_DIR = tempfile.mkdtemp(prefix="mpg-test-config-")
 os.environ["CONFIG_DIR"] = _TEST_CONFIG_DIR
 atexit.register(shutil.rmtree, _TEST_CONFIG_DIR, ignore_errors=True)
 
+
+def _grouped_by_folder(args: list[str], invocation_dir: Path) -> list[str]:
+    """The command line's test paths with each folder's paths together, folders and paths in first-seen order.
+
+    pytest 9 binds a conftest's fixtures to the first collector of its folder. A folder named twice with another
+    folder's path between (``tests/markers/a.py tests/test_jobs.py tests/markers/b.py``) gets a second collector, and
+    the second group's tests lose that conftest's fixtures (``client``) and autouse fixtures.
+
+    Args:
+        args: Paths or node ids (``path::Class::test``), relative to ``invocation_dir`` or absolute.
+        invocation_dir: The folder pytest ran in.
+
+    Returns:
+        The same args, regrouped; a path's own node ids keep their order.
+    """
+    first_seen: dict[Path, int] = {}
+    chains = []
+    for arg in args:
+        path = Path(os.path.normpath(invocation_dir / arg.split("::", 1)[0]))
+        chain = [path, *path.parents][::-1]
+        chains.append([first_seen.setdefault(part, len(first_seen)) for part in chain])
+    order = sorted(range(len(args)), key=lambda i: chains[i])
+    return [args[i] for i in order]
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Collect each folder of the command line's test paths once (see ``_grouped_by_folder``)."""
+    config.args[:] = _grouped_by_folder(list(config.args), config.invocation_params.dir)
+
+
 # ---------------------------------------------------------------------------
 # Session-wide: swap APScheduler's SQLAlchemyJobStore for MemoryJobStore.
 #
