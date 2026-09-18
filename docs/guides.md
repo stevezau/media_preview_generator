@@ -126,6 +126,9 @@ Each pick becomes a removable chip; **Start Job** processes them all. The **Publ
 - **Pause Processing** — Stops all processing system-wide: no new jobs will start (manual, scheduled, or webhook), and the current job stops dispatching new tasks. Files already mid-process finish first, then workers go idle (a "soft" pause — nothing is killed mid-frame). Use this to cap bandwidth or pause overnight.
 - **Resume Processing** — Clears the global pause; new jobs can start and the current job resumes dispatching.
 - Controls appear in the **Current Job** header and to the left of **Clear Jobs** in the Job Queue. State is persisted and survives restarts.
+- An **Intro & Credits** job also has its own **Pause** button on its row: files already in progress finish, the job
+  hands its slot back so other jobs can run, and it waits until you click its **Resume**. **Pause Processing** holds
+  it too, but **Resume Processing** doesn't resume a job you paused on its own.
 
 **Scheduling:**
 
@@ -546,8 +549,8 @@ You can enable **both** if you want belt-and-suspenders behavior — the recentl
 ## Intro & Credits
 
 Skip Intro / Skip Credits markers for Plex, Jellyfin and Emby. Detected once per file — from chapters inside the file,
-online databases, matching the theme tune across a season, and (in a later update) reading the on-screen credit
-roll — then published to every server that has that file. **Precision over coverage:** a missing marker is fine, a
+online databases, matching the theme tune across a season, and reading the on-screen credit roll — then published to
+every server that has that file. **Precision over coverage:** a missing marker is fine, a
 wrong one isn't, so a marker only ships when the evidence clears the bar below.
 
 ### Turning it on
@@ -579,11 +582,11 @@ drag-to-reorder:
 
 - **High** (default) — chapters publish on their own unless two other independent sources agree on something
   different (then the file goes to **Needs review**); without chapters, two independent sources must agree.
-- **Medium** — also accepts a single source, but only one that checks *your* file's own cut: chapters, or a SkipDB
-  exact/shifted match. A single IntroDB or TheIntroDB answer never publishes alone, because neither knows which cut
-  of the file you have. A lone SkipDB answer publishes intros and recaps only — its credits often start minutes
-  before the real credit roll, so they still need a second source to agree. Season audio never publishes alone at
-  either setting.
+- **Medium** — also accepts a single source, but only one that checks *your* file's own cut: chapters, on-screen
+  credit text (for credits), or a SkipDB exact/shifted match. A single IntroDB or TheIntroDB answer never publishes
+  alone, because neither knows which cut of the file you have. A lone SkipDB answer publishes intros and recaps only
+  — its credits often start minutes before the real credit roll, so they still need a second source to agree.
+  Season audio never publishes alone at either setting.
 
 Markers already on a Plex/Jellyfin/Emby server only ever *confirm* another source — they never publish on their own,
 and they can only **shorten** a skip (a later intro start, an earlier credits end), never lengthen one. That's
@@ -884,7 +887,7 @@ table covers every state the check can report, using its exact wording:
 | *(Settings)* **Matching audio across a season** shows "Not available" with a reason, e.g. "Needs an ffmpeg with the chromaprint muxer (jellyfin-ffmpeg in the amd64 image); none was found" | This container's ffmpeg has no chromaprint (the arm64 image, or a custom ffmpeg) | Use the amd64 Docker image; every other source keeps working. Saved season audio answers can't help decide an intro meanwhile, so one decided with them goes to **Needs review** on its next check unless other sources agree; they can still keep an intro in review that they contradict |
 | *(Settings)* **Matching audio across a season** shows "Not available": "ffmpeg didn't answer the check for the chromaprint muxer; it is checked again in 10 minutes" | ffmpeg timed out, couldn't start, or exited with an error when asked for its muxers (a busy or slow container start) | Nothing: jobs started meanwhile match no episodes, but saved season audio answers still count, and the check runs again after 10 minutes |
 | *(Settings)* **On-screen credit text** says "Not available" with one of: "Needs ONNX Runtime and OpenCV, which the Docker image includes; they aren't installed here" · "Needs the text detection model, which the Docker image includes; it isn't at …" · "The text detection model at … isn't the expected file" · "The text detection check didn't answer; it is checked again in 10 minutes" | Running outside the Docker image without the packages/model installed, a moved or corrupted model file, or the check timed out/crashed | Use the Docker image, which ships the packages and model; every other source keeps working meanwhile. The last reason clears itself — the check runs again after 10 minutes |
-| Log line "Credit text detection on \<device\>: CPU (\<reason\>)" although this host has a GPU | The self-test picked the CPU: the reason is one of "slower than the CPU", "Vulkan reports no hardware GPU", "no WebGPU device is this GPU", or a helper failure | Nothing to fix if the CPU really is faster or there's no hardware GPU for this device; otherwise check the GPU is passed into the container the way previews use it. arm64 has no GPU path for credit text either way |
+| Log line "Credit text detection on \<device\>: CPU (\<reason\>)" although this host has a GPU | The self-test or the device check picked the CPU: the reason is e.g. "the GPU was slower than the CPU", "the GPU was counting different boxes than the CPU", "Vulkan reports no hardware GPU", "no WebGPU device is this GPU", "… GPUs have no WebGPU path here", "this GPU has no usable WebGPU adapter", or a WebGPU session or helper failure | Nothing to fix if the CPU really is faster or there's no hardware GPU for this device; otherwise check the GPU is passed into the container the way previews use it. arm64 has no GPU path for credit text either way |
 | *(Plex)* Red "✕ Not active" next to Plex Pass: "This Plex server has no Plex Pass, so Plex won't show any markers." | Plex hides all markers — even ones already in its database — without Plex Pass | Add Plex Pass to this Plex server |
 | *(Plex)* "Plex's database is on a network share (…). The app must run on the same machine as Plex to write markers; Plex stays read-only." | SQLite's write mode doesn't work over NFS/SMB/CIFS | Run this app on the same machine as Plex |
 | *(Plex)* "Plex's database is on a filesystem this app doesn't recognise as a local disk (…); Plex stays read-only." | The app couldn't prove the folder is a real local disk, so it refuses to risk Plex's database | Check the mount; open an issue if it's genuinely local |

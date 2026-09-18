@@ -284,7 +284,7 @@ Shared detection settings — one file is detected once, whatever the publish ru
 | `detect.intro` | bool | `true` | TV episodes only. |
 | `detect.credits` | bool | `true` | TV episodes and movies. |
 | `detect.recap` | bool | `false` | Jellyfin's player is the only one with a Skip Recap button. |
-| `publish_when` | `"high"` \| `"medium"` | `"high"` | **High:** chapters publish on their own unless two other independent sources agree on something different (then Needs review); without chapters, two independent sources must agree. **Medium:** also accepts a single source that checks the file's own cut — chapters, or a SkipDB `exact`/`shifted` match (intros and recaps only). IntroDB, TheIntroDB, season audio and markers already on servers never decide alone at either level, and season audio (or `season_audio_previous`) with markers already on servers isn't an agreeing pair on its own. |
+| `publish_when` | `"high"` \| `"medium"` | `"high"` | **High:** chapters publish on their own unless two other independent sources agree on something different (then Needs review); without chapters, two independent sources must agree. **Medium:** also accepts a single source that checks the file's own cut — chapters, on-screen credit text (credits), or a SkipDB `exact`/`shifted` match (intros and recaps only). IntroDB, TheIntroDB, season audio and markers already on servers never decide alone at either level, and season audio (or `season_audio_previous`) with markers already on servers isn't an agreeing pair on its own. |
 | `respect_locks` | bool | `true` | A locked marker is never replaced by detection. The Inspector can't adjust or lock markers yet (a later update); it only shows them and offers Re-detect. |
 | `sources` | array | see above | Evidence sources, in checking/precedence order. Reordering in the UI reorders this array. |
 | `sources[].id` | one of `chapters`, `theintrodb`, `introdb`, `skipdb`, `season_audio`, `credits_text`, `server_markers` | — | `credits_text` runs where text detection is available (see `GET /api/markers/sources/local`); it decides credits alone only at `"medium"`. `season_audio` runs where ffmpeg has chromaprint (see `GET /api/markers/sources/local`); it only confirms intros another source found. Its previous-season hint is stored as `season_audio_previous` evidence (not a settings id). |
@@ -340,6 +340,7 @@ column) holds:
 | `retry_not_before` | ISO-8601 timestamp | Present only on a retry or verify job: the due time (survives a restart without waiting again in full). |
 | `verify` | bool | Present only on a verify job: the delayed check of files published after they were replaced. It queues no further verify job, and doesn't retry a file gone from disk. |
 | `reconcile` | bool | Present only on a Check servers job: it lists the files of drifted published items (and of items whose last publish failed, and decided files to ask servers again about) instead of libraries or paths. |
+| `paused_by_schedule` | bool | Present only while a schedule's stop time holds the job paused: that schedule's next start (or **Run now**) resumes it. A Re-run drops it. |
 
 Retries (files not yet on disk, not yet in a server's library, or on a Plex whose Plex Pass check didn't answer)
 reuse the webhook preview-retry backoff (`webhook_retry_count` / `webhook_retry_delay`) and cap at **500 files** per
@@ -443,9 +444,11 @@ is `markers_skipped` before it is probed or looked up, whether it came from a fo
 | GET | `/api/markers/sources/local` | Whether season audio matching and on-screen credit text can run in this container |
 | POST | `/api/markers/reconcile` | Queue Intro & Credits · Check servers |
 
-All of them require the same `X-Auth-Token` / `Authorization: Bearer` auth as the rest of the API. `POST
-/api/markers/jobs` and `POST /api/markers/reconcile` are CSRF-exempt (like `POST /api/jobs`) so token-authenticated
-scripts can call them directly without a browser session.
+All of them require the same `X-Auth-Token` / `Authorization: Bearer` auth (or a logged-in session) as the rest of the
+API. `POST /api/markers/jobs` and `POST /api/markers/reconcile` are on the app's CSRF-exempt list (like `POST
+/api/jobs`) so token-authenticated scripts can call them directly without a browser session. Note that the app
+doesn't enforce CSRF tokens on any route today (`WTF_CSRF_CHECK_DEFAULT` is off); the session cookie is
+`SameSite=Lax`, so another site can't use a logged-in browser's session to call these routes.
 
 #### POST /api/markers/jobs
 
@@ -495,7 +498,8 @@ Plex item's number of versions (`Media` entries other than optimized copies), wh
 other servers or when it can't be read); a server whose state can't be read gets a degraded row with `error` set
 instead of failing the whole response). `400` when the path isn't a file inside a server library, the
 query is incomplete, or `item_id` isn't shaped like an id that server's type uses (a Plex rating key is digits
-only, e.g. `42`, not `/library/metadata/42`; checked before any server is contacted). `404` for an unknown server, or a `server_id`+`item_id` with no file on this app's disk. `409` when the
+only, e.g. `42`, not `/library/metadata/42`; a Jellyfin or Emby id is up to 36 ASCII hex digits and dashes starting
+with a hex digit, or ASCII digits; checked before any server is contacted). `404` for an unknown server, or a `server_id`+`item_id` with no file on this app's disk. `409` when the
 server is disabled. `500` with a JSON error when the file's data can't be built.
 
 #### POST /api/markers/item/redetect
@@ -565,6 +569,10 @@ its expected path or isn't the expected file, or the check didn't answer (checke
 has no GPU path but is still available on the CPU). `message` names the reason (`""` when available), e.g.
 `{"credits_text": {"available": true, "message": ""}}` or
 `{"credits_text": {"available": false, "message": "Needs the text detection model, which the Docker image includes; it isn't at /app/models/ch_PP-OCRv4_det_infer.onnx"}}`.
+
+A check that fails outright answers `"available": null` for that source only (with `"ffmpeg": null` for season audio
+and a `message` such as "Couldn't check whether credit text can run here"); the other source's answer is unaffected,
+and Settings leaves a `null` row as it is.
 
 #### POST /api/markers/reconcile
 
@@ -814,6 +822,11 @@ Update settings. Send only the fields to change.
 }
 ```
 
+`markers` (the Intro & Credits block) may be partial: posted keys merge over the stored block — `detect` key by key,
+`sources` by `id` (a list naming every source sets their order; a shorter one updates those sources where they are;
+naming a source twice is a `400`). `api_key: "****"` keeps the stored TheIntroDB key and `""` clears it. `GET
+/api/settings` returns the block with the key masked.
+
 ### Plex OAuth Endpoints
 
 #### POST /api/plex/auth/pin
@@ -1024,7 +1037,7 @@ For full design and per-vendor details see [Multi-Media-Server](multi-server.md)
 | GET | `/api/servers` | List configured servers (auth redacted) |
 | POST | `/api/servers` | Add a new server (auto-generates id) |
 | GET | `/api/servers/<id>` | Fetch one server (auth redacted) |
-| PUT/PATCH | `/api/servers/<id>` | Update; redacted auth values are kept |
+| PUT/PATCH | `/api/servers/<id>` | Update; redacted auth values are kept. A body without `markers` keeps the stored Intro & Credits block; a partial `markers` merges over it, `plex`/`emby` sub-block included (a key sent as `null` wins; `"markers": null` resets the block to the defaults, Intro & Credits off) |
 | DELETE | `/api/servers/<id>` | Remove a server |
 | POST | `/api/servers/test-connection` | Test a candidate config without saving |
 | POST | `/api/servers/<id>/refresh-libraries` | Re-fetch the server's library list |
