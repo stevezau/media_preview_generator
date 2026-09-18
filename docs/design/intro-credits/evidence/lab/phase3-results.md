@@ -117,11 +117,50 @@ stored**; it implies no end window was decoded only because this fixture's coars
 (`rule_j.KEEP_AFTER_CREDITS_S`). In general `credits_end` can also return None *after* decoding the window, when the
 refined end fails that same check — so the implication is a property of this fixture, not of the code.
 
-## Rows 12–15
+## Rows 12–15 (the `plex` host, owner decision Q7, 2026-09-16)
 
-**Not run.** They need a throwaway container on the `plex` host (owner decision Q7, 2026-09-16). `plex_rows.py` is
-written and staged; the run is pending the owner being told immediately beforehand, per the controller's standing
-instruction. Nothing in this task touched the `plex` host.
+Run in a throwaway container on `plex` after telling the owner immediately beforehand (per the controller's standing
+instruction): no `/data*` mount, no Plex config, no access to the prod Plex; the container, `/tmp/p3lab` and the
+loaded image were removed right after (confirmed: `ls /tmp/p3lab` fails, the image is gone from `docker images`, no
+leftover `p3lab` container).
+
+**Row 12 — NVIDIA on real hardware: pass.** Real TITAN RTX, self-test picked `webgpu` (4.94 ms/frame vs CPU 6.18 ms),
+pinned to `0000:01:00.0`, box counts identical to CPU.
+
+**Row 13 — Intel on real hardware: pass.** The self-test picked `cpu` ("the GPU was slower than the CPU") for the
+RPL-S integrated GPU — the correct, safe call on a weak iGPU, and the first time this decision has been proven on
+real Intel hardware rather than reasoned about.
+
+**Row 14 — the host's view of both GPUs while the Intel self-test runs, 14 rounds over ~40 s: partial.** The row's
+own documented pass bar needs both halves to hold: no NVIDIA-side PID during the Intel self-test, **and**
+`intel_gpu_top` showing render work while it runs. Only the first half is confirmed. Every round independently chose
+`cpu`. Live process capture during the run:
+- `docker top p3lab`: at different moments, either the CPU-only helper (`--backend cpu ... --no-selftest`) or, mid
+  self-test, a `--backend webgpu ... --pci-bus-id 0000:00:02.0` helper — the Intel iGPU's own PCI address, distinct
+  from the NVIDIA card's `0000:01:00.0` from row 12. Per-device pinning is real, not assumed.
+- `nvidia-smi pmon -c 5 -s u`: no `p3lab` process appears on the NVIDIA GPU at any sample, only `Xorg`, an unrelated
+  host `python`, and the real Plex Transcoder already running on this host. **This half of the bar holds**: the
+  Intel self-test never touches the NVIDIA GPU.
+- `intel_gpu_top -J -s 500`: all four engines (Render/3D, Blitter, Video, VideoEnhance) read 0.0% busy across every
+  sampled window, including one taken while the `webgpu` helper process was confirmed live via `docker top` in the
+  same second. **This half of the bar does not hold** — no render work was observed, so by the row's own bar this
+  is not a clean pass. Two candidate reasons, neither confirmed: the self-test's brief inference workload (a handful
+  of 320×180 frames) may be too short for a 500 ms sample window to catch, or Mesa's compute submission on this
+  iGPU may not register under `intel_gpu_top`'s engine-busy categories. This does not contradict the pinning
+  evidence above (`docker top` + the helper's own `--pci-bus-id` argument establish that independently, and both
+  hold) -- it just means the render-activity half of row 14's own bar is unconfirmed, not that the pinning is in
+  doubt.
+
+**Row 15 — VAAPI decode on the real Intel render node, against the milestone-audit fix: pass.** `duration_ms: 700000`
+confirms the row's own duration bug (N1, found by the deep review before this ever reached `plex`) is fixed: it
+probes the real fixture length rather than a copied constant. VAAPI and CPU decode agree exactly: start 541.0 s /
+end 659.0 s both ways.
+
+**Taken together, rows 12–15 close the NVIDIA-isolation half of Task 5's disclosed cross-vendor gap**: a GPU
+self-test and its own PCI pin are now proven on real NVIDIA hardware (rows 3, 12), and on real Intel hardware the
+self-test correctly chose CPU with no NVIDIA-side contamination and the right PCI address in the helper's own
+argument (rows 13, 14). The Intel-side render-activity half of the gap -- direct hardware confirmation that the
+Intel GPU itself executed work, independent of process arguments -- remains open per row 14's partial result.
 
 ## Resetting the lab
 
