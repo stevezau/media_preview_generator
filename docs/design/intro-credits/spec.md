@@ -1252,3 +1252,8 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   user-id auth, re-read that Emby server on every run still missing evidence. The reader now checks the resolved
   item is the file's own version (as the publisher already did), since Emby's fallback search can return another
   version's item. Plex's one-cut check is unchanged.
+- 2026-09-19 · Final review, cleanup (§6.2 step 6, technical): a Check servers run uses a file's server recheck, and a
+  failed item's retry, once that file has its result, not when the run lists it. A run cancelled (or ended by a
+  restart) before a file leaves that file's rechecks and retries due for the next run; the backoff and the 5-read and
+  5-retry caps count only checks that happened. An item's retry counts once per run however many of its files run,
+  and a revived run doesn't count a file again. Files no run can check still take their turn when listed.
