@@ -1320,13 +1320,6 @@ async function loadMarkersLocalSources() {
     }
 }
 
-function escapeHtml(str) {
-    if (str == null) return '';
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
-}
-
 function fetchGpuStatus() {
     return fetch('/api/system/status').then(r => r.json());
 }

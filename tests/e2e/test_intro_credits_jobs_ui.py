@@ -517,6 +517,31 @@ class TestQueueRows:
         plex_line = detail.locator("div", has_text="Home Plex").last
         expect(plex_line).to_contain_text(re.compile(r"Markers written × 8\s*Needs review × 3"))
 
+    def test_a_quote_in_a_webhook_file_name_stays_inside_the_name_cell_title(self, dashboard) -> None:
+        # The row's title lists the webhook's file names; a Sonarr import can name a file with '"' in it.
+        names = ['Show - S01E01 " onmouseover="window.__xss=1" x=".mkv', "Show - S01E02 'quoted'.mkv"]
+        job = _job(
+            "bbbbbbbb-0000-4000-8000-000000000010",
+            library_name="Sonarr: Show",
+            config={"source": "sonarr", "webhook_basenames": names},
+        )
+        page = dashboard([job])
+        row = page.locator(f"#job-row-{job['id']}")
+        expect(row).to_be_visible(timeout=5000)
+
+        assert row.locator("td").nth(1).get_attribute("title") == ", ".join(names)
+        assert page.locator("#jobQueue [onmouseover]").count() == 0
+
+    def test_the_shared_escape_helpers_escape_quotes_for_attributes(self, dashboard) -> None:
+        # escapeHtml is the page-wide helper (app.js); every attribute built with it relies on quotes being escaped.
+        page = dashboard([])
+        expect(page.locator("#jobQueue")).to_be_attached(timeout=5000)
+        raw = "a\"b'c<d>&e"
+        escaped = page.evaluate(
+            "raw => [escapeHtml(raw), escapeHtmlText(raw), escapeHtmlAttr(raw), escapeHtml(null), escapeHtml(0)]", raw
+        )
+        assert escaped == ["a&quot;b&#39;c&lt;d&gt;&amp;e"] * 3 + ["", "0"]
+
     def test_a_quote_in_a_job_error_stays_inside_the_status_tooltip(self, dashboard) -> None:
         # An Intro & Credits job fails with f"{type(exc).__name__}: {exc}", which can quote a file name.
         error = 'FileNotFoundError: [Errno 2] No such file: \'/data/x " onmouseover="window.__xss=1" y.mkv\''

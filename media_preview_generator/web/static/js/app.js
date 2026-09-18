@@ -25,18 +25,21 @@ let jobTotalPages = 1;
 let jobTotal = 0;
 
 
+const _HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+
 /**
  * Escape HTML special characters to prevent XSS attacks.
+ *
+ * Quotes are escaped too, so the result is safe both as element text and inside a quoted attribute value
+ * (title="…", data-…="…"). A file or server name can contain '"'; the old textContent/innerHTML trick left it as is.
  * @param {string} str - String to escape
- * @returns {string} - Escaped string safe for innerHTML
+ * @returns {string} - Escaped string safe for innerHTML and quoted attribute values
  */
 function escapeHtml(str) {
     if (str === null || str === undefined) {
         return '';
     }
-    const div = document.createElement('div');
-    div.textContent = String(str);
-    return div.innerHTML;
+    return String(str).replace(/[&<>"']/g, (c) => _HTML_ESCAPES[c]);
 }
 
 /**
@@ -632,15 +635,13 @@ async function updateMediaServersStatus() {
     container.innerHTML = rows;
 }
 
+// Kept for their callers: escapeHtml itself is safe in both places now.
 function escapeHtmlText(str) {
-    if (str == null) return '';
-    const div = document.createElement('div');
-    div.textContent = String(str);
-    return div.innerHTML;
+    return escapeHtml(str);
 }
 
 function escapeHtmlAttr(str) {
-    return escapeHtmlText(str).replace(/"/g, '&quot;');
+    return escapeHtml(str);
 }
 
 async function loadLibraries() {
