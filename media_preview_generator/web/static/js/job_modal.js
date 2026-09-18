@@ -1608,13 +1608,14 @@ function renderFileResultsTable(files) {
         html += '<tr>'
             + '<td style="max-width: 400px;">'
             +   '<div class="d-flex align-items-center">'
-            +     '<small class="text-truncate" title="' + escapeHtml(fileName) + '">' + escapeHtml(shortName) + '</small>'
+            // Attribute values need escapeHtmlAttr: escapeHtml leaves '"' as is, and a file name can contain one.
+            +     '<small class="text-truncate" title="' + escapeHtmlAttr(fileName) + '">' + escapeHtml(shortName) + '</small>'
             +     inspectorBtn
             +   '</div>'
             + '</td>'
             + '<td><span class="badge ' + meta.badge + '">' + meta.label + '</span></td>'
             + '<td>' + serversHtml + '</td>'
-            + '<td>' + serverNotes + '<small class="text-muted" title="' + reason + '">' + reason + '</small></td>'
+            + '<td>' + serverNotes + '<small class="text-muted" title="' + escapeHtmlAttr(f.reason || '') + '">' + reason + '</small></td>'
             + '<td>' + workerBadge + '</td>'
             + '</tr>';
     }

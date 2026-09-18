@@ -517,6 +517,19 @@ class TestQueueRows:
         plex_line = detail.locator("div", has_text="Home Plex").last
         expect(plex_line).to_contain_text(re.compile(r"Markers written × 8\s*Needs review × 3"))
 
+    def test_a_quote_in_a_job_error_stays_inside_the_status_tooltip(self, dashboard) -> None:
+        # An Intro & Credits job fails with f"{type(exc).__name__}: {exc}", which can quote a file name.
+        error = 'FileNotFoundError: [Errno 2] No such file: \'/data/x " onmouseover="window.__xss=1" y.mkv\''
+        job = _markers_job(status="failed", error=error, progress={"outcome": None})
+        page = dashboard([job])
+        row = page.locator(f"#job-row-{job['id']}")
+        expect(row).to_be_visible(timeout=5000)
+
+        assert row.locator("[onmouseover]").count() == 0
+        badge = row.locator("[data-bs-toggle='tooltip']").filter(has_text="Failed").first
+        tooltip = badge.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
+        assert tooltip == error
+
     def test_preview_job_breakdown_is_unchanged(self, dashboard) -> None:
         preview = _preview_job()
         page = dashboard([preview])
@@ -871,6 +884,21 @@ class TestFilesPanel:
         assert plex_pill.get_attribute("title") == "Home Plex — 1 marker(s); keeping Plex's credits"
         jellyfin_pill = row.locator("td").nth(2).locator(".badge", has_text="Home Jellyfin")
         assert jellyfin_pill.get_attribute("title") == "Home Jellyfin — Markers written"
+
+    def test_a_quote_in_a_file_name_or_reason_stays_inside_its_title(self, dashboard) -> None:
+        # A media file's name is outside this app's control; '"' used to close the title attribute early.
+        job = _markers_job(config={"kind": "intro_credits", "source": "manual", "libraries": [], "file_paths": []})
+        page = dashboard([job])
+        name = '/data/tv/Show/S01E01 " onmouseover="window.__xss=1" x=".mkv'
+        reason = 'Couldn\'t read "x" onmouseover="window.__xss=2"'
+        files = [{"file": name, "outcome": "failed", "reason": reason, "worker": "Intro & Credits", "servers": []}]
+
+        self._open_files(page, job, files)
+
+        row = page.locator("#fileResultsBody tr").first
+        assert row.locator("small.text-truncate").get_attribute("title") == name
+        assert row.locator("td").nth(3).locator("small").get_attribute("title") == reason
+        assert row.locator("[onmouseover]").count() == 0
 
     def test_preview_file_pills_are_unchanged(self, dashboard) -> None:
         preview = _preview_job()

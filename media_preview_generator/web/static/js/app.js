@@ -3786,9 +3786,11 @@ function getStatusBadge(status, paused, error, outcome, pauseNote) {
 
     var tooltipText = _buildOutcomeTooltip(outcome);
     if (error) {
+        // The error can quote a file name or a server's words, so it's escaped for the title attribute.
+        var errorText = escapeHtmlAttr(error);
         tooltipText = tooltipText
-            ? tooltipText + '&#10;' + error
-            : error;
+            ? tooltipText + '&#10;' + errorText
+            : errorText;
     }
     if (pauseNote && status === 'running' && paused) {
         tooltipText = escapeHtmlAttr(pauseNote) + (tooltipText ? '&#10;' + tooltipText : '');
