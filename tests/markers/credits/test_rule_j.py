@@ -103,6 +103,116 @@ class TestCoarse:
         assert rule_j.credits_start([bright(0)], []) is None
 
 
+class TestAnchorSpacing:
+    """The anchor's yardstick is the gap between the run's own credit frames, in presentation order.
+
+    The prototype measured every row of the whole decoded tail in decode order, which is three mismatches against the
+    distance the anchor actually compares: the body's cadence isn't the roll's, the keyframe cadence isn't the credit
+    cadence, and a decode-order difference isn't a gap.
+    """
+
+    @staticmethod
+    def _tail(body_step: int, body_end: int) -> list[tuple[float, int, float]]:
+        """A lit body at ``body_step`` keyframes, a lone scene-text frame 6 s after it, then a 2 s GOP roll 6 s later."""
+        body = [bright(t) for t in range(0, body_end, body_step)]
+        roll = [dark(t, 2) for t in range(body_end + 12, body_end + 92, 2)]
+        return [*body, dark(body_end + 6, 1), *roll]
+
+    @pytest.mark.parametrize(
+        ("body_step", "body_end", "tail_spacing", "whole_tail_answer"),
+        [
+            (1, 400, 1.0, 490.0),     # dense body: 1.5 x 1 s < the roll's 2 s, so every pair looked far apart
+            (2, 400, 2.0, 412.0),     # same cadence either side: the whole-tail median was the right number too
+            (10, 1200, 10.0, 1206.0), # sparse body: 1.5 x 10 s swallowed the 6 s glue gap, keeping the lone frame
+        ],
+    )  # fmt: skip
+    def test_the_lone_frame_is_skipped_whatever_the_body_was_keyed_at(
+        self, body_step, body_end, tail_spacing, whole_tail_answer
+    ):
+        rows = self._tail(body_step, body_end)
+        first, last = rule_j.credit_runs(rows)[-1]
+        assert rows[first][0] == body_end + 6.0  # the run starts on the lone frame in all three cells
+        assert rule_j._typical_spacing(rows) == tail_spacing
+        assert rule_j._run_spacing(rows, first, last, rule_j.RULE_J) == 2.0
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == body_end + 12.0
+        # Two of the three cells only agree with the roll's own start by accident of how the body was keyed.
+        assert (whole_tail_answer == coarse.pts_s) is (body_step == 2)
+
+    def test_a_dense_body_before_a_slower_roll_does_not_collapse_the_start_to_its_end(self):
+        # An action climax at 1 s keyframes, then a static roll on a 2 s GOP. The whole-tail median (1 s) put the
+        # anchor limit at 1.5 s, under the roll's own 2 s gap: no pair of credit rows ever looked adjacent and the
+        # start walked row by row to the run's last frame, 118 s late.
+        body = [bright(t) for t in range(0, 421)]
+        roll = [dark(t, 2) for t in range(421, 540, 2)]
+        rows = [*body, *roll]
+        assert rule_j.credit_runs(rows) == [(421, 480)]
+        assert rule_j._typical_spacing(rows) == 1.0
+        assert rule_j._run_spacing(rows, 421, 480, rule_j.RULE_J) == 2.0
+        assert rule_j.coarse_start(rows) == Coarse(index=421, end_index=480, pts_s=421.0)
+
+    def test_the_run_gap_is_measured_in_presentation_order_not_decode_order(self):
+        # Six of the 80 files emit the roll's keyframes in swapped pairs. Consecutive differences then run -2 / +6 for
+        # a 2 s roll, and the median of those is 6 s -- a 9 s limit that would keep a lone frame 8 s before the roll.
+        body = [bright(t) for t in range(0, 494, 2)]
+        pairs = [row for t in range(500, 564, 4) for row in (dark(t + 2, 2), dark(t, 2))]
+        rows = [*body, dark(494, 1), *pairs]
+        first, last = rule_j.credit_runs(rows)[-1]
+        assert rows[first][0] == 494.0
+        assert rule_j._typical_spacing(rows[first : last + 1]) == 6.0
+        assert rule_j._run_spacing(rows, first, last, rule_j.RULE_J) == 2.0
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 502.0  # the first roll row emitted, not the lone frame
+
+    def test_only_the_runs_credit_frames_set_the_gap_not_every_keyframe_in_it(self):
+        # tv-31's shape: a 4 s credit cadence carried on 2 s keyframes, the empties between them bridged into the run
+        # by the dark rule. Counting every row halves the yardstick to the keyframe cadence, and the anchor then walks
+        # off the roll's real first frame because its neighbour is 4 s -- one credit frame -- away.
+        body = [bright(t) for t in range(0, 400, 2)]
+        roll = [dark(t, 2) if t % 4 == 0 else dark(t) for t in range(400, 482, 2)]
+        rows = [*body, *roll]
+        first, last = rule_j.credit_runs(rows)[-1]
+        assert rows[first][0] == 400.0
+        assert rule_j._typical_spacing(rows[first : last + 1]) == 2.0  # every row: the keyframe cadence
+        assert rule_j._run_spacing(rows, first, last, rule_j.RULE_J) == 4.0  # credit frames only: the credit cadence
+        assert rule_j.coarse_start(rows) == Coarse(index=first, end_index=last, pts_s=400.0)
+
+    def test_the_walk_steps_over_one_glued_frame_and_no_more(self):
+        # Two lone scene-text frames ahead of the roll, each far enough from the next credit frame to fail the test.
+        # The anchor is documented to skip *one* glued frame; unbounded it kept walking into the roll itself.
+        body = [bright(t) for t in range(0, 400, 2)]
+        rows = [*body, dark(400, 1), dark(412, 1), *[dark(t, 2) for t in range(424, 490, 2)]]
+        first, last = rule_j.credit_runs(rows)[-1]
+        assert rows[first][0] == 400.0
+        assert rule_j._run_spacing(rows, first, last, rule_j.RULE_J) == 2.0  # limit 3 s: neither 12 s gap passes it
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 412.0  # one step only; unbounded this reached 424.0
+
+    def test_a_scene_keyed_after_the_roll_cannot_reach_the_yardstick(self):
+        # The Q3 shape: a post-credits scene 30 s past the roll's last credit frame. The slice stops at the run's
+        # last row regardless of what that scene's own rows are (see test_a_credit_frame_can_sit_right_past_a_run,
+        # dropped by run_s, for why that row is sometimes itself a credit frame).
+        body = [bright(t) for t in range(0, 400, 4)]
+        rows = [
+            *body,
+            dark(400, 1),
+            *[dark(t, 2) for t in range(424, 472, 4)],
+            *[bright(t) for t in range(502, 560, 4)],
+        ]
+        first, last = rule_j.credit_runs(rows)[-1]
+        assert rows[last][0] == 468.0
+        assert not rule_j.is_credit(rows[last + 1]) and rows[last + 1][0] == 502.0
+        assert rule_j._run_spacing(rows, first, last, rule_j.RULE_J) == 4.0  # the roll's own cadence, not 30 s
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 424.0
+
+    def test_a_run_of_two_rows_keeps_its_first_row(self):
+        # Nothing to measure a cadence against: the gap between the pair is itself the typical gap, so it anchors.
+        rows = [bright(0), bright(60), dark(100, 1), dark(116, 1)]
+        assert rule_j._run_spacing(rows, 2, 3, rule_j.RULE_J) == 16.0
+        assert rule_j.coarse_start(rows) == Coarse(index=2, end_index=3, pts_s=100.0)
+
+
 class TestRefine:
     ROWS = [bright(0), bright(60), dark(100, 1), dark(102, 1), dark(110, 1), dark(125, 1)]
 
@@ -271,9 +381,50 @@ def _rows(raw: list) -> list[tuple[float, int, float]]:
     return [(float(r[0]), int(r[1]), float(r[2])) for r in raw]
 
 
+# Every file whose refined answer differs from the prototype's, as (prototype error, port error) against the
+# frame-check truth. All seven move the same way -- closer to the truth -- and no other file moves. The fixture keeps
+# the prototype's numbers as they were, so both sides are pinned here; ``tools/markers_eval/credits_fixture.py``
+# repeats the id list for its rebuild guard and the two have to agree.
+ANCHOR_DIVERGENCES = {
+    # id:        prototype, port,     why
+    "movie-12": (17.0, 9.0),  # the unbounded walk ran 26.2 s into the roll; one step reaches 8.9 s
+    "movie-25": (334.292, 146.792),  # 10.417 s roll under a 5.292 s tail median: the start had collapsed onto the end
+    "movie-29": (149.029, 90.095),  # 10.010 s roll read as 20.020 s in decode order, against a 2.419 s tail
+    "tv-07": (15.742, 7.742),  # 17 rows in the run, 10 of them credit frames: 1.502 s keyframes, 2.502 s credits
+    "tv-09": (21.125, 0.125),  # 3.670 s roll under a 2.336 s tail median: another collapse onto the run's last frame
+    "tv-22": (19.866, 16.866),  # 16 rows, 6 credit frames: 1.919 s keyframes against a 6.256 s credit cadence
+    "tv-31": (13.0, 4.0),  # 42 rows, 16 credit frames: 2.002 s keyframes against a 4.004 s credit cadence
+}
+
+# Files where the anchor still walks off the run's first row, and where it lands. The refine window absorbs most of
+# these before they reach ``credits_start``, so the divergence table above cannot see them: movie-27 and tv-06 both
+# moved in an earlier round of this fix with no visible effect on their final answer. Pinning the coarse time is what
+# stops that drifting silently.
+ANCHOR_WALKS_TO = {
+    "movie-02": 1853.143,
+    "movie-03": 1568.167,
+    "movie-09": 1860.930,
+    "movie-12": 1727.014,
+    "movie-13": 1859.000,
+    "movie-27": 1859.720,
+    "movie-28": 1714.681,
+    "movie-29": 1512.850,
+    "movie-34": 1548.699,
+    "movie-38": 1791.252,
+    "tv-04": 1373.548,
+    "tv-05": 1374.220,
+    "tv-16": 1376.096,
+    "tv-19": 1376.805,
+    "tv-26": 1411.762,
+    "tv-34": 1429.340,
+}
+
+
 class TestEightyFiles:
     def test_reproduces_the_prototype_at_the_spec_20_s_refine_span(self):
-        # 59 / 1 / 8 / 4; §5.4's table was measured at a 10 s refine span (late 9).
+        # 63 / 1 / 8 / 4 against the prototype's 59 / 1 / 8 / 4. Four files enter the 10 s band: tv-09 (its start no
+        # longer collapses onto the end of its run, 21.1 -> 0.1), movie-12, tv-07 and tv-31. movie-25, movie-29 and
+        # tv-22 improve without changing bucket, and nothing else moves at all. §5.4's table was measured at 10 s.
         tally = Counter()
         for item in _fixture()["items"]:
             start = rule_j.credits_start(_rows(item["key"]), _rows(item["fine"]))
@@ -285,16 +436,79 @@ class TestEightyFiles:
             if abs(error) > 30:
                 tally["early" if error < 0 else "late"] += 1
         assert len(_fixture()["items"]) == 80
-        assert (tally["within_10s"], tally["early"], tally["late"], tally["none"]) == (59, 1, 8, 4)
+        assert (tally["within_10s"], tally["early"], tally["late"], tally["none"]) == (63, 1, 8, 4)
 
-    def test_matches_the_prototype_item_for_item(self):
+    def test_every_divergence_from_the_prototype_is_closer_to_the_truth(self):
+        # The one property that separates this from tuning against a fixture: no file was traded away for another.
+        for item_id, (prototype, port) in ANCHOR_DIVERGENCES.items():
+            assert abs(port) < abs(prototype), item_id
+
+    def test_matches_the_prototype_item_for_item_bar_the_named_anchor_divergences(self):
+        seen = set()
         for item in _fixture()["items"]:
             start = rule_j.credits_start(_rows(item["key"]), _rows(item["fine"]))
             expected = item["expected_error_s"]
-            if expected is None:
+            if item["id"] in ANCHOR_DIVERGENCES:
+                prototype, port = ANCHOR_DIVERGENCES[item["id"]]
+                assert expected == pytest.approx(prototype, abs=0.0015), item["id"]
+                assert start is not None and (start - item["truth_s"]) == pytest.approx(port, abs=0.0015), item["id"]
+                seen.add(item["id"])
+            elif expected is None:
                 assert start is None, item["id"]
             else:
                 assert start is not None and abs((start - item["truth_s"]) - expected) <= 0.0015, item["id"]
+        assert seen == set(ANCHOR_DIVERGENCES)
+
+    def test_the_anchor_walks_on_exactly_these_files_and_lands_here(self):
+        walked = {}
+        for item in _fixture()["items"]:
+            key = _rows(item["key"])
+            runs = rule_j.credit_runs(key)
+            coarse = rule_j.coarse_start(key)
+            if coarse is not None and coarse.index != runs[-1][0]:
+                walked[item["id"]] = round(coarse.pts_s, 3)
+        assert walked == ANCHOR_WALKS_TO
+
+    def test_no_fixture_file_has_a_credit_frame_immediately_past_its_run(self):
+        # Not a structural guarantee (see test_a_credit_frame_can_sit_right_past_a_run below) -- just what the 80
+        # files happen to look like. 41 of them have a row past their run to check this on.
+        checked = 0
+        for item in _fixture()["items"]:
+            key = _rows(item["key"])
+            runs = rule_j.credit_runs(key)
+            if not runs or runs[-1][1] + 1 >= len(key):
+                continue
+            checked += 1
+            assert not rule_j.is_credit(key[runs[-1][1] + 1]), item["id"]
+        assert checked == 41
+
+    def test_a_credit_frame_can_sit_right_past_a_run(self):
+        # A trailing raw run under run_s is dropped by credit_runs, so runs[-1] (the last KEPT run) can leave a
+        # credit frame sitting right past it -- here, a stinger's title card 34 s after the roll, reachable only
+        # because a swapped-order keyframe pair makes the run's own gap-join and dark-bridge rules both fail to
+        # reach it. This is why the slice stays [first:last+1]: measuring the run's own frames is what matters,
+        # not whatever sits just past it.
+        body = [bright(t) for t in range(1000, 1100, 2)]
+        rows = [
+            *body,
+            dark(1100, 1),  # a lone scene-text frame, gap-joined onto the roll over 20 s
+            dark(1120, 1), dark(1122, 1), dark(1124, 1),  # the roll
+            bright(1128),  # emitted out of order: a bright frame with a later pts than the run's last row
+            dark(1126, 1),  # the run's last row (index 55)
+            dark(1160, 1),  # 34 s past the roll's last frame: a credit frame immediately past the run
+        ]  # fmt: skip
+        first, last = rule_j.credit_runs(rows)[-1]
+        assert (first, last) == (50, 55)
+        assert rule_j.is_credit(rows[last + 1])
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 1120.0
+
+    def test_no_start_lands_on_the_last_frame_of_its_own_run(self):
+        # The shape of the bug the anchor's yardstick fixed: a coarse start walked all the way to ``end_index``.
+        for item in _fixture()["items"]:
+            key = _rows(item["key"])
+            coarse = rule_j.coarse_start(key)
+            assert coarse is None or coarse.index < coarse.end_index, item["id"]
 
     def test_four_of_the_76_runs_end_more_than_30_s_before_the_end_of_the_file(self):
         # Measured while planning, on coarse ends (the fixture's 1 fps rows sit around the start, so no end refine here).

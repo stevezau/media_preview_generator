@@ -7,6 +7,12 @@ seconds so the item's tail window starts at 1000 s, rows keep only ``[pts, boxes
 (``credits/adjudicated.json``) replaces the chapter truth. Before writing, every item is checked against the prototype
 (``credits/eval_rules3.py`` ``detect``, refine span 20 s): the port on the shifted rows must give the prototype's
 error within 1.5 ms, or the script stops (an unshifted item would keep real timings; none needed it while planning).
+
+The seven ids in ``ANCHOR_DIVERGENCES`` are exempt from that check, because the port's anchor deliberately no longer
+matches the prototype's -- see ``rule_j._run_spacing`` and ``rule_j.ANCHOR_MAX_STEPS``. They are reported rather than
+stopped, and the fixture stores the prototype's error for them as for every other item;
+``tests/markers/credits/test_rule_j.py`` pins the prototype's number *and* the port's number for each of the seven.
+Any other item disagreeing still stops the script.
 """
 
 from __future__ import annotations
@@ -25,6 +31,11 @@ OUT = Path(__file__).resolve().parents[2] / "tests/fixtures/markers/credits_rule
 RULE_J_PROTOTYPE = dict(dense=3, min_boxes=1, dark=30, gap=24, run=15, pick="last", anchor=True, bridge_dark=True)
 REFINE_SPAN_S = 20.0
 TAIL_ORIGIN_S = 1000
+# The items the port's anchor deliberately answers differently from the prototype's: ``rule_j._run_spacing`` measures
+# the gap between the run's own credit frames in presentation order where the prototype took every row of the whole
+# decoded tail in decode order, and ``rule_j.ANCHOR_MAX_STEPS`` holds the walk to one frame. Keep this list in step
+# with ``ANCHOR_DIVERGENCES`` in ``tests/markers/credits/test_rule_j.py``, which pins both sides of each.
+ANCHOR_DIVERGENCES = {"movie-12", "movie-25", "movie-29", "tv-07", "tv-09", "tv-22", "tv-31"}
 
 
 def _prototype(evidence: Path) -> dict:
@@ -61,12 +72,16 @@ def build(evidence: Path) -> dict:
         expected = None if found is None else round(found - item["truth"], 3)
         shift = round(item["window_start"]) - TAIL_ORIGIN_S
         error, key, fine = _port_error(item, shift)
-        if (error is None) != (expected is None) or (error is not None and abs(error - expected) > 0.0015):
-            sys.exit(f"the port differs from the prototype on {item['kind']} item {counters[item['kind']] + 1}")
         counters[item["kind"]] += 1
+        item_id = f"{item['kind']}-{counters[item['kind']]:02d}"
+        differs = (error is None) != (expected is None) or (error is not None and abs(error - expected) > 0.0015)
+        if differs and item_id not in ANCHOR_DIVERGENCES:
+            sys.exit(f"the port differs from the prototype on {item_id}")
+        if differs:
+            print(f"{item_id}: anchor divergence, prototype {expected} vs port {error}")
         items.append(
             {
-                "id": f"{item['kind']}-{counters[item['kind']]:02d}",
+                "id": item_id,
                 "kind": item["kind"],
                 "duration_s": round(item["duration"] - shift, 3),
                 "truth_s": round(item["truth"] - shift, 3),

@@ -2,10 +2,16 @@
 of a file's ending (spec §5.4; the end is the owner's Q3 ruling, 2026-09-16).
 
 A port of the measured prototype (``evidence/credits/eval_rules3.py`` ``detect`` with rule J's parameters, keyframe
-mode, refined over the 20 s before the coarse answer). Same inputs, same order, same comparisons, so it reproduces the
-prototype at the spec's 20 s refine span on the 80 files (59 / 1 / 8 / 4; §5.4's table was measured at 10 s, late 9;
-``tests/fixtures/markers/credits_rule_j_80.json.gz``). Rows stay in ffmpeg's output order: the measured keyframe rows
-aren't always increasing, and sorting them changes an answer.
+mode, refined over the 20 s before the coarse answer): same inputs, same order, same comparisons, bar the anchor, whose
+yardstick and walk were both wrong. ``_run_spacing`` measures the gap between the credit run's own credit frames in
+presentation order, where the prototype took the median gap of every row of the whole decoded tail in decode order; and
+``ANCHOR_MAX_STEPS`` holds the walk to the one glued-on frame its comment always claimed it stepped over. Together they
+fix a start that collapsed onto the end of the roll and move the 80 files at the spec's 20 s refine span from the
+prototype's 59 / 1 / 8 / 4 to 63 / 1 / 8 / 4, every changed file closer to the truth than the prototype had it
+(§5.4's table was measured at 10 s, late 9; ``tests/fixtures/markers/credits_rule_j_80.json.gz``,
+whose stored errors stay the prototype's -- ``TestEightyFiles`` names the seven items that differ). Everywhere else
+rows stay in ffmpeg's output order: the measured keyframe rows aren't always increasing, and sorting them changes an
+answer.
 """
 
 from __future__ import annotations
@@ -21,6 +27,9 @@ REFINE_BEFORE_S = 20.0
 REFINE_AFTER_S = 1.0
 REFINE_GAP_S = 2.5
 ANCHOR_SPACING_FACTOR = 1.5
+# The anchor is there to step over *one* credit frame the 24 s join glued onto the roll from a story scene, so it takes
+# one step. Unbounded, it eats the roll instead: on movie-02 it walked seven frames and 22.6 s past the real start.
+ANCHOR_MAX_STEPS = 1
 # Owner, Q3: the skip ends at the roll's last credit frame only when more than this much of the file follows it;
 # otherwise it runs to the end of the file (no end), so a closing logo or a few seconds of black never become a stop.
 KEEP_AFTER_CREDITS_S = 30.0
@@ -98,6 +107,37 @@ def _typical_spacing(rows: Sequence[Row]) -> float:
     return gaps[min(len(rows) // 2, len(gaps) - 1)]
 
 
+def _run_spacing(rows: Sequence[Row], first: int, last: int, params: RuleParams) -> float:
+    """The typical gap between one credit run's credit frames, measured in presentation order.
+
+    The anchor asks how far away the next *credit frame* is, so its yardstick has to measure the same thing. Three
+    things have to line up for that, and the prototype had none of them:
+
+    * The population is the run, not the whole decoded tail. A tail median lets a densely keyed body set the limit: a
+      1 s keyframe action climax before a 2 s GOP roll puts ``1.5 x spacing`` under the roll's own gap, no pair of
+      credit rows ever looks adjacent, and the start walks all the way to the end of the run.
+    * Only the run's credit frames count. A run also carries the keyframes the 24 s join and the dark bridge swept up
+      with it, and those are often the majority -- tv-22's run holds 16 rows of which 6 are credit frames, so the
+      keyframe cadence reads 1.919 s where the credit cadence is 6.256 s. Measuring every row is the same
+      yardstick-against-comparison mismatch one layer down.
+    * Presentation order. The measured rows aren't always increasing, so consecutive differences go negative and the
+      median stops being a gap at all: on the six of the 80 files whose runs come out of decode order it read two to
+      three times the real interval (movie-28: 20.020 s for a 10.010 s roll).
+
+    Args:
+        rows: Keyframe rows of the tail, in decode order.
+        first: The run's first row index.
+        last: The run's last row index.
+        params: Rule thresholds, deciding which of the run's rows are credit frames.
+
+    Returns:
+        The typical gap in seconds. A run always holds at least two credit frames: both its first and its last row are
+        credit frames, and it spans ``run_s`` or more.
+    """
+    credit = [row for row in rows[first : last + 1] if is_credit(row, params)]
+    return _typical_spacing(sorted(credit, key=lambda row: row[0]))
+
+
 def coarse_start(rows: Sequence[Row], params: RuleParams = RULE_J) -> Coarse | None:
     """The last credit run's anchored start, or None when the rows hold no run.
 
@@ -113,13 +153,19 @@ def coarse_start(rows: Sequence[Row], params: RuleParams = RULE_J) -> Coarse | N
         return None
     first, last = runs[-1]
     # Start only where two credit samples sit next to each other: the 24 s join lets one story-scene text frame glue
-    # itself onto the roll (Undisputed: a lone scene-text frame 24 s before it).
-    spacing = _typical_spacing(rows)
-    while first < last:
+    # itself onto the roll (Undisputed: a lone scene-text frame 24 s before it). Only ever the one frame, though --
+    # see ANCHOR_MAX_STEPS. The slice below is [first:last+1], not last+2: the run's own credit frames are what the
+    # yardstick measures, so a row outside the run is out of scope whatever it is -- including the rare case where
+    # it's itself a credit frame (a trailing run under run_s gets dropped by credit_runs, so runs[-1] can leave one
+    # sitting right past last when decode order is non-monotonic).
+    spacing = _run_spacing(rows, first, last, params)
+    steps = 0
+    while first < last and steps < ANCHOR_MAX_STEPS:
         following = next(k for k in range(first + 1, last + 1) if is_credit(rows[k], params))
         if rows[following][0] - rows[first][0] <= ANCHOR_SPACING_FACTOR * spacing:
             break
         first = following
+        steps += 1
     return Coarse(index=first, end_index=last, pts_s=rows[first][0])
 
 

@@ -1875,6 +1875,11 @@ PASS including `TestEightyFiles`. If
 `test_reproduces_the_spec_table` gives a different tuple while the item-for-item test passes, the planning
 measurement was wrong: report the tuple, don't edit the expectation.
 
+> Since that dry run the anchor has been fixed (`rule_j._run_spacing`, `rule_j.ANCHOR_MAX_STEPS`), so the **port** now
+> scores 63 / 1 / 8 / 4 on these rows while the fixture still stores the **prototype's** 59 / 1 / 8 / 4 errors. The
+> rebuild prints an `anchor divergence` line for each of the seven exempt ids and stops on any other disagreement;
+> `TestEightyFiles` pins both numbers per id. 63 / 1 / 8 / 4 out of the test is the expected result, not a regression.
+
 Mutation checks (report each result, then revert): `gap_s: float = 24.0` → `23.0` and `dark` → `31.0`, one at a time,
 must fail `TestEightyFiles`; `KEEP_AFTER_CREDITS_S = 30.0` → `29.0` must fail `test_more_than_30_s_must_follow[30.0-None]`;
 `j = credit[0]` → `credit[-1]` in `refine_end` must fail
@@ -7421,9 +7426,10 @@ nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval credits-text --deco
 ```
 
 Expected (the GPU run takes roughly 80 × 15 s + 205 × 17 s ≈ 1.3 h; the CPU run ≈ 80 × 35 s): exit 0 when the gate
-passes. `rule_j_80` should land near the fixture's 59 / 1 / 8 / 4 (the app decodes the refine window itself, the
-prototype decoded around the truth: small differences are real, report them). `summary["gate"]` lists every check
-per set.
+passes. `rule_j_80` should land near 63 / 1 / 8 / 4 (the fixture's stored errors are still the prototype's
+59 / 1 / 8 / 4; `rule_j._run_spacing` and `rule_j.ANCHOR_MAX_STEPS` move seven files, all of them closer to the truth —
+and the app decodes the refine window itself where the prototype decoded around the truth, so small differences on top
+of that are real: report them). `summary["gate"]` lists every check per set.
 
 **If any gate check fails, stop and report** — don't tune rule J, loosen a cap, or change a decision rule. Report the
 failing checks with their numbers per set, the files behind each wrong answer (names only) with their sheets'
