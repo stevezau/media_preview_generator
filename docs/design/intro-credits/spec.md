@@ -423,8 +423,9 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    an earlier credits/preview end) but never lengthen it — so a crowd answer running to the end of the file can't
    swallow a post-credits scene that the server's own marker stops before. Markers from several servers count as one
    source. A Plex item's markers are not used for a file whose item has another version with a duration more
-   than 2 s different (one set per item describes one cut); Emby's reader applies the same check to the versions Emby
-   lists with the item, although each Emby version has its own markers (§3.3, §6.3). Markers on a Jellyfin/Emby server
+   than 2 s different (one set per item describes one cut). Emby's are read only from the file's own version item,
+   which carries only that version's markers (§3.3, §6.3; a path that resolves to another version's item gives no
+   evidence), so no such check applies. Markers on a Jellyfin/Emby server
    that has an importer plugin count as the database it imports (rule 8). Once credits or a preview are decided
    (any path but a lock), a server's own detection markers of that type (never an importer plugin's, never ours or
    another cut's) may also move the **start** later. If any of them covers the decided start or starts within 10 s of
@@ -511,12 +512,13 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
 8. **Manual edit** in the Inspector: no job — save, lock, publish to every owner immediately.
 
 ### 6.3 Publishers
-`MarkerPublisher` (parallel to `OutputAdapter`): `capability() -> Ready | NeedsPlugin | NeedsPass |
-NeedsLocalDb | NeedsPlexDetectionOnce | Disabled`, `write(item_id, markers, *, previous, duration_ms, canonical_path,
+`MarkerPublisher` (parallel to `OutputAdapter`): `capability() -> Ready | Disabled | NeedsConfirmation |
+NeedsPlugin | PluginOutdated | NeedsPass | NeedsLocalDb | NeedsPlexDetectionOnce | UnsupportedSchema | Unreachable |
+Misconfigured` (`publishers/base.Capability`), `write(item_id, markers, *, previous, duration_ms, canonical_path,
 own_previous, kept_types) -> list[Marker]` (the markers ours on the item after the call; `last_write_changed` says
 whether that call changed the server, `last_kept_types` which types stay the server's own, `last_item_files` which
 version files the set was computed for), `shows(item_id, ours, *, kept_types, item_files) -> Ours | Missing |
-Replaced | VersionsChanged | None` (a cheap read-back of what the server shows of what we last left there: Plex's
+Replaced | VersionsChanged | Gone | None` (a cheap read-back of what the server shows of what we last left there: Plex's
 `taggings` rows and the item's live version files under the same lock proof, Jellyfin's core `/MediaSegments`;
 `Shown.VERSIONS_CHANGED` when the item's versions, optimized copies left out, differ from the `item_files` recorded
 at the last write), `atomic_writes`.
@@ -796,8 +798,10 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
 
 - Branch **`feat/markers-detection`** = draft PR #241 → `dev` (reused; GitHub can't change a PR's head branch).
   Merge `dev` in whenever the PR shows "out-of-date".
-- Every push: `ci.yml` tests. Label **`build-docker`** → `ghcr.io/stevezau/media_preview_generator:pr-<N>`
-  (docs-only pushes don't build).
+- Every push: `ci.yml` tests, and on a PR also builds the arm64 image natively and checks credit text detection in
+  it (no push, no secrets; the published image's arm64 build only runs on `dev` pushes, tags and manual
+  dispatch). Label **`build-docker`** → `ghcr.io/stevezau/media_preview_generator:pr-<N>` (amd64; a PR whose
+  changes are all docs doesn't build).
 - Spec + evidence are on the branch in `docs/design/intro-credits/` (tokens, dumps, synth media, Emby DLLs
   gitignored). Trim or remove before release.
 - Plugins built locally for the lab during the build; public releases (Jellyfin manifest, Emby catalog) only at merge.
@@ -1130,8 +1134,9 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
 - 2026-09-15 · Emby publishes per version (§3.3, §5.5 rule 7, §6.3; phase 2 Task 10 round 3,
   `evidence/lab/phase2-results.md`): Emby's web player plays each version's own chapters, so each version item gets
   its own markers, like Jellyfin; no cross-version agreement or recorded version files. Replaces round 1's "Emby
-  versions share one marker set" (the Plex item rule). The server-marker evidence reader still applies the one-cut
-  check to Emby items (parked: stricter than needed). "When Emby has its own markers: Use ours / Keep Emby's"
+  versions share one marker set" (the Plex item rule). (The server-marker evidence reader's one-cut check on Emby
+  items, parked here as stricter than needed, was dropped on 2026-09-19.) "When Emby has its own markers: Use ours /
+  Keep Emby's"
   (`on_emby_redetect`) mirrors Plex's setting through the plugin's `ReplaceOwn`.
 - 2026-09-15 · Check servers details (§6.2 step 6; phase 2 Task 11): "Intro & Credits · Check servers", LOW unless
   asked otherwise; one queued or running at a time (`already_queued`). It reads every published item in steps of 500
@@ -1241,3 +1246,9 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   nothing was published; everything was removed afterwards. Result on untitled chapters that decide nothing: 10 of 11
   starts within 10 s (one 0.5 s early, none later than 9.3 s); the nine answered episodes with a scene after the
   roll all got an end within 4 s of the roll's end, so the scene is kept; one episode (E04) had no answer (`evidence/lab/phase3-results.md` "Side-by-side").
+- 2026-09-19 · Final review (controller ruling, a technical park per the 2026-09-15 line, not an owner ruling): the
+  server-marker evidence reader no longer applies the one-cut check to Emby (§5.5 rule 7). Each Emby version is its
+  own item and its markers are read from that item, so the check only turned valid evidence into "unusable" and, under
+  user-id auth, re-read that Emby server on every run still missing evidence. The reader now checks the resolved
+  item is the file's own version (as the publisher already did), since Emby's fallback search can return another
+  version's item. Plex's one-cut check is unchanged.

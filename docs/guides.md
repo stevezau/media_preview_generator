@@ -599,9 +599,8 @@ Emby server's markers imported by its own intro-database plugin (e.g. an AniSkip
 don't count as an independent second opinion — they join the online-database group instead of adding a vote of their
 own. Plex keeps one marker set per item, so when a Plex item has another version whose length differs from this
 file's by more than 2 seconds (or the lengths can't be read), that server's markers aren't used for this file at all.
-Emby's markers go through the same check, even though Emby keeps each version's markers apart (see
-[Emby](#emby-the-media-preview-bridge-for-emby-plugin)); when this app connects to Emby with an API key, Emby lists only
-the item's own version, so the check always passes. Season audio and a server's own marker never confirm each
+Emby keeps each version's markers apart (see [Emby](#emby-the-media-preview-bridge-for-emby-plugin)), so its
+markers are read only from the file's own version and no such check applies. Season audio and a server's own marker never confirm each
 other: another source has to agree.
 
 **"Never overwrite my edits"** (on by default) means a marker you lock always wins over detection. In this release
