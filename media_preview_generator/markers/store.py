@@ -30,6 +30,9 @@ _SERVER_SOURCE_VALUES = (Source.SERVER_MARKERS.value, Source.SERVER_MARKERS_IMPO
 _RECHECK_TAKEN_AGAIN = timedelta(days=1)
 # ``meta`` key: the last file id whose fingerprint the cache sweep checked (``fingerprint_checks``).
 _FINGERPRINT_CHECKED_UP_TO = "fingerprint_checked_up_to"
+# The fingerprint window whose points ``season_pairs`` runs are matched from: ``audio.fingerprint.WINDOW`` (which
+# imports this module, so it can't be imported here; test_store_audio pins the two together).
+SEASON_PAIR_WINDOW = "intro"
 
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -187,8 +190,9 @@ _SCHEMA = (
         mtime_ns INTEGER NOT NULL,
         failed_at TEXT NOT NULL)""",
     # A file whose credit text decode timed out (a stalled read, spec §5.4), with the identity it had then: its credit
-    # text isn't decoded again (up to 600 s on a worker) until that identity changes, the entry is a day old, or a
-    # forced re-detect. Not tied to a file row, like the member failures above.
+    # text isn't decoded again (up to 600 s per decode on a worker, three decodes at worst) until that identity changes,
+    # the entry is a day old, a forced re-detect, or a credit text answer is stored for it. Not tied to a file row, like
+    # the member failures above.
     """CREATE TABLE IF NOT EXISTS credits_text_timeouts (
         canonical_path TEXT PRIMARY KEY,
         size INTEGER NOT NULL,
@@ -631,7 +635,9 @@ class MarkerStore:
     ) -> None:
         """Store a local detector's answer under each of its sources, and what it was based on, in one transaction.
 
-        A failure (or the process ending) part way leaves the old answer and the old basis, so the answer stays due.
+        A failure (or the process ending) part way leaves the old answer and the old basis, so the answer stays due. A
+        credit text answer (found or not) means its decode finished, so the file's decode timeout is forgotten: an
+        answer asked again the same day (a detector version bump) isn't held back by a timeout the answer replaced.
 
         Args:
             file_id: The file.
@@ -647,6 +653,12 @@ class MarkerStore:
                 conn.execute(
                     "INSERT OR REPLACE INTO detector_runs (file_id, source, signature, run_at) VALUES (?,?,?,?)",
                     (file_id, run[0].value, run[1], now),
+                )
+            if Source.CREDITS_TEXT in answers:
+                conn.execute(
+                    "DELETE FROM credits_text_timeouts "
+                    "WHERE canonical_path = (SELECT canonical_path FROM files WHERE id=?)",
+                    (file_id,),
                 )
 
     @staticmethod
@@ -1130,8 +1142,8 @@ class MarkerStore:
         with self._tx() as conn:
             rows = conn.execute(
                 "SELECT f.id, f.size, f.mtime_ns FROM files f JOIN fingerprints p ON p.file_id = f.id "
-                "AND p.window='intro' WHERE f.id IN (?, ?)",
-                (file_a, file_b),
+                "AND p.window=? WHERE f.id IN (?, ?)",
+                (SEASON_PAIR_WINDOW, file_a, file_b),
             ).fetchall()
             matched = {file_a: tuple(identity_a), file_b: tuple(identity_b)}
             if len(rows) != 2 or any((r["size"], r["mtime_ns"]) != matched[r["id"]] for r in rows):

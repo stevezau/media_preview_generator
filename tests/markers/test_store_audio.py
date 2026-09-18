@@ -6,8 +6,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from media_preview_generator.markers.audio import fingerprint
 from media_preview_generator.markers.models import Candidate, FileIdentity, MarkerType, Source
-from media_preview_generator.markers.store import MarkerStore, StoredFingerprint
+from media_preview_generator.markers.store import SEASON_PAIR_WINDOW, MarkerStore, StoredFingerprint
 
 
 @pytest.fixture
@@ -114,6 +115,19 @@ class TestSeasonPairs:
         assert _pair(store, a, b, [(1.0, 2.0, 3.0, 4.0)]) is False
         assert store.get_season_pair(a.id, b.id, 3) is None
         assert _pair(store, a, b_new, []) is True
+
+    def test_pairs_are_kept_for_the_window_the_season_step_fingerprints(self, store):
+        # The store can't import fingerprint.WINDOW (fingerprint imports the store): if the two ever drift, every pair
+        # would be refused and each season run would match all its pairs again.
+        assert fingerprint.WINDOW == SEASON_PAIR_WINDOW
+        a, b = _file(store, "/m/a.mkv"), _file(store, "/m/b.mkv")
+        _fp(store, a, window=fingerprint.WINDOW), _fp(store, b, window=fingerprint.WINDOW)
+        assert _pair(store, a, b, [(1.0, 2.0, 3.0, 4.0)]) is True
+
+    def test_refused_when_only_another_windows_fingerprint_exists(self, store):
+        a, b = _file(store, "/m/a.mkv"), _file(store, "/m/b.mkv")
+        _fp(store, a), _fp(store, b, window="credits")
+        assert _pair(store, a, b, [(1.0, 2.0, 3.0, 4.0)]) is False
 
 
 class TestRecordMember:

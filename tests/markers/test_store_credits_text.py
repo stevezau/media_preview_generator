@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from media_preview_generator.markers.models import FileIdentity
+from media_preview_generator.markers.models import Candidate, FileIdentity, MarkerType, Source
 from media_preview_generator.markers.store import MarkerStore
 
 AT = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
@@ -34,6 +34,28 @@ def test_a_newer_timeout_replaces_the_paths_entry(store):
     assert store.credits_text_timed_out_at(FileIdentity("/m/Movie.mkv", 100, 1)) is None
     assert store.credits_text_timed_out_at(FileIdentity("/m/Movie.mkv", 300, 3)) == later
     assert store._count("credits_text_timeouts") == 1
+
+
+@pytest.mark.parametrize(
+    ("answers", "forgotten"),
+    [
+        ({Source.CREDITS_TEXT: [Candidate(MarkerType.CREDITS, 5_000_000, None, Source.CREDITS_TEXT)]}, True),
+        ({Source.CREDITS_TEXT: []}, True),  # "looked, no credit roll" is an answer too: the decode finished
+        ({Source.SEASON_AUDIO: []}, False),  # another detector's answer says nothing about this decode
+    ],
+    ids=["credits-found", "no-credits", "other-detector"],
+)
+def test_a_stored_credit_text_answer_forgets_the_files_timeout(store, answers, forgotten):
+    # Audit phase 3 LOW-2: a file that timed out and then decoded fine (a forced run) must not be held back for the
+    # rest of the day when it is asked again (a detector version bump).
+    identity = FileIdentity("/m/Movie.mkv", 100, 1)
+    other = FileIdentity("/m/Other.mkv", 100, 1)
+    rec = store.upsert_file(identity, duration_ms=6_000_000, season_key=None, is_movie=True)
+    store.record_credits_text_timeout(identity, AT, forget_before=AT - timedelta(days=1))
+    store.record_credits_text_timeout(other, AT, forget_before=AT - timedelta(days=1))
+    store.replace_detector_answer(rec.id, answers, version=1)
+    assert (store.credits_text_timed_out_at(identity) is None) is forgotten
+    assert store.credits_text_timed_out_at(other) == AT
 
 
 def test_recording_a_timeout_forgets_entries_that_stopped_counting_for_any_path(store):
