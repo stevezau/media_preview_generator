@@ -845,9 +845,9 @@ def run_intro_credits_job(job_id: str) -> None:
     dispatcher = None
     # Set once the job completes: the fingerprint cache sweep starts after the slot is given back.
     sweep_store = None
-    # While the config holds the Check servers listing: only a revive needs it, so the teardown takes it off the ended
-    # job (the config ships in every job payload).
-    listing_on_job = False
+    # While the config holds the Check servers listing (a revived job's from the start): only a revive needs it, so the
+    # teardown takes it off the ended job (the config ships in every job payload).
+    listing_on_job = LISTING_CONFIG_KEY in cfg
 
     def cancel_check() -> bool:
         return jm.is_cancellation_requested(job_id)
@@ -945,7 +945,11 @@ def run_intro_credits_job(job_id: str) -> None:
                     # A run revived after a restart checks the files its first run listed: taking them counted the
                     # server rechecks and failed-item retries among them as used, so listing again would skip those.
                     listing = CheckServersListing.from_config(cfg.get(LISTING_CONFIG_KEY))
-                    listing_on_job = listing is not None
+                    if listing is None and LISTING_CONFIG_KEY in cfg:
+                        logger.warning(
+                            "Check servers couldn't read the files it listed before the restart; listing them again "
+                            "(server rechecks and retries the first listing took are not checked this time)"
+                        )
                     if listing is None:
                         listing = check_servers_listing(
                             registry=registry,
@@ -961,8 +965,10 @@ def run_intro_credits_job(job_id: str) -> None:
                             ),
                             progress_callback=progress_callback,
                         )
-                        if not cancel_check():
-                            listing_on_job = jm.merge_job_config(job_id, {LISTING_CONFIG_KEY: listing.to_config()})
+                        if not cancel_check() and jm.merge_job_config(
+                            job_id, {LISTING_CONFIG_KEY: listing.to_config()}
+                        ):
+                            listing_on_job = True
                     items, warnings, sender_paths = listing.items, listing.warnings, {}
                 else:
                     items, warnings, sender_paths = build_items(
@@ -1160,10 +1166,15 @@ def start_intro_credits_job_async(job_id: str, config_overrides: dict | None = N
             job = jm.get_job(job_id)
             if job is not None:
                 live = job.config or {}
-                merged = {**live, **config_overrides}
-                merged.update({key: live[key] for key in _JOINED_KEYS if key in live})
-                if merged != live:
-                    jm.update_job_config(job_id, merged)
+                # Only the keys an override changes are written, so a key another thread sets meanwhile (a stop-time
+                # pause) stays.
+                updates = {
+                    key: value
+                    for key, value in config_overrides.items()
+                    if not (key in _JOINED_KEYS and key in live) and (key not in live or live[key] != value)
+                }
+                if updates:
+                    jm.merge_job_config(job_id, updates)
     with _inflight_lock:
         if job_id in _inflight_jobs:
             logger.info("Skipping duplicate Intro & Credits start for {} — already in flight", job_id)

@@ -791,7 +791,7 @@ class TestResumeKeepsJoinedFiles:
         config = {"kind": JOB_KIND_INTRO_CREDITS, "source": "plex", "file_paths": [ep(S1, 1)], "follows_job_id": "p1"}
         job = queue.create_job(library_name="A", kind=JOB_KIND_INTRO_CREDITS, config=config)
         snapshot = {**job.config, "force": True}
-        real_update = queue.update_job_config
+        real_merge = queue.merge_job_config
         join_done = threading.Event()
 
         def join_episode():
@@ -799,14 +799,14 @@ class TestResumeKeepsJoinedFiles:
                 triggers._join(queue, job, [ep(S1, 2)], None)
             join_done.set()
 
-        def resume_write(job_id, merged):
-            if not join_done.is_set() and "force" in merged and merged["force"]:
+        def resume_write(job_id, updates, **kwargs):
+            if not join_done.is_set() and updates.get("force"):
                 # A webhook episode arrives between the resume's read of the job and its write.
                 threading.Thread(target=join_episode).start()
                 join_done.wait(0.2)  # returns at once without the lock; with it, the join waits for this write
-            real_update(job_id, merged)
+            return real_merge(job_id, updates, **kwargs)
 
-        monkeypatch.setattr(queue, "update_job_config", resume_write)
+        monkeypatch.setattr(queue, "merge_job_config", resume_write)
         ran = threading.Event()
         monkeypatch.setattr(job_runner, "run_intro_credits_job", lambda job_id: ran.set())
         job_runner.start_intro_credits_job_async(job.id, snapshot)

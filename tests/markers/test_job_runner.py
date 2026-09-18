@@ -982,6 +982,43 @@ class TestRun:
         ]
         env.jm.complete_job.assert_called_once_with("j1", warning="Couldn't check X")
 
+    @pytest.mark.parametrize("ends", ["cancelled-waiting-for-a-slot", "servers-config-unloadable"])
+    def test_a_revived_check_servers_job_that_ends_before_its_listing_is_read_drops_it(self, env, monkeypatch, ends):
+        from media_preview_generator.markers import reconcile
+
+        stored = reconcile.CheckServersListing([_item("/m/a.mkv")], []).to_config()
+        env.job.config = {"reconcile": True, "source": "reconcile", reconcile.LISTING_CONFIG_KEY: stored}
+        if ends == "cancelled-waiting-for-a-slot":
+            env.gate.acquire.return_value = False
+        else:
+            monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda cfg: None)
+        self._run()
+        env.dispatcher.submit_items.assert_not_called()
+        env.jm.merge_job_config.assert_called_once_with("j1", {}, remove=(reconcile.LISTING_CONFIG_KEY,))
+
+    def test_a_revived_check_servers_job_whose_listing_is_unusable_lists_again_and_says_so(self, env):
+        from loguru import logger
+
+        from media_preview_generator.markers import reconcile
+
+        env.job.config = {"reconcile": True, "source": "reconcile", reconcile.LISTING_CONFIG_KEY: {"files": "?"}}
+        lines: list[str] = []
+        handler = logger.add(lambda m: lines.append(m), level="WARNING", format="{message}")
+        try:
+            self._run([_item("/m/b.mkv")])
+        finally:
+            logger.remove(handler)
+        assert self.listing.called
+        assert env.dispatcher.submit_items.call_args.kwargs["items"] == [_item("/m/b.mkv")]
+        assert any("couldn't read the files" in line.lower() and "listing them again" in line for line in lines)
+        # The new listing replaces it, and goes when the job ends.
+        assert [c for c in env.jm.mock_calls if c[0] == "merge_job_config"] == [
+            call.merge_job_config(
+                "j1", {reconcile.LISTING_CONFIG_KEY: {"files": ["/m/b.mkv"], "warnings": [], "drifted": {}}}
+            ),
+            call.merge_job_config("j1", {}, remove=(reconcile.LISTING_CONFIG_KEY,)),
+        ]
+
     def test_a_check_servers_run_cancelled_during_its_read_back_keeps_no_listing(self, env):
         env.job.config = {"reconcile": True, "source": "reconcile"}
         env.jm.is_cancellation_requested.return_value = True
@@ -2536,7 +2573,13 @@ class TestStartAsync:
 
     @pytest.mark.parametrize(
         ("overrides", "updated"),
-        [(None, None), ({}, None), ({"force": False}, None), ({"force": True}, {"force": True, "libraries": []})],
+        [
+            (None, None),
+            ({}, None),
+            ({"force": False}, None),
+            ({"force": True, "libraries": []}, {"force": True}),
+            ({"retry_not_before": "t"}, {"retry_not_before": "t"}),
+        ],
     )
     def test_config_overrides_are_merged_only_when_they_change_something(self, monkeypatch, overrides, updated):
         jm = MagicMock()
@@ -2544,10 +2587,31 @@ class TestStartAsync:
         monkeypatch.setattr(job_runner, "get_job_manager", lambda: jm)
         monkeypatch.setattr(job_runner, "run_intro_credits_job", lambda jid: None)
         job_runner.start_intro_credits_job_async("start-5", overrides)
+        jm.update_job_config.assert_not_called()
         if updated is None:
-            jm.update_job_config.assert_not_called()
+            jm.merge_job_config.assert_not_called()
         else:
-            jm.update_job_config.assert_called_once_with("start-5", updated)
+            jm.merge_job_config.assert_called_once_with("start-5", updated)
+
+    def test_a_key_another_thread_writes_while_the_overrides_merge_is_kept(self, tmp_path, monkeypatch):
+        from media_preview_generator.web.jobs import PAUSED_BY_SCHEDULE, JobManager
+
+        jm = JobManager(config_dir=str(tmp_path))
+        job = jm.create_job(library_name="A", kind=JOB_KIND_INTRO_CREDITS, config={"libraries": [], "force": False})
+        jm.start_job(job.id)
+        # A stop tick between the resume's read of the config and its write (either writer).
+        for writer in ("update_job_config", "merge_job_config"):
+            real = getattr(jm, writer)
+
+            def pause_then_write(*args, _real=real, **kwargs):
+                jm.request_pause(job.id, by_schedule=True)
+                return _real(*args, **kwargs)
+
+            monkeypatch.setattr(jm, writer, pause_then_write)
+        monkeypatch.setattr(job_runner, "get_job_manager", lambda: jm)
+        monkeypatch.setattr(job_runner, "run_intro_credits_job", lambda jid: None)
+        job_runner.start_intro_credits_job_async(job.id, {"libraries": [], "force": True})
+        assert jm.get_job(job.id).config == {"libraries": [], "force": True, PAUSED_BY_SCHEDULE: True}
 
 
 @pytest.mark.parametrize(("kind", "delegated"), [(JOB_KIND_INTRO_CREDITS, True), (JOB_KIND_PREVIEWS, False)])
