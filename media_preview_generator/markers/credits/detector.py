@@ -1,6 +1,6 @@
 """The credit text detector (spec §5.4): keyframes of the tail → rule J → one frame a second just before its start (and
 around its end when a scene follows the roll, Q3) → one credits candidate from ``credits_text``. The pipeline registers
-it as a local detector that runs on a worker."""
+it as a local detector that runs on a worker whenever it decodes (:func:`credits_text_needs_worker`)."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ REFINING_PHASE = "Refining the credits start…"
 REFINING_END_PHASE = "Finding where the credits end…"
 # A file whose decode timed out isn't decoded again for this long unless it changes or the run is forced (I1).
 TIMEOUT_RETRY = timedelta(days=1)
+_GIVES_UP = "credits_text_gives_up"
 
 
 @dataclass(frozen=True)
@@ -64,9 +65,9 @@ def find_credits(
 ) -> CreditsTextResult:
     """Decode the tail, find the roll, refine its start and, when a scene follows it, its end.
 
-    The app and the harness run exactly this. Every decode leaves ``start_time_s`` to :func:`frames.decode_rows`, which
-    probes the file itself: the pipeline's own probe is None on the re-run path, and a stale or defaulted start time
-    would put a recording's answers tens of thousands of seconds out (Task 6).
+    The app and the harness run exactly this. The container's start time is probed here, once, and handed to every
+    decode: the pipeline's own probe is None on the re-run path, and a stale or defaulted start time would put a
+    recording's answers tens of thousands of seconds out (Task 6).
 
     Args:
         path: The media file (read only).
@@ -85,14 +86,15 @@ def find_credits(
     Raises:
         frames.GpuDecodeError: The GPU decode failed or gave no frames.
         frames.DecodeTimeoutError: A decode ran past its time limit.
-        frames.FrameDecodeError: ffmpeg couldn't decode the frames.
-        frames.DecodeCancelledError: The job was cancelled during a decode.
+        frames.FrameDecodeError: ffprobe couldn't read the start time, or ffmpeg couldn't decode the frames.
+        frames.DecodeCancelledError: The job was cancelled before or during a decode.
         TextDetUnavailableError: Text detection couldn't answer.
     """
     show = phase or (lambda _text: None)
-    decode = {"ffmpeg": ffmpeg, "gpu": gpu, "gpu_device_path": gpu_device_path, "count_boxes": count_boxes,
-              "cancel_check": cancel_check}  # fmt: skip
     show(READING_PHASE)
+    start_time_s = frames.container_start_s(path, ffmpeg, cancel_check=cancel_check)
+    decode = {"ffmpeg": ffmpeg, "gpu": gpu, "gpu_device_path": gpu_device_path, "count_boxes": count_boxes,
+              "cancel_check": cancel_check, "start_time_s": start_time_s}  # fmt: skip
     tail_start = frames.tail_start_s(duration_ms, is_episode=is_episode)
     key_rows = frames.decode_rows(path, start_s=tail_start, length_s=None, keyframes_only=True, fps=None, **decode)
     coarse = rule_j.coarse_start(key_rows)
@@ -124,6 +126,40 @@ def _timed_out_lately(rec: FileRecord, ctx: PipelineContext) -> bool:
         return False
     failed_at = ctx.store.credits_text_timed_out_at(FileIdentity(rec.canonical_path, rec.size, rec.mtime_ns))
     return failed_at is not None and ctx.now() - failed_at < TIMEOUT_RETRY
+
+
+def _gives_up(rec: FileRecord, ctx: PipelineContext) -> str | None:
+    """Why the detector won't decode this file now, or None.
+
+    Read once per run of the file (``ctx.run_memo``), so the check stage's hand-off and the detector itself can't
+    disagree: the day after a timeout could otherwise end between the two reads and put a full decode on the checking
+    thread.
+    """
+    memo = ctx.run_memo(rec.canonical_path)
+    if _GIVES_UP not in memo:
+        if not rec.duration_ms:
+            memo[_GIVES_UP] = "the file's duration is unknown"
+        elif _timed_out_lately(rec, ctx):
+            memo[_GIVES_UP] = "reading its ending timed out less than a day ago; a forced re-detect tries now"
+        else:
+            memo[_GIVES_UP] = None
+    return memo[_GIVES_UP]
+
+
+def credits_text_needs_worker(rec: FileRecord, ctx: PipelineContext) -> bool:
+    """Whether reading a file's credit text needs a worker: only when it is going to be decoded.
+
+    A file with no known duration, or one that timed out lately, makes :func:`detect_credits_text` give up at once, so
+    that happens on the checking thread instead of holding a worker (one by default) every run for the day.
+
+    Args:
+        rec: The file.
+        ctx: The job's context.
+
+    Returns:
+        True when the detector will decode the file.
+    """
+    return _gives_up(rec, ctx) is None
 
 
 def detect_credits_text(
@@ -161,10 +197,9 @@ def detect_credits_text(
     from ...processing.generator import CodecNotSupportedError
     from ..pipeline import DetectorUnavailableError
 
-    if not rec.duration_ms:
-        raise DetectorUnavailableError("the file's duration is unknown")
-    if _timed_out_lately(rec, ctx):
-        raise DetectorUnavailableError("reading its ending timed out less than a day ago; a forced re-detect tries now")
+    reason = _gives_up(rec, ctx)
+    if reason is not None:
+        raise DetectorUnavailableError(reason)
     # The process's one pool (spec §6.4 item 7): never closed here, since closing it ends it for every later file.
     pool = get_textdet_pool()
     try:
@@ -198,7 +233,8 @@ def detect_credits_text(
 
 
 def credits_text_spec() -> LocalDetectorSpec:
-    """The detector as the pipeline registers it: credits only, always on a worker, answers kept per file identity.
+    """The detector as the pipeline registers it: credits only, on a worker whenever it decodes, answers kept per file
+    identity.
 
     Returns:
         Its spec.
@@ -210,4 +246,5 @@ def credits_text_spec() -> LocalDetectorSpec:
         types=frozenset({MarkerType.CREDITS}),
         detect=detect_credits_text,
         version=CREDITS_TEXT_VERSION,
+        needs_worker=credits_text_needs_worker,
     )

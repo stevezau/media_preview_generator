@@ -136,7 +136,13 @@ def _parse_pts(value: bytes, offset_s: float) -> float | None:
         return None
 
 
-def _container_start_s(path: str, ffmpeg: str, *, timeout_s: float) -> float:
+def container_start_s(
+    path: str,
+    ffmpeg: str,
+    *,
+    cancel_check: Callable[[], bool] | None = None,
+    timeout_s: float = PROBE_TIMEOUT_S,
+) -> float:
     """The container's own first timestamp in seconds, 0.0 when it has none.
 
     ``-copyts`` reports each frame at the container's timestamp while ``-ss`` seeks from the start of the file. A
@@ -146,11 +152,16 @@ def _container_start_s(path: str, ffmpeg: str, *, timeout_s: float) -> float:
     Args:
         path: The media file.
         ffmpeg: The ffmpeg binary (ffprobe is taken from beside it).
+        cancel_check: True once the job is cancelled; checked before probing (a stalled mount would otherwise hold the
+            worker for the probe's timeout after a cancel).
         timeout_s: Hard limit for the probe, so a stalled mount holds the worker for this long at most.
 
     Raises:
+        DecodeCancelledError: Already cancelled (nothing is probed).
         FrameDecodeError: ffprobe couldn't read the file, so there is no answer this run.
     """
+    if cancel_check and cancel_check():
+        raise DecodeCancelledError(f"cancelled before decoding {os.path.basename(path)}")
     try:
         probe = probe_media(path, ffprobe=ffprobe_path_for(ffmpeg), timeout_s=timeout_s)
     except ProbeError as exc:
@@ -240,7 +251,7 @@ def run_decode(
         hw_active: Decode runs on the GPU (a failure is then a :class:`GpuDecodeError`).
         count_boxes: Box counts for (n, 180, 320) uint8 luma planes.
         pts_offset_s: The container's own first timestamp, subtracted from every row so they are seconds from the start
-            of the file (see :func:`_container_start_s`). Required, and 0.0 only for a container that starts at 0: a
+            of the file (see :func:`container_start_s`). Required, and 0.0 only for a container that starts at 0: a
             default would quietly hand back a recording's raw timestamps, tens of thousands of seconds out.
         cancel_check: True once the job is cancelled; checked between chunks and while ffmpeg exits.
         timeout_s: Time limit for the decode, checked between chunks: the worker is released within ``timeout_s`` plus
@@ -382,7 +393,7 @@ def decode_rows(
         gpu_device_path=gpu_device_path,
     )  # fmt: skip
     offset_s = (
-        _container_start_s(path, ffmpeg, timeout_s=min(PROBE_TIMEOUT_S, timeout_s))
+        container_start_s(path, ffmpeg, timeout_s=min(PROBE_TIMEOUT_S, timeout_s))
         if start_time_s is None
         else start_time_s
     )
