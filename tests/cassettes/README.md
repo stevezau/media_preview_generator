@@ -126,7 +126,10 @@ grep -rlF -e "$JF_TOKEN" tests/cassettes/test_servers_jellyfin_vcr/ && echo "LEA
 
 Expected: `2 passed`, `clean`. An empty `/Items?Ids=<id>` answer is asked again by id (`/MediaSegments/<id>`: Jellyfin
 12 leaves alternate versions out of item queries), so the unknown-id cassette holds that 404 twice: the test's own
-segments read, then `item_missing`'s check. Jellyfin answers `/Items?Ids=<id>` without `Path` or `MediaSources`, so the scrubber
+segments read, then `item_missing`'s check. In
+`TestJellyfinItemMissingContract.test_an_id_jellyfin_doesnt_have_is_missing.yaml` the third entry is a hand copy of the
+first (same `traceId` and `Date`, Jellyfin 10.11 lab), added when that check came in without a lab to re-record on; the
+answer is deterministic (a 404 for an id no item has). A re-record above replaces it with a real second answer. Jellyfin answers `/Items?Ids=<id>` without `Path` or `MediaSources`, so the scrubber
 can't tell it's synthetic; for exactly that request it keeps each item's `Id` and `Type` only, instead of emptying the
 list (which would replay "the server has it" as "it's gone").
 The API-key read answers an `Items` list whose item has no `Path` (it asks for other fields): the scrubber keeps it
