@@ -453,3 +453,155 @@ class TestRealJobThread:
         assert _wait_for(lambda: gate.snapshot()[0] == 0), "the finished job kept its slot"
         assert sorted(r["file"] for r in jm.get_file_results(job.id)) == ["/m/a.mkv", "/m/c.mkv", "/m/slow.mkv"]
         assert _wait_for(lambda: job.id not in job_runner._inflight_jobs)
+
+
+class TestCreditTextOnTheWorkers:
+    """Worker → pipeline → credit text detector on the real runner, gate, dispatcher and worker (spec §6.4 items 4 and
+    7): the text is read on the worker's own GPU, a GPU decode failure reruns the file on the CPU in the same worker,
+    and a cancel or a text detection failure gives every worker and job slot back. Only the decode and the helper pool
+    are faked (the frame and helper boundaries)."""
+
+    @pytest.fixture
+    def setup(self, engine, tmp_path, monkeypatch):
+        import numpy as np
+
+        from media_preview_generator.markers.credits import detector, frames
+        from media_preview_generator.markers.credits.textdet_helper import TextDetState
+        from media_preview_generator.markers.pipeline import default_local_detectors
+
+        folder = tmp_path / "tv" / "Rick and Morty (2013) {tvdb-275274}" / "Season 01"
+        folder.mkdir(parents=True)
+        media = folder / "Rick and Morty (2013) - S01E01 - Pilot.mkv"
+        media.write_bytes(b"x" * 100)
+        store = MarkerStore(str(tmp_path / "markers.db"))
+        raw = {
+            "detect": {"intro": False, "credits": True},
+            "publish_when": "medium",
+            "sources": [{"id": source, "enabled": source == "credits_text"} for source in (
+                "chapters", "theintrodb", "introdb", "skipdb", "season_audio", "credits_text", "server_markers")],
+        }  # fmt: skip
+        settings = load_global(validate_global(raw, None)[0])
+        registry = FakeRegistry({"plex-1": server_config("plex-1", ServerType.PLEX, root=str(tmp_path / "tv"))})
+        publisher = ready_publisher()
+        # One GPU worker and no CPU worker: the CPU rerun can only be that same worker's.
+        config = SimpleNamespace(cpu_threads=0, gpu_threads=1, scan_workers=4, ffmpeg_path="ffmpeg")
+        monkeypatch.setattr(job_runner, "load_config", lambda: config)
+        monkeypatch.setattr(job_runner, "_build_selected_gpus", lambda s: [("NVIDIA", "cuda:0", {"name": "Test GPU"})])
+        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda cfg: registry)
+        monkeypatch.setattr(triggers, "start_intro_credits_job_async", lambda job_id: None)
+
+        def build_context(*, registry, config, priority, force=False, recheck_empty_server_markers=False):
+            return PipelineContext(
+                registry=registry,
+                config=config,
+                settings=settings,
+                store=store,
+                priority=priority,
+                ffprobe="ffprobe",
+                force=force,
+                clients={},
+                local_detectors=default_local_detectors(settings, config, credits_text=TextDetState.AVAILABLE),
+                credits_text=TextDetState.AVAILABLE,
+                live_config=registry.get_config,
+            )
+
+        monkeypatch.setattr(job_runner, "build_context", build_context)
+        decodes: list[tuple] = []
+        effects: dict = {}
+
+        def decode_rows(path, *, gpu, gpu_device_path, count_boxes, cancel_check, **kwargs):
+            decodes.append((gpu, gpu_device_path))
+            effect = effects.get("gpu" if gpu else "cpu")
+            if callable(effect):
+                effect()
+            elif isinstance(effect, BaseException):
+                raise effect
+            count_boxes(np.zeros((1, frames.FRAME_H, frames.FRAME_W), np.uint8))
+            return []  # no credit roll in the tail: "nothing found"
+
+        pool = MagicMock()
+        pool.count_boxes.return_value = [0]
+        monkeypatch.setattr(frames, "decode_rows", decode_rows)
+        monkeypatch.setattr(detector, "get_textdet_pool", lambda: pool)
+        yield SimpleNamespace(path=str(media), store=store, publisher=publisher, decodes=decodes, effects=effects,
+                              pool=pool)  # fmt: skip
+        store.close()
+
+    def _run(self, engine, setup):
+        with (
+            patch.object(pipeline, "probe_media", return_value=MediaProbe(DURATION, ())),
+            patch.object(pipeline, "publisher_for", return_value=setup.publisher),
+        ):
+            job = triggers.create_intro_credits_job(library_name="TV", priority=2, source="manual",
+                                                    file_paths=[setup.path])  # fmt: skip
+            job_runner.run_intro_credits_job(job.id)
+        return engine.jm.get_job(job.id)
+
+    @staticmethod
+    def _worker():
+        from media_preview_generator.jobs.dispatcher import get_dispatcher
+
+        (worker,) = get_dispatcher().worker_pool._snapshot_workers()
+        return worker
+
+    def _released(self, engine):
+        worker = self._worker()
+        return engine.gate.snapshot()[0] == 0 and _wait_for(lambda: not worker.is_busy)
+
+    def test_the_worker_reads_the_text_on_its_gpu(self, engine, setup):
+        job = self._run(engine, setup)
+        assert setup.decodes == [("NVIDIA", "cuda:0")]
+        assert setup.pool.count_boxes.call_args.kwargs == {"gpu": "NVIDIA", "gpu_device_path": "cuda:0"}
+        assert job.status is JobStatus.COMPLETED and _outcome(engine.jm, job.id) == {"markers_none": 1}
+        assert self._worker().fallback_active is False
+        assert self._released(engine)
+
+    def test_a_gpu_decode_failure_reruns_the_file_on_the_cpu_in_the_same_worker(self, engine, setup):
+        from media_preview_generator.markers.credits import detector, frames
+        from media_preview_generator.markers.models import Source
+
+        setup.effects["gpu"] = frames.GpuDecodeError("the GPU decoded no frames from S01E01.mkv")
+        job = self._run(engine, setup)
+        assert setup.decodes == [("NVIDIA", "cuda:0"), (None, None)]
+        assert setup.pool.count_boxes.call_args.kwargs == {"gpu": None, "gpu_device_path": None}
+        worker = self._worker()
+        assert worker.fallback_active is True and "GPU decoded no frames" in worker.fallback_reason
+        rec = setup.store.get_file(setup.path)
+        assert setup.store.evidence_version(rec.id, Source.CREDITS_TEXT) == detector.CREDITS_TEXT_VERSION
+        # Counted once, as the CPU rerun ended.
+        assert job.status is JobStatus.COMPLETED and _outcome(engine.jm, job.id) == {"markers_none": 1}
+        [row] = engine.jm.get_file_results(job.id)
+        assert row["worker"] == "GPU Worker 1 (Test GPU)"
+        assert self._released(engine)
+
+    def test_a_cancel_during_the_decode_frees_the_worker_and_the_slot_without_a_cpu_rerun(self, engine, setup):
+        from media_preview_generator.markers.credits import frames
+
+        def cancel_then_stop():
+            (running,) = engine.jm.get_running_jobs()
+            engine.jm.request_cancellation(running.id)
+            raise frames.DecodeCancelledError("cancelled while decoding S01E01.mkv")  # what run_decode then raises
+
+        setup.effects["gpu"] = cancel_then_stop
+        job = self._run(engine, setup)
+        assert setup.decodes == [("NVIDIA", "cuda:0")]
+        assert job.status is JobStatus.CANCELLED
+        assert setup.publisher.write.call_count == 0
+        assert self._released(engine)
+
+    @pytest.mark.parametrize("where", ["gpu-helper", "cpu-helper-after-gpu-decode-failure"])
+    def test_a_text_detection_failure_leaves_the_file_unanswered_and_frees_every_slot(self, engine, setup, where):
+        from media_preview_generator.markers.credits import frames
+        from media_preview_generator.markers.credits.textdet_helper import TextDetUnavailableError
+        from media_preview_generator.markers.models import Source
+
+        # The pool itself moves a crashed GPU helper's device to the CPU; what reaches the detector is the CPU helper
+        # failing too (``TextDetectorPool.count_boxes``).
+        setup.pool.count_boxes.side_effect = TextDetUnavailableError("Text detection failed: the helper exited (-9)")
+        if where != "gpu-helper":
+            setup.effects["gpu"] = frames.GpuDecodeError("ffmpeg exited 1 decoding S01E01.mkv on the GPU")
+        job = self._run(engine, setup)
+        rec = setup.store.get_file(setup.path)
+        assert setup.store.evidence_version(rec.id, Source.CREDITS_TEXT) is None  # asked again next run
+        assert job.status is JobStatus.COMPLETED and _outcome(engine.jm, job.id) == {"markers_none": 1}
+        assert self._released(engine)
