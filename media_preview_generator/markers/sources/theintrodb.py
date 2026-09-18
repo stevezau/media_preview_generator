@@ -9,10 +9,12 @@ without the file's duration is still never sent.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from typing import Any
 
 import requests
+from loguru import logger
 
 from ..models import Candidate, MarkerType, MediaIds, Source
 from .online import LookupResult, confidence_value, http_session, ms_value, paced_get_json, result_from, valid_imdb
@@ -56,6 +58,17 @@ class TheIntroDbClient:
         self._api_key = "" if self._key_invalid else key
         self._limiter = limiter if limiter is not None else get_limiter("theintrodb")
         self._session = session if session is not None else http_session()
+        # A job's checking threads share one client; the key warning is logged once per client (per job).
+        self._key_warned = False
+        self._warn_lock = threading.Lock()
+
+    def _warn_key(self, detail: str) -> None:
+        """Log a key problem once: every lookup of the job would otherwise fail the same way at DEBUG only."""
+        with self._warn_lock:
+            if self._key_warned:
+                return
+            self._key_warned = True
+        logger.warning("{}: its lookups give no answers until the key is fixed in Settings → Intro & Credits", detail)
 
     def lookup(
         self,
@@ -80,7 +93,9 @@ class TheIntroDbClient:
         if isinstance(params, LookupResult):
             return params
         if self._key_invalid:
-            return LookupResult("unavailable", detail=f"{_LABEL} API key contains invalid characters")
+            refused = LookupResult("unavailable", detail=f"{_LABEL} API key contains invalid characters")
+            self._warn_key(refused.detail)
+            return refused
         headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
         auth_refused = f"{_LABEL} rejected the API key" if self._api_key else f"{_LABEL} requires an API key"
         body = paced_get_json(
@@ -95,6 +110,8 @@ class TheIntroDbClient:
             auth_refused=auth_refused,
         )
         if isinstance(body, LookupResult):
+            if body.detail.startswith(auth_refused):
+                self._warn_key(body.detail)
             return body
         if not _has_echo_fields(body, ids):
             return LookupResult("unavailable", detail=f"{_LABEL} returned an unexpected response")

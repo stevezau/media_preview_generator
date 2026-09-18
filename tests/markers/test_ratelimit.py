@@ -331,6 +331,20 @@ class TestHeaderParsing:
         assert lim.acquire(priority=2) is Acquire.ALLOWED
         assert c.slept == []
 
+    @pytest.mark.parametrize("reset", [None, "0"], ids=["no-reset-header", "reset-zero"])
+    def test_ratelimit_remaining_zero_without_a_reset_keeps_normal_pacing(self, reset):
+        # Nothing says how long to wait: pacing carries on, and a 429 from the source sets the block if one is due.
+        c = FakeClock()
+        lim = _limiter(c)
+        headers = (
+            {"x-ratelimit-remaining": "0"}
+            if reset is None
+            else {"x-ratelimit-remaining": "0", "x-ratelimit-reset": reset}
+        )
+        lim.record(200, headers)
+        assert lim.usage()["blocked_until_s"] == 0.0
+        assert lim.acquire(priority=2) is Acquire.ALLOWED and c.slept == []
+
     def test_ratelimit_reset_as_unix_time_is_converted_with_the_wall_clock(self):
         c = FakeClock()
         lim = _limiter(c, wall_clock=lambda: 1_757_800_000.0)

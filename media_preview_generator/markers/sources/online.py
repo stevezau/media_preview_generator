@@ -71,20 +71,34 @@ def valid_imdb(value: str | None) -> bool:
     return bool(value) and _IMDB_RE.fullmatch(value) is not None
 
 
-def ms_value(value: object) -> int | None:
-    """A JSON millisecond offset as a non-negative int, or None for anything else (null, strings, booleans, NaN)."""
+def _finite(value: object) -> float | None:
+    """A finite JSON number as a float, or None for anything else (null, strings, booleans, NaN, infinities).
+
+    JSON integers have no size limit: one too large for a float raises OverflowError on conversion and counts as
+    not finite, like an infinity.
+    """
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    if not math.isfinite(value) or value < 0:
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def ms_value(value: object) -> int | None:
+    """A JSON millisecond offset as a non-negative int, or None for anything else (null, strings, booleans, NaN,
+    infinities)."""
+    number = _finite(value)
+    if number is None or number < 0:
         return None
     return int(round(value))
 
 
 def confidence_value(value: object) -> float:
-    """A source-reported confidence clamped to 0-1; missing or non-numeric counts as the default 1.0."""
-    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
-        return 1.0
-    return min(1.0, max(0.0, float(value)))
+    """A source-reported confidence clamped to 0-1; missing, non-numeric or not finite counts as the default 1.0."""
+    number = _finite(value)
+    return 1.0 if number is None else min(1.0, max(0.0, number))
 
 
 def paced_get_json(

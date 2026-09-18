@@ -189,6 +189,71 @@ class TestTheIntroDb:
         assert result.status == "unavailable"
         assert "requires an API key" in result.detail and str(status) in result.detail
 
+    @pytest.mark.parametrize(
+        ("key", "responses", "warning"),
+        [
+            (SECRET + "​", [], "TheIntroDB API key contains invalid characters"),
+            (SECRET, [_resp(401, {}), _resp(403, {})], "TheIntroDB rejected the API key (HTTP 401)"),
+            ("", [_resp(401, {}), _resp(401, {})], "TheIntroDB requires an API key (HTTP 401)"),
+        ],
+        ids=["invalid-characters", "rejected", "key-now-required"],
+    )
+    def test_a_key_problem_is_a_warning_once_per_client_not_only_debug(self, key, responses, warning, loguru_caplog):
+        # Settings accept keys the client refuses (a pasted zero-width space) and a revoked key answers 401 on every
+        # file: at DEBUG only, TheIntroDB would silently stop contributing to every job.
+        client = TheIntroDbClient(key, limiter=_limiter(), session=_session(*responses))
+        for _ in range(2):
+            assert client.lookup(RM_S01E01, duration_ms=1_321_000, priority=2).status == "unavailable"
+        warnings = [r.getMessage() for r in loguru_caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1 and warnings[0].startswith(warning)
+        assert SECRET not in loguru_caplog.text
+
+    @pytest.mark.parametrize("status", [429, 500, 503])
+    def test_other_refusals_are_not_key_warnings(self, status, loguru_caplog):
+        client = TheIntroDbClient(SECRET, limiter=_limiter(), session=_session(_resp(status, {})))
+        client.lookup(RM_S01E01, duration_ms=1_321_000, priority=2)
+        assert not [r for r in loguru_caplog.records if r.levelname == "WARNING"]
+
+    def test_the_key_warning_is_logged_once_across_threads(self, loguru_caplog, monkeypatch):
+        import threading
+        import time
+
+        class SlowFlag:
+            """Widens the check-then-set gap so threads interleave there; only the lock keeps the warning single."""
+
+            def __get__(self, obj, owner):
+                if obj is None:
+                    return self
+                value = obj.__dict__.get("_slow_flag", False)
+                time.sleep(0.005)  # other threads read the same value before this one acts on it
+                return value
+
+            def __set__(self, obj, value):
+                obj.__dict__["_slow_flag"] = value
+
+        monkeypatch.setattr(TheIntroDbClient, "_key_warned", SlowFlag(), raising=False)
+        session = MagicMock()
+        session.get.side_effect = lambda *a, **kw: _resp(401, {})
+        client = TheIntroDbClient(SECRET, limiter=_limiter(), session=session)
+        threads = [
+            threading.Thread(target=client.lookup, args=(RM_S01E01,), kwargs={"duration_ms": 1, "priority": 2})
+            for _ in range(16)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert session.get.call_count == 16
+        assert len([r for r in loguru_caplog.records if r.levelname == "WARNING"]) == 1
+
+    def test_each_job_s_client_warns_again(self, loguru_caplog):
+        # One client per job: a key still refused in the next job is worth its own warning there.
+        for _ in range(2):
+            client = TheIntroDbClient(SECRET, limiter=_limiter(), session=_session(_resp(401, {}), _resp(401, {})))
+            client.lookup(RM_S01E01, duration_ms=1, priority=2)
+            client.lookup(RM_S01E01, duration_ms=1, priority=2)
+        assert len([r for r in loguru_caplog.records if r.levelname == "WARNING"]) == 2
+
     def test_network_error_records_failure(self):
         session = MagicMock()
         session.get.side_effect = requests.ConnectionError("dns")
@@ -244,6 +309,9 @@ class TestTheIntroDb:
             {"start_ms": True, "end_ms": 20_000},
             {"start_ms": 0, "end_ms": float("nan")},
             {"start_ms": float("inf"), "end_ms": None},
+            # JSON integers have no size limit; one too large for a float must drop the segment, not raise.
+            {"start_ms": 10**400, "end_ms": None},
+            {"start_ms": 0, "end_ms": 10**400},
             "not-a-dict",
             None,
         ],
@@ -417,7 +485,12 @@ class TestIntroDb:
         )
         assert result.candidates == (Candidate(T.RECAP, 0, 25_000, Source.INTRODB, confidence=1.0),)
 
-    @pytest.mark.parametrize(("raw", "expected"), [(1.7, 1.0), (-0.2, 0.0), (0.0, 0.0), ("high", 1.0), (True, 1.0)])
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [(1.7, 1.0), (-0.2, 0.0), (0.0, 0.0), ("high", 1.0), (True, 1.0), (10**400, 1.0), (-(10**400), 1.0)],
+        # An int too large for a float is not finite, like an infinity: the default, whatever its sign.
+        ids=["above-one", "negative", "zero", "string", "bool", "int-too-large-for-a-float", "int-too-small"],
+    )
     def test_confidence_is_clamped_to_zero_one(self, raw, expected):
         body = {**IDB_EP, "intro": {"start_ms": 10_000, "end_ms": 40_000, "confidence": raw}}
         result = IntroDbClient(limiter=_limiter(), session=_session(_resp(200, body))).lookup(
