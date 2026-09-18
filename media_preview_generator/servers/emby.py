@@ -160,7 +160,8 @@ class EmbyServer(EmbyApiClient):
 
     def _trigger_item_refresh(self, item_id: str) -> None:
         """Refresh metadata for a single Emby item id."""
-        response = self._request("POST", f"/Items/{item_id}/Refresh")
+        # Quoted: the id arrives from webhook payloads, and "../" or "?" mustn't reach another route.
+        response = self._request("POST", f"/Items/{urllib.parse.quote(str(item_id), safe='')}/Refresh")
         response.raise_for_status()
         logger.info(
             "[{}] Triggered item refresh: {}",

@@ -1213,6 +1213,14 @@ class TestTriggerRefresh:
 
             req.assert_called_once_with("POST", "/Items/42/Refresh")
 
+    def test_item_refresh_quotes_the_item_id(self, emby):
+        # Ids arrive from webhook payloads: "../" or "?" must not reach another Emby route.
+        with patch.object(EmbyServer, "_request") as req:
+            req.return_value.raise_for_status.return_value = None
+            emby.trigger_refresh(item_id="../System/Restart?x=", remote_path=None)
+
+        req.assert_called_once_with("POST", "/Items/..%2FSystem%2FRestart%3Fx%3D/Refresh")
+
     def test_swallows_exceptions_for_path_refresh(self, emby):
         """Path-refresh must call _request AND swallow exceptions.
 

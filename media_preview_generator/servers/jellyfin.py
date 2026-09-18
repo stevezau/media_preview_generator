@@ -218,10 +218,12 @@ class JellyfinServer(EmbyApiClient):
         # path, which doesn't exist → 404 → silent registration miss → off-media
         # trickplay only appeared at the next scheduled scan, never instantly.
         save_with_media = bool(output.get("save_with_media", True))
+        # Quoted: the id arrives from webhook payloads, and "../" or "?" mustn't reach another route.
+        quoted_id = urllib.parse.quote(str(item_id), safe="")
         try:
             resp = self._request(
                 "POST",
-                f"/MediaPreviewBridge/Trickplay/{item_id}",
+                f"/MediaPreviewBridge/Trickplay/{quoted_id}",
                 params={
                     "width": adapter_width,
                     "intervalMs": adapter_interval_ms,
@@ -256,7 +258,7 @@ class JellyfinServer(EmbyApiClient):
 
         # 2. Standard metadata refresh (separate concern from trickplay).
         try:
-            response = self._request("POST", f"/Items/{item_id}/Refresh")
+            response = self._request("POST", f"/Items/{quoted_id}/Refresh")
             response.raise_for_status()
             logger.info(
                 "[{}] Triggered item refresh: {}",

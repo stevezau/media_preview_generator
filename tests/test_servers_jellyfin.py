@@ -938,6 +938,20 @@ class TestTriggerRefresh:
             assert req.call_args_list[0].args == ("POST", "/MediaPreviewBridge/Trickplay/42")
             assert req.call_args_list[1].args == ("POST", "/Items/42/Refresh")
 
+    def test_item_ids_are_quoted_into_both_urls(self, jelly):
+        # Ids arrive from webhook payloads: "../" or "?" must not reach another Jellyfin route.
+        plugin_resp = MagicMock(status_code=204, text="")
+        refresh_resp = MagicMock()
+        refresh_resp.raise_for_status.return_value = None
+
+        with patch.object(JellyfinServer, "_request", side_effect=[plugin_resp, refresh_resp]) as req:
+            jelly.trigger_refresh(item_id="../System/Restart?x=", remote_path=None)
+
+        assert [c.args for c in req.call_args_list] == [
+            ("POST", "/MediaPreviewBridge/Trickplay/..%2FSystem%2FRestart%3Fx%3D"),
+            ("POST", "/Items/..%2FSystem%2FRestart%3Fx%3D/Refresh"),
+        ]
+
     def test_plugin_registration_uses_adapter_width_and_interval_not_hardcoded_defaults(self):
         """Audit L1 — plugin's ``Trickplay`` endpoint MUST be called
         with the same ``width`` and ``intervalMs`` the trickplay
