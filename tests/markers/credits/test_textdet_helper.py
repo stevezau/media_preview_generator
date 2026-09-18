@@ -165,7 +165,10 @@ class TestFallback:
             assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         assert env.backends() == [("cuda:0", "webgpu", True), ("cpu", "cpu", False)]
         assert env.procs[0].wait(timeout=10) is not None  # the GPU helper was closed
-        assert "Credit text detection on cuda:0: CPU (the GPU was slower than the CPU)" in loguru_caplog.text
+        assert (
+            "Credit text detection on cuda:0: CPU (the GPU wasn't at least 10% faster than the CPU "
+            "(20.0 vs 18.0 ms per frame))" in loguru_caplog.text
+        )
 
     @pytest.mark.parametrize(
         ("mode", "timeouts"),
@@ -260,6 +263,25 @@ class TestFallback:
             if pid_file.exists():
                 os.kill(int(pid_file.read_text()), signal.SIGKILL)
 
+    def test_a_hung_helper_is_killed_with_everything_it_started(self, envs, monkeypatch, tmp_path):
+        # A driver or runtime can leave worker processes of its own under the helper. The helper runs in its own
+        # session and its whole process group is killed; killing only the helper would leave those running.
+        pid_file = tmp_path / "child.pid"
+        monkeypatch.setenv("FAKE_CHILD_PID_FILE", str(pid_file))
+        env = envs(modes={"cpu": "hang-with-child"}, request_timeout_s=1.0)
+        try:
+            with pytest.raises(th.TextDetUnavailableError, match="no answer within"):
+                env.pool.count_boxes(PLANES, gpu=None, gpu_device_path=None)
+            child = int(pid_file.read_text())
+            deadline = time.monotonic() + 10
+            while _alive(child) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert not _alive(child)
+            assert env.started[0]["start_new_session"] is True  # what gives the helper a group of its own
+        finally:
+            if pid_file.exists() and _alive(int(pid_file.read_text())):
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+
     def test_an_idle_exit_starts_the_helper_again_without_a_new_self_test(self, envs, loguru_caplog):
         env = envs(idle_exit_s=0.3)
         assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
@@ -267,6 +289,15 @@ class TestFallback:
         assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         assert env.backends() == [("cuda:0", "webgpu", True), ("cuda:0", "webgpu", False)]
         assert not [r for r in loguru_caplog.records if r.levelname == "WARNING"]
+
+
+def _alive(pid: int) -> bool:
+    """Whether a process is still running (a zombie waiting for its reaper counts as gone)."""
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (FileNotFoundError, ProcessLookupError):
+        return False
 
 
 def test_requests_for_one_device_never_overlap(envs):
@@ -404,7 +435,8 @@ def test_the_self_test_warms_both_detectors_before_timing():
         counted = detector.count
         detector.count = lambda frames, counted=counted: (seen.append(len(frames)), counted(frames))[1]
     th.self_test(gpu, cpu, frames, clock=clock, warmup=2)
-    assert seen == [2, 2] + [6, 6] * th.SELFTEST_ROUNDS  # warm-up on both, then one timed pair per round
+    assert th.SELFTEST_ROUNDS == 5
+    assert seen == [2, 2] + [6, 6] * 5  # warm-up on both, then one timed pair per round
 
 
 class TestAvailability:
@@ -532,15 +564,49 @@ def test_the_self_test_needs_a_ten_percent_win_not_just_a_win(gpu_ms, use_gpu):
     assert th.SelfTest(gpu_ms, 10.0, True).use_gpu is use_gpu
 
 
-def test_the_self_test_reports_the_median_of_three_pairs_not_the_first():
+def _self_test(gpu_rounds_s: list[float], cpu_rounds_s: list[float]) -> th.SelfTest:
+    """The self-test on detectors whose timed rounds cost these seconds per frame (warm-up free)."""
     clock = Clock()
     clock.now = 0.0
     frames = np.zeros((3, 180, 320), np.uint8)
-    # The first timed GPU round is a 100 ms outlier; its median is 1 ms, so only a single-sample test would say CPU.
-    gpu = PacedDetector([[1, 0, 3]], [0.0, 0.100, 0.001, 0.001], clock)
-    cpu = PacedDetector([[1, 0, 3]], [0.0, 0.010], clock)
-    result = th.self_test(gpu, cpu, frames, clock=clock, warmup=1)
+    gpu = PacedDetector([[1, 0, 3]], [0.0, *gpu_rounds_s], clock)
+    cpu = PacedDetector([[1, 0, 3]], [0.0, *cpu_rounds_s], clock)
+    return th.self_test(gpu, cpu, frames, clock=clock, warmup=1)
+
+
+@pytest.mark.parametrize(
+    "gpu_rounds_s",
+    [
+        [0.100, 0.001, 0.001, 0.001, 0.001],  # one slow first round: a single-sample test would say CPU
+        [0.001, 0.0095, 0.100, 0.0095, 0.0095],  # four slow rounds of five: their median (9.5 ms) isn't 10 % faster
+    ],
+    ids=["one-slow-round", "four-slow-rounds"],
+)
+def test_slow_gpu_rounds_cannot_hand_the_process_to_the_cpu(gpu_rounds_s):
+    result = _self_test(gpu_rounds_s, [0.010] * 5)
     assert (result.gpu_ms, result.cpu_ms, result.use_gpu) == (1.0, 10.0, True)
+
+
+def test_the_cpu_is_judged_at_its_best_round_too():
+    # A busy CPU slows four rounds of five to 20 ms. Against its median the GPU's 9.5 ms looks twice as fast; against
+    # what the CPU really does (10 ms) it isn't the 10 % faster the GPU has to be.
+    result = _self_test([0.0095] * 5, [0.020, 0.020, 0.010, 0.020, 0.020])
+    assert (result.gpu_ms, result.cpu_ms, result.use_gpu) == (9.5, 10.0, False)
+
+
+@pytest.mark.parametrize(
+    ("result", "reason"),
+    [
+        (th.SelfTest(9.5, 10.0, True), "the GPU wasn't at least 10% faster than the CPU (9.5 vs 10.0 ms per frame)"),
+        (th.SelfTest(20.0, 10.0, True), "the GPU wasn't at least 10% faster than the CPU (20.0 vs 10.0 ms per frame)"),
+        (th.SelfTest(1.0, 10.0, False), "the GPU was counting different boxes than the CPU"),
+    ],
+    ids=["faster-but-not-enough", "slower", "different-boxes"],
+)
+def test_the_cpu_reason_says_what_the_self_test_measured(result, reason):
+    # A GPU a few percent faster than the CPU once logged "the GPU was slower than the CPU", and without the numbers
+    # nobody could tell why the verdict had changed.
+    assert result.cpu_reason() == reason
 
 
 def test_boxes_that_differ_in_any_round_fail_the_self_test():
@@ -659,14 +725,15 @@ class TestHelperProcessBackendChoice:
         stub = StubTextDet(clock, gpu_ms=20.0, cpu_ms=10.0)
         detector, ready = self._start(stub)
         assert detector.backend == "cpu"
-        assert ready["backend"] == "cpu" and ready["reason"] == "the GPU was slower than the CPU"
+        assert ready["backend"] == "cpu"
+        assert ready["reason"] == "the GPU wasn't at least 10% faster than the CPU (20.0 vs 10.0 ms per frame)"
 
     def test_a_gpu_that_only_ties_serves_from_the_cpu(self, clock):
         stub = StubTextDet(clock, gpu_ms=10.0, cpu_ms=10.0)
         detector, ready = self._start(stub)
         assert detector.backend == "cpu"
         assert ready["selftest"] == {"gpu_ms": 10.0, "cpu_ms": 10.0, "same_boxes": True}
-        assert ready["reason"] == "the GPU was slower than the CPU"
+        assert ready["reason"] == "the GPU wasn't at least 10% faster than the CPU (10.0 vs 10.0 ms per frame)"
 
     def test_a_gpu_that_counts_different_boxes_serves_from_the_cpu(self, clock):
         stub = StubTextDet(clock, gpu_ms=1.0, cpu_ms=10.0, gpu_counts=[99] * th.SELFTEST_FRAMES)
@@ -749,6 +816,47 @@ class TestShutdown:
         assert "shutting down" in str(failed[0])
         assert env.pool.backend_of("NVIDIA", "cuda:0") == "webgpu"
         assert not [r for r in loguru_caplog.records if r.levelname == "WARNING"]
+
+    def test_close_all_racing_an_in_flight_cpu_request_says_shutting_down(self, envs):
+        # The CPU helper's request killed by close_all is the pool ending, not text detection failing.
+        env = envs(modes={"cpu": "hang-on-request"}, request_timeout_s=30.0)
+        failed: list[BaseException] = []
+
+        def work():
+            try:
+                env.pool.count_boxes(PLANES, gpu=None, gpu_device_path=None)
+            except BaseException as exc:  # noqa: BLE001 - collected for the assertion
+                failed.append(exc)
+
+        worker = threading.Thread(target=work)
+        worker.start()
+        deadline = time.monotonic() + 20
+        while "cpu" not in env.pool._helpers and time.monotonic() < deadline:
+            time.sleep(0.02)
+        time.sleep(0.3)  # let the request reach the helper, which then hangs
+        env.pool.close_all()
+        worker.join(30)
+        assert not worker.is_alive()
+        assert len(failed) == 1 and isinstance(failed[0], th.TextDetUnavailableError)
+        assert str(failed[0]) == "Text detection is shutting down"
+
+    @pytest.mark.parametrize(("gpu", "device"), [(None, None), ("NVIDIA", "cuda:0")], ids=["cpu", "gpu"])
+    def test_a_helper_that_comes_up_after_close_all_is_stopped_not_kept(self, envs, monkeypatch, gpu, device):
+        # close_all takes its list of helpers while another thread is still starting one: that helper must not be
+        # added to a pool nobody will close again (a WebGPU helper can outlive the app when nothing closes it).
+        env = envs()
+        real_start = th._start
+
+        def start_then_close(spec, **kwargs):
+            helper = real_start(spec, **kwargs)
+            env.pool.close_all()
+            return helper
+
+        monkeypatch.setattr(th, "_start", start_then_close)
+        with pytest.raises(th.TextDetUnavailableError, match="shutting down"):
+            env.pool.count_boxes(PLANES, gpu=gpu, gpu_device_path=device)
+        assert env.pool._helpers == {}
+        assert env.procs[0].wait(timeout=10) is not None
 
     def test_a_request_after_close_all_starts_no_new_helper(self, envs):
         env = envs()

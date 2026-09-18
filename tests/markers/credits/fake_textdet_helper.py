@@ -5,7 +5,9 @@
 Modes: ok, selftest-cpu, crash-on-request, crash-after-reply, idle-exit-on-request, idle-exit-slow-shutdown
 (closes its pipes on a request, then takes 0.5 s to exit 75, so the answer stream ends before poll() has a code),
 hang-on-request, hang-start, bad-ready, hang-on-exit, error-reply, hold-stdin (never reads; a process in its own
-session keeps stdin open after a kill, its pid written to $FAKE_HOLDER_PID_FILE).
+session keeps stdin open after a kill, its pid written to $FAKE_HOLDER_PID_FILE), hang-with-child (hangs on a request
+after starting a child in its own process group, as a driver's worker process would be; the child's pid written to
+$FAKE_CHILD_PID_FILE).
 """
 
 import argparse
@@ -51,7 +53,9 @@ def main() -> int:
             "ready": True,
             "backend": backend,
             "selftest": selftest,
-            "reason": "the GPU was slower than the CPU" if backend != args.backend else "",
+            "reason": "the GPU wasn't at least 10% faster than the CPU (20.0 vs 18.0 ms per frame)"
+            if backend != args.backend
+            else "",
         },
     )
     stdin = sys.stdin.buffer
@@ -60,6 +64,10 @@ def main() -> int:
         with open(os.environ["FAKE_HOLDER_PID_FILE"], "w") as fh:
             fh.write(str(holder.pid))
         time.sleep(3600)
+    if args.mode == "hang-with-child":
+        child = subprocess.Popen(["sleep", "60"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        with open(os.environ["FAKE_CHILD_PID_FILE"], "w") as fh:
+            fh.write(str(child.pid))
     while True:
         readable, _, _ = select.select([stdin], [], [], args.idle_exit_s)
         if not readable:
@@ -85,7 +93,7 @@ def main() -> int:
             os.close(0)
             time.sleep(0.5)
             os._exit(75)
-        if args.mode == "hang-on-request":
+        if args.mode in ("hang-on-request", "hang-with-child"):
             time.sleep(3600)
         if args.mode == "error-reply":
             send(out, {"id": request["id"], "error": "boom"})

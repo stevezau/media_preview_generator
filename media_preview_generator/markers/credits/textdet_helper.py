@@ -33,7 +33,6 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from enum import Enum
-from statistics import median
 from typing import Any, BinaryIO
 
 import numpy as np
@@ -48,10 +47,15 @@ DEFAULT_MODEL_PATH = "/app/models/ch_PP-OCRv4_det_infer.onnx"
 CPU_KEY = "cpu"
 THREADS = 2
 SELFTEST_FRAMES = 20
-SELFTEST_ROUNDS = 3
-# How much faster than the CPU the GPU's median must be to be worth using. A single 20-frame pair once handed
-# the whole process to the GPU on a 0.06% win (17.99 vs 18.00 ms). A real GPU has room to spare: the P5000 on
-# storage measured 11.65 vs 18.77 ms per frame on 2026-09-16, 38% faster (brief note N6).
+# Timed GPU/CPU pairs; each side keeps its best round (see self_test). Resampling 10 cold starts' rounds on storage's
+# P5000 (2026-09-19), the median of 3 rounds put the GPU/CPU ratio 12.5 % or more above its typical value on 3.9 % of
+# self-tests, the best of 5 on 0.65 % -- and 12.5 % is all that separated the TITAN RTX's 4.94 vs 6.18 ms from the
+# margin below.
+SELFTEST_ROUNDS = 5
+# How much faster than the CPU the GPU's best round must be to be worth using. A single 20-frame pair once handed
+# the whole process to the GPU on a 0.06% win (17.99 vs 18.00 ms). A real GPU has room to spare: this self-test on
+# storage's P5000 measures 10.7-11.6 vs 16.2-18.0 ms per frame (2026-09-19), about 35% faster (the planning bench's own
+# script measured 13.3 vs 18.7 ms on the same card).
 GPU_SPEEDUP_MARGIN = 0.10
 START_TIMEOUT_S = 120.0
 REQUEST_TIMEOUT_S = 60.0
@@ -164,7 +168,7 @@ def forget_text_detection_state() -> None:
 
 @dataclass(frozen=True)
 class SelfTest:
-    """A GPU session against the CPU on the same frames (milliseconds per frame)."""
+    """A GPU session against the CPU on the same frames (each side's best round, milliseconds per frame)."""
 
     gpu_ms: float
     cpu_ms: float
@@ -174,6 +178,15 @@ class SelfTest:
     def use_gpu(self) -> bool:
         """The GPU is used only when it counts exactly the CPU's boxes, at least ``GPU_SPEEDUP_MARGIN`` faster."""
         return self.same_boxes and self.gpu_ms <= self.cpu_ms * (1.0 - GPU_SPEEDUP_MARGIN)
+
+    def cpu_reason(self) -> str:
+        """Why this result keeps the CPU (for the helper's ready line and the log)."""
+        if not self.same_boxes:
+            return "the GPU was counting different boxes than the CPU"
+        return (
+            f"the GPU wasn't at least {GPU_SPEEDUP_MARGIN:.0%} faster than the CPU "
+            f"({self.gpu_ms} vs {self.cpu_ms} ms per frame)"
+        )
 
 
 def self_test(
@@ -187,19 +200,22 @@ def self_test(
 ) -> SelfTest:
     """Time both detectors on the same frames after a warm-up and compare their box counts.
 
-    The pair is run ``rounds`` times, alternating, and each side's median is reported: one sample of one pair is
-    noise on a host that is also decoding video, and the verdict is kept for the process.
+    The pair is run ``rounds`` times, alternating, and each side keeps its fastest round. Whatever else the host is
+    doing (a transcode on the same card, a busy CPU) only ever adds time, so a side's best round is its own speed and
+    slow rounds -- one or several -- can't flip a verdict that is kept for the process. A median moves with them: two
+    slow GPU rounds of three put a GPU 20 % faster than the CPU past the 10 % margin.
 
     Args:
         gpu: A detector with ``count(frames) -> list[int]`` on the GPU.
         cpu: The same on the CPU.
         frames: (n, H, W) uint8 luma.
         clock: Seconds (tests pass a fake); ``time.perf_counter`` by default.
-        warmup: Frames each detector runs before timing (session start-up and shader compilation).
+        warmup: Frames each detector runs before timing (session start-up and shader compilation: the first WebGPU
+            call measured 61-101 ms per frame against 11-14 ms after it).
         rounds: How many GPU/CPU pairs to time.
 
     Returns:
-        The median milliseconds per frame each way, and whether every count matched in every round.
+        Each side's best milliseconds per frame, and whether every count matched in every round.
     """
     now = clock or _perf_counter
     for detector in (gpu, cpu):
@@ -219,7 +235,7 @@ def self_test(
         gpu_times.append(gpu_ms)
         cpu_times.append(cpu_ms)
         same_boxes = same_boxes and list(gpu_counts) == list(cpu_counts)
-    return SelfTest(round(median(gpu_times), 2), round(median(cpu_times), 2), same_boxes)
+    return SelfTest(round(min(gpu_times), 2), round(min(cpu_times), 2), same_boxes)
 
 
 @dataclass(frozen=True)
@@ -542,13 +558,17 @@ class TextDetectorPool:
             try:
                 counts = self._on_helper(CPU_KEY, planes, self._cpu_spec)
             except HelperError as exc:
+                self._raise_if_closed()  # close_all killed it: the pool ending, not text detection failing
                 raise TextDetUnavailableError(f"Text detection failed: {exc}") from exc
         if counts is None:  # pragma: no cover - the CPU helper either serves or raises
             raise TextDetUnavailableError("Text detection failed: the CPU helper didn't answer")
         return counts
 
     def backend_of(self, gpu: str | None, gpu_device_path: str | None) -> str | None:
-        """What a worker's text detection runs on: ``webgpu``, ``cpu``, or None before its first request."""
+        """What a worker's text detection runs on: ``webgpu``, ``cpu``, or None before its first request.
+
+        The app itself only logs the verdict (``_record``); this is how the lab scripts and the tests read it.
+        """
         key = device_key(gpu, gpu_device_path)
         if key == CPU_KEY:
             return "cpu"
@@ -632,7 +652,14 @@ class TextDetectorPool:
                 request_timeout_s=self._request_timeout_s,
             )
             with self._guard:
-                self._helpers[key] = helper
+                closed = self._closed
+                if not closed:
+                    self._helpers[key] = helper
+            if closed:
+                # close_all ran while this one started and won't see it: nothing else would ever stop it.
+                helper.kill()
+                helper.close(0)
+                self._raise_if_closed()
             if key != CPU_KEY:
                 self._record(key, helper.ready, spec.pci_bus_id)
                 if helper.ready["backend"] != "webgpu":
@@ -787,8 +814,7 @@ def _start_detector(textdet: Any, args: argparse.Namespace) -> tuple[Any, dict[s
         }
     if result.use_gpu:
         return gpu, {"backend": "webgpu", "selftest": asdict(result), "reason": ""}
-    why = "slower than the CPU" if result.same_boxes else "counting different boxes than the CPU"
-    return cpu(), {"backend": "cpu", "selftest": asdict(result), "reason": f"the GPU was {why}"}
+    return cpu(), {"backend": "cpu", "selftest": asdict(result), "reason": result.cpu_reason()}
 
 
 def _serve(detector: Any, protocol: BinaryIO, idle_exit_s: float) -> int:

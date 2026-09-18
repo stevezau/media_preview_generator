@@ -339,6 +339,15 @@ class TestModel:
         assert isinstance(caught.value.__cause__, PermissionError)
 
 
+def test_the_self_test_frames_are_the_size_the_decoder_hands_over():
+    # textdet can't import frames (it would pull loguru and the probe into the helper process), so the two size
+    # constants are kept apart; a self-test timed at another size would measure a workload the app never runs.
+    from media_preview_generator.markers.credits import frames
+
+    assert (textdet.FRAME_HEIGHT, textdet.FRAME_WIDTH) == (frames.FRAME_H, frames.FRAME_W)
+    assert textdet.synthetic_frames(1).shape[1:] == (frames.FRAME_H, frames.FRAME_W)
+
+
 def test_synthetic_frames_are_deterministic_and_mixed():
     first, second = textdet.synthetic_frames(20), textdet.synthetic_frames(20)
     assert first.shape == (20, 180, 320) and first.dtype == np.uint8
@@ -400,6 +409,7 @@ def test_bench_gate_fails_when_both_runs_are_identical_but_truncated(tmp_path, c
     ]
 
 
+@pytest.mark.integration
 def test_real_model_finds_text_on_the_dark_synthetic_cards():
     path = os.environ.get("MEDIA_PREVIEW_TEXTDET_MODEL", "/app/models/ch_PP-OCRv4_det_infer.onnx")
     if not os.path.isfile(path):
