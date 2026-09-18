@@ -57,6 +57,26 @@ class TestBuildItems:
                 ("jf-1", [("1", True)])
             ]
 
+    def test_two_sender_paths_of_one_file_give_one_item_with_both_senders_item_ids(self):
+        # A Sonarr and a Plex webhook for the same episode joined one follow-up: each sender's path maps to one file.
+        reg = FakeRegistry({"jf-1": server_config("jf-1", ServerType.JELLYFIN)})
+        cfg = {
+            "file_paths": ["/sonarr/tv/Show/S01E01.mkv", "/plex/tv/Show/S01E01.mkv"],
+            "webhook_item_id_hints": {
+                "/sonarr/tv/Show/S01E01.mkv": {"jf-1": "jf-item"},
+                "/plex/tv/Show/S01E01.mkv": {"plex-1": "4242", "jf-1": "other"},
+            },
+        }
+        with patch(
+            "media_preview_generator.jobs.orchestrator._resolve_webhook_path_to_canonical",
+            return_value=("/media/tv/Show/S01E01.mkv", []),
+        ):
+            items, _, sent = job_runner.build_items(cfg, registry=reg)
+        assert [(i.canonical_path, i.item_id_by_server) for i in items] == [
+            ("/media/tv/Show/S01E01.mkv", {"jf-1": "jf-item", "plex-1": "4242"})  # the first sender's id wins a clash
+        ]
+        assert sent == {"/media/tv/Show/S01E01.mkv": "/sonarr/tv/Show/S01E01.mkv"}
+
     def test_file_paths_are_resolved_to_the_canonical_local_path(self):
         reg = FakeRegistry({"jf-1": server_config("jf-1", ServerType.JELLYFIN)})
         with patch(
@@ -2001,6 +2021,19 @@ class TestVerifyReplacedFilesLater:
         )
         logs = [c.args[1] for c in env.jm.add_log.call_args_list]
         assert f"INFO - 2 replaced file(s) are checked again in {delay}s (job job-1)" in logs, logs
+
+    @pytest.mark.parametrize("later", ["verify", "retry"])
+    def test_the_later_job_carries_the_item_ids_of_every_sender_of_a_file(self, env, verify_env, later):
+        # build_items merged a second sender's Plex id into the first sender's ids for the one file both reported.
+        merged = {"jf-1": "abc", "plex-1": "42"}
+        item = ProcessableItem("/m/a.mkv", "", dict(merged), title="a.mkv")
+        row = self.WRITTEN_LATER if later == "verify" else NOT_IN_LIBRARY_ROW
+        verify_env.results.append(("/m/a.mkv", row["status"], [row]))
+        with patch.object(job_runner, "build_items", return_value=([item], [], verify_env.sent)):
+            job_runner.run_intro_credits_job("j1")
+        kwargs = verify_env.create.call_args.kwargs
+        assert kwargs["library_name"].startswith("Verify: " if later == "verify" else "Retry: ")
+        assert (kwargs["file_paths"], kwargs["item_id_hints"]) == (["/data/tv/a.mkv"], {"/data/tv/a.mkv": merged})
 
     def test_rows_without_the_flag_queue_nothing(self, env, verify_env):
         verify_env.results.append(("/m/a.mkv", "markers_published", [_row("markers_written", "2 marker(s)")]))

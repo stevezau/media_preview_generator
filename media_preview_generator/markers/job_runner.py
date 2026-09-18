@@ -192,6 +192,22 @@ def _sent_paths(files: set[str], sender_paths: dict[str, str]) -> list[str]:
     return sorted({sender_paths.get(path, path) for path in files})
 
 
+def _with_merged_sender_hints(cfg: dict, items: list[ProcessableItem], sender_paths: dict[str, str]) -> dict:
+    """The job's config with each sent file's item ids as ``build_items`` merged them from every sender of the file.
+
+    A retry or verify job lists a file as its first sender gave it, with that path's hints (``_hints_for``); the ids a
+    second sender gave (Plex's, next to Sonarr's) would otherwise be lost. The job's stored config is left as it is.
+    """
+    merged = {
+        sender_paths[item.canonical_path]: dict(item.item_id_by_server)
+        for item in items
+        if item.item_id_by_server and item.canonical_path in sender_paths
+    }
+    if not merged:
+        return cfg
+    return {**cfg, "webhook_item_id_hints": {**(cfg.get("webhook_item_id_hints") or {}), **merged}}
+
+
 def _hints_for(cfg: dict, paths: list[str]) -> dict[str, dict[str, str]]:
     sent_hints = cfg.get("webhook_item_id_hints") or {}
     return {path: sent_hints[path] for path in paths if sent_hints.get(path)}
@@ -447,17 +463,25 @@ def build_items(
         configs = [_all_libraries_listed(cfg) for cfg in registry.configs()]
         mappings = [m for cfg in configs for m in (cfg.path_mappings or [])]
         hints = job_config.get("webhook_item_id_hints") or {}
+        by_path: dict[str, ProcessableItem] = {}
         for raw in _expand_directory_to_media_files(file_paths, mappings):
             canonical, _owners = orchestrator._resolve_webhook_path_to_canonical(raw, configs, log_resolution=False)
-            sender_paths.setdefault(canonical, raw)
-            items.append(
-                ProcessableItem(
-                    canonical_path=canonical,
-                    server_id="",
-                    item_id_by_server=dict(hints.get(raw) or {}),
-                    title=os.path.basename(canonical),
-                )
+            sender_hints = dict(hints.get(raw) or {})
+            known = by_path.get(canonical)
+            if known is not None:
+                # Two senders (Sonarr and Plex, say) reported one file: one item, with each server's id either knows;
+                # the first sender's id wins a clash.
+                for server_id, item_id in sender_hints.items():
+                    known.item_id_by_server.setdefault(server_id, item_id)
+                continue
+            sender_paths[canonical] = raw
+            by_path[canonical] = ProcessableItem(
+                canonical_path=canonical,
+                server_id="",
+                item_id_by_server=sender_hints,
+                title=os.path.basename(canonical),
             )
+        items = list(by_path.values())
     else:
         requested: dict[str, list[str]] = {}
         for entry in job_config.get("libraries") or []:
@@ -974,6 +998,7 @@ def run_intro_credits_job(job_id: str) -> None:
                     items, warnings, sender_paths = build_items(
                         cfg, registry=registry, cancel_check=cancel_check, progress_callback=progress_callback
                     )
+                    cfg = _with_merged_sender_hints(cfg, items, sender_paths)
                 if cancel_check():
                     jm.cancel_job(job_id)
                     return
