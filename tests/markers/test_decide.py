@@ -7,6 +7,7 @@ from dataclasses import replace
 
 import pytest
 
+from media_preview_generator.markers import decide as decide_module
 from media_preview_generator.markers.decide import (
     DecisionContext,
     DecisionStatus,
@@ -1713,12 +1714,16 @@ _REF_AUDIO_WITH_SERVER = (
 )
 
 
-def _ref_group(source):
-    # Rule 8: IntroDB, TheIntroDB and an importer plugin's copy on a server are one crowd source.
-    if source in (S.INTRODB, S.THEINTRODB, S.SERVER_MARKERS_IMPORTED):
+def _ref_group(c):
+    # Rule 8: an importer plugin's copy on a server is the database it imports: SkipDB's is SkipDB again; any other
+    # (IntroDB/TheIntroDB, AniSkip until phase 4 measures it, or one that can't be told) is the crowd source.
+    if c.source is S.SERVER_MARKERS_IMPORTED and c.copied_from == "skipdb":
+        return "skipdb"
+    # IntroDB, TheIntroDB and the other importer copies are one crowd source.
+    if c.source in (S.INTRODB, S.THEINTRODB, S.SERVER_MARKERS_IMPORTED):
         return "introdb/theintrodb"
     # The previous season's audio is the same method on the same show as this season's.
-    return "season_audio" if source is S.SEASON_AUDIO_PREVIOUS else source.value
+    return "season_audio" if c.source is S.SEASON_AUDIO_PREVIOUS else c.source.value
 
 
 def _ref_end(c, duration):
@@ -1803,7 +1808,7 @@ def _ref_agreeing_sets(cands, x):
     sets = [
         s
         for s in sets
-        if len({_ref_group(c.source) for c in s}) >= 2
+        if len({_ref_group(c) for c in s}) >= 2
         # ruling G3: season audio and markers already on servers never agree on their own
         and any(c.source not in (*_REF_SERVER, S.SEASON_AUDIO, S.SEASON_AUDIO_PREVIOUS) for c in s)
     ]
@@ -1812,9 +1817,7 @@ def _ref_agreeing_sets(cands, x):
 
 def _ref_compose(members, mtype, x):
     d = x.duration_ms
-    confirmed = [
-        c for c in members if any(_ref_group(o.source) != _ref_group(c.source) and _ref_agree(c, o, d) for o in members)
-    ]
+    confirmed = [c for c in members if any(_ref_group(o) != _ref_group(c) and _ref_agree(c, o, d) for o in members)]
     suppliers = [c for c in confirmed if c.source not in _REF_SERVER]
     # Checked edge: the best-ranked agreeing non-server candidate (source order first); other edge: the safer value of
     # every confirmed candidate, server markers included (they may shorten the skip).
@@ -1862,7 +1865,7 @@ def _ref_decide_type(mtype, cands, x):
         suspect = mtype is T.INTRO and limit is not None and result.end_ms - result.start_ms > limit
         if suspect and not [c for c in backing if c.source not in _REF_SERVER]:
             return review(result, _REF_LONG_INTRO_CHAPTER)
-        if len({_ref_group(c.source) for c in backing}) >= (1 if suspect else 2):
+        if len({_ref_group(c) for c in backing}) >= (1 if suspect else 2):
             chapter = result
             everyone = {S.CHAPTERS, *(c.source for c in backing)}
             shorter, other = _ref_shorter(mtype, _ref_marker_value(chapter), backing, x, everyone)
@@ -1881,7 +1884,7 @@ def _ref_decide_type(mtype, cands, x):
             ranked = [
                 composed[i] for i in sorted(range(len(composed)), key=lambda i: (_ref_rank(composed[i][1], x), i))
             ]
-            names = " vs ".join(dict.fromkeys(_ref_group(winner.source) for _, winner in ranked))
+            names = " vs ".join(dict.fromkeys(_ref_group(winner) for _, winner in ranked))
             return review(ranked[0][0], f"agreeing sources conflict: {names}")
         merged = list({id(c): c for members in agreeing_sets for c in members}.values())
         result, winner = _ref_compose(merged, mtype, x)
@@ -1889,7 +1892,7 @@ def _ref_decide_type(mtype, cands, x):
             return review(_ref_own_marker(winner, x), "agreeing sources disagree on the other edge")
         reason = "sources agree: " + ", ".join(result.decided_by)
     else:
-        groups = sorted({_ref_group(c.source) for c in sane})
+        groups = sorted({_ref_group(c) for c in sane})
         ranked = sorted(sane, key=lambda c: _ref_rank(c, x))
 
         def may_decide_alone(c):
@@ -1899,8 +1902,7 @@ def _ref_decide_type(mtype, cands, x):
         proposal = next((c for c in ranked if may_decide_alone(c)), None)
         if x.publish_when != "medium" or proposal is None or len(groups) > 1:
             disagree = any(
-                _ref_group(a.source) != _ref_group(b.source) and not _ref_agree(a, b, d)
-                for a, b in itertools.combinations(sane, 2)
+                _ref_group(a) != _ref_group(b) and not _ref_agree(a, b, d) for a, b in itertools.combinations(sane, 2)
             )
             kinds = {c.source for c in sane}
             # ruling G3 again: only season audio and markers already on servers, and they agree
@@ -1921,9 +1923,9 @@ def _ref_decide_type(mtype, cands, x):
 
     far = [c for c in guard_pool if abs(_ref_value(c, d) - _ref_marker_value(result)) > tol]
     contradicting = {
-        _ref_group(c.source)
+        _ref_group(c)
         for a, b in itertools.combinations(far, 2)
-        if _ref_group(a.source) != _ref_group(b.source) and _ref_agree(a, b, d)
+        if _ref_group(a) != _ref_group(b) and _ref_agree(a, b, d)
         for c in (a, b)
     }
     if contradicting:
@@ -2108,6 +2110,13 @@ def _random_file(rng):
     # last, so every other draw of a seed stays what it was before the limit existed.
     if rng.random() < 0.5:
         x = replace(x, intro_chapter_limit_ms=rng.choice((20_000, 35_000, 50_000)))
+    # The database an importer plugin's copy names (rule 8), drawn after everything else for the same reason. A copy
+    # that appears twice (the same object) gets one name.
+    named = {}
+    for c in cands:
+        if c.source is S.SERVER_MARKERS_IMPORTED and id(c) not in named:
+            named[id(c)] = replace(c, copied_from=rng.choice(("", "introdb", "skipdb", "aniskip")))
+    cands = [named.get(id(c), c) for c in cands]
     return cands, x, locked
 
 
@@ -2134,6 +2143,122 @@ class TestMatchesReference:
             seen.update(_reason_kind(dec.reason) for dec in got.values())
         # A generator that stopped reaching a rule would make this test pass vacuously.
         assert seen == set(_EVERY_REASON)
+
+
+def _checked_edge(marker):
+    return marker.end_ms if marker.type in _REF_START_TYPES else marker.start_ms
+
+
+def _decide_unshortened(cands, x, locked):
+    """decide() without rule 7's last step (a server's own credits/preview start moving a decided start later)."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(decide_module, "_shorten_to_server_markers", lambda decision, sane, ctx: decision)
+        return decide(cands, x, locked)
+
+
+def _unlocked_decided(decision):
+    return decision.status is DecisionStatus.DECIDED and not decision.marker.locked
+
+
+class TestProperties:
+    """Properties of the finished decide() over the same dense random files as the reference (chapters, every crowd
+    source, SkipDB, season audio and its hint, credit text, several servers' own markers and importer copies naming each
+    database, locks, both levels). The phase-1 deep review's fuzz checked the first three; the rest pin rulings R2, G3
+    and rules 6-7 as properties rather than cells."""
+
+    SEEDS = (20260913, 7, 1234)
+    FILES = 1000
+
+    def _files(self, seed):
+        rng = random.Random(seed)
+        for _ in range(self.FILES):
+            yield _random_file(rng)
+
+    @pytest.mark.parametrize("seed", SEEDS)
+    def test_rule_7_only_moves_a_decided_credits_or_preview_start_later(self, seed):
+        moved = 0
+        for cands, x, locked in self._files(seed):
+            got, raw = decide(cands, x, locked), _decide_unshortened(cands, x, locked)
+            for mtype in T:
+                shortened, before = got[mtype], raw[mtype]
+                if mtype in _REF_START_TYPES:  # intros and recaps are never moved
+                    assert shortened == before, (cands, x)
+                elif _unlocked_decided(shortened):  # never turns Needs review into decided, never lengthens
+                    assert _unlocked_decided(before), (cands, x)
+                    assert shortened.marker.start_ms >= before.marker.start_ms, (cands, x)
+                    assert shortened.marker.end_ms == before.marker.end_ms, (cands, x)
+                    moved += shortened.marker != before.marker
+                elif _unlocked_decided(before):  # the moved start failed sanity: the unmoved marker is proposed
+                    assert shortened.status is DecisionStatus.NEEDS_REVIEW, (cands, x)
+                    assert shortened.proposed == before.marker and shortened.reason.endswith("fails sanity checks")
+                else:
+                    assert shortened == before, (cands, x)
+        assert moved  # a generator that stopped reaching rule 7 would pass this vacuously
+
+    @pytest.mark.parametrize("seed", SEEDS)
+    def test_season_audio_and_markers_on_servers_never_decide_on_their_own(self, seed):
+        only_agree = {*_REF_AUDIO, *_REF_SERVER}
+        for cands, x, locked in self._files(seed):
+            for decision in decide(cands, x, locked).values():
+                if _unlocked_decided(decision):
+                    assert not {S(s) for s in decision.marker.decided_by} <= only_agree, (cands, x, decision)
+
+    @pytest.mark.parametrize("seed", SEEDS)
+    def test_markers_on_servers_never_supply_the_checked_edge_unless_they_shortened_it(self, seed):
+        for cands, x, locked in self._files(seed):
+            for mtype, decision in decide(cands, x, locked).items():
+                if not _unlocked_decided(decision):
+                    continue
+                sane = [c for c in cands if c.type is mtype and _ref_is_sane(c, x)]
+                edge = _checked_edge(decision.marker)
+                from_a_source = any(_ref_value(c, x.duration_ms) == edge for c in sane if c.source not in _REF_SERVER)
+                moved_by_a_server = shortened_by(decision.reason) is not None and any(
+                    c.start_ms == edge for c in sane if c.source is S.SERVER_MARKERS
+                )
+                assert from_a_source or moved_by_a_server, (cands, x, decision)
+
+    @pytest.mark.parametrize("seed", SEEDS)
+    def test_markers_on_servers_only_shorten_a_skip_decided_on_the_same_edge(self, seed):
+        compared = 0
+        for cands, x, locked in self._files(seed):
+            got = decide(cands, x, locked)
+            without = decide([c for c in cands if c.source not in _REF_SERVER], x, locked)
+            for mtype in T:
+                with_servers, bare = got[mtype], without[mtype]
+                if not (_unlocked_decided(with_servers) and _unlocked_decided(bare)):
+                    continue
+                if shortened_by(with_servers.reason) is None and (
+                    _checked_edge(with_servers.marker) != _checked_edge(bare.marker)
+                ):
+                    continue  # a server's agreement confirmed another source's edge: another decision, not a longer one
+                compared += 1
+                assert with_servers.marker.start_ms >= bare.marker.start_ms, (cands, x)
+                assert with_servers.marker.end_ms <= bare.marker.end_ms, (cands, x)
+        assert compared
+
+    @pytest.mark.parametrize("seed", SEEDS)
+    def test_medium_only_adds_single_source_decisions_to_what_high_decides(self, seed):
+        for cands, x, locked in self._files(seed):
+            high = decide(cands, replace(x, publish_when="high"), locked)
+            medium = decide(cands, replace(x, publish_when="medium"), locked)
+            for mtype in T:
+                if medium[mtype] == high[mtype]:
+                    continue
+                if high[mtype].status is DecisionStatus.DECIDED:
+                    # Only a decision Medium adds of the other type in the pair can take it back (rules 9-10).
+                    assert medium[mtype].status is DecisionStatus.NEEDS_REVIEW, (cands, x)
+                    assert medium[mtype].reason in ("intro and recap overlap", "preview overlaps credits")
+                elif medium[mtype].status is DecisionStatus.DECIDED:
+                    assert medium[mtype].reason.startswith("single source ("), (cands, x)
+
+    @pytest.mark.parametrize("seed", SEEDS)
+    def test_every_decided_marker_passes_the_sanity_checks(self, seed):
+        for cands, x, locked in self._files(seed):
+            for mtype, decision in decide(cands, x, locked).items():
+                if _unlocked_decided(decision):
+                    marker = decision.marker
+                    probe = Candidate(mtype, marker.start_ms, marker.end_ms, S.CHAPTERS)
+                    assert sanity_problem(probe, x) is None, (cands, x, decision)
 
 
 class TestSeasonAudioSources:
@@ -2475,3 +2600,152 @@ class TestImportedCopiesJoinTheDatabaseTheyImport:
         d = decide([intro(S.SKIPDB, 127_000, 157_000), own], ctx("high", types=(T.INTRO,)), {})[T.INTRO]
         assert (d.status, d.marker.start_ms, d.marker.end_ms) == (DecisionStatus.DECIDED, 128_000, 157_000)
         assert d.marker.decided_by == ("skipdb", "server_markers")
+
+
+# Every source alone and in every pair (an importer plugin's copy once per database it can name), for every marker type
+# at both levels: the cells rules 3, 4, 6, 7 and 8, R2 and G3 give, written out plainly rather than through decide.py.
+_MATRIX_KINDS = (
+    (S.CHAPTERS, ""),
+    (S.THEINTRODB, ""),
+    (S.INTRODB, ""),
+    (S.SKIPDB, ""),
+    (S.SEASON_AUDIO, ""),
+    (S.SEASON_AUDIO_PREVIOUS, ""),
+    (S.CREDITS_TEXT, ""),
+    (S.SERVER_MARKERS, ""),
+    (S.SERVER_MARKERS_IMPORTED, ""),
+    (S.SERVER_MARKERS_IMPORTED, "introdb"),
+    (S.SERVER_MARKERS_IMPORTED, "skipdb"),
+    (S.SERVER_MARKERS_IMPORTED, "aniskip"),
+)
+# Two sane places per type, far enough apart that answers at the two never agree.
+_MATRIX_NEAR = {T.INTRO: (60_000, 90_000), T.RECAP: (10_000, 40_000), T.CREDITS: (1_250_000, None),
+                T.PREVIEW: (1_290_000, 1_310_000)}  # fmt: skip
+_MATRIX_FAR = {T.INTRO: (150_000, 200_000), T.RECAP: (100_000, 140_000), T.CREDITS: (1_100_000, None),
+               T.PREVIEW: (1_000_000, 1_020_000)}  # fmt: skip
+_MATRIX_ONLY_AGREE = {S.SEASON_AUDIO, S.SEASON_AUDIO_PREVIOUS, S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED}
+
+
+def _kind_id(kind):
+    source, copied_from = kind
+    return source.value + (f"[{copied_from}]" if copied_from else "")
+
+
+def _matrix_candidate(kind, mtype, place):
+    source, copied_from = kind
+    start, end = place[mtype]
+    return Candidate(
+        mtype, start, end, source, origin="plex-1" if source in _REF_SERVER else "", copied_from=copied_from
+    )
+
+
+def _plain_group(kind):
+    source, copied_from = kind
+    if source in (S.INTRODB, S.THEINTRODB):
+        return "crowd"
+    if source is S.SERVER_MARKERS_IMPORTED:
+        return "skipdb" if copied_from == "skipdb" else "crowd"  # AniSkip's and an unknown copy: crowd until phase 4
+    return "season_audio" if source is S.SEASON_AUDIO_PREVIOUS else source.value
+
+
+def _alone_at_medium(source, mtype):
+    """Rule 6 (and Q1, F3): credit text alone, SkipDB alone for intros and recaps."""
+    return source is S.CREDITS_TEXT or (source is S.SKIPDB and mtype in (T.INTRO, T.RECAP))
+
+
+def _credited(*sources):
+    rank = {s: (ORDER.index(s.value) if s.value in ORDER else len(ORDER), list(S).index(s)) for s in sources}
+    return tuple(s.value for s in sorted(set(sources), key=rank.__getitem__))
+
+
+def _own(c):
+    return (c.start_ms, DUR if c.end_ms is None else c.end_ms)
+
+
+def _expected_alone(c, level):
+    if c.source is S.CHAPTERS:
+        return DecisionStatus.DECIDED, _own(c), ("chapters",), "chapters"
+    if level == "medium" and _alone_at_medium(c.source, c.type):
+        return DecisionStatus.DECIDED, _own(c), (c.source.value,), f"single source ({c.source.value})"
+    return DecisionStatus.NEEDS_REVIEW, None, None, "sources don't agree yet"
+
+
+def _expected_agreeing(kinds, a, b, level):
+    sources = {a.source, b.source}
+    if S.CHAPTERS in sources:  # one agreeing source leaves a chapter as it is (rule 3)
+        return DecisionStatus.DECIDED, _own(a), ("chapters",), "chapters"
+    if _plain_group(kinds[0]) == _plain_group(kinds[1]):  # one source twice (rule 8): as if alone
+        deciders = [c.source for c in (a, b) if _alone_at_medium(c.source, c.type)]
+        if level == "medium" and deciders:
+            return DecisionStatus.DECIDED, _own(a), _credited(*sources), f"single source ({deciders[0].value})"
+        return DecisionStatus.NEEDS_REVIEW, None, None, "sources don't agree yet"
+    if sources <= _MATRIX_ONLY_AGREE:  # R2, G3, rule 7: nothing here may supply the times
+        if sources & set(_REF_SERVER) and sources - set(_REF_SERVER):
+            return DecisionStatus.NEEDS_REVIEW, None, None, _REF_AUDIO_WITH_SERVER
+        return DecisionStatus.NEEDS_REVIEW, None, None, "sources don't agree yet"
+    return DecisionStatus.DECIDED, _own(a), _credited(*sources), "sources agree: " + ", ".join(_credited(*sources))
+
+
+def _expected_disagreeing(kinds, near, far, level):
+    chapter = next((c for c in (near, far) if c.source is S.CHAPTERS), None)
+    if chapter is not None:  # one contradicting source never overrides a chapter (rule 3)
+        other = far if chapter is near else near
+        start, end = _own(chapter)
+        # Rule 7: a server's own credits/preview starting inside the decided skip, more than 10 s from both ends,
+        # moves the start to it.
+        if other.source is S.SERVER_MARKERS and chapter.type in (T.CREDITS, T.PREVIEW):
+            if start + 10_000 < other.start_ms < end - 10_000:
+                note = "chapters; start shortened to the server's own marker (plex-1)"
+                return DecisionStatus.DECIDED, (other.start_ms, end), ("chapters", "server_markers"), note
+        return DecisionStatus.DECIDED, (start, end), ("chapters",), "chapters"
+    if _plain_group(kinds[0]) == _plain_group(kinds[1]):
+        if level == "medium" and any(_alone_at_medium(c.source, c.type) for c in (near, far)):
+            return DecisionStatus.NEEDS_REVIEW, None, None, "source disagrees with itself"
+        return DecisionStatus.NEEDS_REVIEW, None, None, "sources don't agree yet"
+    return DecisionStatus.NEEDS_REVIEW, None, None, "sources disagree: "
+
+
+def _got(decision):
+    marker = decision.marker
+    shown = (marker.start_ms, marker.end_ms) if marker else None
+    return decision.status, shown, marker.decided_by if marker else None, decision.reason
+
+
+class TestDecisionMatrix:
+    """publish_when x every source alone and in every pair x every marker type (testing.md "Cover the matrix")."""
+
+    @pytest.mark.parametrize("level", ["high", "medium"])
+    @pytest.mark.parametrize("mtype", list(T), ids=lambda t: t.value)
+    @pytest.mark.parametrize("kind", _MATRIX_KINDS, ids=_kind_id)
+    def test_alone(self, kind, mtype, level):
+        c = _matrix_candidate(kind, mtype, _MATRIX_NEAR)
+        assert _got(decide([c], ctx(level, types=(mtype,)), {})[mtype]) == _expected_alone(c, level)
+
+    @pytest.mark.parametrize("level", ["high", "medium"])
+    @pytest.mark.parametrize("mtype", list(T), ids=lambda t: t.value)
+    @pytest.mark.parametrize(
+        "kinds",
+        list(itertools.combinations_with_replacement(_MATRIX_KINDS, 2)),
+        ids=lambda ks: "+".join(_kind_id(k) for k in ks),
+    )
+    def test_agreeing_pair(self, kinds, mtype, level):
+        a, b = (_matrix_candidate(k, mtype, _MATRIX_NEAR) for k in kinds)
+        expected = _expected_agreeing(kinds, a, b, level)
+        for order in ([a, b], [b, a]):
+            assert _got(decide(order, ctx(level, types=(mtype,)), {})[mtype]) == expected
+
+    @pytest.mark.parametrize("level", ["high", "medium"])
+    @pytest.mark.parametrize("mtype", list(T), ids=lambda t: t.value)
+    @pytest.mark.parametrize(
+        "kinds",
+        list(itertools.product(_MATRIX_KINDS, repeat=2)),
+        ids=lambda ks: "near-" + _kind_id(ks[0]) + "+far-" + _kind_id(ks[1]),
+    )
+    def test_disagreeing_pair(self, kinds, mtype, level):
+        near = _matrix_candidate(kinds[0], mtype, _MATRIX_NEAR)
+        far = _matrix_candidate(kinds[1], mtype, _MATRIX_FAR)
+        status, shown, decided_by, reason = _expected_disagreeing(kinds, near, far, level)
+        for order in ([near, far], [far, near]):
+            got = _got(decide(order, ctx(level, types=(mtype,)), {})[mtype])
+            assert got[:3] == (status, shown, decided_by)
+            assert got[3].startswith(reason) if reason.endswith(": ") else got[3] == reason

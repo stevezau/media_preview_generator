@@ -43,7 +43,9 @@ _INDEPENDENCE_GROUP = {
 }
 # Markers an importer plugin wrote on a Jellyfin/Emby server are the database it imports again (rule 8; ruling
 # 2026-09-16): a SkipDB importer's copy never agrees with SkipDB. AniSkip isn't a source yet and nothing has measured
-# what it copies, so its copies stay with the crowd group until phase 4 does (precision first).
+# what it copies, so its copies stay with the crowd group until phase 4 does (precision first). Only the SkipDB row
+# changes a result today: the other two restate the default above, spelled out so the AniSkip choice is a visible
+# decision, not a fallback someone "simplifies" away.
 _IMPORTED_GROUP = {"introdb": _INTRODB_GROUP, "skipdb": Source.SKIPDB.value, "aniskip": _INTRODB_GROUP}
 # At "Medium" a lone source publishes only when it checks this file's cut itself (rule 6): chapters, SkipDB's
 # duration-matched intros and recaps, and credits text, which reads this file's own frames (owner, Q1, 2026-09-16).

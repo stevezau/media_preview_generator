@@ -20,8 +20,9 @@ from media_preview_generator.markers.sources.online import LookupResult
 from media_preview_generator.processing.generator import CodecNotSupportedError
 from media_preview_generator.servers.base import ServerType
 from tests.markers import test_pipeline
-from tests.markers.fakes import ready_publisher
+from tests.markers.fakes import ready_publisher, server_config
 from tests.markers.test_pipeline import DUR, _clients, _ctx, _probe, _registry, _run
+from tests.markers.test_pipeline import _rows as _rows_by_server
 
 media = test_pipeline.media
 store = test_pipeline.store
@@ -117,6 +118,39 @@ class TestWorkerHandOff:
             "end" in k for k in sent if k.startswith("credits")
         )
         assert emby.publisher.projection_note([decided], duration_ms=DUR) == CREDITS_BEFORE_END_NOTE
+
+    def test_high_publishes_it_with_a_servers_own_agreeing_marker_q2(self, store, media, find):
+        # End to end: a second server (Intro & Credits off there, so evidence only) serves its own Outro 1.75 s after
+        # the text's start; the two agree, and the published start is the text's own (rule 7: never the server's).
+        ctx = ctx_for(store, media, server_markers=True)
+        ctx.registry.configs_by_id["jellyfin-1"] = server_config(
+            "jellyfin-1",
+            ServerType.JELLYFIN,
+            root=test_pipeline._media_root(media),
+            markers={"enabled": False, "library_ids": None},
+        )
+        ctx.registry.get("jellyfin-1").get_media_segments.return_value = [
+            {"Type": "Outro", "StartTicks": 1_292_000 * 10_000, "EndTicks": DUR * 10_000}
+        ]
+        plex = ready_publisher()
+        out, _ = _run(ctx, media, {"plex-1": plex}, stage="process")
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        decided = Marker(T.CREDITS, 1_290_250, DUR, ("credits_text", "server_markers"))
+        assert plex.write.call_args.args == ("item-plex-1", [decided])
+        assert list(_rows_by_server(out)) == ["plex-1"]  # nothing is written to the evidence-only server
+
+    def test_high_publishes_it_with_an_agreeing_online_source(self, store, media, find):
+        clients = _clients(skipdb=LookupResult("ok", (Candidate(T.CREDITS, 1_295_000, None, Source.SKIPDB),)))
+        # SkipDB alone never decides credits (rule 6); with the text agreeing it does, and as the first of the two in
+        # the source order its start is published.
+        ctx = ctx_for(store, media, clients=clients, skipdb=True)
+        plex = ready_publisher()
+        out, _ = _run(ctx, media, {"plex-1": plex}, stage="process")
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert plex.write.call_args.args == (
+            "item-plex-1",
+            [Marker(T.CREDITS, 1_295_000, DUR, ("skipdb", "credits_text"))],
+        )
 
     def test_credits_decided_by_other_sources_never_take_a_worker(self, store, media, find):
         clients = _clients(skipdb=LookupResult("ok", (Candidate(T.CREDITS, 1_291_000, None, Source.SKIPDB),)),
