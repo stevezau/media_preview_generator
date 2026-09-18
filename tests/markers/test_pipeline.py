@@ -29,6 +29,7 @@ from media_preview_generator.markers.publishers.base import (
 from media_preview_generator.markers.settings import load_global, validate_global
 from media_preview_generator.markers.sources.online import LookupResult
 from media_preview_generator.markers.store import MarkerStore
+from media_preview_generator.processing.generator import CodecNotSupportedError
 from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.servers.base import Library, ServerType
 from tests.markers.fakes import FakeClient, FakePlexItems, FakeRegistry, ready_publisher, server_config
@@ -1306,6 +1307,11 @@ class TestOnlineLookups:
 # SourceLimiter.acquire() would (spec finding 4: this used to vanish into a DEBUG line with no trace on the file
 # or the job).
 TIDB_BUDGET_EXHAUSTED = LookupResult("unavailable", detail="TheIntroDB budget_exhausted")
+# Several episodes of one season without the season chapter step, which would run the real ffprobe on the siblings.
+NO_CHAPTERS = {
+    "sources": [{"id": "chapters", "enabled": False}, {"id": "theintrodb", "enabled": True}],
+    "detect": {"intro": True, "credits": False},
+}
 SKIPDB_BUDGET_EXHAUSTED = LookupResult("unavailable", detail="SkipDB budget_exhausted")
 INTRODB_BUDGET_EXHAUSTED = LookupResult("unavailable", detail="IntroDB budget_exhausted")
 
@@ -1474,7 +1480,8 @@ class TestBudgetExhaustedJobWarning:
         others = [os.path.join(os.path.dirname(media), f"Rick and Morty (2013) - S01E0{n}.mkv") for n in (2, 3)]
         for p in others:
             open(p, "wb").write(b"y" * 10)
-        ctx = _ctx(store, reg, clients=_clients(theintrodb=LookupResult("unavailable", detail=detail)))
+        clients = _clients(theintrodb=LookupResult("unavailable", detail=detail))
+        ctx = _ctx(store, reg, clients=clients, settings_raw=NO_CHAPTERS)
         for p in (media, *others):
             _run(ctx, p, {"plex-1": ready_publisher()})
         assert pipeline.budget_exhausted_warnings(ctx) == [
@@ -1517,6 +1524,118 @@ class TestBudgetExhaustedJobWarning:
         assert len(budget_lines) == 1
         assert budget_lines[0].levelname == "WARNING"
         assert "TheIntroDB" in budget_lines[0].getMessage()
+
+
+KEY_REJECTED = LookupResult("unavailable", detail="TheIntroDB rejected the API key (HTTP 401)")
+
+
+class TestJobWideRefusalsAcrossStages:
+    """A file a source refused for the whole job (daily budget, API key) is counted once, by the stage that finishes
+    the file, whichever stage asked: forced or not, handed from the checking thread to a worker, or rerun on the CPU
+    after a GPU error."""
+
+    @staticmethod
+    def _job(store, media, refused, *, force):
+        reg = _registry(media, ServerType.PLEX)
+        detector = MagicMock(return_value=[])
+        spec = LocalDetectorSpec(Source.SEASON_AUDIO, frozenset({T.INTRO}), detector)
+        if force:  # an earlier normal run stored TheIntroDB's answer, so a forced worker stage doesn't ask it again
+            answered = _clients(theintrodb=LookupResult("ok", (TIDB_INTRO,)))
+            _run(
+                _ctx(store, reg, clients=answered, detectors=(spec,), settings_raw=INTRO_ONLY),
+                media,
+                {},
+                stage="process",
+            )
+        client = FakeClient(refused)
+        ctx = _ctx(store, reg, clients={"theintrodb": client}, detectors=(spec,), settings_raw=INTRO_ONLY, force=force)
+        return ctx, client, detector
+
+    @staticmethod
+    def _counted_once(ctx, out, refused):
+        (warning,) = pipeline.budget_exhausted_warnings(ctx)
+        assert "1 file was checked without it" in warning
+        if refused is TIDB_BUDGET_EXHAUSTED:
+            assert warning.startswith("TheIntroDB's daily lookup limit was reached")
+            assert out.message.endswith("; TheIntroDB not checked (daily limit reached)")
+        else:
+            assert warning.startswith(refused.detail)
+
+    @pytest.mark.parametrize("refused", [TIDB_BUDGET_EXHAUSTED, KEY_REJECTED], ids=["budget", "key"])
+    @pytest.mark.parametrize("force", [False, True], ids=["normal", "forced"])
+    def test_a_file_handed_to_a_worker(self, store, media, refused, force):
+        ctx, client, _ = self._job(store, media, refused, force=force)
+        assert _run(ctx, media, {"plex-1": ready_publisher()})[0] is None
+        out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, stage="process")
+        self._counted_once(ctx, out, refused)
+        # A forced run asks each source once; a normal one asks again where nothing is stored.
+        assert len(client.calls) == (1 if force else 2)
+        assert ctx._pending_skips == {}
+
+    @pytest.mark.parametrize("refused", [TIDB_BUDGET_EXHAUSTED, KEY_REJECTED], ids=["budget", "key"])
+    @pytest.mark.parametrize("force", [False, True], ids=["normal", "forced"])
+    def test_a_file_rerun_on_the_cpu_after_a_gpu_error(self, store, media, refused, force):
+        ctx, client, detector = self._job(store, media, refused, force=force)
+        detector.side_effect = [CodecNotSupportedError("the GPU decoded no frames"), []]
+        assert _run(ctx, media, {"plex-1": ready_publisher()})[0] is None
+        with pytest.raises(CodecNotSupportedError):
+            _run(ctx, media, {"plex-1": ready_publisher()}, stage="process", gpu="NVIDIA", gpu_device_path="cuda:0")
+        assert pipeline.budget_exhausted_warnings(ctx) == []  # not finished yet
+        out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, stage="process")
+        self._counted_once(ctx, out, refused)
+        assert len(client.calls) == (1 if force else 3)
+        assert ctx._pending_skips == {}
+
+    @pytest.mark.parametrize("force", [False, True], ids=["normal", "forced"])
+    def test_a_worker_stage_that_gets_an_answer_is_not_counted(self, store, media, force):
+        # The budget reset (00:00 UTC) between the stages. A forced worker stage doesn't ask again, so there the
+        # refusal it was handed stands.
+        ctx, client, _ = self._job(store, media, TIDB_BUDGET_EXHAUSTED, force=force)
+        assert _run(ctx, media, {"plex-1": ready_publisher()})[0] is None
+        client.result = LookupResult("ok", (TIDB_INTRO,))
+        _run(ctx, media, {"plex-1": ready_publisher()}, stage="process")
+        assert len(pipeline.budget_exhausted_warnings(ctx)) == (1 if force else 0)
+
+    def test_a_file_that_kept_changing_leaves_nothing_behind(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        ctx = _ctx(store, reg, clients={"theintrodb": FakeClient(TIDB_BUDGET_EXHAUSTED)}, settings_raw=INTRO_ONLY)
+        ticks = iter(range(1, 100))
+
+        def probe(path, *, ffprobe):
+            os.utime(path, ns=(next(ticks), next(ticks)))  # replaced on every attempt
+            return _probe()
+
+        out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe_effect=probe)
+        assert out.outcome_key == FileOutcome.FAILED.value and "kept changing" in out.message
+        assert ctx._pending_skips == {} and pipeline.budget_exhausted_warnings(ctx) == []
+
+
+class TestRealTheIntroDbRefusals:
+    """The job warning recognises the refusals the real TheIntroDB client writes, not strings copied into a test."""
+
+    @pytest.mark.parametrize(
+        ("key", "status"),
+        [("tidb-key-123", 401), ("tidb-key-123", 403), ("", 401), ("tidb-key" + chr(0x200B), None)],
+        ids=["rejected-401", "rejected-403", "key-required", "key-unsendable"],
+    )
+    def test_one_job_warning_for_every_file(self, store, media, key, status):
+        from media_preview_generator.markers.sources.ratelimit import Acquire, SourceLimiter
+        from media_preview_generator.markers.sources.theintrodb import TheIntroDbClient
+
+        limiter = MagicMock(spec=SourceLimiter)
+        limiter.acquire.return_value = Acquire.ALLOWED
+        session = MagicMock()
+        session.get.side_effect = lambda *a, **kw: MagicMock(status_code=status, headers={})
+        client = TheIntroDbClient(key, limiter=limiter, session=session)
+        detail = client.lookup(MediaIds("episode", tvdb="1", season=1, episode=1), duration_ms=DUR, priority=2).detail
+        other = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E02.mkv")
+        open(other, "wb").write(b"y" * 10)
+        ctx = _ctx(store, _registry(media, ServerType.PLEX), clients={"theintrodb": client}, settings_raw=NO_CHAPTERS)
+        for path in (media, other):
+            _run(ctx, path, {"plex-1": ready_publisher()})
+        assert pipeline.budget_exhausted_warnings(ctx) == [
+            f"{detail}: 2 files were checked without it. Check the TheIntroDB API key in Settings → Intro & Credits."
+        ]
 
 
 def _ticks(ms):

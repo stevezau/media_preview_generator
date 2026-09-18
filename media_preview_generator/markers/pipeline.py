@@ -78,7 +78,7 @@ from .sources.online import LookupResult, is_budget_exhausted
 from .sources.ratelimit import PRIORITY_LOW, RESET_TIME_LABEL
 from .sources.server_markers import READER_VERSION, imported_detail, importer_plugin, read_server_markers
 from .sources.skipdb import SkipDbClient
-from .sources.theintrodb import TheIntroDbClient
+from .sources.theintrodb import TheIntroDbClient, is_key_refusal
 from .store import EvidenceRow, FileRecord, ItemPublishStateRow, MarkerStore, get_marker_store
 
 NO_DATA_RETRY = timedelta(days=14)
@@ -97,9 +97,6 @@ PARSER_VERSIONS = {
     Source.SKIPDB: skipdb.PARSER_VERSION,
 }
 _STORED_LOOKUPS = ("ok", "no_data")
-# How the online clients word an ``unavailable`` answer for a refused (or missing, or unsendable) API key, after the
-# source's label (sources/online.py ``paced_get_json``'s ``auth_refused``, sources/theintrodb.py).
-_KEY_REFUSALS = ("rejected the API key", "requires an API key", "API key contains invalid characters")
 _CHAPTERS_AND_SERVERS = frozenset({Source.CHAPTERS.value, *(s.value for s in SERVER_SOURCES)})
 # Plex and Emby can't tell our markers from their own, and Plex shows one marker set per item across its versions, so
 # their markers are never read back from an item we published to. Jellyfin's reader leaves ours out itself.
@@ -265,6 +262,11 @@ class PipelineContext:
     # The same for a source that refused the API key: its first refusal (e.g. "TheIntroDB rejected the API key (HTTP
     # 401)") and how many files were checked without it.
     _key_refused: dict[Source, tuple[str, int]] = field(default_factory=dict, repr=False)
+    # Per file whose run was handed on before it finished (to a worker, to the worker's CPU rerun, or to a retry after
+    # it changed on disk): the sources its earlier stages were checked without for the whole job's reason, with the
+    # answer. The stage that finishes the file counts them even when it doesn't ask that source again (a forced run
+    # asks each source once), and drops one that answers when it is asked again.
+    _pending_skips: dict[str, dict[Source, str]] = field(default_factory=dict, repr=False)
     # Sources whose running out this job already logged.
     _budget_warned: set[Source] = field(default_factory=set, repr=False)
     _budget_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -896,11 +898,14 @@ def _warn_budget_exhausted(ctx: PipelineContext, source: Source) -> None:
         )
 
 
-def _key_refused(source: Source, detail: str) -> bool:
-    """Whether an ``unavailable`` answer means the source refused this app's API key (or its lack of one), so every
-    lookup of the job fails the same way until the user changes the key."""
-    label = _ONLINE_LABELS[source]
-    return any(detail.startswith(f"{label} {refusal}") for refusal in _KEY_REFUSALS)
+def _job_wide_refusal(source: Source, result: LookupResult | None) -> str | None:
+    """The answer when a source refused a lookup for a reason that holds for the whole job: its daily budget ran out,
+    or (TheIntroDB) it refused the API key, requires one, or the key can't be sent. None for anything else."""
+    if result is None or result.status != "unavailable":
+        return None
+    if is_budget_exhausted(result.detail) or (source is Source.THEINTRODB and is_key_refusal(result.detail)):
+        return result.detail
+    return None
 
 
 def _count_skipped(ctx: PipelineContext, skipped: dict[Source, str]) -> None:
@@ -955,31 +960,33 @@ def budget_exhausted_warnings(ctx: PipelineContext) -> list[str]:
 
 def _lookup(
     client: Any, source: Source, ids: MediaIds, rec: FileRecord, ctx: PipelineContext, cancel_check
-) -> str | None:
+) -> LookupResult | None:
     """Ask one online source and store what it found.
 
     Returns:
-        The source's answer when it refused for the whole job (its daily budget ran out, or it refused the API key),
-        so the caller can note it on the file and count the file on the job once its run finishes; otherwise None.
+        The source's answer (stored when ``ok`` or ``no_data``), or None when the client raised or answered with
+        something that isn't a ``LookupResult``.
     """
     try:
         result = client.lookup(ids, duration_ms=rec.duration_ms, priority=ctx.priority(), cancel_check=cancel_check)
     except Exception as exc:
         logger.warning("{} lookup failed for {}: {}", _ONLINE_LABELS[source], rec.canonical_path, type(exc).__name__)
         return None
-    if not isinstance(result, LookupResult) or result.status not in _STORED_LOOKUPS:
-        # unavailable / not_applicable: nothing is stored, so the next run asks again.
-        if isinstance(result, LookupResult) and is_budget_exhausted(result.detail):
-            _warn_budget_exhausted(ctx, source)
-            return result.detail
+    if not isinstance(result, LookupResult):
         logger.debug("{} lookup for {}: {}", _ONLINE_LABELS[source], rec.canonical_path, result)
-        # The client logs a refused key itself, once per job.
-        refused = isinstance(result, LookupResult) and result.status == "unavailable"
-        return result.detail if refused and _key_refused(source, result.detail) else None
-    ctx.store.replace_evidence(
-        rec.id, source, list(result.candidates), detail=result.detail, version=PARSER_VERSIONS[source]
-    )
-    return None
+        return None
+    if result.status in _STORED_LOOKUPS:
+        ctx.store.replace_evidence(
+            rec.id, source, list(result.candidates), detail=result.detail, version=PARSER_VERSIONS[source]
+        )
+        return result
+    # unavailable / not_applicable: nothing is stored, so the next run asks again. A refused TheIntroDB key is logged
+    # by its client, once per client (a job builds its own clients).
+    if is_budget_exhausted(result.detail):
+        _warn_budget_exhausted(ctx, source)
+    else:
+        logger.debug("{} lookup for {}: {}", _ONLINE_LABELS[source], rec.canonical_path, result)
+    return result
 
 
 def _importer_plugin(ctx: PipelineContext, owner: _Owning) -> tuple[bool, str | None]:
@@ -1515,7 +1522,10 @@ def _attempt(
     phase: Callable[[str], None],
     cancel_check: Callable[[], bool] | None,
     pause_check: Callable[[], bool] | None,
+    skipped: dict[Source, str],
 ) -> ItemOutcome | None:
+    """One run of a file; ``skipped`` (updated in place) holds the sources it was checked without for the whole job's
+    reason, carried over from the file's earlier stages (``_run`` counts them once the file has its outcome)."""
     path = item.canonical_path
 
     def cancelled() -> bool:
@@ -1584,8 +1594,6 @@ def _attempt(
     gather_all = ctx.force
     decisions = _decide(ctx, rec, types, intro_limit)
     lookup_ids: MediaIds | None = None
-    # Sources this run was checked without for the whole job's reason (a used-up budget, a refused key): the answer.
-    skipped: dict[Source, str] = {}
     for source_id in ctx.settings.ordered_enabled_sources():
         source = Source(source_id)
         refresh = _refreshing(ctx, path, source)
@@ -1611,9 +1619,12 @@ def _attempt(
             if lookups_allowed and client is not None and _needs_lookup(ctx, rec, source, refresh):
                 lookup_ids = lookup_ids or _lookup_ids(ids, servers)
                 phase(f"Looking up {_ONLINE_LABELS[source]}…")
-                refusal = _lookup(client, source, lookup_ids, rec, ctx, cancel_check)
+                result = _lookup(client, source, lookup_ids, rec, ctx, cancel_check)
+                refusal = _job_wide_refusal(source, result)
                 if refusal is not None:
                     skipped[source] = refusal
+                elif result is not None and result.status in _STORED_LOOKUPS:
+                    skipped.pop(source, None)  # an earlier stage's refusal no longer holds (the budget reset)
         elif source is Source.SERVER_MARKERS:
             phase("Reading markers already on servers…")
             first_read_only = not gather_all and _all_decided(decisions, types)
@@ -1664,7 +1675,6 @@ def _attempt(
             row[VERIFY_LATER] = True
         rows.append(row)
     outcome = file_outcome({r["status"] for r in rows}, needs_review=needs_review)
-    _count_skipped(ctx, skipped)
     labels = tuple(sorted(_ONLINE_LABELS[source] for source, answer in skipped.items() if is_budget_exhausted(answer)))
     return ItemOutcome(outcome.value, _summary(decisions, types, labels), rows)
 
@@ -1686,24 +1696,40 @@ def _run(
         # No source describes a trailer or featurette and no server lists one as an item, so checking it would only
         # wait (and queue retries) for an item that never comes. Folder jobs and library listings both contain them.
         return ItemOutcome(FileOutcome.SKIPPED.value, EXTRAS_NOT_CHECKED)
+    path = item.canonical_path
     for _ in range(MAX_ATTEMPTS):
         try:
-            with _PATH_LOCKS.hold(item.canonical_path), ctx._running(item.canonical_path):
-                outcome = _attempt(
-                    item,
-                    ctx,
-                    local=local,
-                    gpu=gpu,
-                    gpu_device_path=gpu_device_path,
-                    phase=phase_callback or _no_phase,
-                    cancel_check=cancel_check,
-                    pause_check=pause_check,
-                )
-                if outcome is not None:
-                    ctx._refreshed.pop(item.canonical_path, None)
+            with _PATH_LOCKS.hold(path), ctx._running(path):
+                skipped = ctx._pending_skips.pop(path, {})
+                try:
+                    outcome = _attempt(
+                        item,
+                        ctx,
+                        local=local,
+                        gpu=gpu,
+                        gpu_device_path=gpu_device_path,
+                        phase=phase_callback or _no_phase,
+                        cancel_check=cancel_check,
+                        pause_check=pause_check,
+                        skipped=skipped,
+                    )
+                except BaseException:
+                    # A rerun goes on from here: the retry below after the file changed, or the worker's CPU rerun
+                    # after a GPU error; a forced run doesn't ask the sources it already asked again.
+                    if skipped:
+                        ctx._pending_skips[path] = skipped
+                    raise
+                if outcome is None:  # handed to a worker
+                    if skipped:
+                        ctx._pending_skips[path] = skipped
+                    return None
+                ctx._refreshed.pop(path, None)
+                _count_skipped(ctx, skipped)
                 return outcome
         except _FileChangedError:
-            logger.info("{} changed while its markers were detected; detecting again", item.canonical_path)
+            logger.info("{} changed while its markers were detected; detecting again", path)
+    ctx._refreshed.pop(path, None)
+    ctx._pending_skips.pop(path, None)
     return ItemOutcome(
         FileOutcome.FAILED.value, "The file kept changing while it was analysed; it will be tried again on the next run"
     )
