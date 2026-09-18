@@ -2130,8 +2130,12 @@ class TestServerMarkersFromVendors:
             (ServerType.JELLYFIN, ["Intro Skipper"], Source.SERVER_MARKERS, "decided"),
             (ServerType.JELLYFIN, [], Source.SERVER_MARKERS, "decided"),
             (ServerType.JELLYFIN, None, None, "review"),
+            (ServerType.JELLYFIN, ConnectionError("plugin list timed out"), None, "review"),
             (ServerType.EMBY, ["TheIntroDB"], Source.SERVER_MARKERS_IMPORTED, "review"),
             (ServerType.EMBY, ["Trakt"], Source.SERVER_MARKERS, "decided"),
+            (ServerType.EMBY, [], Source.SERVER_MARKERS, "decided"),
+            (ServerType.EMBY, None, None, "review"),
+            (ServerType.EMBY, ConnectionError("plugin list timed out"), None, "review"),
         ],
         ids=[
             "jf-theintrodb",
@@ -2139,8 +2143,12 @@ class TestServerMarkersFromVendors:
             "jf-intro-skipper",
             "jf-none",
             "jf-unreadable",
+            "jf-plugin-list-raises",
             "emby-theintrodb",
             "emby-other",
+            "emby-none",
+            "emby-unreadable",
+            "emby-plugin-list-raises",
         ],
     )
     def test_markers_an_importer_plugin_wrote_count_with_the_crowd_source(
@@ -2160,7 +2168,10 @@ class TestServerMarkersFromVendors:
                 {"marker_type": "IntroStart", "start_ms": 24_046, "name": ""},
                 {"marker_type": "IntroEnd", "start_ms": 114_105, "name": ""},
             ]
-        server.get_plugin_names.return_value = plugins
+        if isinstance(plugins, Exception):
+            server.get_plugin_names.side_effect = plugins
+        else:
+            server.get_plugin_names.return_value = plugins
         plex = ready_publisher()
         clients = _clients(introdb=IDB_S03E05_INTRO)
         out, _ = _run(
@@ -4489,6 +4500,18 @@ class TestHandlersAndContext:
         assert set(clients) == {"theintrodb", "introdb"}
         assert isinstance(clients["theintrodb"], TheIntroDbClient) and isinstance(clients["introdb"], IntroDbClient)
         assert clients["theintrodb"]._api_key == "k-123"
+
+    @pytest.mark.parametrize("theintrodb", [True, False])
+    @pytest.mark.parametrize("introdb", [True, False])
+    @pytest.mark.parametrize("skipdb", [True, False])
+    def test_build_clients_matrix(self, theintrodb, introdb, skipdb):
+        from media_preview_generator.markers.sources.skipdb import SkipDbClient
+
+        wanted = {"theintrodb": theintrodb, "introdb": introdb, "skipdb": skipdb}
+        raw = {"sources": [{"id": sid, "enabled": on} for sid, on in wanted.items()]}
+        clients = pipeline.build_clients(load_global(validate_global(raw, None)[0]))
+        assert set(clients) == {sid for sid, on in wanted.items() if on}
+        assert not skipdb or isinstance(clients["skipdb"], SkipDbClient)
 
     def test_build_context_uses_live_settings_store_and_ffprobe(self, store):
         settings = load_global({})

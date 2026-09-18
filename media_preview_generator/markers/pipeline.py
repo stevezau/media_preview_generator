@@ -727,14 +727,12 @@ def _only_confirming_chapters(decisions: dict[MarkerType, TypeDecision], types: 
 
 
 def _stale_evidence(ctx: PipelineContext, rec: FileRecord, source: Source) -> bool:
-    """Whether stored evidence of ``source`` was made by an older parser, server reader or local detector version, so
-    it is derived again."""
+    """Whether stored evidence of an online source or a local detector was made by an older parser or detector
+    version, so it is derived again. (Markers on servers are always visited; ``_server_markers_due`` checks their
+    reader version per server.)"""
     if source in _ONLINE_LABELS:
         stored = ctx.store.evidence_fetched_at(rec.id, source) is not None
         return stored and ctx.store.evidence_version(rec.id, source) != PARSER_VERSIONS[source]
-    if source is Source.SERVER_MARKERS:
-        reads = {(r.source, r.origin) for r in ctx.store.evidence_rows(rec.id) if r.source in SERVER_SOURCES}
-        return any(ctx.store.evidence_version(rec.id, s, origin) != READER_VERSION for s, origin in reads)
     return any(_answer_from_another_version(ctx, rec, spec) for spec in ctx.local_detectors if spec.source is source)
 
 

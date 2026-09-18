@@ -181,6 +181,11 @@ class TestValidateServer:
         block, err = ms.validate_server({"library_ids": "1"}, "emby")
         assert block is None and "library_ids" in err
 
+    @pytest.mark.parametrize("raw", [[], "on", 1])
+    def test_rejects_a_block_that_is_not_an_object_and_loads_it_as_off(self, raw):
+        assert ms.validate_server(raw, "jellyfin") == (None, "markers must be an object")
+        assert ms.load_server(raw, "jellyfin").enabled is False
+
     def test_load_server_treats_unconfirmed_plex_as_disabled(self):
         s = ms.load_server({"enabled": True, "plex": {"db_write_confirmed_at": None}}, "plex")
         assert s.enabled is False
