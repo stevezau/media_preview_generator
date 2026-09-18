@@ -31,7 +31,8 @@ from ..job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_PREVIEWS, parse_job_kin
 LOG_RETENTION_CLEARED_MESSAGE = "Log file was cleared due to log retention policy."
 
 # Job config key set while a job's pause came from its schedule's stop time. Only such a pause is resumed by that
-# schedule's next start (or Run now); a pause by hand, or Pause all, overwrites it and any resume clears it.
+# schedule's next start (or Run now); a pause by hand, or Pause all, overwrites it, and any resume or the job's end
+# clears it.
 PAUSED_BY_SCHEDULE = "paused_by_schedule"
 
 # Every key ``upsert_retry_chain_job`` and ``_spawn_retry_job`` write
@@ -2584,7 +2585,8 @@ class JobManager:
         Args:
             job_id: Job identifier.
             by_schedule: The pause comes from the job's schedule's stop time (``PAUSED_BY_SCHEDULE``), so that
-                schedule's next start resumes it. Any other pause replaces that record.
+                schedule's next start resumes it. It only pauses a job that isn't paused yet (checked under the lock,
+                so a pause by hand just before it stays one); any other pause replaces that record.
 
         Returns:
             True when the job was running and is now paused.
@@ -2594,6 +2596,8 @@ class JobManager:
         with self._lock:
             job = self._jobs.get(job_id)
             if not job or job.status != JobStatus.RUNNING:
+                return False
+            if by_schedule and job.paused:
                 return False
             self._pause_flags[job_id] = True
             event = self._pause_events.get(job_id)
@@ -2617,13 +2621,25 @@ class JobManager:
             )
         return paused
 
-    def request_resume(self, job_id: str) -> bool:
-        """Request resume for a paused job."""
+    def request_resume(self, job_id: str, *, only_paused_by_schedule: bool = False) -> bool:
+        """Request resume for a paused job.
+
+        Args:
+            job_id: Job identifier.
+            only_paused_by_schedule: Resume only while the job's pause is its schedule's stop time's
+                (``PAUSED_BY_SCHEDULE``), checked under the lock: a schedule's start tick never resumes a pause by hand,
+                even one made just after the tick looked.
+
+        Returns:
+            True when the job was running and is now resumed.
+        """
         resumed = False
         status_val = ""
         with self._lock:
             job = self._jobs.get(job_id)
             if not job or job.status != JobStatus.RUNNING:
+                return False
+            if only_paused_by_schedule and not (job.paused and (job.config or {}).get(PAUSED_BY_SCHEDULE)):
                 return False
             self._pause_flags[job_id] = False
             event = self._pause_events.get(job_id)
@@ -2648,13 +2664,19 @@ class JobManager:
             return self._pause_flags.get(job_id, False)
 
     def clear_pause_flag(self, job_id: str) -> None:
-        """Clear pause state for a job."""
+        """Clear pause state for a job, including where the pause came from (``PAUSED_BY_SCHEDULE``).
+
+        Nothing is persisted here: ``complete_job`` and ``cancel_job`` persist the job right after, and the runners'
+        own teardown calls this once the job has ended.
+        """
         with self._lock:
             self._pause_flags.pop(job_id, None)
             self._pause_events.pop(job_id, None)
             job = self._jobs.get(job_id)
             if job:
                 job.paused = False
+                if PAUSED_BY_SCHEDULE in (job.config or {}):
+                    job.config = {key: value for key, value in job.config.items() if key != PAUSED_BY_SCHEDULE}
 
     # ========================================================================
     # Active Worker Pool Management

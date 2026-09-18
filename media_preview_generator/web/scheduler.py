@@ -257,6 +257,58 @@ def execute_schedule_stop(schedule_id: str) -> None:
         )
 
 
+# Serialises a Find markers tick's "unfinished job?" check with its job's creation (Run now beside a start tick).
+_FIND_MARKERS_TICK_LOCK = threading.Lock()
+
+
+def _resumed_kind(config: dict | None) -> str | None:
+    """The job kind a schedule's start tick resumes after its stop time paused it (``execute_scheduled_job``).
+
+    Returns:
+        ``intro_credits`` or ``previews``; None for a Recently Added schedule, which resumes nothing.
+    """
+    from ..job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_PREVIEWS
+
+    job_type = str((config or {}).get("job_type", "full_library"))
+    if job_type == "recently_added":
+        return None
+    return JOB_KIND_INTRO_CREDITS if job_type == "intro_credits" else JOB_KIND_PREVIEWS
+
+
+def _warn_stop_paused_jobs_left_behind(schedule_id: str, name: str, config: dict | None) -> None:
+    """Log a WARNING for each job this schedule's stop time paused that its start ticks no longer resume.
+
+    A schedule switched between previews, Intro & Credits and Recently Added leaves the other kind's paused job paused,
+    like a deleted schedule's; this names it instead of leaving it silently.
+
+    Args:
+        schedule_id: The schedule's id.
+        name: Its name.
+        config: Its config after the change.
+    """
+    from .jobs import PAUSED_BY_SCHEDULE, JobStatus, get_job_manager
+
+    kind = _resumed_kind(config)
+    try:
+        jobs = get_job_manager().get_all_jobs()
+    except Exception:
+        logger.exception("Schedule {} changed, but its paused jobs couldn't be listed", schedule_id)
+        return
+    for job in jobs:
+        if job.parent_schedule_id != schedule_id or job.kind == kind:
+            continue
+        if not (job.paused and job.status is JobStatus.RUNNING and (job.config or {}).get(PAUSED_BY_SCHEDULE)):
+            continue
+        logger.warning(
+            "Schedule {!r} ({}) no longer runs the kind of job its stop time paused: job {} ({}) stays paused, and no "
+            "later start tick of this schedule will resume it. Resume or cancel it on the dashboard.",
+            name,
+            schedule_id,
+            job.id[:8],
+            job.library_name,
+        )
+
+
 def _warn_paused_jobs_of_deleted_schedule(schedule_id: str, name: str) -> None:
     """Log a WARNING for each paused job of a deleted schedule: no start tick of it will resume the job any more.
 
@@ -296,97 +348,99 @@ def _start_scheduled_intro_credits_job(
     """Create the Intro & Credits job for a schedule tick (LOW unless the schedule sets a priority).
 
     Nothing is created while a Find markers job of this schedule is still pending or running (a Check servers job it
-    queued before a switch doesn't count). Library ids are only meaningful with their server, so ids without one are
+    queued before a switch doesn't count); that check and the creation are one step, so Run now beside a start tick
+    queues one job. Library ids are only meaningful with their server, so ids without one are
     pinned to the server that owns them and a tick that can't be pinned starts nothing rather than checking every
     library. Chosen libraries outside the server's Intro & Credits selection are left out; a schedule with only a
     server takes that server's selection.
     """
-    try:
-        from ..job_kinds import JOB_KIND_INTRO_CREDITS
-        from ..markers.ownership import marker_libraries
-        from ..markers.triggers import create_intro_credits_job
-        from ..servers.registry import UnsupportedServerTypeError, server_config_from_dict
-        from .jobs import PRIORITY_LOW, JobStatus, get_job_manager, parse_priority
-        from .settings_manager import get_settings_manager
+    with _FIND_MARKERS_TICK_LOCK:
+        try:
+            from ..job_kinds import JOB_KIND_INTRO_CREDITS
+            from ..markers.ownership import marker_libraries
+            from ..markers.triggers import create_intro_credits_job
+            from ..servers.registry import UnsupportedServerTypeError, server_config_from_dict
+            from .jobs import PRIORITY_LOW, JobStatus, get_job_manager, parse_priority
+            from .settings_manager import get_settings_manager
 
-        unfinished = next(
-            (
-                job
-                for job in get_job_manager().get_all_jobs()
-                if job.parent_schedule_id == schedule_id
-                and job.kind == JOB_KIND_INTRO_CREDITS
-                and not (job.config or {}).get("reconcile")
-                and job.status in (JobStatus.PENDING, JobStatus.RUNNING)
-            ),
-            None,
-        )
-        if unfinished is not None:
-            logger.info(
-                "Schedule {}: Intro & Credits job {} from an earlier run hasn't finished; not starting another",
-                schedule_id,
-                unfinished.id[:8],
-            )
-            return
-        if library_ids and not server_id:
-            from .routes.api_jobs import _infer_server_from_library_ids
-
-            server_id = _infer_server_from_library_ids(library_ids)[0]
-            if not server_id:
-                logger.warning(
-                    "Schedule {}: libraries {} don't belong to exactly one enabled media server, so its Intro & "
-                    "Credits job wasn't started. Edit the schedule and pick the server.",
-                    schedule_id,
-                    library_ids,
-                )
-                return
-        if server_id:
-            entry = next(
+            unfinished = next(
                 (
-                    e
-                    for e in get_settings_manager().get("media_servers") or []
-                    if isinstance(e, dict) and e.get("id") == server_id
+                    job
+                    for job in get_job_manager().get_all_jobs()
+                    if job.parent_schedule_id == schedule_id
+                    and job.kind == JOB_KIND_INTRO_CREDITS
+                    and not (job.config or {}).get("reconcile")
+                    and job.status in (JobStatus.PENDING, JobStatus.RUNNING)
                 ),
                 None,
             )
-            try:
-                cfg = server_config_from_dict(entry) if entry is not None else None
-            except UnsupportedServerTypeError:
-                cfg = None
-            allowed = [lib.id for lib in marker_libraries(cfg)] if cfg is not None and cfg.enabled else []
-            if library_ids:
-                names = {lib.id: lib.name for lib in cfg.libraries} if cfg is not None else {}
-                outside = [names.get(lid) or lid for lid in library_ids if lid not in allowed]
-                if outside:
-                    logger.warning(
-                        "Schedule {}: Intro & Credits isn't on for {} on server {}; those libraries are left out",
-                        schedule_id,
-                        outside,
-                        server_id,
-                    )
-                library_ids = [lid for lid in library_ids if lid in allowed]
-            else:
-                library_ids = allowed
-            if not library_ids:
-                logger.warning(
-                    "Schedule {}: none of its libraries on server {} has Intro & Credits turned on; nothing to check",
+            if unfinished is not None:
+                logger.info(
+                    "Schedule {}: Intro & Credits job {} from an earlier run hasn't finished; not starting another",
                     schedule_id,
-                    server_id,
+                    unfinished.id[:8],
                 )
                 return
-        libraries = [{"server_id": server_id, "library_id": str(lid)} for lid in library_ids] if server_id else []
-        create_intro_credits_job(
-            library_name=f"Intro & Credits: {library_name or 'all libraries'}",
-            priority=parse_priority(priority) if priority is not None else PRIORITY_LOW,
-            source="schedule",
-            libraries=libraries,
-            parent_schedule_id=schedule_id,
-        )
-        manager._update_last_run(schedule_id)
-    except Exception:
-        logger.exception(
-            "Scheduled Intro & Credits job {} could not start. It will try again on its next scheduled tick.",
-            schedule_id,
-        )
+            if library_ids and not server_id:
+                from .routes.api_jobs import _infer_server_from_library_ids
+
+                server_id = _infer_server_from_library_ids(library_ids)[0]
+                if not server_id:
+                    logger.warning(
+                        "Schedule {}: libraries {} don't belong to exactly one enabled media server, so its Intro & "
+                        "Credits job wasn't started. Edit the schedule and pick the server.",
+                        schedule_id,
+                        library_ids,
+                    )
+                    return
+            if server_id:
+                entry = next(
+                    (
+                        e
+                        for e in get_settings_manager().get("media_servers") or []
+                        if isinstance(e, dict) and e.get("id") == server_id
+                    ),
+                    None,
+                )
+                try:
+                    cfg = server_config_from_dict(entry) if entry is not None else None
+                except UnsupportedServerTypeError:
+                    cfg = None
+                allowed = [lib.id for lib in marker_libraries(cfg)] if cfg is not None and cfg.enabled else []
+                if library_ids:
+                    names = {lib.id: lib.name for lib in cfg.libraries} if cfg is not None else {}
+                    outside = [names.get(lid) or lid for lid in library_ids if lid not in allowed]
+                    if outside:
+                        logger.warning(
+                            "Schedule {}: Intro & Credits isn't on for {} on server {}; those libraries are left out",
+                            schedule_id,
+                            outside,
+                            server_id,
+                        )
+                    library_ids = [lid for lid in library_ids if lid in allowed]
+                else:
+                    library_ids = allowed
+                if not library_ids:
+                    logger.warning(
+                        "Schedule {}: none of its libraries on server {} has Intro & Credits turned on; nothing to check",
+                        schedule_id,
+                        server_id,
+                    )
+                    return
+            libraries = [{"server_id": server_id, "library_id": str(lid)} for lid in library_ids] if server_id else []
+            create_intro_credits_job(
+                library_name=f"Intro & Credits: {library_name or 'all libraries'}",
+                priority=parse_priority(priority) if priority is not None else PRIORITY_LOW,
+                source="schedule",
+                libraries=libraries,
+                parent_schedule_id=schedule_id,
+            )
+            manager._update_last_run(schedule_id)
+        except Exception:
+            logger.exception(
+                "Scheduled Intro & Credits job {} could not start. It will try again on its next scheduled tick.",
+                schedule_id,
+            )
 
 
 def _start_scheduled_check_servers(manager: "ScheduleManager", schedule_id: str, priority: int | str | None) -> None:
@@ -513,14 +567,14 @@ def execute_scheduled_job(
     # Applies to every job type except recently_added (a fast, idempotent
     # scan that can re-run cheaply), matched by job kind. A job paused by
     # hand (or by Pause all) isn't this schedule's to resume.
-    if job_type != "recently_added":
+    schedule_kind = _resumed_kind(cfg)
+    if schedule_kind is not None:
         try:
-            from ..job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_PREVIEWS
             from .jobs import PAUSED_BY_SCHEDULE, JobStatus, get_job_manager
 
-            # A schedule switched between previews and Intro & Credits must not resume the other kind's job. Between
-            # finding markers and checking servers it does: nothing else would resume the other mode's job.
-            schedule_kind = JOB_KIND_INTRO_CREDITS if job_type == "intro_credits" else JOB_KIND_PREVIEWS
+            # A schedule switched between previews and Intro & Credits must not resume the other kind's job (the
+            # switch logs a WARNING naming it). Between finding markers and checking servers it does: nothing else
+            # would resume the other mode's job.
             job_manager = get_job_manager()
             resumed = []
             for job in job_manager.get_all_jobs():
@@ -530,7 +584,8 @@ def execute_scheduled_job(
                     continue
                 if not (job.config or {}).get(PAUSED_BY_SCHEDULE):
                     continue
-                if job_manager.request_resume(job.id):
+                # Checked again under the job manager's lock: a pause by hand since this listing stays paused.
+                if job_manager.request_resume(job.id, only_paused_by_schedule=True):
                     job_manager.add_log(
                         job.id,
                         f"INFO - Resumed by schedule {schedule_id!r} start tick",
@@ -1423,6 +1478,7 @@ class ScheduleManager:
             schedule["library_ids"] = [str(library_id)] if library_id else []
         if library_name is not None:
             schedule["library_name"] = library_name
+        resumes_other_jobs = config is not None and _resumed_kind(config) != _resumed_kind(schedule.get("config"))
         if config is not None:
             schedule["config"] = config
         if enabled is not None:
@@ -1488,6 +1544,8 @@ class ScheduleManager:
 
         self._save_schedules()
         logger.info("Updated schedule {}", schedule_id)
+        if resumes_other_jobs:
+            _warn_stop_paused_jobs_left_behind(schedule_id, schedule.get("name", schedule_id), schedule["config"])
         return schedule
 
     def delete_schedule(self, schedule_id: str) -> bool:

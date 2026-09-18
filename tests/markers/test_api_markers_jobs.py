@@ -438,15 +438,19 @@ class TestRerunIntroCreditsJobs:
         assert resp.status_code == 200
         assert resp.get_json() == {"job_id": None, "reason": "Intro & Credits is off on every server"}
 
-    @pytest.mark.parametrize("state", ["none-queued", "already-queued", "off-everywhere"])
+    @pytest.mark.parametrize("state", ["none-queued", "already-queued", "already-queued-paused", "off-everywhere"])
     def test_a_check_servers_rerun_clears_pause_all_like_any_rerun(self, client, jm, state):
         from unittest.mock import patch
 
         from media_preview_generator.web.settings_manager import get_settings_manager
 
         finished = self._finished(jm, config=self._check_servers_config())
-        if state == "already-queued":
-            jm.create_job(library_name="waiting", config=self._check_servers_config(), kind="intro_credits")
+        existing = None
+        if state.startswith("already-queued"):
+            existing = jm.create_job(library_name="waiting", config=self._check_servers_config(), kind="intro_credits")
+        if state == "already-queued-paused":
+            jm.start_job(existing.id)
+            assert jm.request_pause(existing.id)  # paused on its own, beside Pause all
         sm = get_settings_manager()
         if state == "off-everywhere":
             sm.set("media_servers", [])
@@ -467,7 +471,13 @@ class TestRerunIntroCreditsJobs:
                 assert resp.status_code == 200 and sm.processing_paused is True
                 drain.assert_not_called()
             else:
-                assert resp.status_code == 202 and resp.get_json()["already_queued"] is (state == "already-queued")
+                body = resp.get_json()
+                assert resp.status_code == 202 and body["already_queued"] is state.startswith("already-queued")
+                # The answer says when the job already there is paused on its own, and the Re-run doesn't resume it.
+                assert body.get("paused", False) is (state == "already-queued-paused")
+                if existing is not None:
+                    assert body["job_id"] == existing.id
+                    assert jm.get_job(existing.id).paused is (state == "already-queued-paused")
                 assert sm.processing_paused is False
                 drain.assert_called_once_with()
                 if state == "none-queued":

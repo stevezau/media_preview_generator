@@ -1423,6 +1423,30 @@ class TestRestart:
         # Where the pause came from outlives the restart with the job's config.
         assert revived[0].config.get("paused_by_schedule", False) is by_schedule
 
+    def test_a_job_its_stop_time_paused_is_held_paused_as_the_stop_times_after_a_restart(self, tmp_path, monkeypatch):
+        # Real JobManager: the revived job is loaded paused, and the hold's stop-time pause must still take.
+        from media_preview_generator.web.jobs import JobManager, JobStatus
+
+        before = JobManager(config_dir=str(tmp_path))
+        job = before.create_job(library_name="Backfill", kind=JOB_KIND_INTRO_CREDITS, config={"libraries": []})
+        before.start_job(job.id)
+        assert before.request_pause(job.id, by_schedule=True)
+        after = JobManager(config_dir=str(tmp_path))
+        (revived,) = after.requeue_interrupted_jobs()
+        assert revived.paused
+        monkeypatch.setattr(job_runner, "get_job_manager", lambda: after)
+        held = []
+
+        def fake_sleep(_seconds):
+            live = after.get_job(job.id)
+            held.append((live.status, after.is_pause_requested(job.id), live.config.get("paused_by_schedule")))
+            after.request_resume(job.id, only_paused_by_schedule=True)  # the schedule's next start
+
+        monkeypatch.setattr(job_runner, "time", SimpleNamespace(sleep=fake_sleep))
+        assert job_runner._hold_pause_from_before_restart(job.id, lambda: False) is True
+        assert held == [(JobStatus.RUNNING, True, True)]
+        assert not after.get_job(job.id).paused
+
     def test_startup_revival_runs_each_intro_credits_job_once_and_creates_no_jobs(self, tmp_path, monkeypatch):
         from media_preview_generator.web import app as app_mod
         from media_preview_generator.web.jobs import JobManager
