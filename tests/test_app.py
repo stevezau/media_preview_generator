@@ -532,7 +532,10 @@ class TestRequeueInterruptedOnStartup:
         else:
             mock_start_job.assert_not_called()
         text = "".join(warnings)
-        assert "Couldn't mark the Intro & Credits jobs left over from before the restart as failed (OSError)" in text
+        assert (
+            "Couldn't mark the Intro & Credits jobs left over from before the restart as failed (OSError: disk I/O "
+            "error). They stay pending until a later restart settles them or you cancel them on the dashboard" in text
+        )
         assert "Could not resume jobs" not in text
 
     @patch("media_preview_generator.web.routes._start_job_async")

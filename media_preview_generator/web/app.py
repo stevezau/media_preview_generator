@@ -441,9 +441,12 @@ def _fail_unrevived_intro_credits_jobs() -> None:
         get_job_manager().fail_unrevived_interrupted_jobs(JOB_KIND_INTRO_CREDITS)
     except Exception as exc:
         logger.warning(
-            "Couldn't mark the Intro & Credits jobs left over from before the restart as failed ({}); a schedule may "
-            "skip its next run while one of them is still listed as pending",
+            "Couldn't mark the Intro & Credits jobs left over from before the restart as failed ({}: {}). They stay "
+            "pending until a later restart settles them or you cancel them on the dashboard; until then their "
+            "schedules skip every run (a leftover Check servers job blocks every Check servers run) and new webhook "
+            "follow-ups for the same files can be folded into them instead of running",
             type(exc).__name__,
+            exc,
         )
 
 
