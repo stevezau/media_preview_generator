@@ -759,6 +759,10 @@ of that type **and** they agree within 2 seconds. A newly added version that has
 hides that item's markers on Plex until it catches up — precision first. Jellyfin and Emby versions each get their
 own markers.
 
+In the Preview Inspector, the Intro & Credits tab shows the version you clicked. When that version's file isn't on
+this app's disk (the other version is, say, or a path mapping is missing), the tab says **"This version's file isn't on
+this disk"** instead of showing another version's markers.
+
 ### Checking the servers still show them
 
 A server can lose or change our markers without this app doing anything: Plex's own detection replaces them, and a

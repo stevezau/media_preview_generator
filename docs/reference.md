@@ -505,7 +505,13 @@ reset header (TheIntroDB's can't be trusted — see `ratelimit.py`).
 
 #### GET /api/markers/item
 
-**Query:** either `path` (a file inside a server library), or `server_id` + `item_id`.
+**Query:** either `path` (a file inside a server library), or `server_id` + `item_id`, optionally with
+`version_file`: the version's file as the Preview Inspector's search row gave it (needed for Plex, where every version
+of an item shares its id). By id, the version asked for is the one `version_file` names, else the one whose own id is
+`item_id` (a Jellyfin version, a merged Jellyfin item's primary version, or an Emby item, whose media sources list
+its other versions too), else the item's only version; another version is never opened in its place. A Plex
+`version_file` that names none of the item's versions any more counts as a version that isn't here. Only a Plex item
+with several versions asked for without `version_file` opens the first version whose file is on this disk.
 
 **Response:** `200` with `known`, `canonical_path`, `duration_ms`, `is_movie`, `decisions` (by marker type),
 `evidence` rows (each with its `label`: a chapter's title, season audio's `"10/10"`, or `""`), and `servers` (one row per owning server: `current` markers as read live, `published` markers that
@@ -519,7 +525,9 @@ other servers or when it can't be read); a server whose state can't be read gets
 instead of failing the whole response). `400` when the path isn't a file inside a server library, the
 query is incomplete, or `item_id` isn't shaped like an id that server's type uses (a Plex rating key is digits
 only, e.g. `42`, not `/library/metadata/42`; a Jellyfin or Emby id is up to 36 ASCII hex digits and dashes starting
-with a hex digit, or ASCII digits; checked before any server is contacted). `404` for an unknown server, or a `server_id`+`item_id` with no file on this app's disk. `409` when the
+with a hex digit, or ASCII digits; checked before any server is contacted). `404` for an unknown server, or a
+`server_id`+`item_id` with no file on this app's disk: `{"error": "This version's file isn't on this disk", "reason":
+"version_not_here"}` when the server has the version asked for but its file isn't here. `409` when the
 server is disabled. `500` with a JSON error when the file's data can't be built.
 
 #### POST /api/markers/item/redetect

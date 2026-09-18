@@ -442,12 +442,14 @@
     }
 
     // By path when the search gave one (a Plex item's versions are different files), else by server + item id;
-    // a path this app can't place (400) is tried again by id.
+    // a path this app can't place (400) is tried again by id, naming the version so no other version opens instead.
     async function fetchItem(item) {
         const queries = [];
         if (item.media_file) queries.push('path=' + encodeURIComponent(item.media_file));
         if (item.server_id && item.item_id) {
-            queries.push('server_id=' + encodeURIComponent(item.server_id) + '&item_id=' + encodeURIComponent(item.item_id));
+            let byId = 'server_id=' + encodeURIComponent(item.server_id) + '&item_id=' + encodeURIComponent(item.item_id);
+            if (item.media_file) byId += '&version_file=' + encodeURIComponent(item.media_file);
+            queries.push(byId);
         }
         let lastError = null;
         for (const query of queries) {
@@ -459,6 +461,7 @@
             const data = await resp.json().catch(function () { return {}; });
             if (resp.ok) return data;
             lastError = new Error((data && data.error) || `HTTP ${resp.status}`);
+            lastError.reason = (data && data.reason) || '';
             if (resp.status !== 400) break;
         }
         throw lastError || new Error('Nothing to look up');
@@ -495,6 +498,14 @@
             render(payload, item);
         } catch (error) {
             if (seq !== requestSeq) return;
+            if (error.reason === 'version_not_here') {
+                // Nothing to re-detect: the job would find no file either.
+                const box = el('div', 'alert alert-secondary py-2 mk-version-not-here');
+                box.appendChild(el('strong', '', error.message));
+                box.appendChild(el('div', 'small', 'Intro & Credits reads the file itself. Pick another version, or check this server\'s path mappings.'));
+                body.replaceChildren(box);
+                return;
+            }
             body.replaceChildren(el('div', 'alert alert-warning py-2', `Couldn't load Intro & Credits for this file: ${error.message}`));
             button.disabled = !item.media_file;
         }

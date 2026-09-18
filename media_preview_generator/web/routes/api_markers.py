@@ -271,12 +271,14 @@ def marker_source_usage():
 @api.route("/markers/item", methods=["GET"])
 @api_token_required
 def marker_item():
-    """Inspector data for one file, by ``path`` or by ``server_id`` + ``item_id``.
+    """Inspector data for one file, by ``path`` or by ``server_id`` + ``item_id`` (+ ``version_file``, the version's file
+    as the search row gave it: ``markers.inspect.resolve_local_path`` never opens another version in its place).
 
     Returns:
         200 with ``markers.inspect.item_payload`` (a server whose state can't be read gets a degraded row); 400 when the
         path isn't a file inside a server library, the query is incomplete or ``item_id`` isn't shaped like that
-        server's ids; 404 for an unknown server or an item with no file here; 409 when the server is off; 500 with a
+        server's ids; 404 for an unknown server or an item with no file here (``reason: version_not_here`` when the
+        server has the version asked for but its file isn't on this disk); 409 when the server is off; 500 with a
         JSON error when the file's data can't be built.
     """
     from ...markers import inspect
@@ -298,7 +300,10 @@ def marker_item():
             return jsonify({"error": "item_id isn't an item id this server uses"}), 400
         if not cfg.enabled:
             return _server_off_response(cfg)
-        path = inspect.resolve_local_path(server, cfg, item_id)
+        try:
+            path = inspect.resolve_local_path(server, cfg, item_id, version_file=request.args.get("version_file"))
+        except inspect.VersionNotHereError:
+            return jsonify({"error": inspect.VERSION_NOT_HERE, "reason": "version_not_here"}), 404
         if not path:
             return jsonify({"error": "No file on this app's disk for that item"}), 404
     safe = _library_file(path, registry)

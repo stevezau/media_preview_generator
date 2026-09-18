@@ -357,9 +357,12 @@ def resolve_calls(monkeypatch):
     calls = []
     answers = {}
 
-    def fake(server, config, item_id):
-        calls.append({"server": server, "config": config, "item_id": item_id})
-        return answers.get((config.id, item_id))
+    def fake(server, config, item_id, version_file=None):
+        calls.append({"server": server, "config": config, "item_id": item_id, "version_file": version_file})
+        answer = answers.get((config.id, item_id))
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
     monkeypatch.setattr(inspect, "resolve_local_path", fake)
     return calls, answers
@@ -387,6 +390,41 @@ def test_item_by_server_item_resolving_to_nothing_is_404(client, servers, item_c
         "/api/markers/item", query_string={"server_id": "plex-1", "item_id": "404"}, headers=_api_headers()
     )
     assert resp.status_code == 404
+    assert resp.get_json() == {"error": "No file on this app's disk for that item"}
+    assert item_calls == []
+
+
+@pytest.mark.parametrize("server_id", ["plex-1", "jf-1", "emby-1"])
+def test_item_by_server_item_forwards_the_version_clicked(client, servers, media, item_calls, resolve_calls, server_id):
+    calls, answers = resolve_calls
+    answers[(server_id, "42")] = str(media / "tv" / "Show" / "S01E01.mkv")
+    version_file = "/media/tv/Show/S01E01 - 2160p.mkv"
+
+    resp = client.get(
+        "/api/markers/item",
+        query_string={"server_id": server_id, "item_id": "42", "version_file": version_file},
+        headers=_api_headers(),
+    )
+
+    assert resp.status_code == 200
+    assert [(c["item_id"], c["version_file"]) for c in calls] == [("42", version_file)]
+
+
+@pytest.mark.parametrize("server_id", ["plex-1", "jf-1", "emby-1"])
+def test_item_by_server_item_whose_version_isnt_here_says_so(client, servers, item_calls, resolve_calls, server_id):
+    from media_preview_generator.markers import inspect
+
+    _calls, answers = resolve_calls
+    answers[(server_id, "42")] = inspect.VersionNotHereError(inspect.VERSION_NOT_HERE)
+
+    resp = client.get(
+        "/api/markers/item",
+        query_string={"server_id": server_id, "item_id": "42", "version_file": "/elsewhere/S01E01 - 2160p.mkv"},
+        headers=_api_headers(),
+    )
+
+    assert resp.status_code == 404
+    assert resp.get_json() == {"error": "This version's file isn't on this disk", "reason": "version_not_here"}
     assert item_calls == []
 
 

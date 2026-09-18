@@ -295,33 +295,73 @@ def server_status_payload(server: Any, config: ServerConfig) -> dict:
     }
 
 
-def resolve_local_path(server: Any, config: ServerConfig, item_id: str) -> str | None:
-    """Local path of a server item: the first path-mapped candidate of one of its versions that is a file on disk.
+VERSION_NOT_HERE = "This version's file isn't on this disk"
 
-    A version asked for by its own id (a Jellyfin version) comes first; then the item's versions in the server's
-    order, so a Plex item (every version shares its id) whose first version isn't on this disk opens another.
+
+class VersionNotHereError(LookupError):
+    """The server has the version asked for, but its file isn't on this app's disk."""
+
+
+def _same_item(version_id: str, item_id: str) -> bool:
+    # Emby names a version's media source "mediasource_<item id>"; Jellyfin's primary source id is the item's id,
+    # sometimes written with dashes.
+    def plain(value: str) -> str:
+        return str(value).removeprefix("mediasource_").replace("-", "").lower()
+
+    return plain(version_id) == plain(item_id)
+
+
+def resolve_local_path(server: Any, config: ServerConfig, item_id: str, version_file: str | None = None) -> str | None:
+    """Local path of a server item's version: the first path-mapped candidate of its file that is a file on disk.
+
+    The version is the one whose file ``version_file`` names (the Preview Inspector's search row, needed for Plex,
+    where every version shares the item's id), else the one whose own id is ``item_id`` (a Jellyfin version, or an Emby
+    item, whose media sources list its other versions too), else the item's only version. Another version is never
+    opened in its place. Only a Plex item with several versions asked for without ``version_file`` (or an id naming
+    none of an item's versions) opens the first version that is on this disk.
 
     Args:
         server: Live client for ``config``.
         config: The server's config (its ``path_mappings``).
         item_id: The server's item id.
+        version_file: The version's file as the search row gave it (the server's path, or its first mapped local
+            path). When it names none of the item's versions, the id decides; if the id can't (a Plex item's versions
+            share it), the version clicked is gone.
 
     Returns:
-        The local file path, or None when the server doesn't know the item or no version's file exists here.
+        The local file path, or None when the server doesn't know the item, or no version was asked for and none of
+        the item's files is here.
+
+    Raises:
+        VersionNotHereError: The version asked for (or the item's only version) has no file on this disk, or
+            ``version_file`` names none of a Plex item's versions.
     """
     try:
-        versions = list(server.resolve_item_to_remote_paths(item_id) or [])
+        versions = [(vid, remote) for vid, remote in server.resolve_item_to_remote_paths(item_id) or [] if remote]
     except Exception as exc:
         logger.debug("Item {} lookup on {} failed: {}", item_id, config.name, type(exc).__name__)
         return None
-    versions.sort(key=lambda version: version[0] != item_id)  # stable: the server's order otherwise
-    for _version_id, remote in versions:
-        if not remote:
-            continue
+    mappings = list(config.path_mappings or [])
+
+    def local_files(remote: str) -> list[str]:
         # apply_path_mappings reads both the current remote_prefix and the legacy plex_prefix mapping keys.
-        for candidate in apply_path_mappings(remote, list(config.path_mappings or [])):
+        return apply_path_mappings(remote, mappings)
+
+    asked = [v for v in versions if version_file and version_file in (v[1], *local_files(v[1]))]
+    if not asked:
+        own = [v for v in versions if _same_item(v[0], item_id)]
+        if own and len(own) < len(versions):
+            asked = own
+        elif len(versions) == 1:
+            asked = versions
+        elif version_file and versions:
+            raise VersionNotHereError(VERSION_NOT_HERE)
+    for _version_id, remote in asked or versions:
+        for candidate in local_files(remote):
             if os.path.isfile(candidate):
                 return candidate
+    if asked:
+        raise VersionNotHereError(VERSION_NOT_HERE)
     return None
 
 

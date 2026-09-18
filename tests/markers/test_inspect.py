@@ -494,11 +494,8 @@ def test_resolve_local_path_without_mapping_uses_the_server_path(media):
     assert inspect.resolve_local_path(server, cfg, "abc") == str(media / "tv" / "Show" / "S01E01.mkv")
 
 
-@pytest.mark.parametrize(
-    "remote",
-    [[], [("42", "")], [("42", "/data/tv/Show/S01E02.mkv")], RuntimeError("down")],
-)
-def test_resolve_local_path_none_when_nothing_exists(media, remote):
+@pytest.mark.parametrize("remote", [[], [("42", "")], RuntimeError("down")], ids=["unknown", "no-path", "server-down"])
+def test_resolve_local_path_none_when_the_server_gives_no_file(media, remote):
     cfg = server_config("plex", ServerType.PLEX)
     cfg.path_mappings.append({"remote_prefix": "/data/tv", "local_prefix": str(media / "tv")})
     server = MagicMock()
@@ -509,11 +506,12 @@ def test_resolve_local_path_none_when_nothing_exists(media, remote):
     assert inspect.resolve_local_path(server, cfg, "42") is None
 
 
-def test_resolve_local_path_ignores_a_folder(media):
+def test_resolve_local_path_never_opens_a_folder(media):
     cfg = server_config("jf", ServerType.JELLYFIN)
     server = MagicMock()
     server.resolve_item_to_remote_paths.return_value = [("abc", str(media / "tv" / "Show"))]
-    assert inspect.resolve_local_path(server, cfg, "abc") is None
+    with pytest.raises(inspect.VersionNotHereError):
+        inspect.resolve_local_path(server, cfg, "abc")
 
 
 def _two_versions(media, *, on_disk):
@@ -523,26 +521,151 @@ def _two_versions(media, *, on_disk):
     return [(v, f"/data/tv/Show/{name}") for v, name in (("v1", "S01E01 - 1080p.mkv"), ("v2", "S01E01 - 2160p.mkv"))]
 
 
-@pytest.mark.parametrize(
-    ("stype", "asked", "on_disk", "expected"),
-    [
-        # Plex: every version shares the item's id; the first version with a file here is the one.
-        (ServerType.PLEX, "42", ["S01E01 - 2160p.mkv"], "S01E01 - 2160p.mkv"),
-        (ServerType.PLEX, "42", ["S01E01 - 1080p.mkv", "S01E01 - 2160p.mkv"], "S01E01 - 1080p.mkv"),
-        # Jellyfin: a version's own id opens that version, whichever is listed first.
-        (ServerType.JELLYFIN, "v2", ["S01E01 - 1080p.mkv", "S01E01 - 2160p.mkv"], "S01E01 - 2160p.mkv"),
-        (ServerType.JELLYFIN, "v2", ["S01E01 - 1080p.mkv"], "S01E01 - 1080p.mkv"),
-        (ServerType.JELLYFIN, "parent", ["S01E01 - 2160p.mkv"], "S01E01 - 2160p.mkv"),
-    ],
-    ids=["plex-only-v2-here", "plex-both-here", "jellyfin-clicked-v2", "jellyfin-v2-not-here", "jellyfin-parent"],
-)
-def test_resolve_local_path_picks_the_version_asked_for_or_one_on_this_disk(media, stype, asked, on_disk, expected):
+V1, V2 = "S01E01 - 1080p.mkv", "S01E01 - 2160p.mkv"
+
+
+def _version_file(media, name, *, mapped=True):
+    """The version's file as the Inspector's search row gives it: its first mapped local path (or the server's path)."""
+    return str(media / "tv" / "Show" / name) if mapped else f"/data/tv/Show/{name}"
+
+
+# Version ids as each server reports them for a two-version item (V1, V2), and the item ids a search row carries.
+# Plex: every version shares the item's rating key. Jellyfin: a merged item's id is its primary version's source id.
+# Emby: each version is its own item, and its media sources (named "mediasource_<item id>") list the other version too.
+JF_V1, JF_V2 = "0123456789abcdef0123456789abcde1", "0123456789abcdef0123456789abcde2"
+_VERSION_IDS = {
+    ServerType.PLEX: ("42", "42"),
+    ServerType.JELLYFIN: (JF_V1, JF_V2),
+    ServerType.EMBY: ("mediasource_53", "mediasource_55"),
+}
+
+
+def _two_version_server(media, stype, on_disk):
     cfg = server_config("srv", stype)
     cfg.path_mappings.append({"remote_prefix": "/data/tv", "local_prefix": str(media / "tv")})
     server = MagicMock()
-    server.resolve_item_to_remote_paths.return_value = _two_versions(media, on_disk=on_disk)
-    assert inspect.resolve_local_path(server, cfg, asked) == str(media / "tv" / "Show" / expected)
+    ids = _VERSION_IDS[stype]
+    server.resolve_item_to_remote_paths.return_value = [
+        (vid, remote) for vid, (_v, remote) in zip(ids, _two_versions(media, on_disk=on_disk), strict=True)
+    ]
+    return cfg, server
+
+
+@pytest.mark.parametrize(
+    ("stype", "asked", "version_file", "on_disk", "expected"),
+    [
+        # Plex: every version shares the item's id, so the search row's file says which version was clicked.
+        (ServerType.PLEX, "42", V2, [V1, V2], V2),
+        (ServerType.PLEX, "42", V1, [V1, V2], V1),
+        # ...whichever form of the path the row carried (mapped here, or the server's own when unmapped).
+        (ServerType.PLEX, "42", "remote:" + V2, [V1, V2], V2),
+        # No version named: the first version with a file here, as before.
+        (ServerType.PLEX, "42", None, [V2], V2),
+        (ServerType.PLEX, "42", None, [V1, V2], V1),
+        # Jellyfin: a version's own id opens that version, whichever is listed first.
+        (ServerType.JELLYFIN, JF_V2, None, [V1, V2], V2),
+        (ServerType.JELLYFIN, JF_V2, V2, [V1, V2], V2),
+        # The merged item's own id is its primary version.
+        (ServerType.JELLYFIN, JF_V1, None, [V1, V2], V1),
+        # The same id written with dashes.
+        (ServerType.JELLYFIN, "01234567-89ab-cdef-0123-456789abcde2", None, [V1, V2], V2),
+        # A row whose file names none of the item's versions (a stale search) falls back to the id.
+        (ServerType.JELLYFIN, JF_V2, "S01E01 - 720p.mkv", [V1, V2], V2),
+        # Emby: the item's id matches its own media source, wherever the other version is listed.
+        (ServerType.EMBY, "55", None, [V1, V2], V2),
+        (ServerType.EMBY, "53", None, [V1, V2], V1),
+    ],
+    ids=[
+        "plex-clicked-v2",
+        "plex-clicked-v1",
+        "plex-clicked-v2-server-path",
+        "plex-no-version-only-v2-here",
+        "plex-no-version-both-here",
+        "jellyfin-clicked-v2",
+        "jellyfin-clicked-v2-with-file",
+        "jellyfin-item-id-is-its-primary-version",
+        "jellyfin-dashed-id",
+        "jellyfin-stale-file-uses-the-id",
+        "emby-clicked-55",
+        "emby-clicked-53",
+    ],
+)
+def test_resolve_local_path_opens_the_version_asked_for(media, stype, asked, version_file, on_disk, expected):
+    cfg, server = _two_version_server(media, stype, on_disk)
+    if version_file and version_file.startswith("remote:"):
+        version_file = _version_file(media, version_file.removeprefix("remote:"), mapped=False)
+    elif version_file:
+        version_file = _version_file(media, version_file)
+
+    assert inspect.resolve_local_path(server, cfg, asked, version_file=version_file) == str(
+        media / "tv" / "Show" / expected
+    )
     server.resolve_item_to_remote_paths.assert_called_once_with(asked)
+
+
+@pytest.mark.parametrize(
+    ("stype", "asked", "version_file", "on_disk"),
+    [
+        # The owner's rule (2026-09-19): never open another version in place of the one clicked; say it's not here.
+        (ServerType.PLEX, "42", V1, [V2]),
+        (ServerType.PLEX, "42", V2, [V1]),
+        # A Plex row whose file is none of the item's versions any more: the id can't say which one was clicked.
+        (ServerType.PLEX, "42", "S01E01 - 720p.mkv", [V1, V2]),
+        (ServerType.JELLYFIN, JF_V2, None, [V1]),
+        (ServerType.JELLYFIN, JF_V2, V2, [V1]),
+        (ServerType.JELLYFIN, JF_V1, None, [V2]),
+        (ServerType.EMBY, "55", None, [V1]),
+        (ServerType.EMBY, "55", V2, [V1]),
+    ],
+    ids=[
+        "plex-v1-not-here",
+        "plex-v2-not-here",
+        "plex-stale-file",
+        "jellyfin-v2-not-here",
+        "jellyfin-v2-not-here-with-file",
+        "jellyfin-primary-not-here",
+        "emby-55-not-here",
+        "emby-55-not-here-with-file",
+    ],
+)
+def test_resolve_local_path_says_the_version_asked_for_isnt_here(media, stype, asked, version_file, on_disk):
+    cfg, server = _two_version_server(media, stype, on_disk)
+
+    with pytest.raises(inspect.VersionNotHereError, match="This version's file isn't on this disk"):
+        inspect.resolve_local_path(
+            server, cfg, asked, version_file=_version_file(media, version_file) if version_file else None
+        )
+
+
+@pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.JELLYFIN, ServerType.EMBY])
+def test_resolve_local_path_says_an_items_only_version_isnt_here(media, stype):
+    cfg = server_config("srv", stype)
+    cfg.path_mappings.append({"remote_prefix": "/data/tv", "local_prefix": str(media / "tv")})
+    server = MagicMock()
+    server.resolve_item_to_remote_paths.return_value = [("42", "/data/tv/Show/S01E02.mkv")]
+
+    with pytest.raises(inspect.VersionNotHereError):
+        inspect.resolve_local_path(server, cfg, "42")
+
+
+@pytest.mark.parametrize(
+    ("stype", "asked"),
+    [(ServerType.PLEX, "42"), (ServerType.JELLYFIN, "fedcba9876543210fedcba9876543210")],
+    ids=["plex-item", "id-naming-no-version"],
+)
+def test_resolve_local_path_none_when_no_version_was_asked_for_and_none_is_here(media, stype, asked):
+    cfg, server = _two_version_server(media, stype, on_disk=[])
+
+    assert inspect.resolve_local_path(server, cfg, asked) is None
+
+
+def test_resolve_local_path_an_id_naming_no_version_opens_one_that_is_here(media):
+    # Not seen from a real server (a merged Jellyfin item's id is its primary version's); kept as the old behaviour.
+    cfg, server = _two_version_server(media, ServerType.JELLYFIN, on_disk=[V2])
+
+    assert inspect.resolve_local_path(server, cfg, "fedcba9876543210fedcba9876543210") == str(
+        media / "tv" / "Show" / V2
+    )
 
 
 @pytest.mark.parametrize(("stage", "detection_asked"), [("inspector", False), ("edit-tab", True)])

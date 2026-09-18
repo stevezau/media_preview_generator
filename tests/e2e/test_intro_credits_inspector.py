@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import urllib.parse
 
 import pytest
 from playwright.sync_api import Page, Route, expect
@@ -17,6 +18,11 @@ from ._mocks import _fulfill_json, mock_servers_list
 
 _MEDIA_FILE = "/data/tv/South Park (1997)/Season 01/South Park S01E03.mkv"
 _DURATION = 1_322_000  # 22:02
+
+
+def _quote(value: str) -> str:
+    """``value`` the way the page's encodeURIComponent writes it into a query."""
+    return urllib.parse.quote(value, safe="-_.!~*'()")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -289,6 +295,7 @@ class _Inspector:
         payload: dict,
         results: list[dict] | None = None,
         item_handler=None,
+        server_type: str = "plex",
     ) -> None:
         self.page = page
         self.app_url = app_url
@@ -297,14 +304,12 @@ class _Inspector:
         self.info_requests: list[str] = []
         self.redetect_bodies: list[dict] = []
         self.item_handler = item_handler
-        mock_servers_list(
-            page,
-            servers=[{"id": "plex-1", "name": "Plex", "type": "plex", "enabled": True, "url": "http://p:32400"}],
-        )
+        server = {"id": "plex-1", "name": server_type.title(), "type": server_type, "enabled": True, "url": "http://p"}
+        mock_servers_list(page, servers=[server])
         page.route(
             "**/api/bif/servers/*/search**",
             lambda r: _fulfill_json(
-                r, {"server_id": "plex-1", "server_type": "plex", "results": results or [_result()]}
+                r, {"server_id": "plex-1", "server_type": server_type, "results": results or [_result()]}
             ),
         )
         page.route("**/api/bif/info**", self._info)
@@ -795,7 +800,9 @@ class TestIntroCreditsTabLoading:
         assert len(inspector.item_requests) == 2
         assert "path=" in inspector.item_requests[0]
         assert "server_id=plex-1&item_id=4321" in inspector.item_requests[1]
-        assert "path=" not in inspector.item_requests[1]
+        assert "path=" not in inspector.item_requests[1].replace("version_file=", "")
+        # The version clicked goes along, so the server's other version never opens in its place.
+        assert "version_file=" + _quote(_MEDIA_FILE) in inspector.item_requests[1]
         expect(_server_card(page, "plex-1").locator(".mk-plan")).to_have_text("Will replace")
         expect(page.locator("#markersInspectorPath")).to_have_text(_MEDIA_FILE)
 
@@ -835,6 +842,59 @@ class TestIntroCreditsTabLoading:
         expect(page.locator("#markersInspectorPath")).to_have_text(other)
         expect(_server_card(page, "plex-e04")).to_be_visible()
         expect(_server_card(page, "plex-1")).to_have_count(0)
+
+
+_V1080 = "/data/movies/Heat (1995)/Heat (1995) - 1080p.mkv"
+_V2160 = "/data/movies/Heat (1995)/Heat (1995) - 2160p.mkv"
+# Plex: one item, every version shares its id. Jellyfin: each version's own id. Emby: each version its own item.
+_VERSION_IDS = {
+    "plex": ("4321", "4321"),
+    "jellyfin": ("0123456789abcdef0123456789abcde1", "0123456789abcdef0123456789abcde2"),
+    "emby": ("5001", "5002"),
+}
+
+
+@pytest.mark.e2e
+class TestVersionNotOnThisDisk:
+    """The owner's rule (2026-09-19): a version whose file isn't on this disk says so; another version never opens."""
+
+    @pytest.mark.parametrize("server_type", ["plex", "jellyfin", "emby"])
+    def test_a_version_whose_file_isnt_here_says_so(self, authed_page: Page, app_url: str, server_type) -> None:
+        first_id, second_id = _VERSION_IDS[server_type]
+        results = [
+            {**_result(item_id=first_id, media_file=_V1080, title="Heat (1995)"), "type": "movie"},
+            {
+                **_result(item_id=second_id, media_file=_V2160, title="Heat (1995)"),
+                "type": "movie",
+                "preview_path": "",
+                "preview_exists": False,
+            },
+        ]
+
+        def answer(route: Route) -> None:
+            if "path=" in route.request.url.replace("version_file=", ""):
+                _fulfill_json(route, {"error": "Path is not a file inside any server library"}, status=400)
+            else:
+                body = {"error": "This version's file isn't on this disk", "reason": "version_not_here"}
+                _fulfill_json(route, body, status=404)
+
+        inspector = _Inspector(
+            authed_page, app_url, south_park(), results=results, item_handler=answer, server_type=server_type
+        )
+        inspector.open_result(1)
+        page = inspector.open_tab()
+
+        box = page.locator("#markersInspectorBody .mk-version-not-here")
+        expect(box).to_contain_text("This version's file isn't on this disk")
+        expect(box).to_contain_text("Pick another version")
+        expect(page.locator("#markersInspectorBody")).not_to_contain_text("Couldn't load")
+        expect(page.locator("#markersInspectorBody .mk-window")).to_have_count(0)
+        expect(page.locator("#markersRedetectBtn")).to_be_disabled()
+        expect(page.locator("#markersInspectorPath")).to_have_text(_V2160)
+        assert len(inspector.item_requests) == 2
+        by_id = inspector.item_requests[1]
+        assert f"item_id={second_id}" in by_id
+        assert "version_file=" + _quote(_V2160) in by_id
 
 
 @pytest.mark.e2e
