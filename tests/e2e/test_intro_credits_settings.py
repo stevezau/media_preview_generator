@@ -94,7 +94,10 @@ def _mock_local_sources(page: Page, body: object, status: int = 200) -> None:
     page.route("**/api/markers/sources/local", handler)
 
 
-AVAILABLE = {"season_audio": {"available": True, "ffmpeg": "/usr/lib/jellyfin-ffmpeg/ffmpeg", "message": ""}}
+AVAILABLE = {
+    "season_audio": {"available": True, "ffmpeg": "/usr/lib/jellyfin-ffmpeg/ffmpeg", "message": ""},
+    "credits_text": {"available": True, "message": ""},
+}
 
 
 def _open_settings(
@@ -195,24 +198,12 @@ class TestIntroCreditsSettings:
         expect(authed_page.locator("#markersSourceList .markers-source .info-icon")).to_have_count(7)
         expect(authed_page.locator("#markersSourceList")).to_contain_text("Second opinion, never copied as-is")
 
-    @pytest.mark.parametrize("source_id", ["credits_text"])
-    def test_coming_soon_sources_are_disabled_with_badge(self, authed_page: Page, app_url: str, source_id: str) -> None:
-        _open_settings(authed_page, app_url, _default_markers())
-        row = authed_page.locator(f"#markersSourceList .markers-source[data-id='{source_id}']")
-        expect(row.locator(".markers-source-enabled")).to_be_disabled()
-        expect(row.locator(".markers-source-soon-badge")).to_be_visible()
-        expect(row.locator(".markers-source-soon-badge")).to_have_text("Coming soon")
-        # Sources that work today stay switchable.
-        expect(
-            authed_page.locator("#markersSourceList .markers-source[data-id='skipdb'] .markers-source-enabled")
-        ).to_be_enabled()
-
-    def test_coming_soon_sources_round_trip_their_stored_values(self, authed_page: Page, app_url: str) -> None:
+    def test_local_sources_round_trip_their_stored_values(self, authed_page: Page, app_url: str) -> None:
         markers = _default_markers()
         by_id = {s["id"]: s for s in markers["sources"]}
         by_id["season_audio"]["enabled"] = False
         by_id["credits_text"]["enabled"] = True
-        # Stored order puts the two coming-soon sources first.
+        # Stored order puts the two local sources first.
         markers["sources"] = [by_id["credits_text"], by_id["season_audio"]] + [
             s for s in markers["sources"] if s["id"] not in ("credits_text", "season_audio")
         ]
@@ -224,6 +215,68 @@ class TestIntroCreditsSettings:
         authed_page.locator("label[for='markersDetectRecap']").click()
         sent = _wait_for_post(authed_page, captured, lambda m: m["detect"]["recap"] is True)
         assert sent["sources"] == markers["sources"]
+
+    def test_no_source_is_coming_soon(self, authed_page: Page, app_url: str) -> None:
+        _open_settings_and_wait_for_local(authed_page, app_url, _default_markers())
+        expect(authed_page.locator("#markersSourceList .markers-source-soon-badge")).to_have_count(0)
+        expect(authed_page.locator("#markersSourceList .markers-source-soon")).to_have_count(0)
+        for source_id in SOURCE_ORDER:
+            switch = authed_page.locator(
+                f"#markersSourceList .markers-source[data-id='{source_id}'] .markers-source-enabled"
+            )
+            expect(switch).to_be_enabled()
+
+    def test_credit_text_is_switchable_and_explains_its_numbers(self, authed_page: Page, app_url: str) -> None:
+        captured = _open_settings_and_wait_for_local(authed_page, app_url, _default_markers())
+        row = authed_page.locator("#markersSourceList .markers-source[data-id='credits_text']")
+        expect(row.locator(".markers-source-unavailable")).to_be_hidden()
+        expect(row.locator(".markers-source-reason")).to_be_hidden()
+        expect(row).to_contain_text(
+            "Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file"
+        )
+        tooltip = row.locator(".info-icon").evaluate(
+            "el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')"
+        )
+        assert tooltip == (
+            "Finds where the credit roll starts from text on screen near the end of the file, and stops the skip at "
+            "the last credit when a scene follows. Tested alone on 80 files: within 10 s on 63, more than 30 s early "
+            'on 1, missed 8. At "High" another source has to agree; at "Medium" it can publish alone.'
+        )
+        row.locator(".markers-source-enabled").click()
+        sent = _wait_for_post(
+            authed_page,
+            captured,
+            lambda m: next(s for s in m["sources"] if s["id"] == "credits_text")["enabled"] is False,
+        )
+        assert [s["id"] for s in sent["sources"]] == SOURCE_ORDER
+
+    def test_credit_text_unavailable_says_why_and_keeps_the_stored_choice(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        reason = (
+            "Needs the text detection model, which the Docker image includes; it isn't at "
+            "/app/models/ch_PP-OCRv4_det_infer.onnx"
+        )
+        local = {**AVAILABLE, "credits_text": {"available": False, "message": reason}}
+        captured = _open_settings_and_wait_for_local(authed_page, app_url, _default_markers(), local=local)
+        row = authed_page.locator("#markersSourceList .markers-source[data-id='credits_text']")
+        expect(row.locator(".markers-source-unavailable")).to_have_text("Not available", timeout=5000)
+        expect(row.locator(".markers-source-reason")).to_have_text(reason)
+        expect(row.locator(".markers-source-enabled")).to_be_checked()
+        season = authed_page.locator("#markersSourceList .markers-source[data-id='season_audio']")
+        expect(season.locator(".markers-source-unavailable")).to_be_hidden()
+        authed_page.locator("label[for='markersDetectRecap']").click()
+        sent = _wait_for_post(authed_page, captured, lambda m: m["detect"]["recap"] is True)
+        assert next(s for s in sent["sources"] if s["id"] == "credits_text")["enabled"] is True
+
+    def test_an_answer_without_credit_text_leaves_its_row_as_is(self, authed_page: Page, app_url: str) -> None:
+        # An app one version behind answers season audio only.
+        _open_settings_and_wait_for_local(
+            authed_page, app_url, _default_markers(), local={"season_audio": AVAILABLE["season_audio"]}
+        )
+        row = authed_page.locator("#markersSourceList .markers-source[data-id='credits_text']")
+        expect(row.locator(".markers-source-enabled")).to_be_enabled()
+        expect(row.locator(".markers-source-unavailable")).to_be_hidden()
 
     def test_season_audio_is_switchable_and_explains_its_numbers(self, authed_page: Page, app_url: str) -> None:
         captured = _open_settings_and_wait_for_local(authed_page, app_url, _default_markers())

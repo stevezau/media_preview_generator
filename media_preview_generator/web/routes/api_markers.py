@@ -403,13 +403,22 @@ def marker_season_publish():
 @api.route("/markers/sources/local", methods=["GET"])
 @api_token_required
 def marker_local_sources():
-    """Whether the local detectors can run in this container (season audio needs an ffmpeg with chromaprint).
+    """Whether the local detectors can run in this container: season audio needs an ffmpeg with chromaprint, credit text
+    ONNX Runtime, OpenCV and the text detection model.
 
     Returns:
-        200 with ``{"season_audio": {"available", "ffmpeg", "message"}}``; ``message`` says why when it isn't available.
+        200 with ``{"season_audio": {"available", "ffmpeg", "message"}, "credits_text": {"available", "message"}}``;
+        ``message`` says why when a source isn't available.
     """
     from ...markers.audio import fingerprint
+    from ...markers.credits import textdet_helper
 
     # No setting to pass: jobs use jellyfin-ffmpeg, then ffmpeg on PATH, the order chromaprint_status tries with None.
     found, reason = fingerprint.chromaprint_status(None)
-    return jsonify({"season_audio": {"available": found is not None, "ffmpeg": found, "message": reason}})
+    text_available, text_reason = textdet_helper.text_detection_status()
+    return jsonify(
+        {
+            "season_audio": {"available": found is not None, "ffmpeg": found, "message": reason},
+            "credits_text": {"available": text_available, "message": text_reason},
+        }
+    )

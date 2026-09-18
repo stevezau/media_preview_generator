@@ -460,12 +460,9 @@ def default_local_detectors(
                 "text, saved credit text answers still count, and the check runs again in 10 minutes"
             )
         else:
-            # TODO(task-10): point at Settings → Intro & Credits for the reason once that page renders
-            # ``textdet_helper.text_detection_status()``; it has no caller yet, so naming it here would send the user
-            # to a reason that isn't shown.
             logger.warning(
-                "On-screen credit text is on, but text detection isn't available here; credits come from the other "
-                "sources only"
+                "On-screen credit text is on, but text detection isn't available here (see Settings → Intro & "
+                "Credits for the reason); credits come from the other sources only"
             )
     return tuple(detectors)
 

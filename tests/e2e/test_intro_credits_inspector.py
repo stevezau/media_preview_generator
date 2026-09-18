@@ -173,6 +173,19 @@ def movie() -> dict:
     }
 
 
+def movie_with_credit_text() -> dict:
+    payload = movie()
+    payload["decisions"]["credits"] = _decision(
+        "decided", ("credits", 6_912_000, 7_200_000), decided_by=["credits_text", "server_markers"]
+    )
+    payload["evidence"] = [
+        _evidence("chapters", None, None, None, "No chapters"),
+        _evidence("credits_text", "credits", 6_912_000, None),
+    ]
+    payload["servers"] = [_server("plex-1", "Plex", "plex", "up_to_date", [_marker("credits", 6_915_000, 7_200_000)])]
+    return payload
+
+
 def not_checked() -> dict:
     return {
         "known": False,
@@ -524,6 +537,37 @@ class TestIntroCreditsTab:
         expect(chips).to_contain_text("Recap: not used for movies")
         expect(chips).to_contain_text("Preview: Detection off")
         expect(chips).not_to_contain_text("Intro: Detection off")
+
+    def test_credit_text_has_its_own_lane_in_the_ending(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, movie_with_credit_text())
+        inspector.open_result()
+        page = inspector.open_tab()
+        expect(_lane(page, "ending", "Credit text")).to_contain_text("1:55:12 →")
+        expect(_lane(page, "ending", "Credit text").locator(".mk-disagree")).to_have_count(0)
+
+    def test_credit_text_with_a_scene_after_the_roll_shows_where_the_skip_ends(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        # Q3: an end 20 s before the end of a 2 h file ("1:59:40"); laneRange() writes "start–end" unless the end is
+        # within 2 s of the end of the file.
+        payload = movie_with_credit_text()
+        payload["evidence"][-1] = _evidence("credits_text", "credits", 6_912_000, 7_180_000)
+        payload["decisions"]["credits"] = _decision(
+            "decided", ("credits", 6_912_000, 7_180_000), decided_by=["credits_text"]
+        )
+        inspector = _Inspector(authed_page, app_url, payload)
+        inspector.open_result()
+        page = inspector.open_tab()
+        expect(_lane(page, "ending", "Credit text")).to_contain_text("1:55:12–1:59:40")
+        expect(_lane(page, "ending", "Decision")).to_contain_text("1:55:12–1:59:40")
+
+    def test_credit_text_that_found_nothing_says_so(self, authed_page: Page, app_url: str) -> None:
+        payload = movie()
+        payload["evidence"].append(_evidence("credits_text", None, None, None))
+        inspector = _Inspector(authed_page, app_url, payload)
+        inspector.open_result()
+        page = inspector.open_tab()
+        expect(_lane(page, "ending", "Credit text")).to_contain_text("Nothing found")
 
     def test_late_intro_widens_the_opening_window_and_far_segments_are_noted(
         self, authed_page: Page, app_url: str

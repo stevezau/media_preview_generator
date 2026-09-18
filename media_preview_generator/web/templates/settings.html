@@ -481,7 +481,7 @@
                         <div class="markers-opt mb-3">
                             <div>
                                 <label for="markersDetectCredits">Credits</label>
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Found from chapters and online databases; on-screen credit text detection arrives in a later update."><i class="bi bi-info-circle"></i></button>
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Found from chapters, online databases, and the on-screen credit roll."><i class="bi bi-info-circle"></i></button>
                                 <div class="small text-muted">TV episodes and movies</div>
                             </div>
                             <div class="form-check form-switch markers-switch">
@@ -529,8 +529,7 @@
                             <span class="small text-muted">drag to reorder</span>
                         </div>
                         <!-- Order is the order sources are checked and which one's times win. Reordered by the grip
-                             (drag) or the ▲/▼ buttons (keyboard and touch). "Coming soon" sources aren't built yet:
-                             their switches are disabled but keep (and save) the stored value and position. -->
+                             (drag) or the ▲/▼ buttons (keyboard and touch). -->
                         <ol id="markersSourceList" class="list-unstyled mb-0" aria-labelledby="markersSourcesLabel">
                             <li class="markers-source" data-id="chapters">
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
@@ -615,17 +614,18 @@
                                     <button type="button" class="btn btn-sm btn-link markers-source-down" aria-label="Move matching audio across a season down"><i class="bi bi-caret-down-fill"></i></button>
                                 </div>
                             </li>
-                            <li class="markers-source markers-source-soon" data-id="credits_text">
+                            <li class="markers-source" data-id="credits_text">
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">On-screen credit text</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Coming in a later update: finds the start of the credit roll from on-screen text (within 10 s on 59 of 80 test files)."><i class="bi bi-info-circle"></i></button>
-                                    <span class="badge bg-secondary-subtle text-secondary-emphasis border border-secondary-subtle ms-1 markers-source-soon-badge">Coming soon</span>
-                                    <div class="small text-muted">About 10–30 s per file</div>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds where the credit roll starts from text on screen near the end of the file, and stops the skip at the last credit when a scene follows. Tested alone on 80 files: within 10 s on 63, more than 30 s early on 1, missed 8. At &quot;High&quot; another source has to agree; at &quot;Medium&quot; it can publish alone."><i class="bi bi-info-circle"></i></button>
+                                    <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1 markers-source-unavailable" hidden>Not available</span>
+                                    <div class="small text-muted">Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file</div>
+                                    <div class="small text-warning-emphasis markers-source-reason" hidden></div>
                                 </div>
                                 <div class="markers-source-controls">
                                     <div class="form-check form-switch markers-switch">
-                                        <input class="form-check-input markers-source-enabled" type="checkbox" role="switch" disabled aria-label="Use on-screen credit text" checked>
+                                        <input class="form-check-input markers-source-enabled" type="checkbox" role="switch" aria-label="Use on-screen credit text" checked>
                                     </div>
                                     <button type="button" class="btn btn-sm btn-link markers-source-up" aria-label="Move on-screen credit text up"><i class="bi bi-caret-up-fill"></i></button>
                                     <button type="button" class="btn btn-sm btn-link markers-source-down" aria-label="Move on-screen credit text down"><i class="bi bi-caret-down-fill"></i></button>
@@ -1298,21 +1298,25 @@ async function loadMarkersUsage() {
 }
 
 async function loadMarkersLocalSources() {
-    const row = document.querySelector('#markersSourceList .markers-source[data-id="season_audio"]');
-    if (!row) return;
+    const rows = ['season_audio', 'credits_text']
+        .map((id) => [id, document.querySelector(`#markersSourceList .markers-source[data-id="${id}"]`)])
+        .filter(([, row]) => row);
+    if (!rows.length) return;
     try {
         const response = await fetch('/api/markers/sources/local');
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        const audio = data && data.season_audio;
-        if (!audio || typeof audio.available !== 'boolean') return;
-        // The switch keeps the stored choice: a job in another container (or after an image update) may have chromaprint.
-        row.querySelector('.markers-source-unavailable').hidden = audio.available;
-        const reason = row.querySelector('.markers-source-reason');
-        reason.textContent = audio.available ? '' : String(audio.message || '');
-        reason.hidden = audio.available;
+        rows.forEach(([id, row]) => {
+            const status = data && data[id];
+            if (!status || typeof status.available !== 'boolean') return;
+            // The switch keeps the stored choice: a job in another container (or after an image update) may run it.
+            row.querySelector('.markers-source-unavailable').hidden = status.available;
+            const reason = row.querySelector('.markers-source-reason');
+            reason.textContent = status.available ? '' : String(status.message || '');
+            reason.hidden = status.available;
+        });
     } catch (_error) {
-        // Unknown: leave the row as it is.
+        // Unknown: leave the rows as they are.
     }
 }
 

@@ -124,8 +124,3 @@ html {
 .markers-key-input {
     max-width: 14rem;
 }
-/* Sources not built yet: the row reads as unavailable, the "Coming soon" badge stays at full strength. */
-.markers-source-soon .markers-source-name,
-.markers-source-soon .markers-source-body > .text-muted {
-    opacity: 0.6;
-}

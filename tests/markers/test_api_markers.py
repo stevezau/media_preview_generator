@@ -701,15 +701,31 @@ def test_season_publish_refuses_when_config_is_unwritable(client, servers, media
 
 
 @pytest.mark.parametrize(("found", "reason"), [("/usr/lib/jellyfin-ffmpeg/ffmpeg", ""), (None, "no chromaprint")])
-def test_local_sources_status(client, servers, monkeypatch, found, reason):
+@pytest.mark.parametrize(
+    ("text_available", "text_reason"),
+    [
+        (True, ""),
+        (
+            False,
+            "Needs the text detection model, which the Docker image includes; it isn't at "
+            "/app/models/ch_PP-OCRv4_det_infer.onnx",
+        ),
+    ],
+)
+def test_local_sources_status(client, servers, monkeypatch, found, reason, text_available, text_reason):
     from media_preview_generator.markers.audio import fingerprint
+    from media_preview_generator.markers.credits import textdet_helper
 
     asked = []
     monkeypatch.setattr(
         fingerprint, "chromaprint_status", lambda configured: asked.append(configured) or (found, reason)
     )
+    monkeypatch.setattr(textdet_helper, "text_detection_status", lambda: (text_available, text_reason))
     resp = client.get("/api/markers/sources/local", headers=_api_headers())
-    assert resp.get_json() == {"season_audio": {"available": found is not None, "ffmpeg": found, "message": reason}}
+    assert resp.get_json() == {
+        "season_audio": {"available": found is not None, "ffmpeg": found, "message": reason},
+        "credits_text": {"available": text_available, "message": text_reason},
+    }
     # The ffmpeg jobs use: jellyfin-ffmpeg, then PATH (config._resolve_ffmpeg_path has no setting to pass).
     assert asked == [None]
 
