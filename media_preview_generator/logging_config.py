@@ -16,11 +16,19 @@ configured level:
 Only the handler IDs created by :func:`setup_logging` are tracked; per-job
 log sinks added externally are left untouched during hot-reloads.
 
+Standard-library ``logging`` (Flask, werkzeug, APScheduler, python-socketio,
+…) is routed into loguru too (``_StdlibToLoguru``), so its lines are masked
+and written by the same handlers, at the levels that reached the console
+before; a library that keeps its records to itself (urllib3's and requests'
+NullHandler) stays quiet as before.
+
 Set ``LOG_FORMAT=json`` (env var) or pass ``log_format="json"`` to emit
 structured JSON on stderr for log-aggregation pipelines (ELK / Loki / etc.).
 """
 
+import inspect
 import json as _json
+import logging  # stdlib logging only to hand libraries' records to loguru; app code must use loguru
 import os
 import sys
 import threading
@@ -142,6 +150,77 @@ def _json_sink(message) -> None:
             payload[key] = extra[key]
     sys.stderr.write(_json.dumps(payload, default=str) + "\n")
     sys.stderr.flush()
+
+
+# ---------------------------------------------------------------------------
+# Standard-library logging (Flask, werkzeug, APScheduler, python-socketio, …)
+# ---------------------------------------------------------------------------
+
+
+class _StdlibToLoguru(logging.Handler):
+    """Root handler of the standard library's ``logging``: its records go through loguru, masked and written like the
+    app's own lines.
+
+    It stands in for the stdlib's last-resort handler, which printed WARNING and above of a record no handler took, so
+    what reaches the logs is what reached them before: it sits at WARNING, and leaves a record to a handler of its own
+    logger or a parent below the root (urllib3's and requests' NullHandler, which keep their records quiet).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        # Set while this thread hands a record to loguru: a loguru sink that gives records back to ``logging`` (a
+        # test's caplog bridge) would otherwise send the record round for ever.
+        self._handing_over = threading.local()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if getattr(self._handing_over, "active", False) or _handled_below_root(record):
+            return
+        self._handing_over.active = True
+        try:
+            try:
+                level: str | int = logger.level(record.levelname).name
+            except ValueError:
+                level = record.levelno
+            # Name the code that logged (loguru reads its module, function and line), not this handler or logging.
+            frame, depth = inspect.currentframe(), 0
+            while frame is not None and (depth == 0 or frame.f_code.co_filename == logging.__file__):
+                frame = frame.f_back
+                depth += 1
+            logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+        except Exception:
+            self.handleError(record)
+        finally:
+            self._handing_over.active = False
+
+
+def _handled_below_root(record: logging.LogRecord) -> bool:
+    """Whether the record's logger, or a parent it propagates to below the root, has a handler of its own."""
+    current: logging.Logger | None = logging.getLogger(record.name)
+    while current is not None and current is not logging.root:
+        if current.handlers:
+            return True
+        current = current.parent if current.propagate else None
+    return False
+
+
+def _route_stdlib_logging() -> None:
+    """Send the standard library's ``logging`` through loguru (``_StdlibToLoguru``); safe to call again.
+
+    python-socketio, python-engineio and Flask give their loggers a console handler of their own when nothing handles
+    their records yet (Flask on first use, the others when the app starts): each is taken off, so their lines are
+    masked and written once, WARNING and above as the root handler takes them (and not below their own logger's
+    level). A handler writing anywhere else (a file, a stream of its own) stays. A logger that doesn't propagate
+    (gunicorn's) keeps its handlers and never reaches the root.
+    """
+    if not any(isinstance(handler, _StdlibToLoguru) for handler in logging.root.handlers):
+        logging.root.addHandler(_StdlibToLoguru())
+    for candidate in list(logging.root.manager.loggerDict.values()):
+        if not isinstance(candidate, logging.Logger) or not candidate.propagate:
+            continue
+        for handler in list(candidate.handlers):
+            # Flask's streams to the request's ``wsgi.errors``, which is sys.stderr outside a request.
+            if type(handler) is logging.StreamHandler and handler.stream in (sys.stderr, sys.stdout):
+                candidate.removeHandler(handler)
 
 
 def get_app_log_path() -> str:
@@ -266,6 +345,9 @@ def setup_logging(
                 diagnose=False,
             )
             _managed_handler_ids.append(hid)
+
+        # --- 4. Standard-library logging through the handlers above ---
+        _route_stdlib_logging()
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,9 @@ Tests for logging configuration.
 """
 
 import json
+import logging
 import os
+import sys
 from io import StringIO
 from unittest.mock import MagicMock, patch
 
@@ -39,6 +41,9 @@ def _reset_logging_state():
     snapshot = dict(_loguru_logger._core.handlers)  # noqa: SLF001
     # setup_logging installs a global patcher; loguru's configure(patcher=None) leaves it in place, so put it back here.
     patcher = _loguru_logger._core.patcher  # noqa: SLF001
+    # ...and a handler on the standard library's root logger (stdlib records into loguru).
+    stdlib_root_handlers = list(logging.root.handlers)
+    logging.root.handlers = [h for h in stdlib_root_handlers if not isinstance(h, _logging_mod._StdlibToLoguru)]
     _logging_mod._managed_handler_ids = []
     _logging_mod._initial_setup_done = False
     old_broadcaster = _logging_mod._broadcaster
@@ -46,6 +51,7 @@ def _reset_logging_state():
     try:
         yield
     finally:
+        logging.root.handlers = stdlib_root_handlers
         _logging_mod._managed_handler_ids = []
         _logging_mod._initial_setup_done = False
         _logging_mod._broadcaster = old_broadcaster
@@ -256,6 +262,221 @@ class TestLoggingConfig:
 
         # Clean up handlers we added
         logger.remove()
+
+
+class TestStdlibLogging:
+    """Standard-library ``logging`` (Flask, werkzeug, APScheduler, python-socketio, …) goes through loguru, masked and
+    written like the app's own lines, at the levels that reached the console before: the stdlib's last-resort handler
+    printed WARNING and above of loggers no handler took, and a library's own handler (urllib3's NullHandler) kept its
+    records.
+    """
+
+    TOKEN_URL = "http://plex:32400/library?X-Plex-Token=" + "s3cr3t"
+
+    @staticmethod
+    def _app_log_line(app_log, text):
+        """app.log's JSON line whose message holds ``text``."""
+        [line] = [json.loads(ln) for ln in app_log.splitlines() if ln.startswith("{") and text in json.loads(ln)["msg"]]
+        return line
+
+    @pytest.fixture
+    def start(self, tmp_path):
+        """``start(level)`` runs setup_logging (INFO, the app's default, unless given) with a console, app.log and the
+        live viewer, and returns ``read()``: what each of the three wrote so far."""
+        from loguru import logger
+
+        printed: list[str] = []
+        console = MagicMock()
+        console.print.side_effect = lambda msg, end="": printed.append(str(msg))
+        socketio = MagicMock()
+        _logging_mod._broadcaster = _logging_mod.SocketIOLogBroadcaster(socketio)
+
+        def read():
+            logger.complete()
+            app_log = tmp_path / "logs" / "app.log"
+            live = " ".join(c.args[1]["msg"] for c in socketio.emit.call_args_list)
+            return "".join(printed), (app_log.read_text() if app_log.exists() else ""), live
+
+        def run(level="INFO"):
+            with patch.dict(os.environ, {"CONFIG_DIR": str(tmp_path)}):
+                setup_logging(level, console=console)
+            return read
+
+        return run
+
+    @pytest.fixture
+    def stdlib_logger(self, request):
+        """``stdlib_logger(suffix)``: a logger of this test's own, left without handlers afterwards."""
+        made: list[logging.Logger] = []
+
+        def make(suffix):
+            made.append(logging.getLogger(f"tests.stdlib.{request.node.name}.{suffix}"))
+            return made[-1]
+
+        yield make
+        for lg in made:
+            lg.handlers.clear()
+            lg.setLevel(logging.NOTSET)
+            lg.propagate = True
+
+    def test_a_stdlib_warning_reaches_every_sink_masked_at_its_level_naming_its_caller(self, start, stdlib_logger):
+        read = start()
+        stdlib_logger("plain").warning("Couldn't reach %s", self.TOKEN_URL)
+        texts = read()
+        for text in texts:
+            assert "Couldn't reach http://plex:32400/library?X-Plex-Token=****" in text and "s3cr3t" not in text
+        line = self._app_log_line(texts[1], "Couldn't reach")
+        assert (line["level"], line["mod"], line["func"]) == (
+            "WARNING",
+            "test_logging_config",
+            "test_a_stdlib_warning_reaches_every_sink_masked_at_its_level_naming_its_caller",
+        )
+
+    def test_a_stdlib_exceptions_traceback_is_masked(self, start, stdlib_logger):
+        read = start()
+        token = "s3cr3t" + "XYZ"  # not a literal: the traceback quotes the raising line's source
+        try:
+            raise ConnectionError(f"GET /library/metadata/1?X-Plex-Token={token} failed")
+        except ConnectionError:
+            stdlib_logger("exc").exception("fetch failed")
+        console, app_log, _live = read()
+        for text in (console, app_log):
+            assert "fetch failed" in text and "Traceback" in text
+            assert "X-Plex-Token=****" in text and "s3cr3tXYZ" not in text
+        assert self._app_log_line(app_log, "fetch failed")["level"] == "ERROR"
+
+    def test_a_level_loguru_doesnt_know_keeps_its_number(self, start, stdlib_logger):
+        logging.addLevelName(35, "NOTICE")  # a library's own level name
+        read = start()
+        stdlib_logger("custom").log(35, "a notice")
+        _console, app_log, _live = read()
+        assert self._app_log_line(app_log, "a notice")["level"] == "Level 35"
+
+    @pytest.mark.parametrize("logger_before_setup", [False, True], ids=["logger-made-after", "logger-made-before"])
+    def test_a_flask_route_traceback_is_written_once_through_loguru(self, start, capsys, logger_before_setup):
+        # Flask gives its app logger a stderr handler of its own when nothing handles its records yet.
+        from flask import Flask
+
+        app = Flask(f"tests.stdlib.flask_{logger_before_setup}")
+        token_url = self.TOKEN_URL
+
+        @app.route("/boom")
+        def boom():
+            raise RuntimeError(f"upstream said no: {token_url}")
+
+        if logger_before_setup:
+            from flask.logging import default_handler
+
+            # What Flask attaches on first use when nothing handles its records (pytest's own capture handler on the
+            # root logger hides that from Flask's check here, so it is attached by hand).
+            app.logger.addHandler(default_handler)
+        read = start()
+        try:
+            assert app.test_client().get("/boom").status_code == 500
+            console, app_log, _live = read()
+            assert console.count("Exception on /boom [GET]") == 1 and app_log.count("Exception on /boom [GET]") == 1
+            assert "upstream said no: http://plex:32400/library?X-Plex-Token=****" in console
+            assert "s3cr3t" not in console + app_log
+            assert "Exception on /boom" not in capsys.readouterr().err  # Flask's own handler printed nothing
+        finally:
+            app.logger.handlers.clear()
+
+    @pytest.mark.parametrize("stream", ["stderr", "stdout"])
+    def test_a_librarys_own_console_handler_is_taken_off_so_its_lines_are_written_once(
+        self, start, stdlib_logger, capsys, stream
+    ):
+        lib = stdlib_logger("socketio_like")  # python-socketio and python-engineio set themselves up like this
+        lib.setLevel(logging.ERROR)
+        lib.addHandler(logging.StreamHandler(getattr(sys, stream)))
+        read = start()
+        lib.error("emit failed for %s", self.TOKEN_URL)
+        lib.warning("below the library's own level")
+        console, _app_log, _live = read()
+        assert console.count("emit failed for http://plex:32400/library?X-Plex-Token=****") == 1
+        assert "below the library's own level" not in console
+        assert capsys.readouterr() == ("", "")
+        assert lib.handlers == []
+
+    @pytest.mark.parametrize("kind", ["stream-of-its-own", "file"])
+    def test_a_handler_writing_elsewhere_than_the_console_is_kept(self, start, stdlib_logger, tmp_path, kind):
+        # Only a console handler would print a line twice: a handler with somewhere else to write keeps its records.
+        lib = stdlib_logger("own_output")
+        if kind == "file":
+            handler = logging.FileHandler(tmp_path / "lib.log")
+        else:
+            handler = logging.StreamHandler(StringIO())
+        lib.addHandler(handler)
+        read = start()
+        lib.warning("kept where the library writes")
+        console, app_log, _live = read()
+        assert lib.handlers == [handler]
+        handler.flush()
+        written = (tmp_path / "lib.log").read_text() if kind == "file" else handler.stream.getvalue()
+        assert "kept where the library writes" in written
+        assert "kept where the library writes" not in console + app_log
+        handler.close()
+
+    def test_a_logger_that_doesnt_propagate_keeps_its_own_handler(self, start, stdlib_logger):
+        # gunicorn's own loggers: they write where gunicorn was told to, and never reach the root logger.
+        own = StringIO()
+        gunicorn_error = stdlib_logger("gunicorn_error")
+        gunicorn_error.propagate = False
+        gunicorn_error.addHandler(logging.StreamHandler(own))
+        read = start()
+        gunicorn_error.error("Worker (pid:7) was sent SIGKILL")
+        console, _app_log, _live = read()
+        assert "SIGKILL" in own.getvalue() and "SIGKILL" not in console
+        assert len(gunicorn_error.handlers) == 1
+
+    @pytest.mark.parametrize("root_level", [None, logging.DEBUG], ids=["root-level-as-is", "root-level-lowered"])
+    def test_levels_stay_what_reached_the_console_before(self, start, stdlib_logger, root_level):
+        # A lowered root level (pytest's caplog does it; so would a library's logging.basicConfig) still lets no
+        # library's DEBUG or INFO line through: the last-resort handler printed WARNING and above only.
+        import urllib3  # noqa: F401 - gives the urllib3 logger its NullHandler, as importing requests does
+
+        before = logging.root.level
+        read = start("DEBUG")  # the app's own DEBUG lines are on; the libraries' aren't
+        assert logging.root.level == before
+        if root_level is not None:
+            logging.root.setLevel(root_level)
+        try:
+            plain = stdlib_logger("plain")
+            plain.info("an info line")
+            plain.debug("a debug line")
+            logging.getLogger("urllib3.connectionpool").debug("Starting new HTTP connection (1): plex:32400")
+            logging.getLogger("urllib3.connectionpool").warning("Retrying (Retry(total=2)) after connection broken")
+            logging.getLogger("werkzeug").info('127.0.0.1 - - "GET /api/jobs HTTP/1.1" 200 -')
+            plain.warning("a warning line")
+        finally:
+            logging.root.setLevel(before)
+        written = " ".join(read())
+        for quiet in ("an info line", "a debug line", "Starting new HTTP", "Retrying (Retry", "GET /api/jobs"):
+            assert quiet not in written
+        assert "a warning line" in written
+
+    def test_setting_up_again_installs_one_handler_and_writes_each_line_once(self, start, stdlib_logger):
+        start()
+        read = start()  # changing the log level in Settings sets logging up again
+        stdlib_logger("twice").warning("only once please")
+        console, app_log, live = read()
+        assert sum(isinstance(h, _logging_mod._StdlibToLoguru) for h in logging.root.handlers) == 1
+        assert [text.count("only once please") for text in (console, app_log, live)] == [1, 1, 1]
+
+    def test_a_sink_that_hands_records_back_to_logging_doesnt_loop(self, start, stdlib_logger):
+        from loguru import logger
+
+        class BackToLogging(logging.Handler):
+            def emit(self, record):
+                logging.getLogger(record.name).handle(record)
+
+        read = start()
+        handler_id = logger.add(BackToLogging(), level="WARNING", format="{message}")
+        try:
+            stdlib_logger("loop").warning("round trip")
+        finally:
+            logger.remove(handler_id)
+        console, _app_log, _live = read()
+        assert console.count("round trip") == 1
 
 
 # -----------------------------------------------------------------------
