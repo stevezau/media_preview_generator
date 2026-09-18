@@ -231,6 +231,7 @@ def test_cancel_kills_ffmpeg_and_collects_it_within_the_kill_wait():
             fpmod.compute_fingerprint("/m/a.mkv", 60_000, ffmpeg="ffmpeg", cancel_check=lambda: True)
     proc.kill.assert_called_once()
     assert proc.communicate.call_args_list[-1].kwargs == {"timeout": fpmod.KILL_WAIT_S}
+    assert fpmod.stalled_ffmpegs() == 0  # collected at once: never counted as stuck
 
 
 @pytest.mark.parametrize("stop", ["timeout", "cancel"])
@@ -274,6 +275,7 @@ def test_an_ffmpeg_whose_output_outlives_the_kill_never_holds_the_worker(tmp_pat
     for reaper in [t for t in threading.enumerate() if t.name == "fingerprint-reaper"]:
         reaper.join(10)
     assert proc.returncode == -9
+    assert fpmod.stalled_ffmpegs() == 0  # counted down once collected
 
 
 def _record(store, tmp_path, name="S01E01.mkv"):
@@ -359,6 +361,129 @@ def test_at_most_two_fingerprints_run_at_once(store, tmp_path):
         for t in threads:
             t.join(10)
     assert peak[0] == 2
+
+
+class _StuckProc:
+    """An ffmpeg stuck in a read on a stalled mount: killing it changes nothing until ``released``, then it exits."""
+
+    def __init__(self):
+        self.released = threading.Event()
+        self.returncode = None
+
+    def kill(self):
+        pass
+
+    def communicate(self, timeout=None):
+        if not self.released.wait(timeout):
+            raise subprocess.TimeoutExpired("ffmpeg", timeout)
+        self.returncode = -9
+        return b"", b""
+
+
+class TestStalledFfmpegs:
+    """A killed ffmpeg that still holds its output gives back its slot and the file's lock, but counts as stalled until
+    it is collected: at ``MAX_PARALLEL`` stalled, no new ffmpeg starts on what is most likely the same stalled mount."""
+
+    @pytest.fixture
+    def stuck(self, monkeypatch):
+        monkeypatch.setattr(fpmod, "KILL_WAIT_S", 0.3)
+        monkeypatch.setattr(fpmod, "_POLL_S", 0.05)
+        procs: list[_StuckProc] = []
+
+        def popen(*args, **kwargs):
+            procs.append(_StuckProc())
+            return procs[-1]
+
+        monkeypatch.setattr(fpmod.subprocess, "Popen", popen)
+        yield procs
+        for proc in procs:
+            proc.released.set()
+        for reaper in [t for t in threading.enumerate() if t.name == "fingerprint-reaper"]:
+            reaper.join(5)
+        assert fpmod.stalled_ffmpegs() == 0
+
+    def _stall(self, store, rec):
+        with pytest.raises(fpmod.FingerprintError, match="cancelled"):
+            fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg", cancel_check=lambda: True)
+
+    def test_two_stalled_ffmpegs_keep_a_third_from_starting(self, store, tmp_path, stuck):
+        first, second, third = (_record(store, tmp_path, f"S01E0{i}.mkv") for i in (1, 2, 3))
+        self._stall(store, first)
+        self._stall(store, second)
+        assert fpmod.stalled_ffmpegs() == 2
+        failures: list[str] = []
+        with pytest.raises(fpmod.FingerprintStalledError, match="2 earlier fingerprint ffmpegs are still stuck"):
+            fpmod.ensure_fingerprint(store, third, ffmpeg="ffmpeg", on_failure=lambda: failures.append("x"))
+        assert len(stuck) == 2  # no ffmpeg started
+        assert failures == []  # the mount's fault, not the file's: nothing counts against it
+
+    def test_the_count_comes_down_as_stalled_ffmpegs_finally_exit(self, store, tmp_path, stuck, monkeypatch):
+        first, second, third = (_record(store, tmp_path, f"S01E0{i}.mkv") for i in (1, 2, 3))
+        self._stall(store, first)
+        self._stall(store, second)
+        stuck[0].released.set()  # the stall ends for one of them
+        deadline = time.monotonic() + 5
+        while fpmod.stalled_ffmpegs() != 1 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert fpmod.stalled_ffmpegs() == 1
+        raw = np.array([7, 8], dtype="<u4").tobytes()
+        with patch.object(fpmod.subprocess, "Popen", return_value=_proc(stdout=raw)) as popen:
+            assert fpmod.ensure_fingerprint(store, third, ffmpeg="ffmpeg").tolist() == [7, 8]
+        assert popen.call_args.args[0] == fpmod.fingerprint_command("ffmpeg", third.canonical_path, 105.0)
+
+    @staticmethod
+    def _hand_off_two_stuck_ffmpegs(stuck):
+        """Two ffmpegs of other files, stopped and handed to the reaper while still stuck."""
+        for name in ("S02E01.mkv", "S02E02.mkv"):
+            stuck.append(_StuckProc())
+            fpmod._stop(stuck[-1], name)
+        assert fpmod.stalled_ffmpegs() == 2
+
+    @staticmethod
+    def _run(store, rec, errors):
+        def run():
+            try:
+                fpmod.ensure_fingerprint(store, rec, ffmpeg="ffmpeg")
+            except BaseException as exc:  # noqa: BLE001 - collected for the assertions
+                errors.append(exc)
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        return thread
+
+    def test_with_every_slot_busy_a_stalled_mount_is_reported_without_waiting_for_one(self, store, tmp_path, stuck):
+        rec = _record(store, tmp_path, "S01E01.mkv")
+        self._hand_off_two_stuck_ffmpegs(stuck)
+        for _ in range(fpmod.MAX_PARALLEL):
+            fpmod._PARALLEL.acquire()  # both slots held by other files' ffmpegs that are still running
+        errors: list[BaseException] = []
+        try:
+            thread = self._run(store, rec, errors)
+            thread.join(1)
+            assert not thread.is_alive()  # not parked behind the running ffmpegs
+        finally:
+            for _ in range(fpmod.MAX_PARALLEL):
+                fpmod._PARALLEL.release()
+        thread.join(5)
+        assert [type(e) for e in errors] == [fpmod.FingerprintStalledError]
+        assert len(stuck) == 2  # no ffmpeg started
+
+    def test_a_caller_given_a_slot_after_the_mount_stalled_starts_no_ffmpeg(self, store, tmp_path, stuck):
+        rec = _record(store, tmp_path, "S01E01.mkv")
+        for _ in range(fpmod.MAX_PARALLEL):
+            fpmod._PARALLEL.acquire()  # both slots held by running ffmpegs
+        errors: list[BaseException] = []
+        try:
+            thread = self._run(store, rec, errors)  # nothing stalled yet: it waits for a slot
+            time.sleep(0.2)
+            self._hand_off_two_stuck_ffmpegs(stuck)  # meanwhile other ffmpegs stall on the mount
+        finally:
+            fpmod._PARALLEL.release()  # a running one finishes normally and frees its slot
+        thread.join(3)
+        fpmod._PARALLEL.release()
+        assert not thread.is_alive()
+        assert [type(e) for e in errors] == [fpmod.FingerprintStalledError]
+        assert len(stuck) == 2  # the freed slot started nothing on the stalled mount
 
 
 @pytest.mark.parametrize("made", [{"algorithm": 2}, {"length_s": 60.0}], ids=["other-algorithm", "other-window"])

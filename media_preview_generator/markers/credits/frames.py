@@ -23,7 +23,7 @@ import numpy as np
 from loguru import logger
 
 from ...processing.hwaccel import hwaccel_decode_args
-from ..probe import ProbeError, ffprobe_path_for, probe_media
+from ..probe import ProbeError, ProbeTimeoutError, ffprobe_path_for, probe_media
 from .rule_j import Row
 
 FRAME_W = 320
@@ -154,18 +154,24 @@ def container_start_s(
         ffmpeg: The ffmpeg binary (ffprobe is taken from beside it).
         cancel_check: True once the job is cancelled; checked before probing (a stalled mount would otherwise hold the
             worker for the probe's timeout after a cancel).
-        timeout_s: Hard limit for the probe, so a stalled mount holds the worker for this long at most.
+        timeout_s: Hard limit for the probe, so a stalled mount holds the worker for this long plus
+            ``probe.KILL_WAIT_S`` at most.
 
     Raises:
         DecodeCancelledError: Already cancelled (nothing is probed).
+        DecodeTimeoutError: ffprobe ran past ``timeout_s``: the file is left alone for a day like a decode that
+            timed out, instead of taking a worker every run only to stall again.
         FrameDecodeError: ffprobe couldn't read the file, so there is no answer this run.
     """
+    name = os.path.basename(path)
     if cancel_check and cancel_check():
-        raise DecodeCancelledError(f"cancelled before decoding {os.path.basename(path)}")
+        raise DecodeCancelledError(f"cancelled before decoding {name}")
     try:
         probe = probe_media(path, ffprobe=ffprobe_path_for(ffmpeg), timeout_s=timeout_s)
+    except ProbeTimeoutError as exc:
+        raise DecodeTimeoutError(f"reading the start time of {name} timed out after {timeout_s:g} s") from exc
     except ProbeError as exc:
-        raise FrameDecodeError(f"could not read the start time of {os.path.basename(path)}: {exc}") from exc
+        raise FrameDecodeError(f"could not read the start time of {name}: {exc}") from exc
     return (probe.start_time_ms or 0) / 1000.0
 
 
@@ -382,8 +388,9 @@ def decode_rows(
 
     Raises:
         DecodeCancelledError: Already cancelled (nothing is probed or decoded).
-        FrameDecodeError: The start time couldn't be read, plus everything :func:`run_decode` raises. Probing adds at
-            most ``min(30 s, timeout_s)`` before that function's own release bound.
+        DecodeTimeoutError: The start time probe ran past its limit, plus everything :func:`run_decode` raises.
+        FrameDecodeError: The start time couldn't be read. Probing adds at most ``min(30 s, timeout_s)`` plus
+            ``probe.KILL_WAIT_S`` before :func:`run_decode`'s own release bound.
     """
     name = os.path.basename(path)
     if cancel_check and cancel_check():

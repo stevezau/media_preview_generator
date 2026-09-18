@@ -85,7 +85,7 @@ def find_credits(
 
     Raises:
         frames.GpuDecodeError: The GPU decode failed or gave no frames.
-        frames.DecodeTimeoutError: A decode ran past its time limit.
+        frames.DecodeTimeoutError: A decode, or the start time probe before them, ran past its time limit.
         frames.FrameDecodeError: ffprobe couldn't read the start time, or ffmpeg couldn't decode the frames.
         frames.DecodeCancelledError: The job was cancelled before or during a decode.
         TextDetUnavailableError: Text detection couldn't answer.
@@ -140,7 +140,7 @@ def _gives_up(rec: FileRecord, ctx: PipelineContext) -> str | None:
         if not rec.duration_ms:
             memo[_GIVES_UP] = "the file's duration is unknown"
         elif _timed_out_lately(rec, ctx):
-            memo[_GIVES_UP] = "reading its ending timed out less than a day ago; a forced re-detect tries now"
+            memo[_GIVES_UP] = "reading the file timed out less than a day ago; a forced re-detect tries now"
         else:
             memo[_GIVES_UP] = None
     return memo[_GIVES_UP]

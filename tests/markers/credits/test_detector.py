@@ -13,6 +13,7 @@ from media_preview_generator.markers.credits import detector, frames, rule_j
 from media_preview_generator.markers.credits.textdet_helper import TextDetUnavailableError
 from media_preview_generator.markers.models import Candidate, FileIdentity, MarkerType, Source
 from media_preview_generator.markers.pipeline import DetectorUnavailableError
+from media_preview_generator.markers.probe import ProbeTimeoutError
 from media_preview_generator.markers.store import FileRecord, MarkerStore
 from media_preview_generator.processing.generator import CodecNotSupportedError
 from media_preview_generator.servers.base import ServerType
@@ -299,6 +300,19 @@ class TestDetect:
         with pytest.raises(DetectorUnavailableError, match="timed out after"):
             detector.detect_credits_text(MOVIE, ctx=ctx)
         assert len(seen) == 4
+
+    def test_a_start_time_probe_that_times_out_waits_a_day_like_a_decode(self, monkeypatch, pool, ctx):
+        # The real find_credits: only ffprobe is replaced, stalled on a mount.
+        def stalled(path, **kwargs):
+            raise ProbeTimeoutError(f"ffprobe failed for {path}: TimeoutExpired")
+
+        monkeypatch.setattr(frames, "probe_media", stalled)
+        monkeypatch.setattr(frames, "decode_rows", lambda path, **kwargs: pytest.fail("decoded anyway"))
+        with pytest.raises(DetectorUnavailableError, match="reading the start time of Movie \\(2020\\).mkv timed out"):
+            detector.detect_credits_text(MOVIE, ctx=ctx)
+        identity = FileIdentity(MOVIE.canonical_path, MOVIE.size, MOVIE.mtime_ns)
+        assert ctx.store.credits_text_timed_out_at(identity) == NOW
+        assert detector.credits_text_needs_worker(MOVIE, ctx) is False  # settled on the checking thread for a day
 
     def test_an_unknown_duration_is_no_answer(self, pool, ctx):
         rec = FileRecord(9, "/m/x.mkv", 1, 1, None, None, True)

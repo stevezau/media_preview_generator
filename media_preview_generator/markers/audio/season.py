@@ -32,12 +32,13 @@ from ...plex_client import VIDEO_EXTENSIONS
 from ..decide import DecisionStatus, intro_chapter_length_ms, intro_chapter_limit_ms
 from ..external_ids import ids_from_path, is_extra
 from ..models import Candidate, FileIdentity, MarkerType, Source
-from ..probe import ProbeError, probe_media
+from ..probe import ProbeError, ProbeStalledError, probe_media
 from ..sources.chapters import CHAPTER_RULES_VERSION, chapter_candidates
 from . import POINT_S
 from .fingerprint import (
     FingerprintError,
     FingerprintSkippedError,
+    FingerprintStalledError,
     cached_fingerprint,
     chromaprint_ffmpeg,
     ensure_fingerprint,
@@ -416,6 +417,10 @@ def _member_record(ctx: PipelineContext, path: str) -> FileRecord | None:
     probed isn't probed again for a day while its identity stays the same, except by a forced re-detect. The season
     step holds only its own file's path lock, so the store refuses to change another file's identity
     (``record_member``).
+
+    Raises:
+        ProbeStalledError: Earlier ffprobes are still stuck on their files, so this one wasn't read (and nothing is
+            recorded against it).
     """
     identity = _disk_identity(path)
     rec = ctx.store.get_file(path)
@@ -433,6 +438,8 @@ def _member_record(ctx: PipelineContext, path: str) -> FileRecord | None:
         return None
     try:
         probe = probe_media(path, ffprobe=ctx.ffprobe)
+    except ProbeStalledError:
+        raise
     except ProbeError as exc:
         logger.debug("The season step skips {}: {}", os.path.basename(path), exc)
         probe = None
@@ -449,6 +456,16 @@ def _member_record(ctx: PipelineContext, path: str) -> FileRecord | None:
         chapters=chapter_candidates(probe),
         chapter_version=CHAPTER_RULES_VERSION,
     )
+
+
+def _member_record_if_readable(ctx: PipelineContext, path: str) -> FileRecord | None:
+    """:func:`_member_record`, with a member ffprobe can't be started for now counting as unread (its own run reads
+    it)."""
+    try:
+        return _member_record(ctx, path)
+    except ProbeStalledError as exc:
+        logger.debug("The season step leaves out {} for now: {}", os.path.basename(path), exc)
+        return None
 
 
 def _intro_chapter_ms(ctx: PipelineContext, rec: FileRecord | None) -> int | None:
@@ -478,7 +495,7 @@ def season_intro_chapter_limits(ctx: PipelineContext, canonical_path: str) -> tu
     siblings = [path for path in group.episodes if path != canonical_path]
     siblings += [path for path in groups_holding(canonical_path, view.videos, view.group) if path not in group.episodes]
     groups = {path: view.group(path).episodes for path in siblings}
-    lengths = {path: _intro_chapter_ms(ctx, _member_record(ctx, path)) for path in group.episodes}
+    lengths = {path: _intro_chapter_ms(ctx, _member_record_if_readable(ctx, path)) for path in group.episodes}
 
     def length(path: str) -> int | None:
         if path not in lengths:
@@ -799,7 +816,8 @@ def detect_season_audio(
         it was matched with (the pipeline stores both together).
 
     Raises:
-        DetectorUnavailableError: No chromaprint ffmpeg, this episode couldn't be fingerprinted, or cancelled.
+        DetectorUnavailableError: No chromaprint ffmpeg, this episode couldn't be fingerprinted, earlier fingerprint
+            ffmpegs or ffprobes are still stuck on their files (the season stops there), or cancelled.
     """
     from ..pipeline import DetectorAnswer, DetectorUnavailableError
 
@@ -818,6 +836,8 @@ def detect_season_audio(
             cancel_check=cancel_check,
             on_failure=functools.partial(_record_fingerprint_failure, ctx, rec),
         )
+    except FingerprintStalledError as exc:
+        raise DetectorUnavailableError(str(exc)) from exc  # the mount's fault, not this file's: nothing recorded
     except FingerprintError as exc:
         if not (cancel_check and cancel_check()):
             # Siblings' runs don't ask for this file again until its season changes (season_audio_followups).
@@ -833,7 +853,10 @@ def detect_season_audio(
     for n, path in enumerate(others, 1):
         if cancel_check and cancel_check():
             raise DetectorUnavailableError("cancelled")
-        member = _member_record(ctx, path)
+        try:
+            member = _member_record(ctx, path)
+        except ProbeStalledError as exc:
+            raise DetectorUnavailableError(str(exc)) from exc  # every later sibling would meet the same stall
         if member is None:
             left_out_changed = left_out_changed or _changed_since_record(ctx, path)
             continue
@@ -852,6 +875,10 @@ def detect_season_audio(
             except FingerprintSkippedError:
                 logger.debug("Season audio leaves out {}: it couldn't be fingerprinted lately", os.path.basename(path))
                 continue
+            except FingerprintStalledError as exc:
+                # Every later sibling would meet the same stalled mount: no answer this run rather than one matched
+                # against whichever siblings happened to be fingerprinted already.
+                raise DetectorUnavailableError(str(exc)) from exc
             except FingerprintError as exc:
                 logger.info("Season audio leaves out {} this time: {}", os.path.basename(path), exc)
                 continue

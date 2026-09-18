@@ -19,6 +19,7 @@ import numpy as np
 from loguru import logger
 
 from ..locks import KeyedLocks
+from ..probe import kill_and_collect, stuck_processes
 from ..store import SEASON_PAIR_WINDOW, FileRecord, FingerprintCheck, MarkerStore, StoredFingerprint
 
 # One name for the window, defined beside the season-pair queries that read it (the store can't import this module).
@@ -55,6 +56,9 @@ _MUXER_LOCKS = KeyedLocks()
 _SWEEP_LOCK = threading.Lock()
 _sweep_started_at: float | None = None
 _stuck_warned_at: float | None = None
+# Killed ffmpegs that still held their output are counted under this reaper name (probe.stuck_processes). They no
+# longer hold a fingerprint slot, so without the count every freed slot would start another one on the same mount.
+REAPER = "fingerprint-reaper"
 
 
 class ChromaprintState(str, Enum):
@@ -71,6 +75,11 @@ class FingerprintError(Exception):
     """ffmpeg couldn't fingerprint the file. No fingerprint is stored; season audio records the failure, so other
     episodes' season steps skip the file for a day while it is unchanged, and only its own run and a forced re-detect
     try it again sooner."""
+
+
+class FingerprintStalledError(FingerprintError):
+    """``MAX_PARALLEL`` earlier fingerprint ffmpegs are still stuck reading their files (a stalled mount), so no new one
+    is started. Not the file's fault: nothing is recorded against it, and nothing else should be."""
 
 
 class FingerprintSkippedError(Exception):
@@ -229,16 +238,22 @@ def _stop(proc: subprocess.Popen, name: str) -> None:
 
     A read stuck on a stalled network mount leaves ffmpeg unkillable until the read returns, holding its pipes. Waiting
     for that would keep the worker, one of the two fingerprint slots and the file's lock for as long as the mount
-    stalls, so such a process goes to a daemon reaper instead.
+    stalls, so such a process goes to a daemon reaper instead, and counts as stalled until the reaper collects it.
     """
-    proc.kill()
-    try:
-        proc.communicate(timeout=KILL_WAIT_S)
-    except subprocess.TimeoutExpired:
-        logger.warning(
-            "ffmpeg fingerprinting {} still holds its output after being stopped; leaving it to finish", name
+    kill_and_collect(proc, what=f"ffmpeg fingerprinting {name}", reaper_name=REAPER, wait_s=KILL_WAIT_S)
+
+
+def stalled_ffmpegs() -> int:
+    """How many killed fingerprint ffmpegs are still stuck holding their output."""
+    return stuck_processes(REAPER)
+
+
+def _raise_if_stalled(name: str) -> None:
+    stalled = stalled_ffmpegs()
+    if stalled >= MAX_PARALLEL:
+        raise FingerprintStalledError(
+            f"Not fingerprinting {name}: {stalled} earlier fingerprint ffmpegs are still stuck reading their files"
         )
-        threading.Thread(target=proc.communicate, daemon=True, name="fingerprint-reaper").start()
 
 
 def points_of(stored: StoredFingerprint) -> np.ndarray:
@@ -288,34 +303,42 @@ def ensure_fingerprint(
         cancel_check: True once the job is cancelled.
         skip: Asked once the file's lock is held and nothing is cached: True means don't run ffmpeg. Callers that
             waited on the lock while another caller's ffmpeg failed see that failure here.
-        on_failure: Called when ffmpeg fails (not when the job was cancelled), before the lock is released, so a
-            ``skip`` of a caller waiting on the lock sees what it records.
+        on_failure: Called when ffmpeg fails (not when the job was cancelled, nor when earlier ffmpegs are stalled),
+            before the lock is released, so a ``skip`` of a caller waiting on the lock sees what it records.
 
     Returns:
         The points, or None when the file's row changed identity while ffmpeg ran (nothing stored).
 
     Raises:
+        FingerprintStalledError: ``MAX_PARALLEL`` earlier ffmpegs are still stuck reading their files; none is started.
         FingerprintError: The file has no known duration, or ffmpeg failed.
         FingerprintSkippedError: ``skip`` said not to run ffmpeg.
     """
+    name = os.path.basename(rec.canonical_path)
     with _FILE_LOCKS.hold(rec.id):
         if not rec.duration_ms:
-            raise FingerprintError(f"No known duration for {os.path.basename(rec.canonical_path)}")
+            raise FingerprintError(f"No known duration for {name}")
         stored = cached_fingerprint(store, rec)
         if stored is not None:
             return points_of(stored)
         if skip is not None and skip():
-            raise FingerprintSkippedError(f"Not fingerprinting {os.path.basename(rec.canonical_path)} again yet")
+            raise FingerprintSkippedError(f"Not fingerprinting {name} again yet")
+        _raise_if_stalled(name)  # rather than wait for a slot only to find the mount still stalled
         while not _PARALLEL.acquire(timeout=_POLL_S):
             if cancel_check and cancel_check():
-                raise FingerprintError(f"Fingerprinting {os.path.basename(rec.canonical_path)} cancelled")
+                raise FingerprintError(f"Fingerprinting {name} cancelled")
         try:
             try:
+                # A stalled ffmpeg is counted just before it gives back its slot, and a caller waiting for that slot
+                # takes it at once: only a check here sees it.
+                _raise_if_stalled(name)
                 points = compute_fingerprint(
                     rec.canonical_path, rec.duration_ms, ffmpeg=ffmpeg, cancel_check=cancel_check
                 )
             finally:
                 _PARALLEL.release()
+        except FingerprintStalledError:
+            raise
         except FingerprintError:
             if on_failure is not None and not (cancel_check and cancel_check()):
                 on_failure()

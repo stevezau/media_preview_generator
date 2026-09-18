@@ -27,7 +27,7 @@ from media_preview_generator.markers.credits.frames import (
     FrameDecodeError,
     GpuDecodeError,
 )
-from media_preview_generator.markers.probe import MediaProbe, ProbeError
+from media_preview_generator.markers.probe import MediaProbe, ProbeError, ProbeStalledError, ProbeTimeoutError
 
 FF = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
 MOVIE = "/media/Movie (2020)/Movie.mkv"
@@ -803,3 +803,23 @@ class TestDecodeRows:
                 count_boxes=lambda p: [0] * len(p),
             )
         assert type(excinfo.value) is FrameDecodeError
+
+    def test_a_start_time_probe_that_times_out_is_a_decode_timeout(self, monkeypatch):
+        # A stalled mount stalls ffprobe as surely as ffmpeg. As a plain decode error the file would take a worker
+        # every run only to stall again; as a timeout it is left alone for a day, like a decode that timed out.
+        def stalled(path, **kwargs):
+            raise ProbeTimeoutError("ffprobe failed for /m/Recording.ts: TimeoutExpired")
+
+        monkeypatch.setattr(frames, "probe_media", stalled)
+        with pytest.raises(DecodeTimeoutError, match="reading the start time of Recording.ts timed out after 30 s"):
+            frames.container_start_s("/m/Recording.ts", FF)
+
+    def test_a_probe_not_started_for_earlier_stuck_ones_is_no_answer_this_time(self, monkeypatch):
+        # Not this file's timeout: it isn't left alone for a day, only unanswered this run.
+        def gated(path, **kwargs):
+            raise ProbeStalledError(f"Not reading {path}: 2 earlier ffprobes are still stuck reading their files")
+
+        monkeypatch.setattr(frames, "probe_media", gated)
+        with pytest.raises(FrameDecodeError, match="could not read the start time of Recording.ts") as caught:
+            frames.container_start_s("/m/Recording.ts", FF)
+        assert type(caught.value) is FrameDecodeError

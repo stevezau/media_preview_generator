@@ -25,7 +25,7 @@ from media_preview_generator.markers.decide import LONG_INTRO_CHAPTER_REASON, De
 from media_preview_generator.markers.external_ids import ids_from_path
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, Source
 from media_preview_generator.markers.outcomes import FileOutcome
-from media_preview_generator.markers.probe import Chapter, MediaProbe, ProbeError
+from media_preview_generator.markers.probe import Chapter, MediaProbe, ProbeError, ProbeStalledError
 from media_preview_generator.markers.sources.chapters import CHAPTER_RULES_VERSION, chapter_candidates
 from media_preview_generator.markers.sources.online import LookupResult
 from media_preview_generator.markers.store import MarkerStore
@@ -701,6 +701,74 @@ class TestFailures:
         ):
             season.detect_season_audio(rec, ctx=_season_ctx(store, e1), cancel_check=cancelled.is_set)
         assert store.member_fingerprint_failed_at(FileIdentity(e2, *_identity(e2))) is None
+
+    def test_stalled_fingerprint_ffmpegs_stop_the_season_at_that_sibling_and_blame_no_file(self, store, show):
+        e1, e2, e3 = show(1, 3)
+        rec = store.upsert_file(FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=None, is_movie=False)
+
+        def compute(path, duration_ms, *, ffmpeg, cancel_check=None):
+            audio.computed.append(path)
+            if path == e2:
+                raise fingerprint.FingerprintStalledError("2 earlier fingerprint ffmpegs are still stuck")
+            return fake_points(path)
+
+        with (
+            _Audio() as audio,
+            patch.object(fingerprint, "compute_fingerprint", side_effect=compute),
+            pytest.raises(pipeline.DetectorUnavailableError, match="still stuck"),
+        ):
+            season.detect_season_audio(rec, ctx=_season_ctx(store, e1))
+        assert audio.computed == [e1, e2]  # E3 would meet the same stalled mount: not tried
+        assert store.member_fingerprint_failed_at(FileIdentity(e2, *_identity(e2))) is None
+        assert store.get_detector_failure(rec.id, Source.SEASON_AUDIO) is None
+
+    def test_stalled_ffprobes_stop_the_season_at_that_sibling_and_blame_no_file(self, store, show):
+        e1, e2, e3 = show(1, 3)
+        rec = store.upsert_file(FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=None, is_movie=False)
+        probed: list[str] = []
+
+        def probe(path, **kwargs):
+            probed.append(path)
+            if path == e2:
+                raise ProbeStalledError(f"Not reading {path}: 2 earlier ffprobes are still stuck")
+            return MediaProbe(DUR, ())
+
+        with (
+            _Audio(),
+            patch.object(season, "probe_media", side_effect=probe),
+            pytest.raises(pipeline.DetectorUnavailableError, match="still stuck"),
+        ):
+            season.detect_season_audio(rec, ctx=_season_ctx(store, e1))
+        assert probed == [e2]  # E3 would meet the same stall: not tried
+        assert store.member_probe_failed_at(FileIdentity(e2, *_identity(e2))) is None
+        assert store.get_detector_failure(rec.id, Source.SEASON_AUDIO) is None
+
+    def test_a_member_ffprobe_cant_start_for_counts_as_unread_for_the_chapter_check(self, store, show):
+        e1, e2, e3 = show(1, 3)
+
+        def probe(path, **kwargs):
+            if path == e2:
+                raise ProbeStalledError(f"Not reading {path}: 2 earlier ffprobes are still stuck")
+            return MediaProbe(DUR, ())
+
+        with patch.object(season, "probe_media", side_effect=probe):
+            limit, siblings = season.season_intro_chapter_limits(_season_ctx(store, e1), e1)
+        assert (limit, siblings) == (None, {e2: None, e3: None})
+        assert store.member_probe_failed_at(FileIdentity(e2, *_identity(e2))) is None  # read again next time
+        assert store.get_file(e3) is not None and store.get_file(e2) is None
+
+    def test_stalled_fingerprint_ffmpegs_are_not_this_episodes_failure(self, store, show):
+        e1, _ = show(1, 2)
+        rec = store.upsert_file(FileIdentity(e1, *_identity(e1)), duration_ms=DUR, season_key=None, is_movie=False)
+        stalled = fingerprint.FingerprintStalledError("2 earlier fingerprint ffmpegs are still stuck")
+        with (
+            _Audio(),
+            patch.object(fingerprint, "compute_fingerprint", side_effect=stalled),
+            pytest.raises(pipeline.DetectorUnavailableError, match="still stuck"),
+        ):
+            season.detect_season_audio(rec, ctx=_season_ctx(store, e1))
+        assert store.get_detector_failure(rec.id, Source.SEASON_AUDIO) is None
+        assert store.member_fingerprint_failed_at(FileIdentity(e1, *_identity(e1))) is None
 
     def test_a_file_whose_own_fingerprint_failed_lately_still_needs_a_worker(self, store, show):
         e1, e2 = show(1, 2)
