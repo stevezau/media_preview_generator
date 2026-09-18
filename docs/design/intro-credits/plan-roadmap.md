@@ -174,23 +174,23 @@ medium fixed; lab matrix 23/23; `pr-241` image `sha256:3afed8e7…` from `8a8b92
 `evidence/lab/phase2-results.md`, `evidence/eval/phase2-harness.md`.
 
 ### Phase 3 — Credits text detection (plan: `plan-phase3.md`)
-- `credits/frames.py`: `ffmpeg -threads 2 [hwaccel args from the worker's GPU] -skip_frame nokey -ss <tail> -copyts
+- [x] `credits/frames.py`: `ffmpeg -threads 2 [hwaccel args from the worker's GPU] -skip_frame nokey -ss <tail> -copyts
   -i <file> -an -sn -dn -fps_mode passthrough -vf "<gpu scale to 320x180>,showinfo" -f rawvideo -`; tail 900 s movies,
   450 s TV; 1 fps refine over the 20 s before the coarse answer. Hwaccel args extracted from
   `processing/ffmpeg_runner.py` into a shared helper without changing preview command lines (golden-args test).
-- `credits/textdet.py`: PP-OCRv4 det ONNX at `det_limit_side_len=320`, `det_limit_type="max"`; DBNet post-processing
+- [x] `credits/textdet.py`: PP-OCRv4 det ONNX at `det_limit_side_len=320`, `det_limit_type="max"`; DBNet post-processing
   vendored (OpenCV contours; ~~unclip computed analytically~~ **superseded by T-R2**: pyclipper is kept for the
   unclip step, since an analytic replacement can't match its integer rounding exactly and identical box counts is
   the gate) — must give **identical box counts** to `rapidocr_onnxruntime==1.4.4` on the 289-frame bench set before
   use.
-- `credits/textdet_helper.py`: one helper subprocess per GPU device (plus one shared CPU helper), env from
+- [x] `credits/textdet_helper.py`: one helper subprocess per GPU device (plus one shared CPU helper), env from
   `get_vulkan_env_overrides()`, WebGPU plugin EP when `get_vulkan_device_info()` is hardware and a 20-frame
   self-test counts exactly the CPU's boxes, faster; else CPU. Crash/hang → CPU for the process lifetime; cancel
   between chunks.
-- `credits/rule_j.py`: rule J exactly as spec §5.4 (luma < 30 & boxes ≥ 1, or boxes ≥ 3; runs over gaps ≤ 24 s with
+- [x] `credits/rule_j.py`: rule J exactly as spec §5.4 (luma < 30 & boxes ≥ 1, or boxes ≥ 3; runs over gaps ≤ 24 s with
   dark bridging; runs ≥ 15 s; last run; anchor; refine). Regression test reproduces 63/80 within 10 s, 1 early,
   from an anonymised copy of `evidence/credits/f3.jsonl` committed as a test fixture.
-- Docker: numpy, onnxruntime, onnxruntime-ep-webgpu, opencv-python-headless, **and pyclipper** (T-R2); model
+- [x] Docker: numpy, onnxruntime, onnxruntime-ep-webgpu, opencv-python-headless, **and pyclipper** (T-R2); model
   downloaded at build with sha256.
 
 Plan: `plan-phase3.md` (14 tasks).
@@ -199,6 +199,17 @@ Done when: harness ≥ spec §5.4 numbers with 0–1 early per 80, GPU path prov
 Intel (self-test picks CPU on the iGPU), and combined credits decisions beat Plex's native credits markers on the
 same files. Owner's Q5 answer: rule J ships as measured (no tuning attempted); a later tuning pass is a follow-up
 that must beat rule J on both the 80-file and 205-movie sets with no more early answers.
+
+**Status 2026-09-19: built, audited and lab-proven; owner review of PR #241 next.** Rule J alone on the 80: 63 within
+10 s and 1 early on the GPU decode (meets §5.4); 58 on the CPU decode (one short, a scaler difference between the two
+paths). Against Plex's own credits markers: the 80 pass all five gate checks on both decode paths; the 205-movie set
+passes both "never looser than Plex" checks and fails the usefulness floor and the two wrong caps (credit text answers
+late on split rolls, spec §13 item 14). Owner, 2026-09-18: ships at Medium now, the late-answer gap is a follow-up.
+GPU path proven on storage NVIDIA (rows 3–5, 9) and on `plex`: NVIDIA picks the GPU, Intel's self-test picks the CPU
+on the iGPU (rows 12–13); row 14 is partial (Intel render work not seen by `intel_gpu_top`). Lab matrix 15 of 16 plus
+row 14 partial; `pr-241` image `sha256:f9668467…` from `a3c6c32` re-ran rows 1, 2, 3 and 16, and one real season on
+`plex` (10 of 11 starts within 10 s, E04 no answer; every answered episode's after-credits scene kept). Evidence: `evidence/lab/phase3-results.md`,
+`evidence/eval/phase3-harness.md`.
 
 ### Phase 4 — Polish (plan: `plan-phase4.md`)
 Adjust/Lock editor in the Inspector (drag handles, keyboard nudge, lock, publish to every owner immediately),

@@ -162,6 +162,75 @@ self-test correctly chose CPU with no NVIDIA-side contamination and the right PC
 argument (rows 13, 14). The Intel-side render-activity half of the gap -- direct hardware confirmation that the
 Intel GPU itself executed work, independent of process arguments -- remains open per row 14's partial result.
 
+## PR image check
+
+`pr-241` pulled from GHCR: `ghcr.io/stevezau/media_preview_generator@sha256:f96684678a6fb40a2dfbb3000ea32e958410dcfcc61cec5224cf84fc57f223a8`,
+built from `a3c6c32`. `textdet_helper --check` exits 0; the pinned model's sha256 matches the one recorded in the spec
+and Task 7's evidence. CI is green on this commit (lint, tests, e2e shards, plugins); its arm64 image build only
+runs on `dev` pushes and tags, so arm64 hasn't been built from this branch. Every runtime package the branch adds,
+with its dependencies, has a prebuilt aarch64 wheel for the image's Python 3.12 (checked with `pip download
+--platform manylinux_2_28_aarch64 --only-binary=:all:`), and the WebGPU wheel is x86_64 only by marker. The lab app recreated on this
+image (`MLAB_APP_GPU=nvidia`) and re-ran rows 1, 2, 3 and 16 after removing their old result files:
+
+- **Row 1 — capability and the Settings row: pass.** Available in the CPU and GPU containers; a broken model path
+  reports "Not available" naming the path; the Settings source row shows the badge.
+- **Row 2 — scene after the credits, High then Medium: pass.** High: `needs_review`, nothing published. Medium: the
+  text's end is kept; Plex and both Jellyfins publish start and end; both Embys publish the start and say "skips to
+  the end".
+- **Row 3 — GPU decode and WebGPU text detection: pass.** The GPU run used `-hwaccel cuda`/`scale_cuda` and
+  `-threads 2`; a WebGPU helper ran and the self-test kept the GPU; the GPU and CPU-only runs agree within 2 s on
+  both the start and the end.
+- **Row 16 — a roll that runs to the end of the file: pass.** No end stored; the decision runs to the end of the
+  file; Plex and both Jellyfins publish accordingly; neither Emby row says "skips to the end"; no decode was seen
+  past the credits start.
+
+All four pass on the exact image the PR ships.
+
+## Side-by-side on `plex` (roadmap checkpoint 2, owner, 2026-09-19)
+
+The same `pr-241` digest, pulled on `plex`, ran as a second container next to production: one real season (Rick and
+Morty S01, 11 episodes) mounted read-only (a write into it was refused), its own config volume, no Plex config
+folder mounted, and both GPUs. The app itself won't turn Intro & Credits on for a Plex server until the database
+write is confirmed, and that step was not taken, so the shipped detector ran directly in the container
+(`plex_season_detect.py`, NVIDIA decode on the TITAN RTX) and nothing was published anywhere. Everything was removed
+afterwards (container, volume, temp folder, images); production containers were not touched.
+
+This season is the case credit text exists for: every episode has chapters, but they are untitled (timestamps or
+"Chapter NN"), so the app's chapter rules decide nothing (checked with `chapter_candidates`: no candidate on any
+episode). The chapter boundaries still frame the roll, so they serve as the truth here: a ~25–30 s credits chapter
+followed by the after-credits scene, except the pilot, whose roll runs to the end of the file.
+
+| Episode | Credits chapter (s) | Credit text (s) | Start − truth | End − truth |
+|---|---|---|---:|---:|
+| E01 | 1295.5 → end of file | 1295.0 → no end | −0.5 | runs to the end, as the chapter does |
+| E02 | 1246.7 – 1276.7 | 1247.0 – 1273.0 | +0.3 | −3.7 |
+| E03 | 1228.7 – 1258.7 | 1238.0 – 1258.0 | +9.3 | −0.7 |
+| E04 | 1162.2 – 1186.5 | no answer | | |
+| E05 | 1203.0 – 1232.8 | 1211.0 – 1232.0 | +8.0 | −0.8 |
+| E06 | 1191.9 – 1220.6 | 1198.0 – 1219.0 | +6.1 | −1.6 |
+| E07 | 1239.2 – 1269.3 | 1240.0 – 1269.0 | +0.8 | −0.3 |
+| E08 | 1249.9 – 1279.8 | 1256.0 – 1279.0 | +6.1 | −0.8 |
+| E09 | 1271.0 – 1301.8 | 1278.0 – 1301.0 | +7.0 | −0.8 |
+| E10 | 1264.3 – 1294.3 | 1269.0 – 1293.0 | +4.7 | −1.3 |
+| E11 | 1274.9 – 1305.8 | 1275.0 – 1305.0 | +0.1 | −0.8 |
+
+- **10 of 11 starts within 10 s**: the only early one is E01, by 0.5 s (far inside the harness's 10 s "wrong" bar);
+  the rest are 0.1–9.3 s late.
+- **After-credits scenes kept**: E02–E11 all have a scene after the roll. All nine of them that got an answer got an
+  end within 4 s of the roll's end, so the skip stops before the scene instead of running to the end of the file
+  (Q3 on real footage). The pilot, whose roll ends the file, correctly got no end.
+- **E04: no answer** (the detector returned no start and raised nothing), so no skip at all from this source: the
+  safe outcome. Not investigated further; this run didn't capture the detector's warnings (the script now prints
+  them), so a re-run is the first step.
+- **Cost**: 1.9–5.2 s per episode after the first (13.2 s, including the self-test), NVIDIA decode.
+- **Device choice**: the self-test picked the CPU for text detection on the TITAN this time ("the GPU was slower than
+  the CPU"), where row 12 two days earlier picked the GPU (4.9 vs 6.2 ms per frame). The GPU has to be at least
+  10 % faster to be kept, and this host also runs the production Plex Transcoder on that card (seen in row 14).
+  `nvidia-smi` a few minutes after the run showed 0 % GPU and decoder use, but load during the self-test itself
+  wasn't captured, so why it flipped isn't established. The device choice isn't expected to change the answer: the
+  self-test only keeps a GPU whose box counts equal the CPU's on its 20 synthetic frames, and row 3 found the GPU
+  and CPU answers within 2 s of each other on real decode paths.
+
 ## Resetting the lab
 
 ```bash

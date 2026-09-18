@@ -19,7 +19,7 @@ published to every server that has the file. Feature name in the UI: **"Intro & 
    https://claude.ai/code/artifact/65394c1a-e878-4fc2-985b-63bc4c307c5d (source: `evidence/design/index.html`).
 5. Memory notes: `intro-credits-markers-design`, `lab-servers-on-storage`, `design-doc-survives-clear`.
 
-**Status (2026-09-15).** Phase 1 (§12: store, chapters/online detection, Intro & Credits job type, Plex + Jellyfin
+**Status (2026-09-19).** Phase 1 (§12: store, chapters/online detection, Intro & Credits job type, Plex + Jellyfin
 publishers, per-server Edit tab, Settings section, Inspector tab, config migration, docs) is built, audited and
 lab-proven: lab matrix 18/19 (row 11 unit-tested), `pr-241` image checked on the lab, and a scale run on 715 real files
 with 0 failures (`evidence/lab/phase1-results.md`). Its findings are fixed in §5.5 rules 6–7 and a warning when an
@@ -34,15 +34,22 @@ testable), owner checks done (Plex Web skip buttons, Emby Premiere), and the `pr
 (`sha256:3afed8e7124b6a2c465bcdf6c70f261c044b78ee18c29cbf642444d628908341`, from `8a8b92e`) re-ran rows 1, 2 and 8
 on the lab (`evidence/lab/phase2-results.md` "PR image check"). Rulings R1–R5 and G3 are in §14. Still open with the
 owner: the Emby catalog submission (roadmap checkpoint 4).
-**Phase 3 (credits text) is built** (`plan-phase3.md`; ledger `.superpowers/sdd/plan-phase3/progress.md`):
+**Phase 3 (credits text) is built, audited and lab-proven** (`plan-phase3.md`; ledger
+`.superpowers/sdd/plan-phase3/progress.md`):
 keyframe-tail sampling, rule J's start and end, the ONNX Runtime WebGPU/CPU text detector with a per-device
 self-test, the Settings row, the Inspector "Credit text" lane, and the accuracy harness
 (`evidence/eval/phase3-harness.md`). Milestone audit found and fixed two real bugs (the end anchor, a stale
 tooltip; §14 2026-09-18). The harness gate passes 5 of 5 on the 80 hand-checked files (movies40 + tv40) on both
 decode paths and fails 3 of 5 on the harder 205-movie set — a disclosed detector-gap limitation, not fixed here
 (§5.4, §13 item 14; owner, 2026-09-18): ships at "Medium" now, "High" needs a second source until that gap closes.
-Rulings T-R1–T-R9 and contradictions C1–C7 resolved while planning phase 3 are in §14. Next: the phase-3 lab
-matrix. Build runs on PR #241, branch
+Rulings T-R1–T-R9 and contradictions C1–C7 resolved while planning phase 3 are in §14. Lab matrix
+(`evidence/lab/phase3-results.md`): 15 of 16 rows pass on storage and on the `plex` host's real NVIDIA and Intel GPUs;
+row 14 is partial (no NVIDIA-side contamination during the Intel self-test, but `intel_gpu_top` never showed Intel
+render work; §13 item 12). The `pr-241` image (`sha256:f96684678a6fb40a2dfbb3000ea32e958410dcfcc61cec5224cf84fc57f223a8`,
+from `a3c6c32`) re-ran rows 1, 2, 3 and 16 on the lab, and ran the detector on one real season on `plex` beside
+production (§14, 2026-09-19): 10 of 11 starts within 10 s (E04 no answer), every answered episode's after-credits
+scene kept. Next: owner review, then
+phase 4. Build runs on PR #241, branch
 `feat/markers-detection`; spec, slimmed evidence and plans live in `docs/design/intro-credits/`. Local-only, gitignored
 files stay beside them: `evidence/lab/env` (tokens), `evidence/lab/synth/` (webm), `evidence/lab/scale_mounts.sh` and
 `evidence/lab/results/` (real library paths), `evidence/online/skipdb-dump.json`,
@@ -50,7 +57,8 @@ files stay beside them: `evidence/lab/env` (tokens), `evidence/lab/synth/` (webm
 
 **Working rules (owner's, non-negotiable).**
 - Prove server behaviour on the **lab servers on storage** (§10.3), never on the prod Plex on `plex`. Prod Plex DB:
-  read-only queries only (`sqlite3 "file:<db>?mode=ro"`).
+  read-only queries only (`sqlite3 "file:<db>?mode=ro"`). The owner's two one-off exceptions (§14 2026-09-16 Q7,
+  2026-09-19) don't extend to anything else: ask again, and remind the owner of this rule when asking.
 - Never delete or write files under `/data*` (the owner's library, both hosts). Lab mounts are `:ro`.
 - Commits on the feature branch need no per-commit ask (owner, 2026-09-13); run the `Architecture Review` agent on
   the staged diff first and block on HIGH; commit with `PATH="/home/data/.venv/bin:$PATH" git commit`. Never commit
@@ -811,6 +819,10 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
    (owner's Q4) passes 5 of 5 on the 80 (movies40 + tv40) on both decode paths and fails 3 of 5 on the 205-movie set
    — a disclosed detector-gap limitation, not tuned around (§5.4, §13). Ships at "Medium"; at "High" it needs a
    second source until that gap closes. *Done when* (Task 14): lab-proven, with the shipped image's digest recorded.
+   **Done (2026-09-19):** lab matrix 15 of 16 pass plus row 14 partial (`evidence/lab/phase3-results.md`), the
+   `pr-241` image `sha256:f96684678a6fb40a2dfbb3000ea32e958410dcfcc61cec5224cf84fc57f223a8` (from `a3c6c32`) re-ran
+   rows 1, 2, 3 and 16 and one real season on `plex`; 8702 unit/integration tests (88.51 %), 328 e2e (one xdist flake, passed alone), 92 eval, 9
+   real-model integration tests pass. Waiting on owner review.
 4. **Polish.** Adjust/Lock editor, AniSkip, Setup Health checks, helper container for Plex on another machine, docs.
 
 ## 13. Risks and open items
@@ -832,10 +844,12 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
 11. **Dolby Vision profile 5 credits text is unmeasured** — 0 of the 80 hand-checked files and 0 of the 205-movie
     set are profile 5 (`evidence/credits/phase3-measurements.md` M5); the detector reads the base layer's luma like
     any file, but this hasn't been checked against a real profile-5 credit roll.
-12. **Dawn's device choice on a two-GPU host is unproven.** The WebGPU EP's own device selection doesn't choose the
-    physical adapter Dawn runs on (T-R3); whether the app's PCI-address pinning actually steers Dawn to the right
-    GPU on a host with two real GPUs (not storage's GPU-plus-BMC-VGA case) is open until Task 13 row 14 (plex host,
-    the owner's Q7 throwaway container).
+12. **Dawn's device choice on a two-GPU host is half proven.** The WebGPU EP's own device selection doesn't choose
+    the physical adapter Dawn runs on (T-R3). Task 13 rows 12–14 on `plex` (TITAN RTX + Intel UHD 770): each helper
+    gets its own device's PCI address, and the Intel self-test never put a process on the NVIDIA card. But
+    `intel_gpu_top` read 0 % on every engine while the Intel helper ran, so the Intel side's own render work is
+    inferred from the helper's arguments, not seen on the hardware (row 14 partial). Either way the Intel self-test
+    chose the CPU on that iGPU, so nothing beyond the self-test's own frames ran on it.
 13. **A lone credit-text keyframe inside a scene, within 24 s of the roll, joins rule J's run and extends it over
     that scene** — an end computed from the run's last credit keyframe can then land inside the scene instead of on
     the roll. Not measured directly (none of the 17 files with a published end showed this shape, but the harness
@@ -1220,3 +1234,10 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   when a gap splits the roll), not a measurement artifact; fixing it is a tracked follow-up (§13 item 14), not
   attempted here. Available and recommended at "Medium"; available at "High" only when a second source agrees —
   unchanged default behaviour for anyone who hasn't touched "Publish when".
+- 2026-09-19 · Owner, phase 3 close-out (roadmap checkpoint 2): a one-off side-by-side of the `pr-241` image on `plex`
+  against one real season (Rick and Morty S01), read-only, its own config, no Plex config folder. Reminded of the
+  lab-only rule first, the owner approved it for this run only. The database-write confirmation the app needs to
+  turn Intro & Credits on for a Plex server was not given, so the shipped detector ran directly in the container and
+  nothing was published; everything was removed afterwards. Result on untitled chapters that decide nothing: 10 of 11
+  starts within 10 s (one 0.5 s early, none later than 9.3 s); the nine answered episodes with a scene after the
+  roll all got an end within 4 s of the roll's end, so the scene is kept; one episode (E04) had no answer (`evidence/lab/phase3-results.md` "Side-by-side").
