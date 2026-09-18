@@ -948,6 +948,13 @@ the file shows the one that still needs something: **Failed**, then **Needs revi
 **Markers written**, then **Up to date**. A file written to Plex but still waiting on Jellyfin shows **Waiting**;
 each server's own result is on the file's row.
 
+Under a job's per-server results, **Decided by** counts how many files each source decided, per marker type — for
+example "Credits: chapters 40 · credit text 9 · TheIntroDB + server markers 3". It fills in while the job runs. A file
+counts once per type, under the sources its marker came from; a marker a chapter set counts as **chapters** even when
+other sources agreed, and **server markers** (markers already on your servers) only appear as the second opinion a
+single source needed. Files that need review, failed or weren't checked aren't counted. See
+[Reference — Decided-by counts](reference.md#decided-by-counts).
+
 > [!NOTE]
 > Rolling back to a version before Intro & Credits existed needs an extra step — see
 > [Rolling back to a previous version](#rolling-back-to-a-previous-version).

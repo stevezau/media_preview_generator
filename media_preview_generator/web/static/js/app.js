@@ -1651,6 +1651,66 @@ function _renderJobFileIssues(outcome) {
     }).filter(Boolean).join(' ');
 }
 
+// Intro & Credits "Decided by" counts (progress.marker_sources, markers/source_counts.py): one line per marker type,
+// its source groups biggest first. A group names up to two sources ("TheIntroDB + IntroDB + 1 more"); past five
+// groups the rest add up under "other", listed in its tooltip.
+const MARKER_SOURCE_NAMES = {
+    chapters: 'chapters',
+    theintrodb: 'TheIntroDB',
+    introdb: 'IntroDB',
+    skipdb: 'SkipDB',
+    season_audio: 'season audio',
+    season_audio_previous: 'last season\'s audio',
+    credits_text: 'credit text',
+    server_markers: 'server markers',
+    server_markers_imported: 'server markers',
+    user: 'your edits',
+};
+const MARKER_SOURCE_TYPE_LABELS = { intro: 'Intro', credits: 'Credits', recap: 'Recap', preview: 'Preview' };
+const MARKER_SOURCE_GROUPS_SHOWN = 5;
+const MARKER_SOURCES_TIP = 'How many files each source decided in this job. A file counts once per marker type, '
+    + 'under the sources its marker came from. A chapter decides on its own, so a marker a chapter set counts as '
+    + 'chapters even when other sources agreed. Markers already on your servers only confirm, so they\'re named only '
+    + 'when they were the second opinion a single source needed. Files that need review, failed or weren\'t checked '
+    + 'aren\'t counted.';
+
+function _markerSourceGroupLabel(group) {
+    const names = String(group).split('+').map(function (id) { return MARKER_SOURCE_NAMES[id] || id; });
+    return names.length > 2 ? `${names[0]} + ${names[1]} + ${names.length - 2} more` : names.join(' + ');
+}
+
+function _renderMarkerSources(sources) {
+    if (!sources || typeof sources !== 'object') return '';
+    const lines = Object.keys(MARKER_SOURCE_TYPE_LABELS).map(function (type) {
+        const counts = new Map();
+        Object.entries(sources[type] || {}).forEach(function ([group, n]) {
+            if (!(n > 0)) return;
+            const label = _markerSourceGroupLabel(group);
+            counts.set(label, (counts.get(label) || 0) + n);
+        });
+        if (!counts.size) return '';
+        const ranked = Array.from(counts.entries())
+            .sort(function (a, b) { return b[1] - a[1] || a[0].localeCompare(b[0]); });
+        const shown = ranked.slice(0, MARKER_SOURCE_GROUPS_SHOWN).map(function ([label, n]) {
+            return `${escapeHtmlText(label)} <span class="fw-semibold">${n.toLocaleString()}</span>`;
+        });
+        const rest = ranked.slice(MARKER_SOURCE_GROUPS_SHOWN);
+        if (rest.length) {
+            const total = rest.reduce(function (sum, entry) { return sum + entry[1]; }, 0);
+            const tip = rest.map(function ([label, n]) { return `${label} ${n}`; }).join(' · ');
+            shown.push(`<span title="${escapeHtmlAttr(tip)}">other <span class="fw-semibold">${total.toLocaleString()}</span></span>`);
+        }
+        return `<div class="marker-sources-line"><span class="text-body">${MARKER_SOURCE_TYPE_LABELS[type]}:</span> `
+            + `${shown.join(' · ')}</div>`;
+    }).filter(Boolean);
+    if (!lines.length) return '';
+    return `<div class="mt-2 marker-sources"><strong class="me-1">Decided by</strong>`
+        + `<button type="button" class="info-icon align-baseline" tabindex="0" data-bs-toggle="tooltip" `
+        + `data-bs-placement="top" title="${escapeHtmlAttr(MARKER_SOURCES_TIP)}" aria-label="What these counts mean">`
+        + `<i class="bi bi-info-circle"></i></button>`
+        + `<div class="small text-muted mt-1">${lines.join('')}</div></div>`;
+}
+
 function _renderPublishersBlock(job) {
     // D12 — per-server aggregate (one row per registered server with
     // status counts), NOT per-file. Per-file × per-server attribution
@@ -1665,8 +1725,9 @@ function _renderPublishersBlock(job) {
     // the server rows, rather than dangling at the bottom of the card.
     const outcome = (job && job.progress && job.progress.outcome) || (job && job.outcome) || null;
     const fileIssues = _renderJobFileIssues(outcome);
-    if (!rows.length && !fileIssues) return '';
     const isMarkers = _isMarkersJob(job);
+    const sourcesBlock = isMarkers ? _renderMarkerSources(job.progress && job.progress.marker_sources) : '';
+    if (!rows.length && !fileIssues && !sourcesBlock) return '';
     const lines = rows.map(function (entry) {
         const stype = (entry.server_type || '').toLowerCase();
         const logo = _vendorLogo(stype, 12) || '';
@@ -1731,7 +1792,7 @@ function _renderPublishersBlock(job) {
             `</div>`
         );
     }).filter(Boolean).join('');
-    if (!lines) return '';
+    if (!lines && !sourcesBlock) return '';
     // The verbose "Auto-retrying — Tiles are on disk… backs off 30s →
     // 2m → 5m → 15m → 1h…" alert previously rendered here was
     // redundant with (a) the per-server badge tooltip on "Generated
@@ -1755,7 +1816,7 @@ function _renderPublishersBlock(job) {
         tipAttr = ' title="Aggregated across all ' + totalRuns + ' run'
             + (totalRuns === 1 ? '' : 's') + ' of this chain"';
     }
-    const header = rows.length ? `<strong class="me-2"${tipAttr}>Servers</strong>${lines}` : '';
+    const header = lines ? `<strong class="me-2"${tipAttr}>Servers</strong>${lines}` : '';
     // File-level issues laid out like a server row — a "Files" pill, arrow,
     // then the same badge chips — so they read as part of the breakdown.
     const noteLine = fileIssues
@@ -1763,7 +1824,7 @@ function _renderPublishersBlock(job) {
           `<span class="badge bg-light text-dark border"><i class="bi bi-exclamation-triangle me-1"></i>Files</span>` +
           `<span class="text-muted small" aria-hidden="true">→</span>${fileIssues}</div>`
         : '';
-    return `<div class="mt-3 pt-2 border-top">${header}${noteLine}</div>`;
+    return `<div class="mt-3 pt-2 border-top">${header}${noteLine}${sourcesBlock}</div>`;
 }
 
 // Pick the retry-chain info-modal template matching the Job's server
@@ -2123,6 +2184,7 @@ function updateJobQueue(force) {
         }
     }
 
+    _disposeBootstrapTooltips(tbody);
     tbody.innerHTML = html;
 
     // Initialize Bootstrap tooltips on status badges
@@ -2391,7 +2453,9 @@ function updateActiveJobs(runningJobs, force) {
         </div>`;
     }
 
+    _disposeBootstrapTooltips(container);
     container.innerHTML = html;
+    _initBootstrapTooltips(container);
     _ensureElapsedTimer();
     refreshWorkerScaleButtons();
 }
@@ -2456,9 +2520,16 @@ function updateJobProgress(jobId, progress, publishers) {
         const pubEl = document.getElementById('activeJobPublishers-' + jobId);
         if (pubEl) {
             const known = jobs.find(function (j) { return j.id === jobId; });
-            pubEl.innerHTML = _renderPublishersBlock({
-                publishers: publishers, outcome: progress.outcome, kind: known ? known.kind : undefined,
+            const html = _renderPublishersBlock({
+                publishers: publishers, progress: progress, kind: known ? known.kind : undefined,
             });
+            // Progress ticks every second or so; replacing an unchanged block would drop an open ⓘ tooltip.
+            if (pubEl._renderedHtml !== html) {
+                _disposeBootstrapTooltips(pubEl);
+                pubEl.innerHTML = html;
+                pubEl._renderedHtml = html;
+                _initBootstrapTooltips(pubEl);
+            }
         }
     }
 
@@ -4387,6 +4458,15 @@ function _initBootstrapTooltips(scope) {
     });
 }
 window._initBootstrapTooltips = _initBootstrapTooltips;
+
+// Call before replacing `scope`'s HTML: a tooltip open on a removed element otherwise stays on screen.
+function _disposeBootstrapTooltips(scope) {
+    if (!scope || typeof bootstrap === 'undefined' || !bootstrap.Tooltip) return;
+    scope.querySelectorAll('[data-bs-toggle="tooltip"]').forEach((el) => {
+        const tip = bootstrap.Tooltip.getInstance(el);
+        if (tip) tip.dispose();
+    });
+}
 
 /**
  * App-wide info-icon (ⓘ) unified behaviour.

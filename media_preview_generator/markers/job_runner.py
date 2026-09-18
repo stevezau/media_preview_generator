@@ -42,6 +42,7 @@ from .ownership import marker_libraries
 from .pipeline import budget_exhausted_warnings, build_context, cached_capability, kind_handlers
 from .reconcile import LISTING_CONFIG_KEY, RECONCILE_SOURCE, CheckServersListing
 from .settings import load_server
+from .source_counts import stored_groups
 from .store import MarkerStore
 
 _POLL_S = 1.0
@@ -684,7 +685,7 @@ def _unchanged_since_analysed(store, path: str) -> bool:
 
 def _skip_finished_before_restart(
     jm, job_id: str, items: list[ProcessableItem], store
-) -> tuple[list[ProcessableItem], dict[str, int], set[str]]:
+) -> tuple[list[ProcessableItem], dict[str, int], set[str], dict[str, str]]:
     """Drop files this job settled before a restart revived it, so they aren't looked up or published twice.
 
     Their outcomes come from the job's own Files-panel rows (only a revived job has any) and are carried into the
@@ -692,14 +693,14 @@ def _skip_finished_before_restart(
     server still waiting for it, runs again.
 
     Returns:
-        The items still to do, the carried outcome counts, and the carried files published after they were replaced
-        (a row flagged ``VERIFY_LATER``): the job still owes them their later check.
+        The items still to do, the carried outcome counts, the carried files published after they were replaced
+        (a row flagged ``VERIFY_LATER``): the job still owes them their later check, and each carried file's outcome.
     """
     try:
         rows = jm.get_file_results(job_id)
     except Exception as exc:
         logger.warning("Couldn't read the files this job already finished ({}); checking every file", exc)
-        return items, {}, set()
+        return items, {}, set(), {}
     settled: dict[str, str] = {}
     to_verify: set[str] = set()
     for row in rows if isinstance(rows, list) else []:
@@ -713,23 +714,24 @@ def _skip_finished_before_restart(
         if any(server.get(VERIFY_LATER) for server in servers):
             to_verify.add(row["file"])
     if not settled:
-        return items, {}, set()
-    carried: Counter[str] = Counter()
+        return items, {}, set(), {}
+    carried_outcomes: dict[str, str] = {}
     carried_to_verify: set[str] = set()
     remaining = []
     for item in items:
         outcome = settled.get(item.canonical_path)
         if outcome is not None and _unchanged_since_analysed(store, item.canonical_path):
-            carried[outcome] += 1
+            carried_outcomes[item.canonical_path] = outcome
             if item.canonical_path in to_verify:
                 carried_to_verify.add(item.canonical_path)
         else:
             remaining.append(item)
+    carried = Counter(carried_outcomes.values())
     if carried:
         logger.info(
             "Resuming after a restart: {} file(s) finished before it are not checked again", sum(carried.values())
         )
-    return remaining, dict(carried), carried_to_verify
+    return remaining, dict(carried), carried_to_verify, carried_outcomes
 
 
 def _start_fingerprint_sweep(cfg: dict, store: MarkerStore) -> None:
@@ -1020,7 +1022,15 @@ def run_intro_credits_job(job_id: str) -> None:
                 checks_replaced_later = sent_files and not (cfg.get("verify") or cfg.get("verify_chain"))
                 listed = {item.canonical_path for item in items}
                 # A revived job still owes the later check of the replaced files it published before the restart.
-                items, carried, replaced_before_restart = _skip_finished_before_restart(jm, job_id, items, ctx.store)
+                items, carried, replaced_before_restart, carried_outcomes = _skip_finished_before_restart(
+                    jm, job_id, items, ctx.store
+                )
+                if carried_outcomes:
+                    # The pipeline never decides for a file without an owner; the store may still hold an old run's.
+                    for path, outcome in sorted(carried_outcomes.items()):
+                        if outcome != FileOutcome.NO_OWNERS.value:
+                            ctx.decided_by.add(stored_groups(ctx.store, path))
+                    jm.set_marker_sources(job_id, ctx.decided_by.snapshot())
                 if not items:
                     jm.set_job_outcome(job_id, carried)
                     _complete(jm, job_id, carried, warnings)
@@ -1056,6 +1066,8 @@ def run_intro_credits_job(job_id: str) -> None:
                     jm.record_file_result(
                         job_id, file_path, outcome, reason, worker, servers=servers, server_messages=True
                     )
+                    # The pipeline counted the file before handing its result here (``PipelineContext.decided_by``).
+                    jm.set_marker_sources(job_id, ctx.decided_by.snapshot())
                     if listing is not None and (gone := _confirmed_gone_items(listing, registry, file_path, servers)):
                         gone_items[file_path] = gone
                         waiting.setdefault(NOT_IN_LIBRARY, set()).add(file_path)
@@ -1105,6 +1117,8 @@ def run_intro_credits_job(job_id: str) -> None:
                 result = tracker.get_result()
                 outcome = dict(result["outcome"])  # includes the carried counts
                 jm.set_job_outcome(job_id, outcome)
+                # Worker threads store their snapshots in any order; the last one stored may not be the newest.
+                jm.set_marker_sources(job_id, ctx.decided_by.snapshot())
                 if result["cancelled"] or cancel_check():
                     jm.cancel_job(job_id)
                     return

@@ -16,6 +16,7 @@ from media_preview_generator.markers.pipeline import PipelineContext
 from media_preview_generator.markers.probe import Chapter, MediaProbe
 from media_preview_generator.markers.publishers.base import ItemNotFoundError, PublishError
 from media_preview_generator.markers.settings import load_global, validate_global
+from media_preview_generator.markers.source_counts import DecidedByTally
 from media_preview_generator.markers.store import MarkerStore
 from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.servers.base import ServerType
@@ -189,6 +190,21 @@ class TestRetryThroughThePipeline:
         assert publishers["plex-1"].write.call_count == 1
         assert publishers["jf-1"].write.call_count == 1
         assert [c.args[0] for c in publishers["jf-1"].write.call_args_list] == ["item-jf-1"]
+
+    def test_the_finished_job_carries_which_sources_decided_its_markers(self, engine, setup, tmp_path):
+        _, publishers = setup.make([("plex-1", ServerType.PLEX)])
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            job_id = triggers.create_intro_credits_job(
+                library_name="x", priority=2, source="manual", file_paths=[setup.path]
+            ).id
+            job_runner.run_intro_credits_job(job_id)
+
+        expected = {"intro": {"chapters": 1}, "credits": {"chapters": 1}}
+        assert engine.jm.get_job(job_id).to_dict()["progress"]["marker_sources"] == expected
+        # Stored with the job, so the finished job's summary still shows them after a restart.
+        reloaded = JobManager(config_dir=str(tmp_path / "config"))
+        assert reloaded.get_job(job_id).progress.marker_sources == expected
 
     def test_a_failed_server_on_the_file_still_retries_the_server_that_hasnt_indexed_it(self, engine, setup):
         registry, publishers = setup.make([("plex-1", ServerType.PLEX), ("jf-1", ServerType.JELLYFIN)])
@@ -429,7 +445,8 @@ class TestRealJobThread:
             check_share=0.25,
         )
         monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda config: MagicMock())
-        monkeypatch.setattr(job_runner, "build_context", lambda **kw: MagicMock())
+        # The real job manager stores the context's counts on the job, so those have to be real.
+        monkeypatch.setattr(job_runner, "build_context", lambda **kw: MagicMock(decided_by=DecidedByTally()))
         monkeypatch.setattr(job_runner, "kind_handlers", lambda ctx: handlers)
         items = [ProcessableItem(f"/m/{name}.mkv", "") for name in ("a", "slow", "c")]
         monkeypatch.setattr(job_runner, "build_items", lambda cfg, **kw: (items, [], {}))

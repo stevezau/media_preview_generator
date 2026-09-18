@@ -448,7 +448,11 @@ function showLogsModal(jobId) {
     // can identify the job at a glance.
     _renderModalHeader(_job);
     const _hdr = document.getElementById('logsModalPublishers');
-    if (_hdr) _hdr.innerHTML = _job ? _renderPublishersBlock(_job) : '';
+    if (_hdr) {
+        _disposeBootstrapTooltips(_hdr);
+        _hdr.innerHTML = _job ? _renderPublishersBlock(_job) : '';
+        _initBootstrapTooltips(_hdr);
+    }
     // Clear any leftover attempt-scope subtitle from a previous modal
     // open. _loadAttemptsDropdown re-renders it for chains.
     _renderLogsSubtitle();

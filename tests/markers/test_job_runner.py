@@ -13,6 +13,10 @@ import pytest
 
 from media_preview_generator.job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_PREVIEWS
 from media_preview_generator.markers import job_runner
+from media_preview_generator.markers.decide import DecisionStatus, TypeDecision
+from media_preview_generator.markers.models import FileIdentity, Marker, MarkerType
+from media_preview_generator.markers.source_counts import DecidedByTally
+from media_preview_generator.markers.store import MarkerStore
 from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.servers.base import Library, ServerType
 from tests.markers.fakes import FakeRegistry, server_config
@@ -611,6 +615,34 @@ class TestRun:
             servers=[{"id": "jf-1"}],
             server_messages=True,
         )
+
+    def test_each_file_result_updates_the_jobs_decided_by_counts(self, env):
+        env.ctx.decided_by = DecidedByTally()
+        with patch.object(job_runner, "set_file_result_callback") as set_cb:
+            self._run()
+        callback = set_cb.call_args_list[0].args[0]
+        # The pipeline counts a file before its result reaches the job.
+        env.ctx.decided_by.add({MarkerType.CREDITS: "credits_text"})
+        env.jm.set_marker_sources.reset_mock()
+
+        callback("/m/a.mkv", "markers_published", "", "Lookup", servers=[])
+
+        env.jm.set_marker_sources.assert_called_once_with("j1", {"credits": {"credits_text": 1}})
+
+    def test_the_finished_job_stores_the_final_counts_after_every_file(self, env):
+        # Worker threads store their snapshots in any order, so the last per-file one may be stale.
+        env.ctx.decided_by = DecidedByTally()
+        env.tracker.get_result.side_effect = lambda: (
+            env.ctx.decided_by.add({MarkerType.INTRO: "chapters"}),
+            {"completed": 1, "failed": 0, "total": 1, "cancelled": False, "outcome": {"markers_published": 1}},
+        )[1]
+
+        self._run()
+
+        assert env.jm.set_marker_sources.call_args_list[-1] == call("j1", {"intro": {"chapters": 1}})
+        stored_at = env.jm.method_calls.index(call.set_marker_sources("j1", {"intro": {"chapters": 1}}))
+        completed_at = next(i for i, c in enumerate(env.jm.method_calls) if c[0] == "complete_job")
+        assert stored_at < completed_at
 
     def test_paused_job_hands_back_its_slot_so_a_high_preview_job_is_admitted(self, env, monkeypatch):
         from media_preview_generator.web.job_gate import JobGate
@@ -1326,9 +1358,9 @@ class TestRestart:
             path.write_bytes(b"x" * 10)
             st = os.stat(path)
             if analysed == "same":
-                records[str(path)] = SimpleNamespace(size=st.st_size, mtime_ns=st.st_mtime_ns)
+                records[str(path)] = SimpleNamespace(id=len(records) + 1, size=st.st_size, mtime_ns=st.st_mtime_ns)
             elif analysed == "replaced":
-                records[str(path)] = SimpleNamespace(size=st.st_size + 1, mtime_ns=st.st_mtime_ns)
+                records[str(path)] = SimpleNamespace(id=len(records) + 1, size=st.st_size + 1, mtime_ns=st.st_mtime_ns)
             row = {"file": str(path), "outcome": outcome}
             if servers is not None:
                 row["servers"] = servers
@@ -1366,6 +1398,68 @@ class TestRestart:
         # The tracker counts them from the start (live "x/y" and breakdown); its result already includes them.
         assert kwargs["carried_outcome"] == {"markers_published": 1}
         env.jm.set_job_outcome.assert_called_once_with("j1", {"markers_published": 1})
+
+    @pytest.fixture
+    def decided_in_store(self, env, tmp_path):
+        """A real markers store: each file analysed as it is on disk, with a decision per type, and this job's row."""
+        store = MarkerStore(str(tmp_path / "markers.db"))
+        env.ctx.store = store
+        env.ctx.decided_by = DecidedByTally()
+        env.jm.get_file_results.return_value = []
+
+        def make(name, outcome, decided):
+            path = tmp_path / name
+            path.write_bytes(b"x" * 10)
+            st = os.stat(path)
+            rec = store.upsert_file(
+                FileIdentity(str(path), st.st_size, st.st_mtime_ns),
+                duration_ms=1_320_000,
+                season_key=None,
+                is_movie=True,
+            )
+            decisions = {
+                mtype: TypeDecision(mtype, DecisionStatus.DECIDED, Marker(mtype, 0, 30_000, sources), None, "")
+                if sources
+                else TypeDecision(mtype, DecisionStatus.NEEDS_REVIEW, None, None, "one source")
+                for mtype, sources in decided.items()
+            }
+            store.save_decisions(rec.id, decisions, settings_fingerprint="fp")
+            env.jm.get_file_results.return_value.append({"file": str(path), "outcome": outcome})
+            return _item(str(path))
+
+        yield make
+        store.close()
+
+    def test_resumed_job_counts_the_files_it_carries_from_what_the_store_decided(self, env, decided_in_store):
+        chapters, credit_text = ("chapters",), ("credits_text",)
+        items = [
+            decided_in_store(
+                "a.mkv", "markers_published", {MarkerType.INTRO: chapters, MarkerType.CREDITS: credit_text}
+            ),
+            decided_in_store("b.mkv", "markers_up_to_date", {MarkerType.CREDITS: chapters}),
+            # Only the decided type of a file in review counts.
+            decided_in_store("c.mkv", "markers_needs_review", {MarkerType.INTRO: (), MarkerType.CREDITS: chapters}),
+            decided_in_store("d.mkv", "markers_none", {MarkerType.CREDITS: ()}),
+            # No server had Intro & Credits on for it, so this job decided nothing; the store's markers are old.
+            decided_in_store("e.mkv", "markers_no_owners", {MarkerType.CREDITS: chapters}),
+            # Run again, so it counts when its new run finishes, not from the store.
+            decided_in_store("f.mkv", "failed", {MarkerType.CREDITS: chapters}),
+        ]
+        with patch.object(job_runner, "build_items", return_value=(items, [], {})):
+            job_runner.run_intro_credits_job("j1")
+
+        assert env.jm.set_marker_sources.call_args_list[0] == call(
+            "j1", {"intro": {"chapters": 1}, "credits": {"credits_text": 1, "chapters": 2}}
+        )
+
+    def test_a_job_with_nothing_carried_reads_no_sources_from_the_store(self, env, finished, tmp_path):
+        with (
+            patch.object(job_runner, "build_items", return_value=([_item(str(tmp_path / "new.mkv"))], [], {})),
+            patch.object(job_runner, "stored_groups") as stored,
+        ):
+            job_runner.run_intro_credits_job("j1")
+
+        stored.assert_not_called()
 
     @pytest.mark.parametrize(("outcome", "skipped"), ALL_OUTCOMES)
     def test_only_settled_outcomes_are_skipped(self, env, finished, outcome, skipped):
@@ -2304,7 +2398,7 @@ class TestVerifyReplacedFilesLater:
             path = tmp_path / name
             path.write_bytes(b"x" * 10)
             st = os.stat(path)
-            records[str(path)] = SimpleNamespace(size=st.st_size, mtime_ns=st.st_mtime_ns)
+            records[str(path)] = SimpleNamespace(id=len(records) + 1, size=st.st_size, mtime_ns=st.st_mtime_ns)
             server = {"id": "jf-1", "status": "markers_written", **({"verify_later": True} if verify_later else {})}
             env.jm.get_file_results.return_value.append(
                 {"file": str(path), "outcome": "markers_published", "servers": [server]}

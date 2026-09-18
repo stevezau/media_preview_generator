@@ -726,6 +726,101 @@ class TestQueueRows:
         expect(retry_card).to_contain_text("Waiting to retry")
 
 
+# What markers/source_counts.py stores on a job: files per marker type and source group.
+_MARKER_SOURCES = {
+    "intro": {"chapters": 40, "theintrodb+skipdb": 6, "skipdb": 2},
+    "credits": {"chapters": 40, "credits_text": 9, "theintrodb+server_markers": 3},
+}
+
+
+@pytest.mark.e2e
+class TestDecidedByCounts:
+    def _open_detail(self, page: Page, job: dict):
+        page.locator(f"#job-files-toggle-{job['id']}").click()
+        detail = page.locator(f"#job-detail-{job['id']}")
+        expect(detail).to_be_visible(timeout=5000)
+        return detail
+
+    def test_finished_job_lists_per_type_counts_biggest_first_with_readable_names(self, dashboard) -> None:
+        job = _markers_job(progress={"marker_sources": _MARKER_SOURCES})
+        detail = self._open_detail(dashboard([job]), job)
+
+        block = detail.locator(".marker-sources")
+        expect(block).to_contain_text("Decided by")
+        lines = block.locator(".marker-sources-line")
+        expect(lines).to_have_count(2)
+        expect(lines.nth(0)).to_have_text("Intro: chapters 40 · TheIntroDB + SkipDB 6 · SkipDB 2")
+        expect(lines.nth(1)).to_have_text("Credits: chapters 40 · credit text 9 · TheIntroDB + server markers 3")
+
+    def test_the_info_icon_explains_what_counts(self, dashboard) -> None:
+        job = _markers_job(progress={"marker_sources": _MARKER_SOURCES})
+        detail = self._open_detail(dashboard([job]), job)
+
+        icon = detail.locator(".marker-sources .info-icon")
+        tip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
+        assert tip.startswith("How many files each source decided in this job.")
+        assert "need review, failed or weren't checked aren't counted" in tip
+        icon.hover()
+        expect(detail.page.locator(".tooltip")).to_contain_text("How many files each source decided", timeout=3000)
+
+    def test_three_sources_name_two_and_more_than_five_groups_add_up_under_other(self, dashboard) -> None:
+        sources = {
+            "credits": {
+                "chapters": 30,
+                "credits_text": 9,
+                "theintrodb+skipdb+season_audio": 4,
+                "theintrodb+skipdb+introdb": 1,
+                "skipdb+server_markers": 3,
+                "introdb+server_markers": 2,
+                "user": 1,
+                "theintrodb+server_markers": 1,
+            }
+        }
+        job = _markers_job(progress={"marker_sources": sources})
+        detail = self._open_detail(dashboard([job]), job)
+
+        line = detail.locator(".marker-sources-line")
+        # Both three-source groups read the same, so they add up; the smallest groups fold into "other".
+        expect(line).to_have_text(
+            "Credits: chapters 30 · credit text 9 · TheIntroDB + SkipDB + 1 more 5 · SkipDB + server markers 3 · "
+            "IntroDB + server markers 2 · other 2"
+        )
+        other = line.locator("span[title]").last
+        assert other.get_attribute("title") == "TheIntroDB + server markers 1 · your edits 1"
+
+    @pytest.mark.parametrize("sources", [None, {}, {"intro": {}}], ids=["none", "empty", "type-without-counts"])
+    def test_nothing_decided_shows_no_decided_by_block(self, dashboard, sources) -> None:
+        job = _markers_job(progress={"marker_sources": sources})
+        detail = self._open_detail(dashboard([job]), job)
+
+        expect(detail).to_contain_text("Markers written × 8")
+        expect(detail.locator(".marker-sources")).to_have_count(0)
+
+    def test_preview_jobs_never_show_it(self, dashboard) -> None:
+        preview = _preview_job()
+        preview["progress"]["marker_sources"] = _MARKER_SOURCES
+        detail = self._open_detail(dashboard([preview]), preview)
+
+        expect(detail).to_contain_text("Generated × 11")
+        expect(detail.locator(".marker-sources")).to_have_count(0)
+
+    def test_a_running_job_updates_the_counts_live(self, dashboard) -> None:
+        job = _markers_job(status="running", completed_at=None, progress={"percent": 40.0, "marker_sources": None})
+        page = dashboard([job])
+        card = page.locator(f"#active-job-{job['id']}")
+        expect(card).to_be_visible(timeout=5000)
+        expect(card.locator(".marker-sources")).to_have_count(0)
+
+        progress = {**job["progress"], "marker_sources": {"credits": {"chapters": 3, "credits_text": 1}}}
+        page.evaluate(
+            "([id, progress, publishers]) => updateJobProgress(id, progress, publishers)",
+            [job["id"], progress, job["publishers"]],
+        )
+
+        expect(card.locator(".marker-sources-line")).to_have_text("Credits: chapters 3 · credit text 1")
+        expect(card).to_contain_text("Markers written × 8")
+
+
 def _files_response(files: list[dict]) -> dict:
     return {
         "files": files,

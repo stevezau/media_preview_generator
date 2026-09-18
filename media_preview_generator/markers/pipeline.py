@@ -71,6 +71,7 @@ from .publishers.base import (
 )
 from .publishers.factory import publisher_for
 from .settings import GlobalMarkersSettings, ServerMarkersSettings, get_global_settings, load_server
+from .source_counts import DecidedByTally, decided_groups
 from .sources import introdb, skipdb, theintrodb
 from .sources.chapters import CHAPTER_RULES_VERSION, chapter_candidates
 from .sources.introdb import IntroDbClient
@@ -221,6 +222,8 @@ class PipelineContext:
         credits_text: What the job's check for credit text detection found. ABSENT keeps stored credits text answers
             from helping decide (they may still hold a type in review); UNKNOWN (the check didn't answer) registers no
             detector, but stored answers count as if it were there.
+        decided_by: Files per marker type and source group this job decided; a file counts once its run reaches
+            publishing and doesn't fail (the job summary's "Decided by" counts).
     """
 
     registry: Any
@@ -238,6 +241,7 @@ class PipelineContext:
     recheck_empty_server_markers: bool = False
     chromaprint: ChromaprintState = ChromaprintState.AVAILABLE
     credits_text: TextDetState = TextDetState.AVAILABLE
+    decided_by: DecidedByTally = field(default_factory=DecidedByTally, repr=False)
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
     _capability_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -1677,6 +1681,8 @@ def _attempt(
             row[VERIFY_LATER] = True
         rows.append(row)
     outcome = file_outcome({r["status"] for r in rows}, needs_review=needs_review)
+    if outcome is not FileOutcome.FAILED:
+        ctx.decided_by.add(decided_groups(decisions))
     labels = tuple(sorted(_ONLINE_LABELS[source] for source, answer in skipped.items() if is_budget_exhausted(answer)))
     return ItemOutcome(outcome.value, _summary(decisions, types, labels), rows)
 

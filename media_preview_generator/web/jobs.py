@@ -287,6 +287,9 @@ class JobProgress:
     # fills as the wait elapses, instead of a stuck-looking 0% bar.
     retry_eta: str | None = None
     retry_wait_total: int | None = None
+    # Intro & Credits: files per marker type and source group that decided them, {"credits": {"chapters": 40}}
+    # (markers.source_counts). None on other jobs.
+    marker_sources: dict[str, dict[str, int]] | None = None
 
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
@@ -1837,6 +1840,22 @@ class JobManager:
             job = self._jobs.get(job_id)
             if job:
                 job.progress.outcome = outcome
+            return job
+
+    def set_marker_sources(self, job_id: str, counts: dict[str, dict[str, int]]) -> Optional["Job"]:
+        """Store an Intro & Credits job's "Decided by" counts; the next progress event and the finished job carry them.
+
+        Args:
+            job_id: Job identifier.
+            counts: Files per marker type and source group (``markers.source_counts.DecidedByTally.snapshot``).
+
+        Returns:
+            The job, or None when there's no such job.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                job.progress.marker_sources = counts
             return job
 
     def complete_job(

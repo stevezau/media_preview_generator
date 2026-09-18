@@ -146,7 +146,9 @@ class TestSeasonFollowUpJob:
 
     def test_files_the_job_skipped_as_finished_before_a_restart_still_count_as_its_own(self, env, monkeypatch):
         monkeypatch.setattr(
-            job_runner, "_skip_finished_before_restart", lambda jm, job_id, items, store: (items[1:], {"x": 1}, set())
+            job_runner,
+            "_skip_finished_before_restart",
+            lambda jm, job_id, items, store: (items[1:], {"x": 1}, set(), {}),
         )
         create = self._run(env, [_item(ep(S1, 1)), _item(ep(S1, 2))], [ep(S1, 1), ep(S1, 3)])
         assert create.call_args.kwargs["file_paths"] == [ep(S1, 3)]

@@ -432,6 +432,26 @@ Extras are never checked: a file with a Plex extra suffix (`-trailer`, `-feature
 `Featurettes`, `Extras`, `Behind The Scenes`, `Deleted Scenes`, `Interviews`, `Scenes`, `Shorts`, `Other`, `Samples`)
 is `markers_skipped` before it is probed or looked up, whether it came from a folder, a webhook or a library listing.
 
+### Decided-by counts
+
+An Intro & Credits job's `progress.marker_sources` (in `GET /api/jobs/{id}` and the live `job_progress` event;
+`null` on other jobs, and on an Intro & Credits job until its first file finishes) counts the files each source
+decided, per marker type:
+
+```json
+{"intro": {"chapters": 40, "theintrodb+skipdb": 6}, "credits": {"chapters": 40, "credits_text": 9, "theintrodb+server_markers": 3}}
+```
+
+A file counts once per decided marker type, under one group: its marker's sources (source ids from Settings, joined
+with `+`, in your source order). A marker a chapter set counts as `chapters` even when other sources agreed (a chapter
+decides on its own; they only confirmed or trimmed it); markers already on servers (`server_markers`, importer copies
+included) are named only when they were the one other opinion a single source needed; the user's own marker is
+`user`. A file counts when its run ends with any outcome but `failed`, so a file whose every server was skipped still
+counts what its sources decided, while a type in review, and a file not found, with no server, or an extra, never
+count. A job revived after a restart counts the files it carries from what the markers store holds for them. The
+Dashboard shows these as **Decided by** under the job's per-server breakdown, biggest group first, at most five groups
+per type (the rest add up under "other").
+
 ### Intro & Credits Endpoints
 
 | Method | Endpoint | Description |
