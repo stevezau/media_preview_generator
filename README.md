@@ -79,7 +79,8 @@ confirmation for destructive changes.
 
 **Skip Intro & Skip Credits markers** for Plex, Jellyfin and Emby. Detected
 once per file from chapters, online databases (TheIntroDB, IntroDB.app,
-SkipDB) and season audio matching, then published to every server that has
+SkipDB), season audio matching, and the on-screen credit roll (GPU on any
+vendor, CPU fallback), then published to every server that has
 it — direct database write for Plex (Plex Pass, same machine as Plex), the
 Media Preview Bridge plugin for Jellyfin, and the Media Preview Bridge for Emby
 plugin. Precision over coverage: a marker only ships when chapters say so or

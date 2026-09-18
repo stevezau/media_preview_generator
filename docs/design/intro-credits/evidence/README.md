@@ -3,7 +3,11 @@
 Everything the design spec (`../spec.md`) cites lives here. Nothing important lives in a
 session scratchpad. **Local-only (gitignored, public repo):** every `*.json`/`*.jsonl` truth set and result (they list
 real library file paths), `lab/*_truth.txt`, `credits/spot.txt`, `credits/framechecks/`, `lab/env`, `lab/synth/`,
-`online/skipdb-dump.json`, `plugins/emby-4.10/embylibs/`. They exist only on `storage`. `lab/env` holds lab-server tokens: chmod 600, never commit, never paste into docs.
+`online/skipdb-dump.json`, `plugins/emby-4.10/embylibs/`, the phase-3 harness caches
+(`eval/phase3_credits_gpu.json`, `eval/phase3_credits_cpu.json` — details with file paths; the counts and folder
+names those support are in `eval/phase3-harness.md`), and `credits/bench/` (the phase-3 measurement scripts' raw
+outputs, model and Python 3.12 venv; `$MARKERS_BENCH_DIR`). They exist only on `storage`. `lab/env` holds lab-server
+tokens: chmod 600, never commit, never paste into docs.
 
 ## Map
 
@@ -14,9 +18,9 @@ real library file paths), `lab/*_truth.txt`, `credits/spot.txt`, `credits/framec
 | `plex-provider-redirect/` | Plex `MetadataProviderUrl` redirect test (not honoured) | `proxy.py`, `log.jsonl`, `pms_marker_strings.txt` |
 | `online/` | TheIntroDB / IntroDB / SkipDB accuracy on 43 verified cases | `cases.json`, `query.py`, `online_results.json`, `skipdb-dump.json` (30 MB snapshot — don't commit) |
 | `coverage/` | Online coverage on a random prod sample | `cov.py`, `coverage_results.json` |
-| `eval/` | TV intro detection eval (118 episodes with studio chapters) | `named_seasons.json`, `run_eval_v3.py`, `eval_results_v3.json` (v1/v2/v3 results), `sweep_intro.*`, `snap_test.py`, `fp_variants.py` + `.log` (alg0/1/2/4, downmix), `fp_alg2.py`, `few_siblings.py` + `.log` (weekly releases / previous season), `phase2-harness.md` (phase 2 harness `tools/markers_eval`: §5.3 reproduction gate, season step gate, full report against Plex's own markers). Fingerprint caches are not kept — first run recomputes (~2 s/episode) |
+| `eval/` | TV intro detection eval (118 episodes with studio chapters); phase-3 credits-text accuracy harness | `named_seasons.json`, `run_eval_v3.py`, `eval_results_v3.json` (v1/v2/v3 results), `sweep_intro.*`, `snap_test.py`, `fp_variants.py` + `.log` (alg0/1/2/4, downmix), `fp_alg2.py`, `few_siblings.py` + `.log` (weekly releases / previous season), `phase2-harness.md` (phase 2 harness `tools/markers_eval`: §5.3 reproduction gate, season step gate, full report against Plex's own markers), **`phase3-harness.md`** (phase 3 harness `python -m tools.markers_eval credits-text`: spec §5.4 bar, the owner's Q4 gate per set, ends, frame checks; local-only `phase3_credits_gpu.json`/`phase3_credits_cpu.json` back it with file paths). Fingerprint and credits-text answers are cached per file identity, detector version and decode path — a re-run of either harness costs seconds once cached |
 | `detect/` | Detector prototypes | `fp.py`, `fp3.py` (v3 season matcher), credits OCR prototypes |
-| `credits/` | Credits-start eval (80 files with chapter truth) | `movie_credit_truth.json` (205 movies), `movies40.json`, `tv40.json`, `features3.py` (GPU extractor → `f3.jsonl`), `eval_rules3.py` (rules + grid), **`rule_j.py` (reproduces spec §5.4 table)**, `compare_rules.py`, `adjudicated.json` (truth fixed by frame checks), `framechecks/` (contact sheets), `framecheck.py`, `gpu_bench.py` (CPU vs CUDA text detection), `gpu/` (**cross-vendor GPU: WebGPU/Vulkan in the app image, ncnn attempt — see `gpu/RESULTS.md`**) |
+| `credits/` | Credits-start eval (80 files with chapter truth); phase-3 pre-build measurements | `movie_credit_truth.json` (205 movies), `movies40.json`, `tv40.json`, `features3.py` (GPU extractor → `f3.jsonl`), `eval_rules3.py` (rules + grid), **`rule_j.py` (reproduces spec §5.4 table)**, `compare_rules.py`, `adjudicated.json` (truth fixed by frame checks), `framechecks/` (contact sheets), `framecheck.py`, `gpu_bench.py` (CPU vs CUDA text detection), `gpu/` (**cross-vendor GPU: WebGPU/Vulkan in the app image, ncnn attempt — see `gpu/RESULTS.md`**), **`phase3/`** (phase-3 measurement scripts: `measure_packages.sh`, `measure_combinations.py`, `measure_cost.py`, `measure_hdr.py`, `measure_webgpu_devices.py`), **`phase3-measurements.md`** (Task 1's pre-build numbers: package sizes, model hashes, WebGPU device selection, decode/detect cost, HDR kinds; local-only `bench/` holds the raw outputs, model and Python 3.12 venv, `$MARKERS_BENCH_DIR`) |
 | `design/` | Design report source (artifact https://claude.ai/code/artifact/65394c1a-e878-4fc2-985b-63bc4c307c5d) | `index.html`, `before_*.jpg`, `shot.py` |
 | `history/` | Superseded spec revisions and old report copies | `spec-rev2-2026-09-13.md` |
 | `screenshots/` | UI and lab screenshots cited by the results files | `phase1/`, `phase2/` (e.g. `task10-r3-*.png` Emby versions in the web player) |

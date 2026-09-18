@@ -179,18 +179,26 @@ medium fixed; lab matrix 23/23; `pr-241` image `sha256:3afed8e7…` from `8a8b92
   450 s TV; 1 fps refine over the 20 s before the coarse answer. Hwaccel args extracted from
   `processing/ffmpeg_runner.py` into a shared helper without changing preview command lines (golden-args test).
 - `credits/textdet.py`: PP-OCRv4 det ONNX at `det_limit_side_len=320`, `det_limit_type="max"`; DBNet post-processing
-  vendored (OpenCV contours; unclip computed analytically) — must give **identical box counts** to
-  `rapidocr_onnxruntime==1.4.4` on the 289-frame bench set before use.
-- `credits/textdet_helper.py`: one helper subprocess per GPU device, env from `get_vulkan_env_overrides()`, WebGPU
-  plugin EP when `get_vulkan_device_info()` is hardware and a 20-frame self-test beats CPU; else CPU. Crash/hang →
-  CPU; cancel between requests.
+  vendored (OpenCV contours; ~~unclip computed analytically~~ **superseded by T-R2**: pyclipper is kept for the
+  unclip step, since an analytic replacement can't match its integer rounding exactly and identical box counts is
+  the gate) — must give **identical box counts** to `rapidocr_onnxruntime==1.4.4` on the 289-frame bench set before
+  use.
+- `credits/textdet_helper.py`: one helper subprocess per GPU device (plus one shared CPU helper), env from
+  `get_vulkan_env_overrides()`, WebGPU plugin EP when `get_vulkan_device_info()` is hardware and a 20-frame
+  self-test counts exactly the CPU's boxes, faster; else CPU. Crash/hang → CPU for the process lifetime; cancel
+  between chunks.
 - `credits/rule_j.py`: rule J exactly as spec §5.4 (luma < 30 & boxes ≥ 1, or boxes ≥ 3; runs over gaps ≤ 24 s with
-  dark bridging; runs ≥ 15 s; last run; anchor; refine). Regression test reproduces 59/80 within 10 s, 1 early,
+  dark bridging; runs ≥ 15 s; last run; anchor; refine). Regression test reproduces 63/80 within 10 s, 1 early,
   from an anonymised copy of `evidence/credits/f3.jsonl` committed as a test fixture.
-- Docker: numpy, onnxruntime, onnxruntime-ep-webgpu, opencv-python-headless; model downloaded at build with sha256.
+- Docker: numpy, onnxruntime, onnxruntime-ep-webgpu, opencv-python-headless, **and pyclipper** (T-R2); model
+  downloaded at build with sha256.
+
+Plan: `plan-phase3.md` (14 tasks).
+
 Done when: harness ≥ spec §5.4 numbers with 0–1 early per 80, GPU path proven on storage NVIDIA and plex NVIDIA +
 Intel (self-test picks CPU on the iGPU), and combined credits decisions beat Plex's native credits markers on the
-same files.
+same files. Owner's Q5 answer: rule J ships as measured (no tuning attempted); a later tuning pass is a follow-up
+that must beat rule J on both the 80-file and 205-movie sets with no more early answers.
 
 ### Phase 4 — Polish (plan: `plan-phase4.md`)
 Adjust/Lock editor in the Inspector (drag handles, keyboard nudge, lock, publish to every owner immediately),

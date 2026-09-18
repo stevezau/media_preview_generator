@@ -168,6 +168,15 @@ These are not migrated to settings.json and remain in effect:
 | `MEDIA_ROOT` | `/` | Same as `PLEX_DATA_ROOT` but for media paths. |
 | `RATELIMIT_STORAGE_URL` | `memory://` | Backend for rate-limit counters. The default in-memory store is fine for a single-container deploy; set to `redis://host:port/0` if you run behind a load balancer with multiple replicas. |
 
+### Developer / harness-only
+
+Not for deployment — these override paths used during development and the accuracy harness, and are never migrated
+into `settings.json`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEDIA_PREVIEW_TEXTDET_MODEL` | the Docker image's own copy (`/app/models/ch_PP-OCRv4_det_infer.onnx`) | Overrides the on-screen credit text model path, for development and the `tools/markers_eval credits-text` harness. |
+
 ### External Authentication (AUTH_METHOD)
 
 If you secure access via a reverse proxy (Authelia, Authentik, Caddy Security, nginx basic auth, etc.) or a VPN (Tailscale, WireGuard), you can disable the built-in login screen:
@@ -278,7 +287,7 @@ Shared detection settings — one file is detected once, whatever the publish ru
 | `publish_when` | `"high"` \| `"medium"` | `"high"` | **High:** chapters publish on their own unless two other independent sources agree on something different (then Needs review); without chapters, two independent sources must agree. **Medium:** also accepts a single source that checks the file's own cut — chapters, or a SkipDB `exact`/`shifted` match (intros and recaps only). IntroDB, TheIntroDB, season audio and markers already on servers never decide alone at either level, and season audio (or `season_audio_previous`) with markers already on servers isn't an agreeing pair on its own. |
 | `respect_locks` | bool | `true` | A locked marker is never replaced by detection. The Inspector can't adjust or lock markers yet (a later update); it only shows them and offers Re-detect. |
 | `sources` | array | see above | Evidence sources, in checking/precedence order. Reordering in the UI reorders this array. |
-| `sources[].id` | one of `chapters`, `theintrodb`, `introdb`, `skipdb`, `season_audio`, `credits_text`, `server_markers` | — | `credits_text` isn't built in this release: its `enabled` value and position round-trip through save/load, but detection doesn't run. `season_audio` runs where ffmpeg has chromaprint (see `GET /api/markers/sources/local`); it only confirms intros another source found. Its previous-season hint is stored as `season_audio_previous` evidence (not a settings id). |
+| `sources[].id` | one of `chapters`, `theintrodb`, `introdb`, `skipdb`, `season_audio`, `credits_text`, `server_markers` | — | `credits_text` runs where text detection is available (see `GET /api/markers/sources/local`); it decides credits alone only at `"medium"`. `season_audio` runs where ffmpeg has chromaprint (see `GET /api/markers/sources/local`); it only confirms intros another source found. Its previous-season hint is stored as `season_audio_previous` evidence (not a settings id). |
 | `sources[].enabled` | bool | varies | `theintrodb` defaults to `false` (used without the vendor's written permission); the rest default to `true`. |
 | `sources[].api_key` | string | `""` | `theintrodb` only. Optional. `GET`/`POST /api/settings` mask a set key as `****`; posting `****` back keeps the stored key unchanged. Never logged. |
 
@@ -431,7 +440,7 @@ is `markers_skipped` before it is probed or looked up, whether it came from a fo
 | POST | `/api/markers/item/redetect` | Re-run Intro & Credits for one file, asking every source again |
 | GET | `/api/markers/season` | Inspector Season view data for one episode's season |
 | POST | `/api/markers/season/publish` | Queue an Intro & Credits job for the episodes of one episode's season |
-| GET | `/api/markers/sources/local` | Whether season audio matching can run in this container |
+| GET | `/api/markers/sources/local` | Whether season audio matching and on-screen credit text can run in this container |
 | POST | `/api/markers/reconcile` | Queue Intro & Credits · Check servers |
 
 All of them require the same `X-Auth-Token` / `Authorization: Bearer` auth as the rest of the API. `POST
@@ -544,11 +553,18 @@ body must be a JSON object with a path"}`, `{"error": "Path is not a file inside
 
 #### GET /api/markers/sources/local
 
-**Response:** `200` with `{"season_audio": {"available", "ffmpeg", "message"}}` — season audio matching needs an
-ffmpeg with the chromaprint muxer (jellyfin-ffmpeg in the amd64 image; the arm64 image has none). `ffmpeg` is the
-binary found (`null` when none), and `message` says why it isn't available (`""` when it is): no ffmpeg lists the
-muxer, or one didn't answer the check (then it is asked again after 10 minutes), e.g.
+**Response:** `200` with `{"season_audio": {"available", "ffmpeg", "message"}, "credits_text": {"available",
+"message"}}` — season audio matching needs an ffmpeg with the chromaprint muxer (jellyfin-ffmpeg in the amd64
+image; the arm64 image has none). `ffmpeg` is the binary found (`null` when none), and `message` says why it isn't
+available (`""` when it is): no ffmpeg lists the muxer, or one didn't answer the check (then it is asked again
+after 10 minutes), e.g.
 `{"season_audio": {"available": true, "ffmpeg": "/usr/lib/jellyfin-ffmpeg/ffmpeg", "message": ""}}`.
+
+`credits_text.available` is `false` when ONNX Runtime/OpenCV aren't installed, the text detection model isn't at
+its expected path or isn't the expected file, or the check didn't answer (checked again after 10 minutes; arm64
+has no GPU path but is still available on the CPU). `message` names the reason (`""` when available), e.g.
+`{"credits_text": {"available": true, "message": ""}}` or
+`{"credits_text": {"available": false, "message": "Needs the text detection model, which the Docker image includes; it isn't at /app/models/ch_PP-OCRv4_det_infer.onnx"}}`.
 
 #### POST /api/markers/reconcile
 

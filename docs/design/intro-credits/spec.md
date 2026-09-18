@@ -33,8 +33,16 @@ audit: 0 critical/high, 7 medium fixed. Lab matrix 23/23 (row 20 in Plex Web; na
 testable), owner checks done (Plex Web skip buttons, Emby Premiere), and the `pr-241` image
 (`sha256:3afed8e7124b6a2c465bcdf6c70f261c044b78ee18c29cbf642444d628908341`, from `8a8b92e`) re-ran rows 1, 2 and 8
 on the lab (`evidence/lab/phase2-results.md` "PR image check"). Rulings R1–R5 and G3 are in §14. Still open with the
-owner: the Emby catalog submission (roadmap checkpoint 4). Next: owner review of PR #241, then phase 3 (credits text;
-`plan-phase3.md` is written after that review). Build runs on PR #241, branch
+owner: the Emby catalog submission (roadmap checkpoint 4).
+**Phase 3 (credits text) is built** (`plan-phase3.md`; ledger `.superpowers/sdd/plan-phase3/progress.md`):
+keyframe-tail sampling, rule J's start and end, the ONNX Runtime WebGPU/CPU text detector with a per-device
+self-test, the Settings row, the Inspector "Credit text" lane, and the accuracy harness
+(`evidence/eval/phase3-harness.md`). Milestone audit found and fixed two real bugs (the end anchor, a stale
+tooltip; §14 2026-09-18). The harness gate passes 5 of 5 on the 80 hand-checked files (movies40 + tv40) on both
+decode paths and fails 3 of 5 on the harder 205-movie set — a disclosed detector-gap limitation, not fixed here
+(§5.4, §13 item 14; owner, 2026-09-18): ships at "Medium" now, "High" needs a second source until that gap closes.
+Rulings T-R1–T-R9 and contradictions C1–C7 resolved while planning phase 3 are in §14. Next: the phase-3 lab
+matrix. Build runs on PR #241, branch
 `feat/markers-detection`; spec, slimmed evidence and plans live in `docs/design/intro-credits/`. Local-only, gitignored
 files stay beside them: `evidence/lab/env` (tokens), `evidence/lab/synth/` (webm), `evidence/lab/scale_mounts.sh` and
 `evidence/lab/results/` (real library paths), `evidence/online/skipdb-dump.json`,
@@ -252,34 +260,66 @@ footage — **not** on epilogue text cards ("Two months later…").
 **Frames.** The job samples **keyframes of the tail itself** (no dependency on preview frames):
 `ffmpeg -threads 2 [-hwaccel cuda -hwaccel_output_format cuda] -skip_frame nokey -ss <tail start> -copyts -i <file>
 -an -sn -dn -fps_mode passthrough -vf "scale…320:180…,showinfo" -f rawvideo -` (pts from `showinfo`). Tail = last
-**900 s** for movies (covers 205/205 movies' measured credits length: median 233 s, p95 529 s, max 852 s), last
-**450 s** for TV. Then a short full decode at 1 fps over the 20 s before the coarse answer to refine it.
-Measured cost on storage (P5000 NVDEC): 8–13 s per movie incl. text detection; CPU keyframe decode of a 15-min tail
-26.5 s. Per-frame exact seeks (150–270 s) and full-rate decode of the tail are never used. Decode uses the app's existing per-GPU ffmpeg hwaccel selection (NVIDIA / Intel / AMD, same as previews) with CPU fallback.
+**900 s** for a movie or a file of unknown kind, **450 s** for a TV episode (a `season_key` on the file's record;
+T-R4 — a longer tail on an unknown-kind file only costs extra decode). Measured tails (lab scale run chapter
+truth): TV credits (400 episodes) median 72 s, p95 267 s, 390 within 450 s (the 10 beyond are 462–463 s and
+chapter mislabels at 1,365–2,578 s); movies (102) p95 563 s, max 852 s, all within 900 s — covers 205/205 measured
+movie credits lengths too (median 233 s, p95 529 s). Keyframe rows are read in ffmpeg's own output order, **never
+sorted** (T-R5): they are not always increasing (8 of 80 files in the 80-file set), and dropping the non-increasing
+rows changes rule J's answer on one file. Mean luma is rounded to 0.1 and pts to 0.001 before rule J, matching the
+prototype (T-R6, rule J compares luma against 30 and 12); because `-copyts` keeps the file's own start time in
+`pts_time` while `-ss` seeks from the start of the file, every row's pts has the container's own `format.start_time`
+subtracted before rule J sees it — skipping that on a recording with a non-zero start (an MPEG-TS PCR base can put
+`pts_time` tens of thousands of seconds into a short file) would put the whole answer out of range. Then a short
+full decode at 1 fps over the 20 s before the coarse answer to refine it, and, when more than 30 s of the file
+follows the chosen run's last credit keyframe, a second 1 fps decode over the 21 s from 1 s before that keyframe to
+refine the end (Q3); otherwise the skip runs to the end of the file with no end. Measured cost on storage (P5000
+NVDEC): 8–13 s per movie incl. text detection; CPU keyframe decode of a 15-min tail 26.5 s. Per-frame exact seeks
+(150–270 s) and full-rate decode of the tail are never used. Decode uses the app's existing per-GPU ffmpeg hwaccel
+selection (NVIDIA / Intel / AMD, same as previews) with CPU fallback; a decode that exits non-zero or yields no
+frames is a GPU failure (worker CPU rerun), while a decode that times out (600 s) is "no answer" and isn't decoded
+again for a day unless the file changes or the run is forced (T-R7).
 
 **Text detector.** RapidOCR **detection model only** (no recognition) at the frame's own 320 px
 (`det_limit_side_len=320, det_limit_type="max"`) — same hits as default upscaling (19/19, 0 false), far cheaper.
+`det_limit_side_len=320` is actually ignored by rapidocr 1.4.4 under `limit_type="max"` (the limit is raised to 960
+for any frame under it): the frame keeps its own size because it's already under that raised limit, not because the
+320 setting took effect (C6) — don't "fix" the limit to make it apply.
 **Runs on any GPU vendor, CPU fallback** (owner 2026-09-13: "make sure all GPU types work";
-`evidence/credits/gpu/RESULTS.md`). Same ONNX model on every path, identical boxes:
+`evidence/credits/gpu/RESULTS.md`). Same ONNX model on every path, identical boxes: post-processing is vendored in
+`markers/credits/textdet.py` (pyclipper kept for the unclip step, T-R2); identical box counts to
+rapidocr_onnxruntime 1.4.4 on the 289-frame bench (`evidence/eval/phase3-harness.md`). Model
+`ch_PP-OCRv4_det_infer.onnx` (4,745,517 bytes, sha256 `d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9`,
+taken from the rapidocr_onnxruntime 1.4.4 wheel), pinned at `/app/models/ch_PP-OCRv4_det_infer.onnx`;
+`MEDIA_PREVIEW_TEXTDET_MODEL` overrides the path for development and the harness (not a setting; §8).
+**arm64: no WebGPU EP wheel, CPU only.**
 - **GPU:** ONNX Runtime **WebGPU plugin EP** (`onnxruntime-ep-webgpu`, +16 MB; Dawn → Vulkan → NVIDIA, Intel ANV, AMD
   RADV — ICDs and loader already in the image). Inside the app image on NVIDIA: 13.3 ms/frame vs CPU 18.7, 100% same
   boxes — **only** after applying the app's Vulkan probe env (`gpu/vulkan_probe.py` `get_vulkan_env_overrides()`,
   e.g. `__EGL_VENDOR_LIBRARY_FILENAMES`) before the session is created. Without it the NVIDIA ICD fails and Dawn
   silently uses llvmpipe at 430 ms/frame.
 - **Guard:** use the GPU only when `get_vulkan_device_info()` reports a hardware device and a 20-frame self-test on
-  that device beats CPU; pick the device with the EP's `powerPreference`/`deviceId` to match the GPU the user enabled
-  for previews. Otherwise CPU.
+  that device counts exactly the CPU's boxes, faster — a GPU that only matches the CPU's speed, or counts different
+  boxes, doesn't pass. Otherwise CPU. A GPU helper runs on the WebGPU EP device whose `pci_bus_id` matches the
+  worker GPU's; with no PCI match it falls back to the CPU, except on a host with a single WebGPU device when the
+  worker's PCI address is unknown (T-R3) — the EP lists every display PCI device from sysfs, not only
+  Vulkan-capable ones (storage's own ASPEED BMC VGA is listed beside the P5000), so refusing the GPU whenever
+  several devices are listed would disable it on ordinary servers.
 - **CPU:** ONNX Runtime CPU, `intra_op_num_threads=2`, 18–23 ms/frame.
 - Rejected: CUDA-only `onnxruntime-gpu` (+2.8 GB, NVIDIA only); ncnn Vulkan (fast, but the pnnx-converted model
   output was wrong); OpenVINO (Intel only, +180 MB); ROCm/MIGraphX (GB-scale, removed from ORT); OpenCV DNN (no
   Vulkan in pip wheels).
 - Honest gain: decode dominates, so a movie takes ≈ 16.7 s with GPU text detection vs 18.8 s on CPU.
-- **Proven:** storage P5000 13.3 vs 18.7 ms; plex TITAN RTX 4.8 vs 7.7 ms; plex Intel UHD 770 16.1 vs 8.0 ms (iGPU
-  slower than that CPU → self-test picks CPU). All 100% identical boxes. **AMD not tested** (no hardware, owner
-  confirmed): same Vulkan/RADV path, self-test decides.
+- **Proven:** storage P5000 13.3 vs 18.7 ms (planning bench); the shipped helper's own self-test on storage measured
+  11.2–11.4 ms/frame on WebGPU against 17.4–18.8 ms on the CPU (GPU kept, pinned to the card's PCI address,
+  `evidence/eval/phase3-harness.md`); plex TITAN RTX 4.8 vs 7.7 ms; plex Intel UHD 770 16.1 vs 8.0 ms (iGPU slower
+  than that CPU → self-test picks CPU). All 100% identical boxes. **AMD not tested** (no hardware, owner
+  confirmed): same Vulkan/RADV path, self-test decides (Q6).
 - CPU runtime size ≈ +300 MB (onnxruntime 62 MB, rapidocr 16 MB, opencv-headless ≈ 150 MB, numpy 59 MB,
-  shapely/pyclipper 15 MB). Note `rapidocr_onnxruntime` 1.4.4 is "gradually no longer maintained" and caps Python
-  < 3.13: vendor its det pre/post-processing (small) or move to RapidOCR 3.x at build time.
+  pyclipper ≈ 3.5 MB — all in the image; shapely ≈ 11 MB is a test-only dependency, used only to check the
+  vendored post-processing against rapidocr's own, and stays out of the image). `rapidocr_onnxruntime` 1.4.4 is
+  "gradually no longer maintained" and caps Python < 3.13, which is why its det pre/post-processing is vendored
+  (above) rather than depended on at build time.
 
 **Rule "J"** per frame `[pts, boxes, luma_mean]`:
 1. Credit frame = (`luma < 30` and `boxes ≥ 1`) or (`luma ≥ 30` and `boxes ≥ 3`). Bright frames need more text:
@@ -301,6 +341,9 @@ Measured cost on storage (P5000 NVDEC): 8–13 s per movie incl. text detection;
 | Preview frames every 6 s (owner's interval) | 58 / 80 | 61 | 0 | 9 | 10 |
 | Preview frames every 10 s (app default) | 43 / 80 | 49 | 1 | 9 | 21 |
 
+The table's keyframe row was measured with the prototype's 10 s refine span; the app refines over 20 s, which gives
+63 / 1 early / 8 late / 4 none on the same rows (`tests/fixtures/markers/credits_rule_j_80.json.gz`).
+
 Late cases are credits styles the rule doesn't see as "credit frames": names over bright footage or a curtain call
 (Taxi Driver, Come from Away, Revenge of the Nerds), textured or light backgrounds (The Mummy, LOTR: Return of the
 King), tiny text on black at 320 px (WILL). Late skips are harmless (viewer sees more). Misses: credits shorter
@@ -313,7 +356,23 @@ it reads this file's own frames (§5.5 rule 6; owner, 2026-09-16). It also agree
 as an independent source (rule 7 still shortens). The skip ends at the roll's last credit frame, refined at 1 fps to
 the roll's last contiguous credit frame (no fade step), when more than 30 s of the file follows the roll (a scene
 after the credits); otherwise it runs to the end of the file. Emby still gets the start only (§6.3 R1).
-Full rule tuning happens in phase 3 on a larger hand-checked set.
+Rule J ships as measured; every answer more than 10 s early or 30 s late, shaped like epilogue cards, or with an
+end is frame-checked and adjudicated in `evidence/eval/phase3-harness.md`; tuning is a follow-up that must beat J on
+both sets with no more early answers. Epilogue text cards touching the roll, or joined to it over black, become the
+start (pinned in `test_rule_j.TestEpilogueCards`); the harness frame-checks every answer shaped like that.
+
+**Harness** (`evidence/eval/phase3-harness.md`; the app's own `find_credits` and `decide()`, not the prototype):
+- Rule J alone on the 80 (this spec's own bar: ≥ 59 within 10 s, ≤ 1 early): GPU decode 63 within 10 s / 1 early /
+  8 late / 3 none — meets the bar. CPU decode 58 within 10 s / 1 early / 9 late / 8 none — misses the bar by one
+  file; the two decode paths scale the frame differently (`scale_cuda` vs swscale) and don't always agree, though
+  the CPU run still clears the Q4 gate below.
+- Q4 gate, check by check: the 80 (movies40 + tv40) passes 5 of 5 on both decode paths. The 205 movies fails 3 of 5
+  (Medium useful 90 < Plex's 124; Medium wrong 17 > cap 5; High wrong 15 > cap 3) but passes both "never looser than
+  Plex" checks by a wide margin. The failure is a detector gap, not a truth problem: rule J's `coarse_start` takes
+  the roll's **last** credit run, so a roll whose opening section is names over bright footage, or one split by a
+  gap longer than 24 s, answers late — a disclosed, tracked limitation (§13), not tuned around here.
+- Ends (Q3): 19 set rows (17 distinct files) got an end; published for 6 files at High and 8 at Medium. No end
+  swallowed a scene.
 
 ### 5.5 Combining evidence
 Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
@@ -415,7 +474,13 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
 2. **Owners.** `find_owning_servers(canonical_path)` → keep owners with `markers.enabled` and the item's library in
    `library_ids`. No enabled owner → nothing is detected.
 3. **Ensure markers for the file.** Fresh `markers` for (size, mtime) → reuse ("detected once, reused"). Otherwise
-   gather evidence in §1 order, stop early when §5.5 is satisfied by more than chapters alone (a chapter decision keeps asking so rule 3 can veto it; a server never asked for the file, and not yet published to, is still read once, since rule 7 lets its own markers shorten decided credits; an empty or unusable answer isn't asked again while everything stays decided), decide, store. Stored chapter and online evidence carries its rules or parser version; a file whose stored version is older is probed or asked again on the next run.
+   gather evidence in §1 order, stop early when §5.5 is satisfied by more than chapters alone. **A decided type
+   doesn't ask a local detector again on a normal run** (only a forced run, an answer of another version, or an
+   answer the decision rests on does); a chapter decision is final for credits text (C7) — a server never asked for
+   the file, and not yet published to, is still read once, since rule 7 lets its own markers shorten decided
+   credits; an empty or unusable answer isn't asked again while everything stays decided. Decide, store. Stored
+   chapter and online evidence carries its rules or parser version; a file whose stored version is older is probed
+   or asked again on the next run.
 4. **Season step.** Intros need siblings. A job fingerprints the season folder's missing episodes on its workers,
    matches cached fingerprints inline, and queues a Season job for same-season episodes outside the job whose inputs
    changed (R3). An episode alone in its season group uses up to 4 cached fingerprints of the previous season (§5.3).
@@ -552,25 +617,35 @@ Owner (2026-09-13): marker work must respect the GPU and CPU workers exactly lik
 6. **Priority and gate.** Webhook-triggered Intro & Credits jobs submit at NORMAL (preview jobs are HIGH), so previews
    drain first; backfill and schedules submit at LOW; users can change it live with the existing priority API.
    Intro & Credits jobs count toward `max_concurrent_jobs` like any job.
-7. **Text detection on the worker's device.** One long-lived helper subprocess per GPU device
-   (`python -m media_preview_generator.markers.textdet`), started lazily by the first marker item on that device;
-   requests from that device's workers are serialized. Why a subprocess: the Vulkan loader reads its env once per
-   process, and NVIDIA needs overrides (`VK_DRIVER_FILES`, `__EGL_VENDOR_LIBRARY_FILENAMES`) that hide other GPUs —
-   the plex host has NVIDIA + Intel; a driver crash or hang can't take the web app down; the WebGPU plugin has a known
-   Linux hang at shutdown without adapters (ORT PR #29591). On start the helper runs a 20-frame self-test against
-   CPU and falls back to a CPU helper if slower or broken; result cached per device for the process lifetime.
-   Measured: storage P5000 13.3 vs 18.7 ms; plex TITAN RTX 4.8 vs 7.7 ms (GPU kept); plex Intel UHD 770 16.1 vs
-   8.0 ms (→ CPU). Device mapping: worker device (CUDA index / render node) → PCI bus id → EP device with the same
-   `pci_bus_id`; phase 3 must prove the EP honours the chosen device (plugin README: it "selects the physical GPU
-   independently").
+7. **Text detection on the worker's device.** One long-lived helper subprocess per GPU device plus one shared CPU
+   helper (`python -m media_preview_generator.markers.credits.textdet_helper`, T-R1 — the roadmap's module name, not
+   `markers.textdet`), started lazily by the first marker item on that device; requests from that device's workers
+   are serialized. Why a subprocess: the Vulkan loader reads its env once per process, and NVIDIA needs overrides
+   (`VK_DRIVER_FILES`, `__EGL_VENDOR_LIBRARY_FILENAMES`) that hide other GPUs — the plex host has NVIDIA + Intel; a
+   driver crash or hang can't take the web app down; the WebGPU plugin has a known Linux hang at shutdown without
+   adapters (ORT PR #29591). On start the helper runs a 20-frame self-test against CPU and falls back to a CPU
+   helper unless it counts exactly the same boxes, faster; result cached per device for the process lifetime. A GPU
+   helper that crashes or fails during a request, or that fails to answer between requests, moves its device to the
+   CPU helper for the rest of that run of the app, with one WARNING. A helper with no request for 10 minutes exits
+   (code 75) and is started again on demand without a new self-test; one within 5 s of that idle exit is replaced
+   before the next request instead of racing its own timer. On a timeout, cancel or failure the helper's whole
+   process group is killed with a bounded wait, and any pipe a stuck process still holds is handed to a daemon
+   reaper instead of being closed on the worker thread. The availability check (`GET /api/markers/sources/local` or
+   the first job) runs its `--check` subprocess once per process under a lock; the first caller waits up to 30 s,
+   later callers reuse the cached answer (M17). Measured: storage P5000 13.3 vs 18.7 ms; plex TITAN RTX 4.8 vs
+   7.7 ms (GPU kept); plex Intel UHD 770 16.1 vs 8.0 ms (→ CPU). Device mapping: worker device (CUDA index / render
+   node) → PCI bus id → EP device with the same `pci_bus_id`, with no PCI match falling back to the CPU except on a
+   single-WebGPU-device host with an unknown worker PCI address (T-R3); phase 3 must prove the EP honours the chosen
+   device on a two-GPU host (plugin README: it "selects the physical GPU independently") — open until Task 13 row
+   14 (§13).
 8. **Per-job pause** for Intro & Credits jobs: change the job pause/resume routes to set the job-level flag for
    `kind=intro_credits` (global pause still pauses everything). This is what "pause a long backfill without touching
    previews" needs; today it is not possible.
 9. **Webhooks:** `_execute_webhook_job` submits the preview job as today, then an Intro & Credits job for the same
    files when any owning server has markers enabled, items grouped by season folder. No extra debounce: the lower
    priority already runs it after the previews.
-10. **Cancel:** online lookups and the textdet helper check `cancel_check` between requests; ffmpeg steps use the
-    existing cancellation path.
+10. **Cancel:** online lookups check `cancel_check` between requests; text detection is asked chunk by chunk
+    (64 frames) and the decode checks for cancel between chunks; ffmpeg steps use the existing cancellation path.
 
 ## 7. UX
 
@@ -592,10 +667,11 @@ Show a mockup and confirm wording before building each screen.
 2. **Settings → Intro & Credits** (shared detection only): detect Intros / Credits / Recaps; "Publish when"
    High / Medium; "Never overwrite my edits"; ordered sources (chapters, TheIntroDB + optional key + today's usage
    from its headers, IntroDB.app, SkipDB, season audio, credit text, markers already on servers) with measured numbers
-   in ⓘ copy.
-3. **Preview Inspector → "Intro & Credits" tab:** decision lane + evidence lanes (Chapters, Season audio, online
-   sources, each server's current markers) in two zoom windows (first / last 3 min); per-server "will add / will
-   replace"; Adjust, Lock, Re-detect, Publish.
+   in ⓘ copy. The credit text row is live and its switch works (no longer a disabled placeholder): it shows the
+   same "Not available" badge and reason as season audio's row when this container can't run it (Task 10's copy).
+3. **Preview Inspector → "Intro & Credits" tab:** decision lane + evidence lanes (Chapters, Season audio, Credit
+   text, online sources, each server's current markers) in two zoom windows (first / last 3 min); per-server "will
+   add / will replace"; Adjust, Lock, Re-detect, Publish.
 4. **Inspector → Season view:** per-episode intro/credits, evidence chips, per-server dots, "Needs review". "Publish N
    to M servers" = a normal-priority Intro & Credits job for exactly that season's episodes, named `Intro & Credits:
    <show> · Season N` (or `· Specials`); an identical pending or running job is reused (R4). Review opens that
@@ -636,6 +712,9 @@ Per server (`media_servers[]`):
 `"emby": {"on_emby_redetect": "restore"}` instead (`keep_emby` = "Keep Emby's"). TheIntroDB key is a secret:
 never logged, masked in UI and API responses.
 
+`MEDIA_PREVIEW_TEXTDET_MODEL` overrides the text detection model path for development and the harness — it is not a
+setting, and `settings.json` never stores it (§5.4).
+
 ## 9. Codebase touchpoints (verified 2026-09-13 on `dev` @ d47e376)
 
 | Area | Where |
@@ -667,12 +746,23 @@ never logged, masked in UI and API responses.
 - Job kinds: previews path kwargs unchanged; intro_credits items routed to `process_fn`/`check_fn`; GPU worker vs CPU
   worker × decode ok / GPU error → CPU rerun; per-job pause only affects `kind=intro_credits`; priority ordering
   previews HIGH before markers NORMAL/LOW.
-- textdet helper: self-test picks GPU/CPU; crash → CPU; cancel between requests; device → PCI mapping.
+- `frames.py`: tail length by kind (T-R4), row order and non-increasing rows (T-R5), luma/pts rounding and the
+  `-copyts` start-time subtraction (T-R6), chunked decode and cancel between chunks, decode/timeout error mapping
+  (T-R7).
+- `textdet_helper.py`: self-test picks GPU/CPU by exact box count, not speed alone; crash or a between-request
+  failure → CPU for the process lifetime; idle exit and the 5 s replace margin (T-R8); process-group kill and pipe
+  reaper; device → PCI mapping (T-R3); the availability check's once-per-process lock (M17).
+- `detector.py` and rule J: the anonymised 80-file fixture (`test_reproduces_the_spec_table`) and the decision
+  matrix through `decide()` — chapters/credits-text-alone/agreement cells exist and pass.
 - Online clients: header pacing, 429 backoff, key masking.
 
 ### 10.2 Accuracy harness (move into repo under `tests/eval/` or `tools/eval/`, not in CI)
 - TV intros: 118 episodes (`evidence/eval/named_seasons.json`, truth from chapters) → report useful/wrong/missed.
-- Credits: 80 files (`evidence/credits/movies40.json`, `tv40.json`, `adjudicated.json`) + the 205-movie chapter set.
+- Credits: 80 files (`evidence/credits/movies40.json`, `tv40.json`, `adjudicated.json`) + the 205-movie chapter set,
+  run via `python -m tools.markers_eval credits-text` (`tools/markers_eval/README.md`); results in
+  `evidence/eval/phase3-harness.md`.
+- The text detection bench (`289`-frame set) checks the vendored detector against `rapidocr_onnxruntime` 1.4.4
+  before use.
 - Online: 43 verified cases.
 - Required before merging any detector change; results pasted in the PR.
 
@@ -717,8 +807,10 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
 2. **Season audio intros + Emby.** Fingerprint cache, season step, v3 matcher, weekly-release handling, reconcile loop,
    Emby plugin + catalog submission, Season view, eval harness in repo. *Done when:* harness ≥ the §5.3 numbers,
    Emby skip button in the lab.
-3. **Credits text.** Keyframe tail sampling, rule J, larger hand-checked set, tuning. *Done when:* harness ≥ §5.4
-   numbers with 0–1 early per 80.
+3. **Credits text.** Keyframe tail sampling, rule J, the larger hand-checked set. **Built:** the harness gate
+   (owner's Q4) passes 5 of 5 on the 80 (movies40 + tv40) on both decode paths and fails 3 of 5 on the 205-movie set
+   — a disclosed detector-gap limitation, not tuned around (§5.4, §13). Ships at "Medium"; at "High" it needs a
+   second source until that gap closes. *Done when* (Task 14): lab-proven, with the shipped image's digest recorded.
 4. **Polish.** Adjust/Lock editor, AniSkip, Setup Health checks, helper container for Plex on another machine, docs.
 
 ## 13. Risks and open items
@@ -735,6 +827,25 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
 7. **Credits truth is subjective** (epilogues, names over footage, post-credit scenes) — adjudications recorded.
 8. **Jellyfin 12.0 catalog install** of a dual-ABI manifest is untested (manual load works).
 9. **TheIntroDB keyed limit** (1,000/day) unverified.
+10. **AMD credit text detection is untested** (no hardware); the self-test decides GPU vs CPU per device (Q6), the
+    same Vulkan/RADV path already proven on NVIDIA and Intel.
+11. **Dolby Vision profile 5 credits text is unmeasured** — 0 of the 80 hand-checked files and 0 of the 205-movie
+    set are profile 5 (`evidence/credits/phase3-measurements.md` M5); the detector reads the base layer's luma like
+    any file, but this hasn't been checked against a real profile-5 credit roll.
+12. **Dawn's device choice on a two-GPU host is unproven.** The WebGPU EP's own device selection doesn't choose the
+    physical adapter Dawn runs on (T-R3); whether the app's PCI-address pinning actually steers Dawn to the right
+    GPU on a host with two real GPUs (not storage's GPU-plus-BMC-VGA case) is open until Task 13 row 14 (plex host,
+    the owner's Q7 throwaway container).
+13. **A lone credit-text keyframe inside a scene, within 24 s of the roll, joins rule J's run and extends it over
+    that scene** — an end computed from the run's last credit keyframe can then land inside the scene instead of on
+    the roll. Not measured directly (none of the 17 files with a published end showed this shape, but the harness
+    didn't specifically search for it); the harness's frame-check sheets of every file with an end
+    (`evidence/eval/phase3-harness.md`) are where it would show up.
+14. **Credit text answers late when a roll's opening section is names over bright footage, or is split by a gap
+    longer than 24 s** (rule J's `coarse_start` takes the roll's last run) — the one measured reason on-screen
+    credit text alone misses the usefulness and precision gate on the harder 205-movie set (§5.4 "Harness"; owner,
+    2026-09-18). It ships at "Medium" now; at "High" it still needs a second source until this is fixed. Tuning to
+    fix it is a follow-up (Q5) that must not add early answers.
 
 ## 14. Decisions log
 
@@ -1076,3 +1187,36 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   AniSkip copies count as IntroDB + TheIntroDB until phase 4 measures them (Task 9 fix round 2). Unknown or more than
   one database: as before. Known limit: on a server with importers of two databases the copy's database can't be
   told, so SkipDB plus its copy still decide there (pinned by test_pipeline's `two-databases` row).
+- 2026-09-16 · Phase 3 plan rulings, taken while planning (T-R1–T-R9; `plan-phase3.md`), each with its cost if
+  wrong: T-R1 the helper module is `markers.credits.textdet_helper`, not §6.4's `markers.textdet` (cost: a rename)
+  · T-R2 post-processing keeps pyclipper for the unclip step; `shapely` stays a test-only dependency instead of the
+  roadmap's "unclip computed analytically" (cost: 1–10 MB of image if a fuzz test ever finds a differing box) · T-R3
+  a GPU helper matches the worker GPU's PCI bus id, falling back to the CPU on no match except a single-device host
+  with an unknown worker address (cost: an Intel/AMD worker's text detection may land on the host's other GPU —
+  resource use only) · T-R4 the tail is 450 s for an episode (`season_key` present), 900 s for everything else
+  (cost: extra decode on an unknown-kind TV file) · T-R5 keyframe rows are read in ffmpeg's own order, never sorted
+  (cost: none measured) · T-R6 luma is rounded to 0.1 and pts to 0.001 as the prototype recorded them, and every
+  row has the container's own `format.start_time` subtracted before rule J sees it (cost: nonsense credits answers
+  on a recording with a non-zero start if that subtraction is skipped) · T-R7 a GPU decode error reruns on CPU, a
+  600 s decode timeout is "no answer" for a day, a CPU decode failure is asked again next run (cost: a file that
+  always fails CPU decode, not by timing out, takes a worker slot every run) · T-R8 helpers idle-exit after 10
+  minutes and one within 5 s of that exit is replaced before the next request instead of racing its timer (cost: a
+  1–2 s helper start after an idle gap) · T-R9 the detector ignores `pause_check` like season audio (cost: a paused
+  job finishes the file already in progress, ≈10–30 s).
+- 2026-09-16 · Contradictions resolved while planning phase 3 (C1–C7; `plan-phase3.md`): C1 §5.5 rule 6's
+  lone-decider list vs §5.4's "needs a second source under the default publish rule" — resolved by Q1 (credits text
+  may decide alone at Medium) · C2 §5.4's "AMD: self-test decides" vs the evidence README's "default to CPU until
+  proven" — resolved by Q6 (self-test decides) · C3 §12's "larger hand-checked set, tuning" vs the roadmap's
+  phase-3 bullets, which name no tuning — resolved by Q5 (ships as measured, no tuning attempted) · C4 §6.4 item 7's
+  helper module name vs the roadmap's file map — resolved by T-R1 · C5 §5.4's table (measured at a 10 s refine
+  span) vs its own text (20 s refine) — the table stays as measured, with a note now beside it (§5.4) · C6 §5.4's
+  "at the frame's own 320 px" vs `det_limit_side_len=320` being ignored by rapidocr 1.4.4 under `limit_type="max"`
+  — the effect is as written; the reason is now in the spec so the limit isn't "fixed" later (§5.4) · C7 §6.2 step
+  3's "a chapter decision keeps asking" the later sources vs the landed `_detector_pending`, which asks a local
+  detector only for undecided types — the spec now follows the code (§6.2 step 3).
+- 2026-09-18 · Owner ruling on Task 11's failed 205-movie gate check (Q4; the milestone audit): on-screen credit
+  text ships at "Medium" now. At "High" it is not yet good enough on the harder, unadjudicated 205-movie set — a
+  real, disclosed limitation (rule J's `coarse_start` anchors on the roll's **last** credit run, which answers late
+  when a gap splits the roll), not a measurement artifact; fixing it is a tracked follow-up (§13 item 14), not
+  attempted here. Available and recommended at "Medium"; available at "High" only when a second source agrees —
+  unchanged default behaviour for anyone who hasn't touched "Publish when".
