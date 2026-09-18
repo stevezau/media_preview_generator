@@ -164,8 +164,32 @@ class TestSeasonView:
         expect(dots.nth(2)).to_have_class(re.compile(r"\bmk-dot-off\b"))
         expect(_row(page, "E03").locator(".mk-dot").nth(1)).to_have_class(re.compile(r"\bmk-dot-failed\b"))
         expect(body.locator(".mk-season-legend")).to_have_text(
-            "Dots: green = server shows this marker, amber = waiting, red = failed, grey = server not enabled or nothing sent yet"
+            "Dots: green = server shows this marker, amber = waiting, red = failed, grey = server not enabled, skipped "
+            "or nothing sent yet"
         )
+
+    def test_the_legend_names_every_grey_dot_state(self, authed_page: Page, app_url: str) -> None:
+        # markers.inspect._dot answers off / none / skipped too; those three have no colour of their own.
+        payload = season()
+        payload["episodes"][0]["servers"] = {
+            "plex-1": {"state": "skipped", "message": "The Media Preview Bridge plugin isn't installed"},
+            "jf-1": {"state": "none", "message": ""},
+            "emby-1": {"state": "off", "message": ""},
+        }
+        view = _Season(authed_page, app_url, payload)
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        dots = _row(page, "E01").locator(".mk-dot")
+        backgrounds = [dots.nth(i).evaluate("el => getComputedStyle(el).backgroundColor") for i in range(3)]
+        ok_background = (
+            _row(page, "E02").locator(".mk-dot").nth(0).evaluate("el => getComputedStyle(el).backgroundColor")
+        )
+        assert len(set(backgrounds)) == 1 and backgrounds[0] != ok_background
+        legend = page.locator("#markersSeasonBody .mk-season-legend").inner_text()
+        grey = legend.split("grey = ", 1)[1]
+        for word in ("not enabled", "skipped", "nothing sent yet"):
+            assert word in grey
 
     @pytest.mark.parametrize(
         ("total", "text"),

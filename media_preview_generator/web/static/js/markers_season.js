@@ -37,7 +37,8 @@
         none: 'nothing sent yet',
         off: 'Intro & Credits is off',
     };
-    const LEGEND = 'Dots: green = server shows this marker, amber = waiting, red = failed, grey = server not enabled or nothing sent yet';
+    // Every state without its own colour (off, none, skipped) is the plain grey .mk-dot.
+    const LEGEND = 'Dots: green = server shows this marker, amber = waiting, red = failed, grey = server not enabled, skipped or nothing sent yet';
 
     const cache = new Map();
     // media_file → the canonical path setPath reported for it (a file's canonical path doesn't change).

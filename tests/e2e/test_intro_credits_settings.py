@@ -356,11 +356,33 @@ class TestIntroCreditsSettings:
         tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
         assert tooltip == (
             "High: chapters publish on their own unless two other independent sources agree on something different; "
-            "otherwise two independent sources must agree. Medium: also accepts a single "
-            "source that checks your file's length itself — chapters, or SkipDB. A single IntroDB or TheIntroDB "
-            "answer never publishes on its own, because those don't know which cut you have. Anything else shows as "
-            "Needs review."
+            "otherwise two independent sources must agree. Medium: also accepts a single source that checks your own "
+            "file — chapters, on-screen credit text (credits), or SkipDB matched to your file's length (intros and "
+            "recaps only). A single IntroDB or TheIntroDB answer never publishes on its own, because those don't know "
+            "which cut you have. Anything else shows as Needs review."
         )
+
+    def test_publish_when_tooltip_names_the_sources_that_decide_alone_at_medium(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        # Checked against the decision rules, not a copy of the string: the list drifted once (credit text left out).
+        from media_preview_generator.markers.decide import _may_decide_alone
+        from media_preview_generator.markers.models import Candidate, MarkerType, Source
+
+        def alone(source: Source, mtype: MarkerType) -> bool:
+            return _may_decide_alone(Candidate(type=mtype, start_ms=0, end_ms=None, source=source))
+
+        _open_settings(authed_page, app_url, _default_markers())
+        icon = authed_page.locator("#markersPublishWhenLabel + .info-icon")
+        tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
+        medium = tooltip.split("Medium:", 1)[1]
+        assert ("credit text (credits)" in medium) is alone(Source.CREDITS_TEXT, MarkerType.CREDITS)
+        assert ("SkipDB" in medium) is alone(Source.SKIPDB, MarkerType.INTRO)
+        assert ("intros and recaps only" in medium) is not alone(Source.SKIPDB, MarkerType.CREDITS)
+        assert "chapters" in medium and alone(Source.CHAPTERS, MarkerType.CREDITS)
+        for crowd in (Source.INTRODB, Source.THEINTRODB):
+            assert not alone(crowd, MarkerType.INTRO)
+        assert "never publishes on its own" in medium
 
     def test_intros_toggle_tooltip_names_season_audio_as_live(self, authed_page: Page, app_url: str) -> None:
         # Season audio shipped before this feature; the tooltip must not still call it "(soon)".
