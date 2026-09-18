@@ -7,6 +7,7 @@ and working directory setup.
 
 import os
 import tempfile
+import time
 from collections import namedtuple
 from unittest.mock import patch
 
@@ -41,15 +42,60 @@ class TestRedactSecrets:
             ('Authorization: MediaBrowser Token="abc123", Client="app"',
              'Authorization: **** Token="****", Client="app"'),
             ("Authorization: Bearer abc123", "Authorization: Bearer ****"),
+            ("X-Plex-Token: abc123", "X-Plex-Token: ****"),
+            ("X-Api-Key: abc123", "X-Api-Key: ****"),
+            ("Proxy-Authorization: Basic abc123", "Proxy-Authorization: Basic ****"),
+            ("--token=abc123", "--token=****"),
+            ('{"api_key": "abc123"}', '{"api_key": "****"}'),
             ("password=hunter2 user=bob", "password=**** user=bob"),
-            ("nothing secret here: 42 files", "nothing secret here: 42 files"),
+            ("GET http://x/?plex_token=abc123&a=1", "GET http://x/?plex_token=****&a=1"),
+            ("PlexToken=abc123", "PlexToken=****"),
+            ("client_secret=abc123", "client_secret=****"),
+            ("token=b'abc123'", "token=b'****'"),
+            ("{'X-Plex-Token': b'abc123'}", "{'X-Plex-Token': b'****'}"),
+            ("GET http://bob:hunter2@nas:8096/Items", "GET http://bob:****@nas:8096/Items"),
             ("", ""),
         ],
         ids=["plex-query", "api_key", "ApiKey", "access_token", "header-dict", "mediabrowser", "mediabrowser-token-first",
-             "bearer", "password", "clean", "empty"],
+             "bearer", "header-token", "header-api-key", "header-proxy-authorization", "cli-flag", "json-key", "password",
+             "suffix-_token", "suffix-Token", "suffix-_secret",
+             "bytes-value", "bytes-value-quoted-key", "url-credentials", "empty"],
     )  # fmt: skip
     def test_masks_the_value_and_keeps_the_rest(self, text, expected):
         assert redact_secrets(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "nothing secret here: 42 files",
+            "The Secret: Dare to Dream (2020).mkv",
+            "Invalid token: 401",
+            "Token count: 3",
+            "tokens=5 secretary=bob",
+            "http://plex:32400/library/sections/1/all",
+            "b'abc'",
+        ],
+        ids=["clean", "title-with-secret", "invalid-token", "token-count", "longer-words", "url-with-port", "bytes"],
+    )
+    def test_leaves_text_that_only_mentions_a_secret_alone(self, text):
+        # A ``:`` separates a secret only after a quoted key or a header's name; plain prose keeps its words.
+        assert redact_secrets(text) == text
+
+    @pytest.mark.parametrize(
+        "run",
+        [
+            "-".join(["3f2a9c1e-7b4d-4e8a-9f0c-1a2b3c4d5e6f"] * 2800),  # ~100 KB of dash-joined UUIDs
+            "a-" * 50000,
+            "Zm9v_YmFy-" * 10000,  # base64url
+        ],
+        ids=["uuids", "dashes", "base64url"],
+    )
+    def test_a_long_run_of_joined_words_is_masked_in_linear_time(self, run):
+        # Every log line goes through this on the logging thread; a match attempt at each word boundary of a long run
+        # rescanned the run (a 100 KB line took over a minute).
+        start = time.perf_counter()
+        assert redact_secrets(f"token {run} X-Plex-Token=abc123") == f"token {run} X-Plex-Token=****"
+        assert time.perf_counter() - start < 1.0
 
     def test_a_traceback_is_formatted_without_locals_and_masked(self):
         def fetch(token):
