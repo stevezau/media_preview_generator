@@ -12,7 +12,11 @@ import pytest
 from media_preview_generator.job_kinds import ItemOutcome, KindHandlers
 from media_preview_generator.jobs.dispatcher import JobDispatcher
 from media_preview_generator.jobs.worker import WorkerPool
-from media_preview_generator.processing.generator import CancellationError, CodecNotSupportedError
+from media_preview_generator.processing.generator import (
+    CancellationError,
+    CodecNotSupportedError,
+    set_file_result_callback,
+)
 from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.servers.base import ServerType
 
@@ -287,27 +291,120 @@ def test_worker_outcome_with_unknown_key_counts_as_failed():
     assert notify.call_args.args[1].value == "failed"
 
 
-def test_a_finished_item_leaves_no_job_registration_on_its_worker_thread():
+@pytest.mark.parametrize("kind", ["intro_credits", "previews"])
+def test_a_finished_item_leaves_no_job_registration_on_its_worker_thread(kind):
     # A later thread reusing the dead thread's ident (a webhook timer, a decode reader) would log into this job.
     from media_preview_generator.jobs.worker import Worker, is_job_thread_for
+    from tests.conftest import _ms
 
     seen = {}
 
-    def process(item, **kwargs):
+    def on_the_worker():
         seen["ident"] = threading.get_ident()
         seen["registered"] = is_job_thread_for(seen["ident"], "j-reg")
+
+    def process(item, **kwargs):
+        on_the_worker()
         return ItemOutcome("markers_published", "ok")
 
+    def process_canonical_path(**kwargs):
+        on_the_worker()
+        return _ms("skipped", canonical_path=kwargs["canonical_path"])
+
+    registry = MagicMock()
+    registry.get_config.return_value = MagicMock(type=ServerType.PLEX)
     w = Worker(1, "CPU")
     done = threading.Event()
     w._done_event = done
-    with patch("media_preview_generator.jobs.worker._notify_file_result"):
-        w.assign_task(_items("/m/r.mkv")[0], _config(), MagicMock(), job_id="j-reg", process_fn=process,
-                      outcome_keys=KEYS)  # fmt: skip
+    with (
+        patch("media_preview_generator.jobs.worker._notify_file_result"),
+        patch("media_preview_generator.processing.multi_server.process_canonical_path", process_canonical_path),
+    ):
+        custom = {"process_fn": process, "outcome_keys": KEYS} if kind == "intro_credits" else {}
+        w.assign_task(_items("/m/r.mkv")[0], _config(), registry, job_id="j-reg", **custom)
         assert done.wait(timeout=10)
         w.current_thread.join(timeout=5)
     assert seen["registered"] is True  # its logs reached the job's log while it ran
     assert is_job_thread_for(seen["ident"], "j-reg") is False
+
+
+class _ThreadThatWontStart:
+    """``threading.Thread`` when the process can't start one more ("can't start new thread")."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        raise RuntimeError("can't start new thread")
+
+    def is_alive(self):
+        return False
+
+    def join(self, timeout=None):
+        pass
+
+
+@pytest.mark.parametrize("kind", ["intro_credits", "previews"])
+def test_an_item_whose_worker_cannot_start_it_fails_on_its_row_and_frees_the_worker(kind):
+    """Without a started thread the worker's own completion counted a failure with no outcome and no Files row."""
+    from media_preview_generator.jobs import worker as worker_module
+    from media_preview_generator.processing.multi_server import MultiServerResult, MultiServerStatus
+
+    pool = WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[])
+    dispatcher = JobDispatcher(pool)
+    (worker,) = pool._snapshot_workers()
+    process = MagicMock()
+    handlers = None
+    if kind == "intro_credits":
+        handlers = KindHandlers(check_fn=lambda item, *, cancel_check: None, process_fn=process, outcome_keys=KEYS)
+    registry = MagicMock()
+    registry.get_config.return_value = MagicMock(type=ServerType.PLEX)
+    needs_worker = MultiServerResult(canonical_path="/m/a.mkv", status=MultiServerStatus.NEEDS_GENERATION)
+    no_threads = SimpleNamespace(**{**vars(threading), "Thread": _ThreadThatWontStart})
+    rows = []
+    # The job's own Files-panel callback: the row must reach this job, not the scope-less bucket.
+    set_file_result_callback(lambda *row: rows.append(row), job_id="j-start")
+    try:
+        with (
+            patch.object(worker_module, "threading", no_threads),
+            patch("media_preview_generator.processing.multi_server.process_canonical_path", return_value=needs_worker),
+            patch("media_preview_generator.web.jobs.get_job_manager"),
+        ):
+            tracker = dispatcher.submit_items("j-start", _items("/m/a.mkv"), _config(), registry, kind=kind,
+                                              handlers=handlers)  # fmt: skip
+            assert tracker.wait(timeout=10)
+    finally:
+        set_file_result_callback(None, job_id="j-start")
+        dispatcher.shutdown()
+    process.assert_not_called()
+    assert (tracker.failed, tracker.successful, tracker.outcome_counts["failed"]) == (1, 0, 1)
+    reason = "CPU Worker 1 couldn't start on this file (RuntimeError: can't start new thread)"
+    assert rows == [("/m/a.mkv", "failed", reason, "CPU Worker 1", [])]
+    assert worker.is_busy is False and worker.current_task is None
+
+
+def test_while_threads_cannot_start_each_tick_fails_one_item_not_the_whole_queue():
+    from media_preview_generator.jobs import worker as worker_module
+    from media_preview_generator.jobs.dispatcher import JobTracker
+
+    pool = WorkerPool(cpu_workers=2, gpu_workers=0, selected_gpus=[])
+    dispatcher = JobDispatcher(pool)
+    tracker = JobTracker(job_id="j-limit", items=[], config=_config(), registry=MagicMock())
+    tracker.total_items = 3
+    tracker.item_queue.extend(_items("/m/a.mkv", "/m/b.mkv", "/m/c.mkv"))
+    with dispatcher._trackers_lock:
+        dispatcher._trackers["j-limit"] = tracker
+    no_threads = SimpleNamespace(**{**vars(threading), "Thread": _ThreadThatWontStart})
+    try:
+        with (
+            patch.object(worker_module, "threading", no_threads),
+            patch("media_preview_generator.processing.generator._notify_file_result"),
+            patch("media_preview_generator.web.jobs.get_job_manager"),
+        ):
+            dispatcher._assign_tasks()
+    finally:
+        dispatcher.shutdown()
+    assert tracker.failed == 1 and [i.canonical_path for i in tracker.item_queue] == ["/m/b.mkv", "/m/c.mkv"]
 
 
 @pytest.mark.parametrize("stage", ["first-run", "cpu-rerun"])

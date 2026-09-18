@@ -8,7 +8,8 @@ import re
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from functools import partial
 from typing import Any, Optional
 
@@ -58,6 +59,22 @@ def unregister_job_thread() -> None:
     """
     with _job_thread_ids_lock:
         _job_thread_to_job_id.pop(threading.current_thread().ident, None)
+
+
+@contextmanager
+def job_thread(job_id: str | None) -> Iterator[None]:
+    """Register the current thread to ``job_id`` for the block (:func:`register_job_thread`), then unregister it.
+
+    A later thread reusing a finished thread's ident (a webhook timer, a decode reader) mustn't log into the job.
+
+    Args:
+        job_id: The job the thread works for.
+    """
+    register_job_thread(job_id or "")
+    try:
+        yield
+    finally:
+        unregister_job_thread()
 
 
 def is_job_thread_for(thread_id: int, job_id: str) -> bool:
@@ -424,9 +441,7 @@ class Worker:
         # Register THIS worker thread under THIS job's id so the per-job
         # log handler captures only its own messages — not a sibling job
         # running concurrently (D5).
-        register_job_thread(self.current_job_id or "")
-
-        with failure_scope(self.current_job_id):
+        with job_thread(self.current_job_id), failure_scope(self.current_job_id):
             display_name = self.media_file or self.media_title or item.canonical_path
 
             ctx_logger = logger.bind(

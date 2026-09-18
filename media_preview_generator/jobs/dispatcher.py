@@ -829,25 +829,69 @@ class JobDispatcher:
             tracker.generation_started = True
 
             progress_callback = partial(self.worker_pool._update_worker_progress, worker)
-            worker.assign_task(
-                item,
-                tracker.config,
-                tracker.registry,
-                progress_callback=progress_callback,
-                title_max_width=tracker.title_max_width,
-                job_id=job_id,
-                library_name=library_name,
-                cancel_check=tracker.cancel_check,
-                pause_check=tracker.pause_check,
-                process_fn=tracker.handlers.process_fn if tracker.handlers else None,
-                outcome_keys=tracker.handlers.outcome_keys if tracker.handlers else None,
-            )
+            try:
+                worker.assign_task(
+                    item,
+                    tracker.config,
+                    tracker.registry,
+                    progress_callback=progress_callback,
+                    title_max_width=tracker.title_max_width,
+                    job_id=job_id,
+                    library_name=library_name,
+                    cancel_check=tracker.cancel_check,
+                    pause_check=tracker.pause_check,
+                    process_fn=tracker.handlers.process_fn if tracker.handlers else None,
+                    outcome_keys=tracker.handlers.outcome_keys if tracker.handlers else None,
+                )
+            except Exception as exc:
+                self._fail_unstarted_item(worker, tracker, item, exc)
+                # The next tick tries again: while threads can't start (a process limit, usually brief), one tick
+                # would otherwise fail every queued item.
+                break
             logger.info(
                 "Dispatch: assigned canonical item {!r} (job {}) to {}",
                 item.canonical_path,
                 job_id[:8],
                 worker.display_name,
             )
+
+    def _fail_unstarted_item(self, worker: Worker, tracker: JobTracker, item, exc: Exception) -> None:
+        """Count an item its worker couldn't start as failed, with its Files-panel row, and give the worker back.
+
+        Left to the worker, its never-started thread reads as finished: the item counted as failed with no outcome and
+        no row saying why.
+
+        Args:
+            worker: The worker the item was assigned to.
+            tracker: The item's job.
+            item: The :class:`ProcessableItem`.
+            exc: What ``assign_task`` raised (a thread that couldn't start).
+        """
+        from ..processing.generator import _notify_file_result, failure_scope
+
+        reason = f"{worker.display_name} couldn't start on this file ({type(exc).__name__}: {exc})"
+        logger.error(
+            "Dispatch: {} couldn't start {!r} (job {}): {}: {}; counting it as failed",
+            worker.display_name,
+            item.canonical_path,
+            tracker.job_id[:8],
+            type(exc).__name__,
+            exc,
+        )
+        # A worker already running a task of its own (assign_task refused it) keeps that task.
+        if not (worker.current_thread and worker.current_thread.is_alive()):
+            worker.current_task = None
+            worker.is_busy = False
+        failed = ProcessingResult.FAILED.value
+        with tracker._counts_lock:
+            tracker.outcome_counts[failed] = tracker.outcome_counts.get(failed, 0) + 1
+        try:
+            with failure_scope(tracker.job_id):
+                _notify_file_result(item.canonical_path, outcome_value(failed), reason, worker.display_name)
+        except Exception as notify_exc:
+            logger.warning("Could not record the failed start of {}: {}", item.canonical_path, notify_exc)
+        finally:
+            tracker.record_completion(False, worker.display_name, getattr(item, "title", "") or item.canonical_path)
 
     def _get_next_check_item(self):
         """Pick the next item to CHECK, priority-aware, skipping paused jobs.
