@@ -21,6 +21,7 @@ import atexit
 import contextlib
 import importlib.util
 import json
+import math
 import os
 import queue
 import select
@@ -33,6 +34,7 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from enum import Enum
+from statistics import median
 from typing import Any, BinaryIO
 
 import numpy as np
@@ -47,15 +49,12 @@ DEFAULT_MODEL_PATH = "/app/models/ch_PP-OCRv4_det_infer.onnx"
 CPU_KEY = "cpu"
 THREADS = 2
 SELFTEST_FRAMES = 20
-# Timed GPU/CPU pairs; each side keeps its best round (see self_test). Resampling 10 cold starts' rounds on storage's
-# P5000 (2026-09-19), the median of 3 rounds put the GPU/CPU ratio 12.5 % or more above its typical value on 3.9 % of
-# self-tests, the best of 5 on 0.65 % -- and 12.5 % is all that separated the TITAN RTX's 4.94 vs 6.18 ms from the
-# margin below.
+# Timed GPU/CPU pairs, each timed back to back; the median of the pairs' own GPU/CPU ratios decides (see self_test).
 SELFTEST_ROUNDS = 5
-# How much faster than the CPU the GPU's best round must be to be worth using. A single 20-frame pair once handed
-# the whole process to the GPU on a 0.06% win (17.99 vs 18.00 ms). A real GPU has room to spare: this self-test on
-# storage's P5000 measures 10.7-11.6 vs 16.2-18.0 ms per frame (2026-09-19), about 35% faster (the planning bench's own
-# script measured 13.3 vs 18.7 ms on the same card).
+# How much less time than the CPU the GPU must take, as that median ratio, to be worth using. A single 20-frame pair
+# once handed the whole process to the GPU on a 0.06% win (17.99 vs 18.00 ms). A real GPU has room to spare: this
+# self-test on storage's P5000 measures 10.7-11.6 vs 16.2-18.0 ms per frame (2026-09-19), about 35% faster (the
+# planning bench's own script measured 13.3 vs 18.7 ms on the same card); the TITAN RTX on plex, 4.94 vs 6.18 ms.
 GPU_SPEEDUP_MARGIN = 0.10
 START_TIMEOUT_S = 120.0
 REQUEST_TIMEOUT_S = 60.0
@@ -168,16 +167,24 @@ def forget_text_detection_state() -> None:
 
 @dataclass(frozen=True)
 class SelfTest:
-    """A GPU session against the CPU on the same frames (each side's best round, milliseconds per frame)."""
+    """A GPU session against the CPU on the same frames, over several back-to-back rounds.
+
+    Attributes:
+        gpu_ms: The GPU's median milliseconds per frame.
+        cpu_ms: The CPU's median milliseconds per frame.
+        ratio: The median of each round's own GPU/CPU time ratio: what decides.
+        same_boxes: Every count matched in every round.
+    """
 
     gpu_ms: float
     cpu_ms: float
+    ratio: float
     same_boxes: bool
 
     @property
     def use_gpu(self) -> bool:
         """The GPU is used only when it counts exactly the CPU's boxes, at least ``GPU_SPEEDUP_MARGIN`` faster."""
-        return self.same_boxes and self.gpu_ms <= self.cpu_ms * (1.0 - GPU_SPEEDUP_MARGIN)
+        return self.same_boxes and self.ratio <= 1.0 - GPU_SPEEDUP_MARGIN
 
     def cpu_reason(self) -> str:
         """Why this result keeps the CPU (for the helper's ready line and the log)."""
@@ -185,7 +192,7 @@ class SelfTest:
             return "the GPU was counting different boxes than the CPU"
         return (
             f"the GPU wasn't at least {GPU_SPEEDUP_MARGIN:.0%} faster than the CPU "
-            f"({self.gpu_ms} vs {self.cpu_ms} ms per frame)"
+            f"(median {self.gpu_ms} vs {self.cpu_ms} ms per frame; GPU/CPU {self.ratio} per round)"
         )
 
 
@@ -200,10 +207,11 @@ def self_test(
 ) -> SelfTest:
     """Time both detectors on the same frames after a warm-up and compare their box counts.
 
-    The pair is run ``rounds`` times, alternating, and each side keeps its fastest round. Whatever else the host is
-    doing (a transcode on the same card, a busy CPU) only ever adds time, so a side's best round is its own speed and
-    slow rounds -- one or several -- can't flip a verdict that is kept for the process. A median moves with them: two
-    slow GPU rounds of three put a GPU 20 % faster than the CPU past the 10 % margin.
+    The pair is run ``rounds`` times, the GPU and then the CPU back to back, and the verdict is the median of the rounds'
+    own GPU/CPU ratios. Load that lasts across a round (another job's decode, a transcode) slows both halves alike and
+    leaves its ratio alone; a spike that hits one half only is one round of several, outvoted by the median. Comparing
+    each side's best round instead favours the side whose times spread more, usually the GPU. The verdict is kept for
+    the process.
 
     Args:
         gpu: A detector with ``count(frames) -> list[int]`` on the GPU.
@@ -215,7 +223,8 @@ def self_test(
         rounds: How many GPU/CPU pairs to time.
 
     Returns:
-        Each side's best milliseconds per frame, and whether every count matched in every round.
+        Each side's median milliseconds per frame, the median per-round ratio, and whether every count matched in every
+        round.
     """
     now = clock or _perf_counter
     for detector in (gpu, cpu):
@@ -235,7 +244,8 @@ def self_test(
         gpu_times.append(gpu_ms)
         cpu_times.append(cpu_ms)
         same_boxes = same_boxes and list(gpu_counts) == list(cpu_counts)
-    return SelfTest(round(min(gpu_times), 2), round(min(cpu_times), 2), same_boxes)
+    ratios = [g / c if c > 0 else math.inf for g, c in zip(gpu_times, cpu_times, strict=True)]
+    return SelfTest(round(median(gpu_times), 2), round(median(cpu_times), 2), round(median(ratios), 4), same_boxes)
 
 
 @dataclass(frozen=True)
@@ -696,10 +706,12 @@ class TextDetectorPool:
         test = ready.get("selftest") or {}
         if backend == "webgpu":
             logger.info(
-                "Credit text detection on {}: GPU ({} ms per frame, CPU {} ms), pinned to {}",
+                "Credit text detection on {}: GPU (median {} ms per frame, CPU {} ms; GPU/CPU {} per round), "
+                "pinned to {}",
                 key,
                 test.get("gpu_ms"),
                 test.get("cpu_ms"),
+                test.get("ratio"),
                 pci_bus_id or "no address (unpinned)",  # fmt: skip
             )
         else:

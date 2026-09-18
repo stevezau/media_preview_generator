@@ -107,8 +107,8 @@ class TestRouting:
         assert started["MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE"] == "1"
         assert env.pool.backend_of("NVIDIA", "cuda:0") == "webgpu"
         assert (
-            "Credit text detection on cuda:0: GPU (9.0 ms per frame, CPU 18.0 ms), pinned to 0000:02:00.0"
-            in loguru_caplog.text
+            "Credit text detection on cuda:0: GPU (median 9.0 ms per frame, CPU 18.0 ms; GPU/CPU 0.5 per round), "
+            "pinned to 0000:02:00.0" in loguru_caplog.text
         )
 
     @pytest.mark.parametrize("gpu", ["INTEL", "AMD"])
@@ -167,7 +167,7 @@ class TestFallback:
         assert env.procs[0].wait(timeout=10) is not None  # the GPU helper was closed
         assert (
             "Credit text detection on cuda:0: CPU (the GPU wasn't at least 10% faster than the CPU "
-            "(20.0 vs 18.0 ms per frame))" in loguru_caplog.text
+            "(median 20.0 vs 18.0 ms per frame; GPU/CPU 1.1111 per round))" in loguru_caplog.text
         )
 
     @pytest.mark.parametrize(
@@ -557,11 +557,12 @@ class PacedDetector:
 
 
 @pytest.mark.parametrize(
-    ("gpu_ms", "use_gpu"),
-    [(8.9, True), (9.0, True), (9.01, False), (9.1, False), (10.0, False), (11.0, False)],
+    ("ratio", "use_gpu"),
+    [(0.89, True), (0.9, True), (0.901, False), (0.91, False), (1.0, False), (1.1, False)],
 )
-def test_the_self_test_needs_a_ten_percent_win_not_just_a_win(gpu_ms, use_gpu):
-    assert th.SelfTest(gpu_ms, 10.0, True).use_gpu is use_gpu
+def test_the_self_test_needs_a_ten_percent_win_not_just_a_win(ratio, use_gpu):
+    # The per-side medians are reported, but only the median per-round ratio decides.
+    assert th.SelfTest(5.0, 10.0, ratio, True).use_gpu is use_gpu
 
 
 def _self_test(gpu_rounds_s: list[float], cpu_rounds_s: list[float]) -> th.SelfTest:
@@ -575,31 +576,51 @@ def _self_test(gpu_rounds_s: list[float], cpu_rounds_s: list[float]) -> th.SelfT
 
 
 @pytest.mark.parametrize(
-    "gpu_rounds_s",
+    ("gpu_rounds_s", "cpu_rounds_s", "expected"),
     [
-        [0.100, 0.001, 0.001, 0.001, 0.001],  # one slow first round: a single-sample test would say CPU
-        [0.001, 0.0095, 0.100, 0.0095, 0.0095],  # four slow rounds of five: their median (9.5 ms) isn't 10 % faster
+        # One slow GPU round: a single-sample test would say CPU; the other four rounds outvote it.
+        ([0.100, 0.001, 0.001, 0.001, 0.001], [0.010] * 5, (1.0, 10.0, 0.1, True)),
+        # A GPU fast in one round only: its best round (4 ms) would pass, but four of five back-to-back rounds say
+        # 0.95 of the CPU's time -- the side whose times spread more mustn't win on its luckiest round.
+        ([0.004, 0.0095, 0.100, 0.0095, 0.0095], [0.010] * 5, (9.5, 10.0, 0.95, False)),
+        # Host load slows both sides in round 3: its ratio (0.5) is the others', so nothing changes.
+        ([0.005, 0.005, 0.050, 0.005, 0.005], [0.010, 0.010, 0.100, 0.010, 0.010], (5.0, 10.0, 0.5, True)),
+        # The same rounds with no load at all: the same verdict.
+        ([0.005] * 5, [0.010] * 5, (5.0, 10.0, 0.5, True)),
+        # Each round's own ratio, not the ratio of the two medians: rounds 3-4 slow the GPU alone, round 5 slows
+        # both. Three of five back-to-back rounds say the GPU takes half the CPU's time; the medians say 10 vs 10.
+        ([0.005, 0.005, 0.010, 0.010, 0.010], [0.010, 0.010, 0.010, 0.010, 0.020], (10.0, 10.0, 0.5, True)),
+        # The CPU busy in four rounds of five while the GPU isn't: four back-to-back rounds say 0.475, so the GPU is
+        # kept. (Judged at each side's best round, 9.5 vs 10 ms, this was the CPU: the controller's 2026-09-19 ruling
+        # chose the per-round ratio, which counts the GPU's steadiness under the load the host actually had.)
+        ([0.0095] * 5, [0.020, 0.020, 0.010, 0.020, 0.020], (9.5, 20.0, 0.475, True)),
     ],
-    ids=["one-slow-round", "four-slow-rounds"],
+    ids=[
+        "one-slow-gpu-round",
+        "one-lucky-gpu-round",
+        "load-on-both-sides",
+        "no-load",
+        "per-round-not-medians",
+        "cpu-busy-in-most-rounds",
+    ],
 )
-def test_slow_gpu_rounds_cannot_hand_the_process_to_the_cpu(gpu_rounds_s):
-    result = _self_test(gpu_rounds_s, [0.010] * 5)
-    assert (result.gpu_ms, result.cpu_ms, result.use_gpu) == (1.0, 10.0, True)
-
-
-def test_the_cpu_is_judged_at_its_best_round_too():
-    # A busy CPU slows four rounds of five to 20 ms. Against its median the GPU's 9.5 ms looks twice as fast; against
-    # what the CPU really does (10 ms) it isn't the 10 % faster the GPU has to be.
-    result = _self_test([0.0095] * 5, [0.020, 0.020, 0.010, 0.020, 0.020])
-    assert (result.gpu_ms, result.cpu_ms, result.use_gpu) == (9.5, 10.0, False)
+def test_the_median_per_round_ratio_decides(gpu_rounds_s, cpu_rounds_s, expected):
+    result = _self_test(gpu_rounds_s, cpu_rounds_s)
+    assert (result.gpu_ms, result.cpu_ms, result.ratio, result.use_gpu) == expected
 
 
 @pytest.mark.parametrize(
     ("result", "reason"),
     [
-        (th.SelfTest(9.5, 10.0, True), "the GPU wasn't at least 10% faster than the CPU (9.5 vs 10.0 ms per frame)"),
-        (th.SelfTest(20.0, 10.0, True), "the GPU wasn't at least 10% faster than the CPU (20.0 vs 10.0 ms per frame)"),
-        (th.SelfTest(1.0, 10.0, False), "the GPU was counting different boxes than the CPU"),
+        (
+            th.SelfTest(9.5, 10.0, 0.95, True),
+            "the GPU wasn't at least 10% faster than the CPU (median 9.5 vs 10.0 ms per frame; GPU/CPU 0.95 per round)",
+        ),
+        (
+            th.SelfTest(20.0, 10.0, 2.0, True),
+            "the GPU wasn't at least 10% faster than the CPU (median 20.0 vs 10.0 ms per frame; GPU/CPU 2.0 per round)",
+        ),
+        (th.SelfTest(1.0, 10.0, 0.1, False), "the GPU was counting different boxes than the CPU"),
     ],
     ids=["faster-but-not-enough", "slower", "different-boxes"],
 )
@@ -717,7 +738,7 @@ class TestHelperProcessBackendChoice:
         assert detector.backend == "webgpu"
         assert ready == {
             "backend": "webgpu",
-            "selftest": {"gpu_ms": 1.0, "cpu_ms": 10.0, "same_boxes": True},
+            "selftest": {"gpu_ms": 1.0, "cpu_ms": 10.0, "ratio": 0.1, "same_boxes": True},
             "reason": "",
         }
 
@@ -726,14 +747,18 @@ class TestHelperProcessBackendChoice:
         detector, ready = self._start(stub)
         assert detector.backend == "cpu"
         assert ready["backend"] == "cpu"
-        assert ready["reason"] == "the GPU wasn't at least 10% faster than the CPU (20.0 vs 10.0 ms per frame)"
+        assert ready["reason"] == (
+            "the GPU wasn't at least 10% faster than the CPU (median 20.0 vs 10.0 ms per frame; GPU/CPU 2.0 per round)"
+        )
 
     def test_a_gpu_that_only_ties_serves_from_the_cpu(self, clock):
         stub = StubTextDet(clock, gpu_ms=10.0, cpu_ms=10.0)
         detector, ready = self._start(stub)
         assert detector.backend == "cpu"
-        assert ready["selftest"] == {"gpu_ms": 10.0, "cpu_ms": 10.0, "same_boxes": True}
-        assert ready["reason"] == "the GPU wasn't at least 10% faster than the CPU (10.0 vs 10.0 ms per frame)"
+        assert ready["selftest"] == {"gpu_ms": 10.0, "cpu_ms": 10.0, "ratio": 1.0, "same_boxes": True}
+        assert ready["reason"] == (
+            "the GPU wasn't at least 10% faster than the CPU (median 10.0 vs 10.0 ms per frame; GPU/CPU 1.0 per round)"
+        )
 
     def test_a_gpu_that_counts_different_boxes_serves_from_the_cpu(self, clock):
         stub = StubTextDet(clock, gpu_ms=1.0, cpu_ms=10.0, gpu_counts=[99] * th.SELFTEST_FRAMES)

@@ -45,7 +45,12 @@ def main() -> int:
     selftest = (
         None
         if (not webgpu or args.no_selftest)
-        else {"gpu_ms": 20.0 if backend == "cpu" else 9.0, "cpu_ms": 18.0, "same_boxes": True}
+        else {
+            "gpu_ms": 20.0 if backend == "cpu" else 9.0,
+            "cpu_ms": 18.0,
+            "ratio": 1.1111 if backend == "cpu" else 0.5,
+            "same_boxes": True,
+        }
     )
     send(
         out,
@@ -53,7 +58,8 @@ def main() -> int:
             "ready": True,
             "backend": backend,
             "selftest": selftest,
-            "reason": "the GPU wasn't at least 10% faster than the CPU (20.0 vs 18.0 ms per frame)"
+            "reason": "the GPU wasn't at least 10% faster than the CPU "
+            "(median 20.0 vs 18.0 ms per frame; GPU/CPU 1.1111 per round)"
             if backend != args.backend
             else "",
         },
