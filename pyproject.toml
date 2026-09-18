@@ -55,8 +55,8 @@ dependencies = [
     "numpy>=2.0,<3",
     # Credit text detection (markers/credits/textdet.py). Imported only by its helper process, never by the web app.
     "onnxruntime==1.30.0",
-    # Deliberately Linux x86_64 only: that is the only platform this ships on, and there is no Linux aarch64
-    # wheel, so the arm64 image detects text on the CPU.
+    # x86_64 only: the WebGPU plugin publishes no Linux aarch64 wheel, so the arm64 image (and any arm64 install)
+    # detects text on the CPU.
     "onnxruntime-ep-webgpu==0.3.0; platform_machine == 'x86_64'",
     "opencv-python-headless==5.0.0.93",
     "pyclipper==1.4.0",
