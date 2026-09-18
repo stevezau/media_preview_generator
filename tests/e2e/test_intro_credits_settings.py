@@ -272,6 +272,34 @@ class TestIntroCreditsSettings:
         sent = _wait_for_post(authed_page, captured, lambda m: m["detect"]["recap"] is True)
         assert next(s for s in sent["sources"] if s["id"] == "credits_text")["enabled"] is True
 
+    @pytest.mark.parametrize(
+        ("unknown", "unavailable"), [("season_audio", "credits_text"), ("credits_text", "season_audio")]
+    )
+    def test_a_check_that_couldnt_run_leaves_its_row_while_the_other_says_why(
+        self, authed_page: Page, app_url: str, unknown: str, unavailable: str
+    ) -> None:
+        # GET /api/markers/sources/local answers "available": null for a check that raised (not known either way).
+        reason = "Needs ONNX Runtime and OpenCV, which the Docker image includes; they aren't installed here"
+        local = {
+            "season_audio": {
+                "available": None,
+                "ffmpeg": None,
+                "message": "Couldn't check whether season audio can run here",
+            },
+            "credits_text": {"available": None, "message": "Couldn't check whether credit text can run here"},
+        }
+        local[unavailable] = {**local[unavailable], "available": False, "message": reason}
+        _open_settings_and_wait_for_local(authed_page, app_url, _default_markers(), local=local)
+
+        changed = authed_page.locator(f"#markersSourceList .markers-source[data-id='{unavailable}']")
+        expect(changed.locator(".markers-source-unavailable")).to_be_visible(timeout=5000)
+        expect(changed.locator(".markers-source-reason")).to_have_text(reason)
+        left = authed_page.locator(f"#markersSourceList .markers-source[data-id='{unknown}']")
+        expect(left.locator(".markers-source-unavailable")).to_be_hidden()
+        expect(left.locator(".markers-source-reason")).to_be_hidden()
+        expect(left.locator(".markers-source-reason")).to_have_text("")
+        expect(left.locator(".markers-source-enabled")).to_be_checked()
+
     def test_an_answer_without_credit_text_leaves_its_row_as_is(self, authed_page: Page, app_url: str) -> None:
         # An app one version behind answers season audio only.
         _open_settings_and_wait_for_local(
@@ -365,23 +393,53 @@ class TestIntroCreditsSettings:
     def test_publish_when_tooltip_names_the_sources_that_decide_alone_at_medium(
         self, authed_page: Page, app_url: str
     ) -> None:
-        # Checked against the decision rules, not a copy of the string: the list drifted once (credit text left out).
+        # Checked against the decision rules over every source × marker type, not a copy of the string: the list
+        # drifted once (credit text left out). A new source fails here until it is mapped below.
         from media_preview_generator.markers.decide import _may_decide_alone
         from media_preview_generator.markers.models import Candidate, MarkerType, Source
 
-        def alone(source: Source, mtype: MarkerType) -> bool:
-            return _may_decide_alone(Candidate(type=mtype, start_ms=0, end_ms=None, source=source))
+        phrases = {
+            Source.CHAPTERS: "chapters",
+            Source.THEINTRODB: "TheIntroDB",
+            Source.INTRODB: "IntroDB",
+            Source.SKIPDB: "SkipDB",
+            Source.SEASON_AUDIO: "audio",
+            Source.SEASON_AUDIO_PREVIOUS: "previous season",
+            Source.CREDITS_TEXT: "credit text",
+        }
+        not_in_the_tooltip = {
+            Source.USER: "a marker you locked isn't detection evidence; it wins through 'Never overwrite my edits'",
+            Source.SERVER_MARKERS: "markers already on a server only ever confirm (its own row says so)",
+            Source.SERVER_MARKERS_IMPORTED: "an importer plugin's copy counts as its database's source, never alone",
+        }
+        assert set(Source) == phrases.keys() | not_in_the_tooltip.keys()
+        # The types a source can answer at all, where that's fewer than every type (spec §5.4: credit text).
+        answers = {Source.CREDITS_TEXT: {MarkerType.CREDITS}}
+        qualifiers = {
+            frozenset({MarkerType.CREDITS}): "(credits)",
+            frozenset({MarkerType.INTRO, MarkerType.RECAP}): "(intros and recaps only)",
+        }
 
         _open_settings(authed_page, app_url, _default_markers())
         icon = authed_page.locator("#markersPublishWhenLabel + .info-icon")
         tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
         medium = tooltip.split("Medium:", 1)[1]
-        assert ("credit text (credits)" in medium) is alone(Source.CREDITS_TEXT, MarkerType.CREDITS)
-        assert ("SkipDB" in medium) is alone(Source.SKIPDB, MarkerType.INTRO)
-        assert ("intros and recaps only" in medium) is not alone(Source.SKIPDB, MarkerType.CREDITS)
-        assert "chapters" in medium and alone(Source.CHAPTERS, MarkerType.CREDITS)
-        for crowd in (Source.INTRODB, Source.THEINTRODB):
-            assert not alone(crowd, MarkerType.INTRO)
+        # "also accepts a single source that checks your own file — A, B (x), or C (y). A single … never publishes …"
+        accepted = medium.split(" — ", 1)[1].split(". ", 1)[0]
+        items = [item.removeprefix("or ") for item in accepted.split(", ")]
+
+        for source, phrase in phrases.items():
+            decides = {
+                mtype
+                for mtype in answers.get(source, set(MarkerType))
+                if _may_decide_alone(Candidate(type=mtype, start_ms=0, end_ms=None, source=source))
+            }
+            named = [item for item in items if phrase in item]
+            assert bool(named) is bool(decides), (source, accepted)
+            if decides and decides != set(MarkerType):
+                assert qualifiers[frozenset(decides)] in named[0], (source, named)
+            elif decides:
+                assert "(" not in named[0], (source, named)
         assert "never publishes on its own" in medium
 
     def test_intros_toggle_tooltip_names_season_audio_as_live(self, authed_page: Page, app_url: str) -> None:
