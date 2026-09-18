@@ -74,8 +74,7 @@ class TestPlex:
 class TestItemWideMarkersOfOtherVersions:
     """Plex serves one marker set per item: with ``duration_ms`` (evidence), an item holding another cut of the file
     gives no evidence (None), since its markers may describe that cut. Emby keeps each version's markers on its own
-    item, but its reader applies the same check to the versions Emby lists with the item (with an API key only the
-    item's own version, so the check passes)."""
+    item (spec §3.3), so its markers always describe the item's own cut and its versions are never asked for."""
 
     INTRO = [{"type": "intro", "start_ms": 24_500, "end_ms": 113_900, "final": False}]
     EMBY_INTRO = [
@@ -95,26 +94,30 @@ class TestItemWideMarkersOfOtherVersions:
         server.get_media_source_durations.return_value = durations
         return server, server.get_media_source_durations
 
-    @pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.EMBY], ids=lambda t: t.value)
-    @pytest.mark.parametrize(
-        ("durations", "evidence"),
-        [
-            pytest.param([1_444_574], True, id="one-version"),
-            pytest.param([], True, id="no-version-listed"),
-            pytest.param([1_444_574, 1_446_574], True, id="two-versions-same-cut-2s"),
-            pytest.param([1_442_573, 1_444_574], False, id="two-versions-2001ms-apart"),
-            pytest.param([1_444_574, 1_384_574], False, id="web-and-bluray-60s-apart"),
-            pytest.param([1_444_574, None], False, id="a-version-without-duration"),
-            pytest.param(None, False, id="versions-unreadable"),
-        ],
-    )
-    def test_markers_count_only_when_every_version_is_this_cut(self, stype, durations, evidence):
-        markers = self.INTRO if stype is ServerType.PLEX else self.EMBY_INTRO
-        server, durations_call = self._server(stype, markers, durations)
-        found = read_server_markers(server, _cfg(stype), "777", duration_ms=1_444_574)
-        origin = f"{stype.value}-1"
-        assert found == ([_src(T.INTRO, 24_500, 113_900, origin)] if evidence else None)
+    VERSIONS = [
+        pytest.param([1_444_574], True, id="one-version"),
+        pytest.param([], True, id="no-version-listed"),
+        pytest.param([1_444_574, 1_446_574], True, id="two-versions-same-cut-2s"),
+        pytest.param([1_442_573, 1_444_574], False, id="two-versions-2001ms-apart"),
+        pytest.param([1_444_574, 1_384_574], False, id="web-and-bluray-60s-apart"),
+        pytest.param([1_444_574, None], False, id="a-version-without-duration"),
+        pytest.param(None, False, id="versions-unreadable"),
+    ]
+
+    @pytest.mark.parametrize(("durations", "evidence"), VERSIONS)
+    def test_plex_markers_count_only_when_every_version_is_this_cut(self, durations, evidence):
+        server, durations_call = self._server(ServerType.PLEX, self.INTRO, durations)
+        found = read_server_markers(server, _cfg(ServerType.PLEX), "777", duration_ms=1_444_574)
+        assert found == ([_src(T.INTRO, 24_500, 113_900, "plex-1")] if evidence else None)
         durations_call.assert_called_once_with("777")
+
+    @pytest.mark.parametrize(("durations", "_plex_evidence"), VERSIONS)
+    def test_emby_markers_are_the_items_own_whatever_versions_it_lists(self, durations, _plex_evidence):
+        # With a user id Emby lists every version with the item, with an API key only its own: the answer is the same.
+        server, durations_call = self._server(ServerType.EMBY, self.EMBY_INTRO, durations)
+        found = read_server_markers(server, _cfg(ServerType.EMBY), "777", duration_ms=1_444_574)
+        assert found == [_src(T.INTRO, 24_500, 113_900, "emby-1")]
+        durations_call.assert_not_called()
 
     @pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.EMBY], ids=lambda t: t.value)
     def test_no_markers_needs_no_version_check(self, stype):

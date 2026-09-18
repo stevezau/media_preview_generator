@@ -17,10 +17,8 @@ if TYPE_CHECKING:
 # Bump when reading a server changes what a stored answer would hold, so servers are read again (spec §6.2).
 # 2: an importer-plugin row names every importer plugin, not just the first (its copy's database is read from them).
 READER_VERSION = 2
-# Plex markers are one set per item: another version of the item further apart than this is another cut. Emby keeps
-# each version's markers on its own item (spec §14 2026-09-15), but its reader still applies this check to the versions
-# Emby lists with the item: every version for a client with a user id, only the item's own with an API key (which then
-# always passes).
+# Plex markers are one set per item: another version of the item further apart than this is another cut. Emby and
+# Jellyfin keep each version's markers on its own item (spec §3.3), so their readers need no such check.
 SAME_CUT_MS = 2_000
 _PLEX_TYPES = {"intro": MarkerType.INTRO, "credits": MarkerType.CREDITS}
 # Plugins that write IntroDB / TheIntroDB / SkipDB / AniSkip answers as the server's own segments, by the database they
@@ -126,13 +124,12 @@ def _from_emby(
         starts.setdefault(row["marker_type"], []).append(row["start_ms"])
     intro_start, intro_end, credits_start = (starts.get(k, []) for k in ("IntroStart", "IntroEnd", "CreditsStart"))
     out = []
-    # Emby keeps one intro and one credits start per item; anything else can't be paired without guessing.
+    # Emby keeps one intro and one credits start per item; anything else can't be paired without guessing. Each version
+    # is its own item with its own chapter rows (spec §3.3), so these describe this item's own cut: no version check.
     if len(intro_start) == 1 and len(intro_end) == 1:
         out.append(_candidate(MarkerType.INTRO, intro_start[0], intro_end[0], origin))
     if len(credits_start) == 1:
         out.append(_candidate(MarkerType.CREDITS, credits_start[0], None, origin))
-    if out and duration_ms is not None and not _one_cut(server.get_media_source_durations(item_id), duration_ms):
-        return None
     return out
 
 
@@ -157,9 +154,7 @@ def read_server_markers(
             ours included. Plex and Emby return the same either way.
         duration_ms: This file's duration, when the markers are read as evidence for it. Plex serves one marker set
             per item, so an item whose versions aren't all this cut (within 2 s), or whose versions can't be read,
-            gives None. Emby items get the same check on the versions Emby lists with them, although each Emby version
-            has its own markers; with an API key Emby lists only the item's own version, so the check passes. Jellyfin
-            segments belong to one version and are never checked.
+            gives None. Emby and Jellyfin markers belong to one version's own item and are never checked.
 
     Returns:
         Candidates with ``origin`` = server id (credits that run to the end have ``end_ms=None``); ``[]`` when the

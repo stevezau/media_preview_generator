@@ -2097,10 +2097,20 @@ class TestServerMarkersFromVendors:
             (ServerType.PLEX, [S03E05_BLURAY_MS, S03E05_BLURAY_MS - 1_500], DecisionStatus.DECIDED),
             (ServerType.PLEX, [S03E05_BLURAY_MS, S03E05_BLURAY_MS - 60_000], DecisionStatus.NEEDS_REVIEW),
             (ServerType.PLEX, None, DecisionStatus.NEEDS_REVIEW),
+            # Each Emby version is its own item with its own markers (spec §3.3): the versions Emby lists don't matter.
             (ServerType.EMBY, [S03E05_BLURAY_MS], DecisionStatus.DECIDED),
-            (ServerType.EMBY, [S03E05_BLURAY_MS - 60_000, S03E05_BLURAY_MS], DecisionStatus.NEEDS_REVIEW),
+            (ServerType.EMBY, [S03E05_BLURAY_MS - 60_000, S03E05_BLURAY_MS], DecisionStatus.DECIDED),
+            (ServerType.EMBY, None, DecisionStatus.DECIDED),
         ],
-        ids=["plex-one-version", "plex-same-cut", "plex-other-cut", "plex-unreadable", "emby-one", "emby-other-cut"],
+        ids=[
+            "plex-one-version",
+            "plex-same-cut",
+            "plex-other-cut",
+            "plex-unreadable",
+            "emby-one",
+            "emby-other-cut-listed",
+            "emby-versions-unreadable",
+        ],
     )
     def test_item_wide_markers_are_evidence_only_when_every_version_is_this_cut(
         self, store, media, stype, durations, expected
@@ -2132,7 +2142,31 @@ class TestServerMarkersFromVendors:
             assert stored == [Candidate(T.INTRO, 24_500, 113_900, Source.SERVER_MARKERS, origin=sid)]
         else:
             assert stored == []  # nothing stored, so the next run reads the server again
-        durations_call.assert_called_once_with(f"item-{sid}")
+        if stype is ServerType.PLEX:
+            durations_call.assert_called_once_with(f"item-{sid}")
+        else:
+            durations_call.assert_not_called()
+
+    def test_an_emby_item_listing_another_cut_is_read_once_not_on_every_run(self, store, media):
+        # Under user-id auth Emby lists every version with the item. Its markers used to be stored as "unusable" and
+        # read again on every run that still needed evidence; now they are the item's own answer, read once.
+        reg = _registry(media, ServerType.EMBY)
+        server = reg.get("emby-1")
+        server.get_chapter_markers.return_value = [
+            {"marker_type": "IntroStart", "start_ms": 24_500, "name": ""},
+            {"marker_type": "IntroEnd", "start_ms": 113_900, "name": ""},
+        ]
+        server.get_media_source_durations.return_value = [S03E05_BLURAY_MS - 60_000, S03E05_BLURAY_MS]
+        ctx = _ctx(store, reg, settings_raw=INTRO_DEFAULTS)  # nothing else answers: the intro stays undecided
+        for _ in range(3):
+            pubs = {"emby-1": ready_publisher("emby_bridge")}
+            out, _ = _run(ctx, media, pubs, probe=_probe(duration=S03E05_BLURAY_MS))
+            assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        assert server.get_chapter_markers.call_count == 1
+        rec = store.get_file(media)
+        assert [c for c in store.get_evidence(rec.id) if c.source is Source.SERVER_MARKERS] == [
+            Candidate(T.INTRO, 24_500, 113_900, Source.SERVER_MARKERS, origin="emby-1")
+        ]
 
     @pytest.mark.parametrize(
         ("stype", "plugins", "source", "expected"),
