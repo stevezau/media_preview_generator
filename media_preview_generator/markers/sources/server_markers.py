@@ -7,8 +7,11 @@ import re
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+from loguru import logger
+
 from ...servers.base import ServerType
 from ..models import Candidate, MarkerType, Source
+from ..publishers.emby import OwnVersion, own_version
 from ..publishers.jellyfin import bridge_key, core_key, segment_times
 
 if TYPE_CHECKING:
@@ -16,9 +19,11 @@ if TYPE_CHECKING:
 
 # Bump when reading a server changes what a stored answer would hold, so servers are read again (spec §6.2).
 # 2: an importer-plugin row names every importer plugin, not just the first (its copy's database is read from them).
-READER_VERSION = 2
+# 3: an Emby item that isn't the file's own version gives no evidence (its markers describe another cut).
+READER_VERSION = 3
 # Plex markers are one set per item: another version of the item further apart than this is another cut. Emby and
-# Jellyfin keep each version's markers on its own item (spec §3.3), so their readers need no such check.
+# Jellyfin keep each version's markers on its own item (spec §3.3); Emby's reader checks instead that the item is this
+# file's own version.
 SAME_CUT_MS = 2_000
 _PLEX_TYPES = {"intro": MarkerType.INTRO, "credits": MarkerType.CREDITS}
 # Plugins that write IntroDB / TheIntroDB / SkipDB / AniSkip answers as the server's own segments, by the database they
@@ -77,8 +82,14 @@ def _one_cut(durations: list[int | None] | None, duration_ms: int) -> bool:
 
 
 def _from_plex(
-    server: Any, item_id: str, origin: str, include_ours: bool, duration_ms: int | None
+    server: Any,
+    config: ServerConfig,
+    item_id: str,
+    include_ours: bool,
+    duration_ms: int | None,
+    canonical_path: str | None,
 ) -> list[Candidate] | None:
+    origin = config.id
     rows = server.get_markers(item_id)
     if rows is None:
         return None
@@ -95,8 +106,14 @@ def _from_plex(
 
 
 def _from_jellyfin(
-    server: Any, item_id: str, origin: str, include_ours: bool, duration_ms: int | None
+    server: Any,
+    config: ServerConfig,
+    item_id: str,
+    include_ours: bool,
+    duration_ms: int | None,
+    canonical_path: str | None,
 ) -> list[Candidate] | None:
+    origin = config.id
     rows = server.get_media_segments(item_id)
     if rows is None:
         return None
@@ -114,9 +131,34 @@ def _from_jellyfin(
 
 
 def _from_emby(
-    server: Any, item_id: str, origin: str, include_ours: bool, duration_ms: int | None
+    server: Any,
+    config: ServerConfig,
+    item_id: str,
+    include_ours: bool,
+    duration_ms: int | None,
+    canonical_path: str | None,
 ) -> list[Candidate] | None:
-    rows = server.get_chapter_markers(item_id)
+    origin = config.id
+    if canonical_path is None:
+        rows = server.get_chapter_markers(item_id)
+    else:
+        # Emby's path lookup can fall back to a search that returns another version's item, whose markers describe
+        # another cut: the same check the publisher makes before it writes.
+        answer = server.get_chapters_and_versions(item_id)
+        if answer is None:
+            return None
+        rows, versions = answer
+        state, elsewhere = own_version(item_id, versions, canonical_path, list(config.path_mappings or []))
+        if state is not OwnVersion.YES:
+            logger.debug(
+                "{} item {} isn't this file's own version ({}{}); its markers aren't evidence for {}",
+                config.name,
+                item_id,
+                state.value,
+                f": this file is item {elsewhere}" if elsewhere else "",
+                canonical_path,
+            )
+            return None
     if rows is None:
         return None
     starts: dict[str, list[int]] = {}
@@ -125,7 +167,7 @@ def _from_emby(
     intro_start, intro_end, credits_start = (starts.get(k, []) for k in ("IntroStart", "IntroEnd", "CreditsStart"))
     out = []
     # Emby keeps one intro and one credits start per item; anything else can't be paired without guessing. Each version
-    # is its own item with its own chapter rows (spec §3.3), so these describe this item's own cut: no version check.
+    # is its own item with its own chapter rows (spec §3.3), so no duration check.
     if len(intro_start) == 1 and len(intro_end) == 1:
         out.append(_candidate(MarkerType.INTRO, intro_start[0], intro_end[0], origin))
     if len(credits_start) == 1:
@@ -140,6 +182,7 @@ def read_server_markers(
     *,
     include_ours: bool = False,
     duration_ms: int | None = None,
+    canonical_path: str | None = None,
 ) -> list[Candidate] | None:
     """Read one server's current markers for an item.
 
@@ -154,7 +197,9 @@ def read_server_markers(
             ours included. Plex and Emby return the same either way.
         duration_ms: This file's duration, when the markers are read as evidence for it. Plex serves one marker set
             per item, so an item whose versions aren't all this cut (within 2 s), or whose versions can't be read,
-            gives None. Emby and Jellyfin markers belong to one version's own item and are never checked.
+            gives None. Emby and Jellyfin markers belong to one version's own item: no duration check.
+        canonical_path: This file's local path, when the markers are read as evidence for it. An Emby item that isn't
+            this file's own version (Emby's path lookup can fall back to another version's item) gives None.
 
     Returns:
         Candidates with ``origin`` = server id (credits that run to the end have ``end_ms=None``); ``[]`` when the
@@ -162,4 +207,4 @@ def read_server_markers(
     """
     readers = {ServerType.PLEX: _from_plex, ServerType.JELLYFIN: _from_jellyfin, ServerType.EMBY: _from_emby}
     reader = readers.get(config.type)
-    return reader(server, item_id, config.id, include_ours, duration_ms) if reader else None
+    return reader(server, config, item_id, include_ours, duration_ms, canonical_path) if reader else None

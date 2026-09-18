@@ -2333,6 +2333,50 @@ class TestServerMarkersFromVendors:
         ]
 
     @pytest.mark.parametrize(
+        ("versions", "expected"),
+        [
+            # The path resolved to this file's own version item: its markers agree with IntroDB and decide.
+            ("own", DecisionStatus.DECIDED),
+            # Emby's fallback search returned another version's item: Emby lists this file as item 99.
+            ("another", DecisionStatus.NEEDS_REVIEW),
+            # Several versions and none of them is this file: can't tell whose markers these are.
+            ("unknown", DecisionStatus.NEEDS_REVIEW),
+        ],
+    )
+    def test_emby_markers_count_only_for_this_files_own_version(self, store, media, versions, expected):
+        other = media.replace("Pilot", "Pilot - Extended")
+        listed = {
+            "own": [(other, "99"), (media, "item-emby-1")],
+            "another": [(other, "item-emby-1"), (media, "99")],
+            "unknown": [(other, "item-emby-1"), (other + ".bak", "98")],
+        }[versions]
+        reg = _registry(media, ServerType.EMBY)
+        server = reg.get("emby-1")
+        rows = [
+            {"marker_type": "IntroStart", "start_ms": 24_500, "name": ""},
+            {"marker_type": "IntroEnd", "start_ms": 113_900, "name": ""},
+        ]
+        server.get_chapters_and_versions.side_effect = None
+        server.get_chapters_and_versions.return_value = (rows, listed)
+        ctx = _ctx(store, reg, clients=_clients(introdb=IDB_S03E05_INTRO), settings_raw=INTRO_DEFAULTS)
+        _run(ctx, media, {"emby-1": ready_publisher("emby_bridge")}, probe=_probe(duration=S03E05_BLURAY_MS))
+        rec = store.get_file(media)
+        decision = store.get_decisions(rec.id)[T.INTRO]
+        assert decision.status is expected
+        server.get_chapters_and_versions.assert_called_once_with("item-emby-1")
+        stored = [c for c in store.get_evidence(rec.id) if c.source is Source.SERVER_MARKERS]
+        if expected is DecisionStatus.DECIDED:
+            assert store.get_markers(rec.id)[T.INTRO] == Marker(T.INTRO, 24_500, 114_105, ("introdb", "server_markers"))
+            assert stored == [Candidate(T.INTRO, 24_500, 113_900, Source.SERVER_MARKERS, origin="emby-1")]
+        else:
+            # The other cut's markers never reach decide(): nothing is stored for them, and the read counts as one
+            # that couldn't be done (asked again while the file still needs evidence).
+            assert stored == []
+            rows_stored = [r for r in store.evidence_rows(rec.id) if r.origin == "emby-1"]
+            assert [(r.type, r.detail) for r in rows_stored] == [(None, pipeline.UNUSABLE_SERVER_MARKERS_DETAIL)]
+            assert decision.reason == "sources don't agree yet"
+
+    @pytest.mark.parametrize(
         ("stype", "plugins", "source", "expected"),
         [
             (ServerType.JELLYFIN, ["Media Preview Bridge", "TheIntroDB"], Source.SERVER_MARKERS_IMPORTED, "review"),
@@ -2484,7 +2528,7 @@ class TestServerMarkersFromVendors:
         )
         assert [c.copied_from for c in store.get_evidence(rec.id)] == ["skipdb"]
         ctx = _ctx(store, reg, clients=_clients(introdb=IDB_S03E05_INTRO), settings_raw=INTRO_DEFAULTS)
-        assert pipeline.READER_VERSION == 2
+        assert pipeline.READER_VERSION > 1
         assert pipeline._server_markers_due(ctx, rec, "jellyfin-1", first_read_only=False)
         plex = ready_publisher()
 
@@ -2498,7 +2542,7 @@ class TestServerMarkersFromVendors:
                 "Markers on this server look imported from SkipDB, TheIntroDB; not a second opinion for that database",
             )
         ]
-        assert store.evidence_version(rec.id, Source.SERVER_MARKERS_IMPORTED, "jellyfin-1") == 2
+        assert store.evidence_version(rec.id, Source.SERVER_MARKERS_IMPORTED, "jellyfin-1") == pipeline.READER_VERSION
         copies = [c for c in store.get_evidence(rec.id) if c.source is Source.SERVER_MARKERS_IMPORTED]
         assert [(c.start_ms, c.end_ms, c.copied_from) for c in copies] == [(24_046, 114_105, "")]
         plex.write.assert_not_called()
@@ -2728,6 +2772,23 @@ class TestRulesVersions:
         _run(_ctx(store, reg, settings_raw=INTRO_DEFAULTS), media, pubs)
         assert server.get_media_segments.call_count == 3
         assert store.evidence_version(rec.id, Source.SERVER_MARKERS, "jellyfin-1") == pipeline.READER_VERSION
+
+    def test_an_emby_answer_stored_before_the_own_version_check_is_read_again(self, store, media):
+        # Reader version 2 stored an Emby item's markers without checking the item was this file's own version.
+        reg = _registry(media, ServerType.EMBY)
+        server = reg.get("emby-1")
+        st = os.stat(media)
+        rec = store.upsert_file(
+            FileIdentity(media, st.st_size, st.st_mtime_ns), duration_ms=DUR, season_key=None, is_movie=False
+        )
+        old = Candidate(T.INTRO, 24_046, 114_105, Source.SERVER_MARKERS, origin="emby-1")
+        store.replace_evidence(rec.id, Source.SERVER_MARKERS, [old], origin="emby-1", version=2)
+        ctx = _ctx(store, reg, settings_raw=INTRO_DEFAULTS)
+        assert pipeline._server_markers_due(ctx, rec, "emby-1", first_read_only=True)
+        _run(ctx, media, {"emby-1": ready_publisher("emby_bridge")})
+        server.get_chapters_and_versions.assert_called_once_with("item-emby-1")
+        assert store.evidence_version(rec.id, Source.SERVER_MARKERS, "emby-1") == pipeline.READER_VERSION
+        assert [c for c in store.get_evidence(rec.id) if c.origin == "emby-1"] == []
 
 
 class TestPublishFanOut:

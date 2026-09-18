@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Iterable
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 import requests
@@ -158,6 +159,46 @@ def _post_body(wanted: list[Marker], file_size: int | None) -> dict[str, int | N
         "credits_start_ticks": credits.start_ms * TICKS_PER_MS if credits else None,
         "file_size": file_size,
     }
+
+
+class OwnVersion(Enum):
+    """Whether an Emby item is a file's own version (``own_version``)."""
+
+    YES = "yes"
+    ANOTHER = "another"  # Emby lists the file as another version's item
+    UNKNOWN = "unknown"  # the item has several versions and none of them is the file
+
+
+def own_version(
+    item_id: str, versions: list[tuple[str, str | None]], canonical_path: str, path_mappings: list[dict[str, Any]]
+) -> tuple[OwnVersion, str | None]:
+    """Whether ``item_id`` is this file's own version of an Emby item.
+
+    Emby keeps each version of a video as its own item with its own chapters, and its path lookup can fall back to a
+    search that returns another version's item. An item with one file is the item found for this path, even when the
+    server's path mappings don't map its path back to it.
+
+    Args:
+        item_id: The item the file's path resolved to.
+        versions: ``EmbyServer.get_chapters_and_versions``'s ``[(server-side path, version item id or None)]``.
+        canonical_path: This file's local path.
+        path_mappings: The server's path mappings (server-side path to local path).
+
+    Returns:
+        ``(OwnVersion.YES, None)``; ``(OwnVersion.ANOTHER, the version item Emby lists this file as)``; or
+        ``(OwnVersion.UNKNOWN, None)`` when the item has several versions and none of them is this file.
+    """
+    this_file = [
+        version for path, version in versions if canonical_path in (apply_path_mappings(path, path_mappings) or [path])
+    ]
+    if item_id in this_file:
+        return OwnVersion.YES, None
+    elsewhere = next((version for version in this_file if version), None)
+    if elsewhere is not None:
+        return OwnVersion.ANOTHER, elsewhere
+    if len(versions) > 1:
+        return OwnVersion.UNKNOWN, None
+    return OwnVersion.YES, None
 
 
 class EmbyMarkerPublisher(MarkerPublisher):
@@ -419,28 +460,19 @@ class EmbyMarkerPublisher(MarkerPublisher):
             return None
         return _kept_types(rows, wanted, keep)
 
-    def _local_candidates(self, server_path: str) -> list[str]:
-        return apply_path_mappings(server_path, list(self._config.path_mappings or [])) or [server_path]
-
     def _confirm_version(self, item_id: str, versions: list[tuple[str, str | None]], canonical_path: str) -> None:
-        """Make sure ``item_id`` is this file's own version of the Emby item.
-
-        An item with one file is the item the job found for this path, even when the server's path mappings don't map
-        its path back to it.
+        """Make sure ``item_id`` is this file's own version of the Emby item (``own_version``).
 
         Raises:
             PublishError: Emby lists this file as another version's item.
             ItemNotFoundError: The item has several versions and none of them is this file.
         """
-        this_file = [version for path, version in versions if canonical_path in self._local_candidates(path)]
-        if item_id in this_file:
-            return
-        elsewhere = next((version for version in this_file if version), None)
-        if elsewhere is not None:
+        state, elsewhere = own_version(item_id, versions, canonical_path, list(self._config.path_mappings or []))
+        if state is OwnVersion.ANOTHER:
             raise PublishError(
                 f"This file is Emby item {elsewhere}, another version of item {item_id}; markers not written"
             )
-        if len(versions) > 1:
+        if state is OwnVersion.UNKNOWN:
             raise ItemNotFoundError(
                 "Emby doesn't show which of this item's versions is this file yet; if the file is already in Emby's "
                 "library, check this server's path mappings"

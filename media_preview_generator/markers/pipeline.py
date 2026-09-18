@@ -1036,7 +1036,9 @@ def _read_server_markers(
         if item_wide and ctx.store.published_to_item(cfg.id, item_id):
             continue
         try:
-            found = read_server_markers(owner.server, cfg, item_id, duration_ms=rec.duration_ms)
+            found = read_server_markers(
+                owner.server, cfg, item_id, duration_ms=rec.duration_ms, canonical_path=rec.canonical_path
+            )
         except Exception as exc:
             logger.debug("Reading markers on {} failed for {}: {}", cfg.name, rec.canonical_path, exc)
             found = None

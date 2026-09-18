@@ -356,6 +356,107 @@ class TestEmby:
         assert read_server_markers(server, _cfg(ServerType.EMBY), "42") is None
 
 
+def _emby_item(versions):
+    """Emby's answer for item 53: an intro and a credits start, and every version Emby lists with it."""
+    return {
+        "Id": "53",
+        "Chapters": [
+            {"StartPositionTicks": 0, "MarkerType": "Chapter", "Name": "Chapter 1"},
+            {"StartPositionTicks": 245_000_000, "MarkerType": "IntroStart", "Name": "Intro"},
+            {"StartPositionTicks": 1_139_000_000, "MarkerType": "IntroEnd", "Name": "Intro End"},
+            {"StartPositionTicks": 12_950_000_000, "MarkerType": "CreditsStart", "Name": "Credits"},
+        ],
+        "MediaSources": [{"Path": path, "ItemId": item} for path, item in versions],
+    }
+
+
+class TestEmbyOwnVersion:
+    """Emby's path lookup can fall back to a search that returns another version's item (servers/emby.py). Read as
+    evidence for a file, an Emby item counts only when it is that file's own version: the publisher's own check
+    (``publishers.emby.own_version``), with a real EmbyServer in both auth shapes."""
+
+    OWN = "/media/tv/Show/S01E01.mkv"
+    EXTENDED = "/media/tv/Show/S01E01 - Extended.mkv"
+    FOUND = [_src(T.INTRO, 24_500, 113_900, "emby-1"), _src(T.CREDITS, 1_295_000, None, "emby-1")]
+
+    @staticmethod
+    def _server(user_id, versions, mappings=None):
+        cfg = ServerConfig(
+            id="emby-1",
+            type=ServerType.EMBY,
+            name="Emby",
+            enabled=True,
+            url="http://emby:8096",
+            auth={"method": "api_key", "api_key": "k", "user_id": user_id},
+            path_mappings=mappings or [],
+        )
+        item = _emby_item(versions)
+        answer = {"Items": [item]} if user_id is None else item
+        server = EmbyServer(cfg)
+        server._request = MagicMock(return_value=MagicMock(status_code=200, json=MagicMock(return_value=answer)))
+        return server, cfg
+
+    @pytest.mark.parametrize("user_id", [None, "u1"], ids=["api-key", "user-id"])
+    @pytest.mark.parametrize(
+        ("versions", "canonical_path", "mappings", "evidence"),
+        [
+            pytest.param([(EXTENDED, "55"), (OWN, "53")], OWN, None, True, id="own-version"),
+            pytest.param([(OWN, "53")], OWN, None, True, id="only-version"),
+            # One file only: the item found for this path, even when path mappings don't map it back.
+            pytest.param([("/srv/elsewhere.mkv", "53")], OWN, None, True, id="only-version-unmapped"),
+            pytest.param(
+                [("/tv/Show/S01E01.mkv", "53"), ("/tv/Show/S01E01 - Extended.mkv", "55")],
+                OWN,
+                [{"remote_prefix": "/tv", "local_prefix": "/media/tv"}],
+                True,
+                id="own-version-through-a-path-mapping",
+            ),
+            pytest.param([(EXTENDED, "53"), (OWN, "55")], OWN, None, False, id="another-version-fallback"),
+            pytest.param(
+                [(EXTENDED, "53"), ("/media/tv/Show/S01E01 - Copy.mkv", "54")],
+                OWN,
+                None,
+                False,
+                id="several-versions-none-this-file",
+            ),  # fmt: skip
+        ],
+    )
+    def test_markers_are_evidence_only_for_this_files_own_version(
+        self, user_id, versions, canonical_path, mappings, evidence
+    ):
+        server, cfg = self._server(user_id, versions, mappings)
+        found = read_server_markers(server, cfg, "53", duration_ms=1_444_574, canonical_path=canonical_path)
+        assert found == (self.FOUND if evidence else None)
+        (request,) = server._request.call_args_list
+        if user_id is None:
+            assert request.args == ("GET", "/Items")
+            assert request.kwargs["params"] == {"Ids": "53", "Fields": "Chapters,MediaSources,AlternateMediaSources"}
+        else:
+            assert request.args == ("GET", "/Users/u1/Items/53")
+
+    def test_another_versions_item_is_named_in_a_debug_line(self, loguru_caplog):
+        server, cfg = self._server(None, [(self.EXTENDED, "53"), (self.OWN, "55")])
+        assert read_server_markers(server, cfg, "53", canonical_path=self.OWN) is None
+        (record,) = [r for r in loguru_caplog.records if "own version" in r.getMessage()]
+        assert record.levelname == "DEBUG"
+        assert "item 53" in record.getMessage() and "this file is item 55" in record.getMessage()
+
+    def test_an_item_that_cant_be_read_is_none(self):
+        server = create_autospec(EmbyServer, instance=True)
+        server.get_chapters_and_versions.return_value = None
+        assert read_server_markers(server, _cfg(ServerType.EMBY), "53", canonical_path=self.OWN) is None
+
+    @pytest.mark.parametrize("include_ours", [False, True])
+    def test_without_a_file_nothing_is_checked(self, include_ours):
+        # The Inspector shows what clients of this item see, whichever version it is.
+        server = create_autospec(EmbyServer, instance=True)
+        server.get_chapter_markers.return_value = [{"marker_type": "CreditsStart", "start_ms": 7, "name": ""}]
+        assert read_server_markers(server, _cfg(ServerType.EMBY), "53", include_ours=include_ours) == [
+            _src(T.CREDITS, 7, None, "emby-1")
+        ]
+        server.get_chapters_and_versions.assert_not_called()
+
+
 def test_unknown_server_type_is_none():
     config = MagicMock(type="kodi", id="k-1")
     assert read_server_markers(MagicMock(), config, "1") is None

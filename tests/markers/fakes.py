@@ -57,6 +57,11 @@ class FakeRegistry:
             server.get_part_durations.return_value = []
             server.get_version_count.return_value = None
             server.get_media_source_durations.return_value = []
+            # Emby's one read of an item's chapters and versions: the chapter rows a test gives get_chapter_markers,
+            # and no other version listed (so the item is the file's own), unless a test says otherwise.
+            server.get_chapters_and_versions.side_effect = lambda item_id: (
+                None if (rows := server.get_chapter_markers(item_id)) is None else (rows, [])
+            )
             server.get_plugin_names.return_value = []
             self.servers_by_id[sid] = server
         return self.servers_by_id[sid]
