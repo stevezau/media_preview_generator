@@ -1237,6 +1237,7 @@ def _publish_to(
         cfg,
         sibling_markers=lambda p: markers_for_path(store, p),
         settings_provider=lambda: _live_markers_settings(ctx, cfg),
+        ui_details=False,  # Plex's own detection settings are for the Edit dialog: one more Plex request per check
     )
     if publisher is None:
         return _not_written(ServerStatus.SKIPPED, "Not supported for this server type yet", name="")

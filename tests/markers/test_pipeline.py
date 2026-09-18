@@ -4455,6 +4455,30 @@ class TestConcurrentJobs:
         assert pipeline._PATH_LOCKS._locks == {}
 
 
+class TestRealPlexPublisher:
+    def test_a_job_writes_without_asking_plex_for_its_own_detection_settings(self, store, media, tmp_path, monkeypatch):
+        # The real factory and PlexMarkerPublisher against a Plex 1.43 database file: Plex's detection settings are
+        # for the Edit dialog, and each job's capability check would otherwise ask Plex for them too.
+        from media_preview_generator.markers.publishers import plex_db
+        from tests.markers.test_plex_db_publisher import PLEX_VERSION, _make_db, _served
+
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=((media, None),))
+        monkeypatch.setattr(plex_db, "shm_lock_held_elsewhere", lambda _db, **_kw: True)  # Plex has it open
+        monkeypatch.setattr(plex_db, "filesystem_type", lambda _path, **_kw: "ext4")
+        reg = _registry(media, ServerType.PLEX)
+        reg.configs_by_id["plex-1"].output = {"plex_config_folder": str(folder)}
+        server = reg.get("plex-1")
+        server.resolve_remote_path_to_item_id.return_value = "7"
+        server.get_server_status.return_value = {"plex_pass": True, "version": PLEX_VERSION}
+        with patch.object(pipeline, "probe_media", return_value=_probe(CHAPTERS_BOTH)):
+            out = check_item(_item(media), ctx=_ctx(store, reg))
+        assert _rows(out)["plex-1"]["status"] == ServerStatus.WRITTEN.value
+        assert [row[0] for row in _served(str(db))] == ["intro", "credits"]
+        server.get_server_status.assert_called_with()  # the capability check did reach Plex
+        server.get_marker_detection_prefs.assert_not_called()
+
+
 def test_markers_for_path(store, media):
     assert pipeline.markers_for_path(store, media) is None
     st = os.stat(media)
