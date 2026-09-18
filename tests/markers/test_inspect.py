@@ -469,9 +469,9 @@ def test_resolve_local_path_maps_through_path_mappings(media):
     cfg = server_config("plex", ServerType.PLEX)
     cfg.path_mappings.append({"remote_prefix": "/data/tv", "local_prefix": str(media / "tv")})
     server = MagicMock()
-    server.resolve_item_to_remote_path.return_value = "/data/tv/Show/S01E01.mkv"
+    server.resolve_item_to_remote_paths.return_value = [("42", "/data/tv/Show/S01E01.mkv")]
     assert inspect.resolve_local_path(server, cfg, "42") == str(media / "tv" / "Show" / "S01E01.mkv")
-    server.resolve_item_to_remote_path.assert_called_once_with("42")
+    server.resolve_item_to_remote_paths.assert_called_once_with("42")
 
 
 def test_resolve_local_path_picks_the_candidate_that_exists(media):
@@ -483,37 +483,92 @@ def test_resolve_local_path_picks_the_candidate_that_exists(media):
         ]
     )
     server = MagicMock()
-    server.resolve_item_to_remote_path.return_value = "/data/tv/Show/S01E01.mkv"
+    server.resolve_item_to_remote_paths.return_value = [("42", "/data/tv/Show/S01E01.mkv")]
     assert inspect.resolve_local_path(server, cfg, "42") == str(media / "tv" / "Show" / "S01E01.mkv")
 
 
 def test_resolve_local_path_without_mapping_uses_the_server_path(media):
     cfg = server_config("jf", ServerType.JELLYFIN)
     server = MagicMock()
-    server.resolve_item_to_remote_path.return_value = str(media / "tv" / "Show" / "S01E01.mkv")
+    server.resolve_item_to_remote_paths.return_value = [("abc", str(media / "tv" / "Show" / "S01E01.mkv"))]
     assert inspect.resolve_local_path(server, cfg, "abc") == str(media / "tv" / "Show" / "S01E01.mkv")
 
 
 @pytest.mark.parametrize(
     "remote",
-    [None, "", "/data/tv/Show/S01E02.mkv", RuntimeError("down")],
+    [[], [("42", "")], [("42", "/data/tv/Show/S01E02.mkv")], RuntimeError("down")],
 )
 def test_resolve_local_path_none_when_nothing_exists(media, remote):
     cfg = server_config("plex", ServerType.PLEX)
     cfg.path_mappings.append({"remote_prefix": "/data/tv", "local_prefix": str(media / "tv")})
     server = MagicMock()
     if isinstance(remote, Exception):
-        server.resolve_item_to_remote_path.side_effect = remote
+        server.resolve_item_to_remote_paths.side_effect = remote
     else:
-        server.resolve_item_to_remote_path.return_value = remote
+        server.resolve_item_to_remote_paths.return_value = remote
     assert inspect.resolve_local_path(server, cfg, "42") is None
 
 
 def test_resolve_local_path_ignores_a_folder(media):
     cfg = server_config("jf", ServerType.JELLYFIN)
     server = MagicMock()
-    server.resolve_item_to_remote_path.return_value = str(media / "tv" / "Show")
+    server.resolve_item_to_remote_paths.return_value = [("abc", str(media / "tv" / "Show"))]
     assert inspect.resolve_local_path(server, cfg, "abc") is None
+
+
+def _two_versions(media, *, on_disk):
+    (media / "tv" / "Show" / "S01E01.mkv").unlink()
+    for name in on_disk:
+        (media / "tv" / "Show" / name).write_bytes(b"x")
+    return [(v, f"/data/tv/Show/{name}") for v, name in (("v1", "S01E01 - 1080p.mkv"), ("v2", "S01E01 - 2160p.mkv"))]
+
+
+@pytest.mark.parametrize(
+    ("stype", "asked", "on_disk", "expected"),
+    [
+        # Plex: every version shares the item's id; the first version with a file here is the one.
+        (ServerType.PLEX, "42", ["S01E01 - 2160p.mkv"], "S01E01 - 2160p.mkv"),
+        (ServerType.PLEX, "42", ["S01E01 - 1080p.mkv", "S01E01 - 2160p.mkv"], "S01E01 - 1080p.mkv"),
+        # Jellyfin: a version's own id opens that version, whichever is listed first.
+        (ServerType.JELLYFIN, "v2", ["S01E01 - 1080p.mkv", "S01E01 - 2160p.mkv"], "S01E01 - 2160p.mkv"),
+        (ServerType.JELLYFIN, "v2", ["S01E01 - 1080p.mkv"], "S01E01 - 1080p.mkv"),
+        (ServerType.JELLYFIN, "parent", ["S01E01 - 2160p.mkv"], "S01E01 - 2160p.mkv"),
+    ],
+    ids=["plex-only-v2-here", "plex-both-here", "jellyfin-clicked-v2", "jellyfin-v2-not-here", "jellyfin-parent"],
+)
+def test_resolve_local_path_picks_the_version_asked_for_or_one_on_this_disk(media, stype, asked, on_disk, expected):
+    cfg = server_config("srv", stype)
+    cfg.path_mappings.append({"remote_prefix": "/data/tv", "local_prefix": str(media / "tv")})
+    server = MagicMock()
+    server.resolve_item_to_remote_paths.return_value = _two_versions(media, on_disk=on_disk)
+    assert inspect.resolve_local_path(server, cfg, asked) == str(media / "tv" / "Show" / expected)
+    server.resolve_item_to_remote_paths.assert_called_once_with(asked)
+
+
+@pytest.mark.parametrize(("stage", "detection_asked"), [("inspector", False), ("edit-tab", True)])
+def test_only_the_edit_tab_asks_plex_for_its_own_detection_settings(stage, detection_asked, monkeypatch):
+    # The Inspector's row shows only the capability state; Plex's detection settings are one more Plex request.
+    from media_preview_generator.markers.publishers import plex_db
+    from media_preview_generator.markers.publishers.base import PublishError
+
+    monkeypatch.setattr(
+        plex_db.PlexMarkerPublisher,
+        "_local_checks",
+        lambda self, *, deadline: CapabilityReport(Capability.READY, "", {"db_path": "/plex/db", "lock_holder": True}),
+    )
+
+    def no_database(self, *, read_only, deadline):
+        raise PublishError("stop before the schema checks", state=Capability.MISCONFIGURED)
+
+    monkeypatch.setattr(plex_db.PlexMarkerPublisher, "_database", no_database)
+    server = MagicMock(name="plex-client")
+    server.get_server_status.return_value = {"plex_pass": True, "version": "1.43.0"}
+    cfg = server_config("plex", ServerType.PLEX, markers=_plex_markers(enabled=True))
+    if stage == "inspector":
+        assert inspect._capability_state(server, cfg) == "misconfigured"
+    else:
+        assert inspect.server_status_payload(server, cfg)["capability"]["state"] == "misconfigured"
+    assert server.get_marker_detection_prefs.called is detection_asked
 
 
 # --------------------------------------------------------------------------- item_payload

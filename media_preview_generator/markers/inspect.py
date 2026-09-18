@@ -296,7 +296,10 @@ def server_status_payload(server: Any, config: ServerConfig) -> dict:
 
 
 def resolve_local_path(server: Any, config: ServerConfig, item_id: str) -> str | None:
-    """Local path of a server item: the first path-mapped candidate that is a file on disk.
+    """Local path of a server item: the first path-mapped candidate of one of its versions that is a file on disk.
+
+    A version asked for by its own id (a Jellyfin version) comes first; then the item's versions in the server's
+    order, so a Plex item (every version shares its id) whose first version isn't on this disk opens another.
 
     Args:
         server: Live client for ``config``.
@@ -304,19 +307,21 @@ def resolve_local_path(server: Any, config: ServerConfig, item_id: str) -> str |
         item_id: The server's item id.
 
     Returns:
-        The local file path, or None when the server doesn't know the item or no candidate exists here.
+        The local file path, or None when the server doesn't know the item or no version's file exists here.
     """
     try:
-        remote = server.resolve_item_to_remote_path(item_id)
+        versions = list(server.resolve_item_to_remote_paths(item_id) or [])
     except Exception as exc:
         logger.debug("Item {} lookup on {} failed: {}", item_id, config.name, type(exc).__name__)
         return None
-    if not remote:
-        return None
-    # apply_path_mappings reads both the current remote_prefix and the legacy plex_prefix mapping keys.
-    for candidate in apply_path_mappings(remote, list(config.path_mappings or [])):
-        if os.path.isfile(candidate):
-            return candidate
+    versions.sort(key=lambda version: version[0] != item_id)  # stable: the server's order otherwise
+    for _version_id, remote in versions:
+        if not remote:
+            continue
+        # apply_path_mappings reads both the current remote_prefix and the legacy plex_prefix mapping keys.
+        for candidate in apply_path_mappings(remote, list(config.path_mappings or [])):
+            if os.path.isfile(candidate):
+                return candidate
     return None
 
 
@@ -341,7 +346,8 @@ def _capability_state(server: Any, cfg: ServerConfig) -> str:
 
 
 def _checked_state(server: Any, cfg: ServerConfig) -> str:
-    publisher = publisher_for(server, cfg)
+    # Only the state is shown: Plex's own detection settings (one more Plex request) are the Edit tab's.
+    publisher = publisher_for(server, cfg, ui_details=False)
     return Capability.NEEDS_PLUGIN.value if publisher is None else publisher.capability().state.value
 
 
