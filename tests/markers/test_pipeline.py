@@ -1389,6 +1389,38 @@ class TestBudgetExhaustedJobWarning:
             "(or add a TheIntroDB API key for a higher limit)."
         ]
 
+    def test_a_file_asked_again_on_its_worker_counts_once(self, store, media):
+        # The checking thread asks TheIntroDB, then season audio needs a worker; the worker stage asks again.
+        reg = _registry(media, ServerType.PLEX)
+        spec = LocalDetectorSpec(Source.SEASON_AUDIO, frozenset({T.INTRO}), MagicMock(return_value=[]))
+        client = FakeClient(TIDB_BUDGET_EXHAUSTED)
+        ctx = _ctx(store, reg, clients={"theintrodb": client}, detectors=(spec,), settings_raw=INTRO_ONLY)
+        assert _run(ctx, media, {"plex-1": ready_publisher()})[0] is None
+        _run(ctx, media, {"plex-1": ready_publisher()}, stage="process")
+        assert len(client.calls) == 2
+        assert pipeline.budget_exhausted_warnings(ctx)[0].startswith(
+            "TheIntroDB's daily lookup limit was reached: 1 file was checked without it."
+        )
+
+    def test_a_file_detected_again_after_it_changed_counts_once(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        client = FakeClient(TIDB_BUDGET_EXHAUSTED)
+        ctx = _ctx(store, reg, clients={"theintrodb": client}, settings_raw=INTRO_ONLY)
+        probes = []
+
+        def probe(path, *, ffprobe):
+            probes.append(path)
+            if len(probes) == 1:
+                os.utime(path, ns=(7, 7))  # replaced while its chapters were read: detected again from scratch
+            return _probe()
+
+        out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe_effect=probe)
+        assert len(probes) == 2 and len(client.calls) == 2
+        assert out.outcome_key == FileOutcome.NO_MARKERS.value
+        assert pipeline.budget_exhausted_warnings(ctx)[0].startswith(
+            "TheIntroDB's daily lookup limit was reached: 1 file was checked without it."
+        )
+
     def test_names_each_source_that_ran_out_and_only_theintrodb_gets_the_key_hint(self, store, media):
         # All three online sources in the same job: only TheIntroDB has a key concept, so IntroDB and SkipDB (which
         # take the identical no-hint branch) are both covered rather than assuming one stands in for the other.

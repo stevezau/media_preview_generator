@@ -302,6 +302,24 @@ class TestForcedRefresh:
         assert store.get_decisions(store.get_file(media).id)[T.INTRO].status is DecisionStatus.DECIDED
         assert (inline.call_count, worker.call_count) == (2, 1)  # the intro was decided when the worker started
 
+    def test_a_forced_job_forgets_what_it_refreshed_for_a_file_once_the_file_is_done(self, store, media):
+        # A library-wide forced job must not keep an entry for every file it ran; a handed-off file keeps its own
+        # until the worker stage has used it.
+        reg = _registry(media, ServerType.PLEX)
+        forced = _ctx(store, reg, detectors=(_spec(MagicMock(return_value=[])),), settings_raw=INTRO_ONLY, force=True)
+        assert _run(forced, media, _pubs())[0] is None
+        # Refreshed up to season audio, where it was handed to a worker.
+        assert forced._refreshed == {media: {Source.CHAPTERS, Source.THEINTRODB, Source.INTRODB, Source.SKIPDB}}
+        _run(forced, media, _pubs(), stage="process")
+        assert forced._refreshed == {}
+
+    def test_a_forced_file_done_on_the_checking_thread_leaves_nothing_behind(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        forced = _ctx(store, reg, settings_raw=INTRO_ONLY, force=True)
+        out, probe = _run(forced, media, _pubs())
+        assert out is not None and probe.call_count == 1
+        assert forced._refreshed == {}
+
     def test_forced_run_runs_a_detector_whose_answer_is_current(self, store, media):
         reg = _registry(media, ServerType.PLEX)
         detector = MagicMock(return_value=[])

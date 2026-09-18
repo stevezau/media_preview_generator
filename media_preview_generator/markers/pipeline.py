@@ -241,9 +241,10 @@ class PipelineContext:
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
     _capability_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    # (path, source) pairs a forced run already refreshed, so the worker stage doesn't ask those sources twice and
-    # still refreshes the sources after the detector that handed the item to a worker.
-    _refreshed: set[tuple[str, Source]] = field(default_factory=set, repr=False)
+    # Per file of a forced run: the sources it already refreshed, so the worker stage doesn't ask those sources twice
+    # and still refreshes the sources after the detector that handed the item to a worker. Dropped once the file has
+    # its outcome, so a library-wide forced job doesn't keep an entry for every file it ran.
+    _refreshed: dict[str, set[Source]] = field(default_factory=dict, repr=False)
     # Per server id: its importer plugins of a crowd database (IntroDB/TheIntroDB, SkipDB, AniSkip), joined ("" = none),
     # or None when its plugin list couldn't be read; the copy counts as that database's group.
     _importers: dict[str, str | None] = field(default_factory=dict, repr=False)
@@ -255,8 +256,9 @@ class PipelineContext:
     _left_out_changed: set[str] = field(default_factory=set, repr=False)
     _followups_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # Files this job's lookups skipped because a source's daily budget ran out, by source (job_runner turns this
-    # into a completion warning once the job finishes).
-    _budget_exhausted: dict[Source, int] = field(default_factory=dict, repr=False)
+    # into a completion warning once the job finishes). Paths, not a count: a file asked again in the same job (its
+    # worker stage after the checking thread, a retry after it changed on disk) is still one file.
+    _budget_exhausted: dict[Source, set[str]] = field(default_factory=dict, repr=False)
     _budget_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # Per file being run: the thread running it and what that run computes once (``run_memo``).
     _run_memos: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict, repr=False)
@@ -476,6 +478,12 @@ def build_context(
     recheck_empty_server_markers: bool = False,
 ) -> PipelineContext:
     """Context from live settings (used by the job runner).
+
+    Also runs the checks that decide which local detectors the job registers: whether an ffmpeg with chromaprint
+    exists (only while season audio is on) and whether credit text detection can run here (only while credits and
+    credit text are on). Each answer is kept for the process (one that didn't come is asked again 10 minutes later),
+    so usually only the first job pays for it: ffmpeg listing its muxers, and a subprocess that loads the text
+    detection model.
 
     Args:
         registry: The job's ``ServerRegistry``.
@@ -732,12 +740,12 @@ def _stale_evidence(ctx: PipelineContext, rec: FileRecord, source: Source) -> bo
 
 def _refreshing(ctx: PipelineContext, path: str, source: Source) -> bool:
     """Whether a forced run still has to ask ``source`` again for this file."""
-    return ctx.force and (path, source) not in ctx._refreshed
+    return ctx.force and source not in ctx._refreshed.get(path, ())
 
 
 def _mark_refreshed(ctx: PipelineContext, path: str, source: Source) -> None:
     if ctx.force:
-        ctx._refreshed.add((path, source))
+        ctx._refreshed.setdefault(path, set()).add(source)
 
 
 def _answer_from_another_version(ctx: PipelineContext, rec: FileRecord, spec: LocalDetectorSpec) -> bool:
@@ -866,15 +874,15 @@ def _run_detector(
     )
 
 
-def _note_budget_exhausted(ctx: PipelineContext, source: Source) -> None:
-    """Record that ``source``'s daily budget stopped one file's lookup this job.
+def _note_budget_exhausted(ctx: PipelineContext, source: Source, canonical_path: str) -> None:
+    """Record that ``source``'s daily budget stopped this file's lookup this job.
 
     Warns once per job per source, not once per file: a run-dry source can affect hundreds of files, and a line per
     file would flood the log for no extra information (spec finding 4 raised this from DEBUG). Never logs the key.
     """
     with ctx._budget_lock:
         first = source not in ctx._budget_exhausted
-        ctx._budget_exhausted[source] = ctx._budget_exhausted.get(source, 0) + 1
+        ctx._budget_exhausted.setdefault(source, set()).add(canonical_path)
     if first:
         logger.warning(
             "{}'s daily lookup budget ran out; checking remaining files without it until it resets",
@@ -894,7 +902,7 @@ def budget_exhausted_warnings(ctx: PipelineContext) -> list[str]:
         that (or add a TheIntroDB API key for a higher limit)."
     """
     with ctx._budget_lock:
-        counts = dict(ctx._budget_exhausted)
+        counts = {source: len(paths) for source, paths in ctx._budget_exhausted.items()}
     warnings = []
     for source in sorted(counts, key=lambda s: _ONLINE_LABELS[s]):
         count = counts[source]
@@ -925,7 +933,7 @@ def _lookup(client: Any, source: Source, ids: MediaIds, rec: FileRecord, ctx: Pi
         # unavailable / not_applicable: nothing is stored, so the next run asks again.
         exhausted = isinstance(result, LookupResult) and is_budget_exhausted(result.detail)
         if exhausted:
-            _note_budget_exhausted(ctx, source)
+            _note_budget_exhausted(ctx, source, rec.canonical_path)
         else:
             logger.debug("{} lookup for {}: {}", _ONLINE_LABELS[source], rec.canonical_path, result)
         return exhausted
@@ -1637,7 +1645,7 @@ def _run(
     for _ in range(MAX_ATTEMPTS):
         try:
             with _PATH_LOCKS.hold(item.canonical_path), ctx._running(item.canonical_path):
-                return _attempt(
+                outcome = _attempt(
                     item,
                     ctx,
                     local=local,
@@ -1647,6 +1655,9 @@ def _run(
                     cancel_check=cancel_check,
                     pause_check=pause_check,
                 )
+                if outcome is not None:
+                    ctx._refreshed.pop(item.canonical_path, None)
+                return outcome
         except _FileChangedError:
             logger.info("{} changed while its markers were detected; detecting again", item.canonical_path)
     return ItemOutcome(
