@@ -41,7 +41,8 @@ def cmd_reproduce(args: argparse.Namespace) -> int:
         "tally": report.tally.as_dict(),
         "matcher_tally": report.matcher_tally.as_dict(),
         "spec": dict(zip(("useful", "wrong", "missed"), SPEC_V3, strict=True)),
-        "port_vs_reference": len(report.port_vs_reference),
+        # Without the reference that check never ran: 0 would read as "the port matches it".
+        "port_vs_reference": "not checked" if args.no_reference else len(report.port_vs_reference),
         "drift": len(report.drift),
         "skipped_pairs": len(report.skipped_pairs),
         "silence_dropped": len(report.silence_dropped),
@@ -78,7 +79,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_credits_text(args: argparse.Namespace) -> int:
-    from .credits_text import run_credits_text
+    from .credits_text import UnknownSetError, run_credits_text
 
     ffmpeg = args.ffmpeg or shutil.which("ffmpeg")
     if ffmpeg is None:
@@ -91,8 +92,9 @@ def cmd_credits_text(args: argparse.Namespace) -> int:
             cache_root=root, ffmpeg=ffmpeg, ffprobe=ffprobe_path_for(ffmpeg), baseline_path=baseline,
             sheets_dir=Path(args.sheets) if args.sheets else None,
         )  # fmt: skip
-    except ValueError as exc:
-        # A set that never ran must never look like a set that passed.
+    except UnknownSetError as exc:
+        # A set that never ran must never look like a set that passed. Only this error: any other one (a corrupt
+        # cache or evidence file is a JSONDecodeError, itself a ValueError) keeps its traceback.
         sys.exit(str(exc))
     print(json.dumps(summary, indent=2))
     if args.json:
@@ -135,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     text.add_argument("--ffmpeg")
     text.add_argument("--cache")
-    text.add_argument("--plex-baseline")
+    text.add_argument("--plex-baseline", help=f"Plex's markers (default: evidence/{DEFAULT_BASELINE})")
     text.add_argument("--json", help="write details (local-only: holds file paths)")
     text.set_defaults(func=cmd_credits_text)
     args = parser.parse_args(argv)

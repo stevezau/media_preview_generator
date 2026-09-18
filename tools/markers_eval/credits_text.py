@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 from loguru import logger
 
+from media_preview_generator.markers import credits as credits_package
 from media_preview_generator.markers.credits import rule_j
 from media_preview_generator.markers.credits.detector import CREDITS_TEXT_VERSION, CreditsTextResult, find_credits
 from media_preview_generator.markers.credits.frames import GpuDecodeError
@@ -48,6 +49,49 @@ HIGH_WRONG_PERCENT = 1
 CREDITS = frozenset({MarkerType.CREDITS})
 # The gate's sets: the 80 files (movies40 + tv40 together) and the 205 movies.
 GATE_SETS = {"80": ("movies40", "tv40"), "205": ("movie_credit_truth",)}
+PACKAGE_ROOT = Path(credits_package.__file__).parents[2]
+# The credit text detector and the package code outside it that shapes its answers: the tail decode's arguments and
+# the probe. tests/markers_eval pins that every package module these files import is listed here or changes no answer.
+DETECTOR_SOURCES = ("markers/credits/*.py", "markers/probe.py", "processing/hwaccel.py")
+SHEET_TIMEOUT_S = 300
+HDR_PROBE_TIMEOUT_S = 60
+
+
+class UnknownSetError(ValueError):
+    """``--sets`` names a set this harness doesn't have."""
+
+
+def detector_files(root: Path = PACKAGE_ROOT, patterns: Sequence[str] = DETECTOR_SOURCES) -> list[Path]:
+    """The source files :func:`detector_digest` hashes, sorted.
+
+    Args:
+        root: The ``media_preview_generator`` package folder.
+        patterns: Globs under ``root``.
+
+    Returns:
+        The files.
+    """
+    return sorted({path for pattern in patterns for path in root.glob(pattern)})
+
+
+def detector_digest(root: Path = PACKAGE_ROOT, patterns: Sequence[str] = DETECTOR_SOURCES) -> str:
+    """A digest of the credit text detector's source (:data:`DETECTOR_SOURCES`), part of every cached answer's key.
+
+    ``CREDITS_TEXT_VERSION`` only moves when stored answers in users' ``markers.db`` must be asked again, so it stays
+    put while the detector changes on a branch that never shipped. The harness gates exactly those changes: a cached
+    answer must never outlive the code that made it.
+
+    Args:
+        root: The ``media_preview_generator`` package folder.
+        patterns: Globs under ``root``.
+
+    Returns:
+        16 hex characters.
+    """
+    digest = hashlib.sha256()
+    for path in detector_files(root, patterns):
+        digest.update(path.relative_to(root).as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
+    return digest.hexdigest()[:16]
 
 
 @dataclass
@@ -323,21 +367,34 @@ def undecided_credits(verdicts: Iterable[dict]) -> set[str]:
 
 
 def hdr_kind(path: str, *, ffprobe: str) -> str:
-    """``sdr``, ``hdr10`` (PQ or HLG), ``dv5`` (Dolby Vision profile 5) or ``dv_other`` (ffprobe reads only).
+    """``sdr``, ``hdr10`` (PQ or HLG), ``dv5`` (Dolby Vision profile 5), ``dv_other``, or ``unreadable`` (ffprobe reads
+    only).
 
     Args:
         path: The media file (only read).
         ffprobe: ffprobe binary.
 
     Returns:
-        The file's HDR kind (Task 1 M5's grouping).
+        The file's HDR kind (Task 1 M5's grouping, ``evidence/credits/phase3/measure_hdr.py``): a probe that fails,
+        times out or answers something other than its JSON is ``unreadable``, never counted as ``sdr``.
     """
-    out = subprocess.run(
-        [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
-         "stream=color_transfer:stream_side_data=dv_profile", "-of", "json", path],
-        capture_output=True, text=True, timeout=60,
-    ).stdout  # fmt: skip
-    stream = (json.loads(out or "{}").get("streams") or [{}])[0]
+    try:
+        proc = subprocess.run(
+            [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=color_transfer:stream_side_data=dv_profile", "-of", "json", path],
+            capture_output=True, text=True, timeout=HDR_PROBE_TIMEOUT_S,
+        )  # fmt: skip
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("ffprobe couldn't read the HDR kind of {}: {}", _name(path), type(exc).__name__)
+        return "unreadable"
+    try:
+        answer = json.loads(proc.stdout) if proc.returncode == 0 else None
+    except ValueError:
+        answer = None
+    if not isinstance(answer, dict):
+        logger.warning("ffprobe couldn't read the HDR kind of {} (exit {})", _name(path), proc.returncode)
+        return "unreadable"
+    stream = (answer.get("streams") or [{}])[0]
     profiles = [s.get("dv_profile") for s in stream.get("side_data_list") or [] if "dv_profile" in s]
     if profiles:
         return "dv5" if 5 in profiles else "dv_other"
@@ -398,6 +455,7 @@ class CreditsTextCache:
         self._root.mkdir(parents=True, exist_ok=True)
         self._ffmpeg, self._decode, self._gpu_device = ffmpeg, decode, gpu_device
         self._count_boxes, self._probe = count_boxes, probe
+        self.detector_digest = detector_digest()
         self.gpu_fallbacks: set[str] = set()
 
     def _find(self, path: str, *, is_episode: bool, gpu: str | None) -> CreditsTextResult:
@@ -414,11 +472,14 @@ class CreditsTextCache:
             is_episode: The file is a TV episode (a 450 s tail, T-R4).
 
         Returns:
-            ``{"start_s", "end_s", "key", "fine", "end"}`` (from the cache when this identity, detector version, decode
-            path and kind were read before).
+            ``{"start_s", "end_s", "key", "fine", "end"}`` (from the cache when this identity, detector version and
+            source, decode path and kind were read before).
         """
         st = os.stat(path)
-        key = f"{path}|{st.st_size}|{st.st_mtime_ns}|{CREDITS_TEXT_VERSION}|{self._decode}|{is_episode}"
+        key = (
+            f"{path}|{st.st_size}|{st.st_mtime_ns}|{CREDITS_TEXT_VERSION}|{self.detector_digest}|{self._decode}|"
+            f"{is_episode}"
+        )
         cached = self._root / (hashlib.sha1(key.encode(), usedforsecurity=False).hexdigest() + ".json")
         fell_back = cached.with_suffix(".cpu")
         if cached.exists():
@@ -463,6 +524,19 @@ def _rows_summary(rows: TextRows) -> dict:
             "ends_published": dict(sorted(rows.ends_published.items()))}  # fmt: skip
 
 
+def _write_sheet(ffmpeg: str, path: str, around_s: float, out: Path) -> None:
+    """One frame-check sheet; a failed or stuck ffmpeg is logged and skipped, never ends an hour-long run."""
+    try:
+        proc = subprocess.run(
+            sheet_command(ffmpeg, path, around_s, str(out)), capture_output=True, timeout=SHEET_TIMEOUT_S, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("No frame-check sheet {}: {}", out.name, type(exc).__name__)
+        return
+    if proc.returncode != 0:
+        logger.warning("No frame-check sheet {}: ffmpeg exited {}", out.name, proc.returncode)
+
+
 def _sheet_entry(name: str, detail: dict, reasons: list[str]) -> dict:
     """One row of the frame-check table: names and numbers only, never a path."""
     end = detail["text_end"]
@@ -501,13 +575,13 @@ def run_credits_text(
         meets the spec, and each chosen set passes :func:`gate_checks`).
 
     Raises:
-        ValueError: ``sets`` names a set this harness doesn't have. Checked before anything is measured: a set that is
-            silently skipped (``--sets "80, 205"`` splits to ``"80"`` and ``" 205"``) would report a clean gate for a
-            set that was never run.
+        UnknownSetError: ``sets`` names a set this harness doesn't have. Checked before anything is measured: a set
+            that is silently skipped (``--sets "80, 205"`` splits to ``"80"`` and ``" 205"``) would report a clean gate
+            for a set that was never run.
     """
     unknown = sorted(set(sets) - set(GATE_SETS))
     if unknown:
-        raise ValueError(f"unknown set(s): {unknown}; choose from {sorted(GATE_SETS)}")
+        raise UnknownSetError(f"unknown set(s): {unknown}; choose from {sorted(GATE_SETS)}")
     evidence = evidence_dir()
 
     def load(name: str) -> list | dict:
@@ -516,17 +590,18 @@ def run_credits_text(
     adjudicated = load("adjudicated")
     probes = ProbeCache(cache_root, ffprobe=ffprobe)
     baseline = load_baseline(baseline_path)
-    count_boxes, close = _counter(decode, gpu_device)
-    cache = CreditsTextCache(
-        cache_root, ffmpeg=ffmpeg, decode=decode, gpu_device=gpu_device, count_boxes=count_boxes, probe=probes.probe
-    )
     kinds_of = {"movies40": True, "tv40": False, "movie_credit_truth": True}
-    summary: dict = {"decode": decode, "detector_version": CREDITS_TEXT_VERSION, "sets": {}, "gate": {}, "sheets": []}
     details: dict = {}
     rule = RuleTally()
     kinds: dict[str, RuleTally] = {}
     passed = True
+    count_boxes, close = _counter(decode, gpu_device)
     try:
+        cache = CreditsTextCache(
+            cache_root, ffmpeg=ffmpeg, decode=decode, gpu_device=gpu_device, count_boxes=count_boxes, probe=probes.probe
+        )
+        summary: dict = {"decode": decode, "detector_version": CREDITS_TEXT_VERSION,
+                         "detector_digest": cache.detector_digest, "sets": {}, "gate": {}, "sheets": []}  # fmt: skip
         for group in (g for g in ("80", "205") if g in sets):
             parts = []
             for name in GATE_SETS[group]:
@@ -555,14 +630,9 @@ def run_credits_text(
                     if sheets_dir is not None:
                         sheets_dir.mkdir(parents=True, exist_ok=True)
                         stem = f"{name}-{hashlib.sha1(f['file'].encode(), usedforsecurity=False).hexdigest()[:10]}"
-                        subprocess.run(
-                            sheet_command(ffmpeg, f["file"], f["text"], str(sheets_dir / f"{stem}.jpg")), check=False
-                        )
+                        _write_sheet(ffmpeg, f["file"], f["text"], sheets_dir / f"{stem}.jpg")
                         if f["text_end"] is not None:
-                            subprocess.run(
-                                sheet_command(ffmpeg, f["file"], f["text_end"], str(sheets_dir / f"{stem}-end.jpg")),
-                                check=False,
-                            )
+                            _write_sheet(ffmpeg, f["file"], f["text_end"], sheets_dir / f"{stem}-end.jpg")
             merged = merge_rows(parts)
             files_in_group = sum(len(r.files) for r in parts)
             checks = gate_checks(merged, files_in_group)

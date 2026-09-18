@@ -40,7 +40,9 @@ evidence folder ignores `*.json`).
 - `--full-folder`: matches every episode file in each season folder (`season_group`, the app's rule), which is what
   the app does. The default matches the eval's own file lists, at most 8 files per season, which is how §5.3 was
   measured. In this mode, drift also counts the answers that the larger group changed.
-- `--no-reference`: skips the slow reference.
+- `--no-reference`: skips the slow reference, and with it the gate's first check. Exit 0 then doesn't prove that
+  the port returns what the reference returns, and the summary says `"port_vs_reference": "not checked"`. Use it
+  while iterating; a gate run for a matcher change keeps the reference.
 - `--cache DIR`: overrides the cache folder.
 
 A cold cache fingerprints about 124 files (158 with `--full-folder`), one ffmpeg at a time, at 3–14 s each.
@@ -151,7 +153,8 @@ resting only on credits text and a server's own marker, Q2), `ends_found` (answe
 `ends_published` (decisions whose skip stops before the end of the file).
 
 `rule_j_80` is spec §5.4's own metric for credits text alone on the 80 files — within 5 / 10 / 30 s, early or late by
-more than 30 s, no answer — with `rule_j_80_by_kind` repeating it per HDR kind (`sdr`, `hdr10`, `dv5`, `dv_other`).
+more than 30 s, no answer — with `rule_j_80_by_kind` repeating it per HDR kind (`sdr`, `hdr10`, `dv5`, `dv_other`,
+and `unreadable` for a file ffprobe fails on or times out on).
 
 **The gate** (`gate_checks`, the owner's Q4 ruling of 2026-09-16: precision first, never looser than Plex) is judged
 per set — the 80 (movies40 + tv40 merged) and the 205 movies — and every check is named in `summary["gate"]`:
@@ -178,7 +181,10 @@ nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval credits-text --deco
 The GPU run reads 285 files plus the online cases' 43 and takes about an hour on storage; the CPU run on the 80 files
 takes about 25 minutes. Both are the reported runs: `--decode gpu` is the product path (NVIDIA decode, text detection
 through the helper pool), `--decode cpu` proves the CPU worker path gives the same gate. Answers are cached under
-`$MARKERS_EVAL_CACHE/credits_text` per file identity, detector version, decode path and kind, so a re-run is free.
+`$MARKERS_EVAL_CACHE/credits_text` per file identity, detector version, decode path and kind, and a digest of the
+detector's source (`credits_text.DETECTOR_SOURCES`: `markers/credits/*.py`, the probe and the decode arguments,
+reported as `detector_digest`). A re-run of unchanged code is free; any change to that code measures every file
+again, even when `CREDITS_TEXT_VERSION` stays the same.
 
 - `--online`: also the 43 verified online cases at the app's three source settings, with credit text added the way the
   pipeline adds it — only to cases whose credits the online answers and Plex's markers leave undecided. The count is

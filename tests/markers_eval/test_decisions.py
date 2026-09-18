@@ -124,3 +124,19 @@ def test_season_segments_eval_lists_and_full_folder(tmp_path):
     assert sorted(asked) == sorted(fps)
     assert [full[f][2:] for f in eval_files] == [(3, 3), (3, 3)]
     assert set(full) == set(eval_files)
+
+
+def test_the_harness_decides_in_the_apps_source_order():
+    # decide() breaks ties by source order, so an order the app no longer uses would measure other decisions.
+    import copy
+
+    from media_preview_generator.markers import pipeline
+    from media_preview_generator.markers.settings import DEFAULT_GLOBAL_MARKERS, load_global, validate_global
+    from tools.markers_eval.decisions import ORDER
+    from tools.markers_eval.online import DEFAULT_ORDER, THEINTRODB_ORDER
+
+    raw = copy.deepcopy(DEFAULT_GLOBAL_MARKERS)
+    assert pipeline._decision_order(load_global(validate_global(raw, None)[0])) == DEFAULT_ORDER
+    for source in raw["sources"]:
+        source["enabled"] = True
+    assert pipeline._decision_order(load_global(validate_global(raw, None)[0])) == THEINTRODB_ORDER == ORDER

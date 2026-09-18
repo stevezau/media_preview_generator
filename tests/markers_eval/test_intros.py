@@ -139,3 +139,28 @@ def test_the_gate_refuses_skipped_pairs_with_runs_and_useful_answers_the_guard_d
 
     report = ReproductionReport(tally=Tally(*SPEC_V3), skipped_pairs=skipped, silence_dropped=dropped)
     assert report.passed is passed
+
+
+def test_the_summary_never_reports_a_port_comparison_it_skipped(monkeypatch, capsys):
+    # --no-reference skips the gate's first check; "port_vs_reference": 0 would read as "the port matches it".
+    import json
+    from types import SimpleNamespace
+
+    from tools.markers_eval import __main__ as cli
+    from tools.markers_eval.intros import SPEC_V3, ReproductionReport
+    from tools.markers_eval.score import Tally
+
+    asked = []
+
+    def fake_reproduce(episodes, *, points, with_reference, full_folder):
+        asked.append(with_reference)
+        return ReproductionReport(tally=Tally(*SPEC_V3))
+
+    monkeypatch.setattr(cli, "_cache", lambda args: SimpleNamespace(points=None))
+    monkeypatch.setattr(cli, "load_v3_results", lambda: [])
+    monkeypatch.setattr(cli, "reproduce", fake_reproduce)
+    assert cli.main(["reproduce", "--no-reference"]) == 0
+    assert json.loads(capsys.readouterr().out)["port_vs_reference"] == "not checked"
+    assert cli.main(["reproduce"]) == 0
+    assert json.loads(capsys.readouterr().out)["port_vs_reference"] == 0
+    assert asked == [False, True]
