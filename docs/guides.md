@@ -794,8 +794,9 @@ way. When the job already there is paused, the message is "A Check servers job i
 dashboard." A job paused by its schedule's stop time is resumed by that schedule's next start (or **Run now**), even
 if you've switched the schedule between **Find markers** and **Check servers** since. That start queues nothing else;
 the schedule's own mode queues on a later start, once the resumed job has finished. A job you paused yourself stays
-paused until you resume it, and deleting the schedule leaves a paused job paused. **Re-run** clears **Pause all**, as
-it does for any job. With Intro & Credits off on every server there's nothing to check.
+paused until you resume it. Deleting the schedule, or switching it to a preview or Recently Added schedule, leaves a
+paused job paused, and the log gets a warning naming the job: resume or cancel it on the dashboard. **Re-run** clears
+**Pause all**, as it does for any job. With Intro & Credits off on every server there's nothing to check.
 
 Its tooltip sums it up: "Checks that every server with Intro & Credits on still shows the markers this app sent, and
 sends them again where they're missing or changed (unless that server is set to keep its own). Covers all servers and
@@ -832,6 +833,9 @@ libraries." In detail:
   means reading that server raised an error, or a Jellyfin or Emby server failed 20 reads in a row and the rest of it
   was left for the next run; "Couldn't check Home Plex: no connection to it" means there was no client for it.
 - With nothing to fix it finishes at once; its log says "Every server checked still shows what this app published".
+- A Check servers job that was running when the app restarted picks up where it was: it checks the files its first run
+  listed, skipping those it had finished, rather than listing again (the first listing already used up the rechecks and
+  retries among them). The list is kept on the job only until it ends.
 
 ### Turning it off, or revoking the Plex confirmation
 
