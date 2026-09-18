@@ -200,6 +200,13 @@ against the chapter; on 46 files credits text is more than 30 s later than the c
 
 ## Ends (the owner's Q3)
 
+**These numbers predate a milestone-audit fix to `rule_j.coarse_end_s`** (it was reading the run's last emitted row
+instead of its latest credit keyframe -- the same decode-order-for-presentation-order mistake already fixed once for
+the start). The fix can only move a reported end later or make it disappear, never earlier, so this section's counts
+and lines are a safe lower bound, not the current numbers; a fresh run (the local harness cache was cleared) would
+move a small number of rows. The start numbers above are unaffected -- confirmed no caller passes anything but the
+default `RuleParams` to the start path, and the anchor fix's own regression test is untouched by this one.
+
 19 set rows — 17 distinct files (3 of the 80, 16 of the 205, two of them shared) — gave credits text an end: more than
 30 s of the file follows the roll's last credit keyframe, so the skip stops there instead of running to the end of the
 file.

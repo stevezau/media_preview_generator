@@ -232,15 +232,18 @@ class TestIntroCreditsSettings:
         expect(row.locator(".markers-source-unavailable")).to_be_hidden()
         expect(row.locator(".markers-source-reason")).to_be_hidden()
         expect(row).to_contain_text(
-            "Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file"
+            "Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file; 4K without "
+            "a GPU up to about 2 min"
         )
+        # The numbers are the app's own reported GPU run on the 80 (evidence/eval/phase3-harness.md): 63 within 10 s,
+        # 1 more than 30 s early, 3 with no answer. "missed" is the no-answer count, never the 8 late answers.
         tooltip = row.locator(".info-icon").evaluate(
             "el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')"
         )
         assert tooltip == (
             "Finds where the credit roll starts from text on screen near the end of the file, and stops the skip at "
-            "the last credit when a scene follows. Tested alone on 80 files: within 10 s on 63, more than 30 s early "
-            'on 1, missed 8. At "High" another source has to agree; at "Medium" it can publish alone.'
+            "the last credit when a scene follows. Tested alone on 80 files, on a GPU: within 10 s on 63, more than 30 s early "
+            'on 1, missed 3. At "High" another source has to agree; at "Medium" it can publish alone.'
         )
         row.locator(".markers-source-enabled").click()
         sent = _wait_for_post(
@@ -358,6 +361,20 @@ class TestIntroCreditsSettings:
             "answer never publishes on its own, because those don't know which cut you have. Anything else shows as "
             "Needs review."
         )
+
+    def test_intros_toggle_tooltip_names_season_audio_as_live(self, authed_page: Page, app_url: str) -> None:
+        # Season audio shipped before this feature; the tooltip must not still call it "(soon)".
+        _open_settings(authed_page, app_url, _default_markers())
+        icon = authed_page.locator("label[for='markersDetectIntro'] + .info-icon")
+        tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
+        assert tooltip == "Found from chapters, online databases, and by matching the theme tune across a season."
+
+    def test_credits_toggle_tooltip_does_not_claim_season_audio(self, authed_page: Page, app_url: str) -> None:
+        # Season audio only ever detects intros/recaps (markers/audio/season.py), never credits.
+        _open_settings(authed_page, app_url, _default_markers())
+        icon = authed_page.locator("label[for='markersDetectCredits'] + .info-icon")
+        tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
+        assert tooltip == "Found from chapters, online databases, and the on-screen credit roll."
 
     def test_stored_order_and_values_render(self, authed_page: Page, app_url: str) -> None:
         markers = _default_markers()

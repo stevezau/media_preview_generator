@@ -9,9 +9,11 @@ presentation order, where the prototype took the median gap of every row of the 
 fix a start that collapsed onto the end of the roll and move the 80 files at the spec's 20 s refine span from the
 prototype's 59 / 1 / 8 / 4 to 63 / 1 / 8 / 4, every changed file closer to the truth than the prototype had it
 (§5.4's table was measured at 10 s, late 9; ``tests/fixtures/markers/credits_rule_j_80.json.gz``,
-whose stored errors stay the prototype's -- ``TestEightyFiles`` names the seven items that differ). Everywhere else
-rows stay in ffmpeg's output order: the measured keyframe rows aren't always increasing, and sorting them changes an
-answer.
+whose stored errors stay the prototype's -- ``ANCHOR_DIVERGENCES`` in ``tests/markers/credits/test_rule_j.py`` names
+the seven items that differ).
+``coarse_end_s`` reads the run's latest credit frame in presentation order for the same reason, so Q3's end means the
+end of the roll rather than whichever of its keyframes ffmpeg emitted last. Everywhere else rows stay in ffmpeg's
+output order: the measured keyframe rows aren't always increasing, and sorting them changes an answer.
 """
 
 from __future__ import annotations
@@ -66,7 +68,8 @@ class Coarse:
 
     Attributes:
         index: The start's row in the keyframe rows.
-        end_index: The run's last credit row.
+        end_index: The run's last credit row in ffmpeg's output order, which is where the run stops, not when: the
+            run's latest time is :func:`coarse_end_s`.
         pts_s: The start's time.
     """
 
@@ -241,9 +244,29 @@ def credits_start(
     return None if coarse is None else refine_start(rows, coarse, fine_rows, before_s=before_s, params=params)
 
 
-def coarse_end_s(rows: Sequence[Row], coarse: Coarse) -> float:
-    """The chosen run's last credit keyframe."""
-    return rows[coarse.end_index][0]
+def coarse_end_s(rows: Sequence[Row], coarse: Coarse, params: RuleParams = RULE_J) -> float:
+    """The chosen run's last credit keyframe, in presentation order.
+
+    The rows are in ffmpeg's output order, which isn't always increasing, so the run's last *row* is not always its
+    latest: on four of the 80 files it sits 10-21 s before the run's latest credit keyframe. Reading the row instead
+    is the same decode-order-for-presentation-order mistake :func:`_run_spacing` fixes for the anchor, one layer over,
+    and it moved movie-11 across Q3's 30 s line -- the roll really ends 20 s before the file does, so the skip runs to
+    the end, yet the end window was decoded and walked anyway.
+
+    Args:
+        rows: Keyframe rows of the tail, in decode order.
+        coarse: The coarse start (``index`` and ``end_index`` bound the run).
+        params: Rule thresholds, deciding which of the run's rows are credit frames.
+
+    Returns:
+        The time of the run's latest credit frame. Both ends of the slice are credit frames under the ``params``
+        ``coarse`` was found with, so there is always one -- unless a mismatched ``params`` is passed here, in which
+        case this degrades to the run's last row rather than raising on an empty ``max()``.
+    """
+    return max(
+        (row[0] for row in rows[coarse.index : coarse.end_index + 1] if is_credit(row, params)),
+        default=rows[coarse.end_index][0],
+    )
 
 
 def keeps_a_scene_after(end_s: float, duration_s: float) -> bool:
@@ -266,7 +289,7 @@ def refine_end(
 
     Args:
         rows: The keyframe rows the coarse start came from.
-        coarse: The coarse start (its ``end_index`` is the run's last credit keyframe).
+        coarse: The coarse start (``end_index`` is where the run stops, not when -- see :func:`coarse_end_s`).
         fine_rows: 1 fps rows (any window; only ``[end − 1 s, end + after_s]`` is read).
         after_s: How far past the last credit keyframe the refinement may reach.
         params: Rule thresholds.
@@ -274,7 +297,7 @@ def refine_end(
     Returns:
         The refined end in seconds (the keyframe's time when the window holds no credit frame).
     """
-    t = coarse_end_s(rows, coarse)
+    t = coarse_end_s(rows, coarse, params)
     window = [j for j, row in enumerate(fine_rows) if t - REFINE_END_BEFORE_S <= row[0] <= t + after_s]
     credit = [j for j in window if is_credit(fine_rows[j], params)]
     if not credit:
@@ -308,7 +331,7 @@ def credits_end(
     Returns:
         The end in seconds, or None: the skip runs to the end of the file.
     """
-    if not keeps_a_scene_after(coarse_end_s(rows, coarse), duration_s):
+    if not keeps_a_scene_after(coarse_end_s(rows, coarse, params), duration_s):
         return None
     end = refine_end(rows, coarse, fine_rows, params=params)
     return end if keeps_a_scene_after(end, duration_s) else None

@@ -371,6 +371,46 @@ class TestEnd:
         # From 123 s the walk would stop at once (126 s is 3 s later); the window starts at 124 s.
         assert rule_j.refine_end(self.ROWS, self._coarse(), [dark(123, 1), dark(126, 1)]) == 126.0
 
+    SWAPPED = [*[bright(t) for t in range(0, 100, 2)], dark(100, 1), dark(120, 1), dark(116, 1)]
+
+    def test_the_end_is_the_runs_latest_credit_frame_not_its_last_emitted_row(self):
+        # Four of the 80 files emit the roll's last keyframes out of order, leaving the run's last ROW 10-21 s before
+        # its latest credit frame. Reading the row put movie-11's end 10.4 s early -- enough to cross Q3's 30 s line
+        # and decode an end window for a roll that really runs to the end of the file.
+        coarse = rule_j.coarse_start(self.SWAPPED)
+        assert coarse is not None and self.SWAPPED[coarse.end_index][0] == 116.0  # the last row emitted, 4 s early
+        assert rule_j.coarse_end_s(self.SWAPPED, coarse) == 120.0
+        # 148 − 120 = 28 s, so the skip runs to the end of the file and the fine rows are never read. The last emitted
+        # row says 32 s, which keeps an end and decodes a window for it.
+        assert rule_j.credits_end(self.SWAPPED, coarse, _UnreadRows(), 148.0) is None
+
+    def test_the_end_walk_starts_from_the_runs_latest_credit_frame(self):
+        # The window is [end − 1 s, end + 20 s] around 120 s, so the 116 s row is outside it; anchored on the last
+        # emitted row (116 s) the walk would start there and stop at once, 4 s inside the roll.
+        coarse = rule_j.coarse_start(self.SWAPPED)
+        fine = [dark(116, 1), dark(119, 1), dark(120, 1)]
+        assert rule_j.refine_end(self.SWAPPED, coarse, fine) == 120.0
+
+    def test_a_row_swept_into_the_run_without_text_is_never_its_end(self):
+        # The dark bridge and the 24 s join pull rows with no text into a run. The end is a credit frame, never one of
+        # those, even when one of them carries the run's latest timestamp.
+        rows = [*[bright(t) for t in range(0, 100, 2)], dark(100, 1), dark(130, 0), dark(118, 1)]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and rule_j.credit_runs(rows) == [(50, 52)]
+        assert rule_j.coarse_end_s(rows, coarse) == 118.0
+
+    def test_params_changes_which_of_the_runs_rows_count_as_its_end(self):
+        # coarse is found once, under the caller's params; end functions take params separately (a future per-vendor
+        # tuning could pass a different one at each step), so params has to be pinned on the end path too.
+        rows = [*[bright(t) for t in range(0, 100, 2)], dark(100, 2), dark(110, 2), dark(120, 1)]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and rule_j.credit_runs(rows) == [(50, 52)]
+        assert rule_j.coarse_end_s(rows, coarse) == 120.0
+        # min_boxes=2 drops the 120 s row (1 box) but not the 100/110 s rows (2 boxes): the end moves to 110.
+        assert rule_j.coarse_end_s(rows, coarse, params=rule_j.RuleParams(min_boxes=2)) == 110.0
+        # No row in the slice qualifies at min_boxes=99: degrades to the run's last row instead of raising.
+        assert rule_j.coarse_end_s(rows, coarse, params=rule_j.RuleParams(min_boxes=99)) == rows[coarse.end_index][0]
+
 
 @lru_cache(maxsize=1)
 def _fixture() -> dict:
@@ -510,15 +550,31 @@ class TestEightyFiles:
             coarse = rule_j.coarse_start(key)
             assert coarse is None or coarse.index < coarse.end_index, item["id"]
 
-    def test_four_of_the_76_runs_end_more_than_30_s_before_the_end_of_the_file(self):
-        # Measured while planning, on coarse ends (the fixture's 1 fps rows sit around the start, so no end refine here).
+    def test_three_of_the_76_runs_end_more_than_30_s_before_the_end_of_the_file(self):
+        # Measured while planning on coarse ends (the fixture's 1 fps rows sit around the start, so no end refine
+        # here). Four while the end was the run's last emitted row: movie-11's roll ends 20.4 s before the file does,
+        # and only reading its last row (10.4 s earlier, its keyframes come out of order) put it over the 30 s line.
         kept = []
         for item in _fixture()["items"]:
             key = _rows(item["key"])
             coarse = rule_j.coarse_start(key)
             if coarse is not None and rule_j.keeps_a_scene_after(rule_j.coarse_end_s(key, coarse), item["duration_s"]):
                 kept.append(item["id"])
-        assert len(kept) == 4, kept
+        assert kept == ["movie-24", "movie-35", "tv-31"]
+
+    def test_the_run_ends_later_than_its_last_emitted_row_on_four_files(self):
+        # The shape the end fix addresses, on the measured rows: the run's last row in ffmpeg's output order sits
+        # 10-21 s before the run's latest credit keyframe.
+        moved = {}
+        for item in _fixture()["items"]:
+            key = _rows(item["key"])
+            coarse = rule_j.coarse_start(key)
+            if coarse is None:
+                continue
+            gap = rule_j.coarse_end_s(key, coarse) - key[coarse.end_index][0]
+            if gap:
+                moved[item["id"]] = round(gap, 3)
+        assert moved == {"movie-11": 10.417, "movie-28": 10.010, "movie-38": 20.854, "tv-26": 10.427}
 
     def test_fixture_is_anonymised(self):
         raw = gzip.decompress(FIXTURE.read_bytes()).decode()

@@ -249,8 +249,8 @@ paragraph.
 - **Q3 · End of a credits text candidate.** Rule J defines only the start; the planner recommended no end.
   **OWNER DECISION (2026-09-16), changed from the recommendation: a credits text candidate ends at the last credit frame
   of the chosen run (refined like the start, at the last contiguous credit frame) when that run ends more than 30 s
-  before the end of the file; otherwise it runs to the end of the file (no end).** Measured: 4 of the 76 runs end more
-  than 30 s early. In a cluster the earliest end wins (rule 4's safer other edge), so a text end shortens an agreeing
+  before the end of the file; otherwise it runs to the end of the file (no end).** Measured: 3 of the 76 runs end more
+  than 30 s early (a milestone-audit fix corrected the end to the run's own latest credit keyframe instead of ffmpeg's decode-order last row; one of the original 4 -- movie-11 -- had only crossed the 30 s line because of that bug). In a cluster the earliest end wins (rule 4's safer other edge), so a text end shortens an agreeing
   SkipDB answer or a server's final credits; a chapter decision keeps the chapter's end. Emby is unchanged (R1: it gets
   the start and "Emby skips to the end of the file"). Pinned in Tasks 3 (`rule_j.credits_end`), 8 (detector end
   window, candidate end, pipeline and Emby tests), 9 (`TestEndQ3`), 10 (Inspector lane and copy), 11 (end counts and
@@ -302,8 +302,8 @@ paragraph.
 
 - Settings → Intro & Credits → "On-screen credit text": the "Coming soon" badge goes and the switch works.
   - ⓘ (Q1, Q3): "Finds where the credit roll starts from text on screen near the end of the file, and stops the skip
-    at the last credit when a scene follows. Tested alone on 80 files: within 10 s on 59, more than 30 s early on 1,
-    missed 4. At "High" another source has to agree; at "Medium" it can publish alone." (Task 10 takes the numbers
+    at the last credit when a scene follows. Tested alone on 80 files, on a GPU: within 10 s on 63, more than 30 s early on 1,
+    missed 3. At "High" another source has to agree; at "Medium" it can publish alone." (Task 10 takes the numbers
     from Task 11's run of the app when Task 11 lands first; otherwise these planning numbers, corrected in Task 12.)
   - Subtitle: "Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file" (the range is
     replaced by Task 1's measured CPU and GPU figures if they fall outside it).
@@ -311,9 +311,9 @@ paragraph.
     includes; they aren't installed here" · "Needs the text detection model, which the Docker image includes; it isn't
     at <path>" · "The text detection model at <path> isn't the expected file" · "The text detection check didn't
     answer; it is checked again in 10 minutes".
-- Settings → Intro & Credits section ⓘ (today "Found from chapters, online databases and (soon) by matching the theme
-  tune across a season."): "Found from chapters, online databases, the theme tune a season's episodes share, and the
-  on-screen credit roll."
+- Settings → Intro & Credits, the **Credits** toggle's own ⓘ (this is the credits toggle, not the intro one — season
+  audio only ever detects intros/recaps, never credits, so it is not listed here): "Found from chapters, online
+  databases, and the on-screen credit roll."
 - Dashboard worker row steps: "Reading the credits…", "Refining the credits start…", and "Finding where the credits
   end…" (only when more than 30 s of the file follows the roll).
 - Inspector: the existing "Credit text" lane shows the bar: "1:55:12 →" when it runs to the end, "1:55:12–1:59:40" when
@@ -6463,11 +6463,11 @@ local sources first."). Add to `TestIntroCreditsSettings`:
         row = authed_page.locator("#markersSourceList .markers-source[data-id='credits_text']")
         expect(row.locator(".markers-source-unavailable")).to_be_hidden()
         expect(row.locator(".markers-source-reason")).to_be_hidden()
-        expect(row).to_contain_text("Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file")
+        expect(row).to_contain_text("Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file; 4K without a GPU up to about 2 min")
         tooltip = row.locator(".info-icon").evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
         assert tooltip == (
             "Finds where the credit roll starts from text on screen near the end of the file, and stops the skip at the "
-            "last credit when a scene follows. Tested alone on 80 files: within 10 s on 59, more than 30 s early on 1, "
+            "last credit when a scene follows. Tested alone on 80 files, on a GPU: within 10 s on 63, more than 30 s early on 1, "
             'missed 4. At "High" another source has to agree; at "Medium" it can publish alone."
         )
         row.locator(".markers-source-enabled").click()
@@ -6544,8 +6544,8 @@ report the lane's text before changing the script.
 
 - [ ] **Step 4: Settings markup, script and CSS**
 
-`settings.html`, the section ⓘ (~474): `title="Found from chapters, online databases, the theme tune a season's episodes
-share, and the on-screen credit roll."`
+`settings.html`, the **Credits** toggle's own ⓘ (~484, not the Intros toggle's at ~474 -- season audio only ever
+detects intros/recaps): `title="Found from chapters, online databases, and the on-screen credit roll."`
 
 The sources comment (~531): drop the sentence about "Coming soon" sources, keeping "Order is the order sources are
 checked and which one's times win. Reordered by the grip (drag) or the ▲/▼ buttons (keyboard and touch)."
@@ -6557,9 +6557,9 @@ The row (replaces the whole `<li class="markers-source markers-source-soon" data
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">On-screen credit text</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds where the credit roll starts from text on screen near the end of the file, and stops the skip at the last credit when a scene follows. Tested alone on 80 files: within 10 s on 59, more than 30 s early on 1, missed 4. At &quot;High&quot; another source has to agree; at &quot;Medium&quot; it can publish alone."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds where the credit roll starts from text on screen near the end of the file, and stops the skip at the last credit when a scene follows. Tested alone on 80 files, on a GPU: within 10 s on 63, more than 30 s early on 1, missed 3. At &quot;High&quot; another source has to agree; at &quot;Medium&quot; it can publish alone."><i class="bi bi-info-circle"></i></button>
                                     <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1 markers-source-unavailable" hidden>Not available</span>
-                                    <div class="small text-muted">Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file</div>
+                                    <div class="small text-muted">Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file; 4K without a GPU up to about 2 min</div>
                                     <div class="small text-warning-emphasis markers-source-reason" hidden></div>
                                 </div>
                                 <div class="markers-source-controls">

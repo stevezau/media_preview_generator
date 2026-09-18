@@ -471,7 +471,7 @@
                         <div class="markers-opt mb-3">
                             <div>
                                 <label for="markersDetectIntro">Intros</label>
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Found from chapters, online databases and (soon) by matching the theme tune across a season."><i class="bi bi-info-circle"></i></button>
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Found from chapters, online databases, and by matching the theme tune across a season."><i class="bi bi-info-circle"></i></button>
                                 <div class="small text-muted">TV episodes</div>
                             </div>
                             <div class="form-check form-switch markers-switch">
@@ -618,9 +618,9 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">On-screen credit text</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds where the credit roll starts from text on screen near the end of the file, and stops the skip at the last credit when a scene follows. Tested alone on 80 files: within 10 s on 63, more than 30 s early on 1, missed 8. At &quot;High&quot; another source has to agree; at &quot;Medium&quot; it can publish alone."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds where the credit roll starts from text on screen near the end of the file, and stops the skip at the last credit when a scene follows. Tested alone on 80 files, on a GPU: within 10 s on 63, more than 30 s early on 1, missed 3. At &quot;High&quot; another source has to agree; at &quot;Medium&quot; it can publish alone."><i class="bi bi-info-circle"></i></button>
                                     <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1 markers-source-unavailable" hidden>Not available</span>
-                                    <div class="small text-muted">Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file</div>
+                                    <div class="small text-muted">Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file; 4K without a GPU up to about 2 min</div>
                                     <div class="small text-warning-emphasis markers-source-reason" hidden></div>
                                 </div>
                                 <div class="markers-source-controls">
