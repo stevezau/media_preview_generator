@@ -31,6 +31,39 @@ _SEGMENT_KEYS = (
     ("preview", MarkerType.PREVIEW),
 )
 _API_TYPES = {"movie": "movie", "episode": "tv"}
+# How a lookup's ``unavailable`` detail starts when TheIntroDB refused the key (or its lack of one) or the key can't be
+# sent: every lookup of the job then fails the same way (``is_key_refusal``). ``paced_get_json`` appends " (HTTP n)".
+_KEY_REJECTED = f"{_LABEL} rejected the API key"
+_KEY_REQUIRED = f"{_LABEL} requires an API key"
+_KEY_INVALID = f"{_LABEL} API key contains invalid characters"
+
+
+def sendable_api_key(key: str) -> bool:
+    """Whether a (stripped) key can go in the Authorization header: printable ASCII with no whitespace.
+
+    A pasted zero-width space or curly quote would make http.client raise with the header (the key) in the traceback,
+    so such a key is never put in a header; Settings refuses it before it is saved.
+
+    Args:
+        key: The key, surrounding whitespace already stripped.
+
+    Returns:
+        True when the client would send it.
+    """
+    return key.isascii() and key.isprintable() and not any(ch.isspace() for ch in key)
+
+
+def is_key_refusal(detail: str) -> bool:
+    """Whether an ``unavailable`` lookup's detail says TheIntroDB refused the API key, requires one, or the key can't
+    be sent, so every lookup of the job fails the same way until the key is changed in Settings.
+
+    Args:
+        detail: A ``LookupResult.detail``.
+
+    Returns:
+        True for a key refusal.
+    """
+    return detail.startswith((_KEY_REJECTED, _KEY_REQUIRED, _KEY_INVALID))
 
 
 class TheIntroDbClient:
@@ -52,9 +85,7 @@ class TheIntroDbClient:
             session: HTTP session (default: the shared one).
         """
         key = (api_key or "").strip()
-        # A pasted zero-width space or curly quote would make http.client raise with the header (the key) in the
-        # traceback, so such a key is never put in a header at all.
-        self._key_invalid = not (key.isascii() and key.isprintable() and not any(ch.isspace() for ch in key))
+        self._key_invalid = not sendable_api_key(key)
         self._api_key = "" if self._key_invalid else key
         self._limiter = limiter if limiter is not None else get_limiter("theintrodb")
         self._session = session if session is not None else http_session()
@@ -93,11 +124,11 @@ class TheIntroDbClient:
         if isinstance(params, LookupResult):
             return params
         if self._key_invalid:
-            refused = LookupResult("unavailable", detail=f"{_LABEL} API key contains invalid characters")
+            refused = LookupResult("unavailable", detail=_KEY_INVALID)
             self._warn_key(refused.detail)
             return refused
         headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
-        auth_refused = f"{_LABEL} rejected the API key" if self._api_key else f"{_LABEL} requires an API key"
+        auth_refused = _KEY_REJECTED if self._api_key else _KEY_REQUIRED
         body = paced_get_json(
             _LABEL,
             BASE_URL,

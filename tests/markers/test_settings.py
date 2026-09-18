@@ -2,6 +2,10 @@ import pytest
 
 from media_preview_generator.markers import settings as ms
 
+# Characters a pasted key can carry that the TheIntroDB client can't send (spelled out: they are invisible).
+ZERO_WIDTH_SPACE, NO_BREAK_SPACE = chr(0x200B), chr(0xA0)
+LEFT_QUOTE, RIGHT_QUOTE, E_ACUTE = chr(0x201C), chr(0x201D), chr(0xE9)
+
 
 class TestValidateGlobal:
     def test_defaults_when_raw_is_empty_dict(self):
@@ -64,31 +68,43 @@ class TestValidateGlobal:
         block, err = ms.validate_global(raw, None)
         assert block is None and "api_key" in err
 
+    BAD_KEY_ERROR = "markers.sources: theintrodb api_key must be up to 200 printable ASCII characters with no spaces"
+
     @pytest.mark.parametrize(
         "key",
-        ["abc​def", "“abc”", "clé-123", "abc\x00def", "abc\x7fdef", "a b"],
-        ids=["zero-width-space", "curly-quotes", "non-ascii-letter", "nul", "del", "no-break-space"],
+        [
+            f"abc{ZERO_WIDTH_SPACE}def",
+            f"{LEFT_QUOTE}abc{RIGHT_QUOTE}",
+            f"cl{E_ACUTE}-123",
+            "abc\x00def",
+            "abc\x7fdef",
+            f"a{NO_BREAK_SPACE}b",
+            "k" * 201,
+        ],
+        ids=["zero-width-space", "curly-quotes", "non-ascii-letter", "nul", "del", "no-break-space", "too-long"],
     )
     def test_rejects_an_api_key_the_client_would_refuse_on_every_lookup(self, key):
         # The TheIntroDB client only sends printable ASCII without whitespace; anything else would be saved and then
         # fail every lookup with "API key contains invalid characters".
         raw = {"sources": [{"id": "theintrodb", "enabled": True, "api_key": key}]}
-        block, err = ms.validate_global(raw, None)
-        assert block is None and err == "markers.sources: theintrodb api_key must be printable ASCII with no spaces"
+        assert ms.validate_global(raw, None) == (None, self.BAD_KEY_ERROR)
 
-    def test_accepts_a_printable_ascii_key_with_punctuation(self):
-        raw = {"sources": [{"id": "theintrodb", "enabled": True, "api_key": "tidb_AbC-123.xyz=="}]}
+    def test_rejects_a_new_bad_key_posted_over_a_valid_stored_one(self):
+        stored = {"sources": [{"id": "theintrodb", "enabled": True, "api_key": "real-key-123"}]}
+        posted = {"sources": [{"id": "theintrodb", "enabled": True, "api_key": f"real-key-123{ZERO_WIDTH_SPACE}"}]}
+        assert ms.validate_global(posted, stored) == (None, self.BAD_KEY_ERROR)
+
+    @pytest.mark.parametrize("key", ["tidb_AbC-123.xyz==", "k" * 200])
+    def test_accepts_a_printable_ascii_key_with_punctuation(self, key):
+        raw = {"sources": [{"id": "theintrodb", "enabled": True, "api_key": key}]}
         block, err = ms.validate_global(raw, None)
-        assert (
-            err == ""
-            and next(s for s in block["sources"] if s["id"] == "theintrodb")["api_key"] == "tidb_AbC-123.xyz=="
-        )
+        assert err == "" and next(s for s in block["sources"] if s["id"] == "theintrodb")["api_key"] == key
 
     def test_a_stored_key_the_client_would_refuse_never_resets_the_other_settings(self):
         # Saved before this check existed: loading it (and saving with the masked key) keeps everything else.
         stored = {
             "publish_when": "medium",
-            "sources": [{"id": "theintrodb", "enabled": True, "api_key": "abc​def"}],
+            "sources": [{"id": "theintrodb", "enabled": True, "api_key": f"abc{ZERO_WIDTH_SPACE}def"}],
         }
         assert ms.load_global(stored).publish_when == "medium"
         posted = {"publish_when": "high", "sources": [{"id": "theintrodb", "enabled": True, "api_key": ms.SECRET_MASK}]}
