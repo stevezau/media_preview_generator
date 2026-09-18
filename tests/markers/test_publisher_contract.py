@@ -163,7 +163,6 @@ def emby(tmp_path):
 
     path = _media(tmp_path)
     fake = FakeEmby(path, item_id="4242")
-    fake.server.get_media_source_durations.return_value = [DUR]
     cfg = _config("emby-1", ServerType.EMBY, str(tmp_path / "media"))
 
     def shown():

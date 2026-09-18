@@ -58,7 +58,6 @@ def _ready_server():
     server.get_bridge_info.return_value = {"installed": True, "version": "1.0.0.0", "features": ["markers"]}
     server.get_bridge_markers_access.return_value = "ok"
     server.bridge_catalog_listed.return_value = False
-    server.get_media_source_durations.return_value = [DUR]
     return server
 
 

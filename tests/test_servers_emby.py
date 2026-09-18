@@ -2116,33 +2116,3 @@ class TestPluginNames:
         server = make_server()
         server._request = MagicMock(side_effect=side_effect, return_value=resp)
         assert server.get_plugin_names() is None
-
-
-class TestMediaSourceDurations:
-    """``get_media_source_durations``: one duration per version of an item (Emby markers are one set per item)."""
-
-    def test_one_duration_per_media_source(self, make_server):
-        server = make_server()
-        server._fetch_item_fields = MagicMock(
-            return_value={
-                "MediaSources": [
-                    {"Id": "a", "RunTimeTicks": 14_445_740_000},
-                    {"Id": "b", "RunTimeTicks": 13_845_749_999},
-                    {"Id": "c"},
-                    {"Id": "d", "RunTimeTicks": True},
-                    "junk",
-                ]
-            }
-        )
-        assert server.get_media_source_durations("42") == [1_444_574, 1_384_574, None, None]
-        server._fetch_item_fields.assert_called_once_with("42", "MediaSources")
-
-    def test_no_media_sources_is_empty(self, make_server):
-        server = make_server()
-        server._fetch_item_fields = MagicMock(return_value={"MediaSources": None})
-        assert server.get_media_source_durations("42") == []
-
-    def test_lookup_failure_is_none(self, make_server):
-        server = make_server()
-        server._fetch_item_fields = MagicMock(return_value=None)
-        assert server.get_media_source_durations("42") is None

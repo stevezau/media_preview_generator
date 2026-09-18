@@ -2261,20 +2261,11 @@ class TestServerMarkersFromVendors:
             (ServerType.PLEX, [S03E05_BLURAY_MS, S03E05_BLURAY_MS - 1_500], DecisionStatus.DECIDED),
             (ServerType.PLEX, [S03E05_BLURAY_MS, S03E05_BLURAY_MS - 60_000], DecisionStatus.NEEDS_REVIEW),
             (ServerType.PLEX, None, DecisionStatus.NEEDS_REVIEW),
-            # Each Emby version is its own item with its own markers (spec §3.3): the versions Emby lists don't matter.
-            (ServerType.EMBY, [S03E05_BLURAY_MS], DecisionStatus.DECIDED),
-            (ServerType.EMBY, [S03E05_BLURAY_MS - 60_000, S03E05_BLURAY_MS], DecisionStatus.DECIDED),
+            # Each Emby version is its own item with its own markers (spec §3.3): no duration check, so one row covers
+            # Emby (the versions an item lists are test_emby_markers_count_only_for_this_files_own_version's).
             (ServerType.EMBY, None, DecisionStatus.DECIDED),
         ],
-        ids=[
-            "plex-one-version",
-            "plex-same-cut",
-            "plex-other-cut",
-            "plex-unreadable",
-            "emby-one",
-            "emby-other-cut-listed",
-            "emby-versions-unreadable",
-        ],
+        ids=["plex-one-version", "plex-same-cut", "plex-other-cut", "plex-unreadable", "emby"],
     )
     def test_item_wide_markers_are_evidence_only_when_every_version_is_this_cut(
         self, store, media, stype, durations, expected
@@ -2286,14 +2277,11 @@ class TestServerMarkersFromVendors:
         if stype is ServerType.PLEX:
             server.get_markers.return_value = [{"type": "intro", "start_ms": 24_500, "end_ms": 113_900, "final": False}]
             server.get_part_durations.return_value = durations
-            durations_call = server.get_part_durations
         else:
             server.get_chapter_markers.return_value = [
                 {"marker_type": "IntroStart", "start_ms": 24_500, "name": ""},
                 {"marker_type": "IntroEnd", "start_ms": 113_900, "name": ""},
             ]
-            server.get_media_source_durations.return_value = durations
-            durations_call = server.get_media_source_durations
         clients = _clients(introdb=IDB_S03E05_INTRO)
         ctx = _ctx(store, reg, clients=clients, settings_raw=INTRO_DEFAULTS)
         _run(ctx, media, {sid: ready_publisher()}, probe=_probe(duration=S03E05_BLURAY_MS))
@@ -2307,9 +2295,7 @@ class TestServerMarkersFromVendors:
         else:
             assert stored == []  # nothing stored, so the next run reads the server again
         if stype is ServerType.PLEX:
-            durations_call.assert_called_once_with(f"item-{sid}")
-        else:
-            durations_call.assert_not_called()
+            server.get_part_durations.assert_called_once_with(f"item-{sid}")
 
     def test_an_emby_item_listing_another_cut_is_read_once_not_on_every_run(self, store, media):
         # Under user-id auth Emby lists every version with the item. Its markers used to be stored as "unusable" and
@@ -2320,7 +2306,11 @@ class TestServerMarkersFromVendors:
             {"marker_type": "IntroStart", "start_ms": 24_500, "name": ""},
             {"marker_type": "IntroEnd", "start_ms": 113_900, "name": ""},
         ]
-        server.get_media_source_durations.return_value = [S03E05_BLURAY_MS - 60_000, S03E05_BLURAY_MS]
+        other_cut = media.replace("Pilot", "Pilot - Extended")
+        server.get_chapters_and_versions.side_effect = lambda item_id: (
+            server.get_chapter_markers(item_id),
+            [(other_cut, "99"), (media, "item-emby-1")],
+        )
         ctx = _ctx(store, reg, settings_raw=INTRO_DEFAULTS)  # nothing else answers: the intro stays undecided
         for _ in range(3):
             pubs = {"emby-1": ready_publisher("emby_bridge")}

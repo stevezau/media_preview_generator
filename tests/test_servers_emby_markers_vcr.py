@@ -57,8 +57,6 @@ class TestEmbyBridgeMarkersContract:
         assert item_id
         before = emby_lab.get_emby_marker_state(item_id)
         assert before is not None and before["intro_start_ticks"] is None  # the lab Emby holds none of ours
-        durations = emby_lab.get_media_source_durations(item_id)
-        assert durations is not None and len(durations) == 1
         size = SYNTH_E02_SIZE
         resp = emby_lab.put_emby_markers(
             item_id,

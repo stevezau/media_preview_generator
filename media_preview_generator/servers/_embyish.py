@@ -628,28 +628,6 @@ class EmbyApiClient(MediaServer):
         item = self._fetch_item_fields(item_id, "Chapters", raise_no_answer=raise_no_answer)
         return None if item is None else _chapter_rows(item)
 
-    def get_media_source_durations(self, item_id: str) -> list[int | None] | None:
-        """Duration of every version (MediaSource) of an item.
-
-        Args:
-            item_id: Server item id.
-
-        Returns:
-            Milliseconds per MediaSource in the server's order (None for a source without a usable
-            ``RunTimeTicks``), or None when the item couldn't be fetched.
-        """
-        item = self._fetch_item_fields(item_id, "MediaSources")
-        if item is None:
-            return None
-        durations: list[int | None] = []
-        for source in item.get("MediaSources") or []:
-            if not isinstance(source, dict):
-                continue
-            ticks = source.get("RunTimeTicks")
-            usable = isinstance(ticks, int) and not isinstance(ticks, bool)
-            durations.append(ticks // 10_000 if usable else None)
-        return durations
-
     def get_chapters_and_versions(
         self, item_id: str
     ) -> tuple[list[dict[str, Any]], list[tuple[str, str | None]]] | None:

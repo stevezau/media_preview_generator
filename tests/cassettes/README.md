@@ -93,7 +93,8 @@ grep -rlE "$PLEX_TOKEN|$JF_TOKEN" tests/cassettes/test_servers_markers_vcr/ && e
 Expected: `4 passed`, `clean`.
 
 `tests/test_servers_emby_markers_vcr.py` pins the Media Preview Bridge for Emby routes (Ping, the admin probe,
-GET/POST/DELETE markers with `ReplaceOwn`), Emby's per-user item read (`Chapters`, `MediaSources`) and the read of a
+GET/POST/DELETE markers with `ReplaceOwn`), Emby's per-user item read (`Chapters`; the recorded `Fields=MediaSources`
+read is no longer asked on replay and goes at the next re-record) and the read of a
 grouped item's versions (`Chapters,MediaSources,AlternateMediaSources`, with an API key and per user; Emby groups
 S01E01 with its "- Extended" cut) and the Emby Premiere read (`/Registrations/dvr`, no key on the lab Emby), recorded
 against `mlab-emby` (Emby 4.10) with the plugin installed and nothing stored on Synth Chapters S01E01, S01E01 - Extended

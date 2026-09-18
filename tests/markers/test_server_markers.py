@@ -74,7 +74,7 @@ class TestPlex:
 class TestItemWideMarkersOfOtherVersions:
     """Plex serves one marker set per item: with ``duration_ms`` (evidence), an item holding another cut of the file
     gives no evidence (None), since its markers may describe that cut. Emby keeps each version's markers on its own
-    item (spec §3.3), so its markers always describe the item's own cut and its versions are never asked for."""
+    item (spec §3.3), so its markers always describe the item's own cut and it has no version check."""
 
     INTRO = [{"type": "intro", "start_ms": 24_500, "end_ms": 113_900, "final": False}]
     EMBY_INTRO = [
@@ -83,16 +83,15 @@ class TestItemWideMarkersOfOtherVersions:
     ]
 
     @staticmethod
-    def _server(stype, markers, durations):
+    def _server(stype, markers, durations=None):
         if stype is ServerType.PLEX:
             server = create_autospec(PlexServer, instance=True)
             server.get_markers.return_value = markers
             server.get_part_durations.return_value = durations
-            return server, server.get_part_durations
+            return server
         server = create_autospec(EmbyServer, instance=True)
         server.get_chapter_markers.return_value = markers
-        server.get_media_source_durations.return_value = durations
-        return server, server.get_media_source_durations
+        return server
 
     VERSIONS = [
         pytest.param([1_444_574], True, id="one-version"),
@@ -106,33 +105,32 @@ class TestItemWideMarkersOfOtherVersions:
 
     @pytest.mark.parametrize(("durations", "evidence"), VERSIONS)
     def test_plex_markers_count_only_when_every_version_is_this_cut(self, durations, evidence):
-        server, durations_call = self._server(ServerType.PLEX, self.INTRO, durations)
+        server = self._server(ServerType.PLEX, self.INTRO, durations)
         found = read_server_markers(server, _cfg(ServerType.PLEX), "777", duration_ms=1_444_574)
         assert found == ([_src(T.INTRO, 24_500, 113_900, "plex-1")] if evidence else None)
-        durations_call.assert_called_once_with("777")
+        server.get_part_durations.assert_called_once_with("777")
 
-    @pytest.mark.parametrize(("durations", "_plex_evidence"), VERSIONS)
-    def test_emby_markers_are_the_items_own_whatever_versions_it_lists(self, durations, _plex_evidence):
-        # With a user id Emby lists every version with the item, with an API key only its own: the answer is the same.
-        server, durations_call = self._server(ServerType.EMBY, self.EMBY_INTRO, durations)
+    def test_emby_markers_are_the_items_own_with_a_duration_given(self):
+        server = self._server(ServerType.EMBY, self.EMBY_INTRO)
         found = read_server_markers(server, _cfg(ServerType.EMBY), "777", duration_ms=1_444_574)
         assert found == [_src(T.INTRO, 24_500, 113_900, "emby-1")]
-        durations_call.assert_not_called()
 
     @pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.EMBY], ids=lambda t: t.value)
     def test_no_markers_needs_no_version_check(self, stype):
-        server, durations_call = self._server(stype, [], None)
+        server = self._server(stype, [])
         assert read_server_markers(server, _cfg(stype), "777", duration_ms=1_444_574) == []
-        durations_call.assert_not_called()
+        if stype is ServerType.PLEX:  # Emby has no version check to skip
+            server.get_part_durations.assert_not_called()
 
     @pytest.mark.parametrize("stype", [ServerType.PLEX, ServerType.EMBY], ids=lambda t: t.value)
     def test_what_clients_see_ignores_versions(self, stype):
         # The Inspector shows the server's real state, whatever cut it belongs to.
         markers = self.INTRO if stype is ServerType.PLEX else self.EMBY_INTRO
-        server, durations_call = self._server(stype, markers, None)
+        server = self._server(stype, markers)
         found = read_server_markers(server, _cfg(stype), "777", include_ours=True)
         assert found == [_src(T.INTRO, 24_500, 113_900, f"{stype.value}-1")]
-        durations_call.assert_not_called()
+        if stype is ServerType.PLEX:  # Emby has no version check to skip
+            server.get_part_durations.assert_not_called()
 
     def test_jellyfin_segments_are_per_version_and_need_no_check(self):
         server = create_autospec(JellyfinServer, instance=True)
@@ -142,7 +140,6 @@ class TestItemWideMarkersOfOtherVersions:
         server.get_bridge_markers.return_value = []
         found = read_server_markers(server, _cfg(ServerType.JELLYFIN), "bd", duration_ms=1_444_574)
         assert found == [_src(T.INTRO, 24_500, 113_900, "jellyfin-1")]
-        server.get_media_source_durations.assert_not_called()
 
 
 class TestImporterPlugins:
