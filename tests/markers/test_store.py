@@ -1050,7 +1050,10 @@ class TestServerRechecks:
         return rec
 
     def _take(self, store, clock, servers=("jf-1",), limit=10):
-        return store.take_server_rechecks(list(servers), now=clock["t"], after=self.AFTER, limit=limit)
+        """What a Check servers run lists, marked taken as once each file ran: the files, sorted, each once."""
+        due = store.server_rechecks_due(list(servers), now=clock["t"], after=self.AFTER, limit=limit)
+        store.mark_server_rechecks_taken(due)
+        return sorted({path for path, _server_id in due})
 
     def _rereads(self, store, rec, server_id="jf-1"):
         row = store._conn.execute(
@@ -1075,8 +1078,28 @@ class TestServerRechecks:
         ]  # fmt: skip
         assert self._rereads(cstore, rec) == 5
 
+    def test_listing_what_is_due_takes_nothing(self, cstore, clock):
+        # A run cancelled before the file ran leaves it due at once, first in line.
+        self._file(cstore, "/m/a.mkv")
+        clock["t"] = self.NOW
+        due = cstore.server_rechecks_due(["jf-1"], now=clock["t"], after=self.AFTER, limit=10)
+        assert due == [("/m/a.mkv", "jf-1")]
+        assert cstore.server_rechecks_due(["jf-1"], now=clock["t"], after=self.AFTER, limit=10) == due
+        assert cstore._conn.execute("SELECT COUNT(*) FROM server_marker_rereads").fetchone()[0] == 0
+
+    def test_marking_taken_keeps_nothing_for_an_answer_that_has_markers_by_then(self, cstore, clock):
+        # The run's re-read found markers (the rows go with them): the mark after it mustn't bring a row back.
+        rec = self._file(cstore, "/m/a.mkv")
+        clock["t"] = self.NOW
+        due = cstore.server_rechecks_due(["jf-1"], now=clock["t"], after=self.AFTER, limit=10)
+        found = [Candidate(MarkerType.CREDITS, 950_000, None, Source.SERVER_MARKERS)]
+        cstore.replace_evidence(rec.id, Source.SERVER_MARKERS, found, origin="jf-1")
+        cstore.mark_server_rechecks_taken([*due, ("/m/unknown.mkv", "jf-1")])
+        assert cstore._conn.execute("SELECT COUNT(*) FROM server_marker_rereads").fetchone()[0] == 0
+
     def test_being_taken_doesnt_count_as_a_re_read(self, cstore, clock):
-        # A file taken but not run (cancelled, gone from disk) is taken again a day later on the same step.
+        # A file taken but whose server wasn't read (gone from disk, not in that server's library) is taken again a day
+        # later on the same step.
         rec = self._file(cstore, "/m/a.mkv")
         clock["t"] = self.NOW
         assert self._take(cstore, clock) == ["/m/a.mkv"]

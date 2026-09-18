@@ -201,7 +201,8 @@ _SCHEMA = (
     # A server's empty (or unusable) answer for a file, asked again by Check servers: how many times it was read again
     # without markers (the backoff step; gone once the answer has markers or the file changes), when the last re-read
     # that couldn't replace the answer happened (the backoff counts from it), and when Check servers last took the
-    # file for it, so files it can't run (gone from disk, not in that library) take turns with the rest.
+    # file for it: once the file ran, or at once for a file it can't run (gone from disk, not in that library), so
+    # those take turns with the rest.
     """CREATE TABLE IF NOT EXISTS server_marker_rereads (
         file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
         server_id TEXT NOT NULL,
@@ -665,7 +666,7 @@ class MarkerStore:
     @staticmethod
     def _count_server_reread(conn: sqlite3.Connection, file_id: int, server_id: str, *, has_markers: bool) -> None:
         """Before a server's new answer for a file is stored: an answer with markers forgets the re-reads; an empty one
-        that replaces an empty one counts one more (``take_server_rechecks`` backs off by that count)."""
+        that replaces an empty one counts one more (``server_rechecks_due`` backs off by that count)."""
         if has_markers:
             conn.execute("DELETE FROM server_marker_rereads WHERE file_id=? AND server_id=?", (file_id, server_id))
             return
@@ -1482,8 +1483,15 @@ class MarkerStore:
                 due.append((retries > 0, since, r["server_id"], r["item_id"]))
         return [(server_id, item_id) for _, _, server_id, item_id in sorted(due)]
 
-    def record_failed_item_retries(self, pairs: Iterable[tuple[str, str]]) -> None:
-        """Count one Check servers retry now for each of these ``(server_id, item_id)`` failed items."""
+    def record_failed_item_retries(self, pairs: Iterable[tuple[str, str]], *, listed_at: str | None = None) -> None:
+        """Count one Check servers retry now for each of these ``(server_id, item_id)`` failed items.
+
+        Args:
+            pairs: The items.
+            listed_at: When the Check servers run whose file ran listed them (ISO time): an item already counted since
+                then isn't counted again (another of its files ran first, or a run revived after a restart ran the file
+                again). None counts every item.
+        """
         now = self._now()
         with self._tx() as conn:
             for server_id, item_id in pairs:
@@ -1492,8 +1500,9 @@ class MarkerStore:
                     "SELECT server_id, item_id, version, 1, ? FROM item_publish_state WHERE server_id=? AND item_id=? "
                     "ON CONFLICT(server_id, item_id) DO UPDATE SET retries = CASE WHEN "
                     "failed_item_retries.item_version = excluded.item_version THEN failed_item_retries.retries + 1 "
-                    "ELSE 1 END, item_version = excluded.item_version, retried_at = excluded.retried_at",
-                    (now, server_id, item_id),
+                    "ELSE 1 END, item_version = excluded.item_version, retried_at = excluded.retried_at "
+                    "WHERE ? IS NULL OR failed_item_retries.retried_at < ?",
+                    (now, server_id, item_id, listed_at, listed_at),
                 )
 
     def files_for_item(self, server_id: str, item_id: str) -> list[str]:
@@ -1514,10 +1523,11 @@ class MarkerStore:
             ).fetchall()
         return [r["canonical_path"] for r in rows]
 
-    def take_server_rechecks(
+    def server_rechecks_due(
         self, server_ids: Iterable[str], *, now: datetime, after: Sequence[timedelta], limit: int
-    ) -> list[str]:
-        """Take decided files to ask a server again for its own markers, and remember when they were taken.
+    ) -> list[tuple[str, str]]:
+        """Decided files due to have a server asked again for its own markers. Nothing is written: a Check servers run
+        marks what it took once the file ran (``mark_server_rechecks_taken``), so a run that ends first leaves it due.
 
         A file qualifies for a server when its credits or preview are decided (the types a server's own markers can
         shorten, spec §5.5 rule 7), nothing of ours is on the server item it last published to, and that server's
@@ -1530,18 +1540,18 @@ class MarkerStore:
             server_ids: Servers whose answers count.
             now: The current time.
             after: How old the answer must be before each re-read (the backoff steps).
-            limit: Most (file, server) pairs to take.
+            limit: Most (file, server) pairs.
 
         Returns:
-            The taken files' canonical paths, sorted, each once.
+            ``(canonical_path, server_id)`` pairs in that order.
         """
         ids = sorted(set(server_ids))
         if not ids or limit <= 0 or not after:
             return []
         steps = " ".join("WHEN ? THEN ?" for _ in after)
         marks = ",".join("?" * len(ids))
-        with self._tx() as conn:
-            rows = conn.execute(
+        with self._lock:
+            rows = self._conn.execute(
                 "WITH answers AS ("
                 "  SELECT file_id, origin AS server_id, MAX(fetched_at) AS fetched_at FROM evidence"
                 f"  WHERE source IN (?, ?) AND origin IN ({marks})"  # noqa: S608 - placeholders only
@@ -1574,16 +1584,29 @@ class MarkerStore:
                     int(limit),
                 ),
             ).fetchall()
-            taken_at = self._now()
+        return [(r["canonical_path"], r["server_id"]) for r in rows]
+
+    def mark_server_rechecks_taken(self, pairs: Iterable[tuple[str, str]]) -> None:
+        """Remember that Check servers took these ``(canonical_path, server_id)`` pairs now (``server_rechecks_due``).
+
+        After their file ran, or at once for a file no run can check (gone from disk, not in that server's library), so
+        it takes its turn behind the rest. A pair whose server's answer has markers by now (the run's re-read found
+        some) keeps nothing, like any answer with markers.
+        """
+        marks = ",".join("?" * len(SERVER_SOURCES))
+        now = self._now()
+        with self._tx() as conn:
             conn.executemany(
-                "INSERT INTO server_marker_rereads (file_id, server_id, taken_at) VALUES (?,?,?) "
-                "ON CONFLICT(file_id, server_id) DO UPDATE SET taken_at = excluded.taken_at",
-                [(r["file_id"], r["server_id"], taken_at) for r in rows],
+                "INSERT INTO server_marker_rereads (file_id, server_id, taken_at) "
+                "SELECT f.id, ?, ? FROM files f WHERE f.canonical_path = ? AND ("
+                "  SELECT COUNT(*) > 0 AND COUNT(e.type) = 0 FROM evidence e"
+                f"  WHERE e.file_id = f.id AND e.origin = ? AND e.source IN ({marks})"  # noqa: S608 - placeholders only
+                ") ON CONFLICT(file_id, server_id) DO UPDATE SET taken_at = excluded.taken_at",
+                [(server_id, now, path, server_id, *_SERVER_SOURCE_VALUES) for path, server_id in pairs],
             )
-        return sorted({r["canonical_path"] for r in rows})
 
     def server_recheck_due(self, file_id: int, server_id: str, *, now: datetime, after: Sequence[timedelta]) -> bool:
-        """Whether a server's stored answer for a file is empty and due to be read again (``take_server_rechecks``).
+        """Whether a server's stored answer for a file is empty and due to be read again (``server_rechecks_due``).
 
         Args:
             file_id: The file.
@@ -1628,7 +1651,7 @@ class MarkerStore:
     def count_failed_server_reread(self, file_id: int, server_id: str) -> None:
         """Count a Check servers re-read of a stored answer that failed (an unreadable read, another cut on the item).
 
-        The stored answer stays; the re-read moves the backoff on like one that stayed empty (``take_server_rechecks``).
+        The stored answer stays; the re-read moves the backoff on like one that stayed empty (``server_rechecks_due``).
 
         Args:
             file_id: The file.

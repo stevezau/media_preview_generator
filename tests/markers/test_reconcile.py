@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
@@ -585,14 +587,14 @@ class TestServersToAskAgain:
             server_config("jf-1", ServerType.JELLYFIN, root=media.root, enabled=False),
             server_config("emby-1", ServerType.EMBY, root=media.root),
         ]
-        assert reconcile.files_to_ask_servers_again(registry=_registry(*configs), store=store, limit=10) == [
-            paths[0],
-            paths[2],
-        ]
+        assert reconcile.files_to_ask_servers_again(registry=_registry(*configs), store=store, limit=10) == {
+            paths[0]: frozenset({"plex-1"}),
+            paths[2]: frozenset({"emby-1"}),
+        }
         store.close()
 
     @pytest.mark.parametrize("change", ["file-deleted", "no-server-with-intro-and-credits-on-holds-it"])
-    def test_files_the_pipeline_couldnt_run_are_taken_but_not_listed(self, tmp_path, media, change):
+    def test_files_the_pipeline_couldnt_run_are_taken_at_once_but_not_listed(self, tmp_path, media, change):
         clock = {"t": NOW - timedelta(days=2)}
         store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
         path = media("gone.mkv")
@@ -605,31 +607,32 @@ class TestServersToAskAgain:
         else:
             markers = {"enabled": False, "library_ids": None}
         registry = _registry(server_config("plex-1", ServerType.PLEX, root=media.root, markers=markers))
-        assert reconcile.files_to_ask_servers_again(registry=registry, store=store, limit=10) == []
-        # Taken all the same, so it takes its turn behind files the job can run instead of coming first each time.
-        assert store.take_server_rechecks(["plex-1"], now=NOW, after=RECHECK_AFTER, limit=10) == []
+        assert reconcile.files_to_ask_servers_again(registry=registry, store=store, limit=10) == {}
+        # Taken all the same (no run can check it), so it takes its turn behind files the job can run instead of
+        # coming first each time.
+        assert store.server_rechecks_due(["plex-1"], now=NOW, after=RECHECK_AFTER, limit=10) == []
         store.close()
 
     def test_nothing_is_taken_for_a_limit_of_zero(self, store):
-        with patch.object(store, "take_server_rechecks") as take:
+        with patch.object(store, "server_rechecks_due") as due:
             assert (
                 reconcile.files_to_ask_servers_again(
                     registry=_registry(server_config("plex-1", ServerType.PLEX)), store=store, limit=0
                 )
-                == []
+                == {}
             )
-        take.assert_not_called()
+        due.assert_not_called()
 
-    def test_the_store_takes_them_on_the_backoff_steps(self, store):
+    def test_the_store_lists_them_on_the_backoff_steps(self, store):
         assert [step.days for step in RECHECK_AFTER] == [1, 2, 4, 8, 16]
         with (
-            patch.object(store, "take_server_rechecks", return_value=[]) as take,
+            patch.object(store, "server_rechecks_due", return_value=[]) as due,
             patch.object(reconcile, "_utcnow", return_value=NOW),
         ):
             reconcile.files_to_ask_servers_again(
                 registry=_registry(server_config("plex-1", ServerType.PLEX)), store=store, limit=7
             )
-        take.assert_called_once_with(["plex-1"], now=NOW, after=RECHECK_AFTER, limit=7)
+        due.assert_called_once_with(["plex-1"], now=NOW, after=RECHECK_AFTER, limit=7)
 
     def test_a_server_with_no_detection_of_its_own_is_asked_five_times_then_the_run_has_nothing_to_do(
         self, tmp_path, media
@@ -660,6 +663,7 @@ class TestServersToAskAgain:
                     runs_with_files.append(day)
                     assert [i.canonical_path for i in listing.items] == [path]
                     store.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1")  # the run reads it again
+                    listing.count_checked(store, path)
             assert runs_with_files == [1, 3, 7, 15, 31]
             clock["t"] = NOW + timedelta(days=400)
             final = reconcile.check_servers_listing(registry=_registry(plex, jf), store=store, max_files=500)
@@ -669,10 +673,16 @@ class TestServersToAskAgain:
 
 class TestCheckServersListing:
     def _listing(self, store, drifts, *, rechecks=(), failed=(), warnings=(), max_files=500, **kwargs):
+        """``rechecks``: files asked of jf-1 again; ``failed``: files of Plex item "9", whose last publish failed."""
         with (
             patch.object(reconcile, "find_drift", return_value=(list(drifts), list(warnings))) as find,
-            patch.object(reconcile, "files_of_failed_items", return_value=list(failed)) as retry,
-            patch.object(reconcile, "files_to_ask_servers_again", return_value=list(rechecks)) as ask,
+            patch.object(
+                reconcile, "files_of_failed_items", return_value={p: frozenset({("plex-1", "9")}) for p in failed}
+            ) as retry,
+            patch.object(
+                reconcile, "files_to_ask_servers_again", return_value={p: frozenset({"jf-1"}) for p in rechecks}
+            ) as ask,
+            patch.object(reconcile, "_utcnow", return_value=NOW),
         ):
             listing = reconcile.check_servers_listing(registry="reg", store=store, max_files=max_files, **kwargs)
         return listing, find, retry, ask
@@ -707,24 +717,41 @@ class TestCheckServersListing:
         assert find.call_args.kwargs["progress_callback"] is progress
         assert find.call_args.kwargs["cancel_check"]() is False
         # Failed items' files count against the run's files (drifted e1, e2), then e3 does.
-        retry.assert_called_once_with(registry="reg", store=store, limit=500 - 2)
-        ask.assert_called_once_with(registry="reg", store=store, limit=500 - 3)
+        retry.assert_called_once_with(registry="reg", store=store, limit=500 - 2, now=NOW)
+        ask.assert_called_once_with(registry="reg", store=store, limit=500 - 3, now=NOW)
+        # What each file is checked for, used once it ran (CheckServersListing.count_checked).
+        assert listing.rechecks == {"/tv/S 1/b.mkv": frozenset({"jf-1"}), "/tv/S/e2.mkv": frozenset({"jf-1"})}
+        assert listing.retries == {path: frozenset({("plex-1", "9")}) for path in ("/tv/S/e3.mkv", "/tv/S/e1.mkv")}
+        assert listing.listed_at == NOW.isoformat()
 
     def test_the_listing_survives_a_round_trip_through_the_jobs_config(self, store):
         drifts = [reconcile.Drift("plex-1", "2", Shown.REPLACED, ("/tv/S/e2.mkv", "/tv/S/e1.mkv")),
                   reconcile.Drift("jf-1", "x", Shown.MISSING, ("/tv/S/e1.mkv",))]  # fmt: skip
-        listing, *_ = self._listing(store, drifts, rechecks=["/tv/S 1/b.mkv"], warnings=["Couldn't check X"])
+        listing, *_ = self._listing(
+            store, drifts, rechecks=["/tv/S 1/b.mkv"], failed=["/tv/S/e3.mkv"], warnings=["Couldn't check X"]
+        )
         stored = json.loads(json.dumps(listing.to_config()))  # what jobs.db keeps
         again = reconcile.CheckServersListing.from_config(stored)
         assert again == listing
+        assert (again.rechecks, again.retries, again.listed_at) == (
+            {"/tv/S 1/b.mkv": frozenset({"jf-1"})},
+            {"/tv/S/e3.mkv": frozenset({("plex-1", "9")})},
+            NOW.isoformat(),
+        )
         assert [(i.canonical_path, i.item_id_by_server, i.server_id, i.title) for i in again.items] == [
             (i.canonical_path, i.item_id_by_server, i.server_id, i.title) for i in listing.items
         ]
 
+    def test_a_listing_kept_by_an_older_build_reads_with_nothing_to_count(self):
+        again = reconcile.CheckServersListing.from_config({"files": ["/m/a.mkv"], "warnings": [], "drifted": {}})
+        assert (again.rechecks, again.retries, again.listed_at) == ({}, {}, None)
+
     @pytest.mark.parametrize(
         "stored",
         [None, "files", [], {}, {"files": "x"}, {"files": [1]}, {"files": [], "drifted": {"/a": [["x"]]}},
-         {"files": [], "warnings": [None]}],
+         {"files": [], "warnings": [None]}, {"files": [], "rechecks": {"/a": "jf-1"}},
+         {"files": [], "rechecks": {"/a": [1]}}, {"files": [], "retries": {"/a": [["plex-1"]]}},
+         {"files": [], "retries": []}, {"files": [], "listed_at": 5}],
     )  # fmt: skip
     def test_a_missing_or_unusable_stored_listing_reads_as_none(self, stored):
         assert reconcile.CheckServersListing.from_config(stored) is None
@@ -909,6 +936,7 @@ class TestFailedItems:
                     runs_with_files.append(day)
                     assert [i.canonical_path for i in listing.items] == [path]
                     store.set_item_publish_state("plex-1", "7", None, "failed")  # the run failed again
+                    listing.count_checked(store, path)
             clock["t"] = NOW + timedelta(days=400)
             final = reconcile.check_servers_listing(registry=registry, store=store, max_files=500)
         assert runs_with_files == [1, 3, 7, 15, 31]
@@ -929,17 +957,39 @@ class TestFailedItems:
         assert store.failed_items_due(["plex-1"], now=later, after=RECHECK_AFTER) == [("plex-1", "7")]
         store.close()
 
+    def test_a_retry_is_counted_once_per_listing(self, tmp_path, media):
+        # Each of an item's files counts it once it ran, and a revived run counts again what it runs again.
+        clock = {"t": NOW}
+        store = MarkerStore(str(tmp_path / "clocked.db"), clock=lambda: clock["t"])
+        self._failed(store, "plex-1", "7", media("a.mkv"))
+
+        def counted():
+            row = store._conn.execute("SELECT retries, retried_at FROM failed_item_retries").fetchone()
+            return tuple(row)
+
+        for minutes in (5, 9, 30):
+            clock["t"] = NOW + timedelta(minutes=minutes)
+            store.record_failed_item_retries([("plex-1", "7")], listed_at=NOW.isoformat())
+        assert counted() == (1, (NOW + timedelta(minutes=5)).isoformat())
+        next_run = NOW + timedelta(days=1, minutes=1)
+        clock["t"] = next_run + timedelta(minutes=2)
+        store.record_failed_item_retries([("plex-1", "7")], listed_at=next_run.isoformat())
+        assert counted() == (2, clock["t"].isoformat())
+        store.record_failed_item_retries([("plex-1", "7")])  # no listing: always counts
+        assert counted()[0] == 3
+        store.close()
+
     @pytest.mark.parametrize(
-        ("change", "listed", "taken"),
+        ("change", "listed", "counted_now"),
         [
-            ("none", True, True),
-            ("file-deleted", False, True),
+            ("none", True, False),  # counted once one of its files ran
+            ("file-deleted", False, True),  # no file of it can run
             ("server-off", False, False),
             ("intro-and-credits-off", False, False),
             ("other-server", False, False),
         ],
     )
-    def test_which_failed_items_are_taken_and_which_files_listed(self, store, media, change, listed, taken):
+    def test_which_failed_items_are_listed_and_which_counted_at_once(self, store, media, change, listed, counted_now):
         path = media("a.mkv")
         self._failed(store, "jf-1" if change == "other-server" else "plex-1", "7", path)
         kwargs = {}
@@ -953,11 +1003,11 @@ class TestFailedItems:
         later = NOW + timedelta(days=400)
         with patch.object(store, "record_failed_item_retries", wraps=store.record_failed_item_retries) as record:
             files = reconcile.files_of_failed_items(registry=registry, store=store, limit=10, now=later)
-        assert files == ([path] if listed else [])
         sid = "jf-1" if change == "other-server" else "plex-1"
-        assert record.call_args.args[0] == ([(sid, "7")] if taken else [])
+        assert files == ({path: frozenset({(sid, "7")})} if listed else {})
+        record.assert_called_once_with([(sid, "7")] if counted_now else [])
 
-    def test_items_whose_files_dont_fit_the_limit_wait_untaken(self, store, media):
+    def test_items_whose_files_dont_fit_the_limit_wait_uncounted(self, store, media):
         # Versions of one item share a record; each item's files are listed whole or not at all.
         self._failed(store, "plex-1", "1", media("a/1.mkv"))
         _published(store, "plex-1", "1", media("a/2.mkv"))
@@ -965,13 +1015,166 @@ class TestFailedItems:
         self._failed(store, "plex-1", "2", media("b/1.mkv"))
         registry = _registry(server_config("plex-1", ServerType.PLEX, root=media.root))
         later = NOW + timedelta(days=400)
-        assert reconcile.files_of_failed_items(registry=registry, store=store, limit=1, now=later) == []
-        assert reconcile.files_of_failed_items(registry=registry, store=store, limit=0, now=later) == []
-        assert reconcile.files_of_failed_items(registry=registry, store=store, limit=2, now=later) == [
-            media("a/1.mkv"),
-            media("a/2.mkv"),
+        assert reconcile.files_of_failed_items(registry=registry, store=store, limit=1, now=later) == {}
+        assert reconcile.files_of_failed_items(registry=registry, store=store, limit=0, now=later) == {}
+        first = reconcile.files_of_failed_items(registry=registry, store=store, limit=2, now=later)
+        assert first == {media("a/1.mkv"): frozenset({("plex-1", "1")}), media("a/2.mkv"): frozenset({("plex-1", "1")})}
+        assert reconcile.files_of_failed_items(registry=registry, store=store, limit=2, now=later) == first  # not run
+        store.record_failed_item_retries([("plex-1", "1")])  # item 1's files ran
+        assert reconcile.files_of_failed_items(registry=registry, store=store, limit=2, now=later) == {
+            media("b/1.mkv"): frozenset({("plex-1", "2")})
+        }
+
+    def test_a_file_of_two_failed_items_is_listed_for_both(self, store, media):
+        # One file, published to Plex and Jellyfin, both of whose writes failed: it runs once for both retries.
+        path = media("a.mkv")
+        self._failed(store, "plex-1", "7", path)
+        self._failed(store, "jf-1", "x", path)
+        registry = _registry(
+            server_config("plex-1", ServerType.PLEX, root=media.root),
+            server_config("jf-1", ServerType.JELLYFIN, root=media.root),
+        )
+        files = reconcile.files_of_failed_items(registry=registry, store=store, limit=1, now=NOW + timedelta(days=400))
+        assert files == {path: frozenset({("plex-1", "7"), ("jf-1", "x")})}
+
+
+class TestChecksAreUsedOnlyOnceTheirFileRan:
+    """A recheck of a server's empty answer and a failed item's retry are used once a file listed for them ran
+    (``CheckServersListing.count_checked``, which the job calls per file result), not when the run lists them: a run
+    cancelled, or ended by a restart, before a file leaves that file's checks due for the next run."""
+
+    @pytest.fixture
+    def world(self, tmp_path, media):
+        clock = {"t": NOW - timedelta(days=2)}
+        db = str(tmp_path / "checks.db")
+        store = MarkerStore(db, clock=lambda: clock["t"])
+        recheck = media("recheck.mkv")  # decided credits; Jellyfin had no markers of its own two days ago
+        rec = _decided_credits(store, recheck)
+        store.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1")
+        failed = [media("item7/1.mkv"), media("item7/2.mkv")]  # two versions of Plex item 7, whose last publish failed
+        for path in failed:
+            _published(store, "plex-1", "7", path)
+        store.set_item_publish_state("plex-1", "7", None, "failed")
+        clock["t"] = NOW
+        registry = _registry(
+            server_config("plex-1", ServerType.PLEX, root=media.root),
+            server_config("jf-1", ServerType.JELLYFIN, root=media.root),
+        )
+        world = SimpleNamespace(clock=clock, db=db, store=store, rec=rec, recheck=recheck, failed=failed)
+
+        def listing(on=None):
+            with patch.object(reconcile, "_utcnow", side_effect=lambda: clock["t"]):
+                return reconcile.check_servers_listing(registry=registry, store=on or world.store, max_files=500)
+
+        def counters(on=None):
+            """(rereads, taken_at) of the recheck, (retries, retried_at) of item 7; None where nothing is stored."""
+            conn = (on or world.store)._conn
+            reread = conn.execute(
+                "SELECT rereads, taken_at FROM server_marker_rereads WHERE file_id=? AND server_id='jf-1'", (rec.id,)
+            ).fetchone()
+            retry = conn.execute(
+                "SELECT retries, retried_at FROM failed_item_retries WHERE server_id='plex-1' AND item_id='7'"
+            ).fetchone()
+            return (tuple(reread) if reread else None), (tuple(retry) if retry else None)
+
+        def reopen():
+            """The process died: a new one opens the same markers.db."""
+            world.store.close()
+            world.store = MarkerStore(db, clock=lambda: clock["t"])
+            return world.store
+
+        world.listing, world.counters, world.reopen = listing, counters, reopen
+        yield world
+        world.store.close()
+
+    @staticmethod
+    def _paths(listing):
+        return {item.canonical_path for item in listing.items}
+
+    def test_the_listing_says_what_each_file_is_checked_for(self, world):
+        listing = world.listing()
+        assert self._paths(listing) == {world.recheck, *world.failed}
+        assert listing.rechecks == {world.recheck: frozenset({"jf-1"})}
+        assert listing.retries == {path: frozenset({("plex-1", "7")}) for path in world.failed}
+        assert listing.listed_at == NOW.isoformat()
+        assert world.counters() == (None, None)  # listing uses nothing
+
+    def test_a_run_cancelled_before_any_file_ran_uses_nothing(self, world):
+        assert self._paths(world.listing()) == {world.recheck, *world.failed}
+        world.clock["t"] = NOW + timedelta(hours=1)
+        assert world.counters() == (None, None)
+        assert self._paths(world.listing()) == {world.recheck, *world.failed}
+
+    def test_a_run_cancelled_midway_uses_only_the_checks_of_the_files_that_ran(self, world):
+        listing = world.listing()
+        listing.count_checked(world.store, world.recheck)  # then the cancel, before item 7's files
+        assert world.counters() == ((0, NOW.isoformat()), None)
+        world.clock["t"] = NOW + timedelta(hours=1)
+        # Item 7 is still due; the recheck waits a day like any file checked.
+        assert self._paths(world.listing()) == set(world.failed)
+
+    def test_a_run_that_completes_uses_each_check_once(self, world):
+        listing = world.listing()
+        for path in (world.recheck, *world.failed):
+            listing.count_checked(world.store, path)
+        assert world.counters() == ((0, NOW.isoformat()), (1, NOW.isoformat()))  # item 7: one retry for its two files
+        world.clock["t"] = NOW + timedelta(hours=1)
+        assert world.listing().items == []
+        world.clock["t"] = NOW + timedelta(days=2, minutes=1)  # item 7's second step; nothing re-read the answer here
+        assert self._paths(world.listing()) == {world.recheck, *world.failed}
+
+    def test_a_run_revived_after_a_restart_counts_each_check_once(self, world):
+        listing = world.listing()
+        saved = json.loads(json.dumps(listing.to_config()))  # what the job's config keeps
+        listing.count_checked(world.store, world.recheck)  # finished before the restart
+        listing.count_checked(world.store, world.failed[0])  # counted, then the process died before its row was kept
+        store = world.reopen()
+        world.clock["t"] = NOW + timedelta(minutes=10)
+        revived = reconcile.CheckServersListing.from_config(saved)
+        for path in world.failed:  # the recheck file's row was kept, so the revived run skips it
+            revived.count_checked(store, path)
+        assert world.counters() == ((0, NOW.isoformat()), (1, NOW.isoformat()))
+
+    def test_a_run_the_process_died_in_leaves_the_files_that_didnt_run_due(self, world):
+        # Not revived (a running job is marked failed at the next start): the next run lists what the first didn't check.
+        world.listing().count_checked(world.store, world.recheck)
+        store = world.reopen()
+        world.clock["t"] = NOW + timedelta(hours=1)
+        assert self._paths(world.listing(store)) == set(world.failed)
+        assert world.counters() == ((0, NOW.isoformat()), None)
+
+    def test_a_listing_kept_by_an_older_build_counts_nothing(self, world):
+        # That build used the checks up when it listed them; its revived run mustn't count them again.
+        listing = world.listing()
+        old = {"files": [i.canonical_path for i in listing.items], "warnings": [], "drifted": {}}
+        revived = reconcile.CheckServersListing.from_config(old)
+        for path in (world.recheck, *world.failed):
+            revived.count_checked(world.store, path)
+        assert world.counters() == (None, None)
+
+    @pytest.mark.parametrize("failing", ["mark_server_rechecks_taken", "record_failed_item_retries"])
+    def test_a_store_error_while_counting_is_logged_not_raised_and_the_other_count_still_happens(self, world, failing):
+        from loguru import logger
+
+        path = world.failed[0]
+        # A file listed both to ask Jellyfin again and for item 7's retry.
+        listing = reconcile.CheckServersListing(
+            [], [], rechecks={path: frozenset({"jf-1"})}, retries={path: frozenset({("plex-1", "7")})},
+            listed_at=NOW.isoformat(),
+        )  # fmt: skip
+        lines: list[str] = []
+        handler = logger.add(lambda m: lines.append(m), level="WARNING", format="{level} {message}")
+        try:
+            with patch.object(world.store, failing, side_effect=sqlite3.OperationalError("locked")) as broken:
+                listing.count_checked(world.store, path)  # the job goes on to record the file's row
+        finally:
+            logger.remove(handler)
+        broken.assert_called_once()
+        assert [line.strip() for line in lines] == [
+            "WARNING Check servers couldn't count the checks of 1.mkv: OperationalError"
         ]
-        assert reconcile.files_of_failed_items(registry=registry, store=store, limit=2, now=later) == [media("b/1.mkv")]
+        _reread, retry = world.counters()
+        assert retry == (None if failing == "record_failed_item_retries" else (1, NOW.isoformat()))
 
 
 class TestQueueing:

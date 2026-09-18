@@ -37,8 +37,8 @@ from .store import MarkerStore
 
 RECONCILE_SOURCE = "reconcile"
 RECONCILE_JOB_NAME = "Intro & Credits · Check servers"
-# Job config key holding a run's listing (``CheckServersListing.to_config``). Taking it counts server rechecks and
-# failed-item retries as used, so a run revived after a restart checks these files instead of listing again.
+# Job config key holding a run's listing (``CheckServersListing.to_config``): a run revived after a restart checks these
+# files instead of reading every server back and listing again.
 LISTING_CONFIG_KEY = "check_servers_listing"
 # Items per read-back call, so the job's progress moves and a cancel stops between calls.
 READ_BACK_BATCH = 500
@@ -204,42 +204,55 @@ def _drifted(
 
 def files_to_ask_servers_again(
     *, registry: Any, store: MarkerStore, limit: int, now: datetime | None = None
-) -> list[str]:
-    """Take decided files whose server had no markers of its own, on the ``RECHECK_AFTER`` backoff
-    (``MarkerStore.take_server_rechecks``).
+) -> dict[str, frozenset[str]]:
+    """Decided files whose server had no markers of its own, on the ``RECHECK_AFTER`` backoff
+    (``MarkerStore.server_rechecks_due``), with the servers to ask again.
 
-    Every enabled server counts, with Intro & Credits on or not: its markers are evidence either way. A taken file the
-    pipeline couldn't run (gone from disk, no longer in a library Intro & Credits goes to) is left out, and waits for
-    its turn again like the rest.
+    Every enabled server counts, with Intro & Credits on or not: its markers are evidence either way. Listing a file
+    uses nothing: its turn is used once it ran (``CheckServersListing.count_checked``), so a run cancelled or ended by
+    a restart first leaves it due. A file the pipeline couldn't run (gone from disk, no longer in a library Intro &
+    Credits goes to) is left out and taken at once, so it waits for its turn behind the rest.
 
     Args:
         registry: The job's ``ServerRegistry``.
         store: The markers store.
-        limit: Most (file, server) pairs to take.
+        limit: Most (file, server) pairs.
         now: The current time (default: now).
 
     Returns:
-        The files' paths, sorted.
+        Per file to run, the ids of the servers it is asked again for.
     """
     if limit <= 0:
-        return []
+        return {}
     configs = [cfg for cfg in registry.configs() if cfg.enabled]
-    taken = store.take_server_rechecks(
-        [cfg.id for cfg in configs], now=now or _utcnow(), after=RECHECK_AFTER, limit=limit
-    )
-    return [path for path in taken if _runnable(path, configs)]
+    due = store.server_rechecks_due([cfg.id for cfg in configs], now=now or _utcnow(), after=RECHECK_AFTER, limit=limit)
+    runnable: dict[str, bool] = {}
+    servers: dict[str, set[str]] = {}
+    cant_run: list[tuple[str, str]] = []
+    for path, server_id in due:
+        if path not in runnable:
+            runnable[path] = _runnable(path, configs)
+        if runnable[path]:
+            servers.setdefault(path, set()).add(server_id)
+        else:
+            cant_run.append((path, server_id))
+    store.mark_server_rechecks_taken(cant_run)
+    return {path: frozenset(ids) for path, ids in servers.items()}
 
 
-def files_of_failed_items(*, registry: Any, store: MarkerStore, limit: int, now: datetime | None = None) -> list[str]:
-    """Take server items whose last publish failed, on the ``RECHECK_AFTER`` backoff (``MarkerStore.failed_items_due``),
-    and list their files.
+def files_of_failed_items(
+    *, registry: Any, store: MarkerStore, limit: int, now: datetime | None = None
+) -> dict[str, frozenset[tuple[str, str]]]:
+    """Server items whose last publish failed, on the ``RECHECK_AFTER`` backoff (``MarkerStore.failed_items_due``), and
+    their files.
 
     A failed write queues no retry and leaves the item out of the read-back, so its markers would stay unchecked and
     the new decision unpublished until another job ran the file. Only servers Check servers reads back count. Items are
-    taken (a retry counted) while their files fit in ``limit``; one none of whose files can run is taken all the same,
-    so it stops after the last step like the rest. A failed publish from a file whose part moved to another item (a
-    merge or split) marks the new item failed while the file's record still points at the old item, so the new item
-    lists no file here: the file runs again through the old item's drift instead.
+    listed while their files fit in ``limit``; a listed item's retry is counted once one of its files ran
+    (``CheckServersListing.count_checked``). One none of whose files can run is counted at once, so it stops after the
+    last step like the rest. A failed publish from a file whose part moved to another item (a merge or split) marks the
+    new item failed while the file's record still points at the old item, so the new item lists no file here: the file
+    runs again through the old item's drift instead.
 
     Args:
         registry: The job's ``ServerRegistry``.
@@ -248,27 +261,25 @@ def files_of_failed_items(*, registry: Any, store: MarkerStore, limit: int, now:
         now: The current time (default: now).
 
     Returns:
-        The files' paths, sorted.
+        Per file, the ``(server_id, item_id)`` failed items it is listed for.
     """
     if limit <= 0:
-        return []
+        return {}
     configs = {
         cfg.id: cfg for cfg in registry.configs() if cfg.enabled and load_server(cfg.markers, cfg.type.value).enabled
     }
-    taken: list[tuple[str, str]] = []
-    paths: list[str] = []
+    items_by_path: dict[str, set[tuple[str, str]]] = {}
+    no_file_runs: list[tuple[str, str]] = []
     for server_id, item_id in store.failed_items_due(list(configs), now=now or _utcnow(), after=RECHECK_AFTER):
-        files = [
-            path
-            for path in store.files_for_item(server_id, item_id)
-            if path not in paths and _runnable(path, [configs[server_id]])
-        ]
-        if len(paths) + len(files) > limit:
+        files = [path for path in store.files_for_item(server_id, item_id) if _runnable(path, [configs[server_id]])]
+        if len(items_by_path.keys() | set(files)) > limit:
             break
-        taken.append((server_id, item_id))
-        paths.extend(files)
-    store.record_failed_item_retries(taken)
-    return sorted(paths)
+        if not files:
+            no_file_runs.append((server_id, item_id))
+        for path in files:
+            items_by_path.setdefault(path, set()).add((server_id, item_id))
+    store.record_failed_item_retries(no_file_runs)
+    return {path: frozenset(items) for path, items in items_by_path.items()}
 
 
 @dataclass(frozen=True)
@@ -280,27 +291,40 @@ class CheckServersListing:
             so each file's item is looked up again).
         warnings: Job warnings.
         drifted: Per listed file, the ``(server_id, item_id)`` drifted items it was listed for.
+        rechecks: Per listed file, the ids of the servers asked again for their own markers (``count_checked``).
+        retries: Per listed file, the ``(server_id, item_id)`` failed items it is retried for (``count_checked``).
+        listed_at: When the run listed its files (ISO time), or None for a listing with no retries to count.
     """
 
     items: list[ProcessableItem]
     warnings: list[str]
     drifted: dict[str, frozenset[tuple[str, str]]] = field(default_factory=dict)
+    rechecks: dict[str, frozenset[str]] = field(default_factory=dict)
+    retries: dict[str, frozenset[tuple[str, str]]] = field(default_factory=dict)
+    listed_at: str | None = None
 
     def to_config(self) -> dict[str, Any]:
         """The listing as JSON for the job's config (``LISTING_CONFIG_KEY``).
 
         Returns:
-            ``files`` (in order), ``warnings`` and ``drifted`` (per file, its sorted ``[server_id, item_id]`` pairs).
+            ``files`` (in order), ``warnings``, ``drifted`` and ``retries`` (per file, its sorted
+            ``[server_id, item_id]`` pairs), ``rechecks`` (per file, its sorted server ids) and ``listed_at``.
         """
         return {
             "files": [item.canonical_path for item in self.items],
             "warnings": list(self.warnings),
-            "drifted": {path: sorted([list(pair) for pair in pairs]) for path, pairs in self.drifted.items()},
+            "drifted": _pairs_to_config(self.drifted),
+            "rechecks": {path: sorted(server_ids) for path, server_ids in self.rechecks.items()},
+            "retries": _pairs_to_config(self.retries),
+            "listed_at": self.listed_at,
         }
 
     @classmethod
     def from_config(cls, stored: object) -> CheckServersListing | None:
         """The listing a run kept on its job (:meth:`to_config`).
+
+        A listing kept by a build that used the rechecks and retries up when it listed them has neither: nothing is
+        counted again.
 
         Args:
             stored: The job config's ``LISTING_CONFIG_KEY`` value.
@@ -310,22 +334,55 @@ class CheckServersListing:
         """
         if not isinstance(stored, dict):
             return None
-        files, warnings, drifted = stored.get("files"), stored.get("warnings", []), stored.get("drifted", {})
+        files, warnings = stored.get("files"), stored.get("warnings", [])
+        rechecks, listed_at = stored.get("rechecks", {}), stored.get("listed_at")
         if not isinstance(files, list) or not all(isinstance(path, str) for path in files):
             return None
         if not isinstance(warnings, list) or not all(isinstance(text, str) for text in warnings):
             return None
-        if not isinstance(drifted, dict):
+        drifted, retries = _pairs_from_config(stored.get("drifted", {})), _pairs_from_config(stored.get("retries", {}))
+        if drifted is None or retries is None:
             return None
-        pairs: dict[str, frozenset[tuple[str, str]]] = {}
-        for path, items in drifted.items():
-            if not isinstance(items, list) or not all(
-                isinstance(pair, list) and len(pair) == 2 and all(isinstance(part, str) for part in pair)
-                for pair in items
-            ):
-                return None
-            pairs[path] = frozenset((server_id, item_id) for server_id, item_id in items)
-        return cls(_listed_items(files), list(warnings), pairs)
+        if not isinstance(rechecks, dict) or not all(
+            isinstance(ids, list) and all(isinstance(server_id, str) for server_id in ids) for ids in rechecks.values()
+        ):
+            return None
+        if listed_at is not None and not isinstance(listed_at, str):
+            return None
+        return cls(
+            _listed_items(files),
+            list(warnings),
+            drifted,
+            {path: frozenset(ids) for path, ids in rechecks.items()},
+            retries,
+            listed_at,
+        )
+
+    def count_checked(self, store: MarkerStore, path: str) -> None:
+        """After a listed file ran: use the server rechecks and failed-item retries it was listed for. Never raises.
+
+        Its servers are marked taken (``MarkerStore.mark_server_rechecks_taken``), and each failed item counts one
+        retry, once per listing (``MarkerStore.record_failed_item_retries``), however many of its files run. A file
+        that didn't run (a cancel, a restart before it) uses nothing, so its checks stay due for the next run.
+
+        Args:
+            store: The markers store.
+            path: The file.
+        """
+        servers, items = self.rechecks.get(path), self.retries.get(path)
+        # Each on its own: a failed mark mustn't keep a retry uncounted, or the other way round.
+        counts: list[Callable[[], None]] = []
+        if servers:
+            counts.append(lambda: store.mark_server_rechecks_taken([(path, sid) for sid in sorted(servers)]))
+        if items:
+            counts.append(lambda: store.record_failed_item_retries(sorted(items), listed_at=self.listed_at))
+        for count in counts:
+            try:
+                count()
+            except Exception as exc:
+                logger.warning(
+                    "Check servers couldn't count the checks of {}: {}", os.path.basename(path), type(exc).__name__
+                )
 
     def confirmed_gone_items(self, registry: Any, path: str, rows: Iterable[object]) -> set[tuple[str, str]]:
         """After a listed file ran: the drifted items it was listed for that the server confirms no longer exist, where
@@ -361,6 +418,24 @@ class CheckServersListing:
         return gone
 
 
+def _pairs_to_config(pairs_by_path: dict[str, frozenset[tuple[str, str]]]) -> dict[str, list[list[str]]]:
+    return {path: sorted([list(pair) for pair in pairs]) for path, pairs in pairs_by_path.items()}
+
+
+def _pairs_from_config(stored: object) -> dict[str, frozenset[tuple[str, str]]] | None:
+    """:func:`_pairs_to_config`'s value read back; None when it isn't one."""
+    if not isinstance(stored, dict):
+        return None
+    pairs: dict[str, frozenset[tuple[str, str]]] = {}
+    for path, items in stored.items():
+        if not isinstance(items, list) or not all(
+            isinstance(pair, list) and len(pair) == 2 and all(isinstance(part, str) for part in pair) for pair in items
+        ):
+            return None
+        pairs[path] = frozenset((first, second) for first, second in items)
+    return pairs
+
+
 def _confirmed_missing(registry: Any, server_id: str, item_id: str) -> bool:
     """Whether the server itself says the item doesn't exist (a failed lookup isn't that)."""
     cfg, server = registry.get_config(server_id), registry.get(server_id)
@@ -388,7 +463,8 @@ def check_servers_listing(
 
     At most ``max_files``. Drifted items take turns across runs (never listed first, then the least recently listed);
     while more drifted files wait than a run takes, ``RECHECK_SHARE`` of them are kept for the files to ask servers
-    again about, which take turns too (``MarkerStore.take_server_rechecks``).
+    again about, which take turns too (``MarkerStore.server_rechecks_due``). A recheck or a failed item's retry is used
+    once a file listed for it ran (``CheckServersListing.count_checked``), not here.
 
     Args:
         registry: The job's ``ServerRegistry``.
@@ -414,12 +490,13 @@ def check_servers_listing(
     if left:
         warnings.append(f"{left} more changed file(s) are checked on a later run")
     store.record_drift_listed((drift.server_id, drift.item_id) for drift in chosen)
-    retried: list[str] = []
-    asked_again: list[str] = []
+    now = _utcnow()
+    retried: dict[str, frozenset[tuple[str, str]]] = {}
+    asked_again: dict[str, frozenset[str]] = {}
     if not check():
-        retried = files_of_failed_items(registry=registry, store=store, limit=max_files - len(drifted))
+        retried = files_of_failed_items(registry=registry, store=store, limit=max_files - len(drifted), now=now)
         listed = set(drifted) | set(retried)
-        asked_again = files_to_ask_servers_again(registry=registry, store=store, limit=max_files - len(listed))
+        asked_again = files_to_ask_servers_again(registry=registry, store=store, limit=max_files - len(listed), now=now)
     logger.info(
         "Check servers: {} published item(s) changed on servers ({} file(s) this run); {} file(s) of items whose last "
         "publish failed; {} decided file(s) to ask servers again for their own markers",
@@ -430,7 +507,12 @@ def check_servers_listing(
     )
     paths = sorted(set(drifted) | set(retried) | set(asked_again), key=lambda p: (os.path.dirname(p), p))
     return CheckServersListing(
-        _listed_items(paths), warnings, {path: frozenset(pairs) for path, pairs in drifted.items()}
+        _listed_items(paths),
+        warnings,
+        {path: frozenset(pairs) for path, pairs in drifted.items()},
+        rechecks=asked_again,
+        retries=retried,
+        listed_at=now.isoformat(),
     )
 
 

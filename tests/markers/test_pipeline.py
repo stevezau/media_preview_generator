@@ -2185,11 +2185,13 @@ class TestServerMarkersFromVendors:
         passes = []
         for day in range(1, 61):
             clock["t"] = datetime(2026, 9, 13, tzinfo=UTC) + timedelta(days=day, minutes=day)
-            if store.take_server_rechecks(
+            due = store.server_rechecks_due(
                 ["plex-1", "jellyfin-1"], now=clock["t"], after=pipeline.RECHECK_AFTER, limit=10
-            ):
+            )
+            if due:
                 passes.append(day)
                 run()
+                store.mark_server_rechecks_taken(due)  # as Check servers does once the file ran
         assert passes == [1, 3, 7, 15, 31]
         assert plex_server.get_markers.call_count == reads + 5
         assert [r for r in store.evidence_rows(rec.id) if r.origin == "plex-1"] == [answer]  # the answer is kept

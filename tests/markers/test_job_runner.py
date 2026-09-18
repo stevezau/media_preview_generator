@@ -1,9 +1,10 @@
 """Intro & Credits job runner: file selection, the job thread, delegation from the preview runner and restarts."""
 
+import json
 import os
 import sqlite3
 import threading
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
@@ -962,8 +963,8 @@ class TestRun:
 
         env.job.config = {"reconcile": True, "source": "reconcile"}
         self._run([_item("/m/a.mkv"), _item("/m/b.mkv")], ["Couldn't check X"])
-        # Kept whole while the job runs: rechecks and failed items this run took are counted as taken, so a new listing
-        # would skip them. Taken off again once the job has ended (only a revive needs it).
+        # Kept whole while the job runs, so a revived run checks these files without reading every server back again.
+        # Taken off again once the job has ended (only a revive needs it).
         order = [c for c in env.jm.mock_calls if c[0] in ("merge_job_config", "complete_job")]
         assert order == [
             call.merge_job_config(
@@ -973,6 +974,9 @@ class TestRun:
                         "files": ["/m/a.mkv", "/m/b.mkv"],
                         "warnings": ["Couldn't check X"],
                         "drifted": {},
+                        "rechecks": {},
+                        "retries": {},
+                        "listed_at": None,
                     }
                 },
             ),
@@ -1032,9 +1036,10 @@ class TestRun:
         assert env.dispatcher.submit_items.call_args.kwargs["items"] == [_item("/m/b.mkv")]
         assert any("couldn't read the files" in line.lower() and "listing them again" in line for line in lines)
         # The new listing replaces it, and goes when the job ends.
+        empty = {"drifted": {}, "rechecks": {}, "retries": {}, "listed_at": None}
         assert [c for c in env.jm.mock_calls if c[0] == "merge_job_config"] == [
             call.merge_job_config(
-                "j1", {reconcile.LISTING_CONFIG_KEY: {"files": ["/m/b.mkv"], "warnings": [], "drifted": {}}}
+                "j1", {reconcile.LISTING_CONFIG_KEY: {"files": ["/m/b.mkv"], "warnings": [], **empty}}
             ),
             call.merge_job_config("j1", {}, remove=(reconcile.LISTING_CONFIG_KEY,)),
         ]
@@ -1961,6 +1966,142 @@ class TestLibraryRetry:
         env.jm.record_file_result.assert_called_once_with(
             "j1", "/m/a.mkv", "markers_waiting", "", "Lookup", servers=[NOT_IN_LIBRARY_ROW], server_messages=True
         )
+
+
+class TestCheckServersUsesChecksAsFilesRun:
+    """Check servers uses a server recheck, or a failed item's retry, when a file listed for it has its result, not
+    when it lists the file: over a real markers store and the real listing (spec §6.2 step 6)."""
+
+    NOW = datetime(2026, 9, 15, 12, tzinfo=UTC)
+
+    @pytest.fixture
+    def check_env(self, env, monkeypatch, tmp_path):
+        from media_preview_generator.markers import reconcile
+        from media_preview_generator.markers.decide import DecisionStatus, TypeDecision
+        from media_preview_generator.markers.models import FileIdentity, Marker, MarkerType, Source
+        from media_preview_generator.markers.store import MarkerStore
+
+        clock = {"t": self.NOW - timedelta(days=2)}
+        store = MarkerStore(str(tmp_path / "markers.db"), clock=lambda: clock["t"])
+        root = tmp_path / "media"
+        root.mkdir()
+
+        def on_disk(name):
+            path = root / name
+            path.write_bytes(b"x")
+            st = path.stat()
+            identity = FileIdentity(str(path), st.st_size, st.st_mtime_ns)
+            return str(path), store.upsert_file(identity, duration_ms=1_000_000, season_key=None, is_movie=True)
+
+        # Credits decided; Jellyfin had no markers of its own two days ago: its answer is due to be read again.
+        recheck, rec = on_disk("recheck.mkv")
+        credits = Marker(MarkerType.CREDITS, 900_000, 1_000_000, ("introdb", "skipdb"))
+        decided = TypeDecision(MarkerType.CREDITS, DecisionStatus.DECIDED, credits, None, "introdb")
+        store.save_decisions(rec.id, {MarkerType.CREDITS: decided}, settings_fingerprint="f")
+        store.replace_evidence(rec.id, Source.SERVER_MARKERS, [], origin="jf-1")
+        # Plex item 7's last publish failed two days ago: its retry is due.
+        failed, failed_rec = on_disk("failed.mkv")
+        intro = Marker(MarkerType.INTRO, 10_000, 40_000, ("chapters",))
+        store.set_publish_state(failed_rec.id, "plex-1", item_id="7", markers=[intro], status="written")
+        store.set_item_publish_state("plex-1", "7", [intro], "written")
+        store.set_item_publish_state("plex-1", "7", None, "failed")
+        clock["t"] = self.NOW
+        registry = FakeRegistry(
+            {
+                "plex-1": server_config("plex-1", ServerType.PLEX, root=str(root)),
+                "jf-1": server_config("jf-1", ServerType.JELLYFIN, root=str(root)),
+            }
+        )
+        monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda cfg: registry)
+        monkeypatch.setattr(reconcile, "_utcnow", lambda: clock["t"])
+        monkeypatch.setattr(job_runner, "start_fingerprint_sweep", MagicMock(return_value=True))
+        env.ctx.store = store
+        env.job.config = {"reconcile": True, "source": "reconcile"}
+        env.job.library_name = reconcile.RECONCILE_JOB_NAME
+        # While the job waits: ("cancel") or (path, outcome, reason) file results, in order.
+        steps: list = []
+        set_cb = MagicMock()
+        monkeypatch.setattr(job_runner, "set_file_result_callback", set_cb)
+
+        def during_wait(timeout=None):
+            callback = set_cb.call_args_list[0].args[0]
+            for step in steps:
+                if step == "cancel":
+                    env.jm.is_cancellation_requested.return_value = True
+                    env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "cancelled": True}
+                else:
+                    callback(*step, "Lookup", servers=[])
+            return True
+
+        env.tracker.wait.side_effect = during_wait
+
+        def counters():
+            """(rereads, taken_at) of the recheck, (retries, retried_at) of item 7; None where nothing is stored."""
+            reread = store._conn.execute(
+                "SELECT rereads, taken_at FROM server_marker_rereads WHERE file_id=? AND server_id='jf-1'", (rec.id,)
+            ).fetchone()
+            retry = store._conn.execute(
+                "SELECT retries, retried_at FROM failed_item_retries WHERE server_id='plex-1' AND item_id='7'"
+            ).fetchone()
+            return (tuple(reread) if reread else None), (tuple(retry) if retry else None)
+
+        yield SimpleNamespace(
+            store=store, registry=registry, recheck=recheck, failed=failed, steps=steps, counters=counters, clock=clock
+        )
+        store.close()
+
+    def _submitted(self, env):
+        return [item.canonical_path for item in env.dispatcher.submit_items.call_args.kwargs["items"]]
+
+    def test_a_run_that_completes_uses_each_files_checks_once_its_result_is_in(self, env, check_env):
+        check_env.steps += [(check_env.recheck, "markers_up_to_date", ""), (check_env.failed, "markers_published", "")]
+        job_runner.run_intro_credits_job("j1")
+        assert sorted(self._submitted(env)) == sorted([check_env.recheck, check_env.failed])
+        now = self.NOW.isoformat()
+        assert check_env.counters() == ((0, now), (1, now))
+        env.jm.complete_job.assert_called_once_with("j1", warning=None)
+
+    def test_a_run_cancelled_before_any_file_ran_uses_nothing(self, env, check_env, monkeypatch):
+        from media_preview_generator.markers import reconcile
+
+        listed = reconcile.check_servers_listing
+
+        def cancelled_right_after(**kwargs):
+            listing = listed(**kwargs)
+            env.jm.is_cancellation_requested.return_value = True
+            return listing
+
+        monkeypatch.setattr(reconcile, "check_servers_listing", cancelled_right_after)
+        job_runner.run_intro_credits_job("j1")
+        env.dispatcher.submit_items.assert_not_called()
+        env.jm.cancel_job.assert_called_once_with("j1")
+        assert check_env.counters() == (None, None)
+
+    def test_a_run_cancelled_midway_uses_only_the_checks_of_the_files_that_ran(self, env, check_env):
+        # The cancel stops item 7's file part way: its result says so, and its retry stays due.
+        check_env.steps += [
+            (check_env.recheck, "markers_up_to_date", ""),
+            "cancel",
+            (check_env.failed, "failed", "cancelled by user"),
+        ]
+        job_runner.run_intro_credits_job("j1")
+        assert check_env.counters() == ((0, self.NOW.isoformat()), None)
+        env.jm.cancel_job.assert_called_once_with("j1")
+        assert [c.args[1] for c in env.jm.record_file_result.call_args_list] == [check_env.recheck, check_env.failed]
+
+    def test_a_revived_run_uses_the_checks_of_the_files_it_runs(self, env, check_env):
+        from media_preview_generator.markers import reconcile
+
+        # The first run listed both files and ran the recheck file before the restart.
+        first = reconcile.check_servers_listing(registry=check_env.registry, store=check_env.store, max_files=500)
+        first.count_checked(check_env.store, check_env.recheck)
+        env.job.config[reconcile.LISTING_CONFIG_KEY] = json.loads(json.dumps(first.to_config()))
+        env.jm.get_file_results.return_value = [{"file": check_env.recheck, "outcome": "markers_up_to_date"}]
+        check_env.clock["t"] = self.NOW + timedelta(minutes=10)
+        check_env.steps.append((check_env.failed, "markers_published", ""))
+        job_runner.run_intro_credits_job("j1")
+        assert self._submitted(env) == [check_env.failed]
+        assert check_env.counters() == ((0, self.NOW.isoformat()), (1, check_env.clock["t"].isoformat()))
 
 
 class TestVerifyReplacedFilesLater:

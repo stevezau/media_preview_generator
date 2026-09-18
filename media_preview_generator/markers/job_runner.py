@@ -966,13 +966,12 @@ def run_intro_credits_job(job_id: str) -> None:
                 if cfg.get("reconcile"):
                     from .reconcile import check_servers_listing
 
-                    # A run revived after a restart checks the files its first run listed: taking them counted the
-                    # server rechecks and failed-item retries among them as used, so listing again would skip those.
+                    # A run revived after a restart checks the files its first run listed, without reading every
+                    # server back again; the checks of the files it had finished were used then (count_checked).
                     listing = CheckServersListing.from_config(cfg.get(LISTING_CONFIG_KEY))
                     if listing is None and LISTING_CONFIG_KEY in cfg:
                         logger.warning(
-                            "Check servers couldn't read the files it listed before the restart; listing them again "
-                            "(server rechecks and retries the first listing took are not checked this time)"
+                            "Check servers couldn't read the files it listed before the restart; listing them again"
                         )
                     if listing is None:
                         listing = check_servers_listing(
@@ -1050,6 +1049,10 @@ def run_intro_credits_job(job_id: str) -> None:
                         if isinstance(row, dict) and row.get(READ_BACK_FAILED):
                             name = str(row.get("server_name") or row.get("server_id") or "a server")
                             unchecked.setdefault(name, set()).add(file_path)
+                    # Before the row is kept: a restart in between runs the file again, which counts nothing twice.
+                    # A result that comes in after a cancel (the file stopped part way) leaves its checks due.
+                    if listing is not None and not cancel_check():
+                        listing.count_checked(ctx.store, file_path)
                     jm.record_file_result(
                         job_id, file_path, outcome, reason, worker, servers=servers, server_messages=True
                     )
