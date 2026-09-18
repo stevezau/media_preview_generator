@@ -19,9 +19,10 @@ import numpy as np
 from loguru import logger
 
 from ..locks import KeyedLocks
-from ..store import FileRecord, FingerprintCheck, MarkerStore, StoredFingerprint
+from ..store import SEASON_PAIR_WINDOW, FileRecord, FingerprintCheck, MarkerStore, StoredFingerprint
 
-WINDOW = "intro"
+# One name for the window, defined beside the season-pair queries that read it (the store can't import this module).
+WINDOW = SEASON_PAIR_WINDOW
 ALGORITHM = 1
 MAX_WINDOW_S = 900.0
 WINDOW_FRACTION = 0.35
