@@ -1011,6 +1011,9 @@ def run_intro_credits_job(job_id: str) -> None:
 
                 set_file_result_callback(on_file_result, job_id=job_id)
                 dispatcher = get_or_create_dispatcher(config, _build_selected_gpus(settings))
+                # The running job's pool for the per-job worker routes, as the preview runner registers it; complete_job
+                # and cancel_job clear it.
+                jm.set_active_worker_pool(job_id, dispatcher.worker_pool)
                 tracker = dispatcher.submit_items(
                     job_id=job_id,
                     items=items,
@@ -1101,6 +1104,7 @@ def run_intro_credits_job(job_id: str) -> None:
         set_file_result_callback(None, job_id=job_id)
         jm.clear_pause_flag(job_id)
         jm.clear_cancellation_flag(job_id)
+        jm.clear_active_worker_pool(job_id)
         try:
             if not jm.get_running_jobs():
                 jm.clear_worker_statuses()

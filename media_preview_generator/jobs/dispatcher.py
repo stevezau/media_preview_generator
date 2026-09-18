@@ -206,18 +206,7 @@ class JobTracker:
                             fraction = 0.0
                     effective = self.completed + fraction
                     percent = (effective / self.total_items * 100) if self.total_items > 0 else 0
-                    # Until the first item claims a generation worker, the job
-                    # is still sweeping the library for existing previews —
-                    # surface that rather than "completed", which reads as
-                    # generation. Flips to the normal label the moment
-                    # generation begins (set in JobDispatcher._assign_tasks).
-                    # Mirrors the label the multi-server scan path showed
-                    # before the engines merged.
-                    if self.generation_started:
-                        msg = f"{self.library_prefix}{self.completed}/{self.total_items} completed"
-                    else:
-                        check_label = self.handlers.check_label if self.handlers else "Checking existing previews…"
-                        msg = f"{self.library_prefix}{check_label} {self.completed}/{self.total_items}"
+                    msg = self.progress_message()
                     # Push the live per-file outcome BEFORE the progress callback
                     # fires, so the file-level footnote (not found, no media
                     # parts, …) rides the same throttled job_progress emit
@@ -235,6 +224,22 @@ class JobTracker:
 
         if is_done:
             self.done_event.set()
+
+    def progress_message(self) -> str:
+        """The job banner's text, the same from each completion and from the dispatcher's periodic emit.
+
+        Until the first item claims a generation worker, the job is still sweeping the library (for existing previews,
+        or a kind's own check) — surface that rather than "completed", which reads as generation. Flips to the normal
+        label the moment generation begins (set in JobDispatcher._assign_tasks). Mirrors the label the multi-server
+        scan path showed before the engines merged.
+
+        Returns:
+            E.g. "Checking existing previews… 3/10", "Looking up markers… 3/10" or "3/10 completed".
+        """
+        if self.generation_started:
+            return f"{self.library_prefix}{self.completed}/{self.total_items} completed"
+        check_label = self.handlers.check_label if self.handlers else "Checking existing previews…"
+        return f"{self.library_prefix}{check_label} {self.completed}/{self.total_items}"
 
     def _push_outcome_snapshot(self, outcome: dict[str, int]) -> None:
         """Mirror the live per-file outcome breakdown onto the Job.
@@ -1144,7 +1149,7 @@ class JobDispatcher:
                 tracker.progress_callback(
                     tracker.completed,
                     tracker.total_items,
-                    f"{tracker.library_prefix}{tracker.completed}/{tracker.total_items} completed",
+                    tracker.progress_message(),
                     percent_override=percent,
                 )
                 tracker._last_progress_update = now

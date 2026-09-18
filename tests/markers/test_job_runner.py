@@ -357,6 +357,15 @@ class TestRun:
         env.jm.complete_job.assert_called_once_with("j1", warning="Couldn't list X")
         env.gate.release.assert_called_once_with(3)
 
+    def test_the_shared_worker_pool_is_the_running_jobs_pool(self, env):
+        # POST /api/jobs/<id>/workers/add and /remove act on the running job's pool; with only Intro & Credits jobs
+        # running nothing else registers one, and those routes would answer 409.
+        order = []
+        env.jm.set_active_worker_pool.side_effect = lambda job_id, pool: order.append(("pool", job_id, pool))
+        env.dispatcher.submit_items.side_effect = lambda **kw: order.append("submit") or env.tracker
+        self._run()
+        assert order == [("pool", "j1", env.dispatcher.worker_pool), "submit"]
+
     @pytest.mark.parametrize(("force", "expected"), [(True, True), (False, False), (None, False), ("", False)])
     def test_force_from_job_config_reaches_the_pipeline_context(self, env, force, expected):
         env.job.config = {"libraries": [], "force": force}
@@ -876,6 +885,7 @@ class TestRun:
             self._run()
         env.jm.clear_pause_flag.assert_called_once_with("j1")
         env.jm.clear_cancellation_flag.assert_called_once_with("j1")
+        env.jm.clear_active_worker_pool.assert_called_once_with("j1")
         assert set_cb.call_args_list[-1].args == (None,) and set_cb.call_args_list[-1].kwargs == {"job_id": "j1"}
         clear_failures.assert_called_once()
         assert env.jm.clear_worker_statuses.called is (not others_running)

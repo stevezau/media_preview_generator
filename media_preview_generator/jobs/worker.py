@@ -410,6 +410,8 @@ class Worker:
             try:
                 self._process_custom_item(item, progress_callback)
             finally:
+                # Like the dispatcher's check threads: a later thread reusing this ident mustn't log into this job.
+                unregister_job_thread()
                 if self._done_event is not None:
                     self._done_event.set()
             return

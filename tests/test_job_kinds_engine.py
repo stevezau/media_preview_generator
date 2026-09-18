@@ -287,6 +287,29 @@ def test_worker_outcome_with_unknown_key_counts_as_failed():
     assert notify.call_args.args[1].value == "failed"
 
 
+def test_a_finished_item_leaves_no_job_registration_on_its_worker_thread():
+    # A later thread reusing the dead thread's ident (a webhook timer, a decode reader) would log into this job.
+    from media_preview_generator.jobs.worker import Worker, is_job_thread_for
+
+    seen = {}
+
+    def process(item, **kwargs):
+        seen["ident"] = threading.get_ident()
+        seen["registered"] = is_job_thread_for(seen["ident"], "j-reg")
+        return ItemOutcome("markers_published", "ok")
+
+    w = Worker(1, "CPU")
+    done = threading.Event()
+    w._done_event = done
+    with patch("media_preview_generator.jobs.worker._notify_file_result"):
+        w.assign_task(_items("/m/r.mkv")[0], _config(), MagicMock(), job_id="j-reg", process_fn=process,
+                      outcome_keys=KEYS)  # fmt: skip
+        assert done.wait(timeout=10)
+        w.current_thread.join(timeout=5)
+    assert seen["registered"] is True  # its logs reached the job's log while it ran
+    assert is_job_thread_for(seen["ident"], "j-reg") is False
+
+
 @pytest.mark.parametrize("stage", ["first-run", "cpu-rerun"])
 def test_a_worker_failure_whose_text_carries_a_token_is_masked_on_the_file_row_and_in_the_log(stage):
     from loguru import logger
@@ -670,4 +693,43 @@ def test_previews_tracker_without_handlers_still_calls_process_canonical_path_wi
     assert tracker.kind == "previews" and tracker.handlers is None
     assert calls[0]["check_only"] is True and calls[0]["canonical_path"] == "/m/x.mkv"
     assert calls[0]["server_id_filter"] is None and calls[0]["gpu"] is None
+    dispatcher.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("handlers", "checking"),
+    [
+        (KindHandlers(check_fn=MagicMock(), process_fn=MagicMock(), outcome_keys=KEYS, check_label="Looking up markers…"),
+         "Looking up markers… 1/3"),
+        (None, "Checking existing previews… 1/3"),
+    ],
+    ids=["intro-credits", "previews"],
+)  # fmt: skip
+def test_the_periodic_banner_says_what_each_completion_says(handlers, checking):
+    """The 3 s progress emit and each completion's emit give the job banner one text, not two taking turns."""
+    from media_preview_generator.jobs.dispatcher import JobTracker
+
+    pool = WorkerPool(cpu_workers=1, gpu_workers=0, selected_gpus=[])
+    dispatcher = JobDispatcher(pool)
+    messages = []
+    tracker = JobTracker(
+        job_id="banner",
+        items=_items("/m/a.mkv", "/m/b.mkv", "/m/c.mkv"),
+        config=_config(),
+        registry=MagicMock(),
+        callbacks={
+            "progress_callback": lambda current, total, message, percent_override=None: messages.append(message)
+        },
+        handlers=handlers,
+    )
+    with dispatcher._trackers_lock:
+        dispatcher._trackers["banner"] = tracker
+    with patch("media_preview_generator.web.jobs.get_job_manager"):
+        tracker.record_completion(True, "Lookup", "a")
+        tracker._last_progress_update = 0.0
+        dispatcher._emit_progress_updates()
+        tracker.generation_started = True  # an item reached a worker
+        tracker._last_progress_update = 0.0
+        dispatcher._emit_progress_updates()
+    assert messages == [checking, checking, "1/3 completed"]
     dispatcher.shutdown()
