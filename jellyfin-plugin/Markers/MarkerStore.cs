@@ -73,9 +73,16 @@ public static class MarkerStore
         lock (Gate)
         {
             Directory.CreateDirectory(Dir);
-            // Write-then-rename so a crash mid-write never leaves a half file behind.
+            // Write-then-rename so a crash mid-write never leaves a half file behind, and on disk before the rename:
+            // after a power cut the renamed file must not come back empty, which reads as no markers and makes the
+            // provider drop the item's segments at the next scan.
             var tmp = FileFor(itemId) + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(markers));
+            using (var stream = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                JsonSerializer.Serialize(stream, markers);
+                stream.Flush(flushToDisk: true);
+            }
+
             File.Move(tmp, FileFor(itemId), overwrite: true);
         }
     }
