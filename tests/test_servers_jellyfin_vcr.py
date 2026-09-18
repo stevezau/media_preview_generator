@@ -143,7 +143,8 @@ def jellyfin_lab():
 
 
 class TestJellyfinItemMissingContract:
-    """Check servers' read-back of an item Jellyfin deleted: the segments read fails, then Jellyfin confirms it."""
+    """Check servers' read-back of an item Jellyfin deleted: the segments read fails, then Jellyfin confirms it (an empty
+    ``/Items?Ids=`` answer, then a 404 for the id itself)."""
 
     UNKNOWN_ITEM = "0badc0de0badc0de0badc0de0badc0de"
     SYNTH_E02 = "/media/synth-chapters/Synth Chapters (2021)/Season 01/Synth Chapters (2021) - S01E02.webm"

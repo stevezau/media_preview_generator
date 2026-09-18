@@ -568,6 +568,32 @@ class JellyfinServer(EmbyApiClient):
         """
         return self._request("DELETE", self._bridge_markers_path(item_id))
 
+    def item_missing(self, item_id: str) -> bool | None:
+        """Whether Jellyfin says it has no item with this id (see :meth:`EmbyApiClient.item_missing`).
+
+        With an API key the lookup is ``/Items?Ids=``, and Jellyfin 12 leaves alternate versions out of every item
+        query (another item owns them), so an empty answer is asked again by id: ``/MediaSegments/{id}`` finds any
+        item and answers 404 only when there is none.
+
+        Args:
+            item_id: Jellyfin item id.
+
+        Returns:
+            True when Jellyfin answers that the item doesn't exist, False when it has it, None when it couldn't be
+            asked (a timeout, an error answer).
+        """
+        missing = super().item_missing(item_id)
+        if missing is not True or self._user_id():
+            return missing
+        try:
+            resp = self._request("GET", self._media_segments_path(item_id))
+        except requests.RequestException as exc:
+            logger.debug("Jellyfin item lookup by id failed on {} for {}: {}", self.name, item_id, type(exc).__name__)
+            return None
+        if resp.status_code == 404:
+            return True
+        return False if resp.status_code == 200 else None
+
     def get_media_segments(self, item_id: str, *, raise_no_answer: bool = False) -> list[dict[str, Any]] | None:
         """Segments Jellyfin serves for an item, from every registered provider.
 

@@ -253,8 +253,8 @@ class JellyfinMarkerPublisher(MarkerPublisher):
             logger.debug("Jellyfin {}: couldn't read item {} back: {}", self._config.name, item_id, type(exc).__name__)
             return None
         if rows is None:
-            # One more request only when the read got an error answer: a deleted item is drift to fix, not a read to
-            # warn about.
+            # Only after an error answer is Jellyfin asked whether the item exists (one or two more requests, see
+            # JellyfinServer.item_missing): a deleted item is drift to fix, not a read to warn about.
             return Shown.GONE if self.item_missing(item_id) is True else None
         served: dict[MarkerType, list[tuple[int, int]]] = {}
         for row in rows:

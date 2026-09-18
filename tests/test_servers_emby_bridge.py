@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import requests
@@ -336,28 +336,72 @@ class TestCatalogInstall:
         assert result["ok"] is False and result["error"] == "queue_install failed: HTTPError"
 
 
+_ID_LOOKUP_ANSWERS = [
+    ("gone", _resp(200, {"Items": []}), True),
+    ("there", _resp(200, {"Items": [{"Id": "55"}]}), False),
+    ("error-answer", _resp(500, {"error": "boom"}), None),
+    ("unreadable-answer", _resp(200, ["not", "an", "object"]), None),
+    ("no-connection", requests.ConnectionError("down"), None),
+]
+
+
 class TestItemMissing:
     """Check servers tells a deleted item (drift to fix) apart from a read that failed (a warning)."""
 
     @pytest.mark.parametrize(
-        ("answer", "missing"),
+        ("cls", "stype", "answer", "missing"),
         [
-            (_resp(200, {"Items": []}), True),
-            (_resp(200, {"Items": [{"Id": "55"}]}), False),
-            (_resp(500, {"error": "boom"}), None),
-            (_resp(200, ["not", "an", "object"]), None),
-            (requests.ConnectionError("down"), None),
+            pytest.param(cls, stype, answer, missing, id=f"{stype.value}-{name}")
+            for cls, stype in ((EmbyServer, ServerType.EMBY), (JellyfinServer, ServerType.JELLYFIN))
+            for name, answer, missing in _ID_LOOKUP_ANSWERS
+            # Jellyfin checks an empty answer again by id (the next test).
+            if not (stype is ServerType.JELLYFIN and name == "gone")
         ],
-        ids=["gone", "there", "error-answer", "unreadable-answer", "no-connection"],
     )
-    @pytest.mark.parametrize(("cls", "stype"), [(EmbyServer, ServerType.EMBY), (JellyfinServer, ServerType.JELLYFIN)])
     def test_api_key_servers_look_the_id_up(self, cls, stype, answer, missing):
         server = _server(cls, stype)
         kwargs = {"side_effect": answer} if isinstance(answer, Exception) else {"return_value": answer}
         with patch.object(server, "_request", **kwargs) as req:
             assert server.item_missing("55") is missing
-        assert req.call_args.args == ("GET", "/Items")
-        assert req.call_args.kwargs == {"params": {"Ids": "55"}}
+        assert req.call_args_list == [call("GET", "/Items", params={"Ids": "55"})]
+
+    @pytest.mark.parametrize(
+        ("segments_answer", "missing"),
+        [
+            (_resp(404, {"title": "Not Found", "status": 404}), True),
+            # Jellyfin 12 leaves an alternate version (an item another item owns) out of /Items?Ids= (v12.0
+            # BaseItemRepository.TranslateQuery.cs:806-814), but finds it by id: the lab's 12.0 served our segments
+            # through /MediaSegments/<version id> (evidence/lab/phase1-results.md row 19). No cassette of that yet.
+            (_resp(200, {"Items": []}), False),
+            (_resp(500, None), None),
+            (requests.Timeout("slow"), None),
+        ],
+        ids=["gone", "alternate-version", "error-answer", "no-answer"],
+    )
+    def test_jellyfin_checks_an_empty_id_lookup_by_id(self, segments_answer, missing):
+        server = _server(JellyfinServer, ServerType.JELLYFIN)
+        answers = {"/Items": _resp(200, {"Items": []}), "/MediaSegments/0bad%2F1": segments_answer}
+
+        def answer(method, path, **_kwargs):
+            got = answers[path]
+            if isinstance(got, Exception):
+                raise got
+            return got
+
+        with patch.object(server, "_request", side_effect=answer) as req:
+            assert server.item_missing("0bad/1") is missing
+        assert req.call_args_list == [
+            call("GET", "/Items", params={"Ids": "0bad/1"}),
+            call("GET", "/MediaSegments/0bad%2F1"),
+        ]
+
+    def test_jellyfin_with_a_user_asks_only_for_that_users_item(self):
+        server = JellyfinServer(ServerConfig(id="j1", type=ServerType.JELLYFIN, name="JF", enabled=True,
+                                             url="http://jf:8096", auth={"method": "password", "user_id": "u1"},
+                                             libraries=[]))  # fmt: skip
+        with patch.object(server, "_request", return_value=_resp(404, None)) as req:
+            assert server.item_missing("55") is True
+        assert req.call_args_list == [call("GET", "/Users/u1/Items/55")]
 
     @pytest.mark.parametrize(
         ("answer", "missing"),

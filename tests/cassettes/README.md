@@ -124,7 +124,9 @@ JELLYFIN_URL=http://127.0.0.1:18097 JELLYFIN_TOKEN="$JF_TOKEN" \
 grep -rlF -e "$JF_TOKEN" tests/cassettes/test_servers_jellyfin_vcr/ && echo "LEAK" || echo "clean"
 ```
 
-Expected: `2 passed`, `clean`. Jellyfin answers `/Items?Ids=<id>` without `Path` or `MediaSources`, so the scrubber
+Expected: `2 passed`, `clean`. An empty `/Items?Ids=<id>` answer is asked again by id (`/MediaSegments/<id>`: Jellyfin
+12 leaves alternate versions out of item queries), so the unknown-id cassette holds that 404 twice: the test's own
+segments read, then `item_missing`'s check. Jellyfin answers `/Items?Ids=<id>` without `Path` or `MediaSources`, so the scrubber
 can't tell it's synthetic; for exactly that request it keeps each item's `Id` and `Type` only, instead of emptying the
 list (which would replay "the server has it" as "it's gone").
 The API-key read answers an `Items` list whose item has no `Path` (it asks for other fields): the scrubber keeps it
