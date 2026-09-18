@@ -27,12 +27,35 @@ def test_pins_match_the_detector_and_the_helper():
     assert re.fullmatch(r"[0-9a-f]{64}", fetch.WHEEL_SHA256)
 
 
-def test_the_dockerfile_fetches_in_the_builder_and_copies_to_app_models():
-    text = (ROOT / "Dockerfile").read_text()
-    builder, runtime = text.split("# Stage 2: Runtime", 1)
-    assert "COPY scripts/fetch_textdet_model.py /tmp/fetch_textdet_model.py" in builder
-    assert "RUN python3 /tmp/fetch_textdet_model.py --out /models" in builder
-    assert "COPY --from=builder /models/ch_PP-OCRv4_det_infer.onnx /app/models/ch_PP-OCRv4_det_infer.onnx" in runtime
+def _stages() -> dict[str, str]:
+    """Each build stage's instructions (comments left out) by stage name (``""`` for the unnamed final stage)."""
+    stages = {}
+    for block in re.split(r"(?m)^FROM ", (ROOT / "Dockerfile").read_text())[1:]:
+        header, _, body = block.partition("\n")
+        instructions = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
+        stages[header.split(" AS ", 1)[1].strip() if " AS " in header else ""] = instructions
+    return stages
+
+
+def test_the_model_is_fetched_in_its_own_stage_and_copied_to_app_models():
+    stages = _stages()
+    assert "COPY scripts/fetch_textdet_model.py /tmp/fetch_textdet_model.py" in stages["model"]
+    assert "RUN python3 /tmp/fetch_textdet_model.py --out /models" in stages["model"]
+    # An edit to the fetch script must not invalidate the dependency wheel cache the builder's Layer A keeps.
+    assert "fetch_textdet_model" not in stages["toolchain"] + stages["builder"]
+    runtime = stages[""]
+    assert "COPY --from=model /models/ch_PP-OCRv4_det_infer.onnx /app/models/ch_PP-OCRv4_det_infer.onnx" in runtime
+
+
+def test_the_version_arg_comes_after_the_dependency_wheels():
+    # Every RUN after an ARG sees it as an environment variable, and CI passes a new version on every build, so
+    # declared any earlier it would miss the dependency wheel cache (Layer A) every time.
+    stages = _stages()
+    builder = stages["builder"]
+    assert builder.index("pip3 wheel --wheel-dir=/wheels --no-cache-dir . &&") < builder.index(
+        "ARG SETUPTOOLS_SCM_PRETEND_VERSION"
+    )
+    assert "SETUPTOOLS_SCM_PRETEND_VERSION" not in stages["toolchain"] + stages["model"]
 
 
 def _wheel(model: bytes) -> bytes:
