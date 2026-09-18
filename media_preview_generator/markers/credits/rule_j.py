@@ -12,8 +12,9 @@ prototype's 59 / 1 / 8 / 4 to 63 / 1 / 8 / 4, every changed file closer to the t
 whose stored errors stay the prototype's -- ``ANCHOR_DIVERGENCES`` in ``tests/markers/credits/test_rule_j.py`` names
 the seven items that differ).
 ``coarse_end_s`` reads the run's latest credit frame in presentation order for the same reason, so Q3's end means the
-end of the roll rather than whichever of its keyframes ffmpeg emitted last. Everywhere else rows stay in ffmpeg's
-output order: the measured keyframe rows aren't always increasing, and sorting them changes an answer.
+end of the roll rather than whichever of its keyframes ffmpeg emitted last, and ``fade_back`` never steps onto a later
+row. Everywhere else rows stay in ffmpeg's output order, the anchor's distance included: the measured keyframe rows
+aren't always increasing, and sorting them changes an answer (4 of the 80 coarse starts, as measured).
 """
 
 from __future__ import annotations
@@ -176,13 +177,17 @@ def fade_back(rows: Sequence[Row], index: int, floor_s: float) -> float:
     """Step back from ``rows[index]`` over the fade to black: frames darker than 12, at most 4 s apart, not before
     ``floor_s``.
 
+    Only ever back in time: on the keyframe rows (the fallback when no 1 fps row lies in the refine window) a swapped
+    pair can put a later row before the start in ffmpeg's output order, and stepping onto it would start the skip
+    inside the roll. The 1 fps rows are always in order, so this changes nothing there.
+
     Returns:
         The time of the earliest frame reached.
     """
     i = index
     while (
         i > 0
-        and rows[i - 1][0] >= floor_s
+        and floor_s <= rows[i - 1][0] <= rows[i][0]
         and rows[i - 1][2] < FADE_LUMA
         and rows[i][0] - rows[i - 1][0] <= FADE_STEP_S
     ):
@@ -234,8 +239,8 @@ def credits_start(
     before_s: float = REFINE_BEFORE_S,
     params: RuleParams = RULE_J,
 ) -> float | None:
-    """Coarse start then refinement on rows already decoded (the harness and the fixture test; the detector decodes the
-    fine rows only after it knows the coarse start).
+    """Coarse start then refinement on rows already decoded (the 80-file fixture's builder and its tests; the detector,
+    and the harness through it, decode the fine rows only after they know the coarse start).
 
     Returns:
         The credits start in seconds, or None when the keyframe rows hold no credit run.

@@ -66,6 +66,13 @@ class TestRuns:
         rows = [dark(0, 1), dark(10, 1), dark(20, 1), bright(30, 0, 30.0), dark(40), dark(50, 1), dark(60, 1)]
         assert rule_j.credit_runs(rows) == [(0, 2)]
 
+    def test_a_lit_frame_at_the_same_time_as_the_runs_last_credit_frame_ends_the_dark_bridge(self):
+        # Prototype parity: the bridge holds only while every lit frame is strictly earlier than the run's last credit
+        # frame. A lit row sharing that timestamp (emitted after it) already counts as a scene, so the 30 s of dark
+        # empties that follow can't carry the run over to 150 s.
+        rows = [dark(100, 1), dark(120, 1), bright(120), dark(130), dark(140), dark(150, 1), dark(170, 1)]
+        assert rule_j.credit_runs(rows) == [(0, 1), (5, 6)]
+
     @pytest.mark.parametrize(("length", "kept"), [(14.9, False), (15.0, True)])
     def test_runs_shorter_than_15_s_are_dropped(self, length, kept):
         rows = [dark(100, 1), dark(100 + length, 1)]
@@ -223,6 +230,20 @@ class TestRefine:
                 dark(95, 1, 20.0), dark(98, 1, 20.0), dark(100, 1, 20.0), dark(101, 1, 20.0)]  # fmt: skip
         assert rule_j.refine_start(self.ROWS, coarse, fine) == 98.0
 
+    @pytest.mark.parametrize(("earlier_s", "expected"), [(97.5, 97.5), (97.4, 100.0)])
+    def test_credit_frames_exactly_2_5_s_apart_are_contiguous(self, earlier_s, expected):
+        coarse = rule_j.coarse_start(self.ROWS)
+        fine = [bright(95), dark(earlier_s, 1, 20.0), dark(100, 1, 20.0)]
+        assert rule_j.refine_start(self.ROWS, coarse, fine) == expected
+
+    def test_the_walk_jumps_to_the_first_listed_credit_frame_within_reach_as_the_prototype(self):
+        # 1 fps rows come out in order, where jumping to the first or the last listed frame within 2.5 s ends in the same
+        # place. Out of order they don't: the prototype's walk (``prev[0]``) goes from 100 s to 98 s, the first listed
+        # of the two in reach; jumping to the last listed (101 s) would stop there, 3 s from 98 s.
+        coarse = rule_j.coarse_start(self.ROWS)
+        fine = [dark(98, 1, 20.0), dark(101, 1, 20.0), dark(100, 1, 20.0)]
+        assert rule_j.refine_start(self.ROWS, coarse, fine) == 98.0
+
     def test_walks_back_through_contiguous_credit_frames_then_over_the_fade(self):
         coarse = rule_j.coarse_start(self.ROWS)
         fine = [
@@ -280,6 +301,24 @@ class TestRefine:
         rows = [bright(0), dark(96, 0, 5.0), dark(100, 1), dark(102, 1), dark(116, 1)]
         coarse = rule_j.coarse_start(rows)
         assert rule_j.refine_start(rows, coarse, [bright(10)]) == 96.0
+
+    def test_the_fade_on_the_keyframes_never_steps_to_a_later_row(self):
+        # Keyframe rows come in ffmpeg's output order. A swapped pair can put a dark row from 104 s right before the
+        # 100 s coarse start; stepping "back" onto it would start the skip 4 s into the roll.
+        rows = [bright(0), bright(60), dark(104, 0, 5.0), dark(100, 1), dark(102, 1), dark(110, 1), dark(125, 1)]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse == Coarse(index=3, end_index=6, pts_s=100.0)
+        assert rule_j.refine_start(rows, coarse, [bright(10)]) == 100.0
+
+    def test_the_anchor_compares_rows_in_ffmpegs_output_order(self):
+        # Pinned as measured (Q5): the anchor's distance is read in decode order, so a swapped pair at the run's
+        # start reads as a negative gap and the first emitted credit row (102 s) is the start, not the earlier 100 s
+        # one. Comparing in presentation order instead moves the coarse start of 4 of the 80 files (movie-11, -28,
+        # -38, tv-26) earlier, so it is a rule change for the harness gate, not a fix.
+        body = [bright(t) for t in range(0, 100, 2)]
+        rows = [*body, dark(102, 1), dark(100, 1), *[dark(t, 1) for t in range(104, 132, 2)]]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse == Coarse(index=50, end_index=65, pts_s=102.0)
 
 
 class TestEpilogueCards:
@@ -355,6 +394,17 @@ class TestEnd:
         fine = [dark(t, 1) for t in range(124, 129)]  # the roll goes on to 128 s; 157 − 128 = 29 s
         assert rule_j.credits_end(self.ROWS, self._coarse(), fine, 157.0) is None
 
+    @pytest.mark.parametrize(("later_s", "expected"), [(127.5, 127.5), (127.6, 125.0)])
+    def test_credit_frames_exactly_2_5_s_apart_carry_the_end_forward(self, later_s, expected):
+        fine = [dark(125, 1), dark(later_s, 1), bright(129)]
+        assert rule_j.refine_end(self.ROWS, self._coarse(), fine) == expected
+
+    def test_the_forward_walk_jumps_to_the_last_listed_credit_frame_within_reach(self):
+        # The start's walk mirrored: from 125 s both 124 s and 127 s are within 2.5 s, and the walk takes the last
+        # listed (127 s). Taking the first listed (124 s) would stop there, 3 s short of 127 s.
+        fine = [dark(125, 1), dark(124, 1), dark(127, 1)]
+        assert rule_j.refine_end(self.ROWS, self._coarse(), fine) == 127.0
+
     def test_no_credit_frame_near_the_last_keyframe_keeps_the_keyframe(self):
         assert rule_j.refine_end(self.ROWS, self._coarse(), [bright(126), bright(127)]) == 125.0
 
@@ -410,6 +460,45 @@ class TestEnd:
         assert rule_j.coarse_end_s(rows, coarse, params=rule_j.RuleParams(min_boxes=2)) == 110.0
         # No row in the slice qualifies at min_boxes=99: degrades to the run's last row instead of raising.
         assert rule_j.coarse_end_s(rows, coarse, params=rule_j.RuleParams(min_boxes=99)) == rows[coarse.end_index][0]
+
+
+class TestAShortRollOverACardJustBrighterThanDark:
+    """A real TV ending (keyframe rows from 1158 s on; a 1265.0 s file) whose roll runs 1162.2-1186.5 s over a card at
+    luma 30-35, then a 78.5 s scene. Pinned as rule J reads it (Q5) for the follow-ups in spec §13 items 13 and 14: the
+    rows and timestamps are right on both decode paths, only box counts on lit scene frames differ."""
+
+    GPU = [(1158.657, 0, 50.7), (1162.203, 2, 30.5), (1170.294, 9, 33.5), (1173.047, 11, 34.1), (1179.470, 4, 32.2),
+           (1183.015, 12, 34.2), (1186.519, 0, 153.5), (1188.145, 0, 130.8), (1189.647, 0, 130.6), (1191.649, 1, 158.3),
+           (1195.611, 0, 146.0), (1198.406, 2, 145.2), (1200.157, 0, 134.4), (1206.122, 0, 83.1), (1216.549, 0, 142.0),
+           (1226.976, 0, 141.9), (1236.652, 0, 168.5), (1242.491, 0, 172.6), (1243.742, 0, 139.4), (1247.705, 0, 156.4),
+           (1256.046, 9, 130.4), (1257.548, 2, 42.2), (1259.049, 2, 210.3), (1261.051, 2, 163.9), (1264.054, 0, 29.7)]  # fmt: skip
+    CPU = [(1158.657, 0, 50.9), (1162.203, 2, 30.7), (1170.294, 9, 33.8), (1173.047, 11, 34.4), (1179.470, 4, 32.5),
+           (1183.015, 12, 34.5), (1186.519, 0, 153.5), (1188.145, 2, 130.8), (1189.647, 1, 130.6), (1191.649, 1, 158.5),
+           (1195.611, 0, 146.1), (1198.406, 3, 145.6), (1200.157, 0, 134.5), (1206.122, 0, 83.3), (1216.549, 0, 142.1),
+           (1226.976, 0, 142.1), (1236.652, 0, 168.6), (1242.491, 0, 172.7), (1243.742, 0, 139.6), (1247.705, 0, 156.5),
+           (1256.046, 10, 130.7), (1257.548, 2, 42.4), (1259.049, 2, 210.5), (1261.051, 2, 164.3), (1264.054, 0, 30.0)]  # fmt: skip
+    CPU_END = [
+        bright(1197, 0, 146.1),
+        bright(1198, 3, 145.6),
+        bright(1199, 2, 146.0),
+        *[bright(t) for t in range(1200, 1218)],
+    ]
+    DURATION_S = 1265.024
+
+    def test_the_rolls_credit_keyframes_span_under_15_s_so_there_is_no_answer(self):
+        # The first card (1162.2 s) is 2 boxes at luma 30.5, just over the dark line, where a frame needs 3. What is
+        # left, 1170.3-1183.0 s, is 12.7 s of credit keyframes: under run_s, so no run and no answer.
+        assert not rule_j.is_credit(self.GPU[1])
+        assert rule_j.credit_runs(self.GPU) == []
+
+    def test_a_scene_text_keyframe_can_carry_the_run_and_its_end_into_the_scene(self):
+        # swscale's frame of the scene at 1198.4 s reads 3 boxes (scale_cuda's reads 2): a lit credit frame 15.4 s
+        # after the roll, so the 24 s join takes it in. The run is long enough now and the start is right, but its end
+        # is that scene frame: the skip would run 11.5 s into the scene after the roll (spec §13 item 13).
+        coarse = rule_j.coarse_start(self.CPU)
+        assert coarse is not None and coarse.pts_s == 1170.294
+        assert rule_j.coarse_end_s(self.CPU, coarse) == 1198.406
+        assert rule_j.credits_end(self.CPU, coarse, self.CPU_END, self.DURATION_S) == 1198.0
 
 
 @lru_cache(maxsize=1)
