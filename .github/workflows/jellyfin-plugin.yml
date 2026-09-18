@@ -136,6 +136,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: plugin-v${{ steps.ver.outputs.release_version }}
+          # A manual run creates the tag; without this GitHub puts it on the default branch's head, not on the
+          # commit these DLLs were built from.
+          target_commitish: ${{ github.sha }}
           name: "Media Preview Bridge ${{ steps.ver.outputs.release_version }}"
           body: |
             Jellyfin plugin DLLs — install via Jellyfin admin → Plugins → Repositories.
