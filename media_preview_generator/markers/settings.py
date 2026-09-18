@@ -28,7 +28,7 @@ PUBLISH_WHEN_VALUES: tuple[str, ...] = ("high", "medium")
 ON_PLEX_REDETECT_VALUES: tuple[str, ...] = ("restore", "keep_plex")
 ON_EMBY_REDETECT_VALUES: tuple[str, ...] = ("restore", "keep_emby")
 SECRET_MASK = "****"
-_API_KEY_RE = re.compile(r"^[^\s]{1,200}$")
+_API_KEY_MAX_LEN = 200
 # Sports libraries are excluded by default: no source covers them (spec §4). Name-based because no vendor
 # exposes a "sports" library kind; an explicit library_ids choice always wins.
 _SPORTS_NAME_RE = re.compile(r"\bsports?\b", re.IGNORECASE)
@@ -140,6 +140,12 @@ class ServerMarkersSettings:
         return self.on_plex_redetect == "keep_plex" or self.on_emby_redetect == "keep_emby"
 
 
+def _sendable_api_key(key: str) -> bool:
+    """Whether the TheIntroDB client will send this (stripped) key: the same rule as ``TheIntroDbClient``, which refuses
+    every lookup with any other key (a pasted zero-width space or curly quote can't go in an HTTP header)."""
+    return len(key) <= _API_KEY_MAX_LEN and key.isascii() and key.isprintable() and not any(ch.isspace() for ch in key)
+
+
 def _normalise_sources(raw_sources: Any, existing_sources: Any) -> tuple[list[dict] | None, str]:
     """Validate a posted ``sources`` list and fill in defaults for anything the user omitted.
 
@@ -192,8 +198,11 @@ def _normalise_sources(raw_sources: Any, existing_sources: Any) -> tuple[list[di
         if sid == "theintrodb":
             key = raw.get("api_key", existing_key)
             key = existing_key if key == SECRET_MASK else str(key or "").strip()
-            if key and not _API_KEY_RE.match(key):
-                return None, "markers.sources: theintrodb api_key must not contain whitespace"
+            # Only a new key is checked: a stored one that no longer passes must not make the whole block invalid on
+            # load (every Intro & Credits setting would fall back to the defaults) or refuse every later save; the
+            # client refuses to send it and the job says so.
+            if key and key != existing_key and not _sendable_api_key(key):
+                return None, "markers.sources: theintrodb api_key must be printable ASCII with no spaces"
             entry["api_key"] = key
         out.append(entry)
     for default in DEFAULT_GLOBAL_MARKERS["sources"]:

@@ -64,6 +64,37 @@ class TestValidateGlobal:
         block, err = ms.validate_global(raw, None)
         assert block is None and "api_key" in err
 
+    @pytest.mark.parametrize(
+        "key",
+        ["abc​def", "“abc”", "clé-123", "abc\x00def", "abc\x7fdef", "a b"],
+        ids=["zero-width-space", "curly-quotes", "non-ascii-letter", "nul", "del", "no-break-space"],
+    )
+    def test_rejects_an_api_key_the_client_would_refuse_on_every_lookup(self, key):
+        # The TheIntroDB client only sends printable ASCII without whitespace; anything else would be saved and then
+        # fail every lookup with "API key contains invalid characters".
+        raw = {"sources": [{"id": "theintrodb", "enabled": True, "api_key": key}]}
+        block, err = ms.validate_global(raw, None)
+        assert block is None and err == "markers.sources: theintrodb api_key must be printable ASCII with no spaces"
+
+    def test_accepts_a_printable_ascii_key_with_punctuation(self):
+        raw = {"sources": [{"id": "theintrodb", "enabled": True, "api_key": "tidb_AbC-123.xyz=="}]}
+        block, err = ms.validate_global(raw, None)
+        assert (
+            err == ""
+            and next(s for s in block["sources"] if s["id"] == "theintrodb")["api_key"] == "tidb_AbC-123.xyz=="
+        )
+
+    def test_a_stored_key_the_client_would_refuse_never_resets_the_other_settings(self):
+        # Saved before this check existed: loading it (and saving with the masked key) keeps everything else.
+        stored = {
+            "publish_when": "medium",
+            "sources": [{"id": "theintrodb", "enabled": True, "api_key": "abc​def"}],
+        }
+        assert ms.load_global(stored).publish_when == "medium"
+        posted = {"publish_when": "high", "sources": [{"id": "theintrodb", "enabled": True, "api_key": ms.SECRET_MASK}]}
+        block, err = ms.validate_global(posted, stored)
+        assert err == "" and block["publish_when"] == "high"
+
     def test_api_key_only_on_theintrodb(self):
         raw = {"sources": [{"id": "introdb", "enabled": True, "api_key": "x"}]}
         block, _ = ms.validate_global(raw, None)
