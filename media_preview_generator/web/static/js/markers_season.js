@@ -107,6 +107,9 @@
             const state = (episode.servers || {})[server.server_id] || { state: 'none', message: '' };
             const dot = el('span', 'mk-dot mk-dot-' + state.state);
             dot.title = `${server.server_name}: ${state.message || DOT_WORDS[state.state] || state.state}`;
+            // A title alone isn't read out on a span; the dot is otherwise empty.
+            dot.setAttribute('role', 'img');
+            dot.setAttribute('aria-label', dot.title);
             dots.appendChild(dot);
         });
         td.appendChild(dots);

@@ -161,6 +161,9 @@ class TestSeasonView:
         expect(dots.nth(0)).to_have_class(re.compile(r"\bmk-dot-ok\b"))
         expect(dots.nth(1)).to_have_class(re.compile(r"\bmk-dot-waiting\b"))
         expect(dots.nth(1)).to_have_attribute("title", "Jellyfin: Not in this server's library yet")
+        # Screen readers get the same words: the dot has no text of its own.
+        expect(dots.nth(1)).to_have_attribute("role", "img")
+        expect(dots.nth(1)).to_have_attribute("aria-label", "Jellyfin: Not in this server's library yet")
         expect(dots.nth(2)).to_have_class(re.compile(r"\bmk-dot-off\b"))
         expect(_row(page, "E03").locator(".mk-dot").nth(1)).to_have_class(re.compile(r"\bmk-dot-failed\b"))
         expect(body.locator(".mk-season-legend")).to_have_text(

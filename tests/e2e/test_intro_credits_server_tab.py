@@ -208,6 +208,8 @@ class TestPlexTab:
         expect(_lib_toggle(authed_page, "1")).to_be_checked()
         expect(_lib_toggle(authed_page, "2")).to_be_checked()
         expect(_lib_toggle(authed_page, "3")).not_to_be_checked()
+        # The pills are one named group for screen readers ("Libraries" above them is plain text).
+        expect(authed_page.get_by_role("group", name="Libraries that get markers on this server")).to_have_count(1)
         expect(authed_page.locator("#markersPlexRedetectGroup")).to_be_visible()
         expect(authed_page.locator("#markersRedetectRestore")).to_be_checked()
         expect(authed_page.locator("#markersEmbyRedetectGroup")).to_be_hidden()
