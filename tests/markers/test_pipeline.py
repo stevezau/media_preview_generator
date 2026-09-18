@@ -1460,6 +1460,51 @@ class TestBudgetExhaustedJobWarning:
         assert warnings[2].startswith("TheIntroDB's daily lookup limit was reached: 1 file")
         assert "add a TheIntroDB API key for a higher limit" in warnings[2]
 
+    @pytest.mark.parametrize(
+        "detail",
+        [
+            "TheIntroDB rejected the API key (HTTP 401)",
+            "TheIntroDB rejected the API key (HTTP 403)",
+            "TheIntroDB requires an API key (HTTP 401)",
+            "TheIntroDB API key contains invalid characters",
+        ],
+    )
+    def test_a_refused_key_gives_one_job_warning_for_every_file(self, store, media, detail):
+        reg = _registry(media, ServerType.PLEX)
+        others = [os.path.join(os.path.dirname(media), f"Rick and Morty (2013) - S01E0{n}.mkv") for n in (2, 3)]
+        for p in others:
+            open(p, "wb").write(b"y" * 10)
+        ctx = _ctx(store, reg, clients=_clients(theintrodb=LookupResult("unavailable", detail=detail)))
+        for p in (media, *others):
+            _run(ctx, p, {"plex-1": ready_publisher()})
+        assert pipeline.budget_exhausted_warnings(ctx) == [
+            f"{detail}: 3 files were checked without it. Check the TheIntroDB API key in Settings → Intro & Credits."
+        ]
+
+    @pytest.mark.parametrize(
+        "detail",
+        ["TheIntroDB HTTP 500", "TheIntroDB network error: ConnectTimeout", "TheIntroDB rate_limited"],
+    )
+    def test_other_unavailable_answers_give_no_job_warning(self, store, media, detail):
+        reg = _registry(media, ServerType.PLEX)
+        ctx = _ctx(store, reg, clients=_clients(theintrodb=LookupResult("unavailable", detail=detail)))
+        _run(ctx, media, {"plex-1": ready_publisher()})
+        assert pipeline.budget_exhausted_warnings(ctx) == []
+
+    def test_a_refused_key_and_a_used_up_budget_each_get_their_line(self, store, media):
+        reg = _registry(media, ServerType.PLEX)
+        clients = _clients(
+            theintrodb=LookupResult("unavailable", detail="TheIntroDB rejected the API key (HTTP 401)"),
+            skipdb=SKIPDB_BUDGET_EXHAUSTED,
+        )
+        ctx = _ctx(store, reg, clients=clients)
+        _run(ctx, media, {"plex-1": ready_publisher()})
+        warnings = pipeline.budget_exhausted_warnings(ctx)
+        assert [w.split(":")[0] for w in warnings] == [
+            "SkipDB's daily lookup limit was reached",
+            "TheIntroDB rejected the API key (HTTP 401)",
+        ]
+
     def test_warns_once_per_job_per_source_not_per_file(self, store, media, loguru_caplog):
         reg = _registry(media, ServerType.PLEX)
         other = os.path.join(os.path.dirname(media), "Rick and Morty (2013) - S01E02 - Lawnmower Dog.mkv")

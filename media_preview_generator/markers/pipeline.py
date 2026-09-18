@@ -97,6 +97,9 @@ PARSER_VERSIONS = {
     Source.SKIPDB: skipdb.PARSER_VERSION,
 }
 _STORED_LOOKUPS = ("ok", "no_data")
+# How the online clients word an ``unavailable`` answer for a refused (or missing, or unsendable) API key, after the
+# source's label (sources/online.py ``paced_get_json``'s ``auth_refused``, sources/theintrodb.py).
+_KEY_REFUSALS = ("rejected the API key", "requires an API key", "API key contains invalid characters")
 _CHAPTERS_AND_SERVERS = frozenset({Source.CHAPTERS.value, *(s.value for s in SERVER_SOURCES)})
 # Plex and Emby can't tell our markers from their own, and Plex shows one marker set per item across its versions, so
 # their markers are never read back from an item we published to. Jellyfin's reader leaves ours out itself.
@@ -259,6 +262,9 @@ class PipelineContext:
     # a completion warning once the job finishes). Counted when a file's run finishes, so a file asked again in the
     # same job (its worker stage after the checking thread, a retry after it changed on disk) is still one file.
     _budget_exhausted: dict[Source, int] = field(default_factory=dict, repr=False)
+    # The same for a source that refused the API key: its first refusal (e.g. "TheIntroDB rejected the API key (HTTP
+    # 401)") and how many files were checked without it.
+    _key_refused: dict[Source, tuple[str, int]] = field(default_factory=dict, repr=False)
     # Sources whose running out this job already logged.
     _budget_warned: set[Source] = field(default_factory=set, repr=False)
     _budget_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -890,64 +896,90 @@ def _warn_budget_exhausted(ctx: PipelineContext, source: Source) -> None:
         )
 
 
-def _count_budget_exhausted(ctx: PipelineContext, sources: Iterable[Source]) -> None:
-    """Count one file whose finished run was checked without these sources (their daily budget ran out)."""
+def _key_refused(source: Source, detail: str) -> bool:
+    """Whether an ``unavailable`` answer means the source refused this app's API key (or its lack of one), so every
+    lookup of the job fails the same way until the user changes the key."""
+    label = _ONLINE_LABELS[source]
+    return any(detail.startswith(f"{label} {refusal}") for refusal in _KEY_REFUSALS)
+
+
+def _count_skipped(ctx: PipelineContext, skipped: dict[Source, str]) -> None:
+    """Count one file whose finished run was checked without these sources, each with the answer that stopped it (a
+    used-up daily budget or a refused API key)."""
     with ctx._budget_lock:
-        for source in sources:
-            ctx._budget_exhausted[source] = ctx._budget_exhausted.get(source, 0) + 1
+        for source, detail in skipped.items():
+            if is_budget_exhausted(detail):
+                ctx._budget_exhausted[source] = ctx._budget_exhausted.get(source, 0) + 1
+            else:
+                first_detail, count = ctx._key_refused.get(source, (detail, 0))
+                ctx._key_refused[source] = (first_detail, count + 1)
+
+
+def _files_were(count: int) -> str:
+    return f"{count} file was" if count == 1 else f"{count} files were"
 
 
 def budget_exhausted_warnings(ctx: PipelineContext) -> list[str]:
-    """Job-completion warnings for online sources this job ran out of daily budget for.
+    """Job-completion warnings for online sources this job checked files without: a daily budget that ran out, or an
+    API key the source refused (one line per source, whatever the number of files).
 
     Args:
         ctx: The job's context, read after every file has run.
 
     Returns:
-        One user-facing warning per source that ran out (empty when nothing did), e.g. "TheIntroDB's daily lookup
-        limit was reached: 39 files were checked without it. It resets at 00:00 UTC; run the library again after
-        that (or add a TheIntroDB API key for a higher limit)."
+        User-facing warnings (empty when every source answered), e.g. "TheIntroDB's daily lookup limit was reached: 39
+        files were checked without it. It resets at 00:00 UTC; run the library again after that (or add a TheIntroDB
+        API key for a higher limit)." or "TheIntroDB rejected the API key (HTTP 401): 39 files were checked without it.
+        Check the TheIntroDB API key in Settings → Intro & Credits."
     """
     with ctx._budget_lock:
-        counts = dict(ctx._budget_exhausted)
+        exhausted = dict(ctx._budget_exhausted)
+        refused = dict(ctx._key_refused)
     warnings = []
-    for source in sorted(counts, key=lambda s: _ONLINE_LABELS[s]):
-        count = counts[source]
+    for source in sorted(exhausted, key=lambda s: _ONLINE_LABELS[s]):
         label = _ONLINE_LABELS[source]
-        file_word = "file" if count == 1 else "files"
-        verb = "was" if count == 1 else "were"
         key_hint = " (or add a TheIntroDB API key for a higher limit)" if source is Source.THEINTRODB else ""
         warnings.append(
-            f"{label}'s daily lookup limit was reached: {count} {file_word} {verb} checked without it. "
+            f"{label}'s daily lookup limit was reached: {_files_were(exhausted[source])} checked without it. "
             f"It resets at {RESET_TIME_LABEL}; run the library again after that{key_hint}."
+        )
+    for source in sorted(refused, key=lambda s: _ONLINE_LABELS[s]):
+        detail, count = refused[source]
+        label = _ONLINE_LABELS[source]
+        warnings.append(
+            f"{detail}: {_files_were(count)} checked without it. Check the {label} API key in Settings → Intro & "
+            "Credits."
         )
     return warnings
 
 
-def _lookup(client: Any, source: Source, ids: MediaIds, rec: FileRecord, ctx: PipelineContext, cancel_check) -> bool:
+def _lookup(
+    client: Any, source: Source, ids: MediaIds, rec: FileRecord, ctx: PipelineContext, cancel_check
+) -> str | None:
     """Ask one online source and store what it found.
 
     Returns:
-        Whether the source refused because its daily budget ran out (so the caller can note it on the file, and count
-        the file on the job once its run finishes).
+        The source's answer when it refused for the whole job (its daily budget ran out, or it refused the API key),
+        so the caller can note it on the file and count the file on the job once its run finishes; otherwise None.
     """
     try:
         result = client.lookup(ids, duration_ms=rec.duration_ms, priority=ctx.priority(), cancel_check=cancel_check)
     except Exception as exc:
         logger.warning("{} lookup failed for {}: {}", _ONLINE_LABELS[source], rec.canonical_path, type(exc).__name__)
-        return False
+        return None
     if not isinstance(result, LookupResult) or result.status not in _STORED_LOOKUPS:
         # unavailable / not_applicable: nothing is stored, so the next run asks again.
-        exhausted = isinstance(result, LookupResult) and is_budget_exhausted(result.detail)
-        if exhausted:
+        if isinstance(result, LookupResult) and is_budget_exhausted(result.detail):
             _warn_budget_exhausted(ctx, source)
-        else:
-            logger.debug("{} lookup for {}: {}", _ONLINE_LABELS[source], rec.canonical_path, result)
-        return exhausted
+            return result.detail
+        logger.debug("{} lookup for {}: {}", _ONLINE_LABELS[source], rec.canonical_path, result)
+        # The client logs a refused key itself, once per job.
+        refused = isinstance(result, LookupResult) and result.status == "unavailable"
+        return result.detail if refused and _key_refused(source, result.detail) else None
     ctx.store.replace_evidence(
         rec.id, source, list(result.candidates), detail=result.detail, version=PARSER_VERSIONS[source]
     )
-    return False
+    return None
 
 
 def _importer_plugin(ctx: PipelineContext, owner: _Owning) -> tuple[bool, str | None]:
@@ -1552,7 +1584,8 @@ def _attempt(
     gather_all = ctx.force
     decisions = _decide(ctx, rec, types, intro_limit)
     lookup_ids: MediaIds | None = None
-    budget_exhausted: set[Source] = set()
+    # Sources this run was checked without for the whole job's reason (a used-up budget, a refused key): the answer.
+    skipped: dict[Source, str] = {}
     for source_id in ctx.settings.ordered_enabled_sources():
         source = Source(source_id)
         refresh = _refreshing(ctx, path, source)
@@ -1578,8 +1611,9 @@ def _attempt(
             if lookups_allowed and client is not None and _needs_lookup(ctx, rec, source, refresh):
                 lookup_ids = lookup_ids or _lookup_ids(ids, servers)
                 phase(f"Looking up {_ONLINE_LABELS[source]}…")
-                if _lookup(client, source, lookup_ids, rec, ctx, cancel_check):
-                    budget_exhausted.add(source)
+                refusal = _lookup(client, source, lookup_ids, rec, ctx, cancel_check)
+                if refusal is not None:
+                    skipped[source] = refusal
         elif source is Source.SERVER_MARKERS:
             phase("Reading markers already on servers…")
             first_read_only = not gather_all and _all_decided(decisions, types)
@@ -1630,8 +1664,8 @@ def _attempt(
             row[VERIFY_LATER] = True
         rows.append(row)
     outcome = file_outcome({r["status"] for r in rows}, needs_review=needs_review)
-    _count_budget_exhausted(ctx, budget_exhausted)
-    labels = tuple(sorted(_ONLINE_LABELS[source] for source in budget_exhausted))
+    _count_skipped(ctx, skipped)
+    labels = tuple(sorted(_ONLINE_LABELS[source] for source, answer in skipped.items() if is_budget_exhausted(answer)))
     return ItemOutcome(outcome.value, _summary(decisions, types, labels), rows)
 
 
