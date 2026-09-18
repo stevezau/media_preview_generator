@@ -500,6 +500,60 @@ class TestRequeueInterruptedOnStartup:
         assert sm.processing_paused is True, "an explicit pause must survive the restart"
         mock_start_job.assert_called_once_with("job-456", {})
 
+    @pytest.mark.parametrize("auto_requeue", [True, False])
+    @patch("media_preview_generator.web.routes._start_job_async")
+    @patch("media_preview_generator.web.app.get_job_manager")
+    @patch("media_preview_generator.web.settings_manager.get_settings_manager")
+    def test_revived_jobs_start_even_when_settling_leftover_intro_credits_jobs_fails(
+        self, mock_get_settings_manager, mock_get_job_manager, mock_start_job, auto_requeue
+    ):
+        # A jobs.db write error while failing the leftovers must not strand the revived (preview) jobs PENDING.
+        from loguru import logger
+
+        warnings: list[str] = []
+        sink = logger.add(lambda message: warnings.append(str(message)), level="WARNING", format="{message}")
+        mock_get_settings_manager.return_value.get.side_effect = lambda key, default=None: {
+            "auto_requeue_on_restart": auto_requeue,
+            "requeue_max_age_minutes": 720,
+        }.get(key, default)
+        mock_get_settings_manager.return_value.processing_paused = False
+        jm = mock_get_job_manager.return_value
+        jm.requeue_interrupted_jobs.return_value = [type("RequeuedJob", (), {"id": "job-123", "config": {"a": 1}})()]
+        jm.fail_unrevived_interrupted_jobs.side_effect = OSError("disk I/O error")
+
+        try:
+            _requeue_interrupted_on_startup("/tmp/config")
+        finally:
+            logger.remove(sink)
+
+        jm.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
+        if auto_requeue:
+            mock_start_job.assert_called_once_with("job-123", {"a": 1})
+        else:
+            mock_start_job.assert_not_called()
+        text = "".join(warnings)
+        assert "Couldn't mark the Intro & Credits jobs left over from before the restart as failed (OSError)" in text
+        assert "Could not resume jobs" not in text
+
+    @patch("media_preview_generator.web.routes._start_job_async")
+    @patch("media_preview_generator.web.app.get_job_manager")
+    @patch("media_preview_generator.web.settings_manager.get_settings_manager")
+    def test_leftover_intro_credits_jobs_are_settled_when_nothing_is_revived(
+        self, mock_get_settings_manager, mock_get_job_manager, mock_start_job
+    ):
+        mock_get_settings_manager.return_value.get.side_effect = lambda key, default=None: {
+            "auto_requeue_on_restart": True,
+            "requeue_max_age_minutes": 30,
+        }.get(key, default)
+        jm = mock_get_job_manager.return_value
+        jm.requeue_interrupted_jobs.return_value = []
+
+        _requeue_interrupted_on_startup("/tmp/config")
+
+        jm.requeue_interrupted_jobs.assert_called_once_with(max_age_minutes=30)
+        jm.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
+        mock_start_job.assert_not_called()
+
 
 class TestLeftoverIntroCreditsJobsBeforeSchedulesStart:
     """A schedule tick that fires as the scheduler starts must not see a leftover job from before the restart."""

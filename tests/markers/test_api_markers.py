@@ -365,7 +365,9 @@ def resolve_calls(monkeypatch):
     return calls, answers
 
 
-@pytest.mark.parametrize(("server_id", "client_class"), [("plex-1", "PlexServer"), ("jf-1", "JellyfinServer")])
+@pytest.mark.parametrize(
+    ("server_id", "client_class"), [("plex-1", "PlexServer"), ("jf-1", "JellyfinServer"), ("emby-1", "EmbyServer")]
+)
 def test_item_by_server_item(client, servers, media, item_calls, resolve_calls, server_id, client_class):
     calls, answers = resolve_calls
     episode = str(media / "tv" / "Show" / "S01E01.mkv")
@@ -431,7 +433,13 @@ def test_item_by_server_item_refusals(client, servers, item_calls, resolve_calls
         ("jf-1", "abc xyz", 400),
         ("jf-1", "g123", 400),
         ("jf-1", "a" * 37, 400),
+        # Digits of other scripts match Python's \d; the server's ids are ASCII.
+        ("jf-1", "١٢٣", 400),
+        ("emby-1", "४२", 400),
+        ("jf-1", "----", 400),
+        ("jf-1", "-0123456789abcdef", 400),
         ("emby-1", "5678", 404),
+        ("emby-1", "9" * 40, 404),
         ("emby-1", "5678/../../System/Info", 400),
     ],
 )
@@ -730,6 +738,41 @@ def test_local_sources_status(client, servers, monkeypatch, found, reason, text_
     assert asked == [None]
 
 
+@pytest.mark.parametrize("failing", ["season_audio", "credits_text"])
+def test_local_sources_keeps_the_other_row_when_one_check_raises(client, servers, monkeypatch, loguru_caplog, failing):
+    from media_preview_generator.markers.audio import fingerprint
+    from media_preview_generator.markers.credits import textdet_helper
+
+    def boom(*_args):
+        raise RuntimeError(f"probe failed token={PLEX_TOKEN}")
+
+    ffmpeg = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
+    monkeypatch.setattr(
+        fingerprint, "chromaprint_status", boom if failing == "season_audio" else (lambda configured: (ffmpeg, ""))
+    )
+    monkeypatch.setattr(
+        textdet_helper, "text_detection_status", boom if failing == "credits_text" else (lambda: (True, ""))
+    )
+
+    resp = _secret_free(client.get("/api/markers/sources/local", headers=_api_headers()))
+
+    assert resp.status_code == 200
+    expected = {
+        "season_audio": {"available": True, "ffmpeg": ffmpeg, "message": ""},
+        "credits_text": {"available": True, "message": ""},
+    }
+    expected[failing] = {
+        "season_audio": {
+            "available": None,
+            "ffmpeg": None,
+            "message": "Couldn't check whether season audio can run here",
+        },
+        "credits_text": {"available": None, "message": "Couldn't check whether credit text can run here"},
+    }[failing]
+    assert resp.get_json() == expected
+    assert "RuntimeError" in loguru_caplog.text and PLEX_TOKEN not in loguru_caplog.text
+
+
 # --------------------------------------------------------------------------- auth
 
 
@@ -781,6 +824,8 @@ def test_plugin_install_routes_forget_the_cached_capability(client, servers, mon
         inspect._CAPABILITY_CACHE.get(cfg, "status", lambda: {"state": "ready", "message": "", "details": {}})
     resp = client.post(f"/api/servers/jf-1/{route}", headers=_api_headers())
     assert resp.status_code == 200
+    expected = {"ok": True, "steps": [], "error": ""} if outcome == "ok" else {"ok": False, "error": "Jellyfin said no"}
+    assert resp.get_json() == expected
     assert set(inspect._CAPABILITY_CACHE._entries) == {("plex-1", "status")}
 
 

@@ -431,6 +431,22 @@ def _warn_unhealthy_media_mounts(media_servers: list) -> list[dict[str, str]]:
     return issues
 
 
+def _fail_unrevived_intro_credits_jobs() -> None:
+    """Settle the Intro & Credits jobs a restart left behind and didn't revive.
+
+    Left PENDING they would block their schedule and absorb webhook follow-ups for good. Its own failure is logged and
+    never stops the revived jobs from starting.
+    """
+    try:
+        get_job_manager().fail_unrevived_interrupted_jobs(JOB_KIND_INTRO_CREDITS)
+    except Exception as exc:
+        logger.warning(
+            "Couldn't mark the Intro & Credits jobs left over from before the restart as failed ({}); a schedule may "
+            "skip its next run while one of them is still listed as pending",
+            type(exc).__name__,
+        )
+
+
 def _requeue_interrupted_on_startup(config_dir: str) -> None:
     """Revive jobs that were running or pending when the server last stopped.
 
@@ -449,7 +465,7 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
         )
         if not auto_requeue_enabled:
             logger.info("Auto-requeue on restart is disabled")
-            get_job_manager().fail_unrevived_interrupted_jobs(JOB_KIND_INTRO_CREDITS)
+            _fail_unrevived_intro_credits_jobs()
             return
 
         # A pause from the previous session is honored across the restart —
@@ -463,8 +479,7 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
         max_age = int(settings.get("requeue_max_age_minutes", 720))
         job_manager = get_job_manager()
         revived = job_manager.requeue_interrupted_jobs(max_age_minutes=max_age)
-        # Intro & Credits jobs left PENDING would block their schedule and absorb webhook follow-ups for good.
-        job_manager.fail_unrevived_interrupted_jobs(JOB_KIND_INTRO_CREDITS)
+        _fail_unrevived_intro_credits_jobs()
 
         if not revived:
             return

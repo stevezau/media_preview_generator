@@ -410,12 +410,15 @@ def _merge_sources_update(stored: list[dict], posted: list) -> list:
     """Posted source entries over the stored ones, matched by id.
 
     A list naming every stored source sets their order (the Settings page sends them all); a shorter list updates the
-    named sources where they are. A list with an entry that isn't an object is left for ``validate_global`` to reject.
+    named sources where they are. A list with an entry that isn't an object, or naming a source twice, is left for
+    ``validate_global`` to reject (merged by id, the second entry would silently win).
     """
     if not all(isinstance(entry, dict) for entry in posted):
         return posted
     stored_by_id = {entry.get("id"): entry for entry in stored}
     posted_by_id = {entry.get("id"): entry for entry in posted}
+    if len(posted_by_id) != len(posted):
+        return posted
     if set(stored_by_id) <= set(posted_by_id):
         return [{**stored_by_id.get(entry.get("id"), {}), **entry} for entry in posted]
     merged = [{**entry, **posted_by_id.get(entry.get("id"), {})} for entry in stored]

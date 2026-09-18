@@ -203,7 +203,8 @@ def test_server_save_without_markers_key_carries_block_forward(client, server_ty
     ids=["plex-bad-redetect", "plex-unconfirmed", "jellyfin-bad-library-ids"],
 )
 def test_server_save_without_markers_key_keeps_a_stored_block_that_no_longer_validates(client, server_type, stored):
-    # The Servers UI never sends markers: a hand-edited block must not block URL/auth/library edits.
+    # A client that doesn't send markers (a script; the Edit dialog always sends them) must not be blocked from
+    # URL/auth/library edits by a hand-edited block.
     from media_preview_generator.web.settings_manager import get_settings_manager
 
     sid = _add_server(client, server_type, markers=stored)
@@ -418,3 +419,90 @@ def test_partial_plex_clear_confirmation_with_disable_succeeds(client):
     stored = get_settings_manager().get("media_servers")[0]["markers"]
     assert stored["enabled"] is False
     assert stored["plex"]["db_write_confirmed_at"] is None
+
+
+@pytest.mark.parametrize(
+    "posted_sources",
+    [
+        [
+            {"id": sid, "enabled": True, **({"api_key": ""} if sid == "theintrodb" else {})}
+            for sid in ("skipdb", "chapters", "theintrodb", "introdb", "season_audio", "credits_text", "server_markers")
+        ],
+        [{"id": "theintrodb", "api_key": ""}],
+    ],
+    ids=["full-list", "partial-list"],
+)
+def test_settings_post_empty_api_key_clears_the_stored_key(client, posted_sources):
+    # "Clear key" in Settings sends "": the merge must not fill the stored key back in.
+    stored = _post_markers(client, {"sources": posted_sources})
+    assert next(s for s in stored["sources"] if s["id"] == "theintrodb")["api_key"] == ""
+    tidb = next(s for s in client.get("/api/settings").get_json()["markers"]["sources"] if s["id"] == "theintrodb")
+    assert tidb["api_key"] == ""
+
+
+def test_settings_post_a_partial_list_naming_a_source_twice_is_400(client):
+    # Merged by id, the second entry would silently win; the same duplicate in a full list is already a 400.
+    from media_preview_generator.web.settings_manager import get_settings_manager
+
+    get_settings_manager().set("markers", STORED_GLOBAL)
+    posted = {"sources": [{"id": "skipdb", "enabled": True}, {"id": "skipdb", "enabled": False}]}
+    resp = client.post("/api/settings", json={"markers": posted})
+    assert resp.status_code == 400
+    assert get_settings_manager().get("markers") == STORED_GLOBAL
+
+
+_CONFIRMED_PLEX = {
+    "enabled": True,
+    "library_ids": ["7"],
+    "plex": {"db_write_confirmed_at": "2026-09-13T00:00:00+00:00", "on_plex_redetect": "keep_plex"},
+}
+
+
+def test_server_save_with_markers_null_resets_the_block_to_defaults(client):
+    # An explicit null is "no block": Intro & Credits off and the confirmation dropped, like a server never set up.
+    from media_preview_generator.markers.settings import default_server_markers
+    from media_preview_generator.web.settings_manager import get_settings_manager
+
+    sid = _add_server(client, "plex", markers=_CONFIRMED_PLEX)
+    resp = client.put(f"/api/servers/{sid}", json={"markers": None})
+    assert resp.status_code == 200, resp.get_json()
+    assert get_settings_manager().get("media_servers")[0]["markers"] == default_server_markers("plex")
+
+
+def test_server_save_with_a_non_object_markers_is_400_and_keeps_the_block(client):
+    from media_preview_generator.web.settings_manager import get_settings_manager
+
+    sid = _add_server(client, "plex", markers=_CONFIRMED_PLEX)
+    resp = client.put(f"/api/servers/{sid}", json={"markers": "on"})
+    assert (resp.status_code, resp.get_json()) == (400, {"error": "markers must be an object"})
+    assert get_settings_manager().get("media_servers")[0]["markers"] == _CONFIRMED_PLEX
+
+
+@pytest.mark.parametrize(
+    ("server_type", "markers", "status"),
+    [
+        ("plex", {"enabled": True}, 400),
+        ("plex", None, 201),
+        ("jellyfin", {"enabled": True, "library_ids": None}, 201),
+        ("emby", {"enabled": True, "library_ids": ["3"], "emby": {"on_emby_redetect": "keep_emby"}}, 201),
+    ],
+    ids=["plex-unconfirmed", "plex-no-block", "jellyfin-on", "emby-keep"],
+)
+def test_create_server_validates_the_markers_block(client, server_type, markers, status):
+    from media_preview_generator.markers.settings import default_server_markers
+    from media_preview_generator.web.settings_manager import get_settings_manager
+
+    get_settings_manager().set("media_servers", [])
+    body = {"type": server_type, "name": server_type, "url": "http://x:1", "enabled": False}
+    if server_type == "plex":
+        body["output"] = {"plex_config_folder": "/tmp"}
+    if markers is not None:
+        body["markers"] = markers
+    resp = client.post("/api/servers", json=body)
+    assert resp.status_code == status, resp.get_json()
+    saved = get_settings_manager().get("media_servers")
+    if status == 400:
+        assert "Confirm" in resp.get_json()["error"] and saved == []
+        return
+    expected = default_server_markers(server_type) if markers is None else markers
+    assert saved[0]["markers"] == expected

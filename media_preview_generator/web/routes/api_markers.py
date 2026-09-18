@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from typing import Any
 
 from flask import jsonify, request
@@ -20,9 +21,10 @@ _ONLINE_SOURCE_IDS = ("theintrodb", "introdb", "skipdb")
 _AUTH_SECRET_KEYS = ("token", "api_key", "password", "access_token")
 _MASK = "****"
 # Item ids go into the media server's URL path: bare Plex rating keys, Jellyfin/Emby GUIDs (with or without dashes) or
-# Emby's numeric ids. Anything else is refused before the server is asked.
+# Emby's numeric ids. Anything else is refused before the server is asked. ASCII only: ``\d`` would also take other
+# scripts' digits.
 _PLEX_ITEM_ID_RE = re.compile(r"[0-9]+")
-_EMBYISH_ITEM_ID_RE = re.compile(r"[0-9a-fA-F-]{1,36}|\d+")
+_EMBYISH_ITEM_ID_RE = re.compile(r"[0-9a-fA-F][0-9a-fA-F-]{0,35}|[0-9]+")
 
 
 def _parse_job_priority(raw: object) -> int | None:
@@ -408,17 +410,33 @@ def marker_local_sources():
 
     Returns:
         200 with ``{"season_audio": {"available", "ffmpeg", "message"}, "credits_text": {"available", "message"}}``;
-        ``message`` says why when a source isn't available.
+        ``message`` says why when a source isn't available. A check that raises answers ``"available": null`` (not
+        known) for its own source only, so the other source's row still shows.
     """
     from ...markers.audio import fingerprint
     from ...markers.credits import textdet_helper
 
-    # No setting to pass: jobs use jellyfin-ffmpeg, then ffmpeg on PATH, the order chromaprint_status tries with None.
-    found, reason = fingerprint.chromaprint_status(None)
-    text_available, text_reason = textdet_helper.text_detection_status()
+    def season_audio() -> dict:
+        # No setting to pass: jobs use jellyfin-ffmpeg, then ffmpeg on PATH, the order chromaprint_status tries.
+        found, reason = fingerprint.chromaprint_status(None)
+        return {"available": found is not None, "ffmpeg": found, "message": reason}
+
+    def credits_text() -> dict:
+        available, reason = textdet_helper.text_detection_status()
+        return {"available": available, "message": reason}
+
     return jsonify(
         {
-            "season_audio": {"available": found is not None, "ffmpeg": found, "message": reason},
-            "credits_text": {"available": text_available, "message": text_reason},
+            "season_audio": _local_source_status("season audio", season_audio, {"ffmpeg": None}),
+            "credits_text": _local_source_status("credit text", credits_text, {}),
         }
     )
+
+
+def _local_source_status(name: str, check: Callable[[], dict], unknown_extra: dict) -> dict:
+    """One local detector's status; ``available: None`` with a fixed message when its check raises."""
+    try:
+        return check()
+    except Exception as exc:
+        logger.warning("Couldn't check whether {} can run here: {}", name, type(exc).__name__)
+        return {"available": None, **unknown_extra, "message": f"Couldn't check whether {name} can run here"}

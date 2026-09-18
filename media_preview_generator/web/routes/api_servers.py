@@ -311,8 +311,9 @@ def _merge_markers_update(base_markers: object, posted: object) -> object:
         posted: The client's posted ``markers`` value.
 
     Returns:
-        The merged block when ``posted`` is a dict; ``posted`` unchanged otherwise (``None``, or a
-        malformed non-dict value that ``validate_server`` will go on to reject).
+        The merged block when ``posted`` is a dict; ``posted`` unchanged otherwise: ``None``, which
+        ``validate_server`` turns into the defaults (Intro & Credits off, no confirmation), or a
+        malformed non-dict value that ``validate_server`` rejects.
     """
     if not isinstance(posted, dict):
         return posted
@@ -426,9 +427,10 @@ def _validate_server_payload(
         if err:
             return None, err
     elif isinstance(stored_markers, dict):
-        # Carried forward as stored, without re-validating: the Servers UI never sends markers, and a block that no
-        # longer validates (hand-edited, or a later rule) must not block its URL/auth/library edits. Readers fall back
-        # to Intro & Credits off for an invalid block (markers.settings.load_server).
+        # Carried forward as stored, without re-validating: a client that doesn't send markers (a script or the PATCH
+        # callers; the Edit dialog always sends them) must not be blocked from URL/auth/library edits by a block that no
+        # longer validates (hand-edited, or a later rule). Readers fall back to Intro & Credits off for an invalid
+        # block (markers.settings.load_server).
         markers_block = copy.deepcopy(stored_markers)
     else:
         if stored_markers is not None:
