@@ -1,5 +1,8 @@
 """Worker device → PCI address → WebGPU EP device (spec §6.4 item 7, T-R3)."""
 
+import subprocess
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -27,10 +30,10 @@ def test_normalise_pci_bus_id(value, expected):
 
 class TestWorkerPci:
     def setup_method(self):
-        devices.nvidia_pci_bus_ids.cache_clear()
+        devices.forget_nvidia_pci_bus_ids()
 
     def teardown_method(self):
-        devices.nvidia_pci_bus_ids.cache_clear()
+        devices.forget_nvidia_pci_bus_ids()
 
     def _smi(self, stdout, returncode=0):
         return patch.object(
@@ -63,6 +66,72 @@ class TestWorkerPci:
     def test_nvidia_smi_exiting_non_zero_gives_none(self):
         with self._smi("0, 00000000:02:00.0\n", returncode=9):
             assert devices.worker_pci_bus_id("NVIDIA", "cuda:0") is None
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            {"side_effect": subprocess.TimeoutExpired("nvidia-smi", 5)},
+            {"return_value": SimpleNamespace(returncode=9, stdout="")},
+        ],
+        ids=["timed-out", "exited-non-zero"],
+    )
+    def test_a_failed_read_is_not_kept(self, failure):
+        # A busy host can time nvidia-smi out once. Kept for the process, that one miss would leave every GPU helper
+        # started later without an address (the CPU, on a host whose EP lists several devices) until a restart.
+        with patch.object(devices.subprocess, "run", **failure):
+            assert devices.worker_pci_bus_id("NVIDIA", "cuda:1") is None
+        with self._smi("0, 00000000:02:00.0\n1, 00000000:65:00.0\n") as run:
+            assert devices.worker_pci_bus_id("NVIDIA", "cuda:1") == "0000:65:00.0"
+            assert devices.worker_pci_bus_id("NVIDIA", "cuda:0") == "0000:02:00.0"
+        assert run.call_count == 1  # a good answer is kept
+
+    def test_workers_asking_at_once_share_one_read(self):
+        answered = threading.Event()
+        calls = []
+
+        def slow_smi(*args, **kwargs):
+            calls.append(args)
+            answered.wait(5)
+            return SimpleNamespace(returncode=0, stdout="0, 00000000:02:00.0\n")
+
+        results = []
+        with patch.object(devices.subprocess, "run", side_effect=slow_smi):
+            threads = [
+                threading.Thread(target=lambda: results.append(devices.worker_pci_bus_id("NVIDIA", "cuda:0")))
+                for _ in range(3)
+            ]
+            for thread in threads:
+                thread.start()
+            time.sleep(0.2)  # every thread is inside the read, or waiting for it
+            answered.set()
+            for thread in threads:
+                thread.join(5)
+        assert results == ["0000:02:00.0"] * 3
+        assert len(calls) == 1
+
+    def test_workers_waiting_on_a_failed_read_share_it_instead_of_each_reading_again(self):
+        answered = threading.Event()
+        calls = []
+
+        def slow_failure(*args, **kwargs):
+            calls.append(args)
+            answered.wait(5)
+            raise subprocess.TimeoutExpired("nvidia-smi", 5)
+
+        results = []
+        with patch.object(devices.subprocess, "run", side_effect=slow_failure):
+            threads = [
+                threading.Thread(target=lambda: results.append(devices.worker_pci_bus_id("NVIDIA", "cuda:0")))
+                for _ in range(3)
+            ]
+            for thread in threads:
+                thread.start()
+            time.sleep(0.2)  # one thread is inside the read, the others wait for it
+            answered.set()
+            for thread in threads:
+                thread.join(5)
+        assert results == [None] * 3
+        assert len(calls) == 1  # not three 5 s timeouts one after another
 
     @pytest.mark.parametrize("address", ["0000:00:02.0", "0000:0a:00.0", "0000:c1:00.0"])
     def test_render_node_maps_through_sysfs_with_hex_buses(self, tmp_path, monkeypatch, address):

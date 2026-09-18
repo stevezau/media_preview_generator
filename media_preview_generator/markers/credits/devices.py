@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import functools
 import os
 import re
 import subprocess
+import threading
 from collections.abc import Mapping, Sequence
 
 _PCI_RE = re.compile(r"^(?:([0-9a-fA-F]{1,8}):)?([0-9a-fA-F]{2}):([0-9a-fA-F]{2})\.([0-7])$")
@@ -68,9 +68,40 @@ def drm_pci_bus_id(render_node: str, *, sysfs_drm: str | None = None) -> str | N
     return None
 
 
-@functools.lru_cache(maxsize=1)
+_nvidia_ids: dict[str, str] | None = None
+_nvidia_reads = 0
+_nvidia_ids_lock = threading.Lock()
+
+
 def nvidia_pci_bus_ids() -> dict[str, str]:
-    """NVIDIA GPU index → PCI address from nvidia-smi, read once per process ({} when it can't answer)."""
+    """NVIDIA GPU index → PCI address from nvidia-smi ({} when it can't answer).
+
+    An answer is kept for the process; a failed read isn't, so one nvidia-smi timeout on a busy host doesn't leave every
+    GPU helper started later without an address. Callers asking at once share one read, a failed one included: those
+    that waited for it get its empty answer rather than each running nvidia-smi again (up to 5 s apiece).
+    """
+    global _nvidia_ids, _nvidia_reads
+    reads_seen = _nvidia_reads
+    with _nvidia_ids_lock:
+        if _nvidia_ids is not None:
+            return dict(_nvidia_ids)
+        if _nvidia_reads != reads_seen:
+            return {}  # a read finished, and failed, while this caller waited for it
+        found = _read_nvidia_pci_bus_ids()
+        _nvidia_reads += 1
+        if found:
+            _nvidia_ids = found
+        return dict(found)
+
+
+def forget_nvidia_pci_bus_ids() -> None:
+    """Forget the kept nvidia-smi answer (tests)."""
+    global _nvidia_ids
+    with _nvidia_ids_lock:
+        _nvidia_ids = None
+
+
+def _read_nvidia_pci_bus_ids() -> dict[str, str]:
     try:
         proc = subprocess.run(
             ["nvidia-smi", "--query-gpu=index,pci.bus_id", "--format=csv,noheader"],
