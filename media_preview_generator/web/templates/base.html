@@ -32,8 +32,9 @@
     <!-- Custom CSS -->
     <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
 
-    <!-- CSRF Token for AJAX -->
+    <!-- CSRF token: csrf_fetch.js adds it to every state-changing fetch to this app -->
     <meta name="csrf-token" content="{{ csrf_token() }}">
+    <script src="{{ url_for('static', filename='js/csrf_fetch.js') }}"></script>
 
     {% block head %}{% endblock %}
 </head>

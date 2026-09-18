@@ -556,6 +556,54 @@ def _log_image_deprecation_warning() -> None:
     )
 
 
+_CSRF_REFUSED_MESSAGE = (
+    "This page's security token is missing or out of date. Reload the page and try again. "
+    "Scripts: send the API token in an Authorization: Bearer or X-Auth-Token header instead."
+)
+
+
+def _install_csrf_protection(app: Flask) -> None:
+    """Require a CSRF token on every state-changing request that relies on the browser session.
+
+    A signed-in browser sends its session cookie with any request to this app, including one a page on another
+    site makes it send. The token (the ``csrf-token`` meta tag, or the login form's hidden field) proves the request
+    came from one of this app's own pages. Two kinds of request don't use the session, so need no token: one with a
+    valid API token header (a script), and a webhook receiver, which checks its own secret on every call.
+
+    Args:
+        app: The app, with every blueprint registered.
+    """
+    from flask import jsonify, render_template, request
+    from flask_wtf.csrf import CSRFError
+
+    from .auth import _check_token_headers
+
+    for view in app.view_functions.values():
+        if getattr(view, "is_webhook_receiver", False):
+            csrf.exempt(view)
+
+    @app.before_request
+    def _require_csrf_for_browser_requests():
+        if not app.config["WTF_CSRF_ENABLED"] or request.method not in app.config["WTF_CSRF_METHODS"]:
+            return
+        if _check_token_headers():
+            return
+        csrf.protect(apply_exemptions=True)
+
+    @app.errorhandler(CSRFError)
+    def _csrf_refused(error: CSRFError):
+        logger.info("Refused {} {}: {}", request.method, request.path, error.description)
+        sent_api_token = request.headers.get("X-Auth-Token", "").strip() or request.headers.get(
+            "Authorization", ""
+        ).startswith("Bearer ")
+        if sent_api_token:
+            # A script with a wrong token: the same answer the route's own auth check gives.
+            return jsonify({"error": "Authentication required"}), 401
+        if request.endpoint == "main.login":
+            return render_template("login.html", page_expired=True), 400
+        return jsonify({"error": _CSRF_REFUSED_MESSAGE}), 400
+
+
 def create_app(config_dir: str | None = None) -> Flask:
     """Create and configure the Flask application.
 
@@ -597,7 +645,15 @@ def create_app(config_dir: str | None = None) -> Flask:
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     app.config["CONFIG_DIR"] = config_dir
-    app.config["WTF_CSRF_CHECK_DEFAULT"] = False  # We apply CSRF selectively
+    # Flask-WTF's own check can't tell a script's API token from a browser session, so
+    # _require_csrf_for_browser_requests (below) runs the check instead.
+    app.config["WTF_CSRF_CHECK_DEFAULT"] = False
+    # A dashboard tab stays open for days; the default one-hour token lifetime would make every button in it fail
+    # after an hour. The token is tied to the session, which has its own lifetime.
+    app.config["WTF_CSRF_TIME_LIMIT"] = None
+    # The strict HTTPS check also demands a Referer matching the Host the app sees, which refuses every button behind
+    # a reverse proxy that doesn't pass the original Host on. The session-bound token is the protection that counts.
+    app.config["WTF_CSRF_SSL_STRICT"] = False
     # Cap inbound request bodies to 1 MiB. Webhook payloads from
     # Plex/Emby/Jellyfin/Sonarr/Radarr are kilobytes at most; anything
     # larger is either misconfiguration or a DoS attempt. Flask returns
@@ -620,11 +676,7 @@ def create_app(config_dir: str | None = None) -> Flask:
     # Allow cross-origin requests on all routes (token-auth, not cookie-based)
     CORS(app, origins=cors_origins)
 
-    # Initialize CSRF protection
     csrf.init_app(app)
-
-    # CSRF exemptions are applied selectively per-endpoint after
-    # blueprint registration.  See the loop below register_blueprint().
 
     # Threading mode + polling-only transport. The two design constraints:
     #   1. Eventlet/gevent monkey-patches threading.Thread into green threads
@@ -726,58 +778,7 @@ def create_app(config_dir: str | None = None) -> Flask:
 
     _load_history_from_disk()
 
-    # Selectively exempt API endpoints that use Bearer/X-Auth-Token
-    # (external API calls, not browser-initiated).  Browser-initiated
-    # POST endpoints remain CSRF-protected.
-    _csrf_exempt_endpoints = [
-        # Jobs — @api_token_required, called by external API / dashboard
-        "api.get_jobs",
-        "api.get_job",
-        "api.create_job",
-        "api.cancel_job",
-        "api.get_job_logs",
-        "api.get_worker_statuses",
-        "api.delete_job",
-        "api.clear_jobs",
-        "api.get_job_stats",
-        # Intro & Credits jobs — @api_token_required, the token API for starting them
-        "api.create_marker_job",
-        "api.marker_reconcile",
-        # Schedules — @api_token_required
-        "api.get_schedules",
-        "api.get_schedule",
-        "api.create_schedule",
-        "api.update_schedule",
-        "api.delete_schedule",
-        "api.enable_schedule",
-        "api.disable_schedule",
-        "api.run_schedule_now",
-        "api.get_quiet_hours",
-        "api.update_quiet_hours",
-        # Token management
-        "api.api_regenerate_token",
-        # System config
-        "api.get_config",
-        "api.rescan_gpus",
-        # Libraries
-        "api.get_libraries",
-        # Webhooks — external POST from Radarr/Sonarr/Custom/Plex
-        "webhooks_bp.radarr_webhook",
-        "webhooks_bp.sonarr_webhook",
-        "webhooks_bp.sportarr_webhook",
-        "webhooks_bp.custom_webhook",
-        "webhooks_bp.plex_webhook",
-        "webhooks_bp.get_webhook_history",
-        "webhooks_bp.clear_webhook_history",
-        "webhooks_bp.get_pending_webhooks",
-        # Multi-server router — auto-detects vendor by payload shape
-        "webhooks_bp.webhook_incoming",
-        "webhooks_bp.webhook_per_server",
-    ]
-    for _ep in _csrf_exempt_endpoints:
-        _view = app.view_functions.get(_ep)
-        if _view:
-            csrf.exempt(_view)
+    _install_csrf_protection(app)
 
     # Initialize rate limiter with app
     limiter.init_app(app)

@@ -190,6 +190,8 @@ When set to `external`:
 
 - The login page is bypassed; all browser and API requests are treated as authenticated.
 - Webhook authentication (`webhook_secret` / Bearer token) is **not** affected — external services like Radarr and Sonarr still need their shared secret.
+- A browser's `POST`/`PUT`/`PATCH`/`DELETE` still needs the page's CSRF token (the app's pages send it). Scripts
+  should send the API token (`X-Auth-Token` or `Authorization: Bearer`); see [REST API → Authentication](#authentication).
 - The setup wizard still runs on first boot.
 - Removing the variable (or setting it back to `internal`) instantly re-enables built-in auth.
 
@@ -445,10 +447,8 @@ is `markers_skipped` before it is probed or looked up, whether it came from a fo
 | POST | `/api/markers/reconcile` | Queue Intro & Credits · Check servers |
 
 All of them require the same `X-Auth-Token` / `Authorization: Bearer` auth (or a logged-in session) as the rest of the
-API. `POST /api/markers/jobs` and `POST /api/markers/reconcile` are on the app's CSRF-exempt list (like `POST
-/api/jobs`) so token-authenticated scripts can call them directly without a browser session. Note that the app
-doesn't enforce CSRF tokens on any route today (`WTF_CSRF_CHECK_DEFAULT` is off); the session cookie is
-`SameSite=Lax`, so another site can't use a logged-in browser's session to call these routes.
+API. A script sending the API token can call any of the `POST` routes directly; from a signed-in browser they also
+need the page's CSRF token, like every other state-changing route (see [Authentication](#authentication)).
 
 #### POST /api/markers/jobs
 
@@ -694,6 +694,27 @@ curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8080/api/jobs
 ```
 
 Get your token from [Authentication Token](getting-started.md#authentication-token), or set a fixed token with `WEB_AUTH_TOKEN`.
+
+**Scripts: always send the API token in one of these headers.** A request with a valid API token needs nothing
+else. A wrong one gets `401 {"error": "Authentication required"}`.
+
+**CSRF token (browser sessions).** A request that relies on the signed-in browser session instead of the API token
+must also send the page's CSRF token on every `POST`, `PUT`, `PATCH` and `DELETE`. This stops a page on another site
+from using your signed-in browser to change settings or start jobs. The app's own pages do it for you: every page
+carries the token in `<meta name="csrf-token">` and sends it as the `X-CSRFToken` header, and the login form sends it
+as a hidden `csrf_token` field. Without it (or with a stale one) the request is refused with `400`:
+
+```json
+{"error": "This page's security token is missing or out of date. Reload the page and try again. Scripts: send the API token in an Authorization: Bearer or X-Auth-Token header instead."}
+```
+
+- `GET` requests never need it.
+- The webhook receivers (`POST /api/webhooks/radarr`, `/sonarr`, `/sportarr`, `/custom`, `/plex`, `/incoming` and
+  `/server/{server_id}`) never need it: they check their own webhook secret on every call.
+- The setup wizard sends it too, including before setup is finished when its routes need no sign-in.
+- With `AUTH_METHOD=external`, browser requests still need it; scripts behind the proxy should send the API token.
+- The token lasts as long as the browser session. Signing out, or changing the API token, ends the session, so a tab
+  still open from before has to be reloaded.
 
 ### Setup & Settings Endpoints
 
@@ -1311,7 +1332,7 @@ unless noted.
 | Method | Endpoint | Description |
 |---|---|---|
 | GET | `/api/auth/status` | Session auth state — used by the UI on page load |
-| POST | `/api/auth/login` · `/api/auth/logout` | Session login/logout (cookie-based) |
+| POST | `/api/auth/login` · `/api/auth/logout` | Session login/logout (cookie-based, for the browser: needs the page's CSRF token; scripts send the API token instead) |
 | POST | `/api/token/regenerate` | Rotate the stored API token (disabled when `WEB_AUTH_TOKEN` is set) |
 | POST | `/api/token/set` | Set a custom token — min 8 chars; returns `{success: false, error: ...}` on validation failure |
 

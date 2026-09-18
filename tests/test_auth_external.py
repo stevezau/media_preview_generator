@@ -218,9 +218,9 @@ class TestWebhookAuthNotBypassed:
         test enumerates the acceptable rejection codes explicitly so a
         regression that returned 500 silently can't slip through.
 
-        The custom endpoint is not CSRF-exempt (pre-existing), so without
-        a browser session it returns 302 rather than 401. Either is fine
-        — both reject. A 500 is NOT.
+        The custom endpoint checks its own webhook secret and needs no
+        CSRF token, so it answers 401; 302 and 403 would reject too.
+        A 500 is NOT.
         """
         response = client.post(
             "/api/webhooks/custom",

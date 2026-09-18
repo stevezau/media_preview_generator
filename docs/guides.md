@@ -296,6 +296,12 @@ The web interface uses token-based authentication:
 4. **Token masking** — tokens are always masked in logs (only last 4 chars shown)
 5. **Server secrets** — a media server token, API key or password inside an error (a request's URL, say) shows as
    `****` in this app's own log lines (tracebacks included), a job's error and log, and the Files panel
+6. **Protection from other sites** — while you're signed in, every change the browser makes (saving settings,
+   starting or cancelling a job, editing a server) carries a security token only this app's pages know, so a page on
+   another site can't make those changes for you. You never see it; if a button ever says the page's security token is
+   out of date, reload the page. Webhooks aren't affected (they use the webhook secret). A script must send the API
+   token in a header on every request, as below: signing in once with `POST /api/auth/login` and reusing the cookie
+   no longer works for changes. See [Reference — Authentication](reference.md#authentication).
 
 API authentication:
 

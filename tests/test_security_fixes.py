@@ -37,6 +37,7 @@ def flask_app(tmp_path, mock_auth_config):
 
     app = create_app(config_dir=str(tmp_path))
     app.config["TESTING"] = True
+    app.config["WTF_CSRF_ENABLED"] = False  # CSRF has its own tests: tests/test_csrf.py
     return app
 
 

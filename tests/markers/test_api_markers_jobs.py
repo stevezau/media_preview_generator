@@ -195,22 +195,28 @@ def test_file_inside_the_media_root_is_accepted(client, created, media, monkeypa
     assert created[0]["library_name"] == "Intro & Credits: 1 file"
 
 
+@pytest.mark.parametrize("url", ["/api/markers/jobs", "/api/markers/reconcile", "/api/markers/item/redetect"])
 @pytest.mark.parametrize(
-    ("url", "csrf_exempt"),
+    ("auth", "csrf_refused"),
     [
-        ("/api/markers/jobs", True),  # token API, exempt like POST /api/jobs
-        ("/api/markers/reconcile", True),  # Check servers from a script: the same token API
-        ("/api/markers/item/redetect", False),  # browser-only: proves CSRF is really on in this test
+        ("api_token", False),  # a script: the token header is its proof, no CSRF token needed
+        ("session", True),  # a browser session without the page's token: refused before the route runs
     ],
 )
-def test_token_scripts_can_create_marker_jobs_with_csrf_protection_on(app, created, url, csrf_exempt):
-    # The app ships with WTF_CSRF_CHECK_DEFAULT off, so this turns checking on to test the exemption list itself.
-    app.config.update(WTF_CSRF_ENABLED=True, WTF_CSRF_CHECK_DEFAULT=True)
-    resp = app.test_client().post(url, json={"libraries": []}, headers=_api_headers())
+def test_intro_credits_routes_need_a_csrf_token_only_from_a_browser_session(app, created, url, auth, csrf_refused):
+    app.config["WTF_CSRF_ENABLED"] = True  # the conftest turns it off for the other tests
+    client = app.test_client()
+    headers = _api_headers()
+    if auth == "session":
+        with client.session_transaction() as sess:
+            sess["authenticated"] = True
+        headers = {"Content-Type": "application/json"}
+    resp = client.post(url, json={"libraries": []}, headers=headers)
     body = resp.get_data(as_text=True)
-    assert ("CSRF" not in body) is csrf_exempt, (resp.status_code, body[:200])
+    refused = resp.status_code == 401 or "security token" in body  # a refused token header is answered with 401
+    assert refused is csrf_refused, (resp.status_code, body[:200])
     if url == "/api/markers/jobs":
-        assert resp.status_code == 201 and len(created) == 1
+        assert (resp.status_code == 201 and len(created) == 1) is not csrf_refused
 
 
 def test_requires_authentication(app, created):

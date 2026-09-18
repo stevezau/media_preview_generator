@@ -216,6 +216,9 @@ def _authenticate_webhook(f):
         )
         return jsonify({"error": "Authentication required"}), 401
 
+    # Read by create_app's CSRF setup: a receiver checks its own secret and never reads the browser session, so it
+    # needs no CSRF token (Radarr, Sonarr and Plex couldn't send one).
+    decorated_function.is_webhook_receiver = True
     return decorated_function
 
 
