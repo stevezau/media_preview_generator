@@ -29,6 +29,8 @@ from typing import Optional
 from loguru import logger
 from rich.console import Console
 
+from .utils import redact_secrets, redacted_traceback
+
 # ---------------------------------------------------------------------------
 # Module-level state
 # ---------------------------------------------------------------------------
@@ -78,16 +80,42 @@ def _compact_payload(record) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _jsonl_record_patcher(record) -> bool:
-    """Loguru *filter* that pre-serialises a JSONL string into ``extra``.
+def _mask_secrets(record) -> None:
+    """Loguru patcher: mask tokens in each record's message before any handler (or a job's log) sees it.
 
-    The file handler's format string ``{extra[_jsonl]}`` writes it directly.
+    A message built from exception text can carry a server URL with its token (``utils.redact_secrets``). A logged
+    exception's own text isn't the message: each managed handler masks its traceback (``_write_stderr``,
+    ``_jsonl_format``).
+    """
+    record["message"] = redact_secrets(record["message"])
+
+
+def _write_stderr(message: str) -> None:
+    """Console sink: the formatted line, traceback included, with secrets masked."""
+    sys.stderr.write(redact_secrets(message))
+
+
+def _jsonl_record_patcher(record) -> bool:
+    """Loguru *filter* that pre-serialises a JSONL string, and a logged exception's masked traceback, into ``extra``.
+
+    The file handler's format (``_jsonl_format``) writes them directly.
 
     Returns:
         True always — level gating is done by loguru's ``level=`` parameter.
     """
     record["extra"]["_jsonl"] = _json.dumps(_compact_payload(record), default=str)
+    exception = record.get("exception")
+    value = getattr(exception, "value", None)
+    record["extra"]["_traceback"] = f"{redacted_traceback(value)}\n" if isinstance(value, BaseException) else ""
     return True
+
+
+def _jsonl_format(record) -> str:
+    """app.log's line format: the JSON line, then a logged exception's traceback with secrets masked.
+
+    A callable format, because with a string one loguru appends its own ``{exception}``, whose text isn't masked.
+    """
+    return "{extra[_jsonl]}\n{extra[_traceback]}"
 
 
 def _json_sink(message) -> None:
@@ -107,7 +135,7 @@ def _json_sink(message) -> None:
         "module": record["module"],
     }
     if record["exception"] is not None:
-        payload["exception"] = str(record["exception"])
+        payload["exception"] = redact_secrets(str(record["exception"]))
     extra = record.get("extra", {})
     for key in ("worker_id", "worker_type", "gpu_index", "media_title", "item_key"):
         if key in extra and extra[key] is not None:
@@ -168,6 +196,10 @@ def setup_logging(
                     pass
 
         _managed_handler_ids = []
+        logger.configure(patcher=_mask_secrets)
+
+        # Every handler below sets diagnose=False: loguru's default prints each traceback frame's variable values
+        # (a server's token among them) into docker logs, app.log and the live log viewer. The traceback stays.
 
         # --- 1. Console (stderr) handler ---
         if log_format == "json":
@@ -176,21 +208,24 @@ def setup_logging(
                 level=log_level,
                 format="{message}",
                 enqueue=True,
+                diagnose=False,
             )
         elif console:
             hid = logger.add(
-                lambda msg: console.print(msg, end=""),
+                lambda msg: console.print(redact_secrets(msg), end=""),
                 level=log_level,
                 format=_CONSOLE_FORMAT,
                 enqueue=True,
+                diagnose=False,
             )
         else:
             hid = logger.add(
-                sys.stderr,
+                _write_stderr,
                 level=log_level,
                 format=_CONSOLE_FORMAT,
                 colorize=True,
                 enqueue=True,
+                diagnose=False,
             )
         _managed_handler_ids.append(hid)
 
@@ -201,12 +236,13 @@ def setup_logging(
             hid = logger.add(
                 os.path.join(log_dir, "app.log"),
                 level=log_level,
-                format="{extra[_jsonl]}",
+                format=_jsonl_format,
                 filter=_jsonl_record_patcher,
                 rotation=rotation,
                 retention=retention,
                 compression="gz",
                 enqueue=True,
+                diagnose=False,
             )
             _managed_handler_ids.append(hid)
         except (PermissionError, OSError) as exc:
@@ -227,6 +263,7 @@ def setup_logging(
                 level=log_level,
                 format="{message}",
                 enqueue=True,
+                diagnose=False,
             )
             _managed_handler_ids.append(hid)
 

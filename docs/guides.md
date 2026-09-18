@@ -294,6 +294,8 @@ The web interface uses token-based authentication:
 2. **Custom token via wizard** — set your own token during the setup wizard (Step 5)
 3. **Fixed token** — set `WEB_AUTH_TOKEN` environment variable (overrides wizard setting)
 4. **Token masking** — tokens are always masked in logs (only last 4 chars shown)
+5. **Server secrets** — a media server token, API key or password inside an error (a request's URL, say) shows as
+   `****` in this app's own log lines (tracebacks included), a job's error and log, and the Files panel
 
 API authentication:
 

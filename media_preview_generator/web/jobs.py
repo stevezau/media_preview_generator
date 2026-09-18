@@ -26,6 +26,7 @@ from typing import Any, Optional
 from loguru import logger
 
 from ..job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_PREVIEWS, parse_job_kind
+from ..utils import redact_secrets
 
 # Message shown in UI when a job's log file was removed by retention policy.
 LOG_RETENTION_CLEARED_MESSAGE = "Log file was cleared due to log retention policy."
@@ -1854,6 +1855,9 @@ class JobManager:
                      stored in `job.error` so the UI can display it.
 
         """
+        # Stored, served by GET /api/jobs and logged: exception text in it can carry a server URL with its token.
+        error = redact_secrets(error) if error else error
+        warning = redact_secrets(warning) if warning else warning
         log_msg = None
         log_level = "info"
         with self._lock:
@@ -2125,7 +2129,8 @@ class JobManager:
     # ========================================================================
 
     def add_log(self, job_id: str, message: str) -> None:
-        """Add a log message for a job (in-memory and append to file)."""
+        """Add a log message for a job (in-memory and append to file), secrets masked (``utils.redact_secrets``)."""
+        message = redact_secrets(message)
         with self._lock:
             if job_id not in self._job_logs:
                 self._job_logs[job_id] = deque(maxlen=self._max_log_lines)
@@ -2367,6 +2372,8 @@ class JobManager:
                 if msg:
                     derived_reason = msg
                     break
+        # Served by the Files panel: a publisher's or worker's exception text can carry a server URL with its token.
+        derived_reason = redact_secrets(derived_reason)
 
         record = {
             "file": file_path,
@@ -2401,7 +2408,7 @@ class JobManager:
                 # revived after a restart reads it back to still queue that file's later check.
                 if s.get("verify_later"):
                     entry["verify_later"] = True
-                message = s.get("message") or ""
+                message = redact_secrets(s.get("message") or "")
                 if server_messages and message and message != derived_reason:
                     entry["message"] = message
                 slim.append(entry)

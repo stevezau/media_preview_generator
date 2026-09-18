@@ -1145,6 +1145,50 @@ class TestMergeJobConfig:
         assert jm.merge_job_config("nope", {"a": 1}) is False
 
 
+class TestSecretsAreMaskedWhereJobTextIsStored:
+    """Every writer's text passes through the job manager: a token in it is masked before it is kept or served."""
+
+    LEAK = "GET http://plex:32400/library/metadata/1?X-Plex-Token=s3cr3t failed"
+    MASKED = "GET http://plex:32400/library/metadata/1?X-Plex-Token=**** failed"
+
+    @pytest.mark.parametrize("field", ["error", "warning"])
+    def test_a_finished_jobs_error_or_warning(self, config_dir, field):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test")
+        jm.start_job(job.id)
+
+        jm.complete_job(job.id, **{field: self.LEAK})
+
+        assert jm.get_job(job.id).error == self.MASKED
+        assert JobManager(config_dir=config_dir).get_job(job.id).error == self.MASKED
+
+    def test_a_job_log_line(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test")
+
+        jm.add_log(job.id, f"WARNING - {self.LEAK}")
+
+        (line,) = jm.get_logs(job.id)
+        assert line.endswith(f"WARNING - {self.MASKED}") and "s3cr3t" not in str(list(jm._job_logs[job.id]))
+
+    @pytest.mark.parametrize("where", ["reason", "reason-from-server-message", "server-message"])
+    def test_a_files_panel_row(self, config_dir, where):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test")
+        server = {"server_id": "plex-1", "server_name": "Plex", "server_type": "plex", "status": "failed"}
+        reason = {"reason": self.LEAK, "reason-from-server-message": "", "server-message": "Couldn't publish"}[where]
+        server["message"] = "" if where == "reason" else self.LEAK
+
+        jm.record_file_result(job.id, "/m/a.mkv", "failed", reason=reason, servers=[server], server_messages=True)
+
+        (row,) = jm.get_file_results(job.id)
+        assert row["reason"] == (self.MASKED if where != "server-message" else "Couldn't publish")
+        # A server's message is kept only when it differs from the row's reason.
+        assert row["servers"][0].get("message") == (self.MASKED if where == "server-message" else None)
+        with open(jm._file_results_path(job.id)) as f:
+            assert "s3cr3t" not in f.read()
+
+
 class TestPendingJobsUnderConcurrentCreation:
     """Webhook threads create jobs while other threads list the pending ones (Intro & Credits follow-up dedupe)."""
 

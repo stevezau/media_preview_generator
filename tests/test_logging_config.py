@@ -37,6 +37,8 @@ def _reset_logging_state():
     from loguru import logger as _loguru_logger
 
     snapshot = dict(_loguru_logger._core.handlers)  # noqa: SLF001
+    # setup_logging installs a global patcher; loguru's configure(patcher=None) leaves it in place, so put it back here.
+    patcher = _loguru_logger._core.patcher  # noqa: SLF001
     _logging_mod._managed_handler_ids = []
     _logging_mod._initial_setup_done = False
     old_broadcaster = _logging_mod._broadcaster
@@ -47,6 +49,7 @@ def _reset_logging_state():
         _logging_mod._managed_handler_ids = []
         _logging_mod._initial_setup_done = False
         _logging_mod._broadcaster = old_broadcaster
+        _loguru_logger._core.patcher = patcher  # noqa: SLF001
         # Restore loguru's pre-test handler set so test-scoped StringIO
         # sinks can't outlive the test that created them.
         _loguru_logger.remove()
@@ -136,7 +139,8 @@ class TestLoggingConfig:
         assert app_log_call.kwargs.get("level") == "INFO"
         assert app_log_call.kwargs.get("rotation") == "10 MB"
         assert app_log_call.kwargs.get("retention") == 5
-        assert "{extra[_jsonl]}" in (app_log_call.kwargs.get("format") or "")
+        # A callable format: a string one makes loguru append its own (unmasked) exception text.
+        assert app_log_call.kwargs.get("format")({}) == "{extra[_jsonl]}\n{extra[_traceback]}"
 
     @patch("media_preview_generator.logging_config.os.makedirs")
     @patch("media_preview_generator.logging_config.logger")
@@ -159,6 +163,83 @@ class TestLoggingConfig:
         # Should still add stderr handler but not error file handler
         mock_logger.remove.assert_called_once()
         assert mock_logger.add.call_count == 1
+
+    def test_a_logged_exception_shows_no_local_values(self, tmp_path):
+        """loguru's ``diagnose`` prints each frame's variable values under a traceback; a token among them would land
+        in ``docker logs`` and app.log. The traceback itself stays."""
+        from loguru import logger
+
+        printed: list[str] = []
+        console = MagicMock()
+        console.print.side_effect = lambda msg, end="": printed.append(str(msg))
+        with patch.dict(os.environ, {"CONFIG_DIR": str(tmp_path)}):
+            setup_logging("INFO", console=console)
+
+        def fetch(token):
+            raise ConnectionError(f"no answer after {len(token)} characters")
+
+        try:
+            fetch("s3cr3t" + "-t0ken")  # not a literal: the traceback quotes this line's source
+        except ConnectionError:
+            logger.exception("fetch failed")
+        logger.complete()
+
+        for text in ("".join(printed), (tmp_path / "logs" / "app.log").read_text()):
+            assert "Traceback" in text and "no answer after 12 characters" in text
+            assert "s3cr3t-t0ken" not in text
+
+    def test_a_token_in_a_log_message_is_masked_in_every_handler(self, tmp_path):
+        from loguru import logger
+
+        printed: list[str] = []
+        console = MagicMock()
+        console.print.side_effect = lambda msg, end="": printed.append(str(msg))
+        socketio = MagicMock()
+        _logging_mod._broadcaster = _logging_mod.SocketIOLogBroadcaster(socketio)
+        with patch.dict(os.environ, {"CONFIG_DIR": str(tmp_path)}):
+            setup_logging("INFO", console=console)
+
+        logger.warning("Couldn't reach {}", "http://plex:32400/?X-Plex-Token=" + "s3cr3t")
+        logger.complete()
+
+        live = " ".join(c.args[1]["msg"] for c in socketio.emit.call_args_list)
+        for text in ("".join(printed), (tmp_path / "logs" / "app.log").read_text(), live):
+            assert "X-Plex-Token=****" in text and "s3cr3t" not in text
+
+    @pytest.mark.parametrize("console_kind", ["rich-console", "stderr", "json"])
+    def test_a_logged_exceptions_own_text_is_masked_in_every_handler(self, tmp_path, console_kind):
+        """requests' ConnectionError text carries the request URL, query token included; the patcher only masks the
+        message, so each handler masks the traceback it writes (chained causes too)."""
+        from loguru import logger
+
+        printed: list[str] = []
+        console = None
+        if console_kind == "rich-console":
+            console = MagicMock()
+            console.print.side_effect = lambda msg, end="": printed.append(str(msg))
+        stderr = StringIO()
+        token = "s3cr3t" + "XYZ"  # not a literal: the traceback quotes the raising lines' source
+        with (
+            patch.dict(os.environ, {"CONFIG_DIR": str(tmp_path)}),
+            patch("media_preview_generator.logging_config.sys.stderr", stderr),
+        ):
+            setup_logging("INFO", console=console, log_format="json" if console_kind == "json" else "pretty")
+            try:
+                try:
+                    raise OSError(f"GET http://jf:8096/Items?api_key={token}")
+                except OSError as inner:
+                    raise ConnectionError(f"GET /library/metadata/1?X-Plex-Token={token} failed") from inner
+            except ConnectionError:
+                logger.exception("fetch failed")
+            logger.complete()
+
+        console_text = "".join(printed) if console_kind == "rich-console" else stderr.getvalue()
+        app_log = (tmp_path / "logs" / "app.log").read_text()
+        for text in (console_text, app_log):
+            assert "X-Plex-Token=****" in text and "s3cr3tXYZ" not in text
+        assert "Traceback" in app_log and '"msg": "fetch failed"' in app_log and "api_key=****" in app_log
+        if console_kind != "json":  # the JSON line carries the exception's repr, not its traceback
+            assert "Traceback" in console_text and "api_key=****" in console_text
 
     def test_setup_logging_creates_error_log(self, tmp_path):
         """Test that setup_logging creates the error log file on disk."""
