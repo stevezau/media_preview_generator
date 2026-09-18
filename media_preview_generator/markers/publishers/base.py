@@ -174,7 +174,10 @@ class ItemNotFoundError(PublishError):
 
 
 class MarkerPublisher(ABC):
-    """Writes markers to one server. What a server shows is read through ``sources.server_markers``."""
+    """Writes markers to one server and reads back what it shows of them (``shows``).
+
+    A server's own markers, read as evidence for a decision, come through ``sources.server_markers`` instead.
+    """
 
     supported_types: frozenset[MarkerType] = frozenset()
     name: str = ""

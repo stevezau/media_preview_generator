@@ -118,3 +118,11 @@ def test_saved_settings_provider_reaches_the_plex_and_emby_publishers(stype):
         assert not hasattr(pub, "_settings_provider")
     else:
         assert pub._settings_provider is provider
+
+
+@pytest.mark.parametrize("ui_details", [True, False, None], ids=["edit-dialog", "check-servers", "default"])
+def test_plex_asks_for_its_detection_settings_only_when_the_caller_shows_them(ui_details):
+    # The Edit dialog shows Plex's own detection settings; Check servers passes False to skip that Plex request.
+    kwargs = {} if ui_details is None else {"ui_details": ui_details}
+    pub = publisher_for(create_autospec(PlexServer, instance=True), _cfg(ServerType.PLEX, _MARKERS), **kwargs)
+    assert pub._ui_details is (True if ui_details is None else ui_details)
