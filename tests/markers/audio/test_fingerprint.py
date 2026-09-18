@@ -224,12 +224,56 @@ def test_other_ffmpeg_errors_raise():
             fpmod.compute_fingerprint("/m/a.mkv", 60_000, ffmpeg="ffmpeg")
 
 
-def test_cancel_kills_ffmpeg():
+def test_cancel_kills_ffmpeg_and_collects_it_within_the_kill_wait():
     proc = _proc(hang=True)
     with patch.object(fpmod.subprocess, "Popen", return_value=proc):
         with pytest.raises(fpmod.FingerprintError, match="cancelled"):
             fpmod.compute_fingerprint("/m/a.mkv", 60_000, ffmpeg="ffmpeg", cancel_check=lambda: True)
     proc.kill.assert_called_once()
+    assert proc.communicate.call_args_list[-1].kwargs == {"timeout": fpmod.KILL_WAIT_S}
+
+
+@pytest.mark.parametrize("stop", ["timeout", "cancel"])
+def test_an_ffmpeg_whose_output_outlives_the_kill_never_holds_the_worker(tmp_path, monkeypatch, stop):
+    # A read stalled on a hard network mount leaves ffmpeg unkillable and its pipes open for as long as the stall
+    # lasts. Here a process in a session of its own keeps the pipes open after ffmpeg is killed, the same shape.
+    monkeypatch.setattr(fpmod, "KILL_WAIT_S", 0.5)
+    pid_file = tmp_path / "holder.pid"
+    script = tmp_path / "ffmpeg"
+    script.write_text(f'#!/bin/sh\nsetsid sleep 60 &\necho $! > "{pid_file}"\nexec sleep 60\n')
+    script.chmod(0o755)
+    started_procs: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+
+    def popen(*args, **kwargs):
+        started_procs.append(real_popen(*args, **kwargs))
+        return started_procs[-1]
+
+    monkeypatch.setattr(fpmod.subprocess, "Popen", popen)
+    started = time.monotonic()
+    try:
+        with pytest.raises(fpmod.FingerprintError, match="cancelled" if stop == "cancel" else "timed out"):
+            fpmod.compute_fingerprint(
+                str(tmp_path / "a.mkv"),
+                60_000,
+                ffmpeg=str(script),
+                cancel_check=(lambda: time.monotonic() - started > 0.5) if stop == "cancel" else None,
+                timeout_s=0.5,
+            )
+        elapsed = time.monotonic() - started
+        (proc,) = started_procs
+        assert proc.returncode is None  # handed on, not collected on the worker thread
+    finally:
+        for _ in range(50):
+            if pid_file.exists() and pid_file.read_text().strip():
+                break
+            time.sleep(0.1)
+        os.kill(int(pid_file.read_text()), 9)
+    assert elapsed < 0.5 + 0.5 + 3.0  # bounded, not the 60 s the pipe is held
+    # Once the pipe is let go, the reaper collects the killed ffmpeg: no zombie is left behind.
+    for reaper in [t for t in threading.enumerate() if t.name == "fingerprint-reaper"]:
+        reaper.join(10)
+    assert proc.returncode == -9
 
 
 def _record(store, tmp_path, name="S01E01.mkv"):

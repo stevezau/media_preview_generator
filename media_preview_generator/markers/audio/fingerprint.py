@@ -40,6 +40,8 @@ SWEEP_BUDGET_S = 60.0
 # it is asked again.
 CHROMAPRINT_RETRY_S = 600.0
 JELLYFIN_FFMPEG = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
+# How long a killed ffmpeg may take to let go of its output before it is left to a reaper thread.
+KILL_WAIT_S = 5.0
 _POLL_S = 0.5
 # ffmpeg's wording when a file has no audio stream to fingerprint: a stored empty answer, not a retryable failure.
 _NO_AUDIO_HINTS = ("does not contain any stream", "matches no streams", "Output file is empty")
@@ -189,7 +191,8 @@ def compute_fingerprint(
         duration_ms: File duration, for the window.
         ffmpeg: An ffmpeg with chromaprint.
         cancel_check: True once the job is cancelled; ffmpeg is killed.
-        timeout_s: Hard limit (a hung network mount must not hold a worker).
+        timeout_s: Hard limit (a hung network mount must not hold a worker): the call returns within it plus
+            ``KILL_WAIT_S`` and one poll.
 
     Returns:
         uint32 points (little-endian); empty for a file without an audio stream.
@@ -208,8 +211,7 @@ def compute_fingerprint(
         except subprocess.TimeoutExpired:
             cancelled = bool(cancel_check and cancel_check())
             if cancelled or time.monotonic() > deadline:
-                proc.kill()
-                proc.communicate()
+                _stop(proc, name)
                 why = "cancelled" if cancelled else f"timed out after {timeout_s:.0f} s"
                 raise FingerprintError(f"Fingerprinting {name} {why}") from None
     if proc.returncode != 0:
@@ -219,6 +221,23 @@ def compute_fingerprint(
         raise FingerprintError(f"ffmpeg exited {proc.returncode} fingerprinting {name}: {text.strip()[-200:]}")
     usable = len(out) - len(out) % 4
     return np.frombuffer(out[:usable], dtype="<u4").copy()
+
+
+def _stop(proc: subprocess.Popen, name: str) -> None:
+    """Kill ffmpeg and collect it, waiting at most ``KILL_WAIT_S``.
+
+    A read stuck on a stalled network mount leaves ffmpeg unkillable until the read returns, holding its pipes. Waiting
+    for that would keep the worker, one of the two fingerprint slots and the file's lock for as long as the mount
+    stalls, so such a process goes to a daemon reaper instead.
+    """
+    proc.kill()
+    try:
+        proc.communicate(timeout=KILL_WAIT_S)
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "ffmpeg fingerprinting {} still holds its output after being stopped; leaving it to finish", name
+        )
+        threading.Thread(target=proc.communicate, daemon=True, name="fingerprint-reaper").start()
 
 
 def points_of(stored: StoredFingerprint) -> np.ndarray:
