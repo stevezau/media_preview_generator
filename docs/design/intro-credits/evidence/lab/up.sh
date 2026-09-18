@@ -28,7 +28,9 @@ MV=(-v "/data_16tb2/TV Shows/Rick and Morty (2013) {tvdb-275274}/Season 01:/medi
     -v "${HERE}/synth/Synth Show (2020):/media/synth/Synth Show (2020):ro"
     -v "${HERE}/synth/Synth Chapters (2021):/media/synth-chapters/Synth Chapters (2021):ro"
     -v "${HERE}/synth/Synth Audio (2022):/media/synth-audio/Synth Audio (2022):ro"
-    -v "${HERE}/synth/Synth Movie (2023):/media/synth-movies/Synth Movie (2023):ro")
+    -v "${HERE}/synth/Synth Movie (2023):/media/synth-movies/Synth Movie (2023):ro"
+    -v "${HERE}/synth/Synth Credits (2024):/media/synth-credits/Synth Credits (2024):ro"
+    -v "${HERE}/synth/Synth Credits Open (2025):/media/synth-credits/Synth Credits Open (2025):ro")
 # A second location of the Synth Chapters library, for Plex only: a version of an episode the app can't read (phase 2
 # version-drift row). The app must never see it, so app.sh doesn't get it.
 PLEXONLY=(-v "${HERE}/synth/_plexonly:/media/plexonly:ro")
@@ -43,8 +45,9 @@ if [[ -f "${HERE}/scale_mounts.sh" ]]; then
 fi
 # Synth folders are mounted one show at a time: synth/_staging (files a test adds later) must stay invisible, and each
 # show belongs to one library only (synth = Synth Show, synth-chapters = synth_chapters.sh output, synth-audio =
-# synth_audio.sh output, synth-movies = the two-version movie from synth_chapters.sh). Run synth_chapters.sh and
-# synth_audio.sh before this script: Docker creates a missing bind source as an empty root-owned folder.
+# synth_audio.sh output, synth-movies = the two-version movie from synth_chapters.sh, synth-credits =
+# synth_credits.sh output (two movies, one library)). Run synth_chapters.sh, synth_audio.sh and synth_credits.sh
+# before this script: Docker creates a missing bind source as an empty root-owned folder.
 # app.sh sources this list (MLAB_MOUNTS_ONLY=1) so the app sees every file at the servers' paths.
 # MLAB_MOUNTS_ONLY=1 works only when sourced (`return`); run directly, it is not set.
 [[ "${MLAB_MOUNTS_ONLY:-}" == "1" ]] && return 0
