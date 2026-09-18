@@ -465,7 +465,8 @@ class MarkerStore:
         """Insert or refresh a file; a size/mtime change invalidates derived data (locked markers survive).
 
         A changed identity clears evidence (and its versions), fingerprints, decisions, the server kind, season pairs,
-        detector runs and every server's ``publish_basis``, so the next run offers the markers to every server again
+        detector runs and failures, the season intro-chapter limit, Check servers' re-read counts and every server's
+        ``publish_basis``, so the next run offers the markers to every server again
         even when an in-place replacement (e.g. a Tdarr transcode) lands on identical times: the Jellyfin plugin
         serves nothing for a file whose size changed until it is sent again, and its publisher sends it when the
         stored size differs. ``publish_state`` keeps ``markers_json``/``status`` so that publish still knows what to

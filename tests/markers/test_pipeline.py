@@ -1402,6 +1402,18 @@ class TestBudgetExhaustedJobWarning:
             "TheIntroDB's daily lookup limit was reached: 1 file was checked without it."
         )
 
+    def test_a_file_whose_worker_stage_got_an_answer_is_not_counted(self, store, media):
+        # The budget reset (00:00 UTC) between the checking thread and the worker: the file was checked with it.
+        reg = _registry(media, ServerType.PLEX)
+        spec = LocalDetectorSpec(Source.SEASON_AUDIO, frozenset({T.INTRO}), MagicMock(return_value=[]))
+        client = FakeClient(TIDB_BUDGET_EXHAUSTED)
+        ctx = _ctx(store, reg, clients={"theintrodb": client}, detectors=(spec,), settings_raw=INTRO_ONLY)
+        assert _run(ctx, media, {"plex-1": ready_publisher()})[0] is None
+        client.result = LookupResult("ok", (TIDB_INTRO,))
+        out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, stage="process")
+        assert "not checked" not in out.message
+        assert pipeline.budget_exhausted_warnings(ctx) == []
+
     def test_a_file_detected_again_after_it_changed_counts_once(self, store, media):
         reg = _registry(media, ServerType.PLEX)
         client = FakeClient(TIDB_BUDGET_EXHAUSTED)

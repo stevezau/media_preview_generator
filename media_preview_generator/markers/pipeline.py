@@ -255,10 +255,12 @@ class PipelineContext:
     # (``note_changed_sibling_left_out``).
     _left_out_changed: set[str] = field(default_factory=set, repr=False)
     _followups_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    # Files this job's lookups skipped because a source's daily budget ran out, by source (job_runner turns this
-    # into a completion warning once the job finishes). Paths, not a count: a file asked again in the same job (its
-    # worker stage after the checking thread, a retry after it changed on disk) is still one file.
-    _budget_exhausted: dict[Source, set[str]] = field(default_factory=dict, repr=False)
+    # Files this job checked without a source because its daily budget ran out, by source (job_runner turns this into
+    # a completion warning once the job finishes). Counted when a file's run finishes, so a file asked again in the
+    # same job (its worker stage after the checking thread, a retry after it changed on disk) is still one file.
+    _budget_exhausted: dict[Source, int] = field(default_factory=dict, repr=False)
+    # Sources whose running out this job already logged.
+    _budget_warned: set[Source] = field(default_factory=set, repr=False)
     _budget_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # Per file being run: the thread running it and what that run computes once (``run_memo``).
     _run_memos: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict, repr=False)
@@ -872,20 +874,27 @@ def _run_detector(
     )
 
 
-def _note_budget_exhausted(ctx: PipelineContext, source: Source, canonical_path: str) -> None:
-    """Record that ``source``'s daily budget stopped this file's lookup this job.
+def _warn_budget_exhausted(ctx: PipelineContext, source: Source) -> None:
+    """Log that ``source``'s daily budget ran out, once per job per source.
 
-    Warns once per job per source, not once per file: a run-dry source can affect hundreds of files, and a line per
-    file would flood the log for no extra information (spec finding 4 raised this from DEBUG). Never logs the key.
+    Not once per file: a run-dry source can affect hundreds of files, and a line per file would flood the log for no
+    extra information (spec finding 4 raised this from DEBUG). Never logs the key.
     """
     with ctx._budget_lock:
-        first = source not in ctx._budget_exhausted
-        ctx._budget_exhausted.setdefault(source, set()).add(canonical_path)
+        first = source not in ctx._budget_warned
+        ctx._budget_warned.add(source)
     if first:
         logger.warning(
             "{}'s daily lookup budget ran out; checking remaining files without it until it resets",
             _ONLINE_LABELS[source],
         )
+
+
+def _count_budget_exhausted(ctx: PipelineContext, sources: Iterable[Source]) -> None:
+    """Count one file whose finished run was checked without these sources (their daily budget ran out)."""
+    with ctx._budget_lock:
+        for source in sources:
+            ctx._budget_exhausted[source] = ctx._budget_exhausted.get(source, 0) + 1
 
 
 def budget_exhausted_warnings(ctx: PipelineContext) -> list[str]:
@@ -900,7 +909,7 @@ def budget_exhausted_warnings(ctx: PipelineContext) -> list[str]:
         that (or add a TheIntroDB API key for a higher limit)."
     """
     with ctx._budget_lock:
-        counts = {source: len(paths) for source, paths in ctx._budget_exhausted.items()}
+        counts = dict(ctx._budget_exhausted)
     warnings = []
     for source in sorted(counts, key=lambda s: _ONLINE_LABELS[s]):
         count = counts[source]
@@ -919,8 +928,8 @@ def _lookup(client: Any, source: Source, ids: MediaIds, rec: FileRecord, ctx: Pi
     """Ask one online source and store what it found.
 
     Returns:
-        Whether the source refused because its daily budget ran out (so the caller can note it on the file and the
-        job).
+        Whether the source refused because its daily budget ran out (so the caller can note it on the file, and count
+        the file on the job once its run finishes).
     """
     try:
         result = client.lookup(ids, duration_ms=rec.duration_ms, priority=ctx.priority(), cancel_check=cancel_check)
@@ -931,7 +940,7 @@ def _lookup(client: Any, source: Source, ids: MediaIds, rec: FileRecord, ctx: Pi
         # unavailable / not_applicable: nothing is stored, so the next run asks again.
         exhausted = isinstance(result, LookupResult) and is_budget_exhausted(result.detail)
         if exhausted:
-            _note_budget_exhausted(ctx, source, rec.canonical_path)
+            _warn_budget_exhausted(ctx, source)
         else:
             logger.debug("{} lookup for {}: {}", _ONLINE_LABELS[source], rec.canonical_path, result)
         return exhausted
@@ -1542,7 +1551,7 @@ def _attempt(
     gather_all = ctx.force
     decisions = _decide(ctx, rec, types, intro_limit)
     lookup_ids: MediaIds | None = None
-    budget_exhausted_labels: set[str] = set()
+    budget_exhausted: set[Source] = set()
     for source_id in ctx.settings.ordered_enabled_sources():
         source = Source(source_id)
         refresh = _refreshing(ctx, path, source)
@@ -1569,7 +1578,7 @@ def _attempt(
                 lookup_ids = lookup_ids or _lookup_ids(ids, servers)
                 phase(f"Looking up {_ONLINE_LABELS[source]}…")
                 if _lookup(client, source, lookup_ids, rec, ctx, cancel_check):
-                    budget_exhausted_labels.add(_ONLINE_LABELS[source])
+                    budget_exhausted.add(source)
         elif source is Source.SERVER_MARKERS:
             phase("Reading markers already on servers…")
             first_read_only = not gather_all and _all_decided(decisions, types)
@@ -1620,7 +1629,9 @@ def _attempt(
             row[VERIFY_LATER] = True
         rows.append(row)
     outcome = file_outcome({r["status"] for r in rows}, needs_review=needs_review)
-    return ItemOutcome(outcome.value, _summary(decisions, types, tuple(sorted(budget_exhausted_labels))), rows)
+    _count_budget_exhausted(ctx, budget_exhausted)
+    labels = tuple(sorted(_ONLINE_LABELS[source] for source in budget_exhausted))
+    return ItemOutcome(outcome.value, _summary(decisions, types, labels), rows)
 
 
 def _run(

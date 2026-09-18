@@ -210,8 +210,9 @@ def _sort_key(ctx: DecisionContext) -> Callable[[Candidate], tuple]:
     start), then the safer other edge (later intro/recap start, earlier resolved credits/preview
     end) -- then the raw end (no end first). The shorter-skip levels are a deliberate choice: when
     nothing else separates two candidates, a skip that is too short only shows the viewer more.
-    Two candidates only tie when they differ in nothing but `origin`, or in confidences that all rank
-    as 0.0 (NaN/inf); either way they publish identical markers -- so no result can depend on input order.
+    Two candidates only tie when they differ in nothing but `origin` or `copied_from`, or in confidences that
+    all rank as 0.0 (NaN/inf); either way they publish identical markers (an importer copy, the only candidate
+    `copied_from` sets, never supplies an edge alone) -- so no result can depend on input order.
     """
 
     def key(c: Candidate) -> tuple:
@@ -475,11 +476,11 @@ def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: De
     checks this file's cut itself (not IntroDB/TheIntroDB, not season audio, not markers already on servers, and SkipDB
     only for an intro or recap).
 
-    A second independent group here (server markers included) contradicts the first unless both are
-    server markers (a server's own and an importer plugin's copy, which never form a cluster); a group
-    whose own candidates don't all agree pairwise contradicts itself. The checked edge comes from the
-    best-ranked candidate, the unchecked edge is the safer value across the group's candidates, and
-    decided_by names the sources that supplied either edge.
+    Any second independent group here (server markers included) stops "medium": it either disagrees, or it
+    agrees without being able to form a cluster (a server's own markers and an importer plugin's copy; or season
+    audio and markers on a server, which gets the G3 reason). A group whose own candidates don't all agree
+    pairwise contradicts itself. The checked edge comes from the best-ranked candidate, the unchecked edge is the
+    safer value across the group's candidates, and decided_by names the sources that supplied either edge.
     """
     ranked = sorted(sane, key=_sort_key(ctx))
     groups = sorted({_group(c) for c in sane})
