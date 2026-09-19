@@ -11,10 +11,20 @@ import os
 
 import pytest
 
+from media_preview_generator.markers.sources.server_markers import read_server_markers
 from media_preview_generator.servers import EmbyServer, Library, ServerConfig, ServerType
 from media_preview_generator.servers import emby as emby_module
 
 pytestmark = [pytest.mark.vcr]
+
+
+@pytest.fixture(autouse=True)
+def _forget_cached_pings():
+    """The Bridge ping and catalog answers are module state, kept per server URL: never across tests."""
+    emby_module.clear_catalog_cache()
+    yield
+    emby_module.clear_catalog_cache()
+
 
 SYNTH_SEASON = "/media/synth-chapters/Synth Chapters (2021)/Season 01"
 # S01E02: one version on both lab Embys (Emby 4.10 groups S01E01 with its "- Extended" copy of another length).
@@ -76,11 +86,11 @@ class TestEmbyBridgeMarkersContract:
         )
         state = emby_lab.get_emby_marker_state(item_id)
         assert state == {
+            **emby_module.NOTHING_STORED,
             "intro_start_ticks": 100_000_000,
             "intro_end_ticks": 400_000_000,
             "credits_start_ticks": 1_000_000_000,
             "file_size": size,
-            "stale": False,
         }
         rows = emby_lab.get_chapter_markers(item_id)
         kinds = {(r["marker_type"], r["start_ms"], r["name"]) for r in rows}
@@ -94,13 +104,7 @@ class TestEmbyBridgeMarkersContract:
         assert deleted.status_code == 200 and deleted.json()["Stored"] == 0
         after = emby_lab.get_emby_marker_state(item_id)
         # Emby leaves null fields out of the answer: nothing stored reads as None everywhere.
-        assert after == {
-            "intro_start_ticks": None,
-            "intro_end_ticks": None,
-            "credits_start_ticks": None,
-            "file_size": None,
-            "stale": False,
-        }
+        assert after == emby_module.NOTHING_STORED
         assert not [r for r in emby_lab.get_chapter_markers(item_id) if r["marker_type"] != "Chapter"]
 
     def test_unknown_item_is_not_found(self, emby_lab):
@@ -219,3 +223,52 @@ class TestItemsWithoutPathScrub:
     )
     def test_anything_else_is_dropped(self, sources):
         assert self._kept_items(sources) == []
+
+
+def _emby_without_bridge() -> EmbyServer:
+    """The lab's Emby 4.9 with the Bridge plugin's DLL moved aside (see tests/cassettes/README.md)."""
+    return EmbyServer(
+        ServerConfig(
+            id="emby-vcr-no-bridge",
+            type=ServerType.EMBY,
+            name="Emby without the Bridge",
+            enabled=True,
+            url=os.environ.get("EMBY49_URL", "http://fake-emby49.local:8096"),
+            auth={
+                "method": "api_key",
+                "api_key": os.environ.get("EMBY49_TOKEN", "fake-token"),
+                "user_id": os.environ.get("EMBY49_USER_ID", "FAKE_USER_ID"),
+            },
+            verify_ssl=False,
+            libraries=[Library(id="1", name="Synth Chapters", remote_paths=("/media/synth-chapters",), enabled=True)],
+        )
+    )
+
+
+class TestEmbyWithoutTheBridgeContract:
+    """What an Emby with no markers route answers: the two 404s the reader reads as "nothing there is ours".
+
+    The Ping's answer is pinned here because the reader falls back to it whenever the store read gives anything but
+    the plugin's JSON (a proxy's 502 or HTML page, a 401 on an unrouted path); a bare Emby answers 404, which the
+    client itself already reads as an empty store, so those other answers stay unit-tested.
+    """
+
+    def test_the_ping_says_not_installed_and_the_markers_route_is_404(self):
+        emby = _emby_without_bridge()
+        assert emby.get_bridge_info() == {"installed": False, "version": None, "features": []}
+        item_id = emby._uncached_resolve_remote_path_to_item_id(SYNTH_E02)
+        assert item_id
+        assert emby.get_emby_marker_state(item_id) is None
+        assert emby.get_emby_marker_state(item_id, missing_route_is_empty=True) == emby_module.NOTHING_STORED
+
+    def test_its_markers_are_still_evidence(self):
+        # The rows the plugin wrote before it was removed stay in Emby, and now count as Emby's own (spec §13 item 17):
+        # what matters here is that they don't vanish from the evidence because the store answers 404.
+        emby = _emby_without_bridge()
+        item_id = emby._uncached_resolve_remote_path_to_item_id(SYNTH_E02)
+        found = read_server_markers(emby, emby.config, item_id)
+        assert found is not None
+        assert [(c.type.value, c.start_ms, c.end_ms) for c in found] == [
+            ("intro", 17_000, 47_000),
+            ("credits", 100_000, None),
+        ]

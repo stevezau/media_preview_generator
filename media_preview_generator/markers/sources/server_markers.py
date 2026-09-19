@@ -10,8 +10,9 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from ...servers.base import ServerType
+from ...servers.emby import NOTHING_STORED
 from ..models import Candidate, MarkerType, Source
-from ..publishers.emby import OwnVersion, own_version, without_plugin_rows
+from ..publishers.emby import MARKERS_FEATURE, OwnVersion, own_version, without_plugin_rows
 from ..publishers.jellyfin import bridge_key, core_key, segment_times
 
 if TYPE_CHECKING:
@@ -132,6 +133,29 @@ def _from_jellyfin(
     return [_candidate(*converted, origin) for key, converted in served if key not in ours]
 
 
+def _nothing_stored_without_the_bridge(server: Any, config: ServerConfig) -> dict[str, Any] | None:
+    """An empty marker store when the server has no Bridge plugin that could have stored markers of ours.
+
+    The store read answers more than a 404 when the plugin isn't there: an Emby behind a proxy, or one that rejects an
+    unrouted path, can answer 401, 502 or an HTML page, and every one of those would otherwise take the whole server's
+    markers out of the evidence. The Ping route settles it, kept per server for a few minutes so a server whose
+    markers route is broken doesn't get one ping per item.
+
+    Args:
+        server: Live Emby client.
+        config: That server's ``ServerConfig`` (for the log line).
+
+    Returns:
+        A store with nothing in it when the Bridge (with its markers feature) isn't installed; None when it is, or
+        when the server couldn't be asked.
+    """
+    info = server.get_bridge_info_cached()
+    if info is None or (info.get("installed") and MARKERS_FEATURE in (info.get("features") or [])):
+        logger.debug("Emby {}: the Bridge markers store couldn't be read; its markers are no evidence", config.name)
+        return None
+    return dict(NOTHING_STORED)
+
+
 def _from_emby(
     server: Any,
     config: ServerConfig,
@@ -166,6 +190,8 @@ def _from_emby(
     if not include_ours and any(row["marker_type"] in _EMBY_MARKER_ROWS for row in rows):
         # The Bridge plugin's own store says which rows are ours, whatever markers.db knows (a lost or fresh config).
         state = server.get_emby_marker_state(item_id, missing_route_is_empty=True)
+        if state is None:
+            state = _nothing_stored_without_the_bridge(server, config)
         if state is None:
             # Our own published markers would otherwise count as a second opinion agreeing with ourselves.
             return None
@@ -204,8 +230,8 @@ def read_server_markers(
         config: The server's ``ServerConfig`` (type and id).
         item_id: The server's item id.
         include_ours: False (evidence): leave out segments our Jellyfin plugin serves and chapter rows our Emby plugin
-            wrote (None when its store can't be read). True: everything clients see, ours included. Plex returns the
-            same either way.
+            wrote (None when its store can't be read on an Emby that has the plugin). True: everything clients see,
+            ours included. Plex returns the same either way.
         duration_ms: This file's duration, when the markers are read as evidence for it. Plex serves one marker set
             per item, so an item whose versions aren't all this cut (within 2 s), or whose versions can't be read,
             gives None. Emby and Jellyfin markers belong to one version's own item: no duration check.

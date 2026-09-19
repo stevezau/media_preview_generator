@@ -113,6 +113,28 @@ the test sends on replay; the per-user route answers a single item, so the `Item
 `TestEmbyItemMissingContract` pins how Emby answers an item id it doesn't have (per user: 404; API key: an empty
 `Items` list), which Check servers uses to tell a deleted item from a failed read.
 
+`TestEmbyWithoutTheBridgeContract` pins what an Emby **without** the plugin answers — the Ping (404, so
+`installed: False`) and the markers route (404) — which is how the reader tells "no plugin, so nothing there is ours"
+from "the store can't be read". It is recorded against the lab's Emby 4.9 (`mlab-emby49`, port 18099) with the
+plugin's DLL moved aside; Synth Chapters S01E02 must be indexed there and still carry the marker rows the plugin wrote
+before (the recording has an intro at 17-47 s and credits at 100 s):
+
+```bash
+cd /home/data/workspace/plex_generate_vid_previews
+set -a; . docs/design/intro-credits/evidence/lab/env; set +a
+docker exec mlab-emby49 mv /config/plugins/MediaPreviewBridge.Emby.dll /config/MediaPreviewBridge.Emby.dll.aside
+docker restart mlab-emby49   # wait for /emby/System/Info/Public to answer
+EMBY49_URL=http://127.0.0.1:18099 EMBY49_USER_ID="$EMBY49_UID" EMBY_USER_ID="$EMBY49_UID" \
+  /home/data/.venv/bin/python -m pytest --no-cov -n 0 tests/test_servers_emby_markers_vcr.py \
+  -k WithoutTheBridge --record-mode=once
+grep -rlF -e "$EMBY49_TOKEN" -e "$EMBY49_UID" tests/cassettes/test_servers_emby_markers_vcr/ && echo "LEAK" || echo "clean"
+docker exec mlab-emby49 mv /config/MediaPreviewBridge.Emby.dll.aside /config/plugins/MediaPreviewBridge.Emby.dll
+docker restart mlab-emby49   # put the plugin back: curl /emby/MediaPreviewBridge/Ping must answer again
+```
+
+`EMBY_USER_ID` has to be exported as well: the cassette scrubber reads that one when it replaces the recording user's
+id with `FAKE_USER_ID`.
+
 `tests/test_servers_jellyfin_vcr.py::TestJellyfinItemMissingContract` is recorded against the storage lab's Jellyfin
 10.11 (`mlab-jellyfin`), not the Docker-Compose stack; it asks for an item id Jellyfin doesn't have, and for Synth
 Chapters S01E02, which must be indexed there:

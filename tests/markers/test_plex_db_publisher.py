@@ -1873,6 +1873,24 @@ class TestSchemaGuards:
         report = _publisher(tmp_path, folder).capability()
         assert report.state is Capability.UNSUPPORTED_SCHEMA and "version 6" in report.message
 
+    def test_an_older_url_form_part_is_sampled_beside_the_newest_json_ones(self, tmp_path):
+        # Plex's credits final migration rewrites parts where they are, so a URL-encoded part keeps its old id: it
+        # must not fall out of the sample behind newer JSON parts.
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder)
+        good = _plex_json({"pv:intros": NATIVE_INTROS})
+        conn = sqlite3.connect(db)
+        conn.execute("INSERT INTO media_items (id, metadata_item_id) VALUES (100, 8)")
+        conn.executemany(
+            "INSERT INTO media_parts (id, media_item_id, file, extra_data) VALUES (?, 100, ?, ?)",
+            [(100, "/old.mkv", encode_extra_data({"pv:intros": INTROS_V6_VALUE}, url_form=True))]
+            + [(101 + n, f"/o{n}.mkv", good) for n in range(60)],
+        )
+        conn.commit()
+        conn.close()
+        report = _publisher(tmp_path, folder).capability()
+        assert report.state is Capability.UNSUPPORTED_SCHEMA and "version 6" in report.message
+
     def test_two_marker_tag_rows_are_unsupported(self, tmp_path):
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder)

@@ -79,6 +79,16 @@ namespace MediaPreviewBridge.Emby.Api
 
         public long? FileSize { get; set; }
 
+        /// <summary>
+        /// Gets or sets the markers of ours the item's rows showed before a write that is still under way
+        /// (<see cref="StoredMarkers.Replacing"/>), so a caller can tell those rows are ours too.
+        /// </summary>
+        public long? ReplacingIntroStartTicks { get; set; }
+
+        public long? ReplacingIntroEndTicks { get; set; }
+
+        public long? ReplacingCreditsStartTicks { get; set; }
+
         public bool Stale { get; set; }
 
         public int Stored { get; set; }
@@ -290,6 +300,9 @@ namespace MediaPreviewBridge.Emby.Api
             IntroEndTicks = markers?.IntroEndTicks,
             CreditsStartTicks = markers?.CreditsStartTicks,
             FileSize = markers?.FileSize,
+            ReplacingIntroStartTicks = markers?.Replacing?.IntroStartTicks,
+            ReplacingIntroEndTicks = markers?.Replacing?.IntroEndTicks,
+            ReplacingCreditsStartTicks = markers?.Replacing?.CreditsStartTicks,
             Stale = StoredMarkers.IsStale(markers, currentSize, item.Path),
             Stored = stored,
         };

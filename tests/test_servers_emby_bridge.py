@@ -43,6 +43,28 @@ class TestBridgeInfoShared:
             assert server.get_bridge_info() == expected
         assert req.call_args.args == ("GET", "/MediaPreviewBridge/Ping")
 
+    @pytest.mark.parametrize(
+        ("body", "status"),
+        [({"Ok": True, "Version": "1.0.0.0", "Features": ["markers"]}, 200), (None, 404)],
+        ids=["installed", "no-plugin"],
+    )
+    def test_the_cached_ping_asks_once_per_server(self, body, status):
+        # The markers reader asks per item when a store read fails; on a broken server that would be a ping each time.
+        server = _server()
+        with patch.object(server, "_request", return_value=_resp(status, body)) as req:
+            first = server.get_bridge_info_cached()
+            assert server.get_bridge_info_cached() == first
+        assert first == (
+            {"installed": True, "version": "1.0.0.0", "features": ["markers"]}
+            if status == 200
+            else {"installed": False, "version": None, "features": []}
+        )
+        assert req.call_count == 1
+        emby_module.clear_catalog_cache()
+        with patch.object(server, "_request", return_value=_resp(status, body)) as again:
+            assert server.get_bridge_info_cached() == first
+        assert again.call_count == 1
+
     def test_access_probe_uses_each_vendors_own_unused_id(self):
         emby, jellyfin = _server(), _server(JellyfinServer, ServerType.JELLYFIN)
         with patch.object(
@@ -66,13 +88,17 @@ class TestBridgeInfoShared:
 class TestEmbyMarkers:
     def test_state_is_read_from_the_plugin_answer(self):
         body = {"Id": "42", "Found": True, "Error": None, "IntroStartTicks": 100_000_000, "IntroEndTicks": 400_000_000,
-                "CreditsStartTicks": None, "FileSize": 1234, "Stale": False, "Stored": 0}  # fmt: skip
+                "CreditsStartTicks": None, "FileSize": 1234, "Stale": False, "Stored": 0,
+                "ReplacingIntroStartTicks": 90_000_000, "ReplacingIntroEndTicks": 390_000_000}  # fmt: skip
         server = _server()
         with patch.object(server, "_request", return_value=_resp(200, body)) as req:
             state = server.get_emby_marker_state("42")
         assert req.call_args.args == ("GET", "/MediaPreviewBridge/Markers/42")
+        # The set a write under way is replacing: rows of it can still be on the item, and they are ours too.
         assert state == {"intro_start_ticks": 100_000_000, "intro_end_ticks": 400_000_000,
-                         "credits_start_ticks": None, "file_size": 1234, "stale": False}  # fmt: skip
+                         "credits_start_ticks": None, "file_size": 1234, "stale": False,
+                         "replacing_intro_start_ticks": 90_000_000, "replacing_intro_end_ticks": 390_000_000,
+                         "replacing_credits_start_ticks": None}  # fmt: skip
 
     def test_fields_emby_leaves_out_read_as_none(self):
         # Emby omits null fields: an item with nothing stored answers only Id, Found, Stale and Stored.
@@ -80,7 +106,8 @@ class TestEmbyMarkers:
         with patch.object(server, "_request", return_value=_resp(200, {"Id": "42", "Found": True, "Stale": True})):
             state = server.get_emby_marker_state("42")
         assert state == {"intro_start_ticks": None, "intro_end_ticks": None, "credits_start_ticks": None,
-                         "file_size": None, "stale": True}  # fmt: skip
+                         "file_size": None, "stale": True, "replacing_intro_start_ticks": None,
+                         "replacing_intro_end_ticks": None, "replacing_credits_start_ticks": None}  # fmt: skip
 
     @pytest.mark.parametrize(
         "answer",
@@ -111,8 +138,7 @@ class TestEmbyMarkers:
         with patch.object(server, "_request", return_value=answer) as req:
             state = server.get_emby_marker_state("42", missing_route_is_empty=True)
         assert req.call_args.args == ("GET", "/MediaPreviewBridge/Markers/42")
-        assert state == {"intro_start_ticks": None, "intro_end_ticks": None, "credits_start_ticks": None,
-                         "file_size": None, "stale": False}  # fmt: skip
+        assert state == emby_module.NOTHING_STORED
 
     @pytest.mark.parametrize(
         "answer",

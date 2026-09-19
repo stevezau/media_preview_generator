@@ -150,22 +150,32 @@ def _stored_markers(state: dict[str, Any]) -> list[Marker]:
     return stored
 
 
+def _replacing(state: dict[str, Any]) -> dict[str, Any]:
+    """The set a write under way is replacing, in ``_stored_markers``'s shape (all None on a plugin without them)."""
+    return {
+        key: state.get(f"replacing_{key}") for key in ("intro_start_ticks", "intro_end_ticks", "credits_start_ticks")
+    }
+
+
 def without_plugin_rows(rows: list[dict[str, Any]], state: dict[str, Any]) -> list[dict[str, Any]]:
     """An item's chapter rows without the marker rows the Bridge plugin wrote (ours).
 
     The plugin writes a type's rows from what it stores, all of them or none (without ``ReplaceOwn`` it leaves a type
     that has Emby's own rows alone), so a type's rows are ours only when every row it writes for that type is there.
+    The set a write still under way is replacing counts too: the plugin saves its store before the rows, so after an
+    Emby crash in between the item can still show the earlier set (its ``Replacing*Ticks``, answered by plugin builds
+    that have them).
 
     Args:
         rows: ``get_chapter_markers`` rows (``marker_type``, ``start_ms``).
         state: ``EmbyServer.get_emby_marker_state``'s answer for the item.
 
     Returns:
-        ``rows`` in order, less the intro pair and the credits start equal to what the plugin stores.
+        ``rows`` in order, less the intro pair and the credits start equal to either set the plugin stores.
     """
     present = {(row["marker_type"], row["start_ms"]) for row in rows}
     ours: set[tuple[str, int]] = set()
-    for marker in _stored_markers(state):
+    for marker in _stored_markers(state) + _stored_markers(_replacing(state)):
         if marker.type is MarkerType.INTRO:
             written = {("IntroStart", marker.start_ms), ("IntroEnd", marker.end_ms)}
         else:

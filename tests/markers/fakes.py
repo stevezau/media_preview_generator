@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 from media_preview_generator.markers.publishers.base import Capability, CapabilityReport, Shown, compare_shown
 from media_preview_generator.markers.sources.online import LookupResult
 from media_preview_generator.servers.base import Library, ServerConfig, ServerType
+from media_preview_generator.servers.emby import NOTHING_STORED
 from media_preview_generator.servers.ownership import find_owning_servers
 
 
@@ -53,14 +54,14 @@ class FakeRegistry:
             server.get_media_segments.return_value = []
             server.get_bridge_markers.return_value = []
             server.get_chapter_markers.return_value = []
-            # Emby's Bridge plugin stores nothing for the item: every chapter marker row is Emby's own.
-            server.get_emby_marker_state.return_value = {
-                "intro_start_ticks": None,
-                "intro_end_ticks": None,
-                "credits_start_ticks": None,
-                "file_size": None,
-                "stale": False,
+            # The Bridge plugin is installed (so a store that can't be read means "can't tell"), and stores nothing
+            # for the item: every chapter marker row is the server's own.
+            server.get_bridge_info_cached.return_value = {
+                "installed": True,
+                "version": "1.0.0.0",
+                "features": ["markers"],
             }
+            server.get_emby_marker_state.return_value = dict(NOTHING_STORED)
             # One version per item and no plugins, unless a test says otherwise.
             server.get_part_durations.return_value = []
             server.get_version_count.return_value = None

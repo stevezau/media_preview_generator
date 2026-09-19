@@ -14,7 +14,7 @@ from media_preview_generator.markers.sources.server_markers import (
     read_server_markers,
 )
 from media_preview_generator.servers.base import ServerConfig, ServerType
-from media_preview_generator.servers.emby import EmbyServer
+from media_preview_generator.servers.emby import NOTHING_STORED, EmbyServer
 from media_preview_generator.servers.jellyfin import JellyfinServer
 from media_preview_generator.servers.plex import PlexServer
 
@@ -27,16 +27,6 @@ def _cfg(t):
 
 def _src(t, start, end, origin):
     return Candidate(t, start, end, Source.SERVER_MARKERS, origin=origin)
-
-
-# What get_emby_marker_state gives for an item the Bridge plugin stores nothing for.
-NOTHING_STORED = {
-    "intro_start_ticks": None,
-    "intro_end_ticks": None,
-    "credits_start_ticks": None,
-    "file_size": None,
-    "stale": False,
-}
 
 
 class TestPlex:
@@ -312,21 +302,26 @@ class TestJellyfin:
         assert read_server_markers(server, _cfg(ServerType.JELLYFIN), "abc") is None
 
 
-def _emby(rows, stored=NOTHING_STORED):
+BRIDGE_INSTALLED = {"installed": True, "version": "1.0.0.0", "features": ["markers"]}
+NO_BRIDGE = {"installed": False, "version": None, "features": []}
+
+
+def _emby(rows, stored=NOTHING_STORED, bridge=BRIDGE_INSTALLED):
     server = create_autospec(EmbyServer, instance=True)
     server.get_chapter_markers.return_value = rows
     server.get_emby_marker_state.return_value = stored
+    server.get_bridge_info_cached.return_value = bridge
     return server
 
 
 # Rick and Morty S01E04 on the lab Emby after the scale run (2026-09-19): the Bridge plugin's store and the chapter rows
 # it wrote from it.
 LAB_STORED = {
+    **NOTHING_STORED,
     "intro_start_ticks": 15_000_000,
     "intro_end_ticks": 330_000_000,
     "credits_start_ticks": 12_560_000_000,
     "file_size": 908_150_615,
-    "stale": False,
 }
 LAB_INTRO_ROWS = [
     {"marker_type": "IntroStart", "start_ms": 1_500, "name": "Intro"},
@@ -444,10 +439,91 @@ class TestEmbyOurOwnRows:
         server = _emby(LAB_INTRO_ROWS + LAB_CREDITS_ROW, stored)
         assert read_server_markers(server, _cfg(ServerType.EMBY), "23") == expected
 
+    @pytest.mark.parametrize(
+        ("stored", "expected"),
+        [
+            pytest.param(
+                {
+                    **NOTHING_STORED,
+                    "intro_start_ticks": 20_000_000,
+                    "intro_end_ticks": 350_000_000,
+                    "replacing_intro_start_ticks": 15_000_000,
+                    "replacing_intro_end_ticks": 330_000_000,
+                },
+                [_src(T.CREDITS, 1_256_000, None, "emby-1")],
+                id="intro-rows-still-the-replaced-set",
+            ),
+            pytest.param(
+                {
+                    **NOTHING_STORED,
+                    "intro_start_ticks": 15_000_000,
+                    "intro_end_ticks": 330_000_000,
+                    "replacing_intro_start_ticks": 20_000_000,
+                    "replacing_intro_end_ticks": 350_000_000,
+                },
+                [_src(T.CREDITS, 1_256_000, None, "emby-1")],
+                id="intro-rows-already-the-new-set",
+            ),
+            pytest.param(
+                {
+                    **NOTHING_STORED,
+                    "intro_start_ticks": 15_000_000,
+                    "intro_end_ticks": 330_000_000,
+                    "credits_start_ticks": 12_600_000_000,
+                    "replacing_credits_start_ticks": 12_560_000_000,
+                },
+                [],
+                id="credits-row-still-the-replaced-one",
+            ),
+            pytest.param(
+                {**NOTHING_STORED, "replacing_credits_start_ticks": 12_560_000_000},
+                [_src(T.INTRO, 1_500, 33_000, "emby-1")],
+                id="a-delete-under-way-keeps-emby-s-intro",
+            ),
+        ],
+    )
+    def test_a_write_still_under_way_leaves_out_either_set(self, stored, expected):
+        # The plugin saves its store before the rows: after an Emby crash in between, the item can show either set,
+        # and both are ours.
+        server = _emby(LAB_INTRO_ROWS + LAB_CREDITS_ROW, stored)
+        assert read_server_markers(server, _cfg(ServerType.EMBY), "23") == expected
+
+    def test_a_plugin_build_without_the_replacing_fields_still_reads(self):
+        # An older plugin answers no Replacing*Ticks at all (the app reads what it has).
+        stored = {key: value for key, value in LAB_STORED.items() if not key.startswith("replacing_")}
+        server = _emby(LAB_INTRO_ROWS + LAB_CREDITS_ROW, stored)
+        assert read_server_markers(server, _cfg(ServerType.EMBY), "23") == []
+
     def test_an_unreadable_store_gives_no_evidence(self):
         # Without knowing what the plugin stored, our own markers could come back as "independent" agreement.
         server = _emby(LAB_INTRO_ROWS + LAB_CREDITS_ROW, None)
         assert read_server_markers(server, _cfg(ServerType.EMBY), "23") is None
+        server.get_bridge_info_cached.assert_called_once_with()
+
+    @pytest.mark.parametrize(
+        "bridge",
+        [
+            pytest.param(NO_BRIDGE, id="no-plugin"),
+            pytest.param({"installed": True, "version": "0.9", "features": []}, id="plugin-without-markers"),
+        ],
+    )
+    def test_a_server_without_the_bridge_keeps_all_its_markers_as_evidence(self, bridge):
+        # An Emby with no markers route can answer the store read with anything (401 on an unrouted path, a proxy's
+        # 502 or HTML page): the Ping settles it, and nothing there can be ours.
+        server = _emby(LAB_INTRO_ROWS + LAB_CREDITS_ROW, None, bridge)
+        assert read_server_markers(server, _cfg(ServerType.EMBY), "23") == [
+            _src(T.INTRO, 1_500, 33_000, "emby-1"),
+            _src(T.CREDITS, 1_256_000, None, "emby-1"),
+        ]
+
+    def test_a_server_that_cant_be_pinged_gives_no_evidence(self):
+        server = _emby(LAB_INTRO_ROWS + LAB_CREDITS_ROW, None, None)
+        assert read_server_markers(server, _cfg(ServerType.EMBY), "23") is None
+
+    def test_a_store_that_answers_needs_no_ping(self):
+        server = _emby(LAB_INTRO_ROWS + LAB_CREDITS_ROW, LAB_STORED)
+        assert read_server_markers(server, _cfg(ServerType.EMBY), "23") == []
+        server.get_bridge_info_cached.assert_not_called()
 
     def test_include_ours_shows_what_clients_see_without_reading_the_store(self):
         server = _emby(LAB_INTRO_ROWS + LAB_CREDITS_ROW, None)

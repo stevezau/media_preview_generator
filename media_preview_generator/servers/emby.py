@@ -30,17 +30,33 @@ CATALOG_KEEP_ON_ERROR_S = 86_400.0
 REGISTRATION_TTL_S = 3_600.0
 REGISTRATION_ERROR_TTL_S = 300.0
 REGISTRATION_TIMEOUT_S = 10
+# A Bridge marker store with nothing in it (see EmbyServer.get_emby_marker_state).
+NOTHING_STORED: dict[str, Any] = {
+    "intro_start_ticks": None,
+    "intro_end_ticks": None,
+    "credits_start_ticks": None,
+    "file_size": None,
+    "stale": False,
+    "replacing_intro_start_ticks": None,
+    "replacing_intro_end_ticks": None,
+    "replacing_credits_start_ticks": None,
+}
+# The markers reader pings the Bridge only when an item's store can't be read; on a server whose markers route is
+# broken or hung that would be one ping per item, so the answer is kept per server URL for a few minutes.
+BRIDGE_PING_TTL_S = 300.0
 _monotonic = time.monotonic
 _catalog_answers: dict[str, tuple[float, bool]] = {}
 _registration_answers: dict[str, tuple[float, bool | None]] = {}
+_bridge_answers: dict[str, tuple[float, dict[str, Any] | None]] = {}
 _catalog_guard = threading.Lock()
 
 
 def clear_catalog_cache() -> None:
-    """Forget every cached catalog and Emby Premiere answer (tests)."""
+    """Forget every cached catalog, Emby Premiere and Bridge ping answer (tests)."""
     with _catalog_guard:
         _catalog_answers.clear()
         _registration_answers.clear()
+        _bridge_answers.clear()
 
 
 class EmbyServer(EmbyApiClient):
@@ -180,6 +196,23 @@ class EmbyServer(EmbyApiClient):
     def _markers_path(self, item_id: str) -> str:
         return f"/MediaPreviewBridge/Markers/{urllib.parse.quote(str(item_id), safe='')}"
 
+    def get_bridge_info_cached(self) -> dict[str, Any] | None:
+        """``get_bridge_info`` kept per server URL for ``BRIDGE_PING_TTL_S``, for callers that ask it per item.
+
+        Returns:
+            The same answer as ``get_bridge_info`` (None when the server couldn't be reached), from this server's
+            last ping while that is recent enough.
+        """
+        url = self._config.url.rstrip("/")
+        with _catalog_guard:
+            cached = _bridge_answers.get(url)
+        if cached is not None and _monotonic() - cached[0] < BRIDGE_PING_TTL_S:
+            return cached[1]
+        info = self.get_bridge_info()
+        with _catalog_guard:
+            _bridge_answers[url] = (_monotonic(), info)
+        return info
+
     def get_emby_marker_state(self, item_id: str, *, missing_route_is_empty: bool = False) -> dict[str, Any] | None:
         """What the Bridge plugin stores for an item, shown or not.
 
@@ -189,20 +222,17 @@ class EmbyServer(EmbyApiClient):
                 its store fails), so a 404 means Emby has no markers route, and no plugin there stored anything.
 
         Returns:
-            ``{"intro_start_ticks", "intro_end_ticks", "credits_start_ticks", "file_size", "stale"}`` (None values when
-            nothing is stored; Emby leaves null fields out of its answers), or None when unknown (unknown item, no
-            plugin route unless ``missing_route_is_empty``, the plugin's error answer, a transport error).
+            ``{"intro_start_ticks", "intro_end_ticks", "credits_start_ticks", "file_size", "stale"}``, plus
+            ``"replacing_intro_start_ticks"``, ``"replacing_intro_end_ticks"`` and ``"replacing_credits_start_ticks"``:
+            the markers of ours the item's rows showed before a write still under way, which the item can still show
+            (None when nothing is stored, and always on a plugin build older than the one that answers them; Emby
+            leaves null fields out). None when unknown (unknown item, no plugin route unless
+            ``missing_route_is_empty``, the plugin's error answer, a transport error).
         """
         try:
             resp = self._request("GET", self._markers_path(item_id))
             if resp.status_code == 404 and missing_route_is_empty:
-                return {
-                    "intro_start_ticks": None,
-                    "intro_end_ticks": None,
-                    "credits_start_ticks": None,
-                    "file_size": None,
-                    "stale": False,
-                }
+                return dict(NOTHING_STORED)
             body = resp.json() if resp.status_code == 200 else None
         except (requests.RequestException, ValueError) as exc:
             logger.debug("Emby Bridge markers read failed on {} for {}: {}", self.name, item_id, type(exc).__name__)
@@ -220,6 +250,9 @@ class EmbyServer(EmbyApiClient):
             "credits_start_ticks": ticks("CreditsStartTicks"),
             "file_size": ticks("FileSize"),
             "stale": body.get("Stale") is True,
+            "replacing_intro_start_ticks": ticks("ReplacingIntroStartTicks"),
+            "replacing_intro_end_ticks": ticks("ReplacingIntroEndTicks"),
+            "replacing_credits_start_ticks": ticks("ReplacingCreditsStartTicks"),
         }
 
     def put_emby_markers(

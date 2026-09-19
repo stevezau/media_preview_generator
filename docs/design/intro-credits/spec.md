@@ -582,8 +582,10 @@ at the last write), `atomic_writes`.
 - Tag row missing → `NeedsPlexDetectionOnce` (never create it).
 - Multi-version items share one marker set: publish only when all parts' decisions agree within 2 s.
 - Unknown schema (columns/JSON shape differ from 1.43, `extra_data` in neither of Plex's two forms) → stop writing,
-  show message. A part is written back in the form it has (JSON with `url`, or the URL-encoded form alone; a
-  URL-encoded part we empty is left as `""`, and a later write adds keys in JSON, Plex's usual form).
+  show message. A part is written back in the form it has (JSON with `url`, or the URL-encoded form alone). A
+  URL-encoded part we empty is left as `""` — what Plex's own rollback makes of the `{"url":""}` an emptied JSON part
+  gets, and no fields in either form — and a later write that puts a key back writes JSON, Plex's usual form, exactly
+  as it does over the NULL Plex leaves on an empty part.
 - Never write `tags`; never run integrity checks with stock SQLite (custom tokenizer).
 - Rows and `pv:` keys that already serve the desired times stay byte for byte, except a stale credits `final` flag on
   a one-version item under "Use ours" (see §14, 2026-09-15 "Plex credits `final` flag").
@@ -959,6 +961,11 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     `final` migration, which each rewrote the part in the other form, and a forced refresh; Plex's forced credits
     detection is untested;
     `evidence/lab/phase1-results.md` "Findings 1 and 2"), or accept this as a known limit.
+18. **The Emby plugin's in-flight `Replacing` set needs a plugin release to be told apart.** The plugin saves its
+    store before it writes the chapter rows, so after an Emby crash in between the item can still show the set the
+    write is replacing. The app reads those rows as ours from `Replacing*Ticks`, which `emby-plugin/` now answers but
+    no released build does; until the next plugin release, an Emby that crashed mid-write plus a lost markers.db can
+    still show markers of ours as its own (§14 2026-09-19).
 
 ## 14. Decisions log
 
@@ -1395,9 +1402,19 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   Emby, intros on 285 and 26). Emby's reader now leaves out the chapter rows the Bridge plugin wrote, as Jellyfin's
   reader does with its segments: the plugin shows exactly what it stores, and its store lives on the server, so it
   outlasts a lost markers.db. A type's rows are ours only when every row the plugin writes for it is there (an intro
-  counts as a pair); an Emby without the markers route (404) stores nothing of ours; a store that can't be read (an
-  error, or credentials that aren't an administrator's, which can't publish there either) gives no evidence, as with
-  Jellyfin, and is asked again like any unusable answer. Server reader version 4: every server a file isn't yet
+  counts as a pair), the set a write still under way is replacing included (`Replacing*Ticks`, from the next plugin
+  build; an older one answers none and the gap stays). An Emby with no markers route stores nothing of ours: a 404
+  says so, and for anything else it answers (a proxy's 502 or HTML page, a 401 on an unrouted path) the Ping settles
+  whether the plugin is there. A store that can't be read on an Emby that has the plugin (an error, or credentials
+  that aren't an administrator's, which can't publish there either) gives no evidence, as with Jellyfin, and is asked
+  again like any unusable answer. Server reader version 4: every server a file isn't yet
   published to is read once more (one request per file and server). A file already published to a server keeps the
   answer it stored before (a published server isn't read again), so a markers.db that read our own Emby markers
   before this keeps them for those files. Plex keeps no such record (§13 item 17).
+- 2026-09-20 · Final review, scale-bugs round 2 (§6.3, §13 items 17–18): an Emby that answers the markers route with
+  anything but the plugin's JSON (a proxy's 502 or HTML page, a 401 on an unrouted path) is settled by the Ping, so
+  only an Emby that has the Bridge takes its markers out of the evidence; pinned against the lab's Emby 4.9 with the
+  plugin's DLL moved aside (`tests/cassettes/test_servers_emby_markers_vcr/TestEmbyWithoutTheBridgeContract*`). The
+  Plex library sample gives each `extra_data` form its own 50 newest rows, since the credits `final` migration rewrites
+  parts where they are and a URL-encoded part keeps its old id. The Emby plugin answers `Replacing*Ticks` (needs a
+  plugin build; §13 item 18).

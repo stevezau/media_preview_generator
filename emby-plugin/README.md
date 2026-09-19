@@ -61,6 +61,11 @@ POST body:
  "CreditsStartTicks": 1000000000, "FileSize": 6421799, "Stale": false, "Stored": 3}
 ```
 
+`Replacing*Ticks` (`ReplacingIntroStartTicks`, `ReplacingIntroEndTicks`, `ReplacingCreditsStartTicks`) appear only
+while a write is under way, or after Emby stopped in the middle of one: the markers of ours the item's rows showed
+before it, which can still be the rows on the item. A caller that asks which rows are the plugin's own has to count
+them as well. They go at the next POST, DELETE or item update.
+
 - Answers are HTTP 200 JSON, so both Emby versions answer the same way. An unknown or non-numeric id gives
   `Found: false, Error: "item not found"`. A body the plugin refuses gives `Found: true` with `Error` saying why, and
   nothing is stored. When the store file or the item's chapters can't be written, the answer is HTTP 500 with the same

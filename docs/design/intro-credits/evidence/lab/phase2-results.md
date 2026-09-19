@@ -400,7 +400,7 @@ Findings:
 of ours before), then the chapter rows, then the store without `Replacing`. `Apply`, DELETE and the healer take rows of
 either set for ours; the healer finishes a stopped write at the item's next update ("finished an interrupted marker
 write"). `MarkerStore.Save` flushes the temp file to disk (`Flush(true)`) before the rename. The app's contract is
-unchanged (GET never shows `Replacing`).
+unchanged (GET never shows `Replacing`; superseded 2026-09-20, spec §13 item 18: GET now answers `Replacing*Ticks`).
 
 **Build.** Both ABIs (`nice -n 19`, sdk:9.0, `dotnet build -c Release -p:EmbyAbi=<abi> -p:Version=1.0.0.0`): `Build
 succeeded.` 0 warnings, 0 errors each. Installed for the run (sha256 = build output), then the builds installed before

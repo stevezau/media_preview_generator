@@ -226,6 +226,10 @@ def _plex_quote(value: str) -> str:
 
 
 def _url_form(d: dict[str, str]) -> str:
+    # With no fields left this is "", which is what Plex's own rollback of an emptied JSON part
+    # (extra_data ->> 'url' of {"url":""}) writes, and reads back as no fields in either form. Plex itself leaves an
+    # empty part NULL (production: 55 of them, no "" anywhere), but nothing reads the form of an empty part: the next
+    # write that puts a key back writes JSON, exactly as it does over NULL.
     return "&".join(f"{_plex_quote(k)}={_plex_quote(d[k])}" for k in sorted(d) if k != "url")
 
 
@@ -705,14 +709,18 @@ class PlexMarkerPublisher(MarkerPublisher):
 
     @staticmethod
     def _check_library_marker_versions(conn: sqlite3.Connection) -> None:
-        # Two LIKE scans of media_parts: run from capability() (cached per job, for a few seconds only while Plex Pass
-        # doesn't answer), never per write. Each write still validates the parts it touches in merge_part_extra_data.
-        # Newest rows first: a new format shows up there. Either form of extra_data (see encode_extra_data).
+        # Two LIKE scans of media_parts per key: run from capability() (cached per job, for a few seconds only while
+        # Plex Pass doesn't answer), never per write. Each write still validates the parts it touches in
+        # merge_part_extra_data. Newest rows first, and each form its own window: Plex's credits final migration
+        # rewrites parts where they are, so a URL-encoded part keeps its old id and a shared window of the newest 50
+        # rows could hold none (see encode_extra_data).
         for key in _PART_KEY.values():
             url_form_like = "%" + _plex_quote(key).replace("%", r"\%") + r"=\%7B%"  # pv%3Aintros=%7B...
             rows = conn.execute(
-                "SELECT extra_data FROM media_parts WHERE extra_data LIKE ? OR extra_data LIKE ? ESCAPE '\\' "
-                "ORDER BY id DESC LIMIT 50",
+                "SELECT extra_data FROM (SELECT extra_data FROM media_parts WHERE extra_data LIKE ? "
+                "ORDER BY id DESC LIMIT 50) UNION ALL "
+                "SELECT extra_data FROM (SELECT extra_data FROM media_parts WHERE extra_data LIKE ? ESCAPE '\\' "
+                "ORDER BY id DESC LIMIT 50)",
                 (f'%"{key}":"{{%', url_form_like),
             ).fetchall()
             for (extra,) in rows:
