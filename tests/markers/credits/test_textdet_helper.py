@@ -435,8 +435,8 @@ def test_the_self_test_warms_both_detectors_before_timing():
         counted = detector.count
         detector.count = lambda frames, counted=counted: (seen.append(len(frames)), counted(frames))[1]
     th.self_test(gpu, cpu, frames, clock=clock, warmup=2)
-    assert th.SELFTEST_ROUNDS == 5
-    assert seen == [2, 2] + [6, 6] * 5  # warm-up on both, then one timed pair per round
+    assert th.SELFTEST_ROUNDS == 7
+    assert seen == [2, 2] + [6, 6] * 7  # warm-up on both, then one timed pair per round
 
 
 class TestAvailability:
@@ -578,22 +578,23 @@ def _self_test(gpu_rounds_s: list[float], cpu_rounds_s: list[float]) -> th.SelfT
 @pytest.mark.parametrize(
     ("gpu_rounds_s", "cpu_rounds_s", "expected"),
     [
-        # One slow GPU round: a single-sample test would say CPU; the other four rounds outvote it.
-        ([0.100, 0.001, 0.001, 0.001, 0.001], [0.010] * 5, (1.0, 10.0, 0.1, True)),
-        # A GPU fast in one round only: its best round (4 ms) would pass, but four of five back-to-back rounds say
-        # 0.95 of the CPU's time -- the side whose times spread more mustn't win on its luckiest round.
-        ([0.004, 0.0095, 0.100, 0.0095, 0.0095], [0.010] * 5, (9.5, 10.0, 0.95, False)),
+        # One slow GPU round: a single-sample test would say CPU; the other six rounds outvote it.
+        ([0.100, *[0.001] * 6], [0.010] * 7, (1.0, 10.0, 0.1, True)),
+        # A GPU fast in one round only: its best round (4 ms) would pass, but six of seven back-to-back rounds say
+        # 0.95 of the CPU's time or more -- the side whose times spread more mustn't win on its luckiest round.
+        ([0.004, 0.0095, 0.100, *[0.0095] * 4], [0.010] * 7, (9.5, 10.0, 0.95, False)),
         # Host load slows both sides in round 3: its ratio (0.5) is the others', so nothing changes.
-        ([0.005, 0.005, 0.050, 0.005, 0.005], [0.010, 0.010, 0.100, 0.010, 0.010], (5.0, 10.0, 0.5, True)),
+        ([0.005, 0.005, 0.050, *[0.005] * 4], [0.010, 0.010, 0.100, *[0.010] * 4], (5.0, 10.0, 0.5, True)),
         # The same rounds with no load at all: the same verdict.
-        ([0.005] * 5, [0.010] * 5, (5.0, 10.0, 0.5, True)),
-        # Each round's own ratio, not the ratio of the two medians: rounds 3-4 slow the GPU alone, round 5 slows
-        # both. Three of five back-to-back rounds say the GPU takes half the CPU's time; the medians say 10 vs 10.
-        ([0.005, 0.005, 0.010, 0.010, 0.010], [0.010, 0.010, 0.010, 0.010, 0.020], (10.0, 10.0, 0.5, True)),
-        # The CPU busy in four rounds of five while the GPU isn't: four back-to-back rounds say 0.475, so the GPU is
+        ([0.005] * 7, [0.010] * 7, (5.0, 10.0, 0.5, True)),
+        # Each round's own ratio, not the ratio of the two medians: rounds 4-7 slow the GPU (another job on the
+        # card), rounds 5-7 the whole host. Six of seven back-to-back rounds say the GPU takes half the CPU's time;
+        # the medians say 10 vs 10.
+        ([*[0.005] * 3, *[0.010] * 4], [*[0.010] * 4, *[0.020] * 3], (10.0, 10.0, 0.5, True)),
+        # The CPU busy in six rounds of seven while the GPU isn't: six back-to-back rounds say 0.475, so the GPU is
         # kept. (Judged at each side's best round, 9.5 vs 10 ms, this was the CPU: the controller's 2026-09-19 ruling
         # chose the per-round ratio, which counts the GPU's steadiness under the load the host actually had.)
-        ([0.0095] * 5, [0.020, 0.020, 0.010, 0.020, 0.020], (9.5, 20.0, 0.475, True)),
+        ([0.0095] * 7, [0.020, 0.020, 0.010, *[0.020] * 4], (9.5, 20.0, 0.475, True)),
     ],
     ids=[
         "one-slow-gpu-round",

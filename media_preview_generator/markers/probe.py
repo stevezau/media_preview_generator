@@ -87,7 +87,8 @@ def kill_and_collect(
     """Kill a process and collect it, waiting at most ``wait_s``.
 
     One that still holds its output then goes to a daemon reaper thread, and counts in
-    ``stuck_processes(reaper_name)`` until the reaper collects it.
+    ``stuck_processes(reaper_name)`` until the reaper collects it. The count is app-wide, not per mount: telling mounts
+    apart needs a stat of the file, which itself blocks on the stalled mount (as the pipeline's own stat already does).
 
     Args:
         proc: The process, started with pipes.

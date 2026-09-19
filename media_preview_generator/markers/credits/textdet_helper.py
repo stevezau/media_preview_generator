@@ -50,7 +50,10 @@ CPU_KEY = "cpu"
 THREADS = 2
 SELFTEST_FRAMES = 20
 # Timed GPU/CPU pairs, each timed back to back; the median of the pairs' own GPU/CPU ratios decides (see self_test).
-SELFTEST_ROUNDS = 5
+# Seven, not five: on storage's P5000 (10 cold starts x 12 rounds, 2026-09-19) the median ratio of 5 rounds spread
+# 0.047 around its typical 0.67, of 7 rounds 0.038 -- the TITAN RTX's 4.94 vs 6.18 ms is only 0.1 inside the margin.
+# About 1.2 s more, once per device.
+SELFTEST_ROUNDS = 7
 # How much less time than the CPU the GPU must take, as that median ratio, to be worth using. A single 20-frame pair
 # once handed the whole process to the GPU on a 0.06% win (17.99 vs 18.00 ms). A real GPU has room to spare: this
 # self-test on storage's P5000 measures 10.7-11.6 vs 16.2-18.0 ms per frame (2026-09-19), about 35% faster (the
