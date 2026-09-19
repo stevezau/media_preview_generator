@@ -233,11 +233,13 @@ def keyframe_thinning(path: str, ffmpeg: str, *, cancel_check: Callable[[], bool
     """Which packets the keyframe pass drops before the decoder, from one ffprobe of the first video packets.
 
     Two kinds of stream make ``-skip_frame nokey`` skip nothing, so the keyframe pass would decode and read every frame
-    of the tail for text: 24 times the work at 24 fps, and past the decode timeout on a movie's tail on the CPU.
+    of the tail for text: as many frames as the keyframe pass would otherwise keep one of (48 for an intra-only
+    24 fps stream at ``INTRA_ONLY_SPACING_S``, a VP9 stream's whole GOP), and past the decode timeout on a movie's
+    tail on the CPU.
 
     - An intra-only stream, where every frame is a keyframe. It is told from the first ``INTRA_CHECK_PACKETS`` packet
       flags rather than the codec, so an all-I H.264 or HEVC counts as well as ProRes, DNxHD or MJPEG, and one packet
-      is kept per ``INTRA_ONLY_SPACING_S`` over their frame interval (48 at 24 fps).
+      is kept per ``INTRA_ONLY_SPACING_S`` over their frame interval.
     - A codec whose decoder ignores ``-skip_frame`` (``SKIP_FRAME_IGNORED``: VP9): its packets not flagged as
       keyframes are dropped. A file whose container flags none in the tail gives the pass no frames, like any file
       without a keyframe in its tail: the GPU decode fails, and the worker's CPU rerun finds no roll.

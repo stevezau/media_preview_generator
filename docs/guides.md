@@ -612,7 +612,13 @@ own. Plex keeps one marker set per item, so when a Plex item has another version
 file's by more than 2 seconds (or the lengths can't be read), that server's markers aren't used for this file at all.
 Emby keeps each version's markers apart (see [Emby](#emby-the-media-preview-bridge-for-emby-plugin)), so its
 markers are read only from the file's own version and no such check applies. Season audio and a server's own marker never confirm each
-other: another source has to agree.
+other: another source has to agree. Markers this app wrote itself never count as a server's own on Jellyfin, or on
+Emby while its Bridge plugin is still installed: it asks its own plugin there which markers are its. Plex records no
+author, so if you lose or reset the app's config folder, or remove and add the Plex server again, markers it wrote to
+Plex before that read back as Plex's own for those files. On the lab's scale run they never published a marker by
+themselves, but 57 credits and 36 intros came out shorter than they should be, 6 credits were published only because
+those old markers of ours counted as a second opinion, and 1 credits and 2 intros went to Needs review instead of
+being written.
 
 **"Never overwrite my edits"** (on by default) means a marker you lock always wins over detection. In this release
 the Inspector only shows markers and offers **Re-detect**; adjusting and locking markers there comes in a later
