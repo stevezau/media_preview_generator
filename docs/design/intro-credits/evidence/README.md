@@ -23,7 +23,7 @@ tokens: chmod 600, never commit, never paste into docs.
 | `credits/` | Credits-start eval (80 files with chapter truth); phase-3 pre-build measurements | `movie_credit_truth.json` (205 movies), `movies40.json`, `tv40.json`, `features3.py` (GPU extractor → `f3.jsonl`), `eval_rules3.py` (rules + grid), **`rule_j.py` (reproduces spec §5.4 table)**, `compare_rules.py`, `adjudicated.json` (truth fixed by frame checks), `framechecks/` (contact sheets), `framecheck.py`, `gpu_bench.py` (CPU vs CUDA text detection), `gpu/` (**cross-vendor GPU: WebGPU/Vulkan in the app image, ncnn attempt — see `gpu/RESULTS.md`**), **`phase3/`** (phase-3 measurement scripts: `measure_packages.sh`, `measure_combinations.py`, `measure_cost.py`, `measure_hdr.py`, `measure_webgpu_devices.py`), **`phase3-measurements.md`** (Task 1's pre-build numbers: package sizes, model hashes, WebGPU device selection, decode/detect cost, HDR kinds; local-only `bench/` holds the raw outputs, model and Python 3.12 venv, `$MARKERS_BENCH_DIR`) |
 | `design/` | Design report source (artifact https://claude.ai/code/artifact/65394c1a-e878-4fc2-985b-63bc4c307c5d) | `index.html`, `before_*.jpg`, `shot.py` |
 | `history/` | Superseded spec revisions and old report copies | `spec-rev2-2026-09-13.md` |
-| `screenshots/` | UI and lab screenshots cited by the results files | `phase1/`, `phase2/` (e.g. `task10-r3-*.png` Emby versions in the web player) |
+| `screenshots/` | UI and lab screenshots cited by the results files | `phase1/`, `phase2/` (e.g. `task10-r3-*.png` Emby versions in the web player), `final-review/` (the owner's final-review changes of 2026-09-19; `capture.py` retakes them on the real app with the e2e fixtures' synthetic data) |
 
 ## Lab servers
 
