@@ -53,6 +53,14 @@ class FakeRegistry:
             server.get_media_segments.return_value = []
             server.get_bridge_markers.return_value = []
             server.get_chapter_markers.return_value = []
+            # Emby's Bridge plugin stores nothing for the item: every chapter marker row is Emby's own.
+            server.get_emby_marker_state.return_value = {
+                "intro_start_ticks": None,
+                "intro_end_ticks": None,
+                "credits_start_ticks": None,
+                "file_size": None,
+                "stale": False,
+            }
             # One version per item and no plugins, unless a test says otherwise.
             server.get_part_durations.return_value = []
             server.get_version_count.return_value = None

@@ -11,7 +11,7 @@ from loguru import logger
 
 from ...servers.base import ServerType
 from ..models import Candidate, MarkerType, Source
-from ..publishers.emby import OwnVersion, own_version
+from ..publishers.emby import OwnVersion, own_version, without_plugin_rows
 from ..publishers.jellyfin import bridge_key, core_key, segment_times
 
 if TYPE_CHECKING:
@@ -20,12 +20,14 @@ if TYPE_CHECKING:
 # Bump when reading a server changes what a stored answer would hold, so servers are read again (spec §6.2).
 # 2: an importer-plugin row names every importer plugin, not just the first (its copy's database is read from them).
 # 3: an Emby item that isn't the file's own version gives no evidence (its markers describe another cut).
-READER_VERSION = 3
+# 4: Emby's markers leave out the chapter rows our Bridge plugin wrote (its store says which), as Jellyfin's do.
+READER_VERSION = 4
 # Plex markers are one set per item: another version of the item further apart than this is another cut. Emby and
 # Jellyfin keep each version's markers on its own item (spec §3.3); Emby's reader checks instead that the item is this
 # file's own version.
 SAME_CUT_MS = 2_000
 _PLEX_TYPES = {"intro": MarkerType.INTRO, "credits": MarkerType.CREDITS}
+_EMBY_MARKER_ROWS = frozenset({"IntroStart", "IntroEnd", "CreditsStart"})
 # Plugins that write IntroDB / TheIntroDB / SkipDB / AniSkip answers as the server's own segments, by the database they
 # import ("intro db" covers TheIntroDB too). Intro Skipper is left out on purpose: it fingerprints the server's own
 # files (local detection), it doesn't copy a crowd database.
@@ -161,6 +163,13 @@ def _from_emby(
             return None
     if rows is None:
         return None
+    if not include_ours and any(row["marker_type"] in _EMBY_MARKER_ROWS for row in rows):
+        # The Bridge plugin's own store says which rows are ours, whatever markers.db knows (a lost or fresh config).
+        state = server.get_emby_marker_state(item_id, missing_route_is_empty=True)
+        if state is None:
+            # Our own published markers would otherwise count as a second opinion agreeing with ourselves.
+            return None
+        rows = without_plugin_rows(rows, state)
     starts: dict[str, list[int]] = {}
     for row in rows:
         starts.setdefault(row["marker_type"], []).append(row["start_ms"])
@@ -186,15 +195,17 @@ def read_server_markers(
 ) -> list[Candidate] | None:
     """Read one server's current markers for an item.
 
-    Plex and Emby can't tell our markers from their own, so callers must not read a Plex/Emby item that any file has
-    been published to (as evidence). Jellyfin's are told apart through the Bridge plugin's store.
+    Plex can't tell our markers from its own, so callers must not read a Plex item that any file has been published to
+    (as evidence); after a lost or reset markers.db, markers we wrote there earlier read as Plex's. Jellyfin's and
+    Emby's are told apart through their Bridge plugin's store, which lives on the server.
 
     Args:
         server: Live client for ``config``.
         config: The server's ``ServerConfig`` (type and id).
         item_id: The server's item id.
-        include_ours: False (evidence): leave out segments our Jellyfin plugin serves. True: everything clients see,
-            ours included. Plex and Emby return the same either way.
+        include_ours: False (evidence): leave out segments our Jellyfin plugin serves and chapter rows our Emby plugin
+            wrote (None when its store can't be read). True: everything clients see, ours included. Plex returns the
+            same either way.
         duration_ms: This file's duration, when the markers are read as evidence for it. Plex serves one marker set
             per item, so an item whose versions aren't all this cut (within 2 s), or whose versions can't be read,
             gives None. Emby and Jellyfin markers belong to one version's own item: no duration check.

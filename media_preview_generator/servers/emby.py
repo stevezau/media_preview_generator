@@ -180,19 +180,29 @@ class EmbyServer(EmbyApiClient):
     def _markers_path(self, item_id: str) -> str:
         return f"/MediaPreviewBridge/Markers/{urllib.parse.quote(str(item_id), safe='')}"
 
-    def get_emby_marker_state(self, item_id: str) -> dict[str, Any] | None:
+    def get_emby_marker_state(self, item_id: str, *, missing_route_is_empty: bool = False) -> dict[str, Any] | None:
         """What the Bridge plugin stores for an item, shown or not.
 
         Args:
             item_id: Emby item id.
+            missing_route_is_empty: Read a 404 as nothing stored: the plugin answers every id with 200 (or 500 when
+                its store fails), so a 404 means Emby has no markers route, and no plugin there stored anything.
 
         Returns:
             ``{"intro_start_ticks", "intro_end_ticks", "credits_start_ticks", "file_size", "stale"}`` (None values when
             nothing is stored; Emby leaves null fields out of its answers), or None when unknown (unknown item, no
-            plugin route, the plugin's error answer, a transport error).
+            plugin route unless ``missing_route_is_empty``, the plugin's error answer, a transport error).
         """
         try:
             resp = self._request("GET", self._markers_path(item_id))
+            if resp.status_code == 404 and missing_route_is_empty:
+                return {
+                    "intro_start_ticks": None,
+                    "intro_end_ticks": None,
+                    "credits_start_ticks": None,
+                    "file_size": None,
+                    "stale": False,
+                }
             body = resp.json() if resp.status_code == 200 else None
         except (requests.RequestException, ValueError) as exc:
             logger.debug("Emby Bridge markers read failed on {} for {}: {}", self.name, item_id, type(exc).__name__)

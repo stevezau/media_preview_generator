@@ -103,6 +103,34 @@ class TestEmbyMarkers:
         with patch.object(server, "_request", side_effect=requests.ConnectionError("down")):
             assert server.get_emby_marker_state("42") is None
 
+    def test_no_markers_route_reads_as_nothing_stored_when_asked(self):
+        # Emby's own 404 for a route no plugin serves (lab Emby 4.10): nothing there can be ours.
+        server = _server()
+        answer = _resp(404, None)
+        answer.json.side_effect = ValueError("not JSON")
+        with patch.object(server, "_request", return_value=answer) as req:
+            state = server.get_emby_marker_state("42", missing_route_is_empty=True)
+        assert req.call_args.args == ("GET", "/MediaPreviewBridge/Markers/42")
+        assert state == {"intro_start_ticks": None, "intro_end_ticks": None, "credits_start_ticks": None,
+                         "file_size": None, "stale": False}  # fmt: skip
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            _resp(200, {"Found": False, "Error": "item not found"}),
+            _resp(500, {"Found": True, "Error": "couldn't read the item's markers (IOException)"}),
+            _resp(200, {"Found": True, "Error": "couldn't read the item's markers (IOException)"}),
+            # The route is there but for administrators only: what it stores can't be told.
+            _resp(401, None),
+            _resp(403, None),
+        ],
+        ids=["unknown-item", "store-error-500", "store-error-200", "no-token", "not-an-administrator"],
+    )
+    def test_the_plugin_s_own_failures_stay_unknown_with_a_missing_route_read_as_empty(self, answer):
+        server = _server()
+        with patch.object(server, "_request", return_value=answer):
+            assert server.get_emby_marker_state("42", missing_route_is_empty=True) is None
+
     @pytest.mark.parametrize("replace_own", [True, False])
     def test_put_sends_the_pascal_case_body(self, replace_own):
         server = _server()

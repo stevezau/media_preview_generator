@@ -150,6 +150,31 @@ def _stored_markers(state: dict[str, Any]) -> list[Marker]:
     return stored
 
 
+def without_plugin_rows(rows: list[dict[str, Any]], state: dict[str, Any]) -> list[dict[str, Any]]:
+    """An item's chapter rows without the marker rows the Bridge plugin wrote (ours).
+
+    The plugin writes a type's rows from what it stores, all of them or none (without ``ReplaceOwn`` it leaves a type
+    that has Emby's own rows alone), so a type's rows are ours only when every row it writes for that type is there.
+
+    Args:
+        rows: ``get_chapter_markers`` rows (``marker_type``, ``start_ms``).
+        state: ``EmbyServer.get_emby_marker_state``'s answer for the item.
+
+    Returns:
+        ``rows`` in order, less the intro pair and the credits start equal to what the plugin stores.
+    """
+    present = {(row["marker_type"], row["start_ms"]) for row in rows}
+    ours: set[tuple[str, int]] = set()
+    for marker in _stored_markers(state):
+        if marker.type is MarkerType.INTRO:
+            written = {("IntroStart", marker.start_ms), ("IntroEnd", marker.end_ms)}
+        else:
+            written = {("CreditsStart", marker.start_ms)}
+        if written <= present:
+            ours |= written
+    return [row for row in rows if (row["marker_type"], row["start_ms"]) not in ours]
+
+
 def _post_body(wanted: list[Marker], file_size: int | None) -> dict[str, int | None]:
     intro = next((m for m in wanted if m.type is MarkerType.INTRO), None)
     credits = next((m for m in wanted if m.type is MarkerType.CREDITS), None)

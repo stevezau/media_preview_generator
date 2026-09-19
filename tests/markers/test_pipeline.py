@@ -2782,6 +2782,46 @@ class TestRulesVersions:
         assert store.evidence_version(rec.id, Source.SERVER_MARKERS, "emby-1") == pipeline.READER_VERSION
         assert [c for c in store.get_evidence(rec.id) if c.origin == "emby-1"] == []
 
+    def test_emby_markers_this_app_wrote_before_a_fresh_config_are_not_evidence(self, store, media):
+        # Scale run 2026-09-19: markers.db was new, so nothing recorded the markers we had published to Emby. The
+        # Bridge plugin's store on the server says those rows are ours; Emby's own credits start still counts.
+        reg = _registry(media, ServerType.EMBY)
+        server = reg.get("emby-1")
+        server.get_chapter_markers.return_value = [
+            {"marker_type": "IntroStart", "start_ms": 1_500, "name": ""},
+            {"marker_type": "IntroEnd", "start_ms": 33_000, "name": ""},
+            {"marker_type": "CreditsStart", "start_ms": 1_256_000, "name": ""},
+        ]
+        server.get_emby_marker_state.return_value = {
+            "intro_start_ticks": 15_000_000,
+            "intro_end_ticks": 330_000_000,
+            "credits_start_ticks": None,
+            "file_size": 1,
+            "stale": False,
+        }
+        _run(_ctx(store, reg, settings_raw=INTRO_DEFAULTS), media, {"emby-1": ready_publisher("emby_bridge")})
+        server.get_emby_marker_state.assert_called_once_with("item-emby-1", missing_route_is_empty=True)
+        rec = store.get_file(media)
+        assert [c for c in store.get_evidence(rec.id) if c.source is Source.SERVER_MARKERS] == [
+            Candidate(T.CREDITS, 1_256_000, None, Source.SERVER_MARKERS, origin="emby-1")
+        ]
+        assert store.evidence_version(rec.id, Source.SERVER_MARKERS, "emby-1") == pipeline.READER_VERSION == 4
+
+    def test_emby_markers_give_no_evidence_while_the_plugin_store_cant_be_read(self, store, media):
+        # E.g. credentials that aren't an administrator's: rows of ours can't be told from Emby's, so none count, and
+        # the unusable answer is asked again like any other.
+        reg = _registry(media, ServerType.EMBY)
+        server = reg.get("emby-1")
+        server.get_chapter_markers.return_value = [{"marker_type": "CreditsStart", "start_ms": 1_256_000, "name": ""}]
+        server.get_emby_marker_state.return_value = None
+        _run(_ctx(store, reg, settings_raw=INTRO_DEFAULTS), media, {"emby-1": ready_publisher("emby_bridge")})
+        rec = store.get_file(media)
+        rows = [r for r in store.evidence_rows(rec.id) if r.origin == "emby-1"]
+        assert [(r.source, r.type, r.detail) for r in rows] == [
+            (Source.SERVER_MARKERS, None, pipeline.UNUSABLE_SERVER_MARKERS_DETAIL)
+        ]
+        server.get_emby_marker_state.assert_called_once_with("item-emby-1", missing_route_is_empty=True)
+
 
 class TestPublishFanOut:
     def _decided(self, store, media, reg, pubs):

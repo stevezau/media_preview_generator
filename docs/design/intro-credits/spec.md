@@ -948,6 +948,15 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     the markers again when a later job that includes the file, or a Check servers run, reads the server back and finds
     them changed. Lab-verified order on both ABIs: write → fsync → rename (`evidence/lab/phase2-results.md` "Jellyfin
     plugin fa3772e"). The Emby plugin's store has the same shape (`Flush(true)`, then replace or move; not traced).
+17. **Markers this app wrote to Plex read as Plex's own after markers.db is lost** (a reset or reinstall, a server
+    re-added under a new id; scale run 2026-09-19 finding 2). Plex records nobody's ownership of a marker, and the
+    app's record is only in markers.db. The first run then reads them as a second opinion, and that stored answer stays
+    for the file until the file changes (a server we have published to is never read again). On the scale run they
+    never set a checked edge, decided 6 credits together with Emby's (neither alone was needed), shortened 57 credits
+    and 36 intros, and put 1 credits and 2 intros into Needs review; removing only Emby's changes nothing. Jellyfin's
+    and Emby's are told apart through their plugin's store (§14 2026-09-19). Owner decision pending: a key of ours in
+    each part's `extra_data` recording what we wrote (Plex's credits `final` migration kept every other key of the
+    parts it rewrote), or accept this as a known limit.
 
 ## 14. Decisions log
 
@@ -1379,3 +1388,14 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   publisher now reads both forms, writes a part back in the form it has byte for byte as Plex would (checked on every
   lab row and 517,476 production rows), reads `final` `1` as final, and still refuses anything else. Under "Use ours"
   such an item gets our `final` flag back once; the migration is recorded and doesn't run again on that database.
+- 2026-09-19 · Final review, scale-run finding 2 (§5.5 rule 7, §13 item 17): after a fresh config, markers this app
+  had written to Plex and Emby read as "markers already on a server" (credits on 500 files from Plex and 36 from
+  Emby, intros on 285 and 26). Emby's reader now leaves out the chapter rows the Bridge plugin wrote, as Jellyfin's
+  reader does with its segments: the plugin shows exactly what it stores, and its store lives on the server, so it
+  outlasts a lost markers.db. A type's rows are ours only when every row the plugin writes for it is there (an intro
+  counts as a pair); an Emby without the markers route (404) stores nothing of ours; a store that can't be read (an
+  error, or credentials that aren't an administrator's, which can't publish there either) gives no evidence, as with
+  Jellyfin, and is asked again like any unusable answer. Server reader version 4: every server a file isn't yet
+  published to is read once more (one request per file and server). A file already published to a server keeps the
+  answer it stored before (a published server isn't read again), so a markers.db that read our own Emby markers
+  before this keeps them for those files. Plex keeps no such record (§13 item 17).

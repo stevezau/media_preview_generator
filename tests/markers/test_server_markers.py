@@ -29,6 +29,16 @@ def _src(t, start, end, origin):
     return Candidate(t, start, end, Source.SERVER_MARKERS, origin=origin)
 
 
+# What get_emby_marker_state gives for an item the Bridge plugin stores nothing for.
+NOTHING_STORED = {
+    "intro_start_ticks": None,
+    "intro_end_ticks": None,
+    "credits_start_ticks": None,
+    "file_size": None,
+    "stale": False,
+}
+
+
 class TestPlex:
     # Plex can't tell our markers from its own, so include_ours changes nothing; callers decide whether to read.
     @pytest.mark.parametrize("include_ours", [False, True])
@@ -91,6 +101,7 @@ class TestItemWideMarkersOfOtherVersions:
             return server
         server = create_autospec(EmbyServer, instance=True)
         server.get_chapter_markers.return_value = markers
+        server.get_emby_marker_state.return_value = NOTHING_STORED
         return server
 
     VERSIONS = [
@@ -301,16 +312,40 @@ class TestJellyfin:
         assert read_server_markers(server, _cfg(ServerType.JELLYFIN), "abc") is None
 
 
+def _emby(rows, stored=NOTHING_STORED):
+    server = create_autospec(EmbyServer, instance=True)
+    server.get_chapter_markers.return_value = rows
+    server.get_emby_marker_state.return_value = stored
+    return server
+
+
+# Rick and Morty S01E04 on the lab Emby after the scale run (2026-09-19): the Bridge plugin's store and the chapter rows
+# it wrote from it.
+LAB_STORED = {
+    "intro_start_ticks": 15_000_000,
+    "intro_end_ticks": 330_000_000,
+    "credits_start_ticks": 12_560_000_000,
+    "file_size": 908_150_615,
+    "stale": False,
+}
+LAB_INTRO_ROWS = [
+    {"marker_type": "IntroStart", "start_ms": 1_500, "name": "Intro"},
+    {"marker_type": "IntroEnd", "start_ms": 33_000, "name": "Intro End"},
+]
+LAB_CREDITS_ROW = [{"marker_type": "CreditsStart", "start_ms": 1_256_000, "name": "Credits"}]
+
+
 class TestEmby:
     @pytest.mark.parametrize("include_ours", [False, True])
     def test_chapter_markers_pair_intro_start_end(self, include_ours):
-        server = create_autospec(EmbyServer, instance=True)
-        server.get_chapter_markers.return_value = [
-            {"marker_type": "Chapter", "start_ms": 0, "name": "Chapter 1"},
-            {"marker_type": "IntroStart", "start_ms": 126_771, "name": "Intro"},
-            {"marker_type": "IntroEnd", "start_ms": 157_068, "name": "Intro End"},
-            {"marker_type": "CreditsStart", "start_ms": 1_295_000, "name": "Credits"},
-        ]
+        server = _emby(
+            [
+                {"marker_type": "Chapter", "start_ms": 0, "name": "Chapter 1"},
+                {"marker_type": "IntroStart", "start_ms": 126_771, "name": "Intro"},
+                {"marker_type": "IntroEnd", "start_ms": 157_068, "name": "Intro End"},
+                {"marker_type": "CreditsStart", "start_ms": 1_295_000, "name": "Credits"},
+            ]
+        )
         assert read_server_markers(server, _cfg(ServerType.EMBY), "42", include_ours=include_ours) == [
             _src(T.INTRO, 126_771, 157_068, "emby-1"),
             _src(T.CREDITS, 1_295_000, None, "emby-1"),
@@ -326,31 +361,106 @@ class TestEmby:
         ],
     )
     def test_unpaired_intro_is_ignored(self, rows):
-        server = create_autospec(EmbyServer, instance=True)
-        server.get_chapter_markers.return_value = rows
-        assert read_server_markers(server, _cfg(ServerType.EMBY), "42") == []
+        assert read_server_markers(_emby(rows), _cfg(ServerType.EMBY), "42") == []
 
     def test_ambiguous_duplicates_are_ignored(self):
         # Two IntroStart (or CreditsStart) rows can't be paired without guessing; precision over coverage.
-        server = create_autospec(EmbyServer, instance=True)
-        server.get_chapter_markers.return_value = [
-            {"marker_type": "IntroStart", "start_ms": 1_000, "name": ""},
-            {"marker_type": "IntroStart", "start_ms": 90_000, "name": ""},
-            {"marker_type": "IntroEnd", "start_ms": 120_000, "name": ""},
-            {"marker_type": "CreditsStart", "start_ms": 1_200_000, "name": ""},
-            {"marker_type": "CreditsStart", "start_ms": 1_250_000, "name": ""},
-        ]
+        server = _emby(
+            [
+                {"marker_type": "IntroStart", "start_ms": 1_000, "name": ""},
+                {"marker_type": "IntroStart", "start_ms": 90_000, "name": ""},
+                {"marker_type": "IntroEnd", "start_ms": 120_000, "name": ""},
+                {"marker_type": "CreditsStart", "start_ms": 1_200_000, "name": ""},
+                {"marker_type": "CreditsStart", "start_ms": 1_250_000, "name": ""},
+            ]
+        )
         assert read_server_markers(server, _cfg(ServerType.EMBY), "42") == []
 
     def test_credits_without_intro(self):
-        server = create_autospec(EmbyServer, instance=True)
-        server.get_chapter_markers.return_value = [{"marker_type": "CreditsStart", "start_ms": 7, "name": ""}]
+        server = _emby([{"marker_type": "CreditsStart", "start_ms": 7, "name": ""}])
         assert read_server_markers(server, _cfg(ServerType.EMBY), "42") == [_src(T.CREDITS, 7, None, "emby-1")]
 
     def test_read_failure_is_none(self):
-        server = create_autospec(EmbyServer, instance=True)
-        server.get_chapter_markers.return_value = None
+        server = _emby(None)
         assert read_server_markers(server, _cfg(ServerType.EMBY), "42") is None
+        server.get_emby_marker_state.assert_not_called()
+
+
+class TestEmbyOurOwnRows:
+    """The Bridge plugin only shows what it stores, so its store (on the Emby server, whatever markers.db knows) says
+    which chapter rows are ours; those are never a second opinion (scale run 2026-09-19, finding 2)."""
+
+    @pytest.mark.parametrize(
+        ("stored", "expected"),
+        [
+            pytest.param(LAB_STORED, [], id="both-ours"),
+            pytest.param(
+                {**LAB_STORED, "credits_start_ticks": None},
+                [_src(T.CREDITS, 1_256_000, None, "emby-1")],
+                id="intro-ours-credits-emby-s",
+            ),
+            pytest.param(
+                {**LAB_STORED, "intro_start_ticks": None, "intro_end_ticks": None},
+                [_src(T.INTRO, 1_500, 33_000, "emby-1")],
+                id="credits-ours-intro-emby-s",
+            ),
+            pytest.param(
+                NOTHING_STORED,
+                [_src(T.INTRO, 1_500, 33_000, "emby-1"), _src(T.CREDITS, 1_256_000, None, "emby-1")],
+                id="nothing-stored",
+            ),
+            # A replaced file: the plugin keeps its store but shows nothing new; rows still equal to it are ours until
+            # Emby's next update of the item removes them.
+            pytest.param({**LAB_STORED, "stale": True}, [], id="stale-store"),
+        ],
+    )
+    def test_rows_the_plugin_stores_are_left_out(self, stored, expected):
+        server = _emby(LAB_INTRO_ROWS + LAB_CREDITS_ROW, stored)
+        assert read_server_markers(server, _cfg(ServerType.EMBY), "23") == expected
+        server.get_emby_marker_state.assert_called_once_with("23", missing_route_is_empty=True)
+
+    @pytest.mark.parametrize(
+        ("stored", "expected"),
+        [
+            # "Keep Emby's": the plugin stores ours but leaves Emby's own rows of the type shown.
+            pytest.param(
+                {**LAB_STORED, "intro_start_ticks": 14_990_000},
+                [_src(T.INTRO, 1_500, 33_000, "emby-1")],
+                id="other-intro-start",
+            ),
+            pytest.param(
+                {**LAB_STORED, "intro_end_ticks": 330_010_000},
+                [_src(T.INTRO, 1_500, 33_000, "emby-1")],
+                id="other-intro-end",
+            ),
+            pytest.param(
+                {**LAB_STORED, "credits_start_ticks": 12_560_010_000},
+                [_src(T.CREDITS, 1_256_000, None, "emby-1")],
+                id="other-credits-start",
+            ),
+        ],
+    )
+    def test_only_rows_equal_to_the_store_are_ours(self, stored, expected):
+        server = _emby(LAB_INTRO_ROWS + LAB_CREDITS_ROW, stored)
+        assert read_server_markers(server, _cfg(ServerType.EMBY), "23") == expected
+
+    def test_an_unreadable_store_gives_no_evidence(self):
+        # Without knowing what the plugin stored, our own markers could come back as "independent" agreement.
+        server = _emby(LAB_INTRO_ROWS + LAB_CREDITS_ROW, None)
+        assert read_server_markers(server, _cfg(ServerType.EMBY), "23") is None
+
+    def test_include_ours_shows_what_clients_see_without_reading_the_store(self):
+        server = _emby(LAB_INTRO_ROWS + LAB_CREDITS_ROW, None)
+        assert read_server_markers(server, _cfg(ServerType.EMBY), "23", include_ours=True) == [
+            _src(T.INTRO, 1_500, 33_000, "emby-1"),
+            _src(T.CREDITS, 1_256_000, None, "emby-1"),
+        ]
+        server.get_emby_marker_state.assert_not_called()
+
+    def test_no_marker_rows_skips_the_store_read(self):
+        server = _emby([{"marker_type": "Chapter", "start_ms": 0, "name": "Chapter 1"}], None)
+        assert read_server_markers(server, _cfg(ServerType.EMBY), "23") == []
+        server.get_emby_marker_state.assert_not_called()
 
 
 def _emby_item(versions):
@@ -389,8 +499,15 @@ class TestEmbyOwnVersion:
         )
         item = _emby_item(versions)
         answer = {"Items": [item]} if user_id is None else item
+        # The Bridge plugin stores nothing for the item: every marker row is Emby's own.
+        stored = {"Id": "53", "Found": True, "Stale": False, "Stored": 0}
+
+        def request(method, path, **_kwargs):
+            body = stored if path.startswith("/MediaPreviewBridge/Markers/") else answer
+            return MagicMock(status_code=200, json=MagicMock(return_value=body))
+
         server = EmbyServer(cfg)
-        server._request = MagicMock(return_value=MagicMock(status_code=200, json=MagicMock(return_value=answer)))
+        server._request = MagicMock(side_effect=request)
         return server, cfg
 
     @pytest.mark.parametrize("user_id", [None, "u1"], ids=["api-key", "user-id"])
@@ -424,12 +541,14 @@ class TestEmbyOwnVersion:
         server, cfg = self._server(user_id, versions, mappings)
         found = read_server_markers(server, cfg, "53", duration_ms=1_444_574, canonical_path=canonical_path)
         assert found == (self.FOUND if evidence else None)
-        (request,) = server._request.call_args_list
+        request, *store_read = server._request.call_args_list
         if user_id is None:
             assert request.args == ("GET", "/Items")
             assert request.kwargs["params"] == {"Ids": "53", "Fields": "Chapters,MediaSources,AlternateMediaSources"}
         else:
             assert request.args == ("GET", "/Users/u1/Items/53")
+        # Only this file's own version is checked for rows of ours.
+        assert [c.args for c in store_read] == ([("GET", "/MediaPreviewBridge/Markers/53")] if evidence else [])
 
     def test_another_versions_item_is_named_in_a_debug_line(self, loguru_caplog):
         server, cfg = self._server(None, [(self.EXTENDED, "53"), (self.OWN, "55")])
@@ -446,8 +565,7 @@ class TestEmbyOwnVersion:
     @pytest.mark.parametrize("include_ours", [False, True])
     def test_without_a_file_nothing_is_checked(self, include_ours):
         # The Inspector shows what clients of this item see, whichever version it is.
-        server = create_autospec(EmbyServer, instance=True)
-        server.get_chapter_markers.return_value = [{"marker_type": "CreditsStart", "start_ms": 7, "name": ""}]
+        server = _emby([{"marker_type": "CreditsStart", "start_ms": 7, "name": ""}])
         assert read_server_markers(server, _cfg(ServerType.EMBY), "53", include_ours=include_ours) == [
             _src(T.CREDITS, 7, None, "emby-1")
         ]
