@@ -928,6 +928,24 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     when the run carries on into it. That answers the lab's five Heeramandi episodes on the roll's first card. A
     roll that starts 0–30 s into the tail after a scene still gets none. So does one that began more than 90 s before
     the tail, and one whose only card before the tail the anchor steps over. The lab's chapter truth has none of them.
+15. **Credit text on broadcast TV with on-screen graphics is about as accurate as Plex's own detection, not better** —
+    51 frame-checked broadcast files (39 episodes of 13 shows with a channel or show logo, 12 sports feeds;
+    `evidence/eval/broadcast-tv.md`). At Medium it gets as many useful answers as Plex (10 of 34 rolls, only 4 (GPU) or
+    3 (CPU) of them on the same episodes), skips story on about 1 episode in 7 (6 of 39 on the GPU path, 5 on the CPU,
+    one of them an episode with only an end card; Plex 6; the Q4 gate's cap is 2 here, as on the 80) and puts credits
+    on 4 (GPU) or 5 (CPU) of the 12 sports feeds (Plex: 6). At High it skips story on 2 on both paths (cap 1) and puts
+    credits on 1 sports feed on the CPU, but answers only 4 (GPU) or 3 (CPU) of the 34 rolls. On a dark story frame
+    one box is enough (a channel logo alone); on a lit one, a logo plus a two-line promo lower-third; name captions,
+    in-show graphics and epilogue cards do the same. Both High wrong answers are credit text and Plex agreeing on the
+    same shot, and the CPU's High false answer is the same pair. Tried and not taken: ignoring boxes that sit in one
+    place on at least half the tail's keyframes (no answer moved on the 80 or 205; broadcast +2/−1 on each path), and
+    not counting text + a server's own marker as agreement at High (every broadcast High mistake gone, but every High
+    credits answer on the 80 and 205 too).
+16. **The Jellyfin plugin flushes its marker store file but not the folder** (fa3772e): after a power cut the rename
+    itself can be lost, leaving the previous store file (or none on a first write), never an empty one; the app writes
+    the markers again when a later job that includes the file, or a Check servers run, reads the server back and finds
+    them changed. Lab-verified order on both ABIs: write → fsync → rename (`evidence/lab/phase2-results.md` "Jellyfin
+    plugin fa3772e"). The Emby plugin's store has the same shape (`Flush(true)`, then replace or move; not traced).
 
 ## 14. Decisions log
 
@@ -1343,3 +1361,7 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   other answer is unchanged: every set row on round 2's stored decodes (0 new windows), the 51 broadcast recordings
   and the lab's synthetic files. The harness now keys its stored answers on the text detection backend actually used
   and the GPU device, and its stored decodes on the ffmpeg build.
+- 2026-09-19 · Final review (controller ruling): credit text on broadcast TV ships as measured, a known limit (§13
+  item 15, `evidence/eval/broadcast-tv.md`); static-overlay suppression and "credit text + a server's own marker
+  can't decide High" were measured and rejected. The VP9 keyframe pass drops non-key packets before the decoder
+  (FFmpeg's VP9 decoder ignores `-skip_frame`; §5.4 Frames, `evidence/eval/phase3-harness.md` "VP9's keyframe pass").
