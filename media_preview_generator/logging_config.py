@@ -168,12 +168,12 @@ class _StdlibToLoguru(logging.Handler):
 
     def __init__(self) -> None:
         super().__init__(level=logging.WARNING)
-        # Set while this thread hands a record to loguru: a loguru sink that gives records back to ``logging`` (a
-        # test's caplog bridge) would otherwise send the record round for ever.
+        # Set while this thread hands a record to loguru: a sink that logs through ``logging`` itself, on this thread,
+        # would otherwise send the record round for ever.
         self._handing_over = threading.local()
 
     def emit(self, record: logging.LogRecord) -> None:
-        if getattr(self._handing_over, "active", False) or _handled_below_root(record):
+        if getattr(self._handing_over, "active", False) or _built_by_loguru(record) or _handled_below_root(record):
             return
         self._handing_over.active = True
         try:
@@ -191,6 +191,16 @@ class _StdlibToLoguru(logging.Handler):
             self.handleError(record)
         finally:
             self._handing_over.active = False
+
+
+def _built_by_loguru(record: logging.LogRecord) -> bool:
+    """Whether loguru made the record, for a ``logging.Handler`` added as a loguru sink (the tests' caplog bridge).
+
+    It is a loguru line already: handing it to loguru again would write it twice, and on loguru's writer thread (an
+    ``enqueue`` sink) the round would never end. Loguru's standard-handler sink builds each record with its own
+    ``extra`` dict as the record's ``extra`` attribute.
+    """
+    return isinstance(record.__dict__.get("extra"), dict)
 
 
 def _handled_below_root(record: logging.LogRecord) -> bool:

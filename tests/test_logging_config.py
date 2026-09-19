@@ -462,21 +462,61 @@ class TestStdlibLogging:
         assert sum(isinstance(h, _logging_mod._StdlibToLoguru) for h in logging.root.handlers) == 1
         assert [text.count("only once please") for text in (console, app_log, live)] == [1, 1, 1]
 
-    def test_a_sink_that_hands_records_back_to_logging_doesnt_loop(self, start, stdlib_logger):
+    @pytest.mark.parametrize("started_in", ["stdlib", "loguru"])
+    @pytest.mark.parametrize("enqueue", [False, True], ids=["sink-in-the-caller", "sink-on-loguru-s-writer-thread"])
+    def test_a_sink_that_hands_records_back_to_logging_writes_each_line_once(
+        self, start, stdlib_logger, capfd, started_in, enqueue
+    ):
+        # The tests' caplog bridge (tests/markers/conftest.py loguru_caplog) is such a sink: every loguru record goes
+        # back into stdlib logging, where the root handler must not hand it to loguru again.
         from loguru import logger
+
+        handed_back: list[str] = []
 
         class BackToLogging(logging.Handler):
             def emit(self, record):
-                logging.getLogger(record.name).handle(record)
+                handed_back.append(record.getMessage())
+                if len(handed_back) <= 5:  # a loop stops here instead of hanging the test
+                    logging.getLogger(record.name).handle(record)
 
         read = start()
-        handler_id = logger.add(BackToLogging(), level="WARNING", format="{message}")
+        handler_id = logger.add(BackToLogging(), level="WARNING", format="{message}", enqueue=enqueue)
         try:
-            stdlib_logger("loop").warning("round trip")
+            if started_in == "stdlib":
+                stdlib_logger("loop").warning("round trip")
+            else:
+                logger.warning("round trip")
+            logger.complete()
         finally:
             logger.remove(handler_id)
         console, _app_log, _live = read()
         assert console.count("round trip") == 1
+        assert handed_back == ["round trip"]
+        assert "deadlock" not in capfd.readouterr().err
+
+    def test_a_sink_that_logs_through_logging_itself_writes_each_line_once(self, start, stdlib_logger):
+        # Not loguru's handler sink: the record it logs is a new one, so only the handing-over guard stops the round.
+        # Only on the caller's thread: an enqueue sink doing this would still loop, but no sink of the app's logs
+        # through ``logging`` (the live viewer's socketio logs at ERROR only on its own failures).
+        from loguru import logger
+
+        relog = stdlib_logger("relog")
+        relogged: list[str] = []
+
+        def sink(message):
+            relogged.append(message.record["message"])
+            if len(relogged) <= 5:  # a loop stops here instead of recursing without end
+                relog.warning(message.record["message"])
+
+        read = start()
+        handler_id = logger.add(sink, level="WARNING", format="{message}")
+        try:
+            stdlib_logger("origin").warning("said once")
+        finally:
+            logger.remove(handler_id)
+        console, _app_log, _live = read()
+        assert console.count("said once") == 1
+        assert relogged == ["said once"]
 
 
 # -----------------------------------------------------------------------
