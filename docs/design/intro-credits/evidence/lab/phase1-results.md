@@ -3,6 +3,170 @@
 Lab servers on storage (read-only calls): Jellyfin 10.11 `mlab-jellyfin`, Jellyfin 12 `mlab-jf12`, Emby `mlab-emby`,
 Plex `mlab-plex`. Real library mounted `:ro`.
 
+## Final (final-2, bd9e561) (2026-09-19)
+
+Image `media_preview_generator:final-2` (`sha256:7050dc5d1385…`, `GIT_SHA` bd9e561). Raw data in `results/final-2/`
+and `results/scale/` (git-ignored); the 2026-09-14 scale run is kept in `results/scale-2026-09-14/`.
+
+### Matrix: 16 of 16
+
+The phase 1 rows (14, 1, 2, 3, 13, 4, 6, 5, 7, 8, 9, 10, 16, 18, 19, 17) pass as phase 2 row 19, on a fresh config
+(see `phase2-results.md`, "Final (final-2, bd9e561)").
+- Row 1: job `df0ad357`, 13 written and 1 Needs review, in 49.2 s.
+- Row 10: at the pause 1 file was done and 2 were on workers; 3 once the workers were idle, and still 3 after the
+  preview job ran.
+
+### Scale run on the real library
+
+**Robust. Accuracy held except where TheIntroDB's daily budget ran out. Most server-marker evidence was this app's own
+earlier markers.** Four things differ from 2026-09-14:
+- **Lab Emby 4.10 now takes part.** Its Intro & Credits is on (phase 2), but the scale folders aren't in its library.
+  - It waits on 685 files: "Not in this server's library yet". That makes 432 file outcomes read Waiting.
+  - Each scale job then queued three retry jobs (1, 2 and 5 min later, 09:58–10:07 UTC), which then stopped.
+  - The Plex and Jellyfin rows are unaffected.
+- **TheIntroDB ran out.** The lab's earlier runs today had used most of its daily budget, so 206 files were checked
+  without it. The job now says so (2026-09-14 finding 4 is fixed): "TheIntroDB's daily lookup limit was reached: 206
+  files were checked without it."
+- **The app's own earlier markers counted as the servers' own.** On a fresh config, markers the 2026-09-14 run and
+  today's rows wrote on the lab Plex and Emby read as "markers already on a server" (finding 2).
+- **711 real files, not 715.** The host folder of Indian Matchmaking S03 is now empty (4 files).
+
+**Setup:**
+- Fresh `mlab_app_config` on final-2 with `MLAB_APP_GPU=nvidia`, then `./phase3_matrix.py configure`.
+- One GPU worker (Quadro P5000) and one CPU worker; High; TheIntroDB without a key.
+- Lab Plex quiet prefs as before; a Plex rescan of tv and movies first.
+- Then `./phase1_matrix.py scale job backfill`, `scale collect`, `scale served`, `scale writes backfill`,
+  `scale job second`, `scale writes second`.
+- Then `./scale_score.py score`, `./scale_score.py compare backfill results/scale-2026-09-14/collected-backfill.json`
+  and `./scale_score.py frames backfill`.
+
+**Robustness:**
+- **The backfill:** job `681b9db5` over all libraries, low priority, 726 files in 34.4 min (2.84 s per file).
+  2026-09-14: 722 files in 5 min 47 s (0.48 s per file), with no season audio or credit text.
+- **Outcomes:** 25 Markers written, 244 Needs review, 1 No markers found, 432 Waiting (Emby, above), 24 Failed
+  (finding 1).
+- **Server rows:**
+
+  | Server | Written | Up to date | Needs review | None | Waiting | Failed |
+  |---|---|---|---|---|---|---|
+  | Lab Plex | 170 | 408 | 116 | 5 | 1 | 24 |
+  | Lab Jellyfin 10.11 and 12.0 (each) | 603 | 0 | 117 | 6 | 0 | 0 |
+  | Lab Emby 4.10 | 31 | 0 | 9 | 1 | 685 | 0 |
+  | Lab Emby 4.9 (synth only) | 6 | 0 | 7 | 0 | 0 | 0 |
+
+- **Warnings:** 2. For two Jujutsu Kaisen S02 episodes (10-bit x264): "GPU Worker 1 (Quadro P5000) couldn't process …
+  on the GPU and is retrying on CPU. Reason: ffmpeg exited 218". Both finished on the CPU.
+- **Peaks** (95 `docker stats` samples):
+  - `mlab-app`: 593 % CPU and 962 MiB.
+  - Jellyfin 10.11: 105 % and 295 MiB. Jellyfin 12.0: 27 % and 364 MiB. Plex: 23 % and 114 MiB.
+  - Host load 4.3–18.3.
+- **Lookups:** SkipDB 716 and IntroDB 603, all HTTP 200. TheIntroDB: 57 HTTP 200 and 138 HTTP 404, then 100 left and
+  the low-priority reserve held.
+- **Served = decided:**
+  - Both Jellyfins serve exactly the decisions on 724 of 726 files.
+  - Plex serves the decided intro and credits on every written or up-to-date row.
+  - The mismatches are the 24 failed Plex parts, plus 2 Needs-review files that both Jellyfins still serve from before
+    this run: Mr. Robot S04E01's 9:46–11:14 "Intro" chapter (decided on 2026-09-14) and Synth Show S01E01's markers.
+- **Second backfill:** `d1b9c0e8`, low priority, 24.4 s.
+  - 26 Up to date (the 25 written plus one that had been waiting), 431 Waiting, the rest as in the backfill.
+  - No Plex rows or part `extra_data` changed, no plugin marker file changed, and no online request was sent.
+
+**Decisions and sources, against 2026-09-14** (all files, synth included):
+
+| | 2026-09-14 | final-2 |
+|---|---|---|
+| Intro decided / Needs review / none | 279 / 94 / 247 | 331 / 127 / 162 |
+| Credits decided / Needs review / none | 500 / 92 / 130 | 523 / 162 / 41 |
+| Intro answered by: chapters, IntroDB, TheIntroDB, SkipDB | 256, 230, 102, 78 | 254, 242, 37, 78 |
+| Intro answered by: season audio, server markers | —, 23 | 162, 286 |
+| Credits answered by: chapters, IntroDB, TheIntroDB, SkipDB | 480, 208, 80, 126 | 476, 220, 33, 126 |
+| Credits answered by: credit text, server markers | —, 26 | 168, 501 |
+| Intro decided with season audio / credits decided with credit text | — | 59 / 40 |
+| Decided with chapters (intro / credits) | 249 / 472 | 245 / 468 |
+| Decided by chapters alone (intro / credits) | 247 / 466 | 208 / 406 |
+
+The drop in "chapters alone" is mostly the same chapter decisions, now also confirmed by server markers.
+
+**Accuracy against the same truth** (711 real files; 3 s bar, as on 2026-09-14):
+
+| | 2026-09-14 right / wrong / none | final-2 right / wrong / none |
+|---|---|---|
+| Intro (262 episodes with truth) | 255 / 0 / 7 | 246 / **7** / 9 |
+| Credits (with truth) | 468 / 8 / 26 | 468 / 6 / 24 |
+
+- **The 7 wrong intros are Rick and Morty S01** (E03, E04, E05, E07, E08, E09, E11). Each ends 3.2–4.3 s after the
+  truth, so it skips story.
+  - On 2026-09-14 TheIntroDB answered all of S01, and its end, first in source order, was right.
+  - Today it wasn't asked (budget). The checked edge came from IntroDB (0:33 on E04), with SkipDB (0:29.8) and the lab
+    Plex's markers agreeing inside the 10 s tolerance.
+  - That is the rule as written (the checked edge comes from the best-ranked confirming source). The cause is the
+    missing TheIntroDB answer, not a code change.
+- **Credits:** Innerspace is still the one early start (2026-09-14 finding 2). Late starts went from 7 to 5.
+- **Without truth:** credits markers 19 → 43, intro markers 19 → 75 (season audio and credit text).
+- **Fixed since 2026-09-14 (finding 1 there):** the cold-open "Intro" chapters of Reservation Dogs S01E05 and E06, and
+  Mr. Robot S04E01's, are no longer published: "Intro chapter is much longer than the rest of the season's".
+  - The scorer's replay of `decide()` on the stored evidence has no season context and still publishes them.
+  - Those are the 3 replay differences.
+
+**Markers that skip more than on 2026-09-14, frame-checked** (`./scale_score.py compare`, then `frames`: frames at
+−6, −2, +2 and +6 s around each start, and around each end more than 2 s before the file's end):
+- **105 decided markers:** 89 new, 8 that start more than 3 s earlier, and 8 intros that end more than 3 s later.
+  - 55 intros from season audio with an online source.
+  - 35 credits from credit text with an online source or server markers.
+  - 8 Rick and Morty intros whose end now comes from IntroDB (S01E01, E03, E05, E08, E11; S02E04, E05, E07).
+  - 7 others: Severance S01E01, E06 and E07 credits, Ted Lasso S03E07 and Rick and Morty S02E10 intros, and 2 synth.
+- **102 images**; the 3 synth files have no host path.
+  - The Watcher S01E01's image has no end row. Its video stream stops at 47:06.6, 85 s before its audio, so the +6 s
+    frame doesn't exist. `index.json` records the rows each image shows.
+- **Right or safe on 93 images.** Starts fall on the change into the intro or credits, and ends on the change back.
+  Where an end is off, it ends early, inside the intro or credits, which skips less.
+  - Rick and Morty S02E04, E05, E07 and E10 show the title card at end − 2 s and story at + 2 s. A second pass at
+    0.5 s steps puts each end within 0.5 s of the cut. 2026-09-14's ends there were 3.6–4.2 s early.
+- **Skip story at the end, 5 Rick and Morty S01 intros** (E01, E03, E05, E08, E11): IntroDB's end, 2.9–4.3 s after
+  the truth (E01's 2.9 s is inside the 3 s bar). Same cause as the 7 wrong intros above.
+- **Skip story at the start, 4 files:**
+  - **Severance S01E01, E06 and E07 credits** start 4.8–7.1 s earlier than on 2026-09-14.
+    - At start + 2 s, the last shot is still on screen. E01 and E06 show "Directed by" at + 6 s; E07 is black by then.
+    - On 2026-09-14 TheIntroDB's later start was used. Without it, IntroDB's start is. Same cause as the Rick and
+      Morty intros.
+  - **The Office S02E14 credits:** decided at 20:28.99 from SkipDB and credit text; SkipDB is first in source order.
+    - The car's last shot is still on screen at 20:35. Credit text and IntroDB both start at 20:38.
+    - IntroDB's candidate ends at 21:20, 9 s past the file's end, so it fails sanity ("ends past the end of the file")
+      and doesn't take part.
+    - This is 2026-09-14 finding 3 (SkipDB's The Office starts are 10–15 s early). It now publishes at High, because
+      credit text agrees inside the 10 s tolerance.
+
+### Findings
+
+1. **24 Plex parts refused: "Plex media_parts.extra_data is not JSON".**
+   - Scope: Avenue 5 S02E04–E06, Mr. Robot S04 (5), Mushoku Tensei (7), SPY x FAMILY (8) and The Intern.
+   - What changed: their `extra_data` is now URL-encoded (`ma%3Acontainer=mkv&…&pv%3Acredits=…`), not JSON. On
+     2026-09-14 the same parts were JSON, and the publisher wrote them.
+   - The only content change is `pv:credits` gaining `"final":1`. This app writes `"final":true`, so the change
+     isn't this app's.
+   - The publisher refuses the part as unsupported, and that is safe: nothing is written, and the row reads Failed.
+   - Who rewrote them: **not established.** Running Plex's own credits detection on another of our parts (Mr. Robot
+     S04E02) left its `extra_data` JSON.
+   - If Plex itself writes this form, real servers would refuse those parts too. Next steps: read a real server's
+     `media_parts` for URL-form `extra_data` (read-only, owner's call), or catch the writer in the lab.
+2. **After a fresh config, this app's own earlier Plex and Emby markers count as the server's own.**
+   - Server markers answered on 501 credits and 286 intro files (2026-09-14: 26 and 23).
+   - Most of it is our own earlier markers. For example, Rick and Morty S01E04's Plex and Emby intro, 0:01.5–0:31.64,
+     is exactly what the 2026-09-14 run decided.
+   - Jellyfin's are told apart through the Bridge's store. Plex's and Emby's are told apart only through
+     `markers.db`'s publish records, which a fresh config doesn't have.
+   - Replaying the stored evidence without server markers:
+     - 6 credits are decided only because of them (credit text plus server markers);
+     - they shorten 57 credits and 36 intros;
+     - they never set the checked edge (the intro end or the credits start).
+   - Spec §5.5 rule 7 says "never ours", but here "ours" can't be seen. This affects any reinstall or lost
+     `markers.db` while servers keep markers the app wrote.
+3. **The Office S02E14 credits start 9 s early at High** (above): credit text agreement lets SkipDB's early start
+   through.
+4. **TheIntroDB's budget shapes accuracy.** Without it, IntroDB's intro ends (Rick and Morty S01) and credits starts
+   (Severance) are 3–7 s off, in the direction that skips story. They still agree with SkipDB inside the tolerances.
+   Where TheIntroDB's own ends were early (Rick and Morty S02), IntroDB's are right.
+
 ## Task 6 — `get_external_ids` (2026-09-14, staged code before fix round 1)
 
 | Server | Item | Returned | Result |

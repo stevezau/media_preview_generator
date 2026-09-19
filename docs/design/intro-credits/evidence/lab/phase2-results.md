@@ -2,6 +2,52 @@
 
 Lab servers on storage (`up.sh`), real library mounted `:ro`. Tokens in `env`, scrubbed from every result file.
 
+## Final (final-2, bd9e561) (2026-09-19)
+
+**24 of 24 pass on the first run; the phase-1 regression passes 16 of 16. No harness change was needed.**
+
+- **Image:** `media_preview_generator:final-2` (`sha256:7050dc5d1385…`, `GIT_SHA` bd9e561). It adds, over final-review,
+  rule J version 2 with the text-all-through guard, the VP9 keyframe pass fix, and reading 120 s before the tail
+  for a roll the tail cuts into.
+- **Lab:**
+  - The Jellyfins run the fa3772e plugin builds (see "Jellyfin plugin fa3772e" below).
+  - The Task 17 reset: our markers removed on the old app, 29 files written.
+  - A fresh `mlab_app_config` and `configure`, all five servers `ready`.
+- **Order:** `run` 23, 1, 21, 17, 19, 22, 2, 3, 4, 18, 5, 6, 8, 7, 9, 10, 11, 12, 13, 14, 16, 15, 24, 20, one row per call
+  (08:23–09:05 UTC). Raw results: `results/final-2/`.
+
+| Row | Result | Evidence |
+|---|---|---|
+| 1 Capability | pass | 5 of 5 `ready`; season audio and credit text available. |
+| 2 Season audio backfill | pass | Every S01 intro Needs review with season audio 3/3 (E01 19.4–48.3 s); no intro of ours served; High fingerprinted (peak 2), Medium none. **Credits published: none, at High and at Medium.** |
+| 3 High alone (G3) | pass | Plex and season audio agree on S01E02 and it stays Needs review. |
+| 4 Weekly release | pass | One NORMAL Season job holding only S02E01; S02E01 1/1 at 14.5–43.6 s, S02E02 1/1 at 59.4–88.5 s. |
+| 5 Rick and Morty at High | pass | Season audio in `decided_by` on 11 of 11; 11 useful, 0 wrong, 0 missed. |
+| 6–9 Emby (write, wipe matrix, web Skip Intro, 4.9) | pass | Marker chapters equal the decisions; Skip Intro visible at 22.9 s. |
+| 10 Check servers restores | pass | Plex, Jellyfin 10.11 and Emby written back, Plex's `final` flag included; the second run lists 0 files. |
+| 11 Plex version drift | pass | Waits on "other versions", then written again once the copy is gone. |
+| 12, 13 Plex P3/P4, `final` flag | pass | As in Task 17. |
+| 14 Movie versions | pass | Outro 100–120 s on both versions on both Jellyfins; CreditsStart 100 s on each Emby version; Plex split then merged. |
+| 15 Cassettes | pass | 30 passed with the servers stopped. |
+| 16 Season view | pass | "Publish 3 to 5 servers", 15 of 15 dots green, the browser Publish queued its job. |
+| 17 Security | pass | GET 401; POSTs 400 (CSRF) and 401 with a wrong token; no job queued. |
+| 18 Resources | pass | Chromaprint peak 2 with `-threads 2`; `mlab-app` peaked at 408 % CPU and 706 MiB. |
+| 19 Phase-1 regression | pass | 16 of 16. Row 1: 13 written, 1 Needs review. Row 10: 1 row and 2 files in flight at the pause, 3 once they finished, still 3 during the preview job. |
+| 20 Plex Web | pass | Skip Intro shown at 18.1 s, a click seeks to 47 s; Skip Credits shown at 101.0 s, a click seeks to 120 s. |
+| 21 Check servers schedule | pass | One LOW job from two Run nows. |
+| 22 Deleted Jellyfin item | pass | No "Couldn't read"; the next run lists nothing. |
+| 23 Emby `Replacing` round trip | pass | Check 22 on both Embys. |
+| 24 Jellyfin store file (fa3772e) | pass | Complete JSON, served after a restart and a scan, write → fsync → rename seen on both. |
+
+**Synth Audio and credit text (the final-review finding).**
+
+- On final-2, credit text reads each Synth Audio episode and stores **no answer**: S01E01–E04 and S02E01 each hold one
+  `credits_text` row with no start.
+- Credits stay `no_evidence` on every episode, so no level (High or Medium) can publish credits from them. Row 2's
+  notes read "credits published: {}" for both runs.
+- This is the text-all-through guard (rule J version 2, `rule_j.text_all_through`) doing what it was built for: the
+  test pattern's burnt-in running timecode is on screen through the whole tail.
+
 ## Final review (2026-09-19, image final-review sha256:420d2b9c…, feat 4f1c8b7)
 
 **23 of 23 pass; the phase-1 regression passes 16 of 16.** Product bugs: none. One product finding for the owner

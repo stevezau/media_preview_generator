@@ -5,6 +5,10 @@
     ./scale_score.py truth     chapter / movie-credits / online-cases truth per mounted file -> results/scale/truth.json
     ./scale_score.py score     score results/scale/collected.json (from `phase1_matrix.py scale collect`) against the
                                truth and the prod Plex markers -> results/scale/score.json
+    ./scale_score.py compare NAME OLD   collected-NAME against an earlier run's collected file: per-source and decided
+                               counts, and every decided marker that is new, starts more than EARLY_MS earlier, or (an
+                               intro) ends more than EARLY_MS later -> compare-NAME.json
+    ./scale_score.py frames NAME        strips of four frames around each of those markers' edges -> frames-NAME/
 
 Everything under results/ is git-ignored (it lists library paths). Prod Plex markers come from a read-only dump
 (`phase1_matrix.py scale prod-dump`). The repo is public: only aggregate numbers and show/movie names leave results/.
@@ -586,11 +590,190 @@ def score(name: str = "backfill") -> dict:
     return result
 
 
+EARLY_MS = 3_000
+
+
+def _decided(entry: dict, mtype: str) -> dict | None:
+    decision = (entry.get("decisions") or {}).get(mtype) or {}
+    return decision.get("marker") if decision.get("status") == "decided" else None
+
+
+def summarize(collected: list[dict]) -> dict:
+    """Per marker type: decision statuses, the source sets that decided, and how many files each source answered."""
+    out: dict[str, dict[str, Counter]] = {}
+    for mtype in ("intro", "credits"):
+        status: Counter = Counter()
+        decided_by: Counter = Counter()
+        answered: Counter = Counter()
+        for entry in collected:
+            decision = (entry.get("decisions") or {}).get(mtype)
+            if not decision or (mtype == "intro" and entry.get("is_movie")):
+                continue
+            status[decision["status"]] += 1
+            marker = _decided(entry, mtype)
+            if marker:
+                decided_by["+".join(sorted(marker["decided_by"]))] += 1
+            sources = {
+                e["source"]
+                for e in entry.get("evidence") or []
+                if e.get("type") == mtype and e.get("start_ms") is not None
+            }
+            answered.update(sources)
+        out[mtype] = {"status": status, "decided_by": decided_by, "answered": answered}
+    return out
+
+
+def _longer_skip(mtype: str, now: dict, was: dict | None) -> str | None:
+    """Why a decided marker skips more than before, or None: it is new, it starts more than EARLY_MS earlier, or it is
+    an intro whose end (the checked edge) is more than EARLY_MS later."""
+    if was is None:
+        return "new"
+    if now["start_ms"] < was["start_ms"] - EARLY_MS:
+        return "starts earlier"
+    if mtype == "intro" and now["end_ms"] > was["end_ms"] + EARLY_MS:
+        return "ends later"
+    return None
+
+
+def compare(name: str, old_path: str) -> dict:
+    """This run's collected decisions against an earlier run's: per-source and decided counts, and every decided
+    marker that skips more than before (see :func:`_longer_skip`; the ones to frame-check)."""
+    new = json.loads((OUT / f"collected-{name}.json").read_text())
+    old = json.loads(Path(old_path).read_text())
+    old_by_file = {e["file"]: e for e in old}
+    truth = json.loads((OUT / "truth.json").read_text())
+    earlier = []
+    changes: Counter = Counter()
+    for entry in new:
+        before = old_by_file.get(entry["file"])
+        for mtype in ("intro", "credits"):
+            now = _decided(entry, mtype)
+            was = _decided(before, mtype) if before else None
+            if bool(now) != bool(was):
+                changes[f"{mtype}: {'new decision' if now else 'decision gone'}"] += 1
+            elif now and (now["start_ms"], now["end_ms"]) != (was["start_ms"], was["end_ms"]):
+                changes[f"{mtype}: decision moved"] += 1
+            why = _longer_skip(mtype, now, was) if now else None
+            if why:
+                t = ((truth.get(entry["file"]) or {}).get("truth") or {}).get(mtype)
+                earlier.append({
+                    "file": entry["file"], "host": (truth.get(entry["file"]) or {}).get("host"), "type": mtype,
+                    "why": why,
+                    "now": [now["start_ms"], now["end_ms"], now["decided_by"]],
+                    "was": [was["start_ms"], was["end_ms"], was["decided_by"]] if was else None,
+                    "truth": [t["start"], t["end"]] if t else None,
+                })  # fmt: skip
+    result = {
+        "files": {"new": len(new), "old": len(old)},
+        "new": summarize(new),
+        "old": summarize(old),
+        "changes": changes,
+        "new_or_earlier": earlier,
+    }
+    (OUT / f"compare-{name}.json").write_text(json.dumps(result, indent=1, ensure_ascii=False) + "\n")
+    printable = {k: v for k, v in result.items() if k != "new_or_earlier"}
+    print(json.dumps(printable, indent=1, ensure_ascii=False))
+    print(
+        f"{len(earlier)} decided markers are new, start more than {EARLY_MS // 1000} s earlier, or (intros) end"
+        f" more than {EARLY_MS // 1000} s later than before: {dict(Counter(r['why'] for r in earlier))}"
+    )
+    return result
+
+
+FRAME_OFFSETS_S = (-6, -2, 2, 6)
+
+
+def _grab(host: str, at_s: float, out: Path) -> bool:
+    """One 320 px frame of a library file at ``at_s`` (a read-only read; the output goes under results/).
+
+    ``format=yuvj420p`` hands the mjpeg encoder full-range input. A time past the end of the video stream decodes
+    no frame at all, and ffmpeg then reports a misleading "Non full-range YUV is non-standard" error; that grab
+    fails either way and returns False.
+    """
+    out.unlink(missing_ok=True)
+    try:
+        subprocess.run(
+            ["nice", "-n", "19", "ffmpeg", "-nostdin", "-v", "error", "-y", "-ss", f"{max(at_s, 0):.1f}", "-i", host,
+             "-frames:v", "1", "-vf",
+             "scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2,format=yuvj420p",
+             str(out)],
+            check=False, timeout=120,
+        )  # fmt: skip
+    except subprocess.TimeoutExpired:
+        return False
+    return out.exists()
+
+
+def frames(name: str) -> None:
+    """For every marker compare-NAME lists: frames at -6, -2, +2 and +6 s around its start, and around its end when it
+    ends more than 2 s before the file does, as one image per marker (a row per edge, start first) in
+    results/scale/frames-NAME/, plus index.json naming each image and the edges its rows show (``rows``).
+
+    A frame asked for past the end of the file is taken 0.5 s before the end instead, so the +6 s frame of an end
+    close to the file's end still shows the last picture. The end is the container's duration: when the video stream
+    stops earlier than the audio, a frame past it can't be taken, and that row is missing from ``rows``."""
+    rows = json.loads((OUT / f"compare-{name}.json").read_text())["new_or_earlier"]
+    collected = {e["file"]: e for e in json.loads((OUT / f"collected-{name}.json").read_text())}
+    folder = OUT / f"frames-{name}"
+    folder.mkdir(exist_ok=True)
+    for i, row in enumerate(rows):
+        row["image"], row["edges_ms"], row["rows"] = None, [], []
+        if not row["host"]:  # a lab file outside the scale mounts (synth): no host path in truth.json
+            continue
+        start_ms, end_ms = row["now"][0], row["now"][1]
+        duration = (collected.get(row["file"]) or {}).get("duration_ms") or 0
+        last_s = (duration - 500) / 1000 if duration else None
+        edges = [("start", start_ms)] + ([("end", end_ms)] if end_ms and end_ms < duration - 2_000 else [])
+        strips, drawn = [], []
+        for edge, (label, at) in enumerate(edges):
+            shots = [folder / f"{i:03d}_{edge}_{n}.jpg" for n in range(len(FRAME_OFFSETS_S))]
+            ok = all(
+                _grab(row["host"], min(at / 1000 + off, last_s) if last_s else at / 1000 + off, shot)
+                for off, shot in zip(FRAME_OFFSETS_S, shots, strict=True)
+            )
+            strip = folder / f"{i:03d}_{edge}.jpg"
+            strip.unlink(missing_ok=True)
+            if ok:
+                inputs = [arg for shot in shots for arg in ("-i", str(shot))]
+                subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", *inputs, "-filter_complex",
+                                f"hstack=inputs={len(shots)}", str(strip)], check=False, timeout=60)  # fmt: skip
+            if strip.exists():
+                strips.append(strip)
+                drawn.append([label, at])
+            for shot in shots:
+                shot.unlink(missing_ok=True)
+        image = folder / f"{i:03d}_{row['type']}.jpg"
+        image.unlink(missing_ok=True)
+        if len(strips) == 2:
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(strips[0]), "-i", str(strips[1]),
+                            "-filter_complex", "vstack=inputs=2", str(image)], check=False, timeout=60)  # fmt: skip
+        elif strips:
+            strips[0].rename(image)
+        for strip in strips:
+            strip.unlink(missing_ok=True)
+        row["image"] = image.name if image.exists() else None
+        row["edges_ms"] = [at for _label, at in edges]
+        row["rows"] = drawn if row["image"] else []
+    (folder / "index.json").write_text(json.dumps(rows, indent=1, ensure_ascii=False) + "\n")
+    short = [r["image"] for r in rows if r["image"] and len(r["rows"]) < len(r["edges_ms"])]
+    print(f"{sum(1 for r in rows if r['image'])} of {len(rows)} images in {folder}; missing an edge's row: {short}")
+
+
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["compare"] and len(argv) == 3:
+        compare(argv[1], argv[2])
+        return 0
+    if argv[:1] == ["frames"] and len(argv) == 2:
+        frames(argv[1])
+        return 0
     if argv[:1] == ["pick"]:
         pick()
         mounts = Path(__file__).resolve().parent / "scale_mounts.sh"
-        mounts.write_text("#!/bin/bash\n# Generated by ./scale_score.py pick (git-ignored: it lists real library folders). Sourced by up.sh.\n" + mv_block() + "\n")
+        mounts.write_text(
+            "#!/bin/bash\n# Generated by ./scale_score.py pick (git-ignored: it lists real library folders). Sourced by up.sh.\n"
+            + mv_block()
+            + "\n"
+        )
         mounts.chmod(0o600)
         print(f"wrote {mounts.name}; run ./up.sh recreate and ./app.sh recreate to mount it")
         return 0

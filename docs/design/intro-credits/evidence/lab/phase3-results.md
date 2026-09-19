@@ -4,6 +4,35 @@ On-screen credit text against the lab servers on `storage` (`up.sh`), real libra
 scrubbed from every result file. Rows and their evidence: `phase3_matrix.py`; per-row JSON in `results/p3-row-NN.json`
 (git-ignored).
 
+## Final (final-2, bd9e561) (2026-09-19)
+
+**The 12 storage rows (1–11 and 16) pass on the first run.** Rows 12–15 run on `plex` (another agent) and are not part
+of this pass.
+
+- **Image:** `media_preview_generator:final-2` (`sha256:7050dc5d1385…`, `GIT_SHA` bd9e561). It adds rule J version 2
+  with the text-all-through guard, the VP9 keyframe pass fix, and reading 120 s before the tail for a roll the tail
+  cuts into.
+- **Run:** `MLAB_APP_IMAGE=media_preview_generator:final-2`, `./phase3_matrix.py configure`, then `run` 1–11 and 16,
+  one row per call (09:05–09:19 UTC).
+  - It ran right after the phase 2 pass, on that app's config.
+  - The rows that recreate the app used the same image (row 11's premise checks it).
+- **Raw results:** `results/final-2/p3-row-*.json`.
+
+| Row | Result | Evidence |
+|---|---|---|
+| 1 Capability and Settings row | pass | Available in the CPU and GPU containers; a broken model path reports "Not available" naming it. |
+| 2 Scene after the credits, High then Medium | pass | Answer 541 000 / 659 000 ms. High: Needs review, nothing published. Medium: decided 541 000–659 000 ms from credit text alone. |
+| 3 GPU decode and WebGPU | pass | Self-test "GPU (median 12.35 ms per frame, CPU 19.92 ms; GPU/CPU 0.6628 per round), pinned to 0000:02:00.0"; GPU and CPU answers equal (541 000 / 659 000). |
+| 4 GPU decode failure | pass | The AV1 copy: "couldn't process … on the GPU and is retrying on CPU" (ffmpeg exit 69), then 541 000 / 659 000 on the CPU. |
+| 5 Helper killed | pass | One WARNING "moves to the CPU for the rest of this run of the app … Broken pipe"; both jobs completed with the right answer. |
+| 6 Cancel mid-decode | pass | Decode gone within 10 s, job `cancelled`, stored answer untouched. |
+| 7 Reuse and forced | pass | A normal job decoded nothing; a forced one decoded again (tail + 21 s refine window). |
+| 8 Detection unavailable | pass | A stored answer doesn't decide while detection is unavailable; it decides again once back. |
+| 9 Resources | pass | Every decode `-threads 2`; peak 1 helper; the WebGPU helper has 48 threads (recorded). |
+| 10 The app reproduces the harness | pass | All ten movies: start and end equal to Task 11's GPU harness answers (e.g. Avengers Infinity War 8252 / 8851 s; Summit of the Gods 5423 s, no end). Rule J version 2 didn't move any of these ten. |
+| 11 Phase 1 and 2 regressions | pass | `phase2_matrix.py run 1 3 8` and `phase1_matrix.py run 2 7` exited 0 on final-2. |
+| 16 A roll to the end of the file | pass | No end stored; decided 541 000–660 000 ms (to the end of the file); 2 decodes, 1 refine window. |
+
 **Image under test:** `media_preview_generator:intro-credits-p3`,
 `sha256:f7a77a46f94c27ccdfb98ecfd48f215cbb51b9438bdba30614123544dca29ec2`, built from `feat/markers-detection`
 `e24b3fc` (version `4.4.3.dev104`). `mlab-app` runs it with the NVIDIA runtime and `/dev/dri`
