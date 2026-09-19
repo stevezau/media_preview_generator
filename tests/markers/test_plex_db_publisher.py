@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -56,7 +57,8 @@ def _plex_json(d: dict) -> str:
 
 
 BOTH_NATIVE = _plex_json({"pv:credits": NATIVE_CREDITS, "pv:intros": NATIVE_INTROS, "url": "z"})
-INTROS_V6 = _plex_json({"pv:intros": NATIVE_INTROS.replace('"version":5', '"version":6')})
+INTROS_V6_VALUE = NATIVE_INTROS.replace('"version":5', '"version":6')
+INTROS_V6 = _plex_json({"pv:intros": INTROS_V6_VALUE})
 # What we store for INTRO / CREDITS_FINAL (credits start = served - 2000 ms).
 INTRO_PAYLOAD = (
     '{"MediaPartMarkersArray":{"attributeName":"intros","version":5,'
@@ -277,6 +279,149 @@ class TestExtraDataEncoding:
         with pytest.raises(PublishError) as ei:
             merge_part_extra_data(existing, [INTRO], {T.INTRO}, DUR)
         assert ei.value.state is Capability.UNSUPPORTED_SCHEMA
+
+
+# A real part Plex 1.43.4's one-time CreditsFinalAttributeMigration rewrote in its older URL-encoded form (lab, first
+# database optimize, 2026-09-17): our non-final credits there got "final":1.
+URL_FORM_PART = (FIX / "plex_part_extra_data_url_form.txt").read_text().strip()
+# The same part as this app wrote it before the migration: the credits entry without "final".
+URL_FORM_PART_NOT_FINAL = URL_FORM_PART.replace("%2C%22final%22%3A1%7D%5D", "%7D%5D")
+URL_INTRO = Marker(T.INTRO, 127_000, 214_000, ("chapters",))
+URL_CREDITS = Marker(T.CREDITS, 1_326_000, 1_415_000, ("chapters",))
+URL_DUR = 1_422_004
+INTRO_PAYLOAD_URL = (
+    "%7B%22MediaPartMarkersArray%22%3A%7B%22attributeName%22%3A%22intros%22%2C%22version%22%3A5%2C"
+    "%22MediaPartMarker%22%3A%5B%7B%22startTimeOffset%22%3A11000%2C%22endTimeOffset%22%3A37000%7D%5D%7D%7D"
+)
+CREDITS_NONFINAL_PAYLOAD = (
+    '{"MediaPartMarkersArray":{"attributeName":"credits","version":4,'
+    '"MediaPartMarker":[{"startTimeOffset":1198000,"endTimeOffset":1252000}]}}'
+)
+
+
+class TestUrlFormExtraData:
+    """Plex's older URL-encoded extra_data (``k=v&...``, sorted keys, no ``url`` field) is read and written back as is."""
+
+    def test_rebuilding_plex_s_url_form_is_byte_identical(self):
+        fields, url_form = plex_db.decode_extra_data(URL_FORM_PART)
+        assert url_form is True
+        assert fields["pv:credits"] == (
+            '{"MediaPartMarkersArray":{"attributeName":"credits","version":4,'
+            '"MediaPartMarker":[{"startTimeOffset":1324000,"endTimeOffset":1417000,"final":1}]}}'
+        )
+        assert sorted(fields) == ["ma:container", "ma:videoProfile", "pv:chapters", "pv:credits", "pv:intros"]
+        assert encode_extra_data(fields, url_form=True) == URL_FORM_PART
+
+    def test_json_form_keeps_its_url_field_and_is_not_url_form(self):
+        native = (FIX / "plex_part_extra_data_native.json").read_text().strip()
+        fields, url_form = plex_db.decode_extra_data(native)
+        assert url_form is False and fields == json.loads(native)
+
+    def test_our_changed_credits_are_written_back_in_the_part_s_url_form(self):
+        # The lab's refused parts: Plex flagged our non-final credits final; "Use ours" writes our flag back.
+        out = merge_part_extra_data(
+            URL_FORM_PART, [URL_INTRO, URL_CREDITS], {T.INTRO, T.CREDITS}, URL_DUR, previous=[URL_INTRO, URL_CREDITS]
+        )
+        assert out == URL_FORM_PART_NOT_FINAL
+
+    def test_a_final_1_entry_serving_the_wanted_final_credits_is_left_byte_for_byte(self):
+        # Plex writes "final":1 as well as true; either way the entry serves its stored end.
+        final_credits = Marker(T.CREDITS, 1_326_000, 1_417_000, ("chapters",))
+        out = merge_part_extra_data(URL_FORM_PART, [URL_INTRO, final_credits], {T.INTRO, T.CREDITS}, 1_418_000)
+        assert out == URL_FORM_PART
+
+    @pytest.mark.parametrize("final", [True, 1], ids=["true", "1"])
+    def test_both_final_spellings_read_as_final(self, final):
+        value = json.dumps(
+            {
+                "MediaPartMarkersArray": {
+                    "attributeName": "credits",
+                    "version": 4,
+                    "MediaPartMarker": [{"startTimeOffset": 1_297_000, "endTimeOffset": DUR, "final": final}],
+                }
+            },
+            separators=(",", ":"),
+        )
+        assert plex_db._part_entries(T.CREDITS, value) == [(1_299_000, DUR, True)]
+
+    @pytest.mark.parametrize("url_form", [False, True], ids=["json", "url-form"])
+    @pytest.mark.parametrize("other_keys", [True, False], ids=["other-keys", "no-other-keys"])
+    @pytest.mark.parametrize(
+        ("marker", "key", "payload"),
+        [
+            (INTRO, "pv:intros", INTRO_PAYLOAD),
+            (CREDITS_FINAL, "pv:credits", CREDITS_FINAL_PAYLOAD),
+            (CREDITS_NONFINAL, "pv:credits", CREDITS_NONFINAL_PAYLOAD),
+        ],
+        ids=["intro", "credits-final", "credits-not-final"],
+    )
+    def test_merge_keeps_the_part_s_form_and_its_other_keys(self, url_form, other_keys, marker, key, payload):
+        # Plex's own marker of the same type is on the part; without other keys it is the part's only key.
+        native = NATIVE_INTROS if key == "pv:intros" else NATIVE_CREDITS
+        others = {"ma:container": "mkv", "pv:chapters": '{"Chapters":{"Chapter":[]}}'} if other_keys else {}
+        existing = encode_extra_data({**others, key: native}, url_form=url_form)
+        out = merge_part_extra_data(existing, [marker], {marker.type}, DUR)
+        assert out == encode_extra_data({**others, key: payload}, url_form=url_form)
+        assert out.startswith("{") is not url_form
+
+    def test_url_form_output_literal(self):
+        out = merge_part_extra_data("ma%3Acontainer=mkv", [INTRO], {T.INTRO}, DUR)
+        assert out == f"ma%3Acontainer=mkv&pv%3Aintros={INTRO_PAYLOAD_URL}"
+
+    @pytest.mark.parametrize(
+        ("other_keys", "expected"),
+        [(True, "ma%3Acontainer=mkv"), (False, "")],
+        ids=["other-keys-stay", "nothing-left"],
+    )
+    def test_removing_ours_from_a_url_form_part(self, other_keys, expected):
+        fields = {"pv:intros": INTRO_PAYLOAD, **({"ma:container": "mkv"} if other_keys else {})}
+        out = merge_part_extra_data(encode_extra_data(fields, url_form=True), [], {T.INTRO}, DUR, previous=[INTRO])
+        assert out == expected
+
+    @pytest.mark.parametrize(
+        "existing",
+        [
+            "ma%3Acontainer",  # no "="
+            "pv%3Aintros=x&ma%3Acontainer=mkv",  # keys not sorted
+            "ma%3acontainer=mkv",  # lower-case escape
+            "ma:container=mkv",  # ":" not escaped
+            "ma%3Acontainer=a+b",  # "+" Plex escapes as %2B
+            "ma%3Acontainer=%FF",  # not UTF-8
+            "ma%3Acontainer=mkv&ma%3Acontainer=avi",  # a key twice
+            "ma%3Acontainer=mkv&url=x",  # a url field belongs to the JSON form
+            f"pv%3Aintros={urllib.parse.quote(INTROS_V6_VALUE, safe='')}",  # the untested marker version
+        ],
+        ids=[
+            "no-equals",
+            "unsorted",
+            "lower-case",
+            "unescaped",
+            "plus",
+            "not-utf8",
+            "duplicate",
+            "url-key",
+            "intro-v6",
+        ],
+    )
+    def test_anything_plex_would_not_write_is_still_unsupported(self, existing):
+        with pytest.raises(PublishError) as ei:
+            merge_part_extra_data(existing, [INTRO], {T.INTRO}, DUR)
+        assert ei.value.state is Capability.UNSUPPORTED_SCHEMA
+
+    @pytest.mark.parametrize(
+        ("extra", "final"),
+        [
+            (CREDITS_FINAL_ROW_EXTRA, True),
+            (CREDITS_ROW_EXTRA, False),
+            ("pv%3Afinal=1&pv%3Aversion=4", True),
+            ("pv%3Aversion=4", False),
+            (None, False),
+            ("not readable", False),
+        ],
+        ids=["json-final", "json-not-final", "url-final", "url-not-final", "none", "unreadable"],
+    )
+    def test_taggings_final_flag_in_either_form(self, extra, final):
+        assert plex_db._row_is_final(extra) is final
 
 
 class TestWrite:
@@ -1279,6 +1424,103 @@ class TestNoOp:
         _write_one(_publisher(tmp_path, folder), [INTRO, CREDITS_FINAL])
         assert _rows(db, "SELECT text, [index] FROM taggings ORDER BY [index]") == [("credits", 0), ("intro", 1)]
         assert _rows(db, "SELECT extra_data FROM media_parts") == [(encode_extra_data(payloads),)]
+
+
+class TestUrlFormParts:
+    """Parts Plex rewrote in its URL-encoded form (lab, 2026-09-17) publish, read back and clean up like JSON ones."""
+
+    MIGRATED_ROWS = (
+        (7, 563, 0, "credits", 1_324_000, 1_417_000, CREDITS_FINAL_ROW_EXTRA),
+        (7, 563, 1, "intro", 127_000, 214_000, INTRO_ROW_EXTRA),
+    )
+
+    def _migrated(self, tmp_path):
+        """The lab's refused item: our markers after Plex's CreditsFinalAttributeMigration flagged the credits final."""
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=(("/data/tv/S01E01.mkv", URL_FORM_PART),))
+        _insert_taggings(db, *self.MIGRATED_ROWS)
+        return folder, db
+
+    def test_use_ours_writes_our_flag_back_in_url_form(self, tmp_path, sql_log):
+        folder, db = self._migrated(tmp_path)
+        intro_id = _rows(db, "SELECT id FROM taggings WHERE text='intro'")[0][0]
+        pub = _publisher(tmp_path, folder)
+        ours = _write_one(pub, [URL_INTRO, URL_CREDITS], previous=[URL_INTRO, URL_CREDITS], duration_ms=URL_DUR)
+        assert ours == [URL_INTRO, URL_CREDITS] and pub.last_write_changed is True
+        assert _rows(db, "SELECT extra_data FROM media_parts") == [(URL_FORM_PART_NOT_FINAL,)]
+        assert _rows(db, "SELECT text, time_offset, end_time_offset, extra_data FROM taggings ORDER BY [index]") == [
+            ("credits", 1_324_000, 1_417_000, CREDITS_ROW_EXTRA),
+            ("intro", 127_000, 214_000, INTRO_ROW_EXTRA),
+        ]
+        assert _rows(db, "SELECT id FROM taggings WHERE text='intro'") == [(intro_id,)]  # served our times already
+        assert f"UPDATE media_parts SET extra_data='{URL_FORM_PART_NOT_FINAL}' WHERE id=1" in _writes(sql_log)
+
+    def test_a_second_run_writes_nothing_and_reads_back_as_ours(self, tmp_path, sql_log):
+        folder, db = self._migrated(tmp_path)
+        pub = _publisher(tmp_path, folder)
+        item_row = _write_one(pub, [URL_INTRO, URL_CREDITS], previous=[URL_INTRO, URL_CREDITS], duration_ms=URL_DUR)
+        sql_log.clear()
+        assert _write_one(pub, [URL_INTRO, URL_CREDITS], previous=item_row, duration_ms=URL_DUR) == item_row
+        assert _writes(sql_log) == [] and pub.last_write_changed is False
+        assert pub.shows("7", item_row) is Shown.OURS
+
+    def test_keep_plex_s_keeps_the_credits_plex_flagged_final(self, tmp_path, sql_log):
+        # Plex's migration made our credits serve a 2 s later end: not provably ours any more, so Plex's under Keep
+        # Plex's, and the URL-encoded part is left exactly as Plex wrote it.
+        folder, db = self._migrated(tmp_path)
+        before = _rows(db, "SELECT * FROM taggings"), _rows(db, "SELECT extra_data FROM media_parts")
+        pub = _publisher(tmp_path, folder, redetect="keep_plex")
+        ours = _write_one(pub, [URL_INTRO, URL_CREDITS], previous=[URL_INTRO, URL_CREDITS], duration_ms=URL_DUR)
+        assert ours == [URL_INTRO] and pub.last_kept_types == frozenset({T.CREDITS})
+        assert (_rows(db, "SELECT * FROM taggings"), _rows(db, "SELECT extra_data FROM media_parts")) == before
+        assert _rows(db, "SELECT extra_data FROM media_parts") == [(URL_FORM_PART,)]
+        assert _writes(sql_log) == []
+
+    def test_plex_s_final_rows_read_back_as_replaced_until_written_again(self, tmp_path):
+        # The migration's final flag moves the served credits end 2 s later than what we left there.
+        folder, _db = self._migrated(tmp_path)
+        assert _publisher(tmp_path, folder).shows("7", [URL_INTRO, URL_CREDITS]) is Shown.REPLACED
+
+    def test_removing_ours_keeps_the_url_form_and_every_other_key(self, tmp_path):
+        folder, db = self._migrated(tmp_path)
+        pub = _publisher(tmp_path, folder)
+        item_row = _write_one(pub, [URL_INTRO, URL_CREDITS], previous=[URL_INTRO, URL_CREDITS], duration_ms=URL_DUR)
+        assert _write_one(pub, [], previous=item_row, duration_ms=URL_DUR) == []
+        assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 0
+        # What is left: the part as Plex wrote it, up to the pv:credits key.
+        expected = URL_FORM_PART[: URL_FORM_PART.index("&pv%3Acredits=")]
+        assert expected.startswith("ma%3Acontainer=mkv&ma%3AvideoProfile=high&pv%3Achapters=")
+        assert _rows(db, "SELECT extra_data FROM media_parts") == [(expected,)]
+
+    def test_each_version_keeps_its_own_form(self, tmp_path):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(
+            folder,
+            parts=(("/data/a.mkv", "ma%3Acontainer=mkv"), ("/data/b.mkv", _plex_json({"ma:container": "mp4"}))),
+        )
+        pub = _publisher(
+            tmp_path, folder, sibling_markers=lambda path: {T.INTRO: INTRO} if path == "/data/b.mkv" else None
+        )
+        assert _write_one(pub, [INTRO], path="/data/a.mkv") == [INTRO]
+        assert _rows(db, "SELECT extra_data FROM media_parts ORDER BY id") == [
+            (f"ma%3Acontainer=mkv&pv%3Aintros={INTRO_PAYLOAD_URL}",),
+            (encode_extra_data({"ma:container": "mp4", "pv:intros": INTRO_PAYLOAD}),),
+        ]
+
+    @pytest.mark.parametrize(
+        ("extra", "state"),
+        [
+            (URL_FORM_PART, Capability.READY),
+            (f"pv%3Aintros={urllib.parse.quote(INTROS_V6_VALUE, safe='')}", Capability.UNSUPPORTED_SCHEMA),
+        ],
+        ids=["tested-versions", "intro-v6"],
+    )
+    def test_the_library_sample_reads_url_form_parts_too(self, tmp_path, extra, state):
+        folder = tmp_path / "Plex Media Server"
+        _make_db(folder, parts=(("/data/tv/S01E01.mkv", None), ("/data/tv/o.mkv", extra)))
+        report = _publisher(tmp_path, folder).capability()
+        assert report.state is state
+        assert state is Capability.READY or "version 6" in report.message
 
 
 class TestKeepPlexs:

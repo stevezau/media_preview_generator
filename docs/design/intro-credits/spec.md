@@ -117,7 +117,7 @@ real library mounted read-only.
 |---|---|---|
 | HTTP API to write intro/credits? | **No.** `POST /library/metadata/{id}/marker` → 400 for `type` 1–6 and every name; `attributes` override → 400; `PUT/DELETE …/marker/{id}` on intro/credits → 404; PUT converting a bookmark → 200 but ignored. Only bookmarks work. | (lab, claimed Pass server) + official spec + Plex Web 4.160 bundles + PMS binary route strings (`/marker`, `/marker/:markerID` only) |
 | Other routes | Custom Metadata Providers (Dec 2025) spec has no marker/media/part fields. Plex's cloud credits lookup (`tv.plex.provider.metadata` `/markers?hash=<media_parts.hash>&type=credits`) can be pointed elsewhere with hidden pref `MetadataProviderUrl`, but **zero requests reached the lab proxy** even on forced credits detection → not honoured. Chapter names are never converted to markers. Plex has no plugin system. | (lab) `evidence/plex-provider-redirect/` + developer.plex.tv + staff posts |
-| Where markers live | `taggings` rows (`text` = `intro`/`credits`/`commercial`, `time_offset`/`end_time_offset` ms, `extra_data` e.g. intro `{"pv:version":"5"}`, final credits `{"pv:final":"1","pv:version":"4"}`) pointing at the single `tags` row with `tag_type=12` and **`tag=''`**; plus a per-part copy in `media_parts.extra_data` (`pv:intros`, `pv:credits`: MediaPartMarkersArray JSON, sorted keys, `url` URL-encoded). `metadata_item_setting_markers` is per-user bookmarks. | prod DB (read-only) + (lab) |
+| Where markers live | `taggings` rows (`text` = `intro`/`credits`/`commercial`, `time_offset`/`end_time_offset` ms, `extra_data` e.g. intro `{"pv:version":"5"}`, final credits `{"pv:final":"1","pv:version":"4"}`) pointing at the single `tags` row with `tag_type=12` and **`tag=''`**; plus a per-part copy in `media_parts.extra_data` (`pv:intros`, `pv:credits`: MediaPartMarkersArray JSON, sorted keys, `url` URL-encoded; or, on parts Plex's one-time credits `final` migration rewrote, that `url` form alone, §14 2026-09-19). `metadata_item_setting_markers` is per-user bookmarks. | prod DB (read-only) + (lab) |
 | Direct DB write served? | **Yes, immediately, no restart**, XML identical to native markers. Stock Python `sqlite3` works (ICU triggers exist only on `tags` and `metadata_items` — PMS 1.43.4 — and we never write either; none on `taggings` or `media_parts`). | (lab) `evidence/lab/py_write.py` |
 | `taggings` alone enough? | Served, but **wiped** by the next forced Plex detection of any type (Plex rebuilds from `media_parts.extra_data`). Writing **both** survives. `extra_data` alone is not served. | (lab) |
 | What wipes our markers | Forced detection of the **same** type (`PUT …/credits?force=1`, season `…/intro?force=1`). **Not** wiped by metadata refresh (force), section scan, analyze with detection off, or non-forced detection. PMS 1.43.1+ forces credits detection on manual Analyze. | (lab) + release notes |
@@ -581,7 +581,9 @@ at the last write), `atomic_writes`.
   `url`). Write credits start as `served − 2000 ms`.
 - Tag row missing → `NeedsPlexDetectionOnce` (never create it).
 - Multi-version items share one marker set: publish only when all parts' decisions agree within 2 s.
-- Unknown schema (columns/JSON shape differ from 1.43) → stop writing, show message.
+- Unknown schema (columns/JSON shape differ from 1.43, `extra_data` in neither of Plex's two forms) → stop writing,
+  show message. A part is written back in the form it has (JSON with `url`, or the URL-encoded form alone; a
+  URL-encoded part we empty is left as `""`, and a later write adds keys in JSON, Plex's usual form).
 - Never write `tags`; never run integrity checks with stock SQLite (custom tokenizer).
 - Rows and `pv:` keys that already serve the desired times stay byte for byte, except a stale credits `final` flag on
   a one-version item under "Use ours" (see §14, 2026-09-15 "Plex credits `final` flag").
@@ -1365,3 +1367,15 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   item 15, `evidence/eval/broadcast-tv.md`); static-overlay suppression and "credit text + a server's own marker
   can't decide High" were measured and rejected. The VP9 keyframe pass drops non-key packets before the decoder
   (FFmpeg's VP9 decoder ignores `-skip_frame`; §5.4 Frames, `evidence/eval/phase3-harness.md` "VP9's keyframe pass").
+- 2026-09-19 · Final review, scale-run finding 1 (§3.1, §6.3): the 24 lab-Plex parts refused as "not JSON" were
+  rewritten by Plex itself. PMS 1.43.4's weekly Butler "Optimize database" runs a new database's deferred one-time
+  migrations the first time it runs (lab: 2026-09-17 02:01 UTC). One of them, `202302020000`
+  (`CreditsFinalAttributeMigration`), flags credits `final` when the stored end is within 10 s of the part's end,
+  writes those parts' `extra_data` in Plex's pre-2023-09 URL-encoded form (`k=v&…`, sorted keys, no `url` field: the
+  JSON form's `url` field holds exactly that form) with the entry's `final` as `1`, and rebuilds the item's `taggings`
+  rows with `pv:final`. It flagged our non-final credits ending 1.1–9.7 s before the file's end (10.1 s was left).
+  The owner's production DB (read-only, same PMS) has no URL-form row: the migration ran there before the JSON
+  conversion (`schema_migrations` rows 339 and 354), and 791 credits entries still carry `"final":1` inside JSON. The
+  publisher now reads both forms, writes a part back in the form it has byte for byte as Plex would (checked on every
+  lab row and 517,476 production rows), reads `final` `1` as final, and still refuses anything else. Under "Use ours"
+  such an item gets our `final` flag back once; the migration is recorded and doesn't run again on that database.

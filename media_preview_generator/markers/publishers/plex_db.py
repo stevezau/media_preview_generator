@@ -219,16 +219,83 @@ def publish_error_from_sqlite(exc: sqlite3.Error) -> PublishError:
 
 def _plex_quote(value: str) -> str:
     # Matches Plex's own encoder: everything but alphanumerics and -_~ is %-escaped, including "." (verified
-    # byte-for-byte against all 355 extra_data rows of media_parts, media_items, metadata_items and taggings in
-    # the lab Plex 1.43.4 DB).
+    # byte-for-byte against every extra_data row of media_parts, media_items, metadata_items, media_streams and
+    # taggings in the lab Plex 1.43.4 DB, and of media_parts, media_items and marker taggings in the owner's
+    # production DB: 517,476 rows, read-only, 2026-09-19).
     return urllib.parse.quote(value, safe="").replace(".", "%2E")
 
 
-def encode_extra_data(d: dict[str, str]) -> str:
-    """Serialise an extra_data dict the way Plex does: sorted keys, compact JSON, trailing ``url`` field."""
+def _url_form(d: dict[str, str]) -> str:
+    return "&".join(f"{_plex_quote(k)}={_plex_quote(d[k])}" for k in sorted(d) if k != "url")
+
+
+def encode_extra_data(d: dict[str, str], *, url_form: bool = False) -> str:
+    """Serialise an extra_data dict the way Plex does, in either of the two forms Plex stores.
+
+    The JSON form, Plex's usual one since its 2023-09 schema migration, is compact JSON with sorted keys and a trailing
+    ``url`` field holding the URL-encoded form of the other fields. The URL-encoded form alone (``k=v&k=v``, sorted
+    keys, no ``url`` field) is the format before that migration, and what its rollback (``extra_data ->> 'url'``)
+    turns a row back into. PMS 1.43.4 still writes it: its one-time credits ``final`` migration, run at a new
+    database's first weekly optimize, rewrote the 24 parts it changed in this form (lab, 2026-09-17).
+
+    Args:
+        d: The fields; a ``url`` field is ignored and rebuilt.
+        url_form: Write the URL-encoded form instead of JSON.
+
+    Returns:
+        The extra_data text.
+    """
+    if url_form:
+        return _url_form(d)
     ordered = {k: d[k] for k in sorted(d) if k != "url"}
-    ordered["url"] = "&".join(f"{_plex_quote(k)}={_plex_quote(v)}" for k, v in ordered.items())
+    ordered["url"] = _url_form(ordered)
     return json.dumps(ordered, separators=(",", ":"), ensure_ascii=False)
+
+
+def decode_extra_data(extra: str | None) -> tuple[dict[str, str], bool]:
+    """Read extra_data in either form Plex stores (see ``encode_extra_data``).
+
+    Args:
+        extra: The stored text; None or "" is no fields.
+
+    Returns:
+        The fields (the JSON form's ``url`` field included) and whether ``extra`` is the URL-encoded form.
+
+    Raises:
+        PublishError: UNSUPPORTED_SCHEMA when ``extra`` is JSON but not an object of text values, or is not text
+            ``encode_extra_data`` writes back byte for byte in the URL-encoded form (so a part is only ever rewritten
+            in a form Plex itself wrote).
+    """
+    if not extra:
+        return {}, False
+    if extra.startswith("{"):
+        try:
+            parsed = json.loads(extra)
+        except ValueError as exc:
+            raise PublishError("Plex extra_data is not valid JSON", state=Capability.UNSUPPORTED_SCHEMA) from exc
+        if not isinstance(parsed, dict):
+            raise PublishError("Plex extra_data is not a JSON object", state=Capability.UNSUPPORTED_SCHEMA)
+        if any(not isinstance(v, str) for v in parsed.values()):
+            raise PublishError(
+                "Plex extra_data holds a non-text value; not writing markers.", state=Capability.UNSUPPORTED_SCHEMA
+            )
+        return parsed, False
+    fields: dict[str, str] | None = {}
+    try:
+        for pair in extra.split("&"):
+            key, equals, value = pair.partition("=")
+            if not equals:
+                raise ValueError(pair)
+            fields[urllib.parse.unquote(key, errors="strict")] = urllib.parse.unquote(value, errors="strict")
+    except ValueError:  # UnicodeDecodeError included
+        fields = None
+    # Unsorted or repeated keys, another escaping, a url field: not what Plex writes, so not what we'd write back.
+    if fields is None or _url_form(fields) != extra:
+        raise PublishError(
+            "Plex extra_data is in a form this app doesn't know; not writing markers.",
+            state=Capability.UNSUPPORTED_SCHEMA,
+        )
+    return fields, True
 
 
 def _is_final(marker: Marker, duration_ms: int | None) -> bool:
@@ -264,7 +331,17 @@ def _served_times(mtype: MarkerType, start: int, end: int, final: bool) -> tuple
 
 
 def _row_is_final(extra_data: str | None) -> bool:
-    return '"pv:final":"1"' in (extra_data or "")
+    try:
+        fields = decode_extra_data(extra_data)[0]
+    except PublishError:
+        return False  # never seen in a Plex database (lab or production): read as not final
+    return fields.get("pv:final") == "1"
+
+
+def _is_final_entry(entry: dict) -> bool:
+    # Plex's JSON writer stores true; its credits final migration stores 1 (lab and production DBs).
+    final = entry.get("final")
+    return final is True or (type(final) is int and final == 1)
 
 
 def _rows_served_with_final(rows: list[_TaggingRow], mtype: MarkerType) -> list[tuple[int, int, bool]]:
@@ -293,7 +370,7 @@ def _part_entries(mtype: MarkerType, value: str | None) -> list[tuple[int, int, 
         entries = json.loads(value)["MediaPartMarkersArray"]["MediaPartMarker"]
         out = []
         for e in entries:
-            final = e.get("final") is True
+            final = _is_final_entry(e)
             out.append((*_served_times(mtype, int(e["startTimeOffset"]), int(e["endTimeOffset"]), final), final))
         return sorted(out)
     except (ValueError, KeyError, TypeError, AttributeError):
@@ -360,10 +437,11 @@ def merge_part_extra_data(
     previous: list[Marker] | tuple[Marker, ...] = (),
     refresh_final: frozenset[MarkerType] = frozenset(),
 ) -> str:
-    """Rewrite ``pv:intros``/``pv:credits`` for managed types, keep every other key, rebuild ``url``.
+    """Rewrite ``pv:intros``/``pv:credits`` for managed types, keep every other key and the part's form.
 
     Args:
-        existing: The part's current ``extra_data`` (None or empty for none).
+        existing: The part's current ``extra_data`` in either of Plex's forms (see ``encode_extra_data``), written back
+            in the same form (JSON, with a rebuilt ``url``, when None or empty).
         wanted: Markers to show, in served times.
         managed: Types we set or remove on this item.
         duration_ms: File duration, for credits' "runs to the end" flag.
@@ -378,20 +456,10 @@ def merge_part_extra_data(
         The new ``extra_data`` string.
 
     Raises:
-        PublishError: existing extra_data is not a JSON object of strings, or holds marker data of an untested
-            shape/version.
+        PublishError: existing extra_data is in neither of Plex's forms (see ``decode_extra_data``), or holds marker
+            data of an untested shape/version.
     """
-    try:
-        d = json.loads(existing) if existing else {}
-    except ValueError as exc:
-        raise PublishError("Plex media_parts.extra_data is not JSON", state=Capability.UNSUPPORTED_SCHEMA) from exc
-    if not isinstance(d, dict):
-        raise PublishError("Plex media_parts.extra_data is not a JSON object", state=Capability.UNSUPPORTED_SCHEMA)
-    if any(not isinstance(v, str) for v in d.values()):
-        raise PublishError(
-            "Plex media_parts.extra_data holds a non-text value; not writing markers.",
-            state=Capability.UNSUPPORTED_SCHEMA,
-        )
+    d, url_form = decode_extra_data(existing)
     for key in _PART_KEY.values():
         if key in d:
             _check_marker_array(key, d[key])
@@ -411,7 +479,7 @@ def merge_part_extra_data(
         # Removing the key (not writing "") lets Plex's own non-forced detection analyse the part again (spec §14).
         if ours_before and _part_served(mtype, d.get(key)) == _served_of(ours_before, mtype):
             del d[key]
-    return encode_extra_data(d)
+    return encode_extra_data(d, url_form=url_form)
 
 
 def _rating_key(item_id: str) -> int:
@@ -430,14 +498,12 @@ class _Part(NamedTuple):
 
 
 def _same_extra_data(a: str | None, b: str | None) -> bool:
-    """Same keys and values, ignoring encoding and the derived ``url`` field (no rewrite for a byte difference)."""
+    """Same keys and values, ignoring the derived ``url`` field (no rewrite for a byte difference)."""
     if a == b:
         return True
     try:
-        da, db = (json.loads(x) if x else {} for x in (a, b))
-    except ValueError:
-        return False
-    if not isinstance(da, dict) or not isinstance(db, dict):
+        da, db = decode_extra_data(a)[0], decode_extra_data(b)[0]
+    except PublishError:
         return False
     return {k: v for k, v in da.items() if k != "url"} == {k: v for k, v in db.items() if k != "url"}
 
@@ -641,16 +707,18 @@ class PlexMarkerPublisher(MarkerPublisher):
     def _check_library_marker_versions(conn: sqlite3.Connection) -> None:
         # Two LIKE scans of media_parts: run from capability() (cached per job, for a few seconds only while Plex Pass
         # doesn't answer), never per write. Each write still validates the parts it touches in merge_part_extra_data.
-        # Newest rows first: a new format shows up there.
+        # Newest rows first: a new format shows up there. Either form of extra_data (see encode_extra_data).
         for key in _PART_KEY.values():
+            url_form_like = "%" + _plex_quote(key).replace("%", r"\%") + r"=\%7B%"  # pv%3Aintros=%7B...
             rows = conn.execute(
-                "SELECT extra_data FROM media_parts WHERE extra_data LIKE ? ORDER BY id DESC LIMIT 50",
-                (f'%"{key}":"{{%',),
+                "SELECT extra_data FROM media_parts WHERE extra_data LIKE ? OR extra_data LIKE ? ESCAPE '\\' "
+                "ORDER BY id DESC LIMIT 50",
+                (f'%"{key}":"{{%', url_form_like),
             ).fetchall()
             for (extra,) in rows:
                 try:
-                    value = json.loads(extra)[key]
-                except (ValueError, KeyError, TypeError):
+                    value = decode_extra_data(extra)[0][key]
+                except (PublishError, KeyError):
                     continue
                 _check_marker_array(key, value)
 
