@@ -181,15 +181,18 @@ nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval credits-text --deco
 The GPU run reads 285 files plus the online cases' 43 and takes about an hour on storage; the CPU run on the 80 files
 takes about 25 minutes. Both are the reported runs: `--decode gpu` is the product path (NVIDIA decode, text detection
 through the helper pool), `--decode cpu` proves the CPU worker path gives the same gate. Answers are cached under
-`$MARKERS_EVAL_CACHE/credits_text` per file identity, detector version, decode path and kind, and a digest of the
+`$MARKERS_EVAL_CACHE/credits_text` per file identity, detector version, ffmpeg build (the first line of
+`ffmpeg -version`), decode path and GPU device, the text detection backend the helper pool actually used (as for the
+decodes below; an answer whose backend changed while its file was read isn't kept), kind, and a digest of the
 detector's source (`credits_text.DETECTOR_SOURCES`: `markers/credits/*.py`, the probe and the decode arguments,
 reported as `detector_digest`). A re-run of unchanged code is free; any change to that code runs the app's detector
 on every file again, even when `CREDITS_TEXT_VERSION` stays the same.
 
 That re-run doesn't decode again unless it has to. Every decode the detector asks for (the tail's keyframes, each
 1 fps window) is kept under `$MARKERS_EVAL_CACHE/credits_decodes` (`decode_cache.DecodeCache`) keyed on the file's
-identity, the exact ffmpeg command the app builds (window, decode path, hwaccel arguments, scaler and keyframe
-thinning), the text detection backend that actually counted the boxes, and a digest of the code that turns a command
+identity, the ffmpeg build (the first line of `ffmpeg -version`), the exact ffmpeg command the app builds (window,
+decode path, hwaccel arguments, scaler and keyframe thinning), the text detection backend that actually counted the
+boxes, and a digest of the code that turns a command
 into rows: the detector's sources bar `rule_j.py` and `detector.py` (`credits_text.RULE_FILES`), reported as
 `decode_digest`. The backend is what the helper pool's self-test chose (`webgpu <device>` or `cpu`, reported as
 `text_detection`), not what the run asked for: a GPU run whose self-test fell back to the CPU shares a CPU run's rows,
@@ -199,8 +202,8 @@ keyframe thinning (intra-only stride, VP9's drop of non-key packets), are kept t
 stalled is not; an ffprobe error on the packet probe reads as "no thinning", so a VP9 or intra-only file's keyframe
 pass reads every frame, and that is kept until its entry is deleted). So a change to rule J re-runs the app's own
 `find_credits` against stored rows in seconds and decodes only the windows the new rule asks for that no earlier run
-did (the summary's `decodes` counts both); a change to the decode code, the text detection or its model pin decodes
-everything again. A GPU decode that failed is kept as that failure, so the CPU rerun doesn't retry the GPU each time;
+did (the summary's `decodes` counts both); a change to the decode code, the ffmpeg build, the text detection or its
+model pin decodes everything again. A GPU decode that failed is kept as that failure, so the CPU rerun doesn't retry the GPU each time;
 a one-off failure stays until its entry is deleted. Entries are written whole or not at all.
 
 - `--changed-since OLD.json`: an earlier run's `--json` file. Every set row whose credits text start or end moved by

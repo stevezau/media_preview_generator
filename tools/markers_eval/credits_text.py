@@ -37,7 +37,7 @@ from .cache import ProbeCache
 from .credits import _name, _truth, judge_credits
 from .data import evidence_dir
 from .decisions import ORDER
-from .decode_cache import DecodeCache
+from .decode_cache import DecodeCache, ffmpeg_build
 from .online import SETTINGS, case_file, case_key, load_online, online_verdicts, tally
 from .plex import PlexMarker, first_marker, load_baseline, server_candidates
 
@@ -463,6 +463,7 @@ class CreditsTextCache:
         decode: str,
         gpu_device: str | None,
         count_boxes: Callable[[np.ndarray], list[int]],
+        backend: Callable[[], str | None],
         probe: Callable[[str], MediaProbe],
         decodes: DecodeCache | None = None,
     ) -> None:
@@ -474,6 +475,8 @@ class CreditsTextCache:
             decode: ``gpu`` or ``cpu``.
             gpu_device: The GPU worker's device (ignored on the CPU path).
             count_boxes: Text boxes per chunk of luma planes.
+            backend: The text detection backend ``count_boxes`` counts on (:attr:`TextDetection.backend`): answers
+                counted on another backend, or decoded on another GPU, are other answers.
             probe: A file's duration.
             decodes: Where the detector's decodes are kept across detector changes, or None to decode every time an
                 answer isn't cached.
@@ -486,7 +489,8 @@ class CreditsTextCache:
         self._root = root / "credits_text"
         self._root.mkdir(parents=True, exist_ok=True)
         self._ffmpeg, self._decode, self._gpu_device = ffmpeg, decode, gpu_device
-        self._count_boxes, self._probe, self._decodes = count_boxes, probe, decodes
+        self._count_boxes, self._backend, self._probe, self._decodes = count_boxes, backend, probe, decodes
+        self._build: str | None = None
         self.detector_digest = detector_digest()
         self.gpu_fallbacks: set[str] = set()
 
@@ -507,12 +511,17 @@ class CreditsTextCache:
 
         Returns:
             ``{"start_s", "end_s", "key", "fine", "end"}`` (from the cache when this identity, detector version and
-            source, decode path and kind were read before).
+            source, ffmpeg build, decode path and GPU, text detection backend and kind were read before). An answer
+            whose text detection backend changed while the file was read is returned but not kept.
         """
+        if self._build is None:
+            self._build = ffmpeg_build(self._ffmpeg)
         st = os.stat(path)
+        device = self._gpu_device if self._decode == "gpu" else None
+        backend = self._backend()
         key = (
-            f"{path}|{st.st_size}|{st.st_mtime_ns}|{CREDITS_TEXT_VERSION}|{self.detector_digest}|{self._decode}|"
-            f"{is_episode}"
+            f"{path}|{st.st_size}|{st.st_mtime_ns}|{CREDITS_TEXT_VERSION}|{self.detector_digest}|{self._build}|"
+            f"{self._decode}|{device}|{backend}|{is_episode}"
         )
         cached = self._root / (hashlib.sha1(key.encode(), usedforsecurity=False).hexdigest() + ".json")
         fell_back = cached.with_suffix(".cpu")
@@ -532,7 +541,8 @@ class CreditsTextCache:
             self.gpu_fallbacks.add(_name(path))
         data = {"start_s": found.start_s, "end_s": found.end_s, "key": [list(r) for r in found.key_rows],
                 "fine": [list(r) for r in found.fine_rows], "end": [list(r) for r in found.end_rows]}  # fmt: skip
-        cached.write_text(json.dumps(data))
+        if self._backend() == backend:
+            cached.write_text(json.dumps(data))
         return data
 
 
@@ -721,7 +731,7 @@ def run_credits_text(
         decodes = DecodeCache(cache_root, digest=decode_digest(), backend=detection.backend)
         cache = CreditsTextCache(
             cache_root, ffmpeg=ffmpeg, decode=decode, gpu_device=gpu_device, count_boxes=count_boxes,
-            probe=probes.probe, decodes=decodes,
+            backend=detection.backend, probe=probes.probe, decodes=decodes,
         )  # fmt: skip
         summary: dict = {"decode": decode, "detector_version": CREDITS_TEXT_VERSION,
                          "detector_digest": cache.detector_digest, "decode_digest": decodes.digest,

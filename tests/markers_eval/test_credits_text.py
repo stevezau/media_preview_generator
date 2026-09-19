@@ -301,7 +301,8 @@ def test_cache_runs_the_app_once_per_identity_and_version(tmp_path, monkeypatch)
 
     monkeypatch.setattr(ct, "find_credits", find)
     cache = ct.CreditsTextCache(tmp_path / "cache", ffmpeg="/ff", decode="gpu", gpu_device="cuda:0",
-                                count_boxes=lambda p: [0] * len(p), probe=lambda p: MediaProbe(DUR, ()))  # fmt: skip
+                                count_boxes=lambda p: [0] * len(p), backend=lambda: "webgpu cuda:0",
+                                probe=lambda p: MediaProbe(DUR, ()))  # fmt: skip
     first = cache.result(str(media), is_episode=False)
     second = cache.result(str(media), is_episode=False)
     assert first == second == {"start_s": 5702.0, "end_s": 5890.0, "key": [[5700.0, 2, 12.0]], "fine": [[5701.0, 2, 12.0]],
@@ -423,9 +424,77 @@ def test_every_package_module_the_detector_imports_is_hashed_or_changes_no_answe
     assert NOT_ANSWER_CODE <= imported  # a stale allowlist entry would hide the next module that does matter
 
 
-def _cache_for(tmp_path, find, decode="gpu"):
-    return ct.CreditsTextCache(tmp_path / "cache", ffmpeg="/ff", decode=decode, gpu_device="cuda:0",
-                               count_boxes=lambda p: [0] * len(p), probe=lambda p: MediaProbe(DUR, ()))  # fmt: skip
+def _cache_for(tmp_path, find, decode="gpu", gpu_device="cuda:0", backend="webgpu cuda:0"):
+    return ct.CreditsTextCache(tmp_path / "cache", ffmpeg="/ff", decode=decode, gpu_device=gpu_device,
+                               count_boxes=lambda p: [0] * len(p), backend=lambda: backend,
+                               probe=lambda p: MediaProbe(DUR, ()))  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "answered_again"),
+    [
+        (("gpu", "cuda:0", "webgpu cuda:0"), ("gpu", "cuda:0", "webgpu cuda:0"), False),  # the same run again
+        (("gpu", "cuda:0", "webgpu cuda:0"), ("gpu", "cuda:0", "cpu"), True),  # the self-test chose the CPU this time
+        (("gpu", "cuda:0", "webgpu cuda:0"), ("gpu", "cuda:1", "webgpu cuda:1"), True),  # another card decodes, counts
+        (("gpu", "cuda:0", "cpu"), ("gpu", "cuda:1", "cpu"), True),  # another card decodes, the CPU counts both times
+        (("gpu", "cuda:0", "cpu"), ("cpu", "cuda:0", "cpu"), True),  # a CPU run is another decode path
+        (("cpu", "cuda:0", "cpu"), ("cpu", "cuda:1", "cpu"), False),  # --gpu-device is unused on the CPU path
+    ],
+)  # fmt: skip
+def test_an_answer_is_kept_per_decode_path_card_and_text_detection_backend(tmp_path, monkeypatch, first, second,
+                                                                           answered_again):  # fmt: skip
+    media = tmp_path / "A.mkv"
+    media.write_bytes(b"x")
+    calls = []
+
+    def find(path, **kwargs):
+        calls.append(kwargs)
+        return CreditsTextResult(5702.0, None, (), (), ())
+
+    monkeypatch.setattr(ct, "find_credits", find)
+    _cache_for(tmp_path, find, *first).result(str(media), is_episode=False)
+    _cache_for(tmp_path, find, *second).result(str(media), is_episode=False)
+    assert len(calls) == (2 if answered_again else 1)
+    decode, gpu_device, _ = second
+    assert calls[-1]["gpu_device_path"] == (gpu_device if decode == "gpu" else None)
+
+
+def test_another_ffmpeg_build_answers_again(tmp_path, monkeypatch):
+    media = tmp_path / "A.mkv"
+    media.write_bytes(b"x")
+    calls, asked = [], []
+
+    def find(path, **kwargs):
+        calls.append(kwargs)
+        return CreditsTextResult(5702.0, None, (), (), ())
+
+    monkeypatch.setattr(ct, "find_credits", find)
+    for build in ("8.0.1-3ubuntu2", "8.0.1-3ubuntu2", "8.1-1ubuntu1"):
+        monkeypatch.setattr(ct, "ffmpeg_build", lambda ffmpeg, b=build: asked.append(ffmpeg) or f"ffmpeg version {b}")
+        cache = _cache_for(tmp_path, find)
+        cache.result(str(media), is_episode=False)
+        cache.result(str(media), is_episode=False)
+    assert (len(calls), asked) == (2, ["/ff", "/ff", "/ff"])  # one answer per build; each cache asks once
+
+
+def test_an_answer_whose_backend_changed_while_it_was_read_is_not_kept(tmp_path, monkeypatch):
+    # The GPU helper demoted to the CPU mid-file: its boxes came from both, so no later run may be handed them.
+    media = tmp_path / "A.mkv"
+    media.write_bytes(b"x")
+    calls = []
+    backends = iter(["webgpu cuda:0", "cpu"])
+
+    def find(path, **kwargs):
+        calls.append(kwargs)
+        return CreditsTextResult(5702.0, None, (), (), ())
+
+    monkeypatch.setattr(ct, "find_credits", find)
+    cache = ct.CreditsTextCache(tmp_path / "cache", ffmpeg="/ff", decode="gpu", gpu_device="cuda:0",
+                                count_boxes=lambda p: [0] * len(p), backend=lambda: next(backends),
+                                probe=lambda p: MediaProbe(DUR, ()))  # fmt: skip
+    assert cache.result(str(media), is_episode=False)["start_s"] == 5702.0
+    _cache_for(tmp_path, find).result(str(media), is_episode=False)
+    assert len(calls) == 2
 
 
 def test_a_file_the_gpu_cannot_decode_is_read_on_the_cpu_as_the_worker_does(tmp_path, monkeypatch):
@@ -494,7 +563,7 @@ def test_the_command_exits_non_zero_on_an_unknown_set(monkeypatch):
 def test_the_cache_refuses_data_folders():
     with pytest.raises(ValueError, match="/data"):
         ct.CreditsTextCache(__import__("pathlib").Path("/data/cache"), ffmpeg="/ff", decode="cpu", gpu_device=None,
-                            count_boxes=lambda p: [], probe=lambda p: MediaProbe(DUR, ()))  # fmt: skip
+                            count_boxes=lambda p: [], backend=lambda: "cpu", probe=lambda p: MediaProbe(DUR, ()))  # fmt: skip
 
 
 GATE_FILES = {
@@ -629,6 +698,7 @@ def test_the_run_hands_its_decode_path_and_tools_to_every_part(tmp_path, monkeyp
     # The helper is started on one blank frame before the first file, so the cache is told a backend from the start.
     assert run.counted[0] == (1, 180, 320) and decodes._backend() == "webgpu cuda:0"
     assert summary["text_detection"] == "webgpu cuda:0"
+    assert kwargs.pop("backend")() == "webgpu cuda:0"
     assert kwargs == {"ffmpeg": "/ff", "decode": decode, "gpu_device": gpu_device, "count_boxes": run.count_boxes}
     assert run.seen["probes"] == (tmp_path / "cache", "/ffp")
     assert run.seen["hdr_ffprobe"] == {"/ffp"}

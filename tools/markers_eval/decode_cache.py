@@ -1,12 +1,12 @@
 """The credit text detector's decodes, cached per exact ffmpeg command, so a change to rule J costs seconds, not an hour.
 
 Rule J is pure (rows in, answer out); the hour a ``credits-text`` run takes on storage is the decoding and text
-detection behind the rows. :class:`DecodeCache` keeps each decode's rows keyed on the file's identity, the exact ffmpeg
-command the app builds for it (window, keyframes or 1 fps, hwaccel arguments, scaler and keyframe thinning all
-included), the text detection backend that counted the boxes, and a digest of the code that turns a command into rows
-(``credits_text.decode_digest``). The app's own ``find_credits`` then runs unchanged against it: a rule change re-reads
-stored rows and decodes only the windows it hasn't read before, while a change to the decode code, the text detection
-or the model's pin reads everything again.
+detection behind the rows. :class:`DecodeCache` keeps each decode's rows keyed on the file's identity, the ffmpeg build
+and the exact command the app builds for it (window, keyframes or 1 fps, hwaccel arguments, scaler and keyframe
+thinning all included), the text detection backend that counted the boxes, and a digest of the code that turns a
+command into rows (``credits_text.decode_digest``). The app's own ``find_credits`` then runs unchanged against it: a
+rule change re-reads stored rows and decodes only the windows it hasn't read before, while a change to the decode code,
+the ffmpeg build, the text detection or the model's pin reads everything again.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import contextlib
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -24,17 +25,34 @@ import numpy as np
 from media_preview_generator.markers.credits import frames
 
 
+def ffmpeg_build(ffmpeg: str) -> str:
+    """The first line of ``ffmpeg -version`` (``ffmpeg version 8.0.1-3ubuntu2 Copyright …``).
+
+    Raises:
+        subprocess.CalledProcessError: ffmpeg couldn't say its version (it can't decode either).
+    """
+    result = subprocess.run([ffmpeg, "-version"], capture_output=True, text=True, check=True, timeout=30)
+    return result.stdout.splitlines()[0]
+
+
 class DecodeCache:
     """``decode_rows``, ``container_start_s`` and ``keyframe_thinning`` with :mod:`frames`' own signatures, answered
-    from disk when this exact decode or probe of this exact file was run before by the same decode code and, for rows,
-    the same text detection backend.
+    from disk when this exact decode or probe of this exact file was run before by the same decode code and ffmpeg
+    build and, for rows, the same text detection backend.
 
     A GPU decode that failed (:class:`frames.GpuDecodeError`: ffmpeg exited non-zero on the GPU or gave no frames, as
     for a codec the card can't decode) is kept as that failure, so the harness's CPU rerun of the file doesn't try the
     GPU again on every run. A one-off failure is kept too, until its entry is deleted or the decode code changes.
     """
 
-    def __init__(self, root: Path, *, digest: str, backend: Callable[[], str | None]) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        digest: str,
+        backend: Callable[[], str | None],
+        build: Callable[[str], str] | None = None,
+    ) -> None:
         """Create the cache (``root/credits_decodes``).
 
         Args:
@@ -44,6 +62,8 @@ class DecodeCache:
                 before its first request. It isn't in the command: a GPU run's CPU rerun of a file the card can't
                 decode builds the CPU run's command but counts on the GPU helper, and the helper's own self-test can
                 put a GPU worker's counting on the CPU.
+            build: An ffmpeg binary's build (:func:`ffmpeg_build`, asked once per binary): the same command on another
+                build is another decode.
 
         Raises:
             ValueError: ``root`` is under /data*.
@@ -53,15 +73,19 @@ class DecodeCache:
         self._root = root / "credits_decodes"
         self._root.mkdir(parents=True, exist_ok=True)
         self.digest, self._backend = digest, backend
+        self._build = build or ffmpeg_build
+        self._builds: dict[str, str] = {}
         self.decoded = 0
         self.reused = 0
         # The real functions, taken before :meth:`serving` puts this cache's own in their place on the module.
         self._container_start_s, self._decode_rows = frames.container_start_s, frames.decode_rows
         self._keyframe_thinning = frames.keyframe_thinning
 
-    def _entry(self, path: str, what: str) -> Path:
+    def _entry(self, path: str, ffmpeg: str, what: str) -> Path:
+        if ffmpeg not in self._builds:
+            self._builds[ffmpeg] = self._build(ffmpeg)
         st = os.stat(path)
-        key = f"{path}|{st.st_size}|{st.st_mtime_ns}|{self.digest}|{what}"
+        key = f"{path}|{st.st_size}|{st.st_mtime_ns}|{self.digest}|{self._builds[ffmpeg]}|{what}"
         return self._root / (hashlib.sha1(key.encode(), usedforsecurity=False).hexdigest() + ".json")
 
     def _write(self, entry: Path, data: dict) -> None:
@@ -79,7 +103,7 @@ class DecodeCache:
         timeout_s: float = frames.PROBE_TIMEOUT_S,
     ) -> float:
         """:func:`frames.container_start_s`, once per file identity."""
-        entry = self._entry(path, f"start|{ffmpeg}")
+        entry = self._entry(path, ffmpeg, f"start|{ffmpeg}")
         if entry.exists():
             return json.loads(entry.read_text())["start_s"]
         start_s = self._container_start_s(path, ffmpeg, cancel_check=cancel_check, timeout_s=timeout_s)
@@ -95,7 +119,7 @@ class DecodeCache:
         timeout_s: float = frames.PROBE_TIMEOUT_S,
     ) -> frames.KeyframeThinning:
         """:func:`frames.keyframe_thinning`, once per file identity (a timeout or a stuck ffprobe raises, uncached)."""
-        entry = self._entry(path, f"thinning|{ffmpeg}")
+        entry = self._entry(path, ffmpeg, f"thinning|{ffmpeg}")
         if entry.exists():
             return frames.KeyframeThinning(**json.loads(entry.read_text()))
         thinning = self._keyframe_thinning(path, ffmpeg, cancel_check=cancel_check, timeout_s=timeout_s)
@@ -140,7 +164,7 @@ class DecodeCache:
         what = f"{start_time_s!r}|{json.dumps(command)}"
         before = self._backend()
         if before is not None:
-            entry = self._entry(path, f"rows|{before}|{what}")
+            entry = self._entry(path, ffmpeg, f"rows|{before}|{what}")
             if entry.exists():
                 stored = json.loads(entry.read_text())
                 self.reused += 1
@@ -155,15 +179,15 @@ class DecodeCache:
                 timeout_s=timeout_s, start_time_s=start_time_s, keep_every=keep_every, drop_non_key=drop_non_key,
             )  # fmt: skip
         except frames.GpuDecodeError as exc:
-            self._keep(path, what, before, {"gpu_error": str(exc)})
+            self._keep(path, ffmpeg, what, before, {"gpu_error": str(exc)})
             raise
-        self._keep(path, what, before, {"rows": [list(row) for row in rows]})
+        self._keep(path, ffmpeg, what, before, {"rows": [list(row) for row in rows]})
         return rows
 
-    def _keep(self, path: str, what: str, before: str | None, data: dict) -> None:
+    def _keep(self, path: str, ffmpeg: str, what: str, before: str | None, data: dict) -> None:
         after = self._backend()
         if after is not None and before in (None, after):
-            self._write(self._entry(path, f"rows|{after}|{what}"), data)
+            self._write(self._entry(path, ffmpeg, f"rows|{after}|{what}"), data)
 
     @contextlib.contextmanager
     def serving(self) -> Iterator[None]:

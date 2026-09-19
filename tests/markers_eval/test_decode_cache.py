@@ -5,12 +5,14 @@ from __future__ import annotations
 import inspect
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from media_preview_generator.markers.credits import detector, frames
 from media_preview_generator.markers.probe import MediaProbe
 from tools.markers_eval import credits_text as ct
+from tools.markers_eval import decode_cache
 from tools.markers_eval.decode_cache import DecodeCache
 
 DUR = 6_000_000
@@ -54,6 +56,40 @@ def media(tmp_path):
     path = tmp_path / "A (2001).mkv"
     path.write_bytes(b"x")
     return path
+
+
+def test_another_ffmpeg_build_is_another_decode_for_rows_and_probes(tmp_path, monkeypatch, media):
+    decoder = _Decoder(monkeypatch)
+    asked = []
+
+    def build(version):
+        def answer(ffmpeg):
+            asked.append((version, ffmpeg))
+            return f"ffmpeg version {version}"
+
+        return answer
+
+    for version in ("8.0.1", "8.0.1", "8.1"):
+        cache = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu", build=build(version))
+        cache.decode_rows(str(media), **_kwargs(start_time_s=None))
+        cache.decode_rows(str(media), **_kwargs(start_time_s=None))
+    # One decode and one start-time probe per build; each cache asks its binary's build once.
+    assert (len(decoder.decodes), len(decoder.probes)) == (2, 2)
+    assert asked == [("8.0.1", "/ff"), ("8.0.1", "/ff"), ("8.1", "/ff")]
+
+
+def test_the_build_is_the_first_line_ffmpeg_prints_for_its_version(monkeypatch):
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(stdout="ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025\nbuilt with gcc 15\n")
+
+    monkeypatch.undo()  # the real ffmpeg_build, not the autouse stand-in
+    monkeypatch.setattr(decode_cache.subprocess, "run", run)
+    assert decode_cache.ffmpeg_build("/usr/bin/ffmpeg") == "ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025"
+    assert calls == [(["/usr/bin/ffmpeg", "-version"], {"capture_output": True, "text": True, "check": True,
+                                                        "timeout": 30})]  # fmt: skip
 
 
 def test_a_decode_runs_once_per_file_command_and_decode_code(tmp_path, monkeypatch, media):
@@ -279,8 +315,8 @@ def test_a_rule_change_reruns_the_apps_detector_on_stored_decodes(tmp_path, monk
 
     def cache():
         return ct.CreditsTextCache(tmp_path / "cache", ffmpeg="/ff", decode="gpu", gpu_device="cuda:0",
-                                   count_boxes=lambda p: [0] * len(p), probe=lambda p: MediaProbe(DUR, ()),
-                                   decodes=decodes)  # fmt: skip
+                                   count_boxes=lambda p: [0] * len(p), backend=lambda: "gpu cuda:0",
+                                   probe=lambda p: MediaProbe(DUR, ()), decodes=decodes)  # fmt: skip
 
     monkeypatch.setattr(ct, "detector_digest", lambda: "rule-1")
     first = cache().result(str(media), is_episode=False)
