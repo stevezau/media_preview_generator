@@ -760,7 +760,7 @@ class TestDecidedByCounts:
         icon = detail.locator(".marker-sources .info-icon")
         tip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
         assert tip.startswith("How many files each source decided in this job.")
-        assert "need review, failed or weren't checked aren't counted" in tip
+        assert "Markers that need review, and files that failed or weren't checked, aren't counted." in tip
         icon.hover()
         expect(detail.page.locator(".tooltip")).to_contain_text("How many files each source decided", timeout=3000)
 

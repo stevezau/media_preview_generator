@@ -956,7 +956,8 @@ Under a job's per-server results, **Decided by** counts how many files each sour
 example "Credits: chapters 40 · credit text 9 · TheIntroDB + server markers 3". It fills in while the job runs. A file
 counts once per type, under the sources its marker came from; a marker a chapter set counts as **chapters** even when
 other sources agreed, and **server markers** (markers already on your servers) only appear as the second opinion a
-single source needed. Files that need review, failed or weren't checked aren't counted. See
+single source needed; your own edited markers count as **your edits**. Markers that need review, and files that failed
+or weren't checked, aren't counted. See
 [Reference — Decided-by counts](reference.md#decided-by-counts).
 
 > [!NOTE]
