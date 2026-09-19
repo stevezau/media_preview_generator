@@ -1951,9 +1951,26 @@ def row_15_resources() -> dict:
     )
 
 
+# Since a34f3a0 a change (POST/PUT/PATCH/DELETE) that carries no API token is a browser request, so the CSRF check runs
+# before the route's own auth: with no session either, it is refused with 400 and this message instead of 401. A wrong
+# API token still answers 401.
+CSRF_REFUSED = "security token is missing or out of date"
+
+
+def refused_without_auth(method: str, path: str, body: Any = None) -> dict:
+    """A call with no credentials, and for a change also one with a wrong API token: both must be refused."""
+    code, answer = app(method, path, body, auth=False)
+    if method == "GET":
+        return {"method": method, "path": path, "status": code, "ok": code == 401}
+    wrong, _ = http(method, f"{APP}{path}", headers={"X-Auth-Token": "not-the-token"}, body=body)
+    refused = code == 401 or (code == 400 and CSRF_REFUSED in json.dumps(answer))
+    return {"method": method, "path": path, "status": code, "wrong_token_status": wrong, "ok": refused and wrong == 401}
+
+
 @row(14)
 def row_14_security() -> dict:
-    """Every /api/markers/* route without auth -> 401; path traversal on the item route -> 400."""
+    """Every /api/markers/* route without auth is refused (GET 401; a change 401, or 400 from the CSRF check, and 401
+    with a wrong API token) and queues no job; path traversal on the item route -> 400."""
     routes = json.loads(
         sh(
             "docker",
@@ -1970,12 +1987,16 @@ def row_14_security() -> dict:
         .splitlines()[-1]
     )
     checks = []
+    t0 = now_iso()
     for rule, methods in routes:
         path = rule.replace("<server_id>", "mlab-jellyfin")
         for method in methods:
             body = {} if method == "POST" else None
-            code, _ = app(method, path, body, auth=False)
-            checks.append({"method": method, "path": path, "status": code, "ok": code == 401})
+            checks.append(refused_without_auth(method, path, body))
+    queued = jobs_since(t0)
+    checks.append(
+        {"method": "-", "path": "no job queued by the refused calls", "status": len(queued), "ok": not queued}
+    )
     traversal = []
     for raw in ("/etc/passwd", "/media/synth-chapters/../../etc/passwd", "../../etc/passwd"):
         code, body = app("GET", f"/api/markers/item?{urllib.parse.urlencode({'path': raw})}")
@@ -1985,7 +2006,7 @@ def row_14_security() -> dict:
     passed = all(c["ok"] for c in checks + traversal)
     return write_result(
         14,
-        "Security: /api/markers/* without auth -> 401; path traversal -> 400",
+        "Security: /api/markers/* without auth refused; path traversal -> 400",
         "pass" if passed else "fail",
         {"routes": routes, "unauthenticated": checks, "traversal": traversal},
     )

@@ -2,6 +2,133 @@
 
 Lab servers on storage (`up.sh`), real library mounted `:ro`. Tokens in `env`, scrubbed from every result file.
 
+## Final review (2026-09-19, image final-review sha256:420d2b9c…, feat 4f1c8b7)
+
+**23 of 23 pass; the phase-1 regression passes 16 of 16.** Product bugs: none. One product finding for the owner
+(credit text on the synth test pattern, below). Three rows failed on the first run and passed after harness fixes:
+row 17 and phase-1 row 14 (CSRF) and row 2 (credit text publishes credits at Medium). Row 20 is now automated in
+Plex Web.
+
+### Lab setup
+
+- **Image:** `media_preview_generator:final-review` (`sha256:420d2b9cee59…`, version 4.4.3.dev180), built from
+  `feat/markers-detection` 4f1c8b7. `mlab-app` runs it with the NVIDIA runtime (`MLAB_APP_GPU=nvidia`).
+- **Reset, as in Task 17.**
+  - On the old app (`pr-241` from f8911ee): intro and credits detection off, then one normal job over Synth Chapters,
+    Synth Show, Synth Audio, Synth Movie, both Synth Credits movies, Rick and Morty S01, South Park S01, Toy Story
+    and Up. 27 files written; only our markers were removed.
+  - Earlier result files moved to `results/before-final-review/`.
+  - `mlab-app` and `mlab_app_config` removed, then `./app.sh recreate` on the new image with a fresh config (so the
+    first-start migration ran), then `./phase2_matrix.py configure`. All five servers are `ready`.
+  - The servers, their volumes and their plugins were kept.
+- **Jellyfin plugin:** the lab Jellyfins run 10.11.1.0 / 12.0.1.0 builds from before fa3772e (flush the marker store
+  file to disk before the rename). That change isn't installed here.
+- **Order:** `./phase2_matrix.py run` one row per call: 23, 1, 21, 17, 19, 22, 2, 3, 4, 18, 5, 6, 8, 7, 9, 10, 11,
+  12, 13, 14, 16, 15, then 20. Afterwards:
+  - rows 17 and phase-1 row 14 re-run after their harness fix, and row 19 collected (`P2_ROW19_COLLECT=1`);
+  - row 2 re-checked from its recorded runs (`P2_REEVALUATE=1`);
+  - row 20 ran four times: once during row 19's 600 s wait, then after the matrix, then twice after the architecture
+    review's fixes (the last is the recorded run). The review's token check failed the third run, on Plex Web's own
+    markup (see below); the fourth passed.
+- **Lab left as found:** `publish_when` High, Plex detection `never`, no schedules. No Synth Audio credits are served:
+  later High jobs took S01E02's off.
+
+### Rows
+
+| Row | Result | Evidence |
+|---|---|---|
+| 1 Capability | pass | 5 of 5 `ready`. Both Embys run plugin 1.0.0.0 with `intro_skip_registered` false. Season audio and credit text are available. |
+| 2 Season audio backfill, High then Medium | pass (harness fixed) | Both runs: every S01 episode is Needs review with season audio 3/3 near its theme (E01 19.4–48.3 s against 20–50 s), and no intro of ours is served. High fingerprinted (chromaprint peak 1, `-threads 2`); Medium ran none. S02E01's previous-season hint in the second run: 4/4 at 14.1–43.7 s. Medium also published credits 244.6 s → end on Synth Audio S01E02, from credit text alone (finding below). |
+| 3 High alone (G3) | pass | Plex's forced season detection found all four themes (E02 42.7–72.0 s). S01E02 stays Needs review: "Season audio and a server's own marker agree, but both come from matching audio; needs another source". |
+| 4 Weekly release | pass | One NORMAL job, "Season: Synth Audio (2022) · Season 02", holding only S02E01. S02E01 1/1 at 14.5–43.6 s and S02E02 1/1 at 59.4–88.5 s, both Needs review; nothing served. |
+| 5 Rick and Morty S01 at High | pass | Season audio is in the intro's `decided_by` on 11 of 11. On the 11 online truth cases: 11 useful, 0 wrong, 0 missed. |
+| 6 Emby write and serve (4.10) | pass | Synth Chapters E01–E03 marker chapters equal the decisions, with their 4 plain chapters kept. Synth Audio has none. The Extended copy is its own item with CreditsStart 100 s, and its row reads "2 marker(s); Emby skips to the end of the file". |
+| 7 Emby wipe matrix and a replaced file | pass | S01E02 keeps its markers through all five steps. The replaced S01E03 has `Stale` true and no marker chapters; the next job reports `markers_written`, and `Stale` is false. |
+| 8 Emby web Skip Intro | pass | "Skip Intro" visible at 22.9 s. |
+| 9 Emby 4.9 | pass | Marker chapters equal the decisions on 7 files; FullRefresh brings them back. |
+| 10 Check servers restores | pass | A forced job, then our rows dropped on Plex, Jellyfin 10.11 and Emby. One Check servers job wrote the same markers back, Plex's `final` flag included. The second run: "0 published item(s) changed". |
+| 11 Plex version drift | pass | After Check servers and after a normal job: "Waiting for this item's other versions to agree on: intro, credits", nothing served. With the copy removed, the markers are written again. |
+| 12 Plex P3 and P4 | pass | P3: `[index]` is credits 0, intro 1, unchanged after Plex's forced credits detection. P4: Plex added no intro row of its own. |
+| 13 L274 final flag | pass | Plex's forced intro detection moved the intro (129.0–156.8 s → 126.8–157.1 s) and left the credits rows as they were, `final` true. The next job reads "Keeping Plex's intro". |
+| 14 L263 movie versions | pass | Both Jellyfins: Outro 100–120 s on both versions. Each Emby version item has CreditsStart 100 s (4.10: 115/116, 4.9: 93/94). Plex: two separate items, then merged into one, serving credits 100–120 s, with both version files recorded. |
+| 15 Cassettes with lab servers stopped | pass | 30 passed. |
+| 16 Season view in the real app | pass | "Synth Chapters (2021) · Season 1", "3 ready", "Publish 3 to 5 servers", 15 of 15 dots green. The Publish click (a signed-in browser change, which now carries the CSRF token) queued the named NORMAL job, which completed. |
+| 17 Security | pass (harness fixed) | GETs answer 401. `POST …/season/publish` and `POST …/reconcile` answer 400 with the CSRF message, and 401 with a wrong token. No job was queued. Traversal answers 400. |
+| 18 Resources | pass | 11 fingerprints deleted. Chromaprint peak 2, with `-threads 2`. `mlab-app` peaked at 362 % CPU and 705 MiB (Task 17: 304 %, 242 MiB); the forced job now runs credit text too. |
+| 19 Phase-1 regression | pass | 16 of 16 (row 14 after its harness fix). Row 1: 13 Markers written and 1 Needs review (Task 17: 5 and 9): credit text now agrees with the online sources on 9 of 11 Rick and Morty credits. |
+| 20 Plex Web | pass (automated) | Plex Web 4.160.0: "Skip Intro" shown at 18.0 s; a click seeked to 47 s ("0:47 / 2:00"). "Skip Credits" shown at 101.0 s; a click seeked to 120 s, then S01E03 started. Four runs gave the same times. |
+| 21 Check servers schedule | pass | Fresh config: `[]`. Run now twice gave one LOW job carrying the schedule's id; the schedule was then deleted. |
+| 22 Deleted Jellyfin item | pass | The Extended and Copy versions removed. Check servers listed E01 and E03 with no "Couldn't read", and the next run listed nothing. |
+| 23 Emby `Replacing` round trip | pass | Check 22 passes on both Embys. |
+
+### Row 20, automated (`plexweb_client.py`)
+
+- **Runner:** `./phase2_matrix.py run 20` runs `plexweb_client.py` (Playwright Chromium from the shared venv,
+  `nice -n 19`). The lab Plex's token goes in on stdin.
+- **Sign-in without a password.** Plex Web keeps its sign-in in localStorage.
+  - An init script sets `myPlexAccessToken` (the lab token) and a fixed `clientID`, on the lab origin only.
+  - The client then picks the Home's admin on "Select User", named by plex.tv's Home user list.
+- **Allowlist, in code.** A `route` on the browser context aborts every request that isn't the lab Plex or plex.tv.
+  - WebSockets get the same test through `route_web_socket`. Service workers are blocked, because their requests
+    would bypass `route`.
+  - The lab Plex means 127.0.0.1:32402, plus its own plex.direct names from plex.tv's resource list, pinned to its
+    container address.
+  - The same account owns the production server. Plex Web tried it on its LAN and public plex.direct names, and
+    tried 127.0.0.1:32400; all of these were aborted, along with gstatic and sentry.
+  - The Python side calls only the lab Plex and plex.tv.
+- **Premise:** Plex serves our intro 17–47 s and credits 100–120 s on Synth Chapters S01E02, the app decided both, and
+  the item has no per-user marker.
+- **Result:**
+  - Each button shows inside its marker.
+  - Each click makes the player seek to the marker's end, read from the player's own `seeking` events: 47 s and
+    120 s. The credits end with the file (120 s of 120.008 s), so only the intro click shows that the seek target is
+    our marker's end and not the file's.
+  - No token appears in the page's URL, and the lab token isn't in its HTML.
+  - After Select User, Plex Web holds the picked user's own token and writes it into its image URLs, which is its
+    normal markup. The client masks both tokens in everything it prints.
+  - No playback session is left.
+  - The watched state and resume point of S01E02 and S01E03 are put back (Plex can't set back `lastViewedAt`).
+- **Screenshots:** `$MLAB_SHOTS/p2-row20-plex-web-*.png`.
+- **Native Plex apps:** still not testable here.
+
+### Expectations changed
+
+- **Row 17 and phase-1 row 14: CSRF (a34f3a0, e1096f6).**
+  - A change (POST, PUT, PATCH or DELETE) without an API token counts as a browser request. The CSRF check runs
+    before the route's own auth, so with no session the change now answers 400 "This page's security token is
+    missing or out of date… Scripts: send the API token…" instead of 401.
+  - Both rows now require: GET 401; a change refused with 401 or that 400; 401 with a wrong API token; no job queued.
+  - The lab scripts send `X-Auth-Token`, which is exempt. `configure` and every other row worked unchanged, and row
+    16's browser Publish passed because the page sends the token.
+- **Row 2: credit text (phase 3).**
+  - This was the row's first run with credit text on. At Medium, credit text alone decides credits (owner,
+    2026-09-18), so "no server serves an intro of ours" can't count every published marker.
+  - It now counts intros only, and the row notes the credits it published. It was re-checked from the recorded runs.
+- **Unchanged:** every other row passed as written under this review's other changes:
+  - Check servers rechecks (283b406): rows 10, 11, 21 and 22.
+  - The dropped Emby one-cut check (2256bca, be26229): rows 6, 9 and 14.
+  - Masked secrets and redacted job errors (2fb2b43, 1710711).
+  - The "Decided by" counts (dff2859): jobs now carry `marker_sources`.
+
+### Product findings
+
+- **Credit text reads the synth test pattern as credits, and Medium publishes one answer.**
+  - **What happened.** Synth Audio's picture is `testsrc2` and `smptebars` with a burnt-in running timecode, and
+    the files have no credits. Credit text answered on all five episodes: starts at 50.0, 101.0, 220.9, 223.6 and
+    244.6 s, with no end.
+  - Four fail the sanity checks (they start before the last 25 %). S01E02's answer (244.6 s → end) passes, and at
+    Medium it was published as credits to all five servers (job `b7c5f735`, "Decided by" credits_text 1).
+  - At High it stays Needs review (one source), and the lab's later High jobs took it off.
+  - **Real-world analog:** bright, text-dense footage (signage, a ticker, burnt-in text) running through the last
+    quarter of a file. Rule J counts a bright frame with 3 or more text boxes as a credit frame.
+  - **Not a regression:** this falls within the owner's Medium ruling (§5.4 detector gap) and isn't caused by this
+    review's commits.
+  - **Proposed, for the owner:**
+    - (a) accept it under the Medium ruling;
+    - (b) rule J gives no answer when credit-like frames also fill much of the tail before the last run (the content
+      is text-dense throughout, not a roll), gated on the 80- and 205-file harness sets;
+    - (c) either way, give Synth Audio a plain picture so the season audio rows stop exercising credit text.
+
 ## Task 4 — Emby plugin (2026-09-14, first build; superseded by fix round 1 below)
 
 **Build.** `emby-plugin/`, `nice -n 19 docker run … mcr.microsoft.com/dotnet/sdk:9.0 dotnet build -c Release

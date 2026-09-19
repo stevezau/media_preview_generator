@@ -596,10 +596,11 @@ def _season_audio_checks(evidence: dict) -> dict[str, bool]:
             "status"
         ] != "decided" and not any(e["source"] == "season_audio" and e["type"] for e in s2e01["season_audio_evidence"])
         argv = run["chromaprint_argv"]
-        # Nothing of ours on any server: no published marker in the app's records, Jellyfin and Emby show no intro, and
-        # Plex shows only the intro rows it had before the job (its own detection's, from row 3).
+        # No intro of ours on any server: no published intro in the app's records, Jellyfin and Emby show no intro, and
+        # Plex shows only the intro rows it had before the job (its own detection's, from row 3). Credits are out of
+        # this row's scope: since phase 3, credit text alone decides credits at Medium (see _published_credits).
         checks[f"{level}: no server serves an intro of ours"] = not any(
-            any(v.values()) for v in run["published"].values()
+            m["type"] == "intro" for v in run["published"].values() for markers in v.values() for m in markers
         ) and all(
             v["mlab-plex"] == run["served_intros_before"][name]["mlab-plex"]
             and not any(x for sid, x in v.items() if sid != "mlab-plex")
@@ -622,6 +623,17 @@ def _season_audio_checks(evidence: dict) -> dict[str, bool]:
         evidence["medium"]["episodes"]["S02E01"]["season_audio_evidence"], "season_audio_previous", AUDIO_TRUTH[(2, 1)]
     )
     return checks
+
+
+def _published_credits(run: dict) -> dict[str, list]:
+    """Per file, the credits the app published in a row 2 run (credit text alone decides them at Medium)."""
+    return {
+        name: sorted(
+            {(m["start_ms"], m["end_ms"]) for markers in v.values() for m in markers if m["type"] == "credits"}
+        )
+        for name, v in run["published"].items()
+        if any(m["type"] == "credits" for markers in v.values() for m in markers)
+    }
 
 
 def delete_fingerprints(folder: str) -> str:
@@ -685,6 +697,7 @@ def row_02_season_audio_backfill() -> dict:
         "expectation changed: S02E01's hint in the first run of a fresh show can be empty — it uses cached previous-season "
         "fingerprints only, and S02E01 ran before S01 was fingerprinted"
     )
+    notes += [f"{level}: credits published (not this row's question): {_published_credits(evidence[level])}" for level in evidence]  # fmt: skip
     return checks_result(
         2, "Season audio backfill at High and Medium on five servers", checks, {"setup": setup, **evidence}, notes
     )
@@ -1596,21 +1609,28 @@ def row_16_season_view() -> dict:
 
 @row(17)
 def row_17_security() -> dict:
-    """Without the token the phase 2 routes answer 401; the Season route refuses paths outside the libraries (400)."""
+    """Without the token the phase 2 routes are refused (GET 401; a POST 401, or 400 from the CSRF check since a34f3a0,
+    and 401 with a wrong API token) and queue no job; the Season route refuses paths outside the libraries (400)."""
+    t0 = now_iso()
     unauth = {
-        "GET /api/markers/season?path=x": app("GET", "/api/markers/season?path=x", auth=False)[0],
-        "POST /api/markers/season/publish": app("POST", "/api/markers/season/publish", {"path": "x"}, auth=False)[0],
-        "GET /api/markers/sources/local": app("GET", "/api/markers/sources/local", auth=False)[0],
-        "POST /api/markers/reconcile": app("POST", "/api/markers/reconcile", {}, auth=False)[0],
+        "GET /api/markers/season?path=x": p1.refused_without_auth("GET", "/api/markers/season?path=x"),
+        "POST /api/markers/season/publish": p1.refused_without_auth(
+            "POST", "/api/markers/season/publish", {"path": "x"}
+        ),
+        "GET /api/markers/sources/local": p1.refused_without_auth("GET", "/api/markers/sources/local"),
+        "POST /api/markers/reconcile": p1.refused_without_auth("POST", "/api/markers/reconcile", {}),
     }
+    queued = p1.jobs_since(t0)
     traversal = {
         raw: app("GET", f"/api/markers/season?{urllib.parse.urlencode({'path': raw})}")
         for raw in ("/etc/passwd", f"{AUDIO_ROOT}/../../etc/passwd")
     }
-    checks = {f"{k} -> 401": v == 401 for k, v in unauth.items()}
+    checks = {f"{k} refused without the token": v["ok"] for k, v in unauth.items()}
+    checks["no job queued by the refused calls"] = not queued
     checks.update({f"season path {k} -> 400": v[0] == 400 for k, v in traversal.items()})
+    notes = [f"{k}: {v['status']}, wrong token {v.get('wrong_token_status', '-')}" for k, v in unauth.items()]
     return checks_result(
-        17, "Security of the phase 2 routes", checks, {"unauthenticated": unauth, "traversal": traversal}
+        17, "Security of the phase 2 routes", checks, {"unauthenticated": unauth, "traversal": traversal}, notes
     )
 
 
@@ -1684,13 +1704,139 @@ def row_19_phase1_regression() -> dict:
     return checks_result(19, "Phase 1 regression", checks, {"results": results}, [f"results {results}"])
 
 
+PLEXWEB_CLIENT = HERE / "plexweb_client.py"
+PLEX_LIBRARY_ID = "com.plexapp.plugins.library"
+
+
+def plex_play_state(item: str) -> dict:
+    _, meta = plex("GET", f"/library/metadata/{item}")
+    found = meta["MediaContainer"]["Metadata"][0]
+    return {k: found.get(k) for k in ("viewCount", "viewOffset", "lastViewedAt")}
+
+
+def plex_set_play_state(item: str, state: dict) -> None:
+    """Watched or not, and the resume point, as in ``state`` (Plex can't set back a view count or lastViewedAt)."""
+    plex("GET", "/:/unscrobble", key=item, identifier=PLEX_LIBRARY_ID)
+    if state.get("viewCount"):
+        plex("GET", "/:/scrobble", key=item, identifier=PLEX_LIBRARY_ID)
+    if state.get("viewOffset"):
+        plex("GET", "/:/progress", key=item, identifier=PLEX_LIBRARY_ID, time=state["viewOffset"], state="stopped")
+
+
+def plex_sessions() -> int:
+    _, data = plex("GET", "/status/sessions")
+    return int(data["MediaContainer"].get("size", 0))
+
+
+def _first_shown(seen: dict, label: str) -> float | None:
+    return next((b["shown_at"] for b in seen.get("in_page", {}).get("buttons", []) if b["label"] == label and "shown_at" in b), None)  # fmt: skip
+
+
+def _landed_at(click: dict | None, target_s: float) -> bool:
+    """The click made the player seek to ``target_s`` (±1 s), read from its seek events or, failing those, its time on
+    the same part just after the click. Moving on to the next episode alone doesn't count: Up Next could do that."""
+    if not click:
+        return False
+    seeks = [s["to"] for s in click.get("seeks") or [] if s.get("part") == click["before"]["part"]]
+    after = click.get("after") or {}
+    return any(abs(t - target_s) <= 1 for t in seeks) or (
+        after.get("part") == click["before"]["part"] and abs(after.get("t", -99) - target_s) <= 1
+    )
+
+
 @row(20)
-def row_20_plex_app() -> dict:
-    """Plex apps show Skip Intro / Skip Credits on the lab Plex (ledger L276): needs the owner."""
-    return write_result(20, "Plex app shows Skip Intro / Skip Credits (ledger L276)", "needs owner", {
-        "ask": "Open Synth Chapters S01E02 on the claimed lab Plex in any Plex app: Skip Intro at 0:17 and Skip Credits at "
-        "1:40. Synth Audio S01E02 has no intro to skip (season audio never decides alone, R2/G3).",
-    })  # fmt: skip
+def row_20_plex_web() -> dict:
+    """Plex Web, served by the lab Plex (headless Chromium, plexweb_client.py), shows Skip Intro and Skip Credits on our
+    markers (ledger L276). Synth Chapters S01E02 (our intro 17–47 s, credits 100–120 s): played from 0 s, Skip Intro
+    shows inside the intro and a click seeks to 47 s; seeked to 96 s, Skip Credits shows inside the credits and a click
+    seeks to 120 s. Every browser request outside the lab Plex and plex.tv is aborted. The episode's and the next one's
+    watched state and resume point are put back afterwards. Native Plex apps: needs the owner."""
+    episode = p1.synth_path(2)
+    item, next_item = plex_item(episode), plex_item(p1.synth_path(3))
+    intro_start, intro_end, credits_start, credits_end = (ms / 1000 for ms in p1.SYNTH_TRUTH[2])
+    served = p1.plex_served(item)
+    # A per-user marker (not written by the app) would show a button without ours: there must be none on this item.
+    per_user = p1.plex_served(item, per_user=True)
+    decided = p1.decided(p1.item_payload(episode))
+    before = {i: plex_play_state(i) for i in (item, next_item)}
+    p1.SHOTS.mkdir(parents=True, exist_ok=True)
+    try:
+        # Unwatched with no resume point, so Plex Web offers Play from 0 s rather than Resume.
+        for i in before:
+            plex_set_play_state(i, {})
+        run = subprocess.run(
+            ["nice", "-n", "19", p1.VENV_PYTHON, str(PLEXWEB_CLIENT), item, "p2-row20-plex-web", "30", "96"],
+            input=ENV["PLEX_TOKEN"], capture_output=True, text=True, timeout=600, env={**os.environ, "MLAB_SHOTS": str(p1.SHOTS)},
+        )  # fmt: skip
+    finally:
+        sessions_left = _plex_sessions_after_play()
+        restore_errors = []
+        for i, state in before.items():
+            try:
+                plex_set_play_state(i, state)
+            except Exception as exc:  # one item's failed restore must not skip the other's
+                restore_errors.append(f"{i}: {type(exc).__name__}: {exc}")
+        if restore_errors:
+            say(f"  play state not restored: {restore_errors}")
+        after = {i: plex_play_state(i) for i in before}
+    try:
+        seen = json.loads(run.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        return write_result(20, "Plex Web Skip Intro / Skip Credits", "fail", {"error": scrub((run.stdout + run.stderr)[-3000:])})  # fmt: skip
+    intro_shown, credits_shown = _first_shown(seen, "Skip Intro"), _first_shown(seen, "Skip Credits")
+    ours = [("intro", intro_start * 1000, intro_end * 1000), ("credits", credits_start * 1000, credits_end * 1000)]
+    checks = {
+        "premise: Plex serves our intro 17–47 s and credits 100–120 s on S01E02": sorted((m["type"], m["start"], m["end"]) for m in served) == sorted(ours),
+        "premise: the app decided both": set(decided) >= {"intro", "credits"},
+        "premise: no per-user marker on S01E02": per_user == [],
+        "Skip Intro shows inside the intro": intro_shown is not None and intro_start <= intro_shown < intro_end,
+        "a click on Skip Intro seeks to the intro's end (47 s)": _landed_at(seen.get("skip_intro_click"), intro_end),
+        "Skip Credits shows inside the credits": credits_shown is not None and credits_start <= credits_shown < credits_end,
+        "a click on Skip Credits seeks to the credits' end (120 s)": _landed_at(seen.get("skip_credits_click"), credits_end),
+        "no token in the page's URL, and the lab token not in its HTML": seen.get("token_in_url") is False
+        and seen.get("lab_token_in_html") is False,
+        "no playback session left on the lab Plex": sessions_left == 0,
+        "watched state and resume point put back": not restore_errors and all(
+            bool(after[i]["viewCount"]) == bool(before[i]["viewCount"]) and after[i]["viewOffset"] == before[i]["viewOffset"] for i in before
+        ),
+    }  # fmt: skip
+    notes = [
+        f"Plex Web {seen.get('plex_web')}; Skip Intro shown at {intro_shown} s, click {_click_note(seen.get('skip_intro_click'))}",
+        f"Skip Credits shown at {credits_shown} s, click {_click_note(seen.get('skip_credits_click'))}; then {seen.get('after_skip_credits')}",
+        f"in-page button log {seen.get('in_page', {}).get('buttons')}",
+        f"aborted by the allowlist (not the lab Plex or plex.tv): {seen.get('blocked')}",
+        f"Plex Web's own markup carries the picked Home user's token (its image URLs): {seen.get('user_token_in_html')}; "
+        f"masked in the client's output ({seen.get('tokens_held')} token(s) held)",
+        f"play state before {before}, after {after}; screenshots {seen.get('screenshots')}",
+        "the credits end at the file's end (120 s of 120.008 s), so only the intro click shows the seek target is our "
+        "marker's end rather than the file's",
+        "native Plex apps (TV, mobile, HTPC): not testable here — needs owner",
+    ]
+    evidence = {"served": served, "per_user": per_user, "decided": decided, "seen": seen,
+                "play_state": {"before": before, "after": after, "restore_errors": restore_errors}}  # fmt: skip
+    return checks_result(20, "Plex Web Skip Intro / Skip Credits (ledger L276)", checks, evidence, notes)
+
+
+def _plex_sessions_after_play() -> int | str:
+    """The lab Plex's playback sessions after waiting up to 90 s for the row's own to end; an error text when they
+    can't be read, so the restore that follows still runs."""
+    try:
+        wait_until("the lab Plex's playback session to end", lambda: plex_sessions() == 0, timeout=90, every=3)
+    except TimeoutError:
+        pass
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+    try:
+        return plex_sessions()
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+
+def _click_note(click: dict | None) -> str:
+    if not click:
+        return "not made"
+    before = click["before"]
+    return f"at {before['t']:.2f} s -> seeks {[round(s['to'], 2) for s in click.get('seeks') or []]}, then {click.get('after')} ({click.get('duration_label')!r})"
 
 
 @row(21)
