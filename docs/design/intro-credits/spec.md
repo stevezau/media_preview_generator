@@ -856,9 +856,11 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     chose the CPU on that iGPU, so nothing beyond the self-test's own frames ran on it.
 13. **A lone credit-text keyframe inside a scene, within 24 s of the roll, joins rule J's run and extends it over
     that scene** — an end computed from the run's last credit keyframe can then land inside the scene instead of on
-    the roll. Not measured directly (none of the 17 files with a published end showed this shape, but the harness
-    didn't specifically search for it); the harness's frame-check sheets of every file with an end
-    (`evidence/eval/phase3-harness.md`) are where it would show up.
+    the roll. None of the harness's 17 files with a published end showed it, but one real episode does on the CPU
+    decode (final review, 2026-09-19): Rick and Morty S01E04's short roll only forms a run because a 3-box signage
+    keyframe 15.4 s after the roll's last credit keyframe (11.9 s into the next scene) joins it, so the start is
+    right (+0.8 s) and the end lands 11.5 s into the scene; on the GPU decode the same keyframe counts 2 boxes and the file gets no answer. Pinned in
+    `test_rule_j.TestAShortRollOverACardJustBrighterThanDark`; an end-side guard is a rule-J change under Q5.
 14. **Credit text answers late when a roll's opening section is names over bright footage, or is split by a gap
     longer than 24 s** (rule J's `coarse_start` takes the roll's last run) — the one measured reason on-screen
     credit text alone misses the usefulness and precision gate on the harder 205-movie set (§5.4 "Harness"; owner,

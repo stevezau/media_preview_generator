@@ -458,8 +458,8 @@ class TestRealJobThread:
 class TestCreditTextOnTheWorkers:
     """Worker → pipeline → credit text detector on the real runner, gate, dispatcher and worker (spec §6.4 items 4 and
     7): the text is read on the worker's own GPU, a GPU decode failure reruns the file on the CPU in the same worker,
-    and a cancel or a text detection failure gives every worker and job slot back. Only the decode and the helper pool
-    are faked (the frame and helper boundaries)."""
+    and a cancel or a text detection failure gives every worker and job slot back. Only the decode (with its start-time
+    probe) and the helper pool are faked (the frame and helper boundaries)."""
 
     @pytest.fixture
     def setup(self, engine, tmp_path, monkeypatch):
@@ -522,6 +522,8 @@ class TestCreditTextOnTheWorkers:
         pool = MagicMock()
         pool.count_boxes.return_value = [0]
         monkeypatch.setattr(frames, "decode_rows", decode_rows)
+        # The detector reads the container's start time once per file before its decodes: part of the faked decode.
+        monkeypatch.setattr(frames, "container_start_s", lambda *args, **kwargs: 0.0)
         monkeypatch.setattr(detector, "get_textdet_pool", lambda: pool)
         yield SimpleNamespace(path=str(media), store=store, publisher=publisher, decodes=decodes, effects=effects,
                               pool=pool)  # fmt: skip
