@@ -13,6 +13,7 @@ synth/ and results/ (default: this script's folder); MLAB_SHOTS where screenshot
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -20,6 +21,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -1912,6 +1914,212 @@ def row_23_emby_replacing_round_trip() -> dict:
     notes = [f"{c}: store file while held {r.get('store_file_while_held')}; POST after restart {r.get('post_after_restart', {}).get('body')}" for c, r in results.items()]  # fmt: skip
     return checks_result(
         23, "Emby plugin Replacing round trip through a killed write", checks, {"results": results}, notes
+    )
+
+
+JF_STORE = "/config/plugins/Jellyfin.Plugin.MediaPreviewBridge/markers"
+STRACE_SYSCALLS = "openat,write,pwrite64,writev,pwritev,pwritev2,fsync,fdatasync,rename,renameat,renameat2"
+# alpine 3.24.1, pinned by digest (the sidecar adds strace from apk).
+STRACE_IMAGE = "alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
+
+
+def jf_store_file(server_id: str, item_id: str) -> dict:
+    """The Bridge's marker store file for an item: its JSON (None when missing or not complete JSON), its size, and
+    whether a ``.tmp`` from a write is left beside it."""
+    path = f"{JF_STORE}/{item_id}.json"
+    raw = sh("docker", "exec", server_id, "cat", path, check=False)
+    mtime = sh("docker", "exec", server_id, "stat", "-c", "%y", path, check=False).strip()
+    tmp_left = sh("docker", "exec", server_id, "sh", "-c", f"test -e '{path}.tmp' && echo yes || true", check=False)
+    try:
+        parsed = json.loads(raw) if raw else None
+    except json.JSONDecodeError:
+        parsed = None
+    return {
+        "exists": bool(raw),
+        "bytes": len(raw.encode()),
+        "mtime": mtime,
+        "json": parsed,
+        "tmp_left": tmp_left.strip() == "yes",
+    }
+
+
+def stored_tuples(store: dict) -> list[tuple]:
+    """A store file's segments as (type, start ticks, end ticks); the plugin writes the type as its enum number."""
+    names = {0: "Unknown", 1: "Commercial", 2: "Preview", 3: "Recap", 4: "Outro", 5: "Intro"}
+    segments = (store.get("json") or {}).get("Segments") or []
+    return sorted((names.get(s["Type"], s["Type"]), s["StartTicks"], s["EndTicks"]) for s in segments)
+
+
+class JellyfinStrace:
+    """strace on a lab Jellyfin's server process, from a throwaway alpine sidecar that shares only its PID namespace:
+    nothing is installed in the lab container. ``lines`` is None when it couldn't attach (``error`` says why).
+
+    Use it as a context manager: the sidecar is removed however the block ends, and stopping it (SIGTERM) makes strace
+    detach from every Jellyfin thread first.
+    """
+
+    def __init__(self, server_id: str) -> None:
+        self.server_id = server_id
+        self.name = f"mlab-strace-{server_id}"
+        self.lines: list[str] | None = None
+        self.error = ""
+
+    def __enter__(self) -> JellyfinStrace:
+        script = (
+            "apk add --no-cache strace >/dev/null && pid=$(for p in /proc/[0-9]*; do "
+            '[ "$(cat $p/comm 2>/dev/null)" = jellyfin ] && echo ${p#/proc/} && break; done) && '
+            f"exec strace -f -tt -y -e trace={STRACE_SYSCALLS} -o /tmp/trace.txt -p $pid"
+        )
+        sh("docker", "rm", "-f", self.name, check=False)
+        try:
+            sh("docker", "run", "-d", "--name", self.name, f"--pid=container:{self.server_id}", "--cap-add",
+               "SYS_PTRACE", STRACE_IMAGE, "sh", "-c", script)  # fmt: skip
+            wait_until(f"strace to attach to {self.server_id}", lambda: "attached" in self._logs(), timeout=90, every=2)
+        except (TimeoutError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            self.error = f"{type(exc).__name__}: {exc} {self._logs()[-300:]}"
+        except BaseException:
+            self._remove()
+            raise
+        return self
+
+    def _logs(self) -> str:
+        try:
+            out = subprocess.run(["docker", "logs", self.name], capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            return ""
+        return out.stdout + out.stderr
+
+    def _remove(self) -> None:
+        try:
+            sh("docker", "stop", "-t", "20", self.name, check=False, timeout=60)
+        finally:
+            sh("docker", "rm", "-f", self.name, check=False, timeout=60)
+
+    def __exit__(self, *exc: object) -> None:
+        try:
+            sh("docker", "stop", "-t", "20", self.name, check=False, timeout=60)
+            if not self.error:
+                with tempfile.TemporaryDirectory() as tmp:
+                    sh("docker", "cp", f"{self.name}:/tmp/trace.txt", f"{tmp}/trace.txt", check=False, timeout=60)
+                    trace = Path(tmp, "trace.txt")
+                    text = trace.read_text(errors="replace") if trace.exists() else ""
+                self.lines = [line for line in _join_resumed(text.splitlines()) if f"{JF_STORE}/" in line]
+        finally:
+            sh("docker", "rm", "-f", self.name, check=False, timeout=60)
+
+    def for_item(self, item_id: str) -> list[str]:
+        return [line for line in self.lines or [] if item_id in line]
+
+
+# strace -f -tt lines: pid, time, then the call; an interrupted call is split into "<unfinished ...>" and
+# "<... name resumed>" lines.
+_STRACE_LINE = re.compile(r"^(\d+)\s+(\S+)\s+(\w+)\((.*)$")
+_STRACE_RESUMED = re.compile(r"^(\d+)\s+\S+\s+<\.\.\. \w+ resumed>(.*)$")
+_WRITE_CALLS = ("write", "pwrite64", "writev", "pwritev", "pwritev2")
+
+
+def _join_resumed(lines: list[str]) -> list[str]:
+    """Each split call as one line, at the place it started."""
+    out: list[str] = []
+    pending: dict[str, int] = {}
+    for line in lines:
+        resumed = _STRACE_RESUMED.match(line)
+        if resumed and resumed.group(1) in pending:
+            index = pending.pop(resumed.group(1))
+            out[index] = out[index].removesuffix(" <unfinished ...>") + resumed.group(2)
+            continue
+        if line.endswith("<unfinished ...>"):
+            pending[line.split(None, 1)[0]] = len(out)
+        out.append(line)
+    return out
+
+
+def fsync_before_rename(lines: list[str]) -> bool:
+    """The trace shows the item's .tmp written, then fsynced on the same descriptor with no write after it, and only
+    then renamed over the store file."""
+    calls = [(m.group(3), m.group(4)) for m in map(_STRACE_LINE.match, lines) if m]
+    rename = next(
+        (i for i, (name, args) in enumerate(calls)
+         if name in ("rename", "renameat", "renameat2") and ".json.tmp" in args and args.rstrip().endswith("= 0")),
+        None,
+    )  # fmt: skip
+    if rename is None:
+        return False
+    writes = [i for i, (name, args) in enumerate(calls[:rename]) if name in _WRITE_CALLS and ".json.tmp" in args]
+    if not writes:
+        return False
+    last_write = writes[-1]
+    fd = calls[last_write][1].split("<", 1)[0]
+    return any(
+        name in ("fsync", "fdatasync") and args.startswith(f"{fd}<") and ".json.tmp" in args
+        and args.rstrip().endswith("= 0")
+        for name, args in calls[last_write + 1 : rename]
+    )  # fmt: skip
+
+
+@row(24)
+def row_24_jellyfin_store_survives_restart() -> dict:
+    """Jellyfin plugin fa3772e (the marker store file is flushed to disk before its rename): our markers on Synth Chapters
+    S01E02 are dropped on both Jellyfins, a normal job publishes them again, and the store file on disk is then complete
+    JSON holding the item's Intro and Outro. Jellyfin still serves them (/MediaSegments) after a container restart and
+    after a library scan, and neither rewrites the store file. An strace sidecar must attach and show the .tmp written,
+    fsynced on the same descriptor, then renamed; P2_STRACE=off leaves strace out (its checks with it)."""
+    episode = p1.synth_path(2)
+    name = episode.rsplit("/", 1)[-1]
+    items = {sid: p1.jf_items(sid)[episode]["id"] for sid in p1.JELLYFINS}
+    want = expected_jellyfin(p1.item_payload(episode))
+    file_size = (p1.SYNTH_HOST_SEASON / name).stat().st_size
+    for sid, item in items.items():
+        p1.jf(sid, "DELETE", f"/MediaPreviewBridge/Markers/{item}")
+    dropped = {sid: {"served": jf_tuples(sid, item), "store": jf_store_file(sid, item)} for sid, item in items.items()}
+    use_strace = os.environ.get("P2_STRACE", "on") != "off"
+    traces = {sid: JellyfinStrace(sid) for sid in p1.JELLYFINS} if use_strace else {}
+    with contextlib.ExitStack() as stack:
+        for trace in traces.values():
+            stack.enter_context(trace)
+        job, files = run_job({"file_paths": [episode], "library_name": "Phase 2 row 24 Jellyfin store file"})
+    published = {
+        sid: {"served": jf_tuples(sid, item), "store": jf_store_file(sid, item)} for sid, item in items.items()
+    }
+    for sid in p1.JELLYFINS:
+        sh("docker", "restart", sid)
+    for sid in p1.JELLYFINS:
+        p1.jf_wait_healthy(sid)
+    restarted = {
+        sid: {"served": jf_tuples(sid, item), "store": jf_store_file(sid, item)} for sid, item in items.items()
+    }
+    for sid in p1.JELLYFINS:
+        t0 = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+        p1.jf(sid, "POST", "/Library/Refresh")
+        p1.jf_wait_task_idle(sid, "RefreshLibrary", started_after=t0)
+    scanned = {sid: {"served": jf_tuples(sid, item), "store": jf_store_file(sid, item)} for sid, item in items.items()}
+    checks: dict[str, bool] = {"job completed": job["status"] == "completed", "premise: decisions have an intro and credits": len(want) == 2}  # fmt: skip
+    for sid in p1.JELLYFINS:
+        store = published[sid]["store"]
+        checks.update({
+            f"{sid}: premise: dropped (nothing served, no store file)": not dropped[sid]["served"] and not dropped[sid]["store"]["exists"],
+            f"{sid}: the job wrote it (markers_written)": server_row(files, name, sid).get("status") == "markers_written",
+            f"{sid}: store file is complete JSON with the item's Intro and Outro and the file's size": stored_tuples(store) == want and (store["json"] or {}).get("FileSize") == file_size,
+            f"{sid}: no .tmp left beside it": not store["tmp_left"],
+            f"{sid}: served after publish": published[sid]["served"] == want,
+            f"{sid}: served after a container restart": restarted[sid]["served"] == want,
+            f"{sid}: served after a library scan": scanned[sid]["served"] == want,
+            f"{sid}: neither rewrote the store file (bytes, mtime, JSON)": all(
+                state[sid]["store"][k] == store[k] for state in (restarted, scanned) for k in ("bytes", "mtime", "json")
+            ),
+        })  # fmt: skip
+        if use_strace:
+            checks[f"{sid}: strace attached"] = traces[sid].lines is not None
+            checks[f"{sid}: strace: .tmp written, fsynced on the same descriptor, then renamed"] = fsync_before_rename(traces[sid].for_item(items[sid]))  # fmt: skip
+    notes = [f"{sid}: store {published[sid]['store']['bytes']} bytes {published[sid]['store']['json']}; served {published[sid]['served']}" for sid in p1.JELLYFINS]  # fmt: skip
+    notes += [f"{sid}: strace {'not attached: ' + t.error if t.lines is None else t.for_item(items[sid])}" for sid, t in traces.items()]  # fmt: skip
+    evidence = {
+        "items": items, "want": want, "file_size": file_size, "dropped": dropped, "published": published,
+        "restarted": restarted, "scanned": scanned, "files": files,
+        "strace": {sid: {"attached": t.lines is not None, "error": t.error, "lines": t.for_item(items[sid])} for sid, t in traces.items()} or "off",
+    }  # fmt: skip
+    return checks_result(
+        24, "Jellyfin marker store file survives a restart and a scan (fa3772e)", checks, evidence, notes
     )
 
 

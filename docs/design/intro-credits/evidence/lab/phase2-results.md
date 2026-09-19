@@ -21,8 +21,8 @@ Plex Web.
   - `mlab-app` and `mlab_app_config` removed, then `./app.sh recreate` on the new image with a fresh config (so the
     first-start migration ran), then `./phase2_matrix.py configure`. All five servers are `ready`.
   - The servers, their volumes and their plugins were kept.
-- **Jellyfin plugin:** the lab Jellyfins run 10.11.1.0 / 12.0.1.0 builds from before fa3772e (flush the marker store
-  file to disk before the rename). That change isn't installed here.
+- **Jellyfin plugin:** the lab Jellyfins ran 10.11.1.0 / 12.0.1.0 builds from before fa3772e (flush the marker store
+  file to disk before the rename). The follow-up below installs builds with it and re-runs the Jellyfin rows.
 - **Order:** `./phase2_matrix.py run` one row per call: 23, 1, 21, 17, 19, 22, 2, 3, 4, 18, 5, 6, 8, 7, 9, 10, 11,
   12, 13, 14, 16, 15, then 20. Afterwards:
   - rows 17 and phase-1 row 14 re-run after their harness fix, and row 19 collected (`P2_ROW19_COLLECT=1`);
@@ -128,6 +128,98 @@ Plex Web.
     - (b) rule J gives no answer when credit-like frames also fill much of the tail before the last run (the content
       is text-dense throughout, not a roll), gated on the 80- and 205-file harness sets;
     - (c) either way, give Synth Audio a plain picture so the season audio rows stop exercising credit text.
+
+### Jellyfin plugin fa3772e (2026-09-19)
+
+**Every Jellyfin row passes with the plugin that flushes its marker store file to disk before the rename.**
+
+- **Builds:** from `feat/markers-detection` 790a4de (`git archive`, so no local build output is reused). Built the way
+  the plugin CI does it (`dotnet restore` + `dotnet build -c Release -p:JellyfinAbi=…`) in
+  `mcr.microsoft.com/dotnet/sdk` containers: 0 warnings, 0 errors.
+
+  | ABI | SDK | Version | sha256 |
+  |---|---|---|---|
+  | 10.11 (net9.0) | 9.0.318 | 10.11.1.0 | `efaf1306e0a01291d9001c8e3db8225b6b2b8f24be80cfdf741ec37a39136e4c` |
+  | 12.0 (net10.0) | 10.0.401 | 12.0.1.0 | `d29ba4302d189b4ac45e6d6102df8bd5a6ac892ef9d1fa50625c14dec771a5b2` |
+
+  - The csproj versions didn't change, so the new builds report the same versions as the ones they replace
+    (10.11 `060857ad…`, 12.0 `51ab1b07…`, from 2073f3d). Only the sha256 tells them apart.
+  - The new DLLs reference `FileStream` and `Flush` and no longer `WriteAllText`.
+  - The old DLLs are kept in `results/jellyfin-plugin-before-fa3772e/`.
+- **Install:** each DLL copied over its `MediaPreviewBridge_<version>` folder's DLL, then the container restarted.
+  - `GET /Plugins`: Media Preview Bridge 10.11.1.0 on Jellyfin 10.11.11 and 12.0.1.0 on Jellyfin 12.0.0, both Active.
+  - `Ping` answers `features` trickplay and markers.
+  - The app reports both `ready` with their `plugin_version`. The Edit tab shows "Update needed" only for
+    `plugin_outdated` (read from `markers_server_tab.js`; the page itself wasn't opened).
+  - At startup, the plugin's cleanup task checked 546 (10.11) and 548 (12.0) stored items. It removed 2 on 12.0,
+    leftovers of the Extended and Copy items that row 22 deleted.
+- **Runs:**
+  - Row 24 (new) ran once on the lab as found.
+  - Then the Task 17 reset (our markers removed through the new plugins, 29 files written; a fresh `mlab_app_config`;
+    `configure`).
+  - Then `run 1 19 22 2 4 10 14 16`, phase-1 row 10 again after its harness fixes, row 19 collected, and row 24 again
+    after the architecture review's fixes.
+
+| Row | Result | Evidence |
+|---|---|---|
+| p2 1 Capability | pass | 5 of 5 `ready`; Jellyfins report 10.11.1.0 and 12.0.1.0. |
+| p2 2 Season audio | pass | No intro of ours on any server, both Jellyfins included. |
+| p2 4 Weekly release | pass | Nothing served on S02 on either Jellyfin. |
+| p2 10 Check servers restores | pass | Jellyfin 10.11 plugin DELETE, then one Check servers job wrote it back: same segments as before the drop. |
+| p2 14 Movie versions | pass | Both Jellyfins list both versions with Outro 100–120 s. |
+| p2 16 Season view | pass | 15 of 15 dots green, both Jellyfins included. |
+| p2 22 Deleted Jellyfin item | pass | No "Couldn't read"; the run after lists nothing. |
+| p2 24 Store file survives a restart and a scan (new) | pass (3 runs) | See below. |
+| p2 19 Phase-1 regression | pass | 16 of 16. Jellyfin rows: 1 (14 written on both), 3 (ticks equal the decisions), 4 (store files' name, mtime and size unchanged), 6 (scan, ReplaceAllMetadata, Media Segment Scan, restart: kept), 7, 8 (12.0 wrote the second versions), 13 (Skip Intro at 22.9 s on both), 17 (verify job wrote back what both rescans dropped), 19 (12.0 alternates carry our segments; Skip Intro on the 130 s Extended). |
+
+**Row 24 (new, `./phase2_matrix.py run 24`).** On Synth Chapters S01E02, both Jellyfins:
+
+1. Our segments are dropped (plugin `DELETE`: nothing served, no store file).
+2. A normal job writes them back (`markers_written`).
+3. The store file is complete JSON with no `.tmp` beside it (145 bytes):
+   `{"FileSize":6441241,"Segments":[{"Type":5,"StartTicks":170000000,"EndTicks":470000000},{"Type":4,…}]}`. Those are
+   the decisions and the file's size.
+4. `/MediaSegments` serves Intro 17–47 s and Outro 100–120 s after the publish, after `docker restart`, and after a
+   library scan. Neither the restart nor the scan rewrote the store file (bytes, mtime and JSON unchanged).
+
+**The fsync, observed.** strace ran from a throwaway `alpine` sidecar that shares only the Jellyfin container's PID
+namespace (`--cap-add SYS_PTRACE`). Nothing was installed in the lab container. On both servers the publish is:
+
+```
+openat("<store>/<item>.json.tmp", O_WRONLY|O_CREAT|O_CLOEXEC)
+pwrite64(<tmp>, "{\"FileSize\":6441241,…", 145) = 145
+fsync(<tmp>) = 0
+rename("<store>/<item>.json.tmp", "<store>/<item>.json") = 0
+```
+
+- **What the row requires:** the sidecar attaches, and the item's last `.tmp` write is followed by a successful
+  fsync on the same descriptor before the rename. (`P2_STRACE=off` leaves strace and those checks out.)
+- **Afterwards:** Jellyfin's `TracerPid` is 0, and no sidecar is left.
+- **Not covered:** the store folder itself is never fsynced, so after a power cut the rename may be lost. The store
+  would then hold the previous file or none, never an empty one, and the commit's aim was no empty file.
+
+**Expectation changed: phase-1 row 10 (per-job pause).**
+
+- **First failure:** 1 file done at the pause and 5 s later, then 2 while the preview job ran.
+  - The app's log shows the dispatcher gave S01E01 to the GPU worker in the same second as the pause, just before the
+    pause was recorded. A 2160p HEVC file was already on the CPU worker.
+  - The pause is soft (files already on a worker finish), and one finished after the row's fixed 5 s wait.
+- **The row now waits until every worker is idle** (`/api/jobs/workers`) instead of 5 s. It records which files were
+  on a worker at the pause, and requires that no more than those finish.
+- **Second failure, on that stricter check:** 2 files done once the workers were idle, then 3 while the preview job
+  ran.
+  - The paused job's own log has no file picked up between "Pause requested" (03:15:58) and "Resume requested"
+    (03:17:20).
+  - Its Files rows show the third file (S01E05, on the CPU worker since 03:15:46) finishing at 03:17:15.
+  - The job's processed count is published every 3 s by the dispatcher, so the row had read it just before it caught
+    up.
+  - The row now counts the job's Files rows, which are written as each file finishes.
+  - After the architecture review it also requires that no file of the season is on a worker when the preview job
+    finishes: a file handed out when the webhook arrived would still be running.
+- **Last two runs pass.** For example: 1 row and 2 files in flight at the pause, 3 rows once they finished, still 3
+  (and nothing of the season on a worker) when the preview job had finished; resume completed 13/13.
+- **Not a plugin or product change:** the pause held in every run. Earlier runs passed because their in-flight files
+  finished within 5 s. This time, credit text on the CPU worker took 89 s for one 2160p file.
 
 ## Task 4 — Emby plugin (2026-09-14, first build; superseded by fix round 1 below)
 

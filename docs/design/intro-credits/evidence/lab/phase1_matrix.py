@@ -1448,10 +1448,27 @@ def row_10_per_job_pause() -> dict:
     """
     previous = RESULTS / "row-10.json"
     earlier = json.loads(previous.read_text()) if previous.exists() else None
+
+    def processed(job_state: dict) -> int:
+        return job_state["progress"]["processed_items"]
+
+    def busy_workers() -> list[str]:
+        # Nothing else runs in the lab at this point, so every busy worker holds one of this job's files.
+        return [w["current_title"] for w in app_ok("GET", "/api/jobs/workers")["workers"] if w["status"] != "idle"]
+
+    # The job's Files rows are written as each file finishes; its processed count is published only every 3 s, so
+    # the row counts rows.
+    def files_done() -> int:
+        return len(job_files(job["id"]))
+
+    season_titles = {path.rsplit("/", 1)[-1] for path in library_files(SOUTH_PARK_SEASON)}
+
     if os.environ.get("ROW10_JOB"):
         # Continue a job an earlier attempt already paused (that attempt's webhook was deduplicated: the app drops a
         # repeat of the same source + file for 600 s).
         job = app_ok("GET", f"/api/jobs/{os.environ['ROW10_JOB']}")
+        in_flight = busy_workers()
+        done_at_pause = files_done()
         paused = at_pause = job
     else:
         job = start_markers_job(
@@ -1464,9 +1481,22 @@ def row_10_per_job_pause() -> dict:
 
         wait_until("the backfill to finish a file", mid_run, every=0.2, timeout=300)
         paused = app_ok("POST", f"/api/jobs/{job['id']}/pause")
+        # Busy workers before the Files rows: a file that finishes between the two reads is counted in both, never
+        # in neither (the worker thread writes the row; the dispatcher marks the worker idle only after the thread
+        # ends). A forced job sends every file to a worker, so no check-stage result lands outside this count.
+        in_flight = busy_workers()
+        done_at_pause = files_done()
         at_pause = app_ok("GET", f"/api/jobs/{job['id']}")
-    time.sleep(5)
+    # The pause is soft: files already on a worker finish. A fixed 5 s wasn't always enough (a forced 2160p HEVC file
+    # with credit text ran past it), so settle once every worker is idle, then measure.
+    wait_until(
+        "the paused job's in-flight files to finish",
+        lambda: all(w["status"] == "idle" for w in app_ok("GET", "/api/jobs/workers")["workers"]),
+        timeout=900,
+        every=2,
+    )
     settled = app_ok("GET", f"/api/jobs/{job['id']}")
+    done_settled = files_done()
     t0 = send_webhook_now(int(os.environ.get("ROW10_WEBHOOK_EPISODE", "1")))
     found = wait_until(
         "the webhook preview job",
@@ -1475,21 +1505,30 @@ def row_10_per_job_pause() -> dict:
     )
     preview = wait_job(found[0]["id"], timeout=900)
     during = app_ok("GET", f"/api/jobs/{job['id']}")
+    done_during = files_done()
+    # A file of this season handed out when the webhook's jobs arrived would still be on a worker now (each takes
+    # seconds); the webhook's own follow-up is a Synth Chapters file.
+    season_on_workers = [title for title in busy_workers() if title in season_titles]
     followers = [j for j in jobs_since(t0) if j.get("kind") == "intro_credits"]
     resumed = app_ok("POST", f"/api/jobs/{job['id']}/resume")
     final = wait_job(job["id"], timeout=1800)
     followers = [wait_job(j["id"], timeout=900) for j in followers]
-    processed = lambda j: j["progress"]["processed_items"]  # noqa: E731
+    # Only the files already on a worker at the pause may finish: one handed out after it would show up here.
     held = (
         settled["paused"]
         and during["paused"]
-        and processed(during) == processed(settled)
+        and done_settled <= done_at_pause + len(in_flight)
+        and done_during == done_settled
+        and not season_on_workers
         and during["status"] == "running"
     )
+    # Premise of the worker check: the season's titles are known (an empty set would pass it whatever ran).
+    held = held and len(season_titles) == at_pause["progress"]["total_items"]
     passed = held and preview["status"] == "completed" and final["status"] == "completed" and not resumed.get("paused")
     notes = [
         f"paused at {processed(at_pause)}/{at_pause['progress']['total_items']} (pause response paused={paused.get('paused')})",
-        f"5 s later {processed(settled)}; while the preview job ran {processed(during)}, status {during['status']}, paused={during['paused']}",
+        f"Files rows at the pause {done_at_pause}; in flight at the pause: {in_flight}; season titles known {len(season_titles)}",
+        f"once every worker was idle {done_settled} rows; when the preview job had finished {done_during} rows, this season on a worker {season_on_workers}, status {during['status']}, paused={during['paused']}",
         f"preview job {preview['id'][:8]} {preview['status']} priority {preview['priority']} ({preview['started_at']} -> {preview['completed_at']})",
         f"follow-up Intro & Credits jobs: {[(j['id'][:8], j['status'], j['started_at']) for j in followers]}",
         f"after resume: {final['status']} {final['progress']['processed_items']}/{final['progress']['total_items']}; outcomes { {k: v for k, v in (final['progress'].get('outcome') or {}).items() if v} }",
