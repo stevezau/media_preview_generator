@@ -97,6 +97,7 @@ class DecodeCache:
         cancel_check: Callable[[], bool] | None = None,
         timeout_s: float = frames.DECODE_TIMEOUT_S,
         start_time_s: float | None = None,
+        keep_every: int | None = None,
     ) -> list[frames.Row]:
         """:func:`frames.decode_rows`, once per file identity, exact command, start time and text detection.
 
@@ -106,7 +107,7 @@ class DecodeCache:
         """
         command, _ = frames.decode_command(
             ffmpeg, path, start_s=start_s, length_s=length_s, keyframes_only=keyframes_only, fps=fps, gpu=gpu,
-            gpu_device_path=gpu_device_path,
+            gpu_device_path=gpu_device_path, keep_every=keep_every,
         )  # fmt: skip
         if start_time_s is None:
             start_time_s = self.container_start_s(path, ffmpeg, cancel_check=cancel_check)
@@ -122,7 +123,7 @@ class DecodeCache:
             rows = self._decode_rows(
                 path, ffmpeg=ffmpeg, start_s=start_s, length_s=length_s, keyframes_only=keyframes_only, fps=fps,
                 gpu=gpu, gpu_device_path=gpu_device_path, count_boxes=count_boxes, cancel_check=cancel_check,
-                timeout_s=timeout_s, start_time_s=start_time_s,
+                timeout_s=timeout_s, start_time_s=start_time_s, keep_every=keep_every,
             )  # fmt: skip
         except frames.GpuDecodeError as exc:
             self._write(entry, {"gpu_error": str(exc)})

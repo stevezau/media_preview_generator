@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 from pathlib import Path
 
@@ -23,6 +24,7 @@ class _Decoder:
         self.gpu_fails = gpu_fails
         monkeypatch.setattr(frames, "decode_rows", self.decode_rows)
         monkeypatch.setattr(frames, "container_start_s", self.container_start_s)
+        monkeypatch.setattr(frames, "intra_only_stride", lambda *args, **kwargs: None)
 
     def container_start_s(self, path, ffmpeg, *, cancel_check=None, timeout_s=frames.PROBE_TIMEOUT_S):
         self.probes.append(path)
@@ -66,15 +68,15 @@ def test_a_decode_runs_once_per_file_command_and_decode_code(tmp_path, monkeypat
     assert len(decoder.decodes) == 1
     # Every part of the command is in the key: the window, the frame choice, the decode path.
     for changed in ({"start_s": 5101.0}, {"length_s": 21.0}, {"keyframes_only": False, "fps": 1}, {"gpu": None},
-                    {"start_time_s": 30000.0}):  # fmt: skip
+                    {"start_time_s": 30000.0}, {"keep_every": 48}):  # fmt: skip
         cache.decode_rows(str(media), **_kwargs(**changed))
-    assert len(decoder.decodes) == 6
-    DecodeCache(tmp_path / "cache", digest="code-2", counter="gpu cuda:0").decode_rows(str(media), **_kwargs())
     assert len(decoder.decodes) == 7
+    DecodeCache(tmp_path / "cache", digest="code-2", counter="gpu cuda:0").decode_rows(str(media), **_kwargs())
+    assert len(decoder.decodes) == 8
     os.utime(media, ns=(1, 1))  # a replaced file is another file
     cache.decode_rows(str(media), **_kwargs())
-    assert len(decoder.decodes) == 8
-    assert (cache.decoded, cache.reused) == (7, 1)
+    assert len(decoder.decodes) == 9
+    assert (cache.decoded, cache.reused) == (8, 1)
 
 
 def test_the_text_detection_that_counted_the_boxes_is_in_the_key(tmp_path, monkeypatch, media):
@@ -122,12 +124,22 @@ def test_the_real_decode_gets_every_argument_it_was_asked_for(tmp_path, monkeypa
             count_boxes=count_boxes,
             start_time_s=12.5,
             timeout_s=90.0,
+            keep_every=48,
         ),  # fmt: skip
     )
     (kwargs,) = decoder.decodes
     assert kwargs == {"ffmpeg": "/ff", "start_s": 5680.0, "length_s": 21.0, "keyframes_only": False, "fps": 1,
                       "gpu": "NVIDIA", "gpu_device_path": "cuda:0", "count_boxes": count_boxes, "cancel_check": None,
-                      "timeout_s": 90.0, "start_time_s": 12.5}  # fmt: skip
+                      "timeout_s": 90.0, "start_time_s": 12.5, "keep_every": 48}  # fmt: skip
+
+
+def test_the_cache_takes_exactly_the_arguments_the_real_decode_takes():
+    # The cache stands in for frames.decode_rows while the detector runs: an argument the detector passes that the
+    # cache doesn't take crashes every harness run, and one it takes but drops decodes the wrong thing.
+    real = inspect.signature(frames.decode_rows).parameters
+    served = inspect.signature(DecodeCache.decode_rows).parameters
+    assert [name for name in served if name != "self"] == list(real)
+    assert [served[name].default for name in real] == [real[name].default for name in real]
 
 
 def test_the_start_time_is_probed_once_per_file_when_not_given(tmp_path, monkeypatch, media):
