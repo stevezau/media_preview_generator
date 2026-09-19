@@ -190,6 +190,8 @@ self-test and its own PCI pin are now proven on real NVIDIA hardware (rows 3, 12
 self-test correctly chose CPU with no NVIDIA-side contamination and the right PCI address in the helper's own
 argument (rows 13, 14). The Intel-side render-activity half of the gap -- direct hardware confirmation that the
 Intel GPU itself executed work, independent of process arguments -- remains open per row 14's partial result.
+(Closed on the final image: see "Final (final-2, bd9e561) — plex rows" below, where row 14 reads the helpers' own
+DRM counters.)
 
 ## PR image check
 
@@ -259,6 +261,87 @@ followed by the after-credits scene, except the pilot, whose roll runs to the en
   wasn't captured, so why it flipped isn't established. The device choice isn't expected to change the answer: the
   self-test only keeps a GPU whose box counts equal the CPU's on its 20 synthetic frames, and row 3 found the GPU
   and CPU answers within 2 s of each other on real decode paths.
+
+## Final (final-2, bd9e561) — plex rows (2026-09-19)
+
+Rows 12–15 again, on the final image, under the same Q7 terms, plus a VP9 keyframe-pass check per GPU vendor.
+
+**Image:** `media_preview_generator:final-2`. On `storage` its id is `sha256:7050dc5d1385…`; on `plex` the loaded copy
+reads `sha256:2fbaa634aa88…`. It is the same image: `storage` runs Docker's containerd image store, which shows the
+manifest digest, and `plex` the classic store, which shows the config digest. The 24 layer ids are identical on both
+hosts. The app package inside matches `git archive bd9e561 media_preview_generator` file for file (the only extra is
+the generated `release_notes.json`). The package reports version `0.0.0+unknown` because the image was built without
+`SETUPTOOLS_SCM_PRETEND_VERSION`, so the file comparison is what ties it to `bd9e561`.
+
+**How it ran.** Each row ran in its own container, `p3final`, started with `--rm --network none --cpus 2`, the NVIDIA
+runtime and `/dev/dri`. The only mount was `/tmp/p3final` on `plex`, read-only at `/work`. It held the scripts and
+`Synth Credits (2024).mkv` (same sha256 as on `storage`). Everything ran under `nice -n 19` inside the container.
+There was no `/data*` mount, no Plex config and no production volume. There were two sessions: rows 12–15 first, then
+the VP9 check again after the Architecture Review tightened it (the table below is from that second run). The image
+was loaded before each session. After each one, `/tmp/p3final` and the image were removed from `plex`, and no
+`p3final` container was left. `docker ps` on `plex` was the same before the first session and after the second: the
+same container ids, and `plex-generate-previews` and `plex` kept their start times with no restarts. The hardware was
+a TITAN RTX (`0000:01:00.0`) and a UHD 770 (`0000:00:02.0`, `i915`, kernel 6.17). The GPUs were idle (0 %). A Plex
+transcode was using the CPU, and the load average was about 14 on 32 threads.
+
+```bash
+docker save media_preview_generator:final-2 | ssh plex 'nice -n 19 docker load'
+ssh plex 'mkdir /tmp/p3final'
+scp plex_rows.py plex_vp9_keyframes.py "synth/Synth Credits (2024)/Synth Credits (2024).mkv" plex:/tmp/p3final/
+for script in "plex_rows.py 12" "plex_rows.py 13" "plex_rows.py 14" "plex_rows.py 15" "plex_vp9_keyframes.py NVIDIA INTEL"; do
+  ssh plex "docker run --rm --name p3final --network none --cpus 2 --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=all \
+    -e NVIDIA_DRIVER_CAPABILITIES=all --device /dev/dri:/dev/dri -v /tmp/p3final:/work:ro \
+    --entrypoint nice media_preview_generator:final-2 -n 19 python3 /work/$script"
+done
+ssh plex 'rm -rf /tmp/p3final; docker rmi media_preview_generator:final-2'
+```
+
+During row 14, the host also ran `nvidia-smi pmon -c 36 -d 1 -s u` and `docker top p3final` every 2 s.
+
+| Row | Result | Key numbers | 2026-09-16 run |
+|---|---|---|---|
+| 12 NVIDIA | **pass** | The self-test kept WebGPU: 5.15 ms per frame against 6.19 ms on the CPU (0.836), pinned to `0000:01:00.0`. Box counts equal the CPU's | pass (4.94 vs 6.18 ms) |
+| 13 Intel | **pass** | The self-test kept the CPU: the GPU took 17.61 ms per frame against 11.11 ms on the CPU (1.59) | pass (CPU) |
+| 14 Both GPUs during the Intel self-test | **pass** (all five checks) | 8 self-tests in 40 s, and all 8 chose the CPU. Every WebGPU helper (8 of 8) had `--pci-bus-id 0000:00:02.0` and 2.08–2.81 s of `drm-engine-render` time on the Intel GPU in its own DRM fdinfo. No helper had a DRM file open on any other device. The sampler ran to the end | partial: `intel_gpu_top` read 0 % |
+| 15 VAAPI decode | **pass** | `duration_ms` 700 000. VAAPI and CPU both answered 541.0 s start and 659.0 s end | pass (same numbers) |
+
+- **Row 12:** the TITAN kept the GPU again. The switch to the CPU seen in the side-by-side run above did not happen
+  here.
+- **Row 14, NVIDIA: not observable through fdinfo.** The NVIDIA driver publishes no DRM fdinfo counters (its
+  `/dev/nvidia*` nodes aren't DRM files), so the fdinfo half of the check can't see NVIDIA work. On the host,
+  `pmon` listed no text detection helper on the TITAN in any of its 36 samples. The only container process it listed
+  was the app's own Vulkan startup probe (`ffmpeg -init_hw_device vulkan`: one sample, type G, no SM use). That probe
+  checks NVIDIA on purpose for Dolby Vision tone-mapping; it isn't text detection. The fdinfo sampler also caught
+  three of those probe processes, with zero Intel counters.
+- **This closes the gap row 14 left open on 2026-09-16.** The Intel GPU's own counters show the WebGPU helpers
+  running work on it: about 2 s of render-engine time per self-test. `intel_gpu_top`'s 500 ms whole-engine samples
+  had missed that work.
+
+### VP9 keyframe pass per vendor
+
+`plex_vp9_keyframes.py` encodes a 30 s 640×360 VP9 clip (`libvpx-vp9`, 24 fps, `-g 48`) into a temporary folder
+inside the container. ffprobe finds 15 packets flagged as keyframes, at 0, 2, … 28 s. `keyframe_thinning` answers
+`drop_non_key=True, keep_every=None`. For each device, the script builds the app's keyframe-pass command with
+`decode_command` over 10–30 s (20 s, which holds 10 flagged keyframes) and runs it. Two controls run beside it. The
+same command without the drop must give more frames. On a GPU, the same command without its hwaccel arguments must
+fail: that shows the GPU scale filter takes only GPU surfaces, so a GPU run that exits 0 decoded on the GPU. The run
+fails if the window holds no keyframe or if a vendor named on the command line (`NVIDIA INTEL` here) is missing. It
+passed every check.
+
+| Device | Hardware decode arguments (the app's builder) | The app's command | Without the drop (`-skip_frame nokey` only) | Without the hwaccel arguments |
+|---|---|---|---|---|
+| CPU | none | 10 frames, all `iskey:1`, at 10, 12 … 28 s | 480 frames | n/a |
+| NVIDIA TITAN RTX | `-hwaccel cuda -hwaccel_device 0 -hwaccel_output_format cuda` | 10 frames, all `iskey:1`, at 10, 12 … 28 s | 480 frames | exit 218 (`-38`, Function not implemented: the filter graph can't take software frames), 0 frames |
+| Intel UHD 770 | `-hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi` | 10 frames, all `iskey:1`, at 10, 12 … 28 s | 480 frames | exit 218 (`-38`, Function not implemented: the filter graph can't take software frames), 0 frames |
+| AMD | no AMD GPU on `plex` (`lspci`) or on `storage` (its only render node is NVIDIA's) | not run | not run | not run |
+
+- **Both GPUs decode VP9 in hardware.** The app's command exited 0 with 10 frames on each, and the software-frames
+  control failed on each. No vendor present needs the CPU fallback.
+- **If a GPU couldn't decode VP9**, the app would handle it as it handles any other GPU decode failure: ffmpeg exits
+  non-zero or gives no frames, the GPU decode error becomes `CodecNotSupportedError`, and the worker reruns the file
+  on the CPU (row 4 shows this path with AV1 on the P5000).
+- **The drop is what gives 10 frames.** Without it, `-skip_frame nokey` let all 480 frames through on the CPU and on
+  both hwaccels: 48 times the decode and text detection work (one keyframe per 48 frames).
 
 ## Resetting the lab
 
