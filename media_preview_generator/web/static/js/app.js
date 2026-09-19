@@ -1669,10 +1669,9 @@ const MARKER_SOURCE_NAMES = {
 const MARKER_SOURCE_TYPE_LABELS = { intro: 'Intro', credits: 'Credits', recap: 'Recap', preview: 'Preview' };
 const MARKER_SOURCE_GROUPS_SHOWN = 5;
 const MARKER_SOURCES_TIP = 'How many files each source decided in this job. A file counts once per marker type, '
-    + 'under the sources its marker came from. A chapter decides on its own, so a marker a chapter set counts as '
-    + 'chapters even when other sources agreed. Markers already on your servers only confirm, so they\'re named only '
-    + 'when they were the second opinion a single source needed. Files that need review, failed or weren\'t checked '
-    + 'aren\'t counted.';
+    + 'under the sources its marker came from; a marker a chapter set counts as chapters. Markers already on your '
+    + 'servers are named only when they were the second opinion one source needed. Files that need review, failed or '
+    + 'weren\'t checked aren\'t counted.';
 
 function _markerSourceGroupLabel(group) {
     const names = String(group).split('+').map(function (id) { return MARKER_SOURCE_NAMES[id] || id; });
