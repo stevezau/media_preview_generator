@@ -167,6 +167,61 @@ The drop in "chapters alone" is mostly the same chapter decisions, now also conf
    (Severance) are 3–7 s off, in the direction that skips story. They still agree with SkipDB inside the tolerances.
    Where TheIntroDB's own ends were early (Rick and Morty S02), IntroDB's are right.
 
+### Findings 1 and 2: cause, fix and lab proof (branch `scale-bugs`, 2026-09-19)
+
+Image `media_preview_generator:scale-bugs` (the package at `09404cb`), run by `./scale_bugs.py` (raw data in
+`results/scale-bugs/`). Spec §14 has the two dated lines; §13 item 17 has what is left for Plex.
+
+**Finding 1 — who rewrote the 24 parts: Plex's own one-time migration.**
+- The lab Plex log (`Plex Media Server.4.log`, 2026-09-17 02:01:16–18 UTC): the Butler's weekly "Optimizing database",
+  then "Running forward migration 202302020000", then 24 × "CreditsFinalAttributeMigration: Fixed final attribute for
+  <part> media part" and "Doing expensive tags write". All 24 items' `taggings` rows carry `created_at` 02:01:18.
+- It is a deferred migration: a new database runs it at its first Butler optimize and records it in
+  `schema_migrations` (lab row 446). A manual `PUT /library/optimize` runs no migrations; a Butler optimize with the row
+  recorded runs none either (11:42 UTC).
+- Its rule, measured on the 2026-09-14 snapshot: our non-final credits whose stored end was 1.1–9.7 s before the
+  part's end were flagged final; 10.1 s and more were left.
+- Its writer: `extra_data` in the URL-encoded form (the JSON form's `url` field on its own), with the credits entry's
+  `final` as `1`. Plex's analyze reads that form and writes JSON again with the same fields (part 1411, byte for byte
+  what `encode_extra_data` writes).
+- Production (read-only, PMS 1.43.4 as the lab): 0 of 191,650 parts in URL form; `schema_migrations` has
+  `202302020000` at row 339, before the JSON conversion at 354; 791 credits entries carry `"final":1` inside JSON.
+
+**Finding 1 — lab proof of the fix (`c515ca1`):**
+
+| Step | Lab Plex rows | Parts |
+|---|---|---|
+| Job over the 24 files | 24 written | all 24 still URL-encoded; Plex serves the decided markers on 24 of 24; 16 are the migrated bytes with only `final` removed, 8 also took today's newer decision |
+| Same job again | 24 up to date | parts and `taggings` rows unchanged (ids, `created_at`) |
+| Intro detection off, job | 17 written, 7 up to date | the 17 intros removed: rows gone, `pv:intros` deleted, the rest byte for byte, still URL-encoded |
+| Intro detection on, job | 17 written, 7 up to date | every part back to the step-2 bytes, the intro rows written again |
+| `schema_migrations` row deleted, Butler optimize | — | Plex's migration ran again: 28 parts "fixed", 6 of them JSON parts it turned into URL form (the writer reproduced) |
+| Job over the 29 URL-encoded files (the 24, plus 5 new; part 1411, which the analyze below had made JSON, is one of the 6) | 28 written, 1 up to date | all 29 still URL-encoded, our `final` flag back, Plex serves the decided markers on 29 of 29 |
+| Job again | 29 up to date | unchanged |
+
+A key of our own (`zz:probe`) added to part 1411 survived Plex's analyze (URL → JSON), a forced refresh, and the
+migration (JSON → URL). Plex's forced credits detection didn't run in 10 minutes on the lab (202, nothing in the
+credits scanner log), so that rewrite isn't covered here; the key was removed afterwards.
+
+**Finding 2 — what each reader knows about "ours":**
+- Jellyfin: already told apart through the Bridge plugin's store (`get_bridge_markers`).
+- Emby (fixed, `09404cb`): the reader now reads the Bridge plugin's store. Lab Emby item 23 (Rick and Morty S01E04):
+  clients see intro 1.5–33.0 s and credits at 1256 s, the plugin stores exactly those, and the evidence read gives
+  none of them (`results/scale-bugs/emby-23.json`).
+- Plex: nothing on the server says who wrote a row; see spec §13 item 17.
+- Replaying the scale run's stored evidence at High: without Plex's server markers the same 57 credits and 36 intros
+  would be longer; without Emby's nothing changes (Plex's cover the same files); the 6 credits decided only with
+  server markers need neither alone. Our old markers also put 1 credits and 2 intros into Needs review.
+
+**The decision paths asked about:**
+- **Rick and Morty S01, the 7 wrong intros:** TheIntroDB wasn't asked (budget). IntroDB (whole seconds, e.g. 0:33 on
+  E04) and SkipDB (e.g. 0:29.8) agree within 5 s; IntroDB is first in source order, so its end is the checked edge;
+  the start is the later of the two. Our old markers on Plex and Emby agreed and changed nothing: the replay without
+  server markers gives the same 11 intros to the millisecond.
+- **The Office S02E14 credits:** SkipDB starts 20:28.99 and credit text 20:38.00, 9.0 s apart, inside the 10 s
+  tolerance; SkipDB is first in source order, so its start is published. IntroDB's candidate (20:38–21:20) ends 9 s
+  past the file and fails sanity. No server markers and no TheIntroDB answer exist for it, on either run.
+
 ## Task 6 — `get_external_ids` (2026-09-14, staged code before fix round 1)
 
 | Server | Item | Returned | Result |

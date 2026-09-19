@@ -955,8 +955,10 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     never set a checked edge, decided 6 credits together with Emby's (neither alone was needed), shortened 57 credits
     and 36 intros, and put 1 credits and 2 intros into Needs review; removing only Emby's changes nothing. Jellyfin's
     and Emby's are told apart through their plugin's store (§14 2026-09-19). Owner decision pending: a key of ours in
-    each part's `extra_data` recording what we wrote (Plex's credits `final` migration kept every other key of the
-    parts it rewrote), or accept this as a known limit.
+    each part's `extra_data` recording what we wrote (a lab key of ours survived Plex's analyze and its credits
+    `final` migration, which each rewrote the part in the other form, and a forced refresh; Plex's forced credits
+    detection is untested;
+    `evidence/lab/phase1-results.md` "Findings 1 and 2"), or accept this as a known limit.
 
 ## 14. Decisions log
 
