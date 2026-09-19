@@ -136,6 +136,26 @@ class TestFindCredits:
         assert phases == ["Reading the credits…", "Refining the credits start…", "Finding where the credits end…"]
         assert len(probes) == 1
 
+    def test_the_end_window_is_read_around_the_rolls_last_card_when_scene_text_joined_the_run(
+        self, monkeypatch, probes
+    ):
+        # Spec §13 item 13: a lit text frame in the scene, 12 s after the roll's last card, joins the run. The end window
+        # is decoded around that card (5898 s), not the scene's text (5910 s), and the skip stops on the roll.
+        glued = [
+            (5900.0, 0, 120.0),
+            (5904.0, 0, 120.0),
+            (5910.0, 3, 120.0),
+            *[(5912.0 + 2 * i, 0, 120.0) for i in range(40)],
+        ]
+        decodes = Decodes(STORY + ROLL + glued, FINE, END)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                       count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        coarse = rule_j.coarse_start(STORY + ROLL + glued)
+        assert rule_j.coarse_end_s(STORY + ROLL + glued, coarse) == 5910.0
+        assert (decodes.calls[2]["start_s"], decodes.calls[2]["length_s"]) == (5897.0, 21.0)
+        assert result.end_s == 5899.0
+
     def test_the_decoded_windows_cover_everything_the_refinements_read(self, monkeypatch, probes):
         # Rule J may read [coarse − REFINE_BEFORE_S, coarse + REFINE_AFTER_S] for the start and
         # [end − REFINE_END_BEFORE_S, end + REFINE_END_AFTER_S] for the end. With 1 fps credit frames everywhere that was

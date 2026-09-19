@@ -42,6 +42,8 @@ self-test, the Settings row, the Inspector "Credit text" lane, and the accuracy 
 tooltip; §14 2026-09-18). The harness gate passes 5 of 5 on the 80 hand-checked files (movies40 + tv40) on both
 decode paths and fails 3 of 5 on the harder 205-movie set — a disclosed detector-gap limitation, not fixed here
 (§5.4, §13 item 14; owner, 2026-09-18): ships at "Medium" now, "High" needs a second source until that gap closes.
+Rule J version 2 (final review, §14 2026-09-19) narrowed that gap (205 Medium useful 90 → 96, no early answer added)
+and fixed §13 item 13; the 205 still fails 3 of 5.
 Rulings T-R1–T-R9 and contradictions C1–C7 resolved while planning phase 3 are in §14. Lab matrix
 (`evidence/lab/phase3-results.md`): 15 of 16 rows pass on storage and on the `plex` host's real NVIDIA and Intel GPUs;
 row 14 is partial (no NVIDIA-side contamination during the Intel self-test, but `intel_gpu_top` never showed Intel
@@ -336,7 +338,8 @@ taken from the rapidocr_onnxruntime 1.4.4 wheel), pinned at `/app/models/ch_PP-O
    dark keyframes split the roll).
 3. Keep runs ≥ 15 s; pick the **last** one (credits sit at the end).
 4. **Anchor:** start only where two credit samples are adjacent (a lone scene-text frame 24 s before the roll glued
-   itself on — Undisputed).
+   itself on — Undisputed). One step at most, and never over a gap longer than the 24 s join: a frame further ahead
+   was joined by dark frames alone, so it is the roll's own first card on black (WILL; rule J version 2).
 5. **Refine** with the 1 fps decode: walk back from the coarse start through contiguous credit frames (gaps ≤ 2.5 s),
    then back over the fade (luma < 12, steps ≤ 4 s).
 
@@ -350,7 +353,8 @@ taken from the rapidocr_onnxruntime 1.4.4 wheel), pinned at `/app/models/ch_PP-O
 | Preview frames every 10 s (app default) | 43 / 80 | 49 | 1 | 9 | 21 |
 
 The table's keyframe row was measured with the prototype's 10 s refine span; the app refines over 20 s, which gives
-63 / 1 early / 8 late / 4 none on the same rows (`tests/fixtures/markers/credits_rule_j_80.json.gz`).
+63 / 1 early / 8 late / 4 none on the same rows (`tests/fixtures/markers/credits_rule_j_80.json.gz`), and rule J
+version 2 (the anchor's 24 s limit, step 4) gives 64 / 1 / 7 / 4.
 
 Late cases are credits styles the rule doesn't see as "credit frames": names over bright footage or a curtain call
 (Taxi Driver, Come from Away, Revenge of the Nerds), textured or light backgrounds (The Mummy, LOTR: Return of the
@@ -363,24 +367,34 @@ Credits text alone is one source: at "High" it needs a second source; at "Medium
 it reads this file's own frames (§5.5 rule 6; owner, 2026-09-16). It also agrees with a server's own credits marker
 as an independent source (rule 7 still shortens). The skip ends at the roll's last credit frame, refined at 1 fps to
 the roll's last contiguous credit frame (no fade step), when more than 30 s of the file follows the roll (a scene
-after the credits); otherwise it runs to the end of the file. Emby still gets the start only (§6.3 R1).
-Rule J ships as measured; every answer more than 10 s early or 30 s late, shaped like epilogue cards, or with an
-end is frame-checked and adjudicated in `evidence/eval/phase3-harness.md`; tuning is a follow-up that must beat J on
-both sets with no more early answers. Epilogue text cards touching the roll, or joined to it over black, become the
-start (pinned in `test_rule_j.TestEpilogueCards`); the harness frame-checks every answer shaped like that.
+after the credits); otherwise it runs to the end of the file. The end mirrors the start's anchor (rule J version 2,
+§13 item 13): when the run's last credit keyframe is a lit frame further from the one before it than 1.5 × the run's
+credit spacing, with a lit keyframe without text between them, it is scene text the 24 s join glued on, so the end is
+refined from the credit keyframe before it and the 1 fps walk stops where the scene starts. That moves an end, never
+makes one: whether an end is kept is still judged on the run's latest credit keyframe. Emby still gets the start only
+(§6.3 R1).
+Rule J version 1 shipped as measured; version 2 (`CREDITS_TEXT_VERSION` 2, the anchor's 24 s limit and the end's
+step back) is the one tuning so far, and cleared the owner's bar: no more early answers at any level on either set,
+Medium more useful. Every answer more than 10 s early or 30 s late, shaped like epilogue cards, or with an end, and
+every answer a rule change moves by more than 10 s, is frame-checked and adjudicated in
+`evidence/eval/phase3-harness.md`; further tuning must beat version 2 the same way. Epilogue text cards touching the
+roll, or joined to it over black, become the start (pinned in `test_rule_j.TestEpilogueCards`); the harness
+frame-checks every answer shaped like that.
 
 **Harness** (`evidence/eval/phase3-harness.md`; the app's own `find_credits` and `decide()`, not the prototype):
-- Rule J alone on the 80 (this spec's own bar: ≥ 59 within 10 s, ≤ 1 early): GPU decode 63 within 10 s / 1 early /
-  8 late / 3 none — meets the bar. CPU decode 58 within 10 s / 1 early / 9 late / 8 none — misses the bar by one
-  file; the two decode paths scale the frame differently (`scale_cuda` vs swscale) and don't always agree, though
-  the CPU run still clears the Q4 gate below.
+- Rule J alone on the 80 (this spec's own bar: ≥ 59 within 10 s, ≤ 1 early): version 2 on the GPU decode 64 within
+  10 s / 1 early / 7 late / 3 none, on the CPU decode 59 / 1 / 8 / 8 — both meet the bar (version 1: 63 / 1 / 8 / 3
+  and 58 / 1 / 9 / 8, the CPU one file short). The two decode paths scale the frame differently (`scale_cuda` vs
+  swscale) and don't always agree.
 - Q4 gate, check by check: the 80 (movies40 + tv40) passes 5 of 5 on both decode paths. The 205 movies fails 3 of 5
-  (Medium useful 90 < Plex's 124; Medium wrong 17 > cap 5; High wrong 15 > cap 3) but passes both "never looser than
-  Plex" checks by a wide margin. The failure is a detector gap, not a truth problem: rule J's `coarse_start` takes
-  the roll's **last** credit run, so a roll whose opening section is names over bright footage, or one split by a
-  gap longer than 24 s, answers late — a disclosed, tracked limitation (§13), not tuned around here.
-- Ends (Q3): 19 set rows (17 distinct files) got an end; published for 6 files at High and 8 at Medium. No end
-  swallowed a scene.
+  (Medium useful 96 < Plex's 124; Medium wrong 17 > cap 5; High wrong 15 > cap 3; version 1: Medium useful 90) but
+  passes both "never looser than Plex" checks by a wide margin. The failure is a detector gap, not a truth problem:
+  rule J's `coarse_start` takes the roll's **last** credit run, so a roll whose opening section is names over bright
+  footage, or one split by a gap longer than 24 s, answers late — a disclosed, tracked limitation (§13 item 14). The
+  rules measured to reach back to earlier blocks all added early answers or gained one file for tuned parameters.
+- Ends (Q3): 19 set rows (17 distinct files) got an end in version 1's first run; published for 6 files at High and 8
+  at Medium. Version 2 moved no credits-text end on either set, and the two decisions it newly publishes with an end
+  keep the scene or stop on logos. No end swallowed a scene.
 
 ### 5.5 Combining evidence
 Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
@@ -854,18 +868,21 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     `intel_gpu_top` read 0 % on every engine while the Intel helper ran, so the Intel side's own render work is
     inferred from the helper's arguments, not seen on the hardware (row 14 partial). Either way the Intel self-test
     chose the CPU on that iGPU, so nothing beyond the self-test's own frames ran on it.
-13. **A lone credit-text keyframe inside a scene, within 24 s of the roll, joins rule J's run and extends it over
-    that scene** — an end computed from the run's last credit keyframe can then land inside the scene instead of on
-    the roll. None of the harness's 17 files with a published end showed it, but one real episode does on the CPU
-    decode (final review, 2026-09-19): Rick and Morty S01E04's short roll only forms a run because a 3-box signage
-    keyframe 15.4 s after the roll's last credit keyframe (11.9 s into the next scene) joins it, so the start is
-    right (+0.8 s) and the end lands 11.5 s into the scene; on the GPU decode the same keyframe counts 2 boxes and the file gets no answer. Pinned in
-    `test_rule_j.TestAShortRollOverACardJustBrighterThanDark`; an end-side guard is a rule-J change under Q5.
+13. ~~A lone credit-text keyframe inside a scene, within 24 s of the roll, joins rule J's run and extends it over
+    that scene~~ — **fixed in rule J version 2** (§5.4): the end steps back over a lit credit keyframe glued on after
+    a scene frame, and the 1 fps walk stops where the scene starts. Measured on Rick and Morty S01E04's CPU decode
+    (the skip ended 11.5 s into the scene; it now ends on the roll's last frame); no end in either set moved.
 14. **Credit text answers late when a roll's opening section is names over bright footage, or is split by a gap
     longer than 24 s** (rule J's `coarse_start` takes the roll's last run) — the one measured reason on-screen
     credit text alone misses the usefulness and precision gate on the harder 205-movie set (§5.4 "Harness"; owner,
-    2026-09-18). It ships at "Medium" now; at "High" it still needs a second source until this is fixed. Tuning to
-    fix it is a follow-up (Q5) that must not add early answers.
+    2026-09-18). It ships at "Medium" now; at "High" it still needs a second source until this is fixed. **Narrowed
+    by rule J version 2:** the anchor no longer steps off a roll's first card across more than 24 s of dark frames
+    (205: Medium useful 90 → 96, no early answer added), but the last-run selection stands; every rule measured to
+    reach back to earlier blocks added early answers or gained one file for tuned parameters
+    (`evidence/eval/phase3-harness.md` "Tried and not taken"). Its third shape — a roll whose first card sits just
+    above the luma-30 dark line and whose other credit keyframes span under 15 s (Rick and Morty S01E04 on the GPU
+    decode, no answer) — has a measured candidate, 2 boxes at luma 30–33, that answers it and six more of the season
+    within 1 s but put one 205-set movie's start on its epilogue cards; not shipped.
 
 ## 14. Decisions log
 
@@ -1259,3 +1276,12 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   restart) before a file leaves that file's rechecks and retries due for the next run; the backoff and the 5-read and
   5-retry caps count only checks that happened. An item's retry counts once per run however many of its files run,
   and a revived run doesn't count a file again. Files no run can check still take their turn when listed.
+- 2026-09-19 · Final review, rule J lane (the owner asked for the credit-text gaps to be finished; tuning ships only
+  under the owner's own bar, Q4/Q5): rule J version 2 (`CREDITS_TEXT_VERSION` 2, so stored answers are asked again).
+  The anchor never steps over a gap longer than the 24 s join, and the end steps back over scene text glued on after
+  the roll (§5.4, §13 items 13–14). Both sets and both decode paths: no early answer added at any level; Medium useful
+  80 57 → 58 (CPU 54 → 55), 205 90 → 96; rule J alone on the 80 64 / 1 (CPU 59 / 1, now meeting §5.4 too); every
+  moved answer frame-checked (`evidence/eval/phase3-harness.md` "Rule J version 2"). Measured and not shipped: walking
+  back to earlier runs, merging runs over text-carrying gaps, a lower box count next to a run, a lit-only anchor, and
+  2 boxes at luma 30–33 (the last would answer E04 on the GPU but put one movie's start on its epilogue cards). The
+  205's gate still fails 3 of 5; credit text alone stays at "Medium" as ruled on 2026-09-18.

@@ -15,6 +15,11 @@ Harness: `python -m tools.markers_eval credits-text` (see `tools/markers_eval/RE
   (`credits/adjudicated.json`). Chapters are therefore left out of every row: these files stand for files without
   usable chapters.
 
+> **Superseded in part (2026-09-19): rule J version 2**, the last section of this file, moves the numbers below
+> (rule J alone on the 80: GPU 64 / 1 / 7 / 3, CPU 59 / 1 / 8 / 8, which now meets §5.4 too; the 205's Medium useful
+> 90 → 96 with no wrong answer added). The gate's outcome per set is unchanged. Everything above that section is
+> version 1 as measured on 2026-09-18.
+
 **Result: the 80 pass the gate on both decode paths; the 205 fail three of its five checks.** Rule J alone clears
 spec §5.4 on the GPU decode (63 within 10 s, 1 early) and misses it by one file on the CPU decode (58 within 10 s),
 which is a difference between the two paths' scalers, not between two runs of the same one. Nothing was tuned in
@@ -408,3 +413,147 @@ answers two fewer within 10 s. Its Q4 gate on the 80 still passes 5 of 5 (Plex 4
 61 / 10 / 2 / 7; High 39 useful, 0 wrong, 41 missed; Medium 54 useful, 0 wrong, 26 missed), but nothing here argues
 for changing the shipped filter. What the two rows do show is that rule J's answer is sensitive to how the frame is
 scaled, which is worth a line in the spec: the §5.4 numbers belong to a decode path, not to the rule alone.
+
+## Rule J version 2 (2026-09-19): the anchor's 24 s limit and scene text glued onto the end
+
+The owner asked for Intro & Credits to be finished, the credit-text gaps included (spec §13 items 13 and 14). Rule J
+version 2 (`CREDITS_TEXT_VERSION` 2) ships two changes, each the anchor's own purpose stated precisely. Everything
+else tried is in the last table of this section, with why it wasn't taken.
+
+1. **The start's anchor never steps over a gap longer than the 24 s join.** The anchor is there to step over one scene
+   text frame the 24 s join glued onto the roll. A credit frame whose next credit frame is more than 24 s away can only
+   have been joined by the dark bridge ("dark frames without text never break a run"), so every frame between is
+   dark and the lone frame is the roll's own first card on black. Stepping off it put the start on whatever card text
+   detection saw next: WILL's roll opens on "a film by", then shows 65 s of dark keyframes whose small text reads as
+   no boxes, and the step put the start 72 s late.
+2. **The end steps back over scene text glued on after the roll** (§13 item 13, the start's anchor mirrored). When
+   the run's last credit keyframe is lit, more than 1.5 × the run's credit spacing after the credit keyframe before
+   it, and separated from it by a lit keyframe with no text, it is scene text the 24 s join glued on. The end is then
+   refined from the credit keyframe before it, and the 1 fps walk stops where the scene starts. It moves an end, never
+   makes one: whether an end is kept is still Q3's test on the latest credit keyframe, so a lit logo card within 30 s
+   of the end of the file still leaves the skip running to the end.
+
+- Date: 2026-09-19, on `storage`; same host, ffmpeg, driver and Python as above. Text detection on the GPU helper,
+  self-test 11.46 ms per frame against 18.35 ms on the CPU.
+- Code: `feat/markers-detection` at `2256bca` (version 1, the "before" rows, re-measured today) and the same plus
+  this change (version 2). Chapters are left out of every row, as above.
+- Tooling: the harness now keeps every decode (`credits_decodes`, `tools/markers_eval/README.md`). Version 1's run
+  decoded 498 windows on the GPU and 152 on the CPU; version 2 re-ran the app's own `find_credits` and `decide()` on
+  them and decoded only the 1 fps windows its new starts ask for (11 on the GPU, 3 on the CPU). `--changed-since`
+  listed every answer that moved by more than 10 s and wrote its sheets.
+
+### Before and after
+
+Rule J alone on the 80 (spec §5.4: at least 59 within 10 s, at most 1 early by more than 30 s):
+
+| Decode | Version | within 5 s | within 10 s | within 30 s | early >30 s | late >30 s | none | meets spec |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| GPU | 1 | 55 | 63 | 68 | 1 | 8 | 3 | pass |
+| GPU | **2** | 55 | **64** | 69 | 1 | **7** | 3 | pass |
+| CPU | 1 | 49 | 58 | 62 | 1 | 9 | 8 | fail (58 < 59) |
+| CPU | **2** | 49 | **59** | 63 | 1 | **8** | 8 | **pass** |
+| Fixture (`credits_rule_j_80.json.gz`) | 1 → 2 | | 63 → 64 | | 1 → 1 | 8 → 7 | 4 → 4 | |
+
+Rows per set, useful / late / wrong / missed (`wrong` is more than 10 s early against the chapter):
+
+| Set, decode | Row | Version 1 | Version 2 |
+|---|---|---|---|
+| 80, GPU | Plex's first credits marker | 47 / 1 / 13 / 19 | 47 / 1 / 13 / 19 |
+| | Credits text alone | 66 / 8 / 3 / 3 | **67 / 7 / 3 / 3** |
+| | Pipeline, High | 40 / 0 / 1 / 39 | **41 / 0 / 1 / 38** |
+| | Pipeline, Medium | 57 / 0 / 1 / 22 | **58 / 0 / 1 / 21** |
+| 205, GPU | Plex's first credits marker | 124 / 11 / 62 / 8 | 124 / 11 / 62 / 8 |
+| | Credits text alone | 111 / 46 / 37 / 11 | **116 / 41 / 37 / 11** |
+| | Pipeline, High | 89 / 9 / 15 / 92 | **95 / 10 / 15 / 85** |
+| | Pipeline, Medium | 90 / 9 / 17 / 89 | **96 / 10 / 17 / 82** |
+| 80, CPU | Plex's first credits marker | 47 / 1 / 13 / 19 | 47 / 1 / 13 / 19 |
+| | Credits text alone | 61 / 9 / 2 / 8 | **62 / 8 / 2 / 8** |
+| | Pipeline, High | 40 / 0 / 1 / 39 | **41 / 0 / 1 / 38** |
+| | Pipeline, Medium | 54 / 0 / 1 / 25 | **55 / 0 / 1 / 24** |
+
+`text_and_server_only`: 80 41 → 42, 205 113 → 120. Ends found by credits text: unchanged (80: 3 GPU, 1 CPU; 205:
+15, one fewer than the Ends section above, which predates the `coarse_end_s` fix). Ends published: 205 High 5 → 7,
+Medium 6 → 8 (both below); the 80 unchanged (GPU High 2 / Medium 3, CPU High 1 / Medium 2). The 43 online cases: every row unchanged (default High 27 / 3 / 5 / 8; TheIntroDB on, High and Medium,
+33 / 3 / 5 / 2); one answer moved (below).
+
+The Q4 gate's outcome per set is unchanged: the 80 pass 5 of 5 on both paths, and the 205 still fail 3 of 5 (Medium
+useful 96 < Plex 124; Medium wrong 17 > 5; High wrong 15 > 3), passing both "never looser than Plex" checks.
+
+### The owner's bar (Q4/Q5), check by check
+
+| Check | Numbers (version 1 → 2) | Result |
+|---|---|---|
+| No more early answers at any level, per set | 80 GPU: alone 3 → 3, High 1 → 1, Medium 1 → 1. 205: alone 37 → 37, High 15 → 15, Medium 17 → 17. 80 CPU: alone 2 → 2, High 1 → 1, Medium 1 → 1. Every moved answer moved later-to-earlier and none crossed into `wrong` | pass |
+| Medium useful at least today's on each set, strictly more on one | 80: 57 → 58 (CPU 54 → 55); 205: 90 → 96 | pass |
+| Rule J alone on the 80 meets §5.4 on the GPU; the CPU no worse than 58 / 1 | GPU 64 / 1; CPU 59 / 1 | pass |
+| No published end moves into a scene | no credits-text end moved on either set or path; two decisions newly published with an end, frame-checked below: neither is in a scene | pass |
+| Every answer that moves by more than 10 s is frame-checked | 9 files on the GPU (11 set rows), 3 on the CPU (2 of them the same files), 1 online case | done, below |
+
+### Frame checks of every moved answer
+
+| File | Decode | answer − truth, v1 → v2 | Published v2 (High, Medium) | Adjudication |
+|---|---|---:|---|---|
+| WILL (2023) *(both sets)* | GPU, CPU | +67.6 → +5.6 (CPU +40.6 → +5.6) | useful, useful | correct: the screenplay card; the roll opened on "a film by" at the chapter |
+| The Second Mother (2015) | GPU | +21.0 → +1.0 | useful, useful | correct: the first cast card |
+| Two for the Money (2005) | GPU | +88.0 → +7.0 | useful, useful | correct: the producer card; "directed by" over footage opened the roll at the chapter |
+| RocknRolla (2008) | GPU | +32.9 → +6.9 | useful, useful | correct: the end-title card that opens the roll |
+| Executive Decision (1996) | GPU | +32.8 → +13.8 | useful, useful | correct: the cast crawl over the last scene's footage |
+| The Last Song (2010) | GPU | +52.7 → +26.7 | useful, useful | inside the roll (names over footage) |
+| Revenge of the Nerds (1984) *(both sets)* | GPU, CPU | +110.8 → +75.8 | undecided | still late, inside the roll: the crawl on black after the cast cards over footage |
+| Be Natural The Untold Story of Alice Guy-Blache (2018) | GPU | +121.0 → +89.0 | undecided | still late, inside the roll: the cast crawl after an archive clip |
+| Black Panther (2018) | GPU | +281.4 → +242.4 | late, late | still late, inside the roll: the crawl right after the first mid-credits scene, so the published skip starts after that scene; its end (84 s before the end of the file, unchanged) keeps the post-credits scene |
+| Fighter (2024) *(the 80)* | CPU | +187.0 → +151.0 | undecided | still late, inside the roll (the crew crawl) |
+| Marvels Daredevil (2015) S03E12 *(online)* | GPU | +17.4 → −14.6 | not asked (other sources decide it) | correct: the "story editor" card on black opens the roll; the chapter is late |
+
+The two newly published ends, both on decisions version 1 left undecided:
+
+| File | end − duration | What supplies it | Adjudication |
+|---|---:|---|---|
+| Black Panther (2018) | −84 s | credits text (unchanged since version 1) | scene kept: the post-credits scene follows |
+| Executive Decision (1996) | −26 s | Plex's own marker end (rule 7 shortens) | logo or black, not a scene: studio logos after the crawl |
+
+No end swallowed a scene, and no credits-text end moved on either set. The end change's measured case is outside both
+sets: Rick and Morty S01E04 on the CPU decode (in the online cases, which run on the GPU), measured with the app's own
+`find_credits`. Version 1 ended the skip at 1198.0 s, 11.5 s into the scene after the roll; version 2 ends it at
+1186.0 s, the roll's last frame (the side-by-side's frame check has the roll at 1162.2–1186.5 s), and its start is
+1163.0 s. On the GPU decode the episode still has no answer (§13 item 14's third shape, below).
+
+### Tried and not taken
+
+Each was screened on the stored decodes, then measured with real decodes of every window it asks for. Numbers are
+version 2 plus the candidate, GPU decode; `wrong` is against the chapter.
+
+| Candidate | 80: Medium useful / wrong | 205: Medium useful / wrong | 205: High wrong | 205: alone wrong | Why not |
+|---|---|---|---|---|---|
+| Version 2 (shipped) | 58 / 1 | 96 / 17 | 15 | 37 | |
+| Walk back to the previous kept run ≤ 30 s away, ≥ 60 % credit frames | 58 / 1 | 97 / 17 | 15 | 37 | one file (Instant Family) for two tuned numbers; it moves two early answers further early, Rescued by Ruby (2022) from inside the roll onto its epilogue cards |
+| The same at ≥ 50 % | 58 / 1 | 98 / 18 | 16 | 38 | a new published wrong answer |
+| The same at ≤ 60 s | 58 / 1 | 95 / 19 | 17 | 42 | new wrong answers; rule J alone 2 early on the 80 (fails §5.4) |
+| Merge runs ≤ 40 s apart when half the lit keyframes between carry text | 58 / 1 | 97 / 17 | 15 | 37 | one file (Pizza Movie) for two tuned numbers; it moves an already-early documentary 61 s further early |
+| The same at ≤ 90 s | 59 / 1 | 99 / 18 | 16 | 39 | new wrong answers |
+| Lit keyframes next to a run need 2 boxes, not 3 | 59 / 2 | 102 / 22 | 20 | 38 | new wrong answers on both sets; High wrong 2 > the 80's cap of 1 |
+| The anchor steps only across a lit keyframe (with the 24 s limit) | 57 / 2 | 100 / 19 | 17 | 38 | new wrong answers on both sets; High wrong 2 > the 80's cap of 1 |
+| A frame at luma 30–33 needs 2 boxes, not 3 (§13 item 14's third shape) | 58 / 1 | 96 / 17 | 15 | 37 | see below |
+
+The last row is the one near miss. The Rick and Morty S01E04 roll opens on a card at luma 30.5 with 2 boxes, just over
+the dark line, and without it the rest of the roll's credit keyframes span 12.7 s, under the 15 s minimum; that is
+why the GPU decode has no answer. Counting 2 boxes at luma 30–33 as a credit frame answers E04 (start 7.5 s after the
+online truth, end on the roll's last frame) and moves six more episodes of the season to within 1 s of their
+three-source truth (E03 +9.7 → +0.7, E05 +8.5 → +0.5, E06 +6.0 → −0.0, E08 +5.8 → −0.2, E10 +4.6 → −0.4, E09
++35.9 → +28.9), with every set count unchanged. But the harness's own run showed it moving three 205-set starts, and
+one of them, Rescued by Ruby (2022), goes from inside the roll (the crew crawl, 48 s before a late chapter) to 128 s
+before the chapter, on the film's epilogue cards: photos and a few lines of text on a dark ground. That count stays at
+37 only because the chapter already called the old answer early; by frame check it adds a really early answer, so it
+fails the bar's first check and is not shipped. It is the obvious next candidate if it can be told apart from
+epilogue cards.
+
+### What is still open
+
+- **§13 item 13 (an end carried into a scene): fixed** for the measured shape; no end in either set moved.
+- **§13 item 14 (late starts): narrowed, not closed.** The anchor's over-step was one cause of late answers (9 files
+  of the 205 moved earlier, 6 of them into `useful` at both levels). The main cause stands: rule J takes the roll's
+  last run, and a roll whose opening is names over bright footage, or is split by a gap longer than 24 s, is still
+  answered from a later block (41 files of the 205 are more than 30 s late, down from 46). Every rule tried that
+  reaches back to earlier blocks either adds early answers or gains a single file for tuned parameters (table above).
+- The 205's gate still fails its usefulness floor (96 < 124) and both wrong caps (17 > 5, 15 > 3); the adjudication of
+  its version 1 wrong answers above is unchanged, as no wrong answer moved.

@@ -8,10 +8,11 @@ seconds so the item's tail window starts at 1000 s, rows keep only ``[pts, boxes
 (``credits/eval_rules3.py`` ``detect``, refine span 20 s): the port on the shifted rows must give the prototype's
 error within 1.5 ms, or the script stops (an unshifted item would keep real timings; none needed it while planning).
 
-The seven ids in ``ANCHOR_DIVERGENCES`` are exempt from that check, because the port's anchor deliberately no longer
-matches the prototype's -- see ``rule_j._run_spacing`` and ``rule_j.ANCHOR_MAX_STEPS``. They are reported rather than
+The nine ids in ``PORT_DIVERGENCES`` are exempt from that check, because the port's anchor deliberately no longer
+matches the prototype's -- see ``rule_j._run_spacing``, ``rule_j.ANCHOR_MAX_STEPS`` and the anchor's 24 s limit in
+``rule_j.coarse_start``. They are reported rather than
 stopped, and the fixture stores the prototype's error for them as for every other item;
-``tests/markers/credits/test_rule_j.py`` pins the prototype's number *and* the port's number for each of the seven.
+``tests/markers/credits/test_rule_j.py`` pins the prototype's number *and* the port's number for each of the nine.
 Any other item disagreeing still stops the script.
 """
 
@@ -33,9 +34,10 @@ REFINE_SPAN_S = 20.0
 TAIL_ORIGIN_S = 1000
 # The items the port's anchor deliberately answers differently from the prototype's: ``rule_j._run_spacing`` measures
 # the gap between the run's own credit frames in presentation order where the prototype took every row of the whole
-# decoded tail in decode order, and ``rule_j.ANCHOR_MAX_STEPS`` holds the walk to one frame. Keep this list in step
-# with ``ANCHOR_DIVERGENCES`` in ``tests/markers/credits/test_rule_j.py``, which pins both sides of each.
-ANCHOR_DIVERGENCES = {"movie-12", "movie-25", "movie-29", "tv-07", "tv-09", "tv-22", "tv-31"}
+# decoded tail in decode order, ``rule_j.ANCHOR_MAX_STEPS`` holds the walk to one frame, and the walk never steps
+# over a gap the 24 s join can't bridge. Keep this list in step
+# with ``PORT_DIVERGENCES`` in ``tests/markers/credits/test_rule_j.py``, which pins both sides of each.
+PORT_DIVERGENCES = {"movie-03", "movie-12", "movie-25", "movie-29", "movie-38", "tv-07", "tv-09", "tv-22", "tv-31"}
 
 
 def _prototype(evidence: Path) -> dict:
@@ -75,10 +77,10 @@ def build(evidence: Path) -> dict:
         counters[item["kind"]] += 1
         item_id = f"{item['kind']}-{counters[item['kind']]:02d}"
         differs = (error is None) != (expected is None) or (error is not None and abs(error - expected) > 0.0015)
-        if differs and item_id not in ANCHOR_DIVERGENCES:
+        if differs and item_id not in PORT_DIVERGENCES:
             sys.exit(f"the port differs from the prototype on {item_id}")
         if differs:
-            print(f"{item_id}: anchor divergence, prototype {expected} vs port {error}")
+            print(f"{item_id}: port divergence, prototype {expected} vs port {error}")
         items.append(
             {
                 "id": item_id,

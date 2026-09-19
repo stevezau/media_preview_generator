@@ -242,7 +242,7 @@ class TestIntroCreditsSettings:
         )
         assert tooltip == (
             "Finds where the credit roll starts from text on screen near the end of the file, and stops the skip at "
-            "the last credit when a scene follows. Tested alone on 80 files, on a GPU: within 10 s on 63, more than 30 s early "
+            "the last credit when a scene follows. Tested alone on 80 files, on a GPU: within 10 s on 64, more than 30 s early "
             'on 1, missed 3. At "High" another source has to agree; at "Medium" it can publish alone.'
         )
         row.locator(".markers-source-enabled").click()

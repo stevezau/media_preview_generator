@@ -9,8 +9,11 @@ presentation order, where the prototype took the median gap of every row of the 
 fix a start that collapsed onto the end of the roll and move the 80 files at the spec's 20 s refine span from the
 prototype's 59 / 1 / 8 / 4 to 63 / 1 / 8 / 4, every changed file closer to the truth than the prototype had it
 (§5.4's table was measured at 10 s, late 9; ``tests/fixtures/markers/credits_rule_j_80.json.gz``,
-whose stored errors stay the prototype's -- ``ANCHOR_DIVERGENCES`` in ``tests/markers/credits/test_rule_j.py`` names
-the seven items that differ).
+whose stored errors stay the prototype's -- ``PORT_DIVERGENCES`` in ``tests/markers/credits/test_rule_j.py`` names
+the items that differ).
+Version 2 (spec §13 items 13 and 14, ``evidence/eval/phase3-harness.md``) adds two things the prototype never had:
+the anchor never steps over a gap longer than the 24 s join (:func:`coarse_start`), and the end steps back over scene
+text the join glued on after the roll (:func:`end_keyframe_s`). The 80 files move to 64 / 1 / 7 / 4.
 ``coarse_end_s`` reads the run's latest credit frame in presentation order for the same reason, so Q3's end means the
 end of the roll rather than whichever of its keyframes ffmpeg emitted last, and ``fade_back`` never steps onto a later
 row. Everywhere else rows stay in ffmpeg's output order, the anchor's distance included: the measured keyframe rows
@@ -166,7 +169,12 @@ def coarse_start(rows: Sequence[Row], params: RuleParams = RULE_J) -> Coarse | N
     steps = 0
     while first < last and steps < ANCHOR_MAX_STEPS:
         following = next(k for k in range(first + 1, last + 1) if is_credit(rows[k], params))
-        if rows[following][0] - rows[first][0] <= ANCHOR_SPACING_FACTOR * spacing:
+        gap = rows[following][0] - rows[first][0]
+        # A frame further ahead than the 24 s join reaches wasn't glued on by it: only the dark bridge joins across
+        # that, so the frames between are all dark and the frame is the roll's own first card on black (WILL: one
+        # card, then 65 s of dark keyframes whose small text reads as no boxes before the next detected card; the step
+        # put the start there, 72 s late).
+        if gap <= ANCHOR_SPACING_FACTOR * spacing or gap > params.gap_s:
             break
         first = following
         steps += 1
@@ -274,6 +282,48 @@ def coarse_end_s(rows: Sequence[Row], coarse: Coarse, params: RuleParams = RULE_
     )
 
 
+def end_keyframe_s(rows: Sequence[Row], coarse: Coarse, params: RuleParams = RULE_J) -> float:
+    """The keyframe the end's refinement starts from: the run's latest credit keyframe, or the one before it when that
+    keyframe is scene text glued onto the roll.
+
+    The start's anchor, mirrored (spec §13 item 13). The 24 s join lets a lit text frame in the scene after the roll
+    join the run, and the end then lands in that scene: Rick and Morty S01E04's roll ends on a card at 1183.0 s, and
+    swscale's frame of the scene at 1198.4 s reads 3 boxes, so the CPU decode's skip ran 11.5 s into the scene. The last
+    credit keyframe is taken for glued on -- and the end steps back one credit keyframe, never more -- only when it's
+    all of: a lit frame (a dark card is the roll's own), further from the credit keyframe before it than 1.5 x the
+    run's credit spacing, and separated from it by a lit keyframe with no text at all (the scene has started).
+
+    It moves an end, never makes one: whether an end is kept at all is still Q3's test on :func:`coarse_end_s`, so a
+    lit closing card within 30 s of the end of the file (a logo with a line of text) never turns into a stop.
+
+    Args:
+        rows: Keyframe rows of the tail, in decode order.
+        coarse: The coarse start (``index`` and ``end_index`` bound the run).
+        params: Rule thresholds.
+
+    Returns:
+        The keyframe's time.
+    """
+    return _end_keyframes(rows, coarse, params)[0]
+
+
+def _end_keyframes(rows: Sequence[Row], coarse: Coarse, params: RuleParams) -> tuple[float, float | None]:
+    """:func:`end_keyframe_s`, and when it stepped back over glued-on scene text, the scene's first keyframe (the
+    first lit one with no text after the roll's last card; else None)."""
+    run = rows[coarse.index : coarse.end_index + 1]
+    credit = sorted((row for row in run if is_credit(row, params)), key=lambda row: row[0])
+    if len(credit) < 3:
+        return coarse_end_s(rows, coarse, params), None
+    before, last = credit[-2], credit[-1]
+    scene = [row[0] for row in run if before[0] < row[0] < last[0] and row[1] == 0 and row[2] >= params.dark]
+    glued = (
+        last[2] >= params.dark
+        and bool(scene)
+        and last[0] - before[0] > ANCHOR_SPACING_FACTOR * _typical_spacing(credit)
+    )
+    return (before[0], min(scene)) if glued else (last[0], None)
+
+
 def keeps_a_scene_after(end_s: float, duration_s: float) -> bool:
     """Whether more than 30 s of the file follows an end (Q3), so the skip stops there."""
     return duration_s - end_s > KEEP_AFTER_CREDITS_S
@@ -287,23 +337,26 @@ def refine_end(
     after_s: float = REFINE_END_AFTER_S,
     params: RuleParams = RULE_J,
 ) -> float:
-    """Refine the run's last credit keyframe with 1 fps rows, the start's walk in the other direction.
+    """Refine the end keyframe (:func:`end_keyframe_s`) with 1 fps rows, the start's walk in the other direction.
 
     From the first credit frame in ``[end − 1 s, end + after_s]``, walk forward over credit frames at most 2.5 s apart;
     the end is the last one reached (no fade step: the skip stops on the roll's last frame, never inside the scene).
+    ``end`` is :func:`end_keyframe_s`; when that stepped back over scene text glued onto the roll, the window stops at
+    the scene's first keyframe, so the walk can't reach the scene's own text however long it stays on screen.
 
     Args:
         rows: The keyframe rows the coarse start came from.
         coarse: The coarse start (``end_index`` is where the run stops, not when -- see :func:`coarse_end_s`).
         fine_rows: 1 fps rows (any window; only ``[end − 1 s, end + after_s]`` is read).
-        after_s: How far past the last credit keyframe the refinement may reach.
+        after_s: How far past the end keyframe the refinement may reach (never past the scene's first keyframe).
         params: Rule thresholds.
 
     Returns:
         The refined end in seconds (the keyframe's time when the window holds no credit frame).
     """
-    t = coarse_end_s(rows, coarse, params)
-    window = [j for j, row in enumerate(fine_rows) if t - REFINE_END_BEFORE_S <= row[0] <= t + after_s]
+    t, scene_s = _end_keyframes(rows, coarse, params)
+    reach = t + after_s if scene_s is None else min(t + after_s, scene_s)
+    window = [j for j, row in enumerate(fine_rows) if t - REFINE_END_BEFORE_S <= row[0] <= reach]
     credit = [j for j in window if is_credit(fine_rows[j], params)]
     if not credit:
         return t
@@ -326,10 +379,13 @@ def credits_end(
 ) -> float | None:
     """Where the credits skip ends (Q3): the refined last credit frame when more than 30 s of the file follows it.
 
+    Whether an end is kept is judged on the run's latest credit keyframe (:func:`coarse_end_s`); the end itself is
+    refined from :func:`end_keyframe_s`, which may step back over scene text glued onto the roll.
+
     Args:
         rows: The keyframe rows the coarse start came from.
         coarse: The coarse start.
-        fine_rows: 1 fps rows around the run's last credit keyframe (read only when an end can be kept).
+        fine_rows: 1 fps rows around :func:`end_keyframe_s` (read only when an end can be kept).
         duration_s: The file's duration.
         params: Rule thresholds.
 

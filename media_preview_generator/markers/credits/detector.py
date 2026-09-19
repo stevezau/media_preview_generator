@@ -23,7 +23,9 @@ if TYPE_CHECKING:
 
 # Stored with every answer. Bump it when rule J, the tail lengths, the frame format or the model change: stored answers
 # of another version are asked again, even for decided types (spec §14 2026-09-14 "Local detectors").
-CREDITS_TEXT_VERSION = 1
+# 2: the anchor never steps over a gap the 24 s join can't bridge, and the end steps back over scene text glued onto the
+# roll (spec §13 items 13 and 14, phase3-harness.md "Rule J version 2").
+CREDITS_TEXT_VERSION = 2
 READING_PHASE = "Reading the credits…"
 REFINING_PHASE = "Refining the credits start…"
 REFINING_END_PHASE = "Finding where the credits end…"
@@ -122,8 +124,9 @@ def find_credits(
     if not rule_j.keeps_a_scene_after(last_keyframe, duration_s):
         return CreditsTextResult(start_s, None, tuple(key_rows), tuple(fine_rows), ())
     show(REFINING_END_PHASE)
-    end_start = max(0.0, last_keyframe - rule_j.REFINE_END_BEFORE_S)
-    end_length = last_keyframe + rule_j.REFINE_END_AFTER_S - end_start  # more than 30 s of the file follows
+    end_keyframe = rule_j.end_keyframe_s(key_rows, coarse)  # never later than last_keyframe: 30 s+ follows it too
+    end_start = max(0.0, end_keyframe - rule_j.REFINE_END_BEFORE_S)
+    end_length = end_keyframe + rule_j.REFINE_END_AFTER_S - end_start
     end_rows = frames.decode_rows(path, start_s=end_start, length_s=end_length, keyframes_only=False, fps=1, **decode)
     end_s = rule_j.credits_end(key_rows, coarse, end_rows, duration_s)
     return CreditsTextResult(start_s, end_s, tuple(key_rows), tuple(fine_rows), tuple(end_rows))

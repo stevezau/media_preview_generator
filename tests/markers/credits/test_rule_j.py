@@ -195,6 +195,25 @@ class TestAnchorSpacing:
         coarse = rule_j.coarse_start(rows)
         assert coarse is not None and coarse.pts_s == 412.0  # one step only; unbounded this reached 424.0
 
+    @pytest.mark.parametrize(
+        ("gap_s", "start"),
+        [
+            (3.0, 400.0),   # 1.5 x the 2 s credit spacing: the first card's neighbour, no step
+            (24.0, 424.0),  # as far as the 24 s join reaches: possibly glued on by it, one step
+            (24.1, 400.0),  # only the dark bridge joins that far: the roll's own first card, no step
+        ],
+    )  # fmt: skip
+    def test_the_anchor_steps_only_over_a_gap_the_24_s_join_can_bridge(self, gap_s, start):
+        # WILL: the roll's first card, then 65 s of dark empty keyframes before the next card text detection sees. Only
+        # credit_runs' dark bridge joins across more than 24 s, so every frame between is dark and the lone frame is a
+        # card on black, not scene text the join glued on; stepping over it put the start 72 s late.
+        body = [bright(t) for t in range(0, 400, 2)]
+        empties = [dark(400 + t) for t in range(2, int(gap_s), 2)]
+        rows = [*body, dark(400, 1), *empties, *[dark(400 + gap_s + t, 2) for t in range(0, 60, 2)]]
+        assert rule_j.credit_runs(rows) == [(200, len(rows) - 1)]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == start
+
     def test_a_scene_keyed_after_the_roll_cannot_reach_the_yardstick(self):
         # The Q3 shape: a post-credits scene 30 s past the roll's last credit frame. The slice stops at the run's
         # last row regardless of what that scene's own rows are (see test_a_credit_frame_can_sit_right_past_a_run,
@@ -462,10 +481,77 @@ class TestEnd:
         assert rule_j.coarse_end_s(rows, coarse, params=rule_j.RuleParams(min_boxes=99)) == rows[coarse.end_index][0]
 
 
+class TestSceneTextGluedOntoTheEnd:
+    """Spec §13 item 13: the start's anchor, mirrored. A lit text frame in the scene after the roll, within 24 s of the
+    roll's last card, joins the run; the end steps back over it (one keyframe) when it's lit, further than 1.5 x the
+    run's credit spacing from the card before it, and separated from it by a lit keyframe with no text."""
+
+    ROLL = [*[bright(t) for t in range(0, 400, 4)], *[dark(t, 5) for t in range(400, 464, 4)]]  # cards every 4 s
+    DURATION_S = 600.0
+
+    def _end(self, *after):
+        rows = [*self.ROLL, *after]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 400.0
+        return rule_j.end_keyframe_s(rows, coarse), rule_j.coarse_end_s(rows, coarse)
+
+    @pytest.mark.parametrize(
+        ("after", "end_keyframe"),
+        [
+            ((bright(466), bright(470), bright(476, 3)), 460.0),       # scene, then its text: stepped over
+            ((bright(466), dark(476, 1)), 476.0),                      # a dark card after it: the roll's own
+            ((dark(466), dark(470), bright(476, 3)), 476.0),           # only black between: no scene has started
+            ((bright(466, 2), bright(470, 1), bright(476, 3)), 476.0), # every lit frame between has text
+            ((bright(462), bright(466, 3)), 466.0),                    # 6 s: within 1.5 x the 4 s spacing
+            ((bright(462), bright(466.1, 3)), 460.0),                  # 6.1 s: past it
+        ],
+    )  # fmt: skip
+    def test_the_end_steps_back_only_over_lit_text_after_a_scene_frame(self, after, end_keyframe):
+        assert self._end(*after) == (end_keyframe, after[-1][0])
+
+    def test_it_steps_back_one_keyframe_never_more(self):
+        after = (bright(466), bright(472, 3), bright(474), bright(484, 4))
+        assert self._end(*after) == (472.0, 484.0)
+
+    @pytest.mark.parametrize(("min_boxes", "end_keyframe"), [(3, 120.0), (99, 120.0)])
+    def test_fewer_than_three_credit_frames_keep_the_last_row_and_never_raise(self, min_boxes, end_keyframe):
+        # Two credit frames can't have their gap exceed 1.5 x their own spacing, so nothing is stepped over. The guard
+        # matters when end functions get other params than the run was found with (as coarse_end_s allows): one credit
+        # frame (min_boxes=3 keeps only the 3-box row) or none (99) in the slice must degrade, not index credit[-2].
+        rows = [bright(0), bright(60), dark(100, 1), bright(110), bright(120, 3)]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and rule_j.end_keyframe_s(rows, coarse) == 120.0
+        params = rule_j.RuleParams(min_boxes=min_boxes)
+        assert rule_j.end_keyframe_s(rows, coarse, params) == end_keyframe
+        assert rule_j.refine_end(rows, coarse, [], params=params) == end_keyframe
+
+    def test_the_end_refine_starts_from_the_roll_and_stops_where_the_scene_starts(self):
+        rows = [*self.ROLL, bright(466), bright(470), bright(476, 3)]
+        coarse = rule_j.coarse_start(rows)
+        # The scene's text is on screen from 468 s on: without the stop at 466 s (the scene's first keyframe) the
+        # walk, which starts at the first credit frame in the window, would start there when the roll's own last
+        # 1 fps frames are faded below the text line.
+        fine = [dark(459, 0, 8.0), dark(460, 0, 6.0), dark(461), *[bright(t) for t in range(462, 468)],
+                *[bright(t, 3) for t in range(468, 481)]]  # fmt: skip
+        assert rule_j.refine_end(rows, coarse, fine) == 460.0
+        roll_to_462 = [dark(459, 5), dark(460, 5), dark(461, 5), dark(462, 4), *fine[4:]]
+        assert rule_j.credits_end(rows, coarse, roll_to_462, self.DURATION_S) == 462.0
+
+    def test_it_moves_an_end_and_never_makes_one(self):
+        # Under Siege's shape: the roll's last card 30.5 s before the end of the file, then a lit logo with a line of
+        # text 7 s before it. Stepping back would leave more than 30 s and stop the skip on the logos; Q3 is judged on
+        # the latest credit keyframe, so the skip still runs to the end of the file and nothing is decoded for an end.
+        rows = [*self.ROLL, bright(470), dark(478), bright(482), bright(483, 4)]
+        coarse = rule_j.coarse_start(rows)
+        assert rule_j.end_keyframe_s(rows, coarse) == 460.0
+        assert rule_j.credits_end(rows, coarse, _UnreadRows(), 490.5) is None
+
+
 class TestAShortRollOverACardJustBrighterThanDark:
-    """A real TV ending (keyframe rows from 1158 s on; a 1265.0 s file) whose roll runs 1162.2-1186.5 s over a card at
-    luma 30-35, then a 78.5 s scene. Pinned as rule J reads it (Q5) for the follow-ups in spec §13 items 13 and 14: the
-    rows and timestamps are right on both decode paths, only box counts on lit scene frames differ."""
+    """A real TV ending (Rick and Morty S01E04: keyframe rows from 1158 s on; a 1265.0 s file) whose roll runs
+    1162.2-1186.5 s over a card at luma 30-35, then a 78.5 s scene. The rows and timestamps are right on both decode
+    paths, only box counts on lit scene frames differ. Rule J version 2 fixes the CPU decode's end (spec §13 item 13);
+    the GPU decode's missing answer is pinned as rule J reads it."""
 
     GPU = [(1158.657, 0, 50.7), (1162.203, 2, 30.5), (1170.294, 9, 33.5), (1173.047, 11, 34.1), (1179.470, 4, 32.2),
            (1183.015, 12, 34.2), (1186.519, 0, 153.5), (1188.145, 0, 130.8), (1189.647, 0, 130.6), (1191.649, 1, 158.3),
@@ -477,28 +563,32 @@ class TestAShortRollOverACardJustBrighterThanDark:
            (1195.611, 0, 146.1), (1198.406, 3, 145.6), (1200.157, 0, 134.5), (1206.122, 0, 83.3), (1216.549, 0, 142.1),
            (1226.976, 0, 142.1), (1236.652, 0, 168.6), (1242.491, 0, 172.7), (1243.742, 0, 139.6), (1247.705, 0, 156.5),
            (1256.046, 10, 130.7), (1257.548, 2, 42.4), (1259.049, 2, 210.5), (1261.051, 2, 164.3), (1264.054, 0, 30.0)]  # fmt: skip
-    CPU_END = [
-        bright(1197, 0, 146.1),
-        bright(1198, 3, 145.6),
-        bright(1199, 2, 146.0),
-        *[bright(t) for t in range(1200, 1218)],
-    ]
+    # The CPU decode's 1 fps rows of the end window the app now reads, 1 s before the roll's last card on (1182.0 s).
+    CPU_END = [(1182.0, 5, 31.9), (1183.0, 12, 34.5), (1184.0, 14, 36.0), (1185.0, 2, 30.9), (1186.0, 3, 31.6),
+               (1187.0, 0, 153.2), (1188.0, 2, 130.7), (1189.0, 3, 131.1), (1190.0, 1, 130.6), (1191.0, 1, 130.6),
+               (1192.0, 1, 157.4), (1193.0, 1, 155.6), (1194.0, 1, 154.0), (1195.0, 0, 153.7), (1196.0, 0, 146.1),
+               (1197.0, 0, 146.1), (1198.0, 3, 145.6), (1199.0, 2, 146.0), (1200.0, 0, 138.1), (1201.0, 0, 133.9),
+               (1202.0, 0, 133.8)]  # fmt: skip
     DURATION_S = 1265.024
 
     def test_the_rolls_credit_keyframes_span_under_15_s_so_there_is_no_answer(self):
         # The first card (1162.2 s) is 2 boxes at luma 30.5, just over the dark line, where a frame needs 3. What is
-        # left, 1170.3-1183.0 s, is 12.7 s of credit keyframes: under run_s, so no run and no answer.
+        # left, 1170.3-1183.0 s, is 12.7 s of credit keyframes: under run_s, so no run and no answer. Counting 2 boxes
+        # at luma 30-33 answers it and six more of the season within 1 s of their truth, but put a 2022 movie's start
+        # on its epilogue cards (photos on a dark ground): measured and not taken (phase3-harness.md, version 2).
         assert not rule_j.is_credit(self.GPU[1])
         assert rule_j.credit_runs(self.GPU) == []
 
-    def test_a_scene_text_keyframe_can_carry_the_run_and_its_end_into_the_scene(self):
+    def test_a_scene_text_keyframe_glued_onto_the_run_no_longer_carries_its_end_into_the_scene(self):
         # swscale's frame of the scene at 1198.4 s reads 3 boxes (scale_cuda's reads 2): a lit credit frame 15.4 s
-        # after the roll, so the 24 s join takes it in. The run is long enough now and the start is right, but its end
-        # is that scene frame: the skip would run 11.5 s into the scene after the roll (spec §13 item 13).
+        # after the roll, so the 24 s join takes it in and the run is long enough. Its end used to be that scene frame,
+        # so the skip ran 11.5 s into the scene (1198.0 s, spec §13 item 13). The end now steps back over it to the
+        # roll's last card and the refine walks the 1 fps rows to the roll's last frame, as the frames show it.
         coarse = rule_j.coarse_start(self.CPU)
         assert coarse is not None and coarse.pts_s == 1170.294
-        assert rule_j.coarse_end_s(self.CPU, coarse) == 1198.406
-        assert rule_j.credits_end(self.CPU, coarse, self.CPU_END, self.DURATION_S) == 1198.0
+        assert rule_j.coarse_end_s(self.CPU, coarse) == 1198.406  # Q3's test: 66.6 s follows, an end is kept
+        assert rule_j.end_keyframe_s(self.CPU, coarse) == 1183.015
+        assert rule_j.credits_end(self.CPU, coarse, self.CPU_END, self.DURATION_S) == 1186.0
 
 
 @lru_cache(maxsize=1)
@@ -511,14 +601,17 @@ def _rows(raw: list) -> list[tuple[float, int, float]]:
 
 
 # Every file whose refined answer differs from the prototype's, as (prototype error, port error) against the
-# frame-check truth. All seven move the same way -- closer to the truth -- and no other file moves. The fixture keeps
+# frame-check truth: the anchor's yardstick, its one step, and its 24 s limit (rule J version 2). All nine move the
+# same way -- closer to the truth -- and no other file moves. The fixture keeps
 # the prototype's numbers as they were, so both sides are pinned here; ``tools/markers_eval/credits_fixture.py``
 # repeats the id list for its rebuild guard and the two have to agree.
-ANCHOR_DIVERGENCES = {
+PORT_DIVERGENCES = {
     # id:        prototype, port,     why
+    "movie-03": (71.717, 5.55),  # the step crossed 65 s of dark empties, past the 24 s join: the roll's first card kept
     "movie-12": (17.0, 9.0),  # the unbounded walk ran 26.2 s into the roll; one step reaches 8.9 s
     "movie-25": (334.292, 146.792),  # 10.417 s roll under a 5.292 s tail median: the start had collapsed onto the end
     "movie-29": (149.029, 90.095),  # 10.010 s roll read as 20.020 s in decode order, against a 2.419 s tail
+    "movie-38": (130.088, 88.38),  # the step crossed 41.7 s of dark keyframes: still late, 41.7 s less so
     "tv-07": (15.742, 7.742),  # 17 rows in the run, 10 of them credit frames: 1.502 s keyframes, 2.502 s credits
     "tv-09": (21.125, 0.125),  # 3.670 s roll under a 2.336 s tail median: another collapse onto the run's last frame
     "tv-22": (19.866, 16.866),  # 16 rows, 6 credit frames: 1.919 s keyframes against a 6.256 s credit cadence
@@ -531,7 +624,6 @@ ANCHOR_DIVERGENCES = {
 # stops that drifting silently.
 ANCHOR_WALKS_TO = {
     "movie-02": 1853.143,
-    "movie-03": 1568.167,
     "movie-09": 1860.930,
     "movie-12": 1727.014,
     "movie-13": 1859.000,
@@ -539,7 +631,6 @@ ANCHOR_WALKS_TO = {
     "movie-28": 1714.681,
     "movie-29": 1512.850,
     "movie-34": 1548.699,
-    "movie-38": 1791.252,
     "tv-04": 1373.548,
     "tv-05": 1374.220,
     "tv-16": 1376.096,
@@ -551,8 +642,9 @@ ANCHOR_WALKS_TO = {
 
 class TestEightyFiles:
     def test_reproduces_the_prototype_at_the_spec_20_s_refine_span(self):
-        # 63 / 1 / 8 / 4 against the prototype's 59 / 1 / 8 / 4. Four files enter the 10 s band: tv-09 (its start no
-        # longer collapses onto the end of its run, 21.1 -> 0.1), movie-12, tv-07 and tv-31. movie-25, movie-29 and
+        # 64 / 1 / 7 / 4 against the prototype's 59 / 1 / 8 / 4. Five files enter the 10 s band: tv-09 (its start no
+        # longer collapses onto the end of its run, 21.1 -> 0.1), movie-12, tv-07, tv-31 and movie-03 (WILL, 71.7 ->
+        # 5.6: the anchor no longer steps past the 24 s join, CREDITS_TEXT_VERSION 2). movie-25, movie-29, movie-38 and
         # tv-22 improve without changing bucket, and nothing else moves at all. §5.4's table was measured at 10 s.
         tally = Counter()
         for item in _fixture()["items"]:
@@ -565,20 +657,20 @@ class TestEightyFiles:
             if abs(error) > 30:
                 tally["early" if error < 0 else "late"] += 1
         assert len(_fixture()["items"]) == 80
-        assert (tally["within_10s"], tally["early"], tally["late"], tally["none"]) == (63, 1, 8, 4)
+        assert (tally["within_10s"], tally["early"], tally["late"], tally["none"]) == (64, 1, 7, 4)
 
     def test_every_divergence_from_the_prototype_is_closer_to_the_truth(self):
         # The one property that separates this from tuning against a fixture: no file was traded away for another.
-        for item_id, (prototype, port) in ANCHOR_DIVERGENCES.items():
+        for item_id, (prototype, port) in PORT_DIVERGENCES.items():
             assert abs(port) < abs(prototype), item_id
 
-    def test_matches_the_prototype_item_for_item_bar_the_named_anchor_divergences(self):
+    def test_matches_the_prototype_item_for_item_bar_the_named_divergences(self):
         seen = set()
         for item in _fixture()["items"]:
             start = rule_j.credits_start(_rows(item["key"]), _rows(item["fine"]))
             expected = item["expected_error_s"]
-            if item["id"] in ANCHOR_DIVERGENCES:
-                prototype, port = ANCHOR_DIVERGENCES[item["id"]]
+            if item["id"] in PORT_DIVERGENCES:
+                prototype, port = PORT_DIVERGENCES[item["id"]]
                 assert expected == pytest.approx(prototype, abs=0.0015), item["id"]
                 assert start is not None and (start - item["truth_s"]) == pytest.approx(port, abs=0.0015), item["id"]
                 seen.add(item["id"])
@@ -586,7 +678,7 @@ class TestEightyFiles:
                 assert start is None, item["id"]
             else:
                 assert start is not None and abs((start - item["truth_s"]) - expected) <= 0.0015, item["id"]
-        assert seen == set(ANCHOR_DIVERGENCES)
+        assert seen == set(PORT_DIVERGENCES)
 
     def test_the_anchor_walks_on_exactly_these_files_and_lands_here(self):
         walked = {}

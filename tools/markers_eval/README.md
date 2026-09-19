@@ -240,5 +240,5 @@ Rebuilds `tests/fixtures/markers/credits_rule_j_80.json.gz` from the local-only 
 regression runs in CI without any media. It anonymises: files become `movie-01…`/`tv-01…` in the evidence order, every
 time is shifted by a whole number of seconds so the item's tail window starts at 1000 s, rows keep only
 `[pts, boxes, luma]`, and the frame-check truth (`credits/adjudicated.json`) replaces the chapter truth. Each item is
-checked against the prototype (`credits/eval_rules3.py`) before it is written; the seven items in
-`ANCHOR_DIVERGENCES`, where the port's anchor deliberately differs, are reported instead of stopping the build.
+checked against the prototype (`credits/eval_rules3.py`) before it is written; the nine items in
+`PORT_DIVERGENCES`, where the port deliberately differs, are reported instead of stopping the build.
