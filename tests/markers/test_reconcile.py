@@ -1156,7 +1156,7 @@ class TestChecksAreUsedOnlyOnceTheirFileRan:
     def test_a_store_error_while_counting_is_logged_not_raised_and_the_other_count_still_happens(self, world, failing):
         from loguru import logger
 
-        path = world.failed[0]
+        path = world.recheck  # Jellyfin's empty answer for it is stored, so its mark shows in the counters
         # A file listed both to ask Jellyfin again and for item 7's retry.
         listing = reconcile.CheckServersListing(
             [], [], rechecks={path: frozenset({"jf-1"})}, retries={path: frozenset({("plex-1", "7")})},
@@ -1169,12 +1169,15 @@ class TestChecksAreUsedOnlyOnceTheirFileRan:
                 listing.count_checked(world.store, path)  # the job goes on to record the file's row
         finally:
             logger.remove(handler)
-        broken.assert_called_once()
+        if failing == "mark_server_rechecks_taken":
+            broken.assert_called_once_with([(path, "jf-1")])
+            assert world.counters() == (None, (1, NOW.isoformat()))
+        else:
+            broken.assert_called_once_with([("plex-1", "7")], listed_at=NOW.isoformat())
+            assert world.counters() == ((0, NOW.isoformat()), None)
         assert [line.strip() for line in lines] == [
-            "WARNING Check servers couldn't count the checks of 1.mkv: OperationalError"
+            "WARNING Check servers couldn't count the checks of recheck.mkv: OperationalError"
         ]
-        _reread, retry = world.counters()
-        assert retry == (None if failing == "record_failed_item_retries" else (1, NOW.isoformat()))
 
 
 class TestQueueing:

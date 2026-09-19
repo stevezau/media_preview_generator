@@ -2089,6 +2089,13 @@ class TestCheckServersUsesChecksAsFilesRun:
         env.jm.cancel_job.assert_called_once_with("j1")
         assert [c.args[1] for c in env.jm.record_file_result.call_args_list] == [check_env.recheck, check_env.failed]
 
+    def test_a_file_that_fails_without_a_cancel_uses_its_retry(self, env, check_env):
+        # It ran: a failure that stays counts toward the item's backoff like any retry (at most 5).
+        check_env.steps.append((check_env.failed, "failed", "ffmpeg exited 1"))
+        job_runner.run_intro_credits_job("j1")
+        assert check_env.counters() == (None, (1, self.NOW.isoformat()))
+        env.jm.cancel_job.assert_not_called()
+
     def test_a_revived_run_uses_the_checks_of_the_files_it_runs(self, env, check_env):
         from media_preview_generator.markers import reconcile
 
