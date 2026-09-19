@@ -10,12 +10,37 @@ Plex-format-compatible webhook plugin payload shape.
 from __future__ import annotations
 
 import json
+import threading
+import time
+import urllib.parse
 from typing import Any
 
+import requests
 from loguru import logger
 
 from ._embyish import EmbyApiClient, is_video_library_folder
 from .base import FlagTarget, HealthCheckIssue, ServerType, WebhookEvent
+
+# Emby's /Packages answer is its whole public plugin catalog (about 1.4 MB), so whether it lists the Bridge plugin is
+# kept per catalog URL: reused for an hour, and for up to a day while the catalog can't be read.
+CATALOG_TTL_S = 3_600.0
+CATALOG_KEEP_ON_ERROR_S = 86_400.0
+# Whether a server's Emby Premiere key lets viewers skip intros is kept per server URL the same way, for an hour; a
+# failed or timed-out read for 5 minutes, so an Emby that hangs doesn't hold up every load of the tab.
+REGISTRATION_TTL_S = 3_600.0
+REGISTRATION_ERROR_TTL_S = 300.0
+REGISTRATION_TIMEOUT_S = 10
+_monotonic = time.monotonic
+_catalog_answers: dict[str, tuple[float, bool]] = {}
+_registration_answers: dict[str, tuple[float, bool | None]] = {}
+_catalog_guard = threading.Lock()
+
+
+def clear_catalog_cache() -> None:
+    """Forget every cached catalog and Emby Premiere answer (tests)."""
+    with _catalog_guard:
+        _catalog_answers.clear()
+        _registration_answers.clear()
 
 
 class EmbyServer(EmbyApiClient):
@@ -135,13 +160,208 @@ class EmbyServer(EmbyApiClient):
 
     def _trigger_item_refresh(self, item_id: str) -> None:
         """Refresh metadata for a single Emby item id."""
-        response = self._request("POST", f"/Items/{item_id}/Refresh")
+        # Quoted: the id arrives from webhook payloads, and "../" or "?" mustn't reach another route.
+        response = self._request("POST", f"/Items/{urllib.parse.quote(str(item_id), safe='')}/Refresh")
         response.raise_for_status()
         logger.info(
             "[{}] Triggered item refresh: {}",
             self.name,
             item_id,
         )
+
+    # ------------------------------------------------------------------
+    # Media Preview Bridge for Emby plugin (emby-plugin/): Intro & Credits markers
+    # ------------------------------------------------------------------
+
+    PLUGIN_NAME = "Media Preview Bridge for Emby"
+    # Emby item ids are numeric; no library reaches this one.
+    _BRIDGE_ACCESS_PROBE_ID = "999999999999"
+
+    def _markers_path(self, item_id: str) -> str:
+        return f"/MediaPreviewBridge/Markers/{urllib.parse.quote(str(item_id), safe='')}"
+
+    def get_emby_marker_state(self, item_id: str) -> dict[str, Any] | None:
+        """What the Bridge plugin stores for an item, shown or not.
+
+        Args:
+            item_id: Emby item id.
+
+        Returns:
+            ``{"intro_start_ticks", "intro_end_ticks", "credits_start_ticks", "file_size", "stale"}`` (None values when
+            nothing is stored; Emby leaves null fields out of its answers), or None when unknown (unknown item, no
+            plugin route, the plugin's error answer, a transport error).
+        """
+        try:
+            resp = self._request("GET", self._markers_path(item_id))
+            body = resp.json() if resp.status_code == 200 else None
+        except (requests.RequestException, ValueError) as exc:
+            logger.debug("Emby Bridge markers read failed on {} for {}: {}", self.name, item_id, type(exc).__name__)
+            return None
+        if not isinstance(body, dict) or body.get("Found") is not True or body.get("Error"):
+            return None
+
+        def ticks(key: str) -> int | None:
+            value = body.get(key)
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+        return {
+            "intro_start_ticks": ticks("IntroStartTicks"),
+            "intro_end_ticks": ticks("IntroEndTicks"),
+            "credits_start_ticks": ticks("CreditsStartTicks"),
+            "file_size": ticks("FileSize"),
+            "stale": body.get("Stale") is True,
+        }
+
+    def put_emby_markers(
+        self,
+        item_id: str,
+        *,
+        intro_start_ticks: int | None,
+        intro_end_ticks: int | None,
+        credits_start_ticks: int | None,
+        file_size: int | None,
+        replace_own: bool,
+    ) -> requests.Response:
+        """Replace the plugin's markers for an item; it writes them into Emby's chapter rows straight away.
+
+        Args:
+            item_id: Emby item id.
+            intro_start_ticks: Intro start (with ``intro_end_ticks``), or None for no intro.
+            intro_end_ticks: Intro end, or None for no intro.
+            credits_start_ticks: Credits start (Emby keeps no credits end), or None for no credits.
+            file_size: Bytes of the file the markers were detected on; the plugin doesn't show them on a file of
+                another size.
+            replace_own: Whether ours replace marker rows of a type the plugin didn't write (Emby's own detection,
+                other plugins); False keeps those rows and adds none of ours for that type.
+
+        Returns:
+            The raw response (the caller reads the ``MarkersResponse``).
+
+        Raises:
+            requests.RequestException: Transport failure.
+        """
+        body = {
+            "IntroStartTicks": intro_start_ticks,
+            "IntroEndTicks": intro_end_ticks,
+            "CreditsStartTicks": credits_start_ticks,
+            "FileSize": file_size,
+            "ReplaceOwn": replace_own,
+        }
+        return self._request("POST", self._markers_path(item_id), json_body=body)
+
+    def delete_emby_markers(self, item_id: str) -> requests.Response:
+        """Remove the rows the plugin wrote for an item and its stored markers (every other chapter row stays).
+
+        Args:
+            item_id: Emby item id.
+
+        Returns:
+            The raw response (the caller reads the ``MarkersResponse``).
+
+        Raises:
+            requests.RequestException: Transport failure.
+        """
+        return self._request("DELETE", self._markers_path(item_id))
+
+    def bridge_catalog_listed(self) -> bool | None:
+        """Whether Emby's plugin catalog offers the plugin.
+
+        The answer is reused for ``CATALOG_TTL_S`` per catalog URL; while the catalog can't be read, the last answer
+        read is used for up to ``CATALOG_KEEP_ON_ERROR_S``.
+
+        Returns:
+            True or False; None when the catalog couldn't be read and no recent answer is known.
+        """
+        url = f"{self._config.url.rstrip('/')}/Packages"
+        with _catalog_guard:
+            cached = _catalog_answers.get(url)
+        if cached is not None and _monotonic() - cached[0] < CATALOG_TTL_S:
+            return cached[1]
+        listed = self._read_catalog()
+        if listed is None:
+            recent = cached is not None and _monotonic() - cached[0] < CATALOG_KEEP_ON_ERROR_S
+            return cached[1] if recent else None
+        with _catalog_guard:
+            _catalog_answers[url] = (_monotonic(), listed)
+        return listed
+
+    def _read_catalog(self) -> bool | None:
+        try:
+            resp = self._request("GET", "/Packages", timeout=20)
+            body = resp.json() if resp.status_code == 200 else None
+        except (requests.RequestException, ValueError) as exc:
+            logger.debug("Emby plugin catalog read failed on {}: {}", self.name, type(exc).__name__)
+            return None
+        if not isinstance(body, list):
+            return None
+        return any(isinstance(p, dict) and (p.get("Name") or p.get("name")) == self.PLUGIN_NAME for p in body)
+
+    def intro_skip_registered(self) -> bool | None:
+        """Whether this server's Emby Premiere key lets viewers skip intros (``GET /Registrations/dvr``).
+
+        Emby's players check the Premiere feature ``dvr`` against the server's registration before they skip an intro
+        (spec §3.3); credits' "Up Next" has no such check. An answer is reused per server URL for
+        ``REGISTRATION_TTL_S``, a failed read for ``REGISTRATION_ERROR_TTL_S``.
+
+        Returns:
+            ``IsRegistered``; None when it couldn't be read (a transport error or timeout, an error status, an Emby
+            without the route, an unexpected answer).
+        """
+        url = self._config.url.rstrip("/")
+        with _catalog_guard:
+            cached = _registration_answers.get(url)
+        if cached is not None:
+            ttl = REGISTRATION_ERROR_TTL_S if cached[1] is None else REGISTRATION_TTL_S
+            if _monotonic() - cached[0] < ttl:
+                return cached[1]
+        registered = self._read_registration()
+        with _catalog_guard:
+            _registration_answers[url] = (_monotonic(), registered)
+        return registered
+
+    def _read_registration(self) -> bool | None:
+        try:
+            resp = self._request("GET", "/Registrations/dvr", timeout=REGISTRATION_TIMEOUT_S)
+            body = resp.json() if resp.status_code == 200 else None
+        except (requests.RequestException, ValueError) as exc:
+            logger.debug("Emby Premiere registration read failed on {}: {}", self.name, type(exc).__name__)
+            return None
+        registered = body.get("IsRegistered") if isinstance(body, dict) else None
+        return registered if isinstance(registered, bool) else None
+
+    def install_plugin(self) -> dict[str, Any]:
+        """Install the plugin from Emby's catalog and restart Emby; say so when it has to be installed by hand.
+
+        Returns:
+            ``{"steps": [{"step", "ok", "detail"}], "ok", "error", "manual"}``: the same shape as Jellyfin's, plus
+            ``manual`` (True when the catalog doesn't list the plugin, so the user copies the DLL in).
+        """
+        result: dict[str, Any] = {"steps": [], "ok": False, "error": "", "manual": False}
+        listed = self.bridge_catalog_listed()
+        if not listed:
+            result["manual"] = listed is False
+            result["error"] = (
+                "Media Preview Bridge for Emby isn't in the Emby plugin catalog yet; install it by hand (see the Intro "
+                "& Credits guide)"
+                if listed is False
+                else "Couldn't read Emby's plugin catalog"
+            )
+            result["steps"].append({"step": "catalog", "ok": False, "detail": result["error"]})
+            return result
+        result["steps"].append({"step": "catalog", "ok": True, "detail": "listed"})
+        for step, path in (
+            ("queue_install", f"/Packages/Installed/{urllib.parse.quote(self.PLUGIN_NAME)}"),
+            ("restart", "/System/Restart"),
+        ):
+            try:
+                self._request("POST", path).raise_for_status()
+            except requests.RequestException as exc:
+                result["error"] = f"{step} failed: {type(exc).__name__}"
+                result["steps"].append({"step": step, "ok": False, "detail": result["error"]})
+                return result
+            result["steps"].append({"step": step, "ok": True, "detail": ""})
+        result["ok"] = True
+        return result
 
     def set_vendor_extraction(
         self,

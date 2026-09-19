@@ -1,0 +1,469 @@
+"""The credit text detector: which decodes it asks for, what it stores, and how failures leave the detector."""
+
+from __future__ import annotations
+
+import math
+import os
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
+import pytest
+
+from media_preview_generator.markers.credits import detector, frames, rule_j
+from media_preview_generator.markers.credits.textdet_helper import TextDetUnavailableError
+from media_preview_generator.markers.models import Candidate, FileIdentity, MarkerType, Source
+from media_preview_generator.markers.pipeline import DetectorUnavailableError
+from media_preview_generator.markers.probe import ProbeTimeoutError
+from media_preview_generator.markers.store import FileRecord, MarkerStore
+from media_preview_generator.processing.generator import CodecNotSupportedError
+from media_preview_generator.servers.base import ServerType
+from tests.markers import test_pipeline
+from tests.markers.fakes import ready_publisher
+
+media = test_pipeline.media
+store = test_pipeline.store
+MOVIE = FileRecord(7, "/media/movies/Movie (2020)/Movie (2020).mkv", 100, 1, 6_000_000, None, True)
+EPISODE = FileRecord(
+    8, "/media/tv/Show/Season 01/Show - S01E01.mkv", 100, 1, 1_320_000, "/media/tv/Show/Season 01", False
+)
+STORY = [(5100.0 + 2 * i, 0, 120.0) for i in range(300)]  # 5100–5698 s, bright, no text
+ROLL = [(5700.0 + 2 * i, 2, 12.0) for i in range(100)]  # 5700–5898 s, dark cards
+FINE = [(float(t), 0, 120.0) for t in range(5680, 5690)] + [(float(t), 2, 12.0) for t in range(5690, 5702)]
+SCENE = [(5900.0 + 2 * i, 0, 120.0) for i in range(50)]  # 5900–5998 s: a scene after the roll
+END = [(5897.0, 2, 12.0), (5898.0, 2, 12.0), (5899.0, 1, 12.0)] + [(float(t), 0, 120.0) for t in range(5900, 5918)]
+
+
+def count(planes):
+    return [0] * len(planes)
+
+
+class Decodes:
+    def __init__(self, *answers):
+        self.answers = list(answers)
+        self.calls: list[dict] = []
+
+    def __call__(self, path, **kwargs):
+        self.calls.append({"path": path, **kwargs})
+        answer = self.answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+START_TIME_S = 1.4  # the container's own first timestamp, as ffprobe gives it
+
+
+@pytest.fixture
+def probes(monkeypatch):
+    """The start time probe: every call's arguments, answering ``START_TIME_S``."""
+    calls: list[dict] = []
+
+    def probe(path, ffmpeg, **kwargs):
+        calls.append({"path": path, "ffmpeg": ffmpeg, **kwargs})
+        return START_TIME_S
+
+    monkeypatch.setattr(detector.frames, "container_start_s", probe)
+    return calls
+
+
+class TestFindCredits:
+    def test_a_file_without_a_roll_decodes_only_the_tail(self, monkeypatch, probes):
+        decodes = Decodes(STORY)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        phases: list[str] = []
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                       count_boxes=count, gpu="NVIDIA", gpu_device_path="cuda:0", phase=phases.append)  # fmt: skip
+        assert (result.start_s, result.end_s, result.fine_rows, result.end_rows) == (None, None, (), ())
+        (call,) = decodes.calls
+        assert call == {"path": MOVIE.canonical_path, "ffmpeg": "/ff", "start_s": 5100.0, "length_s": None,
+                        "keyframes_only": True, "fps": None, "gpu": "NVIDIA", "gpu_device_path": "cuda:0",
+                        "count_boxes": count, "cancel_check": None, "start_time_s": START_TIME_S}  # fmt: skip
+        assert phases == ["Reading the credits…"]
+        assert probes == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": None}]
+
+    def test_a_roll_to_the_end_of_the_file_is_refined_before_it_and_left_open_ended(self, monkeypatch, probes):
+        cancel = lambda: False  # noqa: E731
+        decodes = Decodes(STORY + ROLL, FINE)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        phases: list[str] = []
+        # The roll's last keyframe is at 5898 s and the file ends at 5910 s: no scene follows, no end decode (Q3).
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=5_910_000, is_episode=False, ffmpeg="/ff",
+                                       count_boxes=count, gpu=None, gpu_device_path=None, cancel_check=cancel,
+                                       phase=phases.append)  # fmt: skip
+        assert (result.start_s, result.end_s) == (rule_j.credits_start(STORY + ROLL, FINE), None) == (5690.0, None)
+        assert len(decodes.calls) == 2
+        # Whole-dict equality, like the tail decode above: every kwarg the refine decode forwards is the detector's to
+        # get right. Every decode gets the start time probed once in this run: a stale or defaulted one would put a
+        # recording's refine rows tens of thousands of seconds out and silently drop the refinement (Task 6).
+        assert decodes.calls[1] == {"path": MOVIE.canonical_path, "ffmpeg": "/ff", "start_s": 5680.0,
+                                    "length_s": 21.0, "keyframes_only": False, "fps": 1, "gpu": None,
+                                    "gpu_device_path": None, "count_boxes": count, "cancel_check": cancel,
+                                    "start_time_s": START_TIME_S}  # fmt: skip
+        assert decodes.calls[0]["start_time_s"] == START_TIME_S
+        assert probes == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": cancel}]
+        assert phases == ["Reading the credits…", "Refining the credits start…"]
+
+    def test_a_scene_after_the_roll_is_read_for_where_the_credits_end(self, monkeypatch, probes):
+        decodes = Decodes(STORY + ROLL + SCENE, FINE, END)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        phases: list[str] = []
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                       count_boxes=count, gpu="NVIDIA", gpu_device_path="cuda:0", phase=phases.append)  # fmt: skip
+        assert (result.start_s, result.end_s, result.end_rows) == (5690.0, 5899.0, tuple(END))
+        # Both refine decodes by whole-dict equality: they stay on the worker's GPU (a refine decode quietly dropped to
+        # the CPU would raise FrameDecodeError instead of the GpuDecodeError the worker's CPU rerun needs), and all three
+        # decodes read the one start time this run probed.
+        gpu_kwargs = {"path": MOVIE.canonical_path, "ffmpeg": "/ff", "keyframes_only": False, "fps": 1,
+                      "gpu": "NVIDIA", "gpu_device_path": "cuda:0", "count_boxes": count, "cancel_check": None,
+                      "start_time_s": START_TIME_S}  # fmt: skip
+        assert decodes.calls[1] == {**gpu_kwargs, "start_s": 5680.0, "length_s": 21.0}
+        assert decodes.calls[2] == {**gpu_kwargs, "start_s": 5897.0, "length_s": 21.0}
+        assert phases == ["Reading the credits…", "Refining the credits start…", "Finding where the credits end…"]
+        assert len(probes) == 1
+
+    def test_the_decoded_windows_cover_everything_the_refinements_read(self, monkeypatch, probes):
+        # Rule J may read [coarse − REFINE_BEFORE_S, coarse + REFINE_AFTER_S] for the start and
+        # [end − REFINE_END_BEFORE_S, end + REFINE_END_AFTER_S] for the end. With 1 fps credit frames everywhere that was
+        # decoded and nowhere else, both walks reach the far edge of what rule J reads only if the decode covered it.
+        def decode(path, *, start_s, length_s, keyframes_only, **kwargs):
+            if keyframes_only:
+                return STORY + ROLL + SCENE
+            return [(float(t), 2, 20.0) for t in range(math.ceil(start_s), math.floor(start_s + length_s) + 1)]
+
+        monkeypatch.setattr(detector.frames, "decode_rows", decode)
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                       count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        coarse = rule_j.coarse_start(STORY + ROLL + SCENE)
+        assert result.start_s == coarse.pts_s - rule_j.REFINE_BEFORE_S
+        assert result.end_s == rule_j.coarse_end_s(STORY + ROLL + SCENE, coarse) + rule_j.REFINE_END_AFTER_S
+
+    def test_a_cancelled_job_is_not_probed_or_decoded(self, monkeypatch):
+        monkeypatch.setattr(detector.frames, "probe_media", lambda path, **kwargs: pytest.fail("probed anyway"))
+        monkeypatch.setattr(detector.frames, "decode_rows", lambda path, **kwargs: pytest.fail("decoded anyway"))
+        with pytest.raises(frames.DecodeCancelledError, match="cancelled before decoding"):
+            detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                  count_boxes=count, gpu=None, gpu_device_path=None, cancel_check=lambda: True)  # fmt: skip
+
+    def test_an_episode_reads_the_last_450_s(self, monkeypatch, probes):
+        decodes = Decodes([])
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
+                              count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert decodes.calls[0]["start_s"] == 870.0
+
+    def test_a_roll_at_the_start_of_the_file_refines_from_0(self, monkeypatch, probes):
+        roll = [(10.0 + 2 * i, 2, 12.0) for i in range(20)]
+        decodes = Decodes(roll, [])
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        detector.find_credits(
+            "/m/short.mkv",
+            duration_ms=50_000,
+            is_episode=False,
+            ffmpeg="/ff",
+            count_boxes=count,
+            gpu=None,
+            gpu_device_path=None,
+        )
+        assert (decodes.calls[1]["start_s"], decodes.calls[1]["length_s"]) == (0.0, 11.0)
+
+
+class FakePool:
+    def __init__(self):
+        self.calls = []
+
+    def count_boxes(self, planes, *, gpu, gpu_device_path):
+        self.calls.append((gpu, gpu_device_path))
+        return [0] * len(planes)
+
+
+@pytest.fixture
+def pool(monkeypatch):
+    fake = FakePool()
+    monkeypatch.setattr(detector, "get_textdet_pool", lambda: fake)
+    return fake
+
+
+NOW = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
+
+
+@pytest.fixture
+def ctx(tmp_path):
+    store = MarkerStore(str(tmp_path / "markers.db"))
+    clock = SimpleNamespace(now=NOW)
+    # run_memo as PipelineContext answers outside a run of the file: a fresh dict every call, nothing kept.
+    yield SimpleNamespace(config=SimpleNamespace(ffmpeg_path="/usr/lib/jellyfin-ffmpeg/ffmpeg"), force=False, store=store,
+                          now=lambda: clock.now, clock=clock, run_memo=lambda path: {})  # fmt: skip
+    store.close()
+
+
+class TestDetect:
+    def _find(self, monkeypatch, answer):
+        seen: list[dict] = []
+
+        def find(path, **kwargs):
+            seen.append({"path": path, **kwargs})
+            if isinstance(answer, BaseException):
+                raise answer
+            start, end = answer if isinstance(answer, tuple) else (answer, None)
+            return detector.CreditsTextResult(start, end, (), (), ())
+
+        monkeypatch.setattr(detector, "find_credits", find)
+        return seen
+
+    def test_a_roll_to_the_end_becomes_one_credits_candidate_without_an_end(self, monkeypatch, pool, ctx):
+        seen = self._find(monkeypatch, 5690.4996)
+        phase = []
+        cancel = lambda: False  # noqa: E731 — identity is asserted: the detector must forward this exact callable
+        assert detector.detect_credits_text(
+            MOVIE, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0", phase_callback=phase.append, cancel_check=cancel
+        ) == [Candidate(MarkerType.CREDITS, 5_690_500, None, Source.CREDITS_TEXT)]
+        (call,) = seen
+        assert (call["path"], call["duration_ms"], call["is_episode"], call["ffmpeg"], call["gpu"], call["gpu_device_path"]) == (
+            MOVIE.canonical_path, 6_000_000, False, "/usr/lib/jellyfin-ffmpeg/ffmpeg", "NVIDIA", "cuda:0")  # fmt: skip
+        assert call["cancel_check"] is cancel
+        # Call it rather than checking it is set: a phase callback wired to something else would leave the worker row
+        # showing the pipeline's last text for the whole decode. Equality, not identity — ``phase.append`` is a fresh
+        # bound method on every access.
+        call["phase"](detector.READING_PHASE)
+        assert phase == [detector.READING_PHASE]
+        call["count_boxes"](frames.np.zeros((2, 180, 320), frames.np.uint8))
+        assert pool.calls == [("NVIDIA", "cuda:0")]
+
+    def test_a_scene_after_the_roll_gives_the_candidate_its_end(self, monkeypatch, pool, ctx):
+        self._find(monkeypatch, (5690.4996, 5899.0004))
+        assert detector.detect_credits_text(MOVIE, ctx=ctx) == [
+            Candidate(MarkerType.CREDITS, 5_690_500, 5_899_000, Source.CREDITS_TEXT)
+        ]
+
+    @pytest.mark.parametrize(
+        ("rec", "episode"),
+        [
+            (EPISODE, True),
+            (MOVIE, False),
+            # Neither a movie nor in a season (a "Pilot" file on its own): read as a movie. Only this cell tells
+            # ``season_key is not None`` from ``not is_movie``.
+            (FileRecord(9, "/m/Some Show - Pilot.mkv", 100, 1, 1_320_000, None, False), False),
+        ],
+    )
+    def test_only_a_file_in_a_season_is_read_as_an_episode(self, monkeypatch, pool, ctx, rec, episode):
+        seen = self._find(monkeypatch, None)
+        assert detector.detect_credits_text(rec, ctx=ctx) == []
+        assert seen[0]["is_episode"] is episode
+
+    def test_a_gpu_decode_failure_is_a_codec_error_for_the_workers_cpu_rerun(self, monkeypatch, pool, ctx):
+        self._find(monkeypatch, frames.GpuDecodeError("the GPU decoded no frames from Movie (2020).mkv"))
+        with pytest.raises(CodecNotSupportedError, match="no frames"):
+            detector.detect_credits_text(MOVIE, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0")
+
+    @pytest.mark.parametrize(
+        ("error", "message"),
+        [
+            (frames.FrameDecodeError("ffmpeg exited 1 decoding Movie (2020).mkv on the CPU"), "exited 1"),
+            (frames.DecodeCancelledError("cancelled while decoding"), "cancelled"),
+            (TextDetUnavailableError("Text detection failed: the helper exited"), "Text detection failed"),
+        ],
+    )
+    def test_other_failures_are_no_answer_this_time_and_not_remembered(self, monkeypatch, pool, ctx, error, message):
+        self._find(monkeypatch, error)
+        with pytest.raises(DetectorUnavailableError, match=message):
+            detector.detect_credits_text(MOVIE, ctx=ctx)
+        assert (
+            ctx.store.credits_text_timed_out_at(FileIdentity(MOVIE.canonical_path, MOVIE.size, MOVIE.mtime_ns)) is None
+        )
+
+    def test_a_timed_out_decode_waits_a_day_unless_forced_or_the_file_changes(self, monkeypatch, pool, ctx):
+        seen = self._find(monkeypatch, frames.DecodeTimeoutError("decoding Movie (2020).mkv timed out after 600 s"))
+        with pytest.raises(DetectorUnavailableError, match="timed out after 600 s"):
+            detector.detect_credits_text(MOVIE, ctx=ctx)
+        assert (
+            ctx.store.credits_text_timed_out_at(FileIdentity(MOVIE.canonical_path, MOVIE.size, MOVIE.mtime_ns)) == NOW
+        )
+        # A second path that timed out around the same time: recording MOVIE's next timeout must not sweep it away
+        # (``forget_before`` is what the SUT controls here — passing ``now`` instead of ``now - TIMEOUT_RETRY`` would
+        # delete every other path's still-live entry on every new timeout).
+        other = FileIdentity("/media/movies/Other (2019)/Other (2019).mkv", 200, 2)
+        ctx.store.record_credits_text_timeout(other, NOW, forget_before=NOW - detector.TIMEOUT_RETRY)
+        ctx.clock.now = NOW + timedelta(hours=23)
+        with pytest.raises(DetectorUnavailableError, match="less than a day ago"):
+            detector.detect_credits_text(MOVIE, ctx=ctx)
+        assert len(seen) == 1  # not decoded again
+        changed = FileRecord(
+            MOVIE.id, MOVIE.canonical_path, MOVIE.size + 1, MOVIE.mtime_ns, MOVIE.duration_ms, None, True
+        )
+        for rec, force in ((changed, False), (MOVIE, True)):
+            ctx.force = force
+            with pytest.raises(DetectorUnavailableError, match="timed out after"):
+                detector.detect_credits_text(rec, ctx=ctx)
+        assert len(seen) == 3  # each timed out again, so the latest entry is from 23 h
+        assert ctx.store.credits_text_timed_out_at(other) == NOW  # the other path's entry survived
+        ctx.force, ctx.clock.now = False, NOW + timedelta(hours=23) + timedelta(days=1, minutes=1)
+        with pytest.raises(DetectorUnavailableError, match="timed out after"):
+            detector.detect_credits_text(MOVIE, ctx=ctx)
+        assert len(seen) == 4
+
+    def test_a_start_time_probe_that_times_out_waits_a_day_like_a_decode(self, monkeypatch, pool, ctx):
+        # The real find_credits: only ffprobe is replaced, stalled on a mount.
+        def stalled(path, **kwargs):
+            raise ProbeTimeoutError(f"ffprobe failed for {path}: TimeoutExpired")
+
+        monkeypatch.setattr(frames, "probe_media", stalled)
+        monkeypatch.setattr(frames, "decode_rows", lambda path, **kwargs: pytest.fail("decoded anyway"))
+        with pytest.raises(DetectorUnavailableError, match="reading the start time of Movie \\(2020\\).mkv timed out"):
+            detector.detect_credits_text(MOVIE, ctx=ctx)
+        identity = FileIdentity(MOVIE.canonical_path, MOVIE.size, MOVIE.mtime_ns)
+        assert ctx.store.credits_text_timed_out_at(identity) == NOW
+        assert detector.credits_text_needs_worker(MOVIE, ctx) is False  # settled on the checking thread for a day
+
+    def test_an_unknown_duration_is_no_answer(self, pool, ctx):
+        rec = FileRecord(9, "/m/x.mkv", 1, 1, None, None, True)
+        with pytest.raises(DetectorUnavailableError, match="duration"):
+            detector.detect_credits_text(rec, ctx=ctx)
+
+
+def test_spec_carries_the_version_and_asks_whether_a_worker_is_needed():
+    spec = detector.credits_text_spec()
+    assert (spec.source, spec.types, spec.version) == (
+        Source.CREDITS_TEXT,
+        frozenset({MarkerType.CREDITS}),
+        detector.CREDITS_TEXT_VERSION,
+    )
+    assert (spec.stored_sources, spec.due, spec.needs_worker, spec.followups) == (
+        frozenset({Source.CREDITS_TEXT}),
+        None,
+        detector.credits_text_needs_worker,
+        None,
+    )
+
+
+class TestNeedsWorker:
+    """A file the detector would give up on at once is answered on the checking thread: a worker (one by default) is
+    held only for a real decode, not for a day of ``DetectorUnavailableError`` after a timeout."""
+
+    def _timed_out(self, ctx, rec, at):
+        ctx.store.record_credits_text_timeout(
+            FileIdentity(rec.canonical_path, rec.size, rec.mtime_ns), at, forget_before=at - detector.TIMEOUT_RETRY
+        )
+
+    @pytest.mark.parametrize(
+        ("duration_ms", "timed_out_ago", "force", "expected"),
+        [
+            (6_000_000, None, False, True),  # never timed out: decode on a worker
+            (None, None, False, False),  # no duration: gives up at once
+            (6_000_000, timedelta(hours=23), False, False),  # timed out lately: gives up at once
+            (6_000_000, timedelta(hours=23), True, True),  # a forced re-detect decodes again
+            (6_000_000, timedelta(days=1), False, True),  # a day on, it is decoded again
+        ],
+        ids=["fresh", "no-duration", "timed-out-lately", "forced", "a-day-later"],
+    )
+    def test_only_a_file_that_will_be_decoded_takes_a_worker(self, ctx, duration_ms, timed_out_ago, force, expected):
+        rec = FileRecord(MOVIE.id, MOVIE.canonical_path, MOVIE.size, MOVIE.mtime_ns, duration_ms, None, True)
+        if timed_out_ago is not None:
+            self._timed_out(ctx, rec, NOW - timed_out_ago)
+        ctx.force = force
+        assert detector.credits_text_needs_worker(rec, ctx) is expected
+
+    def test_another_identity_of_the_path_still_takes_a_worker(self, ctx):
+        self._timed_out(ctx, MOVIE, NOW - timedelta(hours=1))
+        replaced = FileRecord(MOVIE.id, MOVIE.canonical_path, MOVIE.size + 1, 2, MOVIE.duration_ms, None, True)
+        assert detector.credits_text_needs_worker(replaced, ctx) is True
+
+
+class TestCheckStage:
+    """The pipeline's check stage with the real spec: the hand-off decision is ``needs_worker``'s."""
+
+    def _ctx(self, store, media, *, force=False):
+        return test_pipeline._ctx(
+            store,
+            test_pipeline._registry(media, ServerType.PLEX),
+            settings_raw={
+                "detect": {"intro": False, "credits": True},
+                "publish_when": "medium",
+                "sources": [{"id": "credits_text", "enabled": True}],
+            },
+            detectors=(detector.credits_text_spec(),),
+            force=force,
+        )
+
+    def _time_out(self, store, media, ctx):
+        st = os.stat(media)
+        at = ctx.now() - timedelta(hours=1)
+        store.record_credits_text_timeout(
+            FileIdentity(media, st.st_size, st.st_mtime_ns), at, forget_before=at - detector.TIMEOUT_RETRY
+        )
+
+    def test_a_file_that_timed_out_lately_is_settled_without_a_worker(self, store, media, monkeypatch):
+        decoded: list[str] = []
+        monkeypatch.setattr(detector, "find_credits", lambda path, **kwargs: decoded.append(path))
+        ctx = self._ctx(store, media)
+        self._time_out(store, media, ctx)
+        out, _ = test_pipeline._run(ctx, media, {"plex-1": ready_publisher()}, stage="check")
+        assert out is not None  # None would hand the file to a worker only to give up there
+        assert decoded == []
+
+    def test_the_hand_off_and_the_detector_read_one_verdict(self, store, media, monkeypatch):
+        # The day after a timeout can end between the hand-off check and the detector's own guard. Read twice, the
+        # second read would say "decode" on the checking thread; the verdict is read once per run of the file.
+        answers = iter([True, False])
+        monkeypatch.setattr(detector, "_timed_out_lately", lambda rec, ctx: next(answers))
+        monkeypatch.setattr(detector, "find_credits", lambda path, **kwargs: pytest.fail("decoded on the check thread"))
+        out, _ = test_pipeline._run(self._ctx(store, media), media, {"plex-1": ready_publisher()}, stage="check")
+        assert out is not None
+
+    def test_a_forced_run_of_it_still_goes_to_a_worker(self, store, media, monkeypatch):
+        monkeypatch.setattr(detector, "find_credits", lambda path, **kwargs: pytest.fail("decoded on the check thread"))
+        ctx = self._ctx(store, media, force=True)
+        self._time_out(store, media, ctx)
+        out, _ = test_pipeline._run(ctx, media, {"plex-1": ready_publisher()}, stage="check")
+        assert out is None
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize(("scene_s", "expected_end"), [(0, None), (60, 540.0)])
+def test_real_decode_and_detection_on_a_generated_roll(tmp_path, monkeypatch, scene_s, expected_end):
+    import os
+    import shutil
+    import subprocess as sp
+
+    from media_preview_generator.markers.credits import textdet_helper
+
+    model = os.environ.get(textdet_helper.MODEL_ENV, textdet_helper.DEFAULT_MODEL_PATH)
+    ffmpeg = shutil.which("ffmpeg")
+    font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    if not (ffmpeg and os.path.isfile(model) and os.path.isfile(font)):
+        pytest.skip("needs ffmpeg, the DejaVuSans font and the text detection model")
+    monkeypatch.setenv(textdet_helper.MODEL_ENV, model)
+    clip = tmp_path / "movie.mkv"
+    # 420 s of text-free gradients, then 120 s of names scrolling up over black (a new line every 3 s, 20 px/s), then
+    # optionally a 60 s scene after the credits (Q3).
+    roll = ",".join(
+        f"drawtext=fontfile={font}:text='NAME {i}':fontcolor=white:fontsize=24:x=(w-tw)/2:y=h-20*t+{i * 60}"
+        for i in range(40)
+    )
+    inputs = ["-f", "lavfi", "-i",
+              "gradients=size=640x360:rate=24:speed=0.02:seed=3,trim=duration=420,setpts=PTS-STARTPTS",  # fmt: skip
+              "-f", "lavfi", "-i", f"color=c=black:size=640x360:rate=24:duration=120,{roll}"]  # fmt: skip
+    if scene_s:
+        inputs += [
+            "-f",
+            "lavfi",
+            "-i",
+            f"gradients=size=640x360:rate=24:speed=0.05:seed=9,trim=duration={scene_s},setpts=PTS-STARTPTS",
+        ]
+    streams = "".join(f"[{i}:v]" for i in range(len(inputs) // 4))
+    sp.run([ffmpeg, "-v", "error", *inputs, "-filter_complex", f"{streams}concat=n={len(inputs) // 4}:v=1:a=0[v]", "-map", "[v]",
+            "-c:v", "libx264", "-preset", "veryfast", "-g", "48", "-pix_fmt", "yuv420p", str(clip)], check=True)  # fmt: skip
+    # A throwaway pool of this test's own, closed here: the app's singleton (``get_textdet_pool``) is never closed,
+    # since ``close_all`` ends a pool permanently.
+    pool = textdet_helper.TextDetectorPool()
+    try:
+        result = detector.find_credits(str(clip), duration_ms=(540 + scene_s) * 1000, is_episode=False, ffmpeg=ffmpeg,
+                                       count_boxes=lambda p: pool.count_boxes(p, gpu=None, gpu_device_path=None),
+                                       gpu=None, gpu_device_path=None)  # fmt: skip
+    finally:
+        pool.close_all()
+    assert result.start_s is not None and abs(result.start_s - 420.0) <= 10.0
+    if expected_end is None:
+        assert result.end_s is None and result.end_rows == ()
+    else:
+        assert result.end_s is not None and abs(result.end_s - expected_end) <= 3.0

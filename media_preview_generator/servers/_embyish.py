@@ -19,7 +19,8 @@ import re
 import threading
 import time
 import unicodedata
-from collections.abc import Iterator
+import urllib.parse
+from collections.abc import Collection, Iterator
 from typing import Any
 
 import requests
@@ -95,6 +96,10 @@ _LIST_ITEMS_TIMEOUT_S = 60
 # rows so we don't silently hide legitimate video libraries.
 _NON_VIDEO_COLLECTION_TYPES: frozenset[str] = frozenset({"music", "musicvideos", "photos", "books", "audiobooks"})
 
+# A request that got no HTTP answer at all (refused, reset, timed out): the next request to that server would most
+# likely wait just as long.
+NO_ANSWER_ERRORS = (requests.ConnectionError, requests.Timeout)
+
 
 def is_video_library_folder(raw: dict) -> bool:
     """Return True when an Emby/Jellyfin VirtualFolder dict should be
@@ -108,6 +113,25 @@ def is_video_library_folder(raw: dict) -> bool:
         return False
     collection_type = str(raw.get("CollectionType") or "").lower()
     return collection_type not in _NON_VIDEO_COLLECTION_TYPES
+
+
+def _chapter_rows(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """An item's ``Chapters`` as ``{"marker_type", "start_ms", "name"}`` rows (rows without an integer start skipped)."""
+    out: list[dict[str, Any]] = []
+    for chapter in item.get("Chapters") or []:
+        if not isinstance(chapter, dict):
+            continue
+        ticks = chapter.get("StartPositionTicks")
+        if not isinstance(ticks, int) or isinstance(ticks, bool):
+            continue
+        out.append(
+            {
+                "marker_type": str(chapter.get("MarkerType") or "Chapter"),
+                "start_ms": ticks // 10_000,
+                "name": str(chapter.get("Name") or ""),
+            }
+        )
+    return out
 
 
 class EmbyApiClient(MediaServer):
@@ -138,14 +162,14 @@ class EmbyApiClient(MediaServer):
         # is also virtually free on the hot path (single attribute
         # read, no acquire) thanks to double-checked locking.
         self._session_lock = threading.Lock()
-        # Reverse-lookup cache: ``{remote_path: (expires_at, item_id)}``.
+        # Reverse-lookup cache: ``{(remote_path, library scope): (expires_at, item_id)}``.
         # Caches POSITIVE results only — see ``_resolve_one_path`` for the
         # negative-cache regression (chain ``62e32c35``, 2026-05-11) that
         # forced every early retry to short-circuit on stale ``None`` for
         # the full TTL. Value type stays ``str | None`` for backwards-compat
         # with any in-memory entry written by older code paths; the reader
         # in ``_resolve_one_path`` defensively ignores ``None`` values.
-        self._reverse_lookup_cache: dict[str, tuple[float, str | None]] = {}
+        self._reverse_lookup_cache: dict[tuple[str, frozenset[str] | None], tuple[float, str | None]] = {}
         self._reverse_lookup_lock = threading.Lock()
 
     @property
@@ -531,6 +555,234 @@ class EmbyApiClient(MediaServer):
             if isinstance(src, dict):
                 sources.append((str(src.get("Id") or ""), str(src.get("Path") or "")))
         return sources
+
+    def _fetch_item_fields(self, item_id: str, fields: str, *, raise_no_answer: bool = False) -> dict[str, Any] | None:
+        """Fetch one item with extra ``Fields`` using the endpoint that works for this auth shape.
+
+        The id is URL-quoted into the per-user path, so an id from an API caller can't reach another endpoint.
+
+        Raises:
+            requests.RequestException: With ``raise_no_answer``, when the server gave no HTTP answer
+                (``NO_ANSWER_ERRORS``); otherwise every failure returns None.
+        """
+        user_id = self._user_id()
+        try:
+            if user_id:
+                quoted = urllib.parse.quote(str(item_id), safe="")
+                resp = self._request("GET", f"/Users/{user_id}/Items/{quoted}", params={"Fields": fields})
+                resp.raise_for_status()
+                data = resp.json()
+            else:
+                resp = self._request("GET", "/Items", params={"Ids": item_id, "Fields": fields})
+                resp.raise_for_status()
+                items = resp.json().get("Items") or []
+                data = items[0] if items else None
+        except Exception as exc:
+            if raise_no_answer and isinstance(exc, NO_ANSWER_ERRORS):
+                raise
+            logger.debug("{} item field lookup failed for {}: {}", self.vendor_name, item_id, exc)
+            return None
+        return data if isinstance(data, dict) else None
+
+    def item_missing(self, item_id: str) -> bool | None:
+        """Whether the server says it has no item with this id (deleted, or its file moved to a new item).
+
+        Args:
+            item_id: Server item id.
+
+        Returns:
+            True when the server answers that the item doesn't exist, False when it lists it, None when it couldn't be
+            asked (a timeout, an error answer).
+        """
+        user_id = self._user_id()
+        try:
+            if user_id:
+                quoted = urllib.parse.quote(str(item_id), safe="")
+                resp = self._request("GET", f"/Users/{user_id}/Items/{quoted}")
+                if resp.status_code == 404:
+                    return True
+                return False if resp.status_code == 200 else None
+            resp = self._request("GET", "/Items", params={"Ids": item_id})
+            if resp.status_code != 200:
+                return None
+            items = resp.json().get("Items")
+        except (requests.RequestException, ValueError, AttributeError) as exc:
+            logger.debug("{} item lookup failed for {}: {}", self.vendor_name, item_id, type(exc).__name__)
+            return None
+        return not items if isinstance(items, list) else None
+
+    def get_chapter_markers(self, item_id: str, *, raise_no_answer: bool = False) -> list[dict[str, Any]] | None:
+        """Chapter rows with Emby's marker types (``IntroStart``/``IntroEnd``/``CreditsStart``/``Chapter``).
+
+        Args:
+            item_id: Server item id.
+            raise_no_answer: Raise instead of returning None when the server gave no HTTP answer.
+
+        Returns:
+            ``[{"marker_type", "start_ms", "name"}]`` in the server's order (rows without a usable integer start
+            are skipped), or None when the item couldn't be fetched.
+
+        Raises:
+            requests.RequestException: With ``raise_no_answer``: one of ``NO_ANSWER_ERRORS``.
+        """
+        item = self._fetch_item_fields(item_id, "Chapters", raise_no_answer=raise_no_answer)
+        return None if item is None else _chapter_rows(item)
+
+    def get_chapters_and_versions(
+        self, item_id: str
+    ) -> tuple[list[dict[str, Any]], list[tuple[str, str | None]]] | None:
+        """An item's chapter rows and every version of it, in one read.
+
+        Emby keeps each version of a video as its own item with its own chapters, and lists an item's other versions
+        as MediaSources next to its own: with an API key only when ``AlternateMediaSources`` is asked for, on the
+        per-user route always. Each source names its version's item (``ItemId``). The order is Emby's and needn't put
+        the item's own file first.
+
+        Args:
+            item_id: Server item id.
+
+        Returns:
+            ``(chapter rows as get_chapter_markers returns them, [(server-side path, version item id or None)])``
+            (sources without a path left out), or None when the item couldn't be fetched.
+        """
+        item = self._fetch_item_fields(item_id, "Chapters,MediaSources,AlternateMediaSources")
+        if item is None:
+            return None
+        versions = [
+            (str(source["Path"]), str(source["ItemId"]) if source.get("ItemId") else None)
+            for source in item.get("MediaSources") or []
+            if isinstance(source, dict) and source.get("Path")
+        ]
+        return _chapter_rows(item), versions
+
+    def get_plugin_names(self) -> list[str] | None:
+        """Names of the plugins installed on the server (``GET /Plugins``, administrators only on Jellyfin).
+
+        Returns:
+            The names in the server's order, or None when the list couldn't be read.
+        """
+        try:
+            resp = self._request("GET", "/Plugins", timeout=10)
+        except requests.RequestException as exc:
+            logger.debug("{} plugin list failed on {}: {}", self.vendor_name, self.name, type(exc).__name__)
+            return None
+        if resp.status_code != 200:
+            return None
+        try:
+            body = resp.json()
+        except ValueError:
+            return None
+        if not isinstance(body, list):
+            return None
+        return [str(p["Name"]) for p in body if isinstance(p, dict) and p.get("Name")]
+
+    # A valid item id no library item has, per vendor: the admin-only Markers route answers it without touching an item.
+    _BRIDGE_ACCESS_PROBE_ID = ""
+
+    def get_bridge_info(self) -> dict[str, Any] | None:
+        """Bridge plugin presence, version and feature list.
+
+        Returns:
+            ``{"installed": bool, "version": str | None, "features": list[str]}``, or None when the server
+            can't be reached (transport error or a 5xx, which Jellyfin answers to every route while starting up).
+        """
+        not_installed: dict[str, Any] = {"installed": False, "version": None, "features": []}
+        try:
+            resp = self._request("GET", "/MediaPreviewBridge/Ping", timeout=10)
+        except requests.RequestException as exc:
+            logger.debug("Bridge ping failed on {}: {}", self.name, type(exc).__name__)
+            return None
+        if resp.status_code >= 500:
+            return None
+        if resp.status_code != 200:
+            return not_installed
+        try:
+            payload = resp.json()
+        except ValueError:
+            return not_installed
+        if not isinstance(payload, dict):
+            return not_installed
+        # Jellyfin's plugin answers camelCase, Emby keeps the C# PascalCase names.
+        features = payload.get("features", payload.get("Features"))
+        return {
+            "installed": bool(payload.get("ok", payload.get("Ok"))),
+            "version": payload.get("version", payload.get("Version")),
+            "features": [str(f) for f in features] if isinstance(features, list) else [],
+        }
+
+    def get_bridge_markers_access(self) -> str | None:
+        """Whether this server's credentials may use the Bridge markers routes, which need an administrator.
+
+        Probes with an id no item has: an authorised caller gets the plugin's "item not found".
+
+        Returns:
+            ``"ok"``; ``"unauthorized"`` (401: credentials rejected); ``"forbidden"`` (403: not an administrator);
+            None when it couldn't be told (unreachable, no route, other status).
+        """
+        try:
+            resp = self._request("GET", f"/MediaPreviewBridge/Markers/{self._BRIDGE_ACCESS_PROBE_ID}", timeout=10)
+        except requests.RequestException as exc:
+            logger.debug("Bridge markers access probe failed on {}: {}", self.name, type(exc).__name__)
+            return None
+        if resp.status_code == 401:
+            return "unauthorized"
+        if resp.status_code == 403:
+            return "forbidden"
+        if resp.status_code == 200:
+            return "ok"
+        if resp.status_code == 404:
+            try:
+                body = resp.json()
+            except ValueError:
+                return None
+            return "ok" if isinstance(body, dict) and "error" in body else None
+        return None
+
+    def get_external_ids(self, item_id: str) -> dict[str, Any] | None:
+        """ProviderIds (series ids for episodes) plus season/episode numbers.
+
+        Episodes take tmdb/imdb/tvdb ONLY from the series' own ProviderIds. If ``SeriesId`` is
+        missing, or the series re-fetch fails or returns nothing, the ids stay ``None``
+        (season/episode are still reported) — the episode's own (per-episode) ProviderIds are
+        never used as a stand-in for the series', since a wrong id would route another show's
+        markers to this file. Movies never report a ``tvdb`` id (different id space to
+        tmdb/imdb). Unrecognised item types report no ids at all.
+        """
+        item = self._fetch_item_fields(item_id, "ProviderIds,ParentIndexNumber,IndexNumber,SeriesId")
+        if item is None:
+            return None
+        item_type = str(item.get("Type") or "")
+        kind = {"Movie": "movie", "Episode": "episode"}.get(item_type, "unknown")
+        out: dict[str, Any] = {
+            "kind": kind,
+            "tmdb": None,
+            "imdb": None,
+            "tvdb": None,
+            "season": None,
+            "episode": None,
+        }
+        if kind == "unknown":
+            return out
+
+        if kind == "episode":
+            out["season"] = item.get("ParentIndexNumber")
+            out["episode"] = item.get("IndexNumber")
+            series_id = item.get("SeriesId")
+            if not series_id:
+                return out
+            series = self._fetch_item_fields(str(series_id), "ProviderIds")
+            if series is None:
+                return out
+            providers_source = series
+            allowed_schemes = ("tmdb", "imdb", "tvdb")
+        else:
+            providers_source = item
+            allowed_schemes = ("tmdb", "imdb")  # movies: tvdb is a different id space
+
+        providers = {str(k).lower(): str(v) for k, v in (providers_source.get("ProviderIds") or {}).items() if v}
+        for scheme in allowed_schemes:
+            out[scheme] = providers.get(scheme)
+        return out
 
     def media_item_versions(self, raw: dict[str, Any]) -> list[tuple[str, str]]:
         """Yield ``(item_id, path)`` for every version of a ``/Items`` row.
@@ -1157,29 +1409,10 @@ class EmbyApiClient(MediaServer):
 
         Prefers ``MediaSources[0].Path`` over the top-level ``Path``
         because some item types only populate the media source.
+        The endpoint choice lives in :meth:`_fetch_item_fields`.
         """
-        user_id = self._user_id()
-        if user_id:
-            primary_path = f"/Users/{user_id}/Items/{item_id}"
-            primary_params = {"Fields": "Path,MediaSources"}
-            primary_unwrap = lambda data: data  # noqa: E731 — single-item endpoint returns the item directly
-        else:
-            primary_path = "/Items"
-            primary_params = {"Ids": item_id, "Fields": "Path,MediaSources"}
-
-            def primary_unwrap(data):
-                items = data.get("Items") or []
-                return items[0] if items else {}
-
-        try:
-            response = self._request("GET", primary_path, params=primary_params)
-            response.raise_for_status()
-            data = primary_unwrap(response.json())
-        except Exception as exc:
-            logger.debug("{} item lookup failed for {}: {}", self.vendor_name, item_id, exc)
-            return None
-
-        if not isinstance(data, dict):
+        data = self._fetch_item_fields(item_id, "Path,MediaSources")
+        if data is None:
             return None
 
         for source in data.get("MediaSources", []) or []:
@@ -1191,7 +1424,7 @@ class EmbyApiClient(MediaServer):
         path = str(data.get("Path") or "")
         return path or None
 
-    def _resolve_one_path(self, server_view_path: str) -> str | None:
+    def _resolve_one_path(self, server_view_path: str, *, library_ids: Collection[str] | None = None) -> str | None:
         """Cached per-server-view-path lookup.
 
         The base class loops mapped candidates through this hook (see
@@ -1223,14 +1456,19 @@ class EmbyApiClient(MediaServer):
         replace just the uncached body with their vendor-native
         per-path lookup (Emby's ``Path=<exact>`` filter, Jellyfin's
         ``MediaPreviewBridge/ResolvePath``).
+
+        Both vendors look a file up by its path, so ``library_ids`` (the
+        caller's library scope) doesn't change the lookup; it is part of
+        the cache key so an answer is only reused for the same scope.
         """
         basename = os.path.basename(server_view_path or "")
         if not basename:
             return None
 
+        cache_key = (server_view_path, None if library_ids is None else frozenset(library_ids))
         now = time.monotonic()
         with self._reverse_lookup_lock:
-            cached = self._reverse_lookup_cache.get(server_view_path)
+            cached = self._reverse_lookup_cache.get(cache_key)
             # ``cached[1] is not None`` guards against stale negatives
             # left in the cache by older code paths (defence-in-depth
             # for rolling deploys); current code never writes them.
@@ -1239,7 +1477,7 @@ class EmbyApiClient(MediaServer):
         result = self._uncached_resolve_remote_path_to_item_id(server_view_path)
         if result is not None:
             with self._reverse_lookup_lock:
-                self._reverse_lookup_cache[server_view_path] = (now + _REVERSE_LOOKUP_TTL_S, result)
+                self._reverse_lookup_cache[cache_key] = (now + _REVERSE_LOOKUP_TTL_S, result)
         return result
 
     def _find_owning_library_id(self, remote_path: str) -> str | None:

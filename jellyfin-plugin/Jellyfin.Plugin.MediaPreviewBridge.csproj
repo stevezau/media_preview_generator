@@ -1,31 +1,42 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <!-- Build per Jellyfin ABI: `dotnet build -p:JellyfinAbi=12.0` for Jellyfin 12 (net10 + CleanupExtractedData). -->
+    <JellyfinAbi Condition="'$(JellyfinAbi)' == ''">10.11</JellyfinAbi>
     <RootNamespace>Jellyfin.Plugin.MediaPreviewBridge</RootNamespace>
     <AssemblyName>Jellyfin.Plugin.MediaPreviewBridge</AssemblyName>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
-    <!-- Match the Jellyfin server release the plugin targets. The user
-         must run a server at this version or newer for the plugin to load
-         (Jellyfin's plugin loader compares NuGet AssemblyVersion). -->
-    <Version>10.11.0.3</Version>
-    <FileVersion>10.11.0.3</FileVersion>
-    <AssemblyVersion>10.11.0.3</AssemblyVersion>
+  </PropertyGroup>
+
+  <!-- Jellyfin.Controller is pinned to the lowest server release of each ABI; newer servers of the same ABI load us.
+       The plugin loader compares the assembly version, so Version tracks the ABI family. -->
+  <PropertyGroup Condition="'$(JellyfinAbi)' == '10.11'">
+    <TargetFramework>net9.0</TargetFramework>
+    <JellyfinControllerVersion>10.11.0</JellyfinControllerVersion>
+    <SkiaSharpVersion>2.88.9</SkiaSharpVersion>
+    <Version>10.11.1.0</Version>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(JellyfinAbi)' == '12.0'">
+    <TargetFramework>net10.0</TargetFramework>
+    <JellyfinControllerVersion>12.0.0</JellyfinControllerVersion>
+    <!-- Jellyfin 12.0 ships SkiaSharp 3.119.4 (checked in the lab container's jellyfin.deps.json). -->
+    <SkiaSharpVersion>3.119.4</SkiaSharpVersion>
+    <Version>12.0.1.0</Version>
+    <DefineConstants>$(DefineConstants);JF12</DefineConstants>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <FileVersion>$(Version)</FileVersion>
+    <AssemblyVersion>$(Version)</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Jellyfin.Controller is the public plugin API surface (DI hooks,
-         service interfaces). Pinned to the minimum version we support;
-         server runs >= this version load us fine. ITrickplayManager
-         landed in 10.10 so we can't go lower than that. -->
-    <PackageReference Include="Jellyfin.Controller" Version="10.11.0" />
-    <!-- SkiaSharp matches what Jellyfin's image stack uses; we only need
-         it for measuring the last sheet (decode + GetPixel). PrivateAssets
-         keeps it out of the published plugin DLL — Jellyfin already
-         loads SkiaSharp at runtime so we just compile against it. -->
-    <PackageReference Include="SkiaSharp" Version="2.88.9" PrivateAssets="all" />
+    <PackageReference Include="Jellyfin.Controller" Version="$(JellyfinControllerVersion)" />
+    <!-- Compile-only: Jellyfin already loads SkiaSharp at runtime, so it stays out of the published plugin. -->
+    <PackageReference Include="SkiaSharp" Version="$(SkiaSharpVersion)" PrivateAssets="all" />
   </ItemGroup>
 
 </Project>

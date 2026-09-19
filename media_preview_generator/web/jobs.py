@@ -19,14 +19,22 @@ import uuid
 from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, fields
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any, Optional
 
 from loguru import logger
 
+from ..job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_PREVIEWS, parse_job_kind
+from ..utils import redact_secrets
+
 # Message shown in UI when a job's log file was removed by retention policy.
 LOG_RETENTION_CLEARED_MESSAGE = "Log file was cleared due to log retention policy."
+
+# Job config key set while a job's pause came from its schedule's stop time. Only such a pause is resumed by that
+# schedule's next start (or Run now); a pause by hand, or Pause all, overwrites it, and any resume or the job's end
+# clears it.
+PAUSED_BY_SCHEDULE = "paused_by_schedule"
 
 # Every key ``upsert_retry_chain_job`` and ``_spawn_retry_job`` write
 # onto a Job's config to mark it as part of a retry chain. Single
@@ -279,6 +287,9 @@ class JobProgress:
     # fills as the wait elapses, instead of a stuck-looking 0% bar.
     retry_eta: str | None = None
     retry_wait_total: int | None = None
+    # Intro & Credits: files per marker type and source group that decided them, {"credits": {"chapters": 40}}
+    # (markers.source_counts). None on other jobs.
+    marker_sources: dict[str, dict[str, int]] | None = None
 
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
@@ -328,10 +339,11 @@ class Job:
     # job from this schedule that should be resumed instead of spawning
     # a new one?" so library scans can naturally span multiple nights.
     parent_schedule_id: str = ""
+    kind: str = JOB_KIND_PREVIEWS
 
     def __post_init__(self):
         if not self.created_at:
-            self.created_at = datetime.now(timezone.utc).isoformat()
+            self.created_at = datetime.now(UTC).isoformat()
         if isinstance(self.progress, dict):
             # Filter to JobProgress's current fields so a job persisted under a
             # different schema still loads instead of raising TypeError on an
@@ -346,6 +358,7 @@ class Job:
         if isinstance(self.status, str):
             self.status = JobStatus(self.status)
         self.priority = parse_priority(self.priority)
+        self.kind = parse_job_kind(self.kind)
 
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
@@ -367,6 +380,7 @@ class Job:
             "paused": self.paused,
             "priority": self.priority,
             "parent_schedule_id": self.parent_schedule_id,
+            "kind": self.kind,
         }
 
 
@@ -403,7 +417,8 @@ class JobStorage:
             progress_json       TEXT NOT NULL DEFAULT '{}',
             config_json         TEXT NOT NULL DEFAULT '{}',
             publishers_json     TEXT NOT NULL DEFAULT '[]',
-            parent_schedule_id  TEXT NOT NULL DEFAULT ''
+            parent_schedule_id  TEXT NOT NULL DEFAULT '',
+            kind                TEXT NOT NULL DEFAULT 'previews'
         );
         """,
         "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);",
@@ -492,6 +507,10 @@ class JobStorage:
                 self._conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_parent_schedule_id ON jobs(parent_schedule_id)")
             except sqlite3.OperationalError:
                 pass
+            try:
+                self._conn.execute("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'previews'")
+            except sqlite3.OperationalError:
+                pass
 
     def upsert(self, job: "Job") -> None:
         d = job.to_dict()
@@ -502,8 +521,8 @@ class JobStorage:
                                   library_id, library_name, server_id, server_name, server_type,
                                   priority, paused, error,
                                   progress_json, config_json, publishers_json,
-                                  parent_schedule_id)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                  parent_schedule_id, kind)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET
                     status=excluded.status,
                     started_at=excluded.started_at,
@@ -519,7 +538,8 @@ class JobStorage:
                     progress_json=excluded.progress_json,
                     config_json=excluded.config_json,
                     publishers_json=excluded.publishers_json,
-                    parent_schedule_id=excluded.parent_schedule_id
+                    parent_schedule_id=excluded.parent_schedule_id,
+                    kind=excluded.kind
                 """,
                 (
                     d["id"],
@@ -539,6 +559,7 @@ class JobStorage:
                     json.dumps(d["config"]),
                     json.dumps(d["publishers"]),
                     d.get("parent_schedule_id") or "",
+                    d.get("kind") or JOB_KIND_PREVIEWS,
                 ),
             )
 
@@ -590,6 +611,11 @@ class JobStorage:
             _psi = row["parent_schedule_id"] or ""
         except (IndexError, KeyError):
             pass
+        _kind = JOB_KIND_PREVIEWS
+        try:
+            _kind = row["kind"] or JOB_KIND_PREVIEWS
+        except (IndexError, KeyError):
+            pass
         return Job(
             id=row["id"],
             status=row["status"],
@@ -608,6 +634,7 @@ class JobStorage:
             config=_safe_json(row["config_json"], {}),
             publishers=_safe_json(row["publishers_json"], []),
             parent_schedule_id=_psi,
+            kind=_kind,
         )
 
 
@@ -772,7 +799,7 @@ class JobManager:
                     # comes back online — default to "now" if it was
                     # cleared by the running transition.
                     if not job.progress.retry_eta:
-                        job.progress.retry_eta = datetime.now(timezone.utc).isoformat()
+                        job.progress.retry_eta = datetime.now(UTC).isoformat()
                     job.progress.current_item = ""
                     needs_resave.append(job)
                 self._interrupted_retry_chains.append(job)
@@ -790,7 +817,7 @@ class JobManager:
                 job.error = (
                     "Attempt interrupted by container restart — a fresh attempt will run from the chain's next firing."
                 )
-                job.completed_at = datetime.now(timezone.utc).isoformat()
+                job.completed_at = datetime.now(UTC).isoformat()
                 needs_resave.append(job)
                 retry_interrupted_count += 1
                 self._jobs[job.id] = job
@@ -806,7 +833,7 @@ class JobManager:
                 )
                 job.status = JobStatus.FAILED
                 job.error = "Job was interrupted by server restart"
-                job.completed_at = datetime.now(timezone.utc).isoformat()
+                job.completed_at = datetime.now(UTC).isoformat()
                 needs_resave.append(job)
                 self._interrupted_jobs.append(job)
             elif job.status == JobStatus.PENDING:
@@ -1012,7 +1039,7 @@ class JobManager:
         Caller must hold _lock.
         """
         days = self._get_job_history_days()
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff = datetime.now(UTC) - timedelta(days=days)
         cutoff_iso = cutoff.isoformat()
 
         expired_ids = []
@@ -1109,6 +1136,7 @@ class JobManager:
         server_name: str | None = None,
         server_type: str | None = None,
         parent_schedule_id: str = "",
+        kind: str = JOB_KIND_PREVIEWS,
     ) -> Job:
         """Create a new job.
 
@@ -1123,6 +1151,7 @@ class JobManager:
             parent_schedule_id: id of the schedule that spawned this job
                 (D20). Empty for manual / webhook-triggered jobs. Used
                 for pause-on-stop-time and resume-on-next-start lookups.
+            kind: Job kind — previews or intro_credits.
         """
         with self._lock:
             job = Job(
@@ -1135,6 +1164,7 @@ class JobManager:
                 config=config or {},
                 priority=parse_priority(priority),
                 parent_schedule_id=parent_schedule_id or "",
+                kind=parse_job_kind(kind),
             )
             self._jobs[job.id] = job
             self._persist_job(job)
@@ -1170,8 +1200,9 @@ class JobManager:
             return []
 
         max_age_minutes = max(5, min(1440, max_age_minutes))
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        cutoff = datetime.now(UTC) - timedelta(minutes=max_age_minutes)
         revived: list[Job] = []
+        not_revived: list[Job] = []
 
         for job in self._interrupted_jobs:
             # Check age — skip stale jobs.  Use started_at (when
@@ -1181,12 +1212,14 @@ class JobManager:
                 ref_str = job.started_at or job.created_at
                 ref_time = datetime.fromisoformat(ref_str.replace("Z", "+00:00"))
                 if ref_time.tzinfo is None:
-                    ref_time = ref_time.replace(tzinfo=timezone.utc)
+                    ref_time = ref_time.replace(tzinfo=UTC)
                 if ref_time < cutoff:
                     logger.debug("Skipping revive of job {} — too old (ref={})", job.id[:8], ref_str)
+                    not_revived.append(job)
                     continue
             except (ValueError, AttributeError):
                 # Can't parse date — skip to be safe
+                not_revived.append(job)
                 continue
 
             # Revive the job in place — same ID, same created_at
@@ -1194,7 +1227,10 @@ class JobManager:
                 job.status = JobStatus.PENDING
                 job.error = None
                 job.completed_at = None
-                job.paused = False
+                # An Intro & Credits job's own pause is the user's (or its schedule's stop time's) intent and
+                # outlives the restart like the global pause does; its runner re-applies it. The preview runner
+                # can't hold a revived job paused, so a preview job's pause is dropped as before.
+                job.paused = job.paused and job.kind == JOB_KIND_INTRO_CREDITS
                 job.progress = JobProgress()
 
             self.add_log(
@@ -1209,9 +1245,39 @@ class JobManager:
                 for job in revived:
                     self._persist_job(job)
 
-        # Clear the list so it's not processed again
-        self._interrupted_jobs = []
+        # Revived jobs leave the list; the ones left behind stay for fail_unrevived_interrupted_jobs.
+        self._interrupted_jobs = not_revived
         return revived
+
+    def fail_unrevived_interrupted_jobs(self, kind: str) -> list[Job]:
+        """Mark interrupted jobs of ``kind`` that no restart revived as failed.
+
+        A PENDING job that no thread will ever run looks alive forever: an Intro & Credits schedule then never starts
+        another job and webhook follow-ups count its files as already queued. Call after
+        :meth:`requeue_interrupted_jobs` (or instead of it when auto-requeue is off).
+
+        Args:
+            kind: Job kind to settle (``intro_credits``).
+
+        Returns:
+            The jobs marked failed.
+        """
+        failed: list[Job] = []
+        with self._lock:
+            for job in self._interrupted_jobs:
+                if job.kind != kind or job.status is not JobStatus.PENDING:
+                    continue
+                job.status = JobStatus.FAILED
+                job.error = "Interrupted by a restart and not resumed"
+                job.completed_at = datetime.now(UTC).isoformat()
+                job.paused = False
+                self._persist_job(job)
+                self._emit_event("job_failed", job.to_dict())
+                failed.append(job)
+        for job in failed:
+            self.add_log(job.id, "WARNING - Interrupted by a restart and not resumed")
+            logger.info("Marked interrupted job {} ({}) failed — it was not resumed", job.id[:8], job.library_name)
+        return failed
 
     def interrupted_retry_chains(self) -> list[Job]:
         """Return chain Jobs that were in PENDING/RUNNING at load time.
@@ -1246,7 +1312,10 @@ class JobManager:
 
     def get_pending_jobs(self) -> list[Job]:
         """Get all pending jobs."""
-        return [j for j in self._jobs.values() if j.status == JobStatus.PENDING]
+        # Under the lock: webhook threads create jobs while others list them, and iterating the dict while it
+        # grows raises "dictionary changed size during iteration".
+        with self._lock:
+            return [j for j in self._jobs.values() if j.status == JobStatus.PENDING]
 
     def get_running_job(self) -> Job | None:
         """Get a currently running job (first found).
@@ -1355,7 +1424,7 @@ class JobManager:
         Returns:
             The mutated Job, or ``None`` if no originating Job exists.
         """
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
 
         with self._lock:
             job = self._jobs.get(originating_job_id)
@@ -1567,6 +1636,52 @@ class JobManager:
                 self._persist_job(job)
                 self._emit_event("job_updated", job.to_dict())
 
+    def merge_job_config(self, job_id: str, updates: dict[str, Any], *, remove: tuple[str, ...] = ()) -> bool:
+        """Set (or remove) some keys of a job's stored config, keeping every other key as it is now.
+
+        The read and the write happen under one hold of the manager's lock, so a key another thread writes meanwhile
+        (``request_pause`` records a stop-time pause in the config) isn't lost the way a read-then-write would lose it.
+
+        Args:
+            job_id: Job identifier.
+            updates: Keys to set.
+            remove: Keys to take out.
+
+        Returns:
+            True when the config was written; False when the job is missing.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return False
+            config = {**(job.config or {}), **updates}
+            job.config = {key: value for key, value in config.items() if key not in remove}
+            self._persist_job(job)
+            self._emit_event("job_updated", job.to_dict())
+            return True
+
+    def update_job_config_if_pending(self, job_id: str, config: dict[str, Any]) -> bool:
+        """Update stored config for a job only while it is still PENDING.
+
+        The status check and the write happen under one hold of the manager's lock, so a cancel (or a start) can't
+        land between them: files joining a waiting job are never written into a job that will no longer run them.
+
+        Args:
+            job_id: Job identifier.
+            config: The job's new config.
+
+        Returns:
+            True when the config was written; False when the job is missing or no longer pending.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.status != JobStatus.PENDING:
+                return False
+            job.config = dict(config)
+            self._persist_job(job)
+            self._emit_event("job_updated", job.to_dict())
+            return True
+
     def update_job_library_name(self, job_id: str, library_name: str) -> None:
         """Update the displayed ``library_name`` of an existing job.
 
@@ -1615,7 +1730,7 @@ class JobManager:
             if job and job.status != JobStatus.RUNNING:
                 job.status = JobStatus.RUNNING
                 job.paused = False
-                job.started_at = datetime.now(timezone.utc).isoformat()
+                job.started_at = datetime.now(UTC).isoformat()
                 self._running_job_ids.add(job_id)
                 self._pause_flags[job_id] = False
                 self._pause_events[job_id] = threading.Event()
@@ -1718,13 +1833,29 @@ class JobManager:
 
         Args:
             job_id: Job identifier.
-            outcome: Dict mapping ProcessingResult values to counts.
+            outcome: Dict mapping outcome key strings (ProcessingResult values or a job kind's outcome keys) to counts.
 
         """
         with self._lock:
             job = self._jobs.get(job_id)
             if job:
                 job.progress.outcome = outcome
+            return job
+
+    def set_marker_sources(self, job_id: str, counts: dict[str, dict[str, int]]) -> Optional["Job"]:
+        """Store an Intro & Credits job's "Decided by" counts; the next progress event and the finished job carry them.
+
+        Args:
+            job_id: Job identifier.
+            counts: Files per marker type and source group (``markers.source_counts.DecidedByTally.snapshot``).
+
+        Returns:
+            The job, or None when there's no such job.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                job.progress.marker_sources = counts
             return job
 
     def complete_job(
@@ -1743,6 +1874,9 @@ class JobManager:
                      stored in `job.error` so the UI can display it.
 
         """
+        # Stored, served by GET /api/jobs and logged: exception text in it can carry a server URL with its token.
+        error = redact_secrets(error) if error else error
+        warning = redact_secrets(warning) if warning else warning
         log_msg = None
         log_level = "info"
         with self._lock:
@@ -1807,7 +1941,7 @@ class JobManager:
                         f"skipping worker completion update (chain drives lifecycle)"
                     )
                 else:
-                    job.completed_at = datetime.now(timezone.utc).isoformat()
+                    job.completed_at = datetime.now(UTC).isoformat()
                     if error:
                         job.status = JobStatus.FAILED
                         job.error = error
@@ -1867,7 +2001,7 @@ class JobManager:
             if job and job.status in (JobStatus.PENDING, JobStatus.RUNNING):
                 job.status = JobStatus.CANCELLED
                 job.paused = False
-                job.completed_at = datetime.now(timezone.utc).isoformat()
+                job.completed_at = datetime.now(UTC).isoformat()
                 self._running_job_ids.discard(job_id)
                 self.clear_pause_flag(job_id)
                 self.clear_active_worker_pool(job_id)
@@ -1907,7 +2041,7 @@ class JobManager:
                         continue
                     child.status = JobStatus.CANCELLED
                     child.error = "Parent retry chain was cancelled."
-                    child.completed_at = datetime.now(timezone.utc).isoformat()
+                    child.completed_at = datetime.now(UTC).isoformat()
                     self._running_job_ids.discard(child.id)
                     self.clear_pause_flag(child.id)
                     self._persist_job(child)
@@ -2014,11 +2148,12 @@ class JobManager:
     # ========================================================================
 
     def add_log(self, job_id: str, message: str) -> None:
-        """Add a log message for a job (in-memory and append to file)."""
+        """Add a log message for a job (in-memory and append to file), secrets masked (``utils.redact_secrets``)."""
+        message = redact_secrets(message)
         with self._lock:
             if job_id not in self._job_logs:
                 self._job_logs[job_id] = deque(maxlen=self._max_log_lines)
-            timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            timestamp = datetime.now(UTC).strftime("%H:%M:%S")
             line = f"[{timestamp}] {message}"
             self._job_logs[job_id].append(line)
             log_path = os.path.join(self._job_logs_dir, f"{job_id}.log")
@@ -2159,13 +2294,15 @@ class JobManager:
         reason: str = "",
         worker: str = "",
         servers: list[dict] | None = None,
+        server_messages: bool = False,
     ) -> None:
         """Append a per-file processing result to the job's JSONL file.
 
         Args:
             job_id: Job identifier.
             file_path: Absolute path of the media file processed.
-            outcome: ProcessingResult value string (e.g. "generated", "failed").
+            outcome: Outcome key string: a ProcessingResult value (e.g. "generated", "failed") or a job kind's
+                outcome key (e.g. "markers_published").
             reason: Human-readable detail (skip/failure reason).
             worker: Worker display name (e.g. "GPU Worker 1 (NVIDIA TITAN RTX)").
             servers: Per-publisher attribution list (D9). Each entry is the
@@ -2174,6 +2311,9 @@ class JobManager:
                 so the user can see which servers received each preview
                 (single-server installs always get one pill; multi-server
                 fan-out gets one per target).
+            server_messages: Keep each server's own message on its entry when the row's reason doesn't already say
+                it (Intro & Credits: "Keeping Plex's credits"). Preview rows leave it out: their per-server
+                "Published" never matches the "Published to N servers" reason and would grow every row.
         """
         path = self._file_results_path(job_id)
 
@@ -2229,7 +2369,7 @@ class JobManager:
                             "Aggregate counts in the job summary remain accurate."
                         ),
                         "worker": "",
-                        "ts": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                        "ts": datetime.now(UTC).strftime("%H:%M:%S"),
                     }
                     try:
                         with open(path, "a") as f:
@@ -2251,13 +2391,15 @@ class JobManager:
                 if msg:
                     derived_reason = msg
                     break
+        # Served by the Files panel: a publisher's or worker's exception text can carry a server URL with its token.
+        derived_reason = redact_secrets(derived_reason)
 
         record = {
             "file": file_path,
             "outcome": outcome,
             "reason": derived_reason,
             "worker": worker,
-            "ts": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+            "ts": datetime.now(UTC).strftime("%H:%M:%S"),
         }
         # Slim per-server attribution — keep the JSONL compact (no
         # canonical_path duplication, no frame_source unless it differs
@@ -2278,6 +2420,16 @@ class JobManager:
                 fs = s.get("frame_source") or ""
                 if fs and fs != "extracted":
                     entry["frame_source"] = fs
+                # Why a row is waiting (e.g. the server hasn't indexed the file yet); preview rows carry none.
+                if s.get("reason_code"):
+                    entry["reason_code"] = s["reason_code"]
+                # An Intro & Credits row published after its file was replaced (markers.outcomes.VERIFY_LATER): a job
+                # revived after a restart reads it back to still queue that file's later check.
+                if s.get("verify_later"):
+                    entry["verify_later"] = True
+                message = redact_secrets(s.get("message") or "")
+                if server_messages and message and message != derived_reason:
+                    entry["message"] = message
                 slim.append(entry)
                 # First publisher with a .bif output wins. We surface this
                 # at the top level (not on each server entry) because the
@@ -2453,13 +2605,25 @@ class JobManager:
     # Pause / Resume Management
     # ========================================================================
 
-    def request_pause(self, job_id: str) -> bool:
-        """Request pause for a running job."""
+    def request_pause(self, job_id: str, *, by_schedule: bool = False) -> bool:
+        """Request pause for a running job.
+
+        Args:
+            job_id: Job identifier.
+            by_schedule: The pause comes from the job's schedule's stop time (``PAUSED_BY_SCHEDULE``), so that
+                schedule's next start resumes it. It only pauses a job that isn't paused yet (checked under the lock,
+                so a pause by hand just before it stays one); any other pause replaces that record.
+
+        Returns:
+            True when the job was running and is now paused.
+        """
         paused = False
         status_val = ""
         with self._lock:
             job = self._jobs.get(job_id)
             if not job or job.status != JobStatus.RUNNING:
+                return False
+            if by_schedule and job.paused:
                 return False
             self._pause_flags[job_id] = True
             event = self._pause_events.get(job_id)
@@ -2468,6 +2632,9 @@ class JobManager:
                 self._pause_events[job_id] = event
             event.clear()
             job.paused = True
+            job.config = {key: value for key, value in (job.config or {}).items() if key != PAUSED_BY_SCHEDULE}
+            if by_schedule:
+                job.config[PAUSED_BY_SCHEDULE] = True
             status_val = job.status.value
             self._persist_job(job)
             self._emit_event("job_paused", {"job_id": job_id, "paused": True})
@@ -2480,13 +2647,25 @@ class JobManager:
             )
         return paused
 
-    def request_resume(self, job_id: str) -> bool:
-        """Request resume for a paused job."""
+    def request_resume(self, job_id: str, *, only_paused_by_schedule: bool = False) -> bool:
+        """Request resume for a paused job.
+
+        Args:
+            job_id: Job identifier.
+            only_paused_by_schedule: Resume only while the job's pause is its schedule's stop time's
+                (``PAUSED_BY_SCHEDULE``), checked under the lock: a schedule's start tick never resumes a pause by hand,
+                even one made just after the tick looked.
+
+        Returns:
+            True when the job was running and is now resumed.
+        """
         resumed = False
         status_val = ""
         with self._lock:
             job = self._jobs.get(job_id)
             if not job or job.status != JobStatus.RUNNING:
+                return False
+            if only_paused_by_schedule and not (job.paused and (job.config or {}).get(PAUSED_BY_SCHEDULE)):
                 return False
             self._pause_flags[job_id] = False
             event = self._pause_events.get(job_id)
@@ -2495,6 +2674,7 @@ class JobManager:
                 self._pause_events[job_id] = event
             event.set()
             job.paused = False
+            job.config = {key: value for key, value in (job.config or {}).items() if key != PAUSED_BY_SCHEDULE}
             status_val = job.status.value
             self._persist_job(job)
             self._emit_event("job_resumed", {"job_id": job_id, "paused": False})
@@ -2510,13 +2690,19 @@ class JobManager:
             return self._pause_flags.get(job_id, False)
 
     def clear_pause_flag(self, job_id: str) -> None:
-        """Clear pause state for a job."""
+        """Clear pause state for a job, including where the pause came from (``PAUSED_BY_SCHEDULE``).
+
+        Nothing is persisted here: ``complete_job`` and ``cancel_job`` persist the job right after, and the runners'
+        own teardown calls this once the job has ended.
+        """
         with self._lock:
             self._pause_flags.pop(job_id, None)
             self._pause_events.pop(job_id, None)
             job = self._jobs.get(job_id)
             if job:
                 job.paused = False
+                if PAUSED_BY_SCHEDULE in (job.config or {}):
+                    job.config = {key: value for key, value in job.config.items() if key != PAUSED_BY_SCHEDULE}
 
     # ========================================================================
     # Active Worker Pool Management

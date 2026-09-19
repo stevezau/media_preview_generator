@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import http.cookiejar
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -100,7 +101,9 @@ def _start_app(config_dir: str, port: int) -> subprocess.Popen:
 def _login_and_get_cookie(app_url: str) -> dict:
     jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-    data = urllib.parse.urlencode({"token": TOKEN}).encode()
+    with opener.open(f"{app_url}/login", timeout=10) as resp:  # noqa: S310 (localhost-only)
+        csrf_token = re.search(r'name="csrf_token" value="([^"]+)"', resp.read().decode()).group(1)
+    data = urllib.parse.urlencode({"token": TOKEN, "csrf_token": csrf_token}).encode()
     req = urllib.request.Request(
         f"{app_url}/login",
         data=data,

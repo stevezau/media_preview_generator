@@ -9,6 +9,7 @@ alongside in :mod:`api_server_auth`.
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import uuid
@@ -287,6 +288,49 @@ def _validate_plex_output(output: dict) -> str:
     return ""
 
 
+def _merge_markers_update(base_markers: object, posted: object) -> object:
+    """Deep-merge a posted per-server ``markers`` block over the stored one.
+
+    PUT/PATCH is patch semantics everywhere else in this payload (see ``base.get(...)`` fallbacks
+    throughout ``_validate_server_payload``) — but ``markers`` is itself an object with several
+    independent fields (``enabled``, ``library_ids``, ``plex.db_write_confirmed_at``,
+    ``plex.on_plex_redetect``). Without a merge, posting only ``{"enabled": false}`` would fall
+    straight into ``validate_server``'s "reset to defaults" path for every field the client didn't
+    mention — wiping a confirmed Plex server's ``db_write_confirmed_at`` (forcing re-confirmation
+    to re-enable) and any explicit ``library_ids`` selection.
+
+    A field the client *does* send always wins, including an explicit ``null`` (``library_ids:
+    null`` means "all libraries"; ``plex.db_write_confirmed_at: null`` clears the confirmation) —
+    merging only fills in keys the client's payload omits entirely. Clearing the confirmation this
+    way while leaving ``enabled`` at its current ``true`` still 400s: ``validate_server`` refuses
+    an enabled Plex block with no confirmation on record, so revoking it must be sent together
+    with ``enabled: false`` in the same request.
+
+    Args:
+        base_markers: The server's currently-stored ``markers`` block (may be missing/invalid).
+        posted: The client's posted ``markers`` value.
+
+    Returns:
+        The merged block when ``posted`` is a dict; ``posted`` unchanged otherwise: ``None``, which
+        ``validate_server`` turns into the defaults (Intro & Credits off, no confirmation), or a
+        malformed non-dict value that ``validate_server`` rejects.
+    """
+    if not isinstance(posted, dict):
+        return posted
+    base = base_markers if isinstance(base_markers, dict) else {}
+    merged = {**base, **posted}
+    # Only sub-merge when BOTH sides are dicts. If the client posted a non-dict "plex" (a string,
+    # a list, ...), `**posted` above already put that raw value into `merged["plex"]` — leave it
+    # there so validate_server's own "markers.plex must be an object" check rejects it with a 400,
+    # rather than this helper crashing on `{**base_plex, **"not a dict"}`. Same reasoning covers an
+    # explicit `"plex": null`: `isinstance(None, dict)` is False, so the sub-merge is skipped and
+    # the posted `None` (which clears the confirmation) is left to win, instead of `None or {}`
+    # silently discarding it and keeping the stored value.
+    if isinstance(base.get("plex"), dict) and isinstance(posted.get("plex"), dict):
+        merged["plex"] = {**base["plex"], **posted["plex"]}
+    return merged
+
+
 def _validate_server_payload(
     data: dict[str, Any],
     *,
@@ -374,6 +418,25 @@ def _validate_server_payload(
         data.get("health_dismissals") if "health_dismissals" in data else base.get("health_dismissals", [])
     )
 
+    from ...markers.settings import default_server_markers
+    from ...markers.settings import validate_server as _validate_markers
+
+    stored_markers = base.get("markers")
+    if "markers" in data:
+        markers_block, err = _validate_markers(_merge_markers_update(stored_markers, data.get("markers")), type_value)
+        if err:
+            return None, err
+    elif isinstance(stored_markers, dict):
+        # Carried forward as stored, without re-validating: a client that doesn't send markers (a script or the PATCH
+        # callers; the Edit dialog always sends them) must not be blocked from URL/auth/library edits by a block that no
+        # longer validates (hand-edited, or a later rule). Readers fall back to Intro & Credits off for an invalid
+        # block (markers.settings.load_server).
+        markers_block = copy.deepcopy(stored_markers)
+    else:
+        if stored_markers is not None:
+            logger.warning("Server {!r} had an unreadable Intro & Credits block; saved with Intro & Credits off", name)
+        markers_block = default_server_markers(type_value)
+
     err = _validate_path_mappings(path_mappings or [])
     if err:
         return None, err
@@ -406,6 +469,7 @@ def _validate_server_payload(
         "server_identity": str(server_identity) if server_identity else None,
         # Carry-forward only — see comment above on health_dismissals.
         "health_dismissals": list(health_dismissals or []),
+        "markers": markers_block,
     }
 
     # Sanity-check the result: server_config_from_dict applies its own
@@ -920,18 +984,24 @@ def test_existing_server_connection(server_id: str):
     return jsonify(response_payload)
 
 
+def _forget_marker_capability(server_id: str) -> None:
+    from ...markers.inspect import forget_capability
+
+    forget_capability(server_id)
+
+
 @api.route("/servers/<server_id>/install-plugin", methods=["POST"])
 @setup_or_auth_required
 def install_jellyfin_plugin(server_id: str):
-    """One-click install Media Preview Bridge plugin on a saved Jellyfin server.
+    """One-click install of the Media Preview Bridge plugin on a saved Jellyfin or Emby server.
 
-    Drives the "Install plugin in Jellyfin" button on the Edit Server
-    modal (only visible for Jellyfin servers when the plugin probe
-    reports missing). Calls
-    :meth:`JellyfinServer.install_plugin` which adds our manifest URL
-    to Jellyfin's plugin repositories, queues the package install, and
-    requests a Jellyfin restart. Caller polls
-    ``/test-connection`` afterwards for the plugin badge to flip.
+    Drives the Install / Update buttons on the Edit Server modal. Jellyfin:
+    :meth:`JellyfinServer.install_plugin` adds our manifest URL to Jellyfin's
+    plugin repositories, queues the package install, and requests a restart.
+    Emby: :meth:`EmbyServer.install_plugin` installs from Emby's own catalog
+    and restarts, or answers ``manual: true`` when the catalog doesn't list
+    the plugin (the user installs the DLL by hand). Caller polls the server's
+    status afterwards for the plugin badge to flip.
     """
     raw_servers = _get_media_servers()
     target = next((s for s in raw_servers if isinstance(s, dict) and s.get("id") == server_id), None)
@@ -946,18 +1016,20 @@ def install_jellyfin_plugin(server_id: str):
     except Exception as exc:
         return jsonify({"ok": False, "error": f"invalid server config: {exc}"}), 400
 
-    if cfg.type is not ServerType.JELLYFIN:
-        return jsonify({"ok": False, "error": "plugin install is Jellyfin-only"}), 400
+    if cfg.type not in (ServerType.JELLYFIN, ServerType.EMBY):
+        return jsonify({"ok": False, "error": "plugin install is for Jellyfin and Emby servers"}), 400
 
     live = _instantiate_for_probe(cfg)
     if live is None or not hasattr(live, "install_plugin"):
-        return jsonify({"ok": False, "error": "this Jellyfin client doesn't support plugin install"}), 400
+        return jsonify({"ok": False, "error": "this client doesn't support plugin install"}), 400
 
     try:
         result = live.install_plugin()
     except Exception as exc:
         logger.warning("Plugin install on {!r} raised: {}", cfg.name or cfg.id, exc)
         return jsonify({"ok": False, "error": str(exc)}), 200
+    finally:
+        _forget_marker_capability(server_id)  # the Intro & Credits tab's cached plugin state is out of date now
 
     return jsonify(result)
 
@@ -1001,6 +1073,8 @@ def uninstall_jellyfin_plugin(server_id: str):
     except Exception as exc:
         logger.warning("Plugin uninstall on {!r} raised: {}", cfg.name or cfg.id, exc)
         return jsonify({"ok": False, "error": str(exc)}), 200
+    finally:
+        _forget_marker_capability(server_id)  # the Intro & Credits tab's cached plugin state is out of date now
 
     return jsonify(result)
 

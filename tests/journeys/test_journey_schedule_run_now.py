@@ -20,7 +20,7 @@ real.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
@@ -179,7 +179,7 @@ class TestScheduleRunNow:
                 f"Brand-new schedule must have last_run=None; got {schedule_before.get('last_run')!r}"
             )
 
-            t_before_run = datetime.now(timezone.utc)
+            t_before_run = datetime.now(UTC)
 
             # Fire run-now.
             run_resp = client.post(

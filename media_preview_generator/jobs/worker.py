@@ -8,12 +8,15 @@ import re
 import threading
 import time
 from collections import defaultdict, deque
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from functools import partial
 from typing import Any, Optional
 
 from loguru import logger
 
 from ..config import Config
+from ..job_kinds import ItemOutcome, normalize_outcome, outcome_value
 from ..processing.generator import (
     CancellationError,
     CodecNotSupportedError,
@@ -21,7 +24,7 @@ from ..processing.generator import (
     _notify_file_result,
     failure_scope,
 )
-from ..utils import format_display_title
+from ..utils import format_display_title, redact_secrets, redacted_traceback
 
 # Map thread_id -> job_id. The previous implementation stored a flat set
 # of "is a job thread" booleans; that broke as soon as multiple jobs ran
@@ -31,6 +34,9 @@ from ..utils import format_display_title
 # dict-with-job-id lookup gives each handler its own scoped filter.
 _job_thread_to_job_id: dict[int, str] = {}
 _job_thread_ids_lock = threading.Lock()
+# Loguru ``extra`` key: a record bound with it stays out of a job's own log (the app log still has it) — a traceback,
+# say, that belongs in the log file but would bury the job's Logs panel. Honoured by the Intro & Credits job log.
+JOB_LOG_SKIP = "job_log_skip"
 
 
 def register_job_thread(job_id: str = "") -> None:
@@ -53,6 +59,22 @@ def unregister_job_thread() -> None:
     """
     with _job_thread_ids_lock:
         _job_thread_to_job_id.pop(threading.current_thread().ident, None)
+
+
+@contextmanager
+def job_thread(job_id: str | None) -> Iterator[None]:
+    """Register the current thread to ``job_id`` for the block (:func:`register_job_thread`), then unregister it.
+
+    A later thread reusing a finished thread's ident (a webhook timer, a decode reader) mustn't log into the job.
+
+    Args:
+        job_id: The job the thread works for.
+    """
+    register_job_thread(job_id or "")
+    try:
+        yield
+    finally:
+        unregister_job_thread()
 
 
 def is_job_thread_for(thread_id: int, job_id: str) -> bool:
@@ -207,6 +229,11 @@ class Worker:
         # an empty Details cell on a failed file.
         self.last_ms_message: str = ""
 
+        # Set per task by assign_task: a non-preview kind's process function and its valid outcome keys.
+        # None keeps the previews process_canonical_path flow.
+        self.process_fn = None
+        self.outcome_keys: tuple[str, ...] = ()
+
         # In-place GPU→CPU fallback state (set during a retry, cleared on next
         # task assignment). Surfaced to the UI so users see why the switch
         # happened.
@@ -286,6 +313,8 @@ class Worker:
         library_name: str = "",
         cancel_check=None,
         pause_check=None,
+        process_fn: Callable[..., ItemOutcome] | None = None,
+        outcome_keys: tuple[str, ...] | None = None,
     ) -> None:
         """Assign a :class:`ProcessableItem` to this worker.
 
@@ -305,6 +334,11 @@ class Worker:
             library_name: Library name the item belongs to.
             cancel_check: Optional callable returning True when job is
                 cancelled.
+            pause_check: Optional callable returning True while the job is
+                paused.
+            process_fn: Non-preview kind's per-item function; None runs the
+                previews ``process_canonical_path`` flow.
+            outcome_keys: Valid outcome keys for ``process_fn``'s kind.
         """
         # Pre-claimed workers (is_busy=True but no current_task yet) are
         # acceptable — _find_available_worker(claim=True) atomically reserves
@@ -351,6 +385,8 @@ class Worker:
         self.fallback_reason = None
         self.cancel_check = cancel_check
         self.pause_check = pause_check
+        self.process_fn = process_fn
+        self.outcome_keys = tuple(outcome_keys or ())
 
         self.frame = 0
         self.fps = 0
@@ -384,7 +420,19 @@ class Worker:
         funnel) and translates its :class:`MultiServerResult` into the
         :class:`ProcessingResult` counters the WorkerPool accounting consumes.
         Handles in-place GPU→CPU fallback on :class:`CodecNotSupportedError`.
+        A task assigned with ``process_fn`` (a non-preview kind) runs
+        :meth:`_process_custom_item` instead.
         """
+        if self.process_fn is not None:
+            try:
+                self._process_custom_item(item, progress_callback)
+            finally:
+                # Like the dispatcher's check threads: a later thread reusing this ident mustn't log into this job.
+                unregister_job_thread()
+                if self._done_event is not None:
+                    self._done_event.set()
+            return
+
         from ..processing.multi_server import (
             MultiServerStatus,
             process_canonical_path,
@@ -393,9 +441,7 @@ class Worker:
         # Register THIS worker thread under THIS job's id so the per-job
         # log handler captures only its own messages — not a sibling job
         # running concurrently (D5).
-        register_job_thread(self.current_job_id or "")
-
-        with failure_scope(self.current_job_id):
+        with job_thread(self.current_job_id), failure_scope(self.current_job_id):
             display_name = self.media_file or self.media_title or item.canonical_path
 
             ctx_logger = logger.bind(
@@ -665,6 +711,106 @@ class Worker:
             finally:
                 if self._done_event is not None:
                     self._done_event.set()
+
+    def _process_custom_item(self, item, progress_callback) -> None:
+        """Run a non-preview kind's ``process_fn`` with the same GPU→CPU fallback previews use.
+
+        Args:
+            item: The :class:`ProcessableItem` to process.
+            progress_callback: Worker progress callback forwarded to ``process_fn``.
+        """
+        register_job_thread(self.current_job_id or "")
+        display_name = self.media_file or self.media_title or item.canonical_path
+        with failure_scope(self.current_job_id):
+            logger.info("{} picked up: {}", self.display_name, display_name)
+
+            def _phase_cb(text: str) -> None:
+                self.current_phase = text or ""
+
+            def _run(gpu, gpu_device):
+                return self.process_fn(
+                    item,
+                    gpu=gpu,
+                    gpu_device_path=gpu_device,
+                    progress_callback=progress_callback,
+                    phase_callback=_phase_cb,
+                    cancel_check=self.cancel_check,
+                    pause_check=self.pause_check,
+                )
+
+            # Exception text reaches the file's row (served by the jobs API) and the log, and can carry a server URL
+            # with its token: masked, and the traceback kept out of the job's own log.
+            def _failed(message: str, exc: Exception) -> ItemOutcome:
+                text = redact_secrets(message)
+                logger.error("{} failed on {}; other items keep processing: {}", self.display_name, display_name, text)
+                logger.bind(**{JOB_LOG_SKIP: True}).error(
+                    "Traceback of {} on {}:\n{}", self.display_name, display_name, redacted_traceback(exc)
+                )
+                return ItemOutcome("failed", text)
+
+            try:
+                outcome = _run(self.gpu, self.gpu_device)
+            except CancellationError:
+                outcome = ItemOutcome("failed", "cancelled by user")
+            except CodecNotSupportedError as exc:
+                if self.worker_type == "GPU" and not (self.cancel_check and self.cancel_check()):
+                    self.fallback_active = True
+                    self.fallback_reason = redact_secrets(str(exc)) or "GPU processing failed"
+                    logger.warning(
+                        "{} couldn't process {} on the GPU and is retrying on CPU. Reason: {}",
+                        self.display_name,
+                        display_name,
+                        self.fallback_reason,
+                    )
+                    try:
+                        outcome = _run(None, None)
+                    except CancellationError:
+                        outcome = ItemOutcome("failed", "cancelled during CPU fallback")
+                    except Exception as fallback_exc:
+                        outcome = _failed(f"CPU fallback failed: {fallback_exc}", fallback_exc)
+                else:
+                    outcome = ItemOutcome("failed", redact_secrets(f"codec error: {exc}"))
+            except Exception as exc:
+                outcome = _failed(str(exc) or type(exc).__name__, exc)
+
+            valid = normalize_outcome(outcome, self.outcome_keys)
+            if valid is not outcome:
+                logger.warning(
+                    "{} got {} for {}; counting it as failed.", self.display_name, valid.message, display_name
+                )
+            outcome = valid
+            # Counters first: nothing below may skip them, or the job's outcome breakdown drops this item.
+            self.outcome_counts[outcome.outcome_key] = self.outcome_counts.get(outcome.outcome_key, 0) + 1
+            if outcome.failed:
+                self.failed += 1
+            else:
+                self.completed += 1
+            try:
+                raw_rows = list(outcome.publisher_rows or [])
+            except Exception:
+                logger.warning("{} got unusable publisher rows for {}", self.display_name, display_name)
+                raw_rows = []
+            # The dispatcher folds these into the job aggregate; a non-dict row would make that fold raise.
+            rows = [row for row in raw_rows if isinstance(row, dict)]
+            if len(rows) != len(raw_rows):
+                logger.warning(
+                    "{} dropped {} non-dict publisher row(s) for {}",
+                    self.display_name,
+                    len(raw_rows) - len(rows),
+                    display_name,
+                )
+            self.last_publishers = rows
+            self.last_ms_message = outcome.message or ""
+            try:
+                _notify_file_result(
+                    item.canonical_path,
+                    outcome_value(outcome.outcome_key),
+                    outcome.message,
+                    self.display_name,
+                    servers=rows,
+                )
+            except Exception as persist_exc:
+                logger.warning("Failed to persist result for {}: {}", item.canonical_path, persist_exc)
 
     def check_completion(self) -> bool:
         """Check if this worker has completed its current task.
@@ -1585,7 +1731,9 @@ class WorkerPool:
         outcome = {r.value: 0 for r in ProcessingResult}
         for worker in self._snapshot_workers():
             for key, count in worker.outcome_counts.items():
-                outcome[key] += count
+                # Shared-pool workers may also carry non-preview kinds' outcome keys.
+                if key in outcome:
+                    outcome[key] += count
 
         if on_finish:
             on_finish(total_completed, total_failed, total_items)

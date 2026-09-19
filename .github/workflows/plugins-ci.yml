@@ -1,0 +1,46 @@
+name: Plugins — build
+
+on:
+  pull_request:
+    paths: ["jellyfin-plugin/**", "emby-plugin/**", ".github/workflows/plugins-ci.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  jellyfin:
+    name: Jellyfin ${{ matrix.abi }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: "10.11"
+            dotnet: "9.0.x"
+          - abi: "12.0"
+            dotnet: "10.0.x"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.dotnet }}
+      - name: Build
+        working-directory: jellyfin-plugin
+        run: dotnet build -c Release -p:JellyfinAbi=${{ matrix.abi }}
+
+  emby:
+    name: Emby ${{ matrix.abi }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: ["4.9", "4.10"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+      - name: Build
+        working-directory: emby-plugin
+        run: dotnet build -c Release -p:EmbyAbi=${{ matrix.abi }}

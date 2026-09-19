@@ -36,7 +36,7 @@ Be respectful and inclusive. We're all here to make media server software better
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - FFmpeg installed locally (for testing media processing)
 - Docker (for container builds)
 - Git

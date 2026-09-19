@@ -78,3 +78,49 @@ html {
 .settings-content {
     padding-bottom: 40vh;
 }
+
+/* Intro & Credits section: two panels side by side when there's room, as in the approved design. */
+.markers-settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 1.5rem 2rem;
+}
+.markers-source {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 0.75rem;
+    align-items: center;
+    padding: 0.6rem 0;
+    border-top: 1px solid var(--bs-border-color);
+}
+.markers-source:first-child {
+    border-top: 0;
+}
+.markers-source.dragging {
+    opacity: 0.5;
+}
+.markers-source-grip {
+    display: inline-block;
+    min-width: 1.5rem;
+    padding: 0.35rem 0;
+    text-align: center;
+    cursor: grab;
+    color: var(--bs-secondary-color);
+    user-select: none;
+}
+.markers-source-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+.markers-source-controls .btn-link {
+    color: var(--bs-secondary-color);
+    padding: 0.125rem 0.3rem;
+}
+.markers-source-controls .btn-link:hover,
+.markers-source-controls .btn-link:focus-visible {
+    color: var(--bs-primary);
+}
+.markers-key-input {
+    max-width: 14rem;
+}

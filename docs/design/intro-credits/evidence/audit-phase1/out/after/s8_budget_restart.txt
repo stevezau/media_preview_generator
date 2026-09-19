@@ -1,0 +1,3 @@
+before restart: stored {'used': 80, 'limit': 500, 'remaining': 11} | LOW acquire -> budget_exhausted
+after restart : LOW acquire -> budget_exhausted | remaining known: 11
+after first response: stored {'used': 81, 'limit': 500, 'remaining': 0} | route would show used = 81

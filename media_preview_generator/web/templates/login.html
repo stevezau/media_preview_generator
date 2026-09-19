@@ -51,6 +51,15 @@
                             Wait a minute, then try again.
                         </div>
                     </div>
+                    {% elif page_expired %}
+                    <div class="alert alert-warning text-start" role="alert">
+                        <div class="fw-semibold">
+                            <i class="bi bi-arrow-clockwise me-2"></i>This sign-in page expired.
+                        </div>
+                        <div class="small mt-1">
+                            Enter your token again. If this keeps happening, allow cookies for this site.
+                        </div>
+                    </div>
                     {% elif error %}
                     <div class="alert alert-danger text-start" role="alert">
                         <div class="fw-semibold">

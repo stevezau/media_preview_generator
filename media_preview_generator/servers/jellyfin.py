@@ -24,13 +24,14 @@ import json
 import os
 import threading
 import time
+import urllib.parse
 from typing import Any
 
 import requests
 from loguru import logger
 
 from ..config import resolve_frame_interval
-from ._embyish import EmbyApiClient, is_video_library_folder
+from ._embyish import NO_ANSWER_ERRORS, EmbyApiClient, is_video_library_folder
 from .base import FlagTarget, HealthCheckIssue, ServerType, WebhookEvent
 from .ownership import apply_inverse_path_mappings
 
@@ -217,10 +218,12 @@ class JellyfinServer(EmbyApiClient):
         # path, which doesn't exist → 404 → silent registration miss → off-media
         # trickplay only appeared at the next scheduled scan, never instantly.
         save_with_media = bool(output.get("save_with_media", True))
+        # Quoted: the id arrives from webhook payloads, and "../" or "?" mustn't reach another route.
+        quoted_id = urllib.parse.quote(str(item_id), safe="")
         try:
             resp = self._request(
                 "POST",
-                f"/MediaPreviewBridge/Trickplay/{item_id}",
+                f"/MediaPreviewBridge/Trickplay/{quoted_id}",
                 params={
                     "width": adapter_width,
                     "intervalMs": adapter_interval_ms,
@@ -255,7 +258,7 @@ class JellyfinServer(EmbyApiClient):
 
         # 2. Standard metadata refresh (separate concern from trickplay).
         try:
-            response = self._request("POST", f"/Items/{item_id}/Refresh")
+            response = self._request("POST", f"/Items/{quoted_id}/Refresh")
             response.raise_for_status()
             logger.info(
                 "[{}] Triggered item refresh: {}",
@@ -427,6 +430,8 @@ class JellyfinServer(EmbyApiClient):
     # with the plugin the user-visible delay drops from 24h to 0s.
 
     PLUGIN_NAME = "Media Preview Bridge"
+    # A valid GUID no library item has; the admin-only Markers route answers it with the plugin's own 404.
+    _BRIDGE_ACCESS_PROBE_ID = "ffffffffffffffffffffffffffffffff"
     PLUGIN_GUID = "c2cb9bf9-7c5d-4f1a-9a07-2d6f5e5b0001"
     PLUGIN_REPO_URL = "https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json"
 
@@ -469,6 +474,155 @@ class JellyfinServer(EmbyApiClient):
         except (ValueError, AttributeError) as exc:
             self._media_preview_bridge_installed = False
             return {"installed": False, "version": "", "error": f"bad JSON: {exc}"[:200]}
+
+    # Ids reach these routes from webhook hints and API callers: quoted, so "../" or "?" can't reach another route.
+    @staticmethod
+    def _bridge_markers_path(item_id: str) -> str:
+        return f"/MediaPreviewBridge/Markers/{urllib.parse.quote(str(item_id), safe='')}"
+
+    @staticmethod
+    def _media_segments_path(item_id: str) -> str:
+        return f"/MediaSegments/{urllib.parse.quote(str(item_id), safe='')}"
+
+    def get_bridge_marker_state(self, item_id: str) -> dict[str, Any] | None:
+        """What the Bridge plugin stores for an item, served or not.
+
+        Args:
+            item_id: Jellyfin item id.
+
+        Returns:
+            ``{"segments": [{"type", "startTicks", "endTicks"}], "fileSize": int | None, "stale": bool}``.
+            ``stale`` means the stored size differs from the file on disk, so the plugin serves nothing. A plugin
+            without a markers endpoint (or no plugin) gives an empty state, since it can't have stored anything.
+            None when the answer is unknown (item not found, error, unreadable body).
+        """
+        empty: dict[str, Any] = {"segments": [], "fileSize": None, "stale": False}
+        try:
+            resp = self._request("GET", self._bridge_markers_path(item_id))
+            if resp.status_code == 404:
+                try:
+                    body = resp.json()
+                except ValueError:
+                    body = None
+                # The plugin's own 404 carries {"error": ...}; a bare 404 means the route doesn't exist.
+                return None if isinstance(body, dict) and "error" in body else empty
+            if resp.status_code != 200:
+                return None
+            body = resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            logger.debug("Bridge markers read failed on {} for {}: {}", self.name, item_id, type(exc).__name__)
+            return None
+        segments = body.get("segments") if isinstance(body, dict) else None
+        if not isinstance(segments, list):
+            return None
+        file_size = body.get("fileSize")
+        return {
+            "segments": [s for s in segments if isinstance(s, dict)],
+            "fileSize": file_size if isinstance(file_size, int) and not isinstance(file_size, bool) else None,
+            "stale": body.get("stale") is True,
+        }
+
+    def get_bridge_markers(self, item_id: str) -> list[dict[str, Any]] | None:
+        """Segments the Bridge plugin stores for an item (served or not); see :meth:`get_bridge_marker_state`.
+
+        Args:
+            item_id: Jellyfin item id.
+
+        Returns:
+            ``[{"type", "startTicks", "endTicks"}]``, or None when unknown.
+        """
+        state = self.get_bridge_marker_state(item_id)
+        return None if state is None else state["segments"]
+
+    def put_bridge_markers(
+        self, item_id: str, segments: list[dict[str, Any]], file_size: int | None = None
+    ) -> requests.Response:
+        """Replace the Bridge plugin's markers for an item; it publishes them as media segments straight away.
+
+        Args:
+            item_id: Jellyfin item id.
+            segments: ``[{"type", "startTicks", "endTicks"}]``.
+            file_size: Bytes of the file the markers were detected on; the plugin stops serving them when the
+                file on disk has a different size (replaced). Omitted from the body when None.
+
+        Returns:
+            The raw response (the caller maps status codes).
+
+        Raises:
+            requests.RequestException: Transport failure.
+        """
+        body: dict[str, Any] = {"segments": segments}
+        if file_size is not None:
+            body["fileSize"] = file_size
+        return self._request("POST", self._bridge_markers_path(item_id), json_body=body)
+
+    def delete_bridge_markers(self, item_id: str) -> requests.Response:
+        """Remove the Bridge plugin's markers for an item (other providers' segments stay).
+
+        Args:
+            item_id: Jellyfin item id.
+
+        Returns:
+            The raw response (the caller maps status codes).
+
+        Raises:
+            requests.RequestException: Transport failure.
+        """
+        return self._request("DELETE", self._bridge_markers_path(item_id))
+
+    def item_missing(self, item_id: str) -> bool | None:
+        """Whether Jellyfin says it has no item with this id (see :meth:`EmbyApiClient.item_missing`).
+
+        With an API key the lookup is ``/Items?Ids=``, and Jellyfin 12 leaves alternate versions out of every item
+        query (another item owns them), so an empty answer is asked again by id: ``/MediaSegments/{id}`` finds any
+        item and answers 404 only when there is none.
+
+        Args:
+            item_id: Jellyfin item id.
+
+        Returns:
+            True when Jellyfin answers that the item doesn't exist, False when it has it, None when it couldn't be
+            asked (a timeout, an error answer).
+        """
+        missing = super().item_missing(item_id)
+        if missing is not True or self._user_id():
+            return missing
+        try:
+            resp = self._request("GET", self._media_segments_path(item_id))
+        except requests.RequestException as exc:
+            logger.debug("Jellyfin item lookup by id failed on {} for {}: {}", self.name, item_id, type(exc).__name__)
+            return None
+        if resp.status_code == 404:
+            return True
+        return False if resp.status_code == 200 else None
+
+    def get_media_segments(self, item_id: str, *, raise_no_answer: bool = False) -> list[dict[str, Any]] | None:
+        """Segments Jellyfin serves for an item, from every registered provider.
+
+        Args:
+            item_id: Jellyfin item id.
+            raise_no_answer: Raise instead of returning None when Jellyfin gave no HTTP answer.
+
+        Returns:
+            Core ``/MediaSegments`` ``Items`` (``Type``, ``StartTicks``, ``EndTicks``, ...), or None on any error.
+
+        Raises:
+            requests.RequestException: With ``raise_no_answer``: one of ``NO_ANSWER_ERRORS``.
+        """
+        try:
+            resp = self._request("GET", self._media_segments_path(item_id))
+            if resp.status_code != 200:
+                return None
+            body = resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            if raise_no_answer and isinstance(exc, NO_ANSWER_ERRORS):
+                raise
+            logger.debug("Media segments read failed on {} for {}: {}", self.name, item_id, type(exc).__name__)
+            return None
+        items = body.get("Items") if isinstance(body, dict) else None
+        if not isinstance(items, list):
+            return None
+        return [i for i in items if isinstance(i, dict)]
 
     def install_plugin(self) -> dict[str, Any]:
         """One-click install: register repo, install package, restart Jellyfin.

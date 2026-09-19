@@ -1,4 +1,5 @@
 # Build output — produced by `dotnet build` in CI / locally.
 bin/
 obj/
+out/
 *.user

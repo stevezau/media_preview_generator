@@ -15,7 +15,7 @@ vendor with a ``MediaServer`` adapter.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..servers._embyish import EmbyApiClient
@@ -55,7 +55,7 @@ class _EmbyishProcessor(_MediaServerProcessor):
         if library_ids:
             params["ParentId"] = ",".join(library_ids)
 
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+        cutoff = datetime.now(UTC) - timedelta(hours=lookback_hours)
 
         # Public query helper introduced for this exact use case — no
         # private-method reach-across required, errors logged at the
@@ -106,7 +106,7 @@ def _within_lookback(created_iso: str, cutoff: datetime) -> bool:
     except ValueError:
         return False
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed >= cutoff
 
 

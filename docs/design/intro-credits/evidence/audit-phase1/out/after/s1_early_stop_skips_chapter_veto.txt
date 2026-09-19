@@ -1,0 +1,9 @@
+run force=False: introdb asked 1x, skipdb asked 1x (cumulative)
+  outcome: markers_needs_review | intro needs review | rows: [('jf-1', 'markers_needs_review', "Sources don't agree yet")]
+   intro: needs_review (chapters contradicted by agreeing sources: introdb, skipdb)
+run force=True: introdb asked 2x, skipdb asked 2x (cumulative)
+  outcome: markers_needs_review | intro needs review | rows: [('jf-1', 'markers_needs_review', "Sources don't agree yet")]
+   intro: needs_review (chapters contradicted by agreeing sources: introdb, skipdb)
+run force=False: introdb asked 2x, skipdb asked 2x (cumulative)
+  outcome: markers_needs_review | intro needs review | rows: [('jf-1', 'markers_needs_review', "Sources don't agree yet")]
+   intro: needs_review (chapters contradicted by agreeing sources: introdb, skipdb)

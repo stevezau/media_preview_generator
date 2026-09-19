@@ -299,12 +299,27 @@ class TestLoginLogout:
         assert "/login" not in resp.headers.get("Location", "")
 
     def test_logout_clears_session(self, authed_client):
-        resp = authed_client.get("/logout", follow_redirects=False)
+        resp = authed_client.post("/logout", follow_redirects=False)
         assert resp.status_code == 302
+        assert resp.headers["Location"].endswith("/login")
         # Subsequent request should require login
         resp2 = authed_client.get("/", follow_redirects=False)
         assert resp2.status_code == 302
         assert "/login" in resp2.headers.get("Location", "")
+
+    def test_logout_get_only_asks_and_keeps_the_session(self, authed_client):
+        # Any page can make the browser GET /logout (an <img>), so a GET must not sign out.
+        resp = authed_client.get("/logout")
+
+        assert resp.status_code == 200
+        assert b'id="logoutConfirm"' in resp.data
+        assert authed_client.get("/", follow_redirects=False).status_code == 200
+
+    def test_logout_get_when_signed_out_goes_to_login(self, client):
+        resp = client.get("/logout", follow_redirects=False)
+
+        assert resp.status_code == 302
+        assert resp.headers["Location"].endswith("/login")
 
     def test_login_rate_limit_exceeded(self, client):
         """After 5 POSTs to /login, 6th returns 429.
@@ -1346,6 +1361,117 @@ class TestJobsAPI:
         assert resume_resp.status_code == 200
         assert resume_resp.get_json().get("paused") is False
         assert sm.processing_paused is False
+
+    @pytest.mark.parametrize("kind", ["previews", "intro_credits"])
+    def test_pause_resume_job_matrix_by_kind(self, client, kind):
+        """Intro & Credits jobs pause on their own; preview jobs keep the global pause (spec §6.4 item 8)."""
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        sm = get_settings_manager()
+        sm.processing_paused = False
+        jm = get_job_manager()
+        job = jm.create_job(library_name="x", kind=kind)
+        jm.start_job(job.id)
+
+        resp = client.post(f"/api/jobs/{job.id}/pause", headers=_api_headers())
+        assert resp.status_code == 200
+        if kind == "previews":
+            assert sm.processing_paused is True
+        else:
+            assert sm.processing_paused is False
+            assert jm.is_pause_requested(job.id) is True
+            assert resp.get_json()["paused"] is True
+
+        resp = client.post(f"/api/jobs/{job.id}/resume", headers=_api_headers())
+        assert resp.status_code == 200
+        assert sm.processing_paused is False
+        assert jm.is_pause_requested(job.id) is False
+
+    def test_pause_pending_intro_credits_job_is_409(self, client):
+        from media_preview_generator.web.jobs import get_job_manager
+
+        job = get_job_manager().create_job(library_name="x", kind="intro_credits")
+        resp = client.post(f"/api/jobs/{job.id}/pause", headers=_api_headers())
+        assert resp.status_code == 409
+
+    def test_resume_pending_intro_credits_job_is_409(self, client):
+        from media_preview_generator.web.jobs import get_job_manager
+
+        job = get_job_manager().create_job(library_name="x", kind="intro_credits")
+        resp = client.post(f"/api/jobs/{job.id}/resume", headers=_api_headers())
+        assert resp.status_code == 409
+
+    def test_global_pause_sets_preview_job_flags_but_not_intro_credits_flags(self, client):
+        """Pause all holds Intro & Credits jobs through the global flag; their per-job flag is the user's own."""
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        sm = get_settings_manager()
+        sm.processing_paused = False
+        jm = get_job_manager()
+        prev = jm.create_job(library_name="p")
+        ic = jm.create_job(library_name="ic", kind="intro_credits")
+        jm.start_job(prev.id)
+        jm.start_job(ic.id)
+        try:
+            resp = client.post("/api/processing/pause", headers=_api_headers())
+            assert resp.status_code == 200
+            assert sm.processing_paused is True
+            assert jm.is_pause_requested(prev.id) is True
+            assert jm.is_pause_requested(ic.id) is False
+            assert jm.get_job(ic.id).paused is False
+        finally:
+            sm.processing_paused = False
+
+    @pytest.mark.parametrize("resume_via", ["global_resume", "preview_job_resume"])
+    def test_global_resume_keeps_an_intro_credits_jobs_own_pause(self, client, resume_via):
+        """Every global resume path (Resume all, a preview job's Resume) shares resume_running_and_drain_pending."""
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        sm = get_settings_manager()
+        jm = get_job_manager()
+        prev = jm.create_job(library_name="p")
+        ic = jm.create_job(library_name="ic", kind="intro_credits")
+        jm.start_job(prev.id)
+        jm.start_job(ic.id)
+        assert jm.request_pause(prev.id)
+        assert jm.request_pause(ic.id)
+        sm.processing_paused = True
+        url = "/api/processing/resume" if resume_via == "global_resume" else f"/api/jobs/{prev.id}/resume"
+        try:
+            with patch("media_preview_generator.web.routes.job_runner._start_job_async"):
+                resp = client.post(url, headers=_api_headers())
+            assert resp.status_code == 200
+            assert sm.processing_paused is False
+            assert jm.is_pause_requested(prev.id) is False
+            assert jm.is_pause_requested(ic.id) is True
+            assert jm.get_job(ic.id).paused is True
+        finally:
+            sm.processing_paused = False
+
+    def test_resume_intro_credits_job_while_global_pause_reports_processing_paused(self, client):
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        sm = get_settings_manager()
+        jm = get_job_manager()
+        ic = jm.create_job(library_name="ic", kind="intro_credits")
+        jm.start_job(ic.id)
+        assert jm.request_pause(ic.id)
+        sm.processing_paused = True
+        try:
+            resp = client.post(f"/api/jobs/{ic.id}/resume", headers=_api_headers())
+            assert resp.status_code == 200
+            body = resp.get_json()
+            assert body["id"] == ic.id and body["kind"] == "intro_credits"
+            assert body["paused"] is False
+            assert body["processing_paused"] is True
+            assert sm.processing_paused is True
+            assert jm.is_pause_requested(ic.id) is False
+        finally:
+            sm.processing_paused = False
 
     def test_processing_state_get(self, client):
         """GET /api/processing/state returns global pause state.
@@ -3505,6 +3631,42 @@ class TestReprocessJob:
             f"reprocess of a chain head must reach COMPLETED, got {new_job.status} "
             f"(inherited is_retry_chain → stuck-RUNNING bug, issue #242)"
         )
+
+    @pytest.mark.parametrize("kind", ["previews", "intro_credits"])
+    def test_reprocess_keeps_the_job_kind(self, client, kind):
+        from media_preview_generator.web.jobs import get_job_manager
+
+        jm = get_job_manager()
+        job = jm.create_job(library_name="Movies", kind=kind)
+        jm.complete_job(job.id)
+        with patch("media_preview_generator.web.routes.api_jobs._start_job_async") as start:
+            resp = client.post(f"/api/jobs/{job.id}/reprocess", headers=_api_headers())
+        assert resp.status_code == 201
+        new_id = resp.get_json()["id"]
+        assert new_id != job.id
+        assert resp.get_json()["kind"] == kind
+        assert jm.get_job(new_id).kind == kind
+        assert start.call_args.args[0] == new_id
+
+    @pytest.mark.parametrize(
+        "kept",
+        [{"source": "sonarr", "follows_job_id": "prev-1"}, {"source": "season"}],
+        ids=["webhook-follow-up", "season-job"],
+    )
+    def test_reprocess_of_a_sealed_intro_credits_follow_up_drops_the_seal(self, client, kept):
+        from media_preview_generator.markers.job_runner import FILES_SEALED
+        from media_preview_generator.web.jobs import get_job_manager
+
+        jm = get_job_manager()
+        config = {"file_paths": ["/data/tv/S01E01.mkv"], **kept, FILES_SEALED: True}
+        job = jm.create_job(library_name="Intro & Credits · S01E01", kind="intro_credits", config=config)
+        jm.complete_job(job.id)
+        with patch("media_preview_generator.web.routes.api_jobs._start_job_async"):
+            resp = client.post(f"/api/jobs/{job.id}/reprocess", headers=_api_headers())
+        assert resp.status_code == 201
+        new_config = jm.get_job(resp.get_json()["id"]).config
+        assert FILES_SEALED not in new_config
+        assert new_config == {"file_paths": ["/data/tv/S01E01.mkv"], **kept}
 
     def test_reprocess_nonexistent_job(self, client):
         resp = client.post("/api/jobs/nonexistent/reprocess", headers=_api_headers())

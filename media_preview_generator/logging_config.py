@@ -16,11 +16,19 @@ configured level:
 Only the handler IDs created by :func:`setup_logging` are tracked; per-job
 log sinks added externally are left untouched during hot-reloads.
 
+Standard-library ``logging`` (Flask, werkzeug, APScheduler, python-socketio,
+…) is routed into loguru too (``_StdlibToLoguru``), so its lines are masked
+and written by the same handlers, at the levels that reached the console
+before; a library that keeps its records to itself (urllib3's and requests'
+NullHandler) stays quiet as before.
+
 Set ``LOG_FORMAT=json`` (env var) or pass ``log_format="json"`` to emit
 structured JSON on stderr for log-aggregation pipelines (ELK / Loki / etc.).
 """
 
+import inspect
 import json as _json
+import logging  # stdlib logging only to hand libraries' records to loguru; app code must use loguru
 import os
 import sys
 import threading
@@ -28,6 +36,8 @@ from typing import Optional
 
 from loguru import logger
 from rich.console import Console
+
+from .utils import redact_secrets, redacted_traceback
 
 # ---------------------------------------------------------------------------
 # Module-level state
@@ -78,16 +88,42 @@ def _compact_payload(record) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _jsonl_record_patcher(record) -> bool:
-    """Loguru *filter* that pre-serialises a JSONL string into ``extra``.
+def _mask_secrets(record) -> None:
+    """Loguru patcher: mask tokens in each record's message before any handler (or a job's log) sees it.
 
-    The file handler's format string ``{extra[_jsonl]}`` writes it directly.
+    A message built from exception text can carry a server URL with its token (``utils.redact_secrets``). A logged
+    exception's own text isn't the message: each managed handler masks its traceback (``_write_stderr``,
+    ``_jsonl_format``).
+    """
+    record["message"] = redact_secrets(record["message"])
+
+
+def _write_stderr(message: str) -> None:
+    """Console sink: the formatted line, traceback included, with secrets masked."""
+    sys.stderr.write(redact_secrets(message))
+
+
+def _jsonl_record_patcher(record) -> bool:
+    """Loguru *filter* that pre-serialises a JSONL string, and a logged exception's masked traceback, into ``extra``.
+
+    The file handler's format (``_jsonl_format``) writes them directly.
 
     Returns:
         True always — level gating is done by loguru's ``level=`` parameter.
     """
     record["extra"]["_jsonl"] = _json.dumps(_compact_payload(record), default=str)
+    exception = record.get("exception")
+    value = getattr(exception, "value", None)
+    record["extra"]["_traceback"] = f"{redacted_traceback(value)}\n" if isinstance(value, BaseException) else ""
     return True
+
+
+def _jsonl_format(record) -> str:
+    """app.log's line format: the JSON line, then a logged exception's traceback with secrets masked.
+
+    A callable format, because with a string one loguru appends its own ``{exception}``, whose text isn't masked.
+    """
+    return "{extra[_jsonl]}\n{extra[_traceback]}"
 
 
 def _json_sink(message) -> None:
@@ -107,13 +143,94 @@ def _json_sink(message) -> None:
         "module": record["module"],
     }
     if record["exception"] is not None:
-        payload["exception"] = str(record["exception"])
+        payload["exception"] = redact_secrets(str(record["exception"]))
     extra = record.get("extra", {})
     for key in ("worker_id", "worker_type", "gpu_index", "media_title", "item_key"):
         if key in extra and extra[key] is not None:
             payload[key] = extra[key]
     sys.stderr.write(_json.dumps(payload, default=str) + "\n")
     sys.stderr.flush()
+
+
+# ---------------------------------------------------------------------------
+# Standard-library logging (Flask, werkzeug, APScheduler, python-socketio, …)
+# ---------------------------------------------------------------------------
+
+
+class _StdlibToLoguru(logging.Handler):
+    """Root handler of the standard library's ``logging``: its records go through loguru, masked and written like the
+    app's own lines.
+
+    It stands in for the stdlib's last-resort handler, which printed WARNING and above of a record no handler took, so
+    what reaches the logs is what reached them before: it sits at WARNING, and leaves a record to a handler of its own
+    logger or a parent below the root (urllib3's and requests' NullHandler, which keep their records quiet).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        # Set while this thread hands a record to loguru: a sink that logs through ``logging`` itself, on this thread,
+        # would otherwise send the record round for ever.
+        self._handing_over = threading.local()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if getattr(self._handing_over, "active", False) or _built_by_loguru(record) or _handled_below_root(record):
+            return
+        self._handing_over.active = True
+        try:
+            try:
+                level: str | int = logger.level(record.levelname).name
+            except ValueError:
+                level = record.levelno
+            # Name the code that logged (loguru reads its module, function and line), not this handler or logging.
+            frame, depth = inspect.currentframe(), 0
+            while frame is not None and (depth == 0 or frame.f_code.co_filename == logging.__file__):
+                frame = frame.f_back
+                depth += 1
+            logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+        except Exception:
+            self.handleError(record)
+        finally:
+            self._handing_over.active = False
+
+
+def _built_by_loguru(record: logging.LogRecord) -> bool:
+    """Whether loguru made the record, for a ``logging.Handler`` added as a loguru sink (the tests' caplog bridge).
+
+    It is a loguru line already: handing it to loguru again would write it twice, and on loguru's writer thread (an
+    ``enqueue`` sink) the round would never end. Loguru's standard-handler sink builds each record with its own
+    ``extra`` dict as the record's ``extra`` attribute.
+    """
+    return isinstance(record.__dict__.get("extra"), dict)
+
+
+def _handled_below_root(record: logging.LogRecord) -> bool:
+    """Whether the record's logger, or a parent it propagates to below the root, has a handler of its own."""
+    current: logging.Logger | None = logging.getLogger(record.name)
+    while current is not None and current is not logging.root:
+        if current.handlers:
+            return True
+        current = current.parent if current.propagate else None
+    return False
+
+
+def _route_stdlib_logging() -> None:
+    """Send the standard library's ``logging`` through loguru (``_StdlibToLoguru``); safe to call again.
+
+    python-socketio, python-engineio and Flask give their loggers a console handler of their own when nothing handles
+    their records yet (Flask on first use, the others when the app starts): each is taken off, so their lines are
+    masked and written once, WARNING and above as the root handler takes them (and not below their own logger's
+    level). A handler writing anywhere else (a file, a stream of its own) stays. A logger that doesn't propagate
+    (gunicorn's) keeps its handlers and never reaches the root.
+    """
+    if not any(isinstance(handler, _StdlibToLoguru) for handler in logging.root.handlers):
+        logging.root.addHandler(_StdlibToLoguru())
+    for candidate in list(logging.root.manager.loggerDict.values()):
+        if not isinstance(candidate, logging.Logger) or not candidate.propagate:
+            continue
+        for handler in list(candidate.handlers):
+            # Flask's streams to the request's ``wsgi.errors``, which is sys.stderr outside a request.
+            if type(handler) is logging.StreamHandler and handler.stream in (sys.stderr, sys.stdout):
+                candidate.removeHandler(handler)
 
 
 def get_app_log_path() -> str:
@@ -168,6 +285,10 @@ def setup_logging(
                     pass
 
         _managed_handler_ids = []
+        logger.configure(patcher=_mask_secrets)
+
+        # Every handler below sets diagnose=False: loguru's default prints each traceback frame's variable values
+        # (a server's token among them) into docker logs, app.log and the live log viewer. The traceback stays.
 
         # --- 1. Console (stderr) handler ---
         if log_format == "json":
@@ -176,21 +297,24 @@ def setup_logging(
                 level=log_level,
                 format="{message}",
                 enqueue=True,
+                diagnose=False,
             )
         elif console:
             hid = logger.add(
-                lambda msg: console.print(msg, end=""),
+                lambda msg: console.print(redact_secrets(msg), end=""),
                 level=log_level,
                 format=_CONSOLE_FORMAT,
                 enqueue=True,
+                diagnose=False,
             )
         else:
             hid = logger.add(
-                sys.stderr,
+                _write_stderr,
                 level=log_level,
                 format=_CONSOLE_FORMAT,
                 colorize=True,
                 enqueue=True,
+                diagnose=False,
             )
         _managed_handler_ids.append(hid)
 
@@ -201,12 +325,13 @@ def setup_logging(
             hid = logger.add(
                 os.path.join(log_dir, "app.log"),
                 level=log_level,
-                format="{extra[_jsonl]}",
+                format=_jsonl_format,
                 filter=_jsonl_record_patcher,
                 rotation=rotation,
                 retention=retention,
                 compression="gz",
                 enqueue=True,
+                diagnose=False,
             )
             _managed_handler_ids.append(hid)
         except (PermissionError, OSError) as exc:
@@ -227,8 +352,12 @@ def setup_logging(
                 level=log_level,
                 format="{message}",
                 enqueue=True,
+                diagnose=False,
             )
             _managed_handler_ids.append(hid)
+
+        # --- 4. Standard-library logging through the handlers above ---
+        _route_stdlib_logging()
 
 
 # ---------------------------------------------------------------------------

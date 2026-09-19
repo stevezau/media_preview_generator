@@ -3,7 +3,7 @@
 import os
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import urllib3
 from flask import Response, jsonify, request
@@ -270,7 +270,7 @@ def _resolve_bif_for_item(
                     stat = os.stat(bif_path)
                     bif_info = {
                         "file_size": stat.st_size,
-                        "created_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                        "created_at": datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
                     }
                 except OSError:
                     pass
@@ -348,7 +348,7 @@ def _resolve_bif_for_item_all_parts(
                 try:
                     stat = os.stat(bif_path)
                     entry["file_size"] = stat.st_size
-                    entry["created_at"] = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+                    entry["created_at"] = datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat()
                 except OSError:
                     pass
             parts.append(entry)
@@ -611,7 +611,7 @@ def bif_info():
             "frame_count": meta.frame_count,
             "frame_interval_ms": meta.frame_interval_ms,
             "file_size": meta.file_size,
-            "created_at": datetime.fromtimestamp(meta.created_at, tz=timezone.utc).isoformat(),
+            "created_at": datetime.fromtimestamp(meta.created_at, tz=UTC).isoformat(),
             "avg_frame_size": round(avg_size),
             "min_frame_size": min_size,
             "max_frame_size": max_size,

@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from datetime import UTC
 from unittest.mock import patch
 
 import pytest
@@ -396,7 +397,7 @@ class TestWebhookFireAtOnJobConfig:
     """
 
     def test_fresh_batch_sets_webhook_fire_at_on_job_config(self, app_debounced):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from media_preview_generator.web.jobs import get_job_manager
 
@@ -431,7 +432,7 @@ class TestWebhookFireAtOnJobConfig:
             # Within the 60 s debounce window from "now". Allow 5 s slack
             # for test scheduling jitter — anything outside that range
             # means the timestamp wasn't computed from the current time.
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             remaining = (fire_at - now).total_seconds()
             assert 55 <= remaining <= 60, (
                 f"webhook_fire_at must be ~60s in the future (the configured debounce); "

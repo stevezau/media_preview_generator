@@ -1,0 +1,79 @@
+interactions:
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate, zstd
+      Authorization:
+      - FAKE_AUTH
+      Connection:
+      - keep-alive
+      User-Agent:
+      - python-requests/2.33.0
+      X-Emby-Token:
+      - FAKE_EMBY_TOKEN
+    method: GET
+    uri: http://fake-server/MediaPreviewBridge/ResolvePath?path=%2Fmedia%2Fsynth-chapters%2FSynth+Chapters+%282021%29%2FSeason+01%2FSynth+Chapters+%282021%29+-+S01E02.webm
+  response:
+    body:
+      string: '{"itemId":"3d92521f038415bcb3b6fb8229cfa7a8","name":"Synth Chapters","type":"Episode"}'
+    headers:
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Tue, 15 Sep 2026 05:09:39 GMT
+      Server:
+      - Kestrel
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Accept-Encoding
+      X-Response-Time-ms:
+      - '8.4983'
+      content-length:
+      - '86'
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate, zstd
+      Authorization:
+      - FAKE_AUTH
+      Connection:
+      - keep-alive
+      User-Agent:
+      - python-requests/2.33.0
+      X-Emby-Token:
+      - FAKE_EMBY_TOKEN
+    method: GET
+    uri: http://fake-server/Items?Ids=3d92521f038415bcb3b6fb8229cfa7a8
+  response:
+    body:
+      string: '{"Items": [{"Id": "3d92521f038415bcb3b6fb8229cfa7a8", "Type": "Episode"}],
+        "TotalRecordCount": 1, "StartIndex": 0}'
+    headers:
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Tue, 15 Sep 2026 05:09:39 GMT
+      Server:
+      - Kestrel
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Accept-Encoding
+      X-Response-Time-ms:
+      - '18.4172'
+      content-length:
+      - '908'
+    status:
+      code: 200
+      message: OK
+version: 1

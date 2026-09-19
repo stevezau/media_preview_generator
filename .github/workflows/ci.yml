@@ -4,13 +4,14 @@ on:
   push:
     branches: [dev]
     # App release tags are pure semver (e.g. 4.2.1). Exclude plugin tags
-    # (plugin-v10.11.0.3) — they own jellyfin-plugin.yml and must NOT trigger
-    # the app image build: the tag name is fed to SETUPTOOLS_SCM_PRETEND_VERSION,
-    # and a non-PEP440 value ("plugin-v…") aborts the wheel build (and would
-    # otherwise push :latest from a plugin release).
+    # (plugin-v10.11.0.3, emby-plugin-v1.0.0.0) — they own jellyfin-plugin.yml /
+    # emby-plugin.yml and must NOT trigger the app image build: the tag name is
+    # fed to SETUPTOOLS_SCM_PRETEND_VERSION, and a non-PEP440 value ("plugin-v…")
+    # aborts the wheel build (and would otherwise push :latest from a plugin release).
     tags:
       - '*.*.*'
       - '!plugin-*'
+      - '!emby-plugin-*'
     paths-ignore:
       - 'docs/**'
       - '*.md'
@@ -352,10 +353,22 @@ jobs:
         # reachable vendor. Skips any vendor that didn't come up.
         continue-on-error: true
 
+      - name: Credit text prerequisites (model and font)
+        # tests/markers/credits' integration-marked real-model tests skip without the model and the DejaVu font;
+        # fetch the model the same pinned, sha256-checked way the image does.
+        run: |
+          set -euo pipefail
+          python3 scripts/fetch_textdet_model.py --out "$RUNNER_TEMP/models"
+          if [[ ! -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf ]]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends fonts-dejavu-core
+          fi
+
       - name: Run integration tests
         env:
           PLEX_CLAIM: ${{ secrets.PLEX_CLAIM_TOKEN }}
-        run: pytest -m integration --no-cov --tb=short tests/integration/
+          MEDIA_PREVIEW_TEXTDET_MODEL: ${{ runner.temp }}/models/ch_PP-OCRv4_det_infer.onnx
+        run: pytest -m integration --no-cov --tb=short -rs tests/integration/ tests/markers/credits/
         timeout-minutes: 15
 
       - name: Vendor stack logs on failure
@@ -367,6 +380,74 @@ jobs:
         if: always()
         working-directory: tests/integration
         run: docker compose -f docker-compose.test.yml down -v
+
+  arm64-image-check:
+    # The `build` job below only runs on pushes and manual runs, so without this a PR never proves the arm64 image
+    # builds — and the image carries native wheels (onnxruntime, opencv-python-headless, pyclipper, numpy) that must
+    # exist for linux/arm64. Builds natively on GitHub's free arm64 runner and only loads the image into this
+    # runner's Docker: no push, no registry login, no secrets, no :dev / :latest tag. Then checks that the credit
+    # text detector runs inside it and that its model is the one the Dockerfile's fetch step pins.
+    name: arm64 image (build and check, no push)
+    if: github.event_name == 'pull_request'
+    needs: lint
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      CHECK_IMAGE: media-preview-generator-arm64-check:local
+      MODEL_PATH: /app/models/ch_PP-OCRv4_det_infer.onnx
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build linux/arm64 (loaded locally, never pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: ${{ env.CHECK_IMAGE }}
+          build-args: |
+            GIT_BRANCH=pr-${{ github.event.pull_request.number }}
+            GIT_SHA=${{ github.sha }}
+          # Reads the arm64 layers dev's `build` job saved (a PR into dev may read its base branch's cache) and
+          # writes none: every PR's full arm64 layers would crowd those publishing caches out of the repo's 10 GB.
+          cache-from: type=gha,scope=linux/arm64
+
+      - name: The image is linux/arm64
+        run: |
+          set -euo pipefail
+          arch="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$CHECK_IMAGE")"
+          if [[ "$arch" != "linux/arm64" ]]; then
+            echo "::error::Built $arch, expected linux/arm64"
+            exit 1
+          fi
+
+      - name: The credit text detector runs in the image
+        run: >-
+          docker run --rm --entrypoint python3 "$CHECK_IMAGE"
+          -m media_preview_generator.markers.credits.textdet_helper --check
+
+      - name: The image's model is the one the Dockerfile's fetch step pins
+        run: |
+          set -euo pipefail
+          expected="$(python3 -c 'import runpy; print(runpy.run_path("scripts/fetch_textdet_model.py")["MODEL_SHA256"])')"
+          if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Could not read MODEL_SHA256 from scripts/fetch_textdet_model.py (got '$expected')"
+            exit 1
+          fi
+          read -r actual _ < <(docker run --rm --entrypoint sha256sum "$CHECK_IMAGE" "$MODEL_PATH")
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::$MODEL_PATH is $actual, the fetch step pins $expected"
+            exit 1
+          fi
+          echo "$MODEL_PATH matches the pin ($expected)"
 
   context:
     runs-on: ubuntu-latest

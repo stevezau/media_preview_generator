@@ -29,6 +29,21 @@ def plex_wrapper(mock_config):
     return PlexServer(mock_config, server_id="plex-test", name="Test Plex")
 
 
+@pytest.fixture
+def plex_server_under_test(mock_config):
+    """A :class:`PlexServer` whose ``_connect`` is a ``MagicMock``.
+
+    ``retry_plex_call`` is patched to call straight through so tests can
+    drive ``conn.query`` directly without exercising the real retry/backoff
+    loop (which only matters for ``ParseError``/connection-error handling,
+    already covered elsewhere).
+    """
+    server = PlexServer(mock_config, server_id="plex-test", name="Test Plex")
+    server._connect = MagicMock()
+    with patch("media_preview_generator.plex_client.retry_plex_call", side_effect=lambda f, *a, **k: f(*a, **k)):
+        yield server
+
+
 class TestConstruction:
     def test_implements_media_server(self, plex_wrapper):
         from media_preview_generator.servers import MediaServer
@@ -801,6 +816,61 @@ class TestResolveOnePath:
         assert result == "9"
 
 
+class TestResolveScopedToLibraries:
+    """Intro & Credits resolves in the libraries that hold the file, whatever their preview opt-in (audit C MED-1).
+
+    Movies (section 1) has previews on; TV Shows (section 2) has previews off because Plex makes its own thumbnails,
+    and Intro & Credits is on there. The preview path keeps searching only preview-enabled sections.
+    """
+
+    EPISODE = "/tv/Show/Season 01/Show S01E01.mkv"
+
+    def _server(self, *, tv_previews: bool):
+        from media_preview_generator.servers.base import Library, ServerConfig
+
+        cfg = ServerConfig(
+            id="plex-1",
+            type=ServerType.PLEX,
+            name="Plex",
+            enabled=True,
+            url="http://plex:32400",
+            auth={"token": "t"},
+            libraries=[
+                Library("1", "Movies", ("/movies",), enabled=True),
+                Library("2", "TV Shows", ("/tv",), enabled=tv_previews),
+            ],
+        )
+        server = PlexServer(cfg)
+        movies, tv = MagicMock(), MagicMock()
+        movies.key, movies.title, movies.METADATA_TYPE = 1, "Movies", "movie"
+        tv.key, tv.title, tv.METADATA_TYPE = 2, "TV Shows", "episode"
+        episode = MagicMock(ratingKey=42)
+        episode.media = [MagicMock(parts=[MagicMock(file=self.EPISODE)])]
+        in_section = {"1": [], "2": [episode]}
+        plex = MagicMock()
+        plex.library.sections.return_value = [movies, tv]
+        # Plex answers per section: only section 2's file= query holds the episode.
+        plex.fetchItems.side_effect = lambda ekey: in_section[ekey.split("/library/sections/")[1].split("/")[0]]
+        server._plex = plex
+        return server, plex
+
+    @pytest.mark.parametrize("tv_previews", [False, True], ids=["tv-previews-off", "tv-previews-on"])
+    def test_markers_caller_finds_the_episode_in_its_library(self, tv_previews):
+        server, plex = self._server(tv_previews=tv_previews)
+        with patch("media_preview_generator.plex_client.retry_plex_call", side_effect=lambda f, *a, **k: f(*a, **k)):
+            assert server.resolve_remote_path_to_item_id(self.EPISODE, library_ids=["2"]) == "42"
+        sections = [c.args[0].split("/library/sections/")[1].split("/")[0] for c in plex.fetchItems.call_args_list]
+        assert sections == ["2"]
+
+    @pytest.mark.parametrize(("tv_previews", "expected"), [(False, None), (True, "42")])
+    def test_preview_caller_keeps_the_preview_library_filter(self, tv_previews, expected):
+        server, plex = self._server(tv_previews=tv_previews)
+        with patch("media_preview_generator.plex_client.retry_plex_call", side_effect=lambda f, *a, **k: f(*a, **k)):
+            assert server.resolve_remote_path_to_item_id(self.EPISODE) == expected
+        sections = [c.args[0].split("/library/sections/")[1].split("/")[0] for c in plex.fetchItems.call_args_list]
+        assert sections == (["1"] if not tv_previews else ["1", "2"])
+
+
 class TestGetBundleMetadata:
     """D31 — get_bundle_metadata is the canary's path to Plex's bundle hash.
 
@@ -1555,3 +1625,311 @@ class TestPlexPreviewsReadiness:
         assert row["severity"] == "recommended"
         assert "boom" in (row["reason"] or "")
         assert row["current"] == "unknown (probe failed)"
+
+
+class TestGetExternalIds:
+    def _xml(self, text):
+        import xml.etree.ElementTree as ET
+
+        return ET.fromstring(text)
+
+    def test_episode_uses_show_guids_and_indexes(self, plex_server_under_test):
+        episode = self._xml(
+            '<MediaContainer><Video type="episode" parentIndex="1" index="3" grandparentRatingKey="99">'
+            '<Guid id="imdb://tt5555555"/></Video></MediaContainer>'
+        )
+        show = self._xml(
+            '<MediaContainer><Directory type="show"><Guid id="imdb://tt2861424"/><Guid id="tmdb://60625"/>'
+            '<Guid id="tvdb://275274"/></Directory></MediaContainer>'
+        )
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = [episode, show]
+        ids = plex_server_under_test.get_external_ids("/library/metadata/123")
+        assert ids == {
+            "kind": "episode",
+            "tmdb": "60625",
+            "imdb": "tt2861424",
+            "tvdb": "275274",
+            "season": 1,
+            "episode": 3,
+        }
+        assert [c.args[0] for c in conn.query.call_args_list] == [
+            "/library/metadata/123?includeGuids=1",
+            "/library/metadata/99?includeGuids=1",
+        ]
+
+    def test_movie(self, plex_server_under_test):
+        movie = self._xml(
+            '<MediaContainer><Video type="movie"><Guid id="tmdb://862"/><Guid id="imdb://tt0114709"/>'
+            "</Video></MediaContainer>"
+        )
+        plex_server_under_test._connect.return_value.query.return_value = movie
+        assert plex_server_under_test.get_external_ids("862") == {
+            "kind": "movie",
+            "tmdb": "862",
+            "imdb": "tt0114709",
+            "tvdb": None,
+            "season": None,
+            "episode": None,
+        }
+
+    def test_query_failure_returns_none(self, plex_server_under_test):
+        plex_server_under_test._connect.return_value.query.side_effect = RuntimeError("down")
+        assert plex_server_under_test.get_external_ids("1") is None
+
+    def test_grandparent_query_failure_keeps_season_episode_but_no_ids(self, plex_server_under_test):
+        """RULING (fix round 1, HIGH-1, lab-verified on Plex): a show-guid lookup
+
+        failure must NEVER fall back to the episode's own (wrong, episode-scoped)
+        guids — that leaks an episode id into the series-id slot, which sends
+        another show's markers to this file. kind/season/episode are still
+        reported; tmdb/imdb/tvdb stay None."""
+        episode = self._xml(
+            '<MediaContainer><Video type="episode" parentIndex="1" index="3" grandparentRatingKey="99">'
+            '<Guid id="imdb://tt5555555"/></Video></MediaContainer>'
+        )
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = [episode, RuntimeError("show down")]
+        ids = plex_server_under_test.get_external_ids("123")
+        assert ids == {"kind": "episode", "tmdb": None, "imdb": None, "tvdb": None, "season": 1, "episode": 3}
+
+    def test_grandparent_lookup_empty_keeps_season_episode_but_no_ids(self, plex_server_under_test):
+        """RULING (fix round 1, HIGH-1): an empty show container (no children
+
+        at all) must NOT fall back to the episode's own guids either — same
+        leak as above, just via a different failure shape (empty vs. raising)."""
+        episode = self._xml(
+            '<MediaContainer><Video type="episode" parentIndex="1" index="3" grandparentRatingKey="99">'
+            '<Guid id="imdb://tt5555555"/></Video></MediaContainer>'
+        )
+        empty_show = self._xml("<MediaContainer></MediaContainer>")
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = [episode, empty_show]
+        ids = plex_server_under_test.get_external_ids("123")
+        assert ids == {"kind": "episode", "tmdb": None, "imdb": None, "tvdb": None, "season": 1, "episode": 3}
+
+    def test_episode_without_grandparent_key_keeps_season_episode_but_no_ids(self, plex_server_under_test):
+        """RULING (fix round 1, HIGH-1): no grandparentRatingKey at all (e.g. a
+
+        loose episode file Plex hasn't fully indexed into a show) must not
+        fall back to the episode's own guids, and must not issue a second
+        query at all."""
+        episode = self._xml(
+            '<MediaContainer><Video type="episode" parentIndex="1" index="3">'
+            '<Guid id="imdb://tt5555555"/></Video></MediaContainer>'
+        )
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = episode
+        ids = plex_server_under_test.get_external_ids("1")
+        assert ids == {"kind": "episode", "tmdb": None, "imdb": None, "tvdb": None, "season": 1, "episode": 3}
+        conn.query.assert_called_once()
+
+    def test_unknown_type_maps_to_unknown_kind_with_no_ids(self, plex_server_under_test):
+        """RULING (fix round 1, MED-3): an unrecognised type (e.g. the show
+
+        item itself) reports NO ids at all, not just kind="unknown" with the
+        node's own guids still leaking through."""
+        node = self._xml('<MediaContainer><Directory type="show"><Guid id="tmdb://1"/></Directory></MediaContainer>')
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = node
+        ids = plex_server_under_test.get_external_ids("5")
+        assert ids == {"kind": "unknown", "tmdb": None, "imdb": None, "tvdb": None, "season": None, "episode": None}
+        conn.query.assert_called_once()  # no further lookup for an unrecognised kind
+
+    def test_movie_never_reports_tvdb_even_if_present(self, plex_server_under_test):
+        """RULING (fix round 1, LOW): movies never report a tvdb id — different id space."""
+        movie = self._xml(
+            '<MediaContainer><Video type="movie"><Guid id="tmdb://862"/><Guid id="tvdb://999"/>'
+            "</Video></MediaContainer>"
+        )
+        plex_server_under_test._connect.return_value.query.return_value = movie
+        ids = plex_server_under_test.get_external_ids("1")
+        assert ids["tvdb"] is None
+        assert ids["tmdb"] == "862"
+
+    def test_empty_item_id_returns_none_without_query(self, plex_server_under_test):
+        assert plex_server_under_test.get_external_ids("") is None
+        assert plex_server_under_test.get_external_ids(None) is None
+        plex_server_under_test._connect.return_value.query.assert_not_called()
+
+    def test_missing_parent_and_index_become_none(self, plex_server_under_test):
+        episode = self._xml('<MediaContainer><Video type="episode" grandparentRatingKey="99"></Video></MediaContainer>')
+        show = self._xml('<MediaContainer><Directory type="show"><Guid id="tvdb://1"/></Directory></MediaContainer>')
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = [episode, show]
+        ids = plex_server_under_test.get_external_ids("1")
+        assert ids["season"] is None
+        assert ids["episode"] is None
+
+
+class TestPlexMarkerHelpers:
+    @staticmethod
+    def _root(subscription):
+        import xml.etree.ElementTree as ET
+
+        return ET.fromstring(f'<MediaContainer myPlexSubscription="{subscription}" friendlyName="lab"/>')
+
+    def test_plex_pass_is_read_fresh_from_the_server_root(self, plex_server_under_test):
+        # plexapi's myPlexSubscription attribute is frozen at connect time; a claim or lapse must show up.
+        conn = plex_server_under_test._connect.return_value
+        conn.myPlexSubscription = True
+        conn.query.side_effect = [self._root("1"), self._root("0")]
+        assert plex_server_under_test.get_server_status()["plex_pass"] is True
+        assert plex_server_under_test.get_server_status()["plex_pass"] is False
+        assert [c.args[0] for c in conn.query.call_args_list] == ["/", "/"]
+
+    def test_server_status_reads_pass_and_version_from_one_root_query(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = ET.fromstring(
+            '<MediaContainer myPlexSubscription="1" version="1.43.4.10903-e5521bd8c" friendlyName="lab"/>'
+        )
+        assert plex_server_under_test.get_server_status() == {"plex_pass": True, "version": "1.43.4.10903-e5521bd8c"}
+        assert [c.args[0] for c in conn.query.call_args_list] == ["/"]
+
+    @pytest.mark.parametrize("failure", ["connect", "query", "empty"])
+    def test_server_status_unreachable(self, plex_server_under_test, failure):
+        if failure == "connect":
+            plex_server_under_test._connect.side_effect = RuntimeError("down")
+        elif failure == "query":
+            plex_server_under_test._connect.return_value.query.side_effect = RuntimeError("down")
+        else:
+            plex_server_under_test._connect.return_value.query.return_value = None
+        assert plex_server_under_test.get_server_status() is None
+
+    def test_get_markers_parses_served_markers(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        xml = ET.fromstring(
+            '<MediaContainer><Video ratingKey="7"><Marker type="intro" startTimeOffset="990" '
+            'endTimeOffset="29306"/><Marker type="credits" startTimeOffset="1156521" endTimeOffset="1186521"/>'
+            '<Marker type="credits" startTimeOffset="1294044" endTimeOffset="1322272" final="1"/>'
+            '<Marker type="bookmark" startTimeOffset="5" endTimeOffset="6"/></Video></MediaContainer>'
+        )
+        plex_server_under_test._connect.return_value.query.return_value = xml
+        assert plex_server_under_test.get_markers("7") == [
+            {"type": "intro", "start_ms": 990, "end_ms": 29306, "final": False},
+            {"type": "credits", "start_ms": 1156521, "end_ms": 1186521, "final": False},
+            {"type": "credits", "start_ms": 1294044, "end_ms": 1322272, "final": True},
+        ]
+        assert (
+            plex_server_under_test._connect.return_value.query.call_args.args[0]
+            == "/library/metadata/7?includeMarkers=1"
+        )
+
+    def test_get_markers_accepts_a_metadata_key(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = ET.fromstring('<MediaContainer><Video ratingKey="7"/></MediaContainer>')
+        assert plex_server_under_test.get_markers("/library/metadata/7") == []
+        assert conn.query.call_args.args[0] == "/library/metadata/7?includeMarkers=1"
+
+    def test_get_markers_returns_none_when_plex_fails_or_has_no_item(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = RuntimeError("down")
+        assert plex_server_under_test.get_markers("7") is None
+        conn.query.side_effect = None
+        conn.query.return_value = ET.fromstring("<MediaContainer/>")
+        assert plex_server_under_test.get_markers("7") is None
+
+    def test_get_part_durations_lists_every_part_of_every_version(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        xml = ET.fromstring(
+            '<MediaContainer><Video ratingKey="777" duration="1444574">'
+            '<Media id="1" duration="1444574"><Part id="11" duration="1444574" file="/tv/bd.mkv"/></Media>'
+            '<Media id="2" duration="1384574"><Part id="21" duration="1384574" file="/tv/web.mkv"/></Media>'
+            '<Media id="3"><Part id="31" file="/tv/unknown.mkv"/></Media>'
+            "</Video></MediaContainer>"
+        )
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = xml
+        assert plex_server_under_test.get_part_durations("/library/metadata/777") == [1_444_574, 1_384_574, None]
+        assert conn.query.call_args.args[0] == "/library/metadata/777"
+
+    @pytest.mark.parametrize(
+        ("media", "count"),
+        [
+            # A stacked version (two parts) is one version.
+            ('<Media id="1"><Part id="11" file="/tv/cd1.mkv"/><Part id="12" file="/tv/cd2.mkv"/></Media>', 1),
+            # Plex's "Optimize" copy of a version isn't another version.
+            (
+                '<Media id="1"><Part id="11" file="/tv/bd.mkv"/></Media>'
+                '<Media id="2" proxyType="42"><Part id="21" file="/tv/Plex Versions/Optimized for TV/bd.mp4"/></Media>',
+                1,
+            ),
+            (
+                '<Media id="1"><Part id="11" file="/tv/bd.mkv"/></Media>'
+                '<Media id="2"><Part id="21" file="/tv/web.mkv"/></Media>',
+                2,
+            ),
+        ],
+        ids=["stacked", "optimized-copy", "two-versions"],
+    )
+    def test_get_version_count_counts_versions_not_parts_or_optimized_copies(
+        self, plex_server_under_test, media, count
+    ):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = ET.fromstring(
+            f'<MediaContainer><Video ratingKey="777">{media}</Video></MediaContainer>'
+        )
+        assert plex_server_under_test.get_version_count("/library/metadata/777") == count
+        assert conn.query.call_args.args[0] == "/library/metadata/777"
+
+    def test_get_version_count_returns_none_when_plex_fails_or_has_no_item(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = RuntimeError("down")
+        assert plex_server_under_test.get_version_count("7") is None
+        conn.query.side_effect = None
+        conn.query.return_value = ET.fromstring("<MediaContainer/>")
+        assert plex_server_under_test.get_version_count("7") is None
+
+    def test_get_part_durations_returns_none_when_plex_fails_or_has_no_item(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = RuntimeError("down")
+        assert plex_server_under_test.get_part_durations("7") is None
+        conn.query.side_effect = None
+        conn.query.return_value = ET.fromstring("<MediaContainer/>")
+        assert plex_server_under_test.get_part_durations("7") is None
+
+    @staticmethod
+    def _prefs(**values):
+        import xml.etree.ElementTree as ET
+
+        settings = "".join(f'<Setting id="{k}" type="text" default="asap" value="{v}"/>' for k, v in values.items())
+        return ET.fromstring(f"<MediaContainer>{settings}</MediaContainer>")
+
+    def test_marker_detection_prefs_are_read_fresh(self, plex_server_under_test):
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = [
+            self._prefs(GenerateIntroMarkerBehavior="asap", GenerateCreditsMarkerBehavior="never"),
+            self._prefs(GenerateIntroMarkerBehavior="never", GenerateCreditsMarkerBehavior="scheduled"),
+        ]
+        assert plex_server_under_test.get_marker_detection_prefs() == {"intro": "asap", "credits": "never"}
+        assert plex_server_under_test.get_marker_detection_prefs() == {"intro": "never", "credits": "scheduled"}
+        assert [c.args[0] for c in conn.query.call_args_list] == ["/:/prefs", "/:/prefs"]
+
+    def test_marker_detection_prefs_hidden_pref_is_none(self, plex_server_under_test):
+        # Plex hides these prefs on servers without Plex Pass; plexapi's Settings.get raises NotFound for them.
+        from plexapi.exceptions import NotFound
+        from plexapi.settings import Settings
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = self._prefs(GenerateIntroMarkerBehavior="asap")
+        with pytest.raises(NotFound):
+            Settings(conn, conn.query.return_value).get("GenerateCreditsMarkerBehavior")
+        assert plex_server_under_test.get_marker_detection_prefs() == {"intro": "asap", "credits": None}
+
+    def test_marker_detection_prefs_unreachable(self, plex_server_under_test):
+        plex_server_under_test._connect.side_effect = RuntimeError("down")
+        assert plex_server_under_test.get_marker_detection_prefs() == {"intro": None, "credits": None}

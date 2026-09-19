@@ -1,0 +1,43 @@
+DEFAULT (introdb+skipdb, high)
+   ('credits', 'decided-late') 1
+   ('credits', 'decided-ok') 1
+   ('credits', 'needs_review') 23
+   ('credits', 'no_evidence') 18
+   ('intro', 'decided-WRONG') 3
+   ('intro', 'decided-ok') 10
+   ('intro', 'needs_review') 30
+  Rick and Morty S01E04 credits: late pub 1256.0 truth 1154.5 by ('introdb', 'skipdb')
+  Marvels Daredevil S03E02 intro: WRONG pub 238.0-306.0 truth 236.8-287.7 by ('introdb', 'skipdb')
+  Marvels Daredevil S03E03 intro: WRONG pub 224.0-293.0 truth 223.3-274.2 by ('introdb', 'skipdb')
+  Marvels Daredevil S03E06 intro: WRONG pub 184.5-252.0 truth 183.6-243.8 by ('introdb', 'skipdb')
+TheIntroDB enabled, high
+   ('credits', 'decided-late') 1
+   ('credits', 'decided-ok') 1
+   ('credits', 'needs_review') 36
+   ('credits', 'no_evidence') 5
+   ('intro', 'decided-WRONG') 1
+   ('intro', 'decided-ok') 11
+   ('intro', 'needs_review') 31
+  Rick and Morty S01E04 credits: late pub 1256.0 truth 1154.5 by ('introdb', 'skipdb')
+  Marvels Daredevil S03E03 intro: WRONG pub 224.0-293.0 truth 223.3-274.2 by ('introdb', 'skipdb')
+TheIntroDB enabled, medium
+   ('credits', 'decided-WRONG(early)') 5
+   ('credits', 'decided-late') 2
+   ('credits', 'decided-ok') 22
+   ('credits', 'needs_review') 9
+   ('credits', 'no_evidence') 5
+   ('intro', 'decided-WRONG') 5
+   ('intro', 'decided-ok') 24
+   ('intro', 'needs_review') 14
+  Rick and Morty S01E04 credits: late pub 1256.0 truth 1154.5 by ('introdb', 'skipdb')
+  South Park S01E01 intro: WRONG pub 0.0-35.0 truth 8.0-34.0 by ('theintrodb', 'introdb')
+  South Park S01E03 intro: WRONG pub 0.0-35.0 truth 11.0-37.0 by ('theintrodb', 'introdb')
+  South Park S01E10 intro: WRONG pub 0.0-35.0 truth 18.0-43.0 by ('theintrodb', 'introdb')
+  South Park S01E11 intro: WRONG pub 0.0-35.0 truth 9.0-36.0 by ('theintrodb', 'introdb')
+  Outlander S08E02 credits: late pub 3499.0 truth 3413.4 by ('skipdb',)
+  Marvels Daredevil S03E02 credits: WRONG(early) pub 2847.1 truth 2860.6 by ('skipdb',)
+  Marvels Daredevil S03E03 intro: WRONG pub 224.0-293.0 truth 223.3-274.2 by ('introdb', 'skipdb')
+  Marvels Daredevil S03E03 credits: WRONG(early) pub 2830.4 truth 2856.2 by ('skipdb',)
+  Marvels Daredevil S03E06 credits: WRONG(early) pub 3125.7 truth 3141.0 by ('skipdb',)
+  Marvels Daredevil S03E09 credits: WRONG(early) pub 3110.4 truth 3123.5 by ('skipdb',)
+  Marvels Daredevil S03E12 credits: WRONG(early) pub 3185.9 truth 3200.6 by ('skipdb',)

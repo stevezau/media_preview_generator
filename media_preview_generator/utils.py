@@ -6,12 +6,76 @@ different modules in the application.
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
+import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
+
+# A secret's name, then its value up to a separator. The name ends in token, api key, password or secret (so
+# ``plex_token``, ``PlexToken``, ``X-Emby-Token`` and ``client_secret`` count). Three ways to write one:
+#   name=value         a URL query, a form, a MediaBrowser header's ``Token="…"``
+#   'name': value      a quoted key: a dict's repr or JSON
+#   Name: value        an HTTP header (Authorization, X-…-Token, X-…-Api-Key)
+# Only those take ``:``, so prose such as "Invalid token: 401" or "The Secret: …" is left alone; a quoted word or a
+# header's name before ``:`` still counts ("'Secret': 3" → "'Secret': ****"): masking a word beats leaking a token.
+# The value may be quoted, a bytes literal (``b'…'``) or follow a Bearer/Basic scheme. "MediaBrowser" is no scheme
+# here: its header's ``Token="…"`` is matched by its own name.
+# A name starts only where a run of word characters and dashes starts, and its prefix is capped: starting at every
+# ``\b`` inside a long dash-joined run (UUIDs, base64url) made each match attempt rescan the run, quadratic per line.
+_NAME_START = r"(?<![\w-])"
+_SECRET_NAME = r"[\w-]{0,64}?(?:token|api[_-]?key|passw(?:or)?d|secret)"
+_SECRET_RE = re.compile(
+    r"(?i)("
+    rf"{_NAME_START}{_SECRET_NAME}['\"]?\s*=\s*"
+    rf"|['\"](?:{_SECRET_NAME}|authorization)['\"]\s*:\s*"
+    rf"|{_NAME_START}(?:(?:proxy-)?authorization|x-[\w-]{{0,64}}?(?:token|authorization|api-?key))\s*:\s*"
+    r")((?:b?['\"])?(?:(?:bearer|basic)\s+)?)"
+    r"[^\s&'\",;)\]}\x1b]+"  # \x1b: a colour code after the value (a coloured console line) stays
+)
+# A password in a URL's userinfo: ``scheme://user:password@host``.
+_URL_PASSWORD_RE = re.compile(r"(://[^\s/:@]+:)[^\s/@]+(@)")
+# Every job log line is masked: most carry none of these words, and skip the two patterns above.
+_SECRET_HINTS = ("token", "key", "passw", "secret", "authorization", "://")
+
+
+def redact_secrets(text: str) -> str:
+    """Mask tokens, API keys and passwords in text shown on a job or written to a log.
+
+    Exception text from an HTTP client can carry the request's URL or headers (``?X-Plex-Token=…``, ``api_key=…``,
+    ``http://user:password@host``).
+
+    Args:
+        text: Any text.
+
+    Returns:
+        The text with each secret's value replaced by ``****``.
+    """
+    if not text:
+        return ""
+    lowered = text.lower()
+    if not any(hint in lowered for hint in _SECRET_HINTS):
+        return text
+    masked = _SECRET_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}****", text)
+    return _URL_PASSWORD_RE.sub(r"\1****\2", masked)
+
+
+def redacted_traceback(exc: BaseException) -> str:
+    """An exception's traceback for the log, secrets masked (:func:`redact_secrets`).
+
+    Formatted by the standard library rather than loguru's ``logger.exception``, whose traceback repeats the
+    exception's text unmasked and, with loguru's ``diagnose``, shows each frame's local values.
+
+    Args:
+        exc: The exception.
+
+    Returns:
+        The traceback text, without a trailing newline.
+    """
+    return redact_secrets("".join(traceback.format_exception(exc))).rstrip()
 
 
 def to_utc_naive(value: datetime) -> datetime:
@@ -34,8 +98,8 @@ def to_utc_naive(value: datetime) -> datetime:
     See GitHub #226 for the silent zero-items repro on UTC-behind hosts.
     """
     if value.tzinfo is not None:
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
-    return datetime.fromtimestamp(value.timestamp(), tz=timezone.utc).replace(tzinfo=None)
+        return value.astimezone(UTC).replace(tzinfo=None)
+    return datetime.fromtimestamp(value.timestamp(), tz=UTC).replace(tzinfo=None)
 
 
 def calculate_title_width():
@@ -320,9 +384,9 @@ def atomic_json_save_with_backup(filepath: str, data: Any, *, permissions: int |
         IOError: If the primary write or replace fails. Backup failures do not raise.
     """
     if os.path.exists(filepath):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         bak_path = f"{filepath}.{ts}.bak"
         try:
             shutil.copy2(filepath, bak_path)

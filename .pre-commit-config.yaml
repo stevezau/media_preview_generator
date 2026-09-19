@@ -1,3 +1,6 @@
+# Research evidence for the Intro & Credits feature (prototype scripts, truth sets) is not app code.
+exclude: ^docs/design/intro-credits/evidence/
+
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.9.6

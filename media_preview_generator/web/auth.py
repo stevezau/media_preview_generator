@@ -257,6 +257,18 @@ def is_authenticated() -> bool:
     return session.get("authenticated", False)
 
 
+def start_signed_in_session() -> None:
+    """Mark this browser's session signed in, starting it afresh.
+
+    Nothing from before the sign-in carries over, the CSRF secret above all: another app on this host (a different
+    port is the same site for cookies) can plant a ``session`` cookie whose token it read from /login. Kept, that token
+    would stay valid for the whole signed-in session.
+    """
+    session.clear()
+    session["authenticated"] = True
+    session.permanent = True
+
+
 def login_required(f):
     """Decorator to require authentication for a route."""
 

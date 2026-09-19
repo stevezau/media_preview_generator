@@ -9,6 +9,7 @@ tests stay vendor-agnostic at the test layer too.
 
 from __future__ import annotations
 
+from datetime import UTC
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -184,11 +185,11 @@ class TestEmbyishRecentlyAdded:
     embyish helper; one combined test covers the path."""
 
     def test_within_lookback_iso_with_z_suffix(self):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from media_preview_generator.processing._embyish import _within_lookback
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cutoff = now - timedelta(hours=1)
         recent_iso = now.isoformat().replace("+00:00", "Z")
         old_iso = (now - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
@@ -196,21 +197,21 @@ class TestEmbyishRecentlyAdded:
         assert not _within_lookback(old_iso, cutoff)
 
     def test_within_lookback_strips_subnano_precision(self):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from media_preview_generator.processing._embyish import _within_lookback
 
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+        cutoff = datetime.now(UTC) - timedelta(hours=1)
         # Jellyfin / Emby emit .NET-style 7-digit fractional seconds.
-        candidate = (datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%S.1234567+00:00")
+        candidate = (datetime.now(UTC)).strftime("%Y-%m-%dT%H:%M:%S.1234567+00:00")
         assert _within_lookback(candidate, cutoff)
 
     def test_within_lookback_rejects_garbage(self):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from media_preview_generator.processing._embyish import _within_lookback
 
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+        cutoff = datetime.now(UTC) - timedelta(hours=1)
         assert not _within_lookback("not a date", cutoff)
         assert not _within_lookback("", cutoff)
 
@@ -228,7 +229,7 @@ class TestEmbyishRecentlyAdded:
         assert _format_title(movie) == "Cool Movie"
 
     def test_scan_recently_added_filters_window_and_path_maps(self):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         proc = EmbyProcessor()
         cfg = _config(
@@ -236,7 +237,7 @@ class TestEmbyishRecentlyAdded:
             ServerType.EMBY,
             mappings=[{"remote_prefix": "/r", "local_prefix": "/l"}],
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         recent_iso = now.isoformat().replace("+00:00", "Z")
         old_iso = (now - timedelta(hours=72)).isoformat().replace("+00:00", "Z")
 
@@ -264,7 +265,7 @@ class TestEmbyishRecentlyAdded:
         """A recently-added multi-version item must yield one ProcessableItem
         per version, each keyed by its own MediaSource id and path-mapped
         independently — the recently-added analog of the list_items #268 fix."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         proc = EmbyProcessor()
         cfg = _config(
@@ -272,7 +273,7 @@ class TestEmbyishRecentlyAdded:
             ServerType.EMBY,
             mappings=[{"remote_prefix": "/r", "local_prefix": "/l"}],
         )
-        recent_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        recent_iso = datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
         with patch("media_preview_generator.processing.emby.EmbyServer") as klass:
             instance = MagicMock()

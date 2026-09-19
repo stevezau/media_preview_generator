@@ -53,6 +53,7 @@ class _StubServer(MediaServer):
         self._resolve_returns = resolve_returns or {}
         self._path_refresh_raises = path_refresh_raises or {}
         self.resolve_calls: list[str] = []
+        self.resolve_scopes: list[Any] = []
         self.path_refresh_calls: list[str] = []
         self.item_refresh_calls: list[str] = []
 
@@ -84,8 +85,9 @@ class _StubServer(MediaServer):
 
     # ------------------------------------------------------------------
     # The new hooks the base class delegates to.
-    def _resolve_one_path(self, server_view_path: str) -> str | None:
+    def _resolve_one_path(self, server_view_path: str, *, library_ids=None) -> str | None:
         self.resolve_calls.append(server_view_path)
+        self.resolve_scopes.append(library_ids)
         return self._resolve_returns.get(server_view_path)
 
     def _trigger_path_refresh(self, server_view_path: str) -> None:
@@ -165,6 +167,30 @@ class TestResolveBaseClassContract:
         srv = _StubServer()
         assert srv.resolve_remote_path_to_item_id("") is None
         assert srv.resolve_calls == []
+
+    @pytest.mark.parametrize("library_ids", [None, ["2", "3"]])
+    def test_library_scope_reaches_every_candidate(self, library_ids):
+        srv = _StubServer(path_mappings=[{"plex_prefix": "/mnt", "local_prefix": "/data"}])
+        assert srv.resolve_remote_path_to_item_id("/data/x.mkv", library_ids=library_ids) is None
+        assert srv.resolve_calls == ["/data/x.mkv", "/mnt/x.mkv"]
+        assert srv.resolve_scopes == [library_ids, library_ids]
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            pytest.param({"remote_prefix": "/mnt", "local_prefix": "/data"}, id="remote_prefix_only"),
+            pytest.param({"plex_prefix": "/mnt", "local_prefix": "/data"}, id="plex_prefix_only"),
+            pytest.param(
+                {"remote_prefix": "/mnt", "plex_prefix": "/stale", "local_prefix": "/data"},
+                id="both_remote_wins",
+            ),
+        ],
+    )
+    def test_mapped_candidate_comes_from_remote_prefix_or_legacy_plex_prefix(self, row):
+        """The documented ``remote_prefix`` key maps paths for item lookup, like legacy ``plex_prefix``."""
+        srv = _StubServer(path_mappings=[row], resolve_returns={"/mnt/x.mkv": "item-1"})
+        assert srv.resolve_remote_path_to_item_id("/data/x.mkv") == "item-1"
+        assert srv.resolve_calls == ["/data/x.mkv", "/mnt/x.mkv"]
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +337,7 @@ class TestSubclassesInheritBaseContract:
         srv = self._make_server(server_factory_name)
         calls: list[str] = []
 
-        def fake_resolve_one_path(self_, path):
+        def fake_resolve_one_path(self_, path, *, library_ids=None):
             calls.append(path)
             return None  # force every candidate to be tried
 

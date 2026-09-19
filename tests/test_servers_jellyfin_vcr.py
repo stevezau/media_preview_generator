@@ -124,3 +124,78 @@ class TestJellyfinTriggerPathRefreshContract:
         # No return value to assert on — the cassette interaction IS
         # the assertion. A future regression that changes the URL or
         # body shape gets a cassette miss on replay.
+
+
+@pytest.fixture
+def jellyfin_lab():
+    """Jellyfin 10.11 of the storage lab (``mlab-jellyfin``); recording: tests/cassettes/README.md → "Markers (lab)"."""
+    cfg = ServerConfig(
+        id="jellyfin-vcr-lab",
+        type=ServerType.JELLYFIN,
+        name="Jellyfin VCR lab",
+        enabled=True,
+        url=os.environ.get("JELLYFIN_URL", "http://fake-jellyfin.local:8096"),
+        auth={"method": "api_key", "api_key": os.environ.get("JELLYFIN_TOKEN", "fake-token")},
+        verify_ssl=False,
+        libraries=[Library(id="1", name="Synth Chapters", remote_paths=("/media/synth-chapters",), enabled=True)],
+    )
+    return JellyfinServer(cfg)
+
+
+class TestJellyfinItemMissingContract:
+    """Check servers' read-back of an item Jellyfin deleted: the segments read fails, then Jellyfin confirms it (an empty
+    ``/Items?Ids=`` answer, then a 404 for the id itself)."""
+
+    UNKNOWN_ITEM = "0badc0de0badc0de0badc0de0badc0de"
+    SYNTH_E02 = "/media/synth-chapters/Synth Chapters (2021)/Season 01/Synth Chapters (2021) - S01E02.webm"
+
+    SYNTH_MOVIE_720P = "/media/synth-movies/Synth Movie (2023)/Synth Movie (2023) - 720p.webm"
+
+    def test_an_id_jellyfin_doesnt_have_is_missing(self, jellyfin_lab):
+        assert jellyfin_lab.get_media_segments(self.UNKNOWN_ITEM) is None
+        assert jellyfin_lab.item_missing(self.UNKNOWN_ITEM) is True
+
+    def test_an_alternate_version_is_not_missing(self, jellyfin_lab):
+        # Recorded against Jellyfin 12.0 (mlab-jf12), which keeps the 720p file as an owned alternate version.
+        alt = jellyfin_lab._uncached_resolve_remote_path_to_item_id(self.SYNTH_MOVIE_720P)
+        assert alt
+        # The premise: 12.0 leaves owned versions out of API-key item queries (10.11 lists them).
+        assert jellyfin_lab._request("GET", "/Items", params={"Ids": alt}).json()["Items"] == []
+        assert jellyfin_lab.item_missing(alt) is False
+
+    def test_an_item_jellyfin_has_is_not_missing(self, jellyfin_lab):
+        item_id = jellyfin_lab._uncached_resolve_remote_path_to_item_id(self.SYNTH_E02)
+        assert item_id
+        assert jellyfin_lab.item_missing(item_id) is False
+
+
+class TestIdLookupScrub:
+    """The recording scrub keeps an ``/Items?Ids=`` answer's items as ``Id`` and ``Type`` only (no path to vouch for)."""
+
+    ITEM = {"Id": "3d92", "Type": "Episode", "Name": "Real Show", "SeriesName": "Real Show", "ImageTags": {"P": "1"}}
+
+    @staticmethod
+    def _items(uri):
+        import json
+        from types import SimpleNamespace
+
+        from tests.conftest import _scrub_request_uri, _scrub_response_body
+
+        _scrub_request_uri(SimpleNamespace(uri=uri))
+        body = json.dumps({"Items": [dict(TestIdLookupScrub.ITEM)], "TotalRecordCount": 1})
+        return json.loads(_scrub_response_body({"headers": {}, "body": {"string": body}})["body"]["string"])["Items"]
+
+    def test_an_id_lookup_keeps_only_id_and_type(self):
+        assert self._items("http://jf:8096/Items?Ids=3d92") == [{"Id": "3d92", "Type": "Episode"}]
+
+    @pytest.mark.parametrize(
+        "uri",
+        [
+            "http://jf:8096/Items?Ids=3d92&Fields=Path",
+            "http://jf:8096/Items?ParentId=1",
+            "http://jf:8096/Users/u/Items",
+        ],
+        ids=["more-params", "not-an-id-lookup", "other-path"],
+    )
+    def test_any_other_items_answer_is_dropped(self, uri):
+        assert self._items(uri) == []
