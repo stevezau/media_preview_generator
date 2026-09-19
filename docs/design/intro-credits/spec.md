@@ -965,7 +965,9 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     store before it writes the chapter rows, so after an Emby crash in between the item can still show the set the
     write is replacing. The app reads those rows as ours from `Replacing*Ticks`, which `emby-plugin/` now answers but
     no released build does; until the next plugin release, an Emby that crashed mid-write plus a lost markers.db can
-    still show markers of ours as its own (§14 2026-09-19).
+    still show markers of ours as its own (§14 2026-09-19). **Release order:** no `emby-plugin-v*` tag or Emby plugin
+    release exists yet, so cutting the first one at or after `fb32a88` closes this before anyone can install a build
+    without it.
 
 ## 14. Decisions log
 
