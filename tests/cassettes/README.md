@@ -121,11 +121,24 @@ Chapters S01E02, which must be indexed there:
 cd /home/data/workspace/plex_generate_vid_previews
 set -a; . docs/design/intro-credits/evidence/lab/env; set +a
 JELLYFIN_URL=http://127.0.0.1:18097 JELLYFIN_TOKEN="$JF_TOKEN" \
-  /home/data/.venv/bin/python -m pytest --no-cov -n 0 tests/test_servers_jellyfin_vcr.py -k ItemMissing --record-mode=once
+  /home/data/.venv/bin/python -m pytest --no-cov -n 0 tests/test_servers_jellyfin_vcr.py -k 'ItemMissing and not alternate' --record-mode=once
 grep -rlF -e "$JF_TOKEN" tests/cassettes/test_servers_jellyfin_vcr/ && echo "LEAK" || echo "clean"
 ```
 
-Expected: `2 passed`, `clean`. An empty `/Items?Ids=<id>` answer is asked again by id (`/MediaSegments/<id>`: Jellyfin
+Expected: `2 passed`, `clean` (the Jellyfin 12.0 test below is recorded separately).
+
+`test_an_alternate_version_is_not_missing` is recorded against the lab's Jellyfin **12.0** (`mlab-jf12`, port
+18098), where the Synth Movie (2023) 720p file is an owned alternate version: 12.0's API-key `/Items?Ids=` leaves it
+out while `/MediaSegments/<id>` answers, which is the case `item_missing` asks again for:
+
+```bash
+JELLYFIN_URL=http://127.0.0.1:18098 JELLYFIN_TOKEN="$JF12_TOKEN" \
+  /home/data/.venv/bin/python -m pytest --no-cov -n 0 tests/test_servers_jellyfin_vcr.py \
+  -k test_an_alternate_version_is_not_missing --record-mode=once
+grep -rlF -e "$JF12_TOKEN" tests/cassettes/test_servers_jellyfin_vcr/ && echo "LEAK" || echo "clean"
+```
+
+An empty `/Items?Ids=<id>` answer is asked again by id (`/MediaSegments/<id>`: Jellyfin
 12 leaves alternate versions out of item queries), so the unknown-id cassette holds that 404 twice: the test's own
 segments read, then `item_missing`'s check. In
 `TestJellyfinItemMissingContract.test_an_id_jellyfin_doesnt_have_is_missing.yaml` the third entry is a hand copy of the

@@ -149,9 +149,19 @@ class TestJellyfinItemMissingContract:
     UNKNOWN_ITEM = "0badc0de0badc0de0badc0de0badc0de"
     SYNTH_E02 = "/media/synth-chapters/Synth Chapters (2021)/Season 01/Synth Chapters (2021) - S01E02.webm"
 
+    SYNTH_MOVIE_720P = "/media/synth-movies/Synth Movie (2023)/Synth Movie (2023) - 720p.webm"
+
     def test_an_id_jellyfin_doesnt_have_is_missing(self, jellyfin_lab):
         assert jellyfin_lab.get_media_segments(self.UNKNOWN_ITEM) is None
         assert jellyfin_lab.item_missing(self.UNKNOWN_ITEM) is True
+
+    def test_an_alternate_version_is_not_missing(self, jellyfin_lab):
+        # Recorded against Jellyfin 12.0 (mlab-jf12), which keeps the 720p file as an owned alternate version.
+        alt = jellyfin_lab._uncached_resolve_remote_path_to_item_id(self.SYNTH_MOVIE_720P)
+        assert alt
+        # The premise: 12.0 leaves owned versions out of API-key item queries (10.11 lists them).
+        assert jellyfin_lab._request("GET", "/Items", params={"Ids": alt}).json()["Items"] == []
+        assert jellyfin_lab.item_missing(alt) is False
 
     def test_an_item_jellyfin_has_is_not_missing(self, jellyfin_lab):
         item_id = jellyfin_lab._uncached_resolve_remote_path_to_item_id(self.SYNTH_E02)

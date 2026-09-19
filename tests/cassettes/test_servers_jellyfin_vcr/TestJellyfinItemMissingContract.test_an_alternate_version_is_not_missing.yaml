@@ -1,0 +1,164 @@
+interactions:
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate, zstd
+      Authorization:
+      - FAKE_AUTH
+      Connection:
+      - keep-alive
+      User-Agent:
+      - python-requests/2.33.0
+      X-Emby-Token:
+      - FAKE_EMBY_TOKEN
+    method: GET
+    uri: http://fake-server/MediaPreviewBridge/ResolvePath?path=%2Fmedia%2Fsynth-movies%2FSynth+Movie+%282023%29%2FSynth+Movie+%282023%29+-+720p.webm
+  response:
+    body:
+      string: '{"itemId":"716e924eee84072fafa25787742e4fef","name":"Synth Movie","type":"Movie"}'
+    headers:
+      Content-Language:
+      - en-US
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Sat, 19 Sep 2026 00:12:40 GMT
+      Server:
+      - Kestrel
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Accept-Encoding
+      X-Response-Time-ms:
+      - '9.6048'
+      content-length:
+      - '81'
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate, zstd
+      Authorization:
+      - FAKE_AUTH
+      Connection:
+      - keep-alive
+      User-Agent:
+      - python-requests/2.33.0
+      X-Emby-Token:
+      - FAKE_EMBY_TOKEN
+    method: GET
+    uri: http://fake-server/Items?Ids=716e924eee84072fafa25787742e4fef
+  response:
+    body:
+      string: '{"Items":[],"TotalRecordCount":0,"StartIndex":0}'
+    headers:
+      Content-Language:
+      - en-US
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Sat, 19 Sep 2026 00:12:40 GMT
+      Server:
+      - Kestrel
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Accept-Encoding
+      X-Response-Time-ms:
+      - '16.8143'
+      content-length:
+      - '48'
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate, zstd
+      Authorization:
+      - FAKE_AUTH
+      Connection:
+      - keep-alive
+      User-Agent:
+      - python-requests/2.33.0
+      X-Emby-Token:
+      - FAKE_EMBY_TOKEN
+    method: GET
+    uri: http://fake-server/Items?Ids=716e924eee84072fafa25787742e4fef
+  response:
+    body:
+      string: '{"Items":[],"TotalRecordCount":0,"StartIndex":0}'
+    headers:
+      Content-Language:
+      - en-US
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Sat, 19 Sep 2026 00:12:40 GMT
+      Server:
+      - Kestrel
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Accept-Encoding
+      X-Response-Time-ms:
+      - '16.0664'
+      content-length:
+      - '48'
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate, zstd
+      Authorization:
+      - FAKE_AUTH
+      Connection:
+      - keep-alive
+      User-Agent:
+      - python-requests/2.33.0
+      X-Emby-Token:
+      - FAKE_EMBY_TOKEN
+    method: GET
+    uri: http://fake-server/MediaSegments/716e924eee84072fafa25787742e4fef
+  response:
+    body:
+      string: '{"Items": [{"Id": "14a7a3ac12f9415d81186eb2da8f39ba", "ItemId": "716e924eee84072fafa25787742e4fef",
+        "Type": "Outro", "StartTicks": 1000000000, "EndTicks": 1200000000}], "TotalRecordCount":
+        1, "StartIndex": 0}'
+    headers:
+      Content-Language:
+      - en-US
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Sat, 19 Sep 2026 00:12:40 GMT
+      Server:
+      - Kestrel
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Accept-Encoding
+      X-Response-Time-ms:
+      - '19.3269'
+      content-length:
+      - '194'
+    status:
+      code: 200
+      message: OK
+version: 1
