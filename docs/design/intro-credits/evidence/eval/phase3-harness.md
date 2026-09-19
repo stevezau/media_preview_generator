@@ -414,33 +414,52 @@ answers two fewer within 10 s. Its Q4 gate on the 80 still passes 5 of 5 (Plex 4
 for changing the shipped filter. What the two rows do show is that rule J's answer is sensitive to how the frame is
 scaled, which is worth a line in the spec: the §5.4 numbers belong to a decode path, not to the rule alone.
 
-## Rule J version 2 (2026-09-19): the anchor's 24 s limit and scene text glued onto the end
+## Rule J version 2 (2026-09-19): the anchor's 24 s limit, scene text glued onto the end, text that never leaves the screen
 
 The owner asked for Intro & Credits to be finished, the credit-text gaps included (spec §13 items 13 and 14). Rule J
-version 2 (`CREDITS_TEXT_VERSION` 2) ships two changes, each the anchor's own purpose stated precisely. Everything
-else tried is in the last table of this section, with why it wasn't taken.
+version 2 (`CREDITS_TEXT_VERSION` 2) ships three changes: the first two state the anchor's own purpose precisely, the
+third came from the lab. Everything else tried is in "Tried and not taken" below, with why it wasn't taken.
 
 1. **The start's anchor never steps over a gap longer than the 24 s join.** The anchor is there to step over one scene
    text frame the 24 s join glued onto the roll. A credit frame whose next credit frame is more than 24 s away can only
-   have been joined by the dark bridge ("dark frames without text never break a run"), so every frame between is
-   dark and the lone frame is the roll's own first card on black. Stepping off it put the start on whatever card text
+   have been joined by the dark bridge ("dark frames without text never break a run"), so every keyframe between them
+   is dark, and the frame is kept as the start, lit or dark. Stepping off it put the start on whatever card text
    detection saw next: WILL's roll opens on "a film by", then shows 65 s of dark keyframes whose small text reads as
-   no boxes, and the step put the start 72 s late.
-2. **The end steps back over scene text glued on after the roll** (§13 item 13, the start's anchor mirrored). When
-   the run's last credit keyframe is lit, more than 1.5 × the run's credit spacing after the credit keyframe before
-   it, and separated from it by a lit keyframe with no text, it is scene text the 24 s join glued on. The end is then
-   refined from the credit keyframe before it, and the 1 fps walk stops where the scene starts. It moves an end, never
-   makes one: whether an end is kept is still Q3's test on the latest credit keyframe, so a lit logo card within 30 s
-   of the end of the file still leaves the skip running to the end.
+   no boxes, and the step put the start 72 s late. On the sets the limit keeps the first frame on 9 files (11 set
+   rows; 3 files on the CPU decode). 6 of those first frames are dark cards and 3 are lit: Executive Decision's cast
+   crawl over the last scene, The Last Song's names over footage and RocknRolla's end-title card. Every one is on the
+   roll or inside it by frame check (below). **The risk it leaves** is the lit case the other way round: scene text on
+   a lit frame, then more than 24 s of dark keyframes, then the roll. That frame is kept as the start too, early by
+   the length of the dark stretch, and nothing in the rows tells it from a lit title card. No file of either set has
+   that shape. Keeping only dark first frames would have put the three lit ones back to version 1's +32.8, +52.7 and
+   +32.9 s (`test_rule_j.TestAnchorSpacing.test_a_first_frame_the_dark_bridge_joined_is_kept_lit_or_dark`).
+2. **The end steps back over scene text glued on after the roll** (§13 item 13, the start's anchor mirrored). The run's
+   last credit keyframe is taken for scene text the 24 s join glued on when it is lit, more than 1.5 × the spacing of
+   the run's other credit keyframes after the credit keyframe before it, and separated from it by a lit keyframe with
+   no text. The spacing leaves that last keyframe out: with it, a run of three or four credit keyframes has the glued
+   gap as its own median, which is never more than 1.5 × itself. **Whether there is an end is decided exactly as
+   version 1 did**: more than 30 s of the file must follow the latest credit keyframe and the last credit frame the
+   1 fps walk reaches from it. Only then does the step back say where the end is: refined from the credit keyframe
+   before, with the 1 fps walk stopping where the scene starts. So it moves an end earlier and never makes one. A lit
+   logo with text that stays on screen to 26 s before the end of the file still leaves the skip running to the end
+   (`test_whether_there_is_an_end_is_decided_from_the_latest_credit_keyframe`).
+3. **Text on screen all through the tail is not a roll.** A run is a roll only when the tail holds at least 30 s of
+   keyframes before it and fewer than 80 % of those carry any text box (`rule_j.text_all_through`). The lab's Synth
+   Audio episodes, a test pattern with a burnt-in running timecode, were answered on every episode; measured below.
 
-- Date: 2026-09-19, on `storage`; same host, ffmpeg, driver and Python as above. Text detection on the GPU helper,
-  self-test 11.46 ms per frame against 18.35 ms on the CPU.
-- Code: `feat/markers-detection` at `2256bca` (version 1, the "before" rows, re-measured today) and the same plus
-  this change (version 2). Chapters are left out of every row, as above.
-- Tooling: the harness now keeps every decode (`credits_decodes`, `tools/markers_eval/README.md`). Version 1's run
-  decoded 498 windows on the GPU and 152 on the CPU; version 2 re-ran the app's own `find_credits` and `decide()` on
-  them and decoded only the 1 fps windows its new starts ask for (11 on the GPU, 3 on the CPU). `--changed-since`
-  listed every answer that moved by more than 10 s and wrote its sheets.
+- Date: 2026-09-19, on `storage`; same host, ffmpeg, driver and Python as above.
+- Code: `feat/markers-detection` at `901cad2`, which includes lane 1's intra-only thinning (the commits after `a08dae2`
+  touch only the lab and docs). Version 1 is `b148d4a`'s `rule_j.py` and `detector.py` put into that tree; version 2
+  is the tree plus this change. Chapters are left out of every row, as above.
+- Text detection: version 2's GPU run chose the GPU helper at its self-test (12.71 ms per frame against 19.08 ms on
+  the CPU). Version 1's GPU run started while the lab's matrices loaded the host, and its self-test chose the CPU
+  (17.55 against 17.96 ms, under the 10 % the GPU must win by). The decode cache keys rows on the backend that counted
+  them, so that run decoded 566 of its 568 windows again. The 489 set windows both runs decoded gave identical rows on
+  the two backends, so the tables below compare rules, not backends.
+- Tooling: every decode is kept (`credits_decodes`, `tools/markers_eval/README.md`). Version 2 was measured with a full
+  re-decode of every window (568 on the GPU, 154 on the CPU), then the third change was run against those stored rows
+  (0 decodes); version 1's CPU run decoded the 3 windows only it asks for. `--changed-since` listed every answer that
+  moved by more than 10 s and wrote its sheets.
 
 ### Before and after
 
@@ -473,11 +492,19 @@ Rows per set, useful / late / wrong / missed (`wrong` is more than 10 s early ag
 
 `text_and_server_only`: 80 41 → 42, 205 113 → 120. Ends found by credits text: unchanged (80: 3 GPU, 1 CPU; 205:
 15, one fewer than the Ends section above, which predates the `coarse_end_s` fix). Ends published: 205 High 5 → 7,
-Medium 6 → 8 (both below); the 80 unchanged (GPU High 2 / Medium 3, CPU High 1 / Medium 2). The 43 online cases: every row unchanged (default High 27 / 3 / 5 / 8; TheIntroDB on, High and Medium,
-33 / 3 / 5 / 2); one answer moved (below).
+Medium 6 → 8 (both below); the 80 unchanged (GPU High 2 / Medium 3, CPU High 1 / Medium 2). The 43 online cases:
+every decision unchanged (258 rows over the three source settings; default High 27 / 3 / 5 / 8; TheIntroDB on, High
+and Medium, 33 / 3 / 5 / 2); one credits-text answer moved (below).
 
 The Q4 gate's outcome per set is unchanged: the 80 pass 5 of 5 on both paths, and the 205 still fail 3 of 5 (Medium
 useful 96 < Plex 124; Medium wrong 17 > 5; High wrong 15 > 3), passing both "never looser than Plex" checks.
+
+Every move in these tables is the start's anchor. The end's decision "exactly as version 1" and its spacing without
+the last keyframe move nothing on either set or path: the full re-decode of version 2 with them gave the first
+measurement's version 2 answers exactly (0 changed on the GPU and on the CPU). The step back fires on one file with
+either spacing (Under Siege, GPU) and newly on one episode with three credit keyframes (Paranormal Caught on Camera,
+CPU); neither gets an end, as their latest credit keyframe is within 30 s of the end of the file. The third change
+moves nothing either: run against the same rows it changed no answer on either set or path and no online decision.
 
 ### The owner's bar (Q4/Q5), check by check
 
@@ -488,6 +515,7 @@ useful 96 < Plex 124; Medium wrong 17 > 5; High wrong 15 > 3), passing both "nev
 | Rule J alone on the 80 meets §5.4 on the GPU; the CPU no worse than 58 / 1 | GPU 64 / 1; CPU 59 / 1 | pass |
 | No published end moves into a scene | no credits-text end moved on either set or path; two decisions newly published with an end, frame-checked below: neither is in a scene | pass |
 | Every answer that moves by more than 10 s is frame-checked | 9 files on the GPU (11 set rows), 3 on the CPU (2 of them the same files), 1 online case | done, below |
+| The third change loses no answer that is useful today, adds no early one, leaves the numbers otherwise unchanged | 0 answers changed on either set or path; 0 online decisions changed | pass |
 
 ### Frame checks of every moved answer
 
@@ -517,6 +545,44 @@ sets: Rick and Morty S01E04 on the CPU decode (in the online cases, which run on
 `find_credits`. Version 1 ended the skip at 1198.0 s, 11.5 s into the scene after the roll; version 2 ends it at
 1186.0 s, the roll's last frame (the side-by-side's frame check has the roll at 1162.2–1186.5 s), and its start is
 1163.0 s. On the GPU decode the episode still has no answer (§13 item 14's third shape, below).
+
+### Text on screen all through the tail (the third change)
+
+The lab's Synth Audio episodes are five minutes of a test pattern with a burnt-in running timecode and no credits.
+Rule J counts boxes, so it can't tell a timecode (or a channel logo, a ticker, subtitles) from a card. The timecode
+puts text on 99.3–100 % of the rows the keyframe pass returns, and the 1.5–7.3 % that read 3 boxes are credit frames
+that join into runs anywhere. Version 1 answered all six episodes, 5.9 to 244.6 s into the file, and the lab published
+S01E02's 244.6 s. (On these VP9 files the GPU decode's keyframe pass returned every frame, 24 a second, though the
+packets are not all keyframes, so the intra-only thinning doesn't apply; why is not yet known. Text detection on such
+a tail costs about 24 times a normal one's.)
+
+A roll follows story, so version 2 answers only when the tail holds at least 30 s of keyframes before the run and
+fewer than 80 % of those carry any text box, lit or dark (`rule_j.text_all_through`; the detector then decodes nothing
+more). Measured on the app's own decodes:
+
+| Files | Tail before the run | Share of those rows with text | Version 1 → 2 |
+|---|---|---|---|
+| Synth Audio, 6 episodes (GPU decode) | 5.9–244.6 s | 0.993–1.000 | 6 answers → none |
+| Synth Credits and Synth Credits Open (a synthetic roll after story) | 541.5 and 541.8 s | 0.00 | 541.0 s → 541.0 s |
+| The sets' 245 files, GPU decode | 84.1 s at the least | 0.54 at the most (a stand-up special) | no answer changed |
+| The 80, CPU decode | 84.1 s at the least | 0.46 at the most | no answer changed |
+
+Those rows are pinned in `test_rule_j.TestTextAllThrough` (`tests/fixtures/markers/credits_synth_lab.json.gz`). The
+two margins are wide on the sets: 84 s against the 30 s floor, 0.54 against 0.8. What it costs, and what it doesn't
+catch:
+
+- **A roll longer than the tail less 30 s gets no answer**: over 420 s on an episode (450 s tail) or 870 s on a movie
+  (900 s tail). Version 1 answered those near the start of the tail. Spec §5.4 "Frames" measured episode rolls at p95
+  267 s and movie rolls at 852 s at the most, and no file of either set comes close.
+- **A channel logo or ticker over real story would cost the real roll's answer** if text detection boxes it on 80 %
+  of the story's keyframes. It can't be told from the timecode by these rows. Unmeasured: none of the sets' files has
+  one (their highest share is 0.54, the 40 episodes' 0.17), so a recording with a network logo is the case to check
+  before trusting the guard on live TV recordings.
+- **Text that comes and goes still starts early.** Subtitles on a dark scene are credit frames to rule J (a dark
+  frame needs one box). When text fills the tail before them, the guard catches them. When they follow story with
+  less text than that and are joined to the roll, the start lands on the scene, pinned as a known limit
+  (`test_a_subtitled_dark_scene_is_no_answer_only_when_text_fills_the_tail_before_it`,
+  `test_subtitles_on_a_dark_scene_after_text_free_story_still_start_early`).
 
 ### Tried and not taken
 
@@ -555,5 +621,8 @@ epilogue cards.
   last run, and a roll whose opening is names over bright footage, or is split by a gap longer than 24 s, is still
   answered from a later block (41 files of the 205 are more than 30 s late, down from 46). Every rule tried that
   reaches back to earlier blocks either adds early answers or gains a single file for tuned parameters (table above).
+- **Two early shapes are known and unmeasured on real files**, as neither set holds one: a lit scene-text frame
+  followed by more than 24 s of dark keyframes before the roll (the anchor keeps it, first change), and subtitles on a
+  dark scene after text-free story, joined to the roll (third change). Both are pinned in `test_rule_j.py`.
 - The 205's gate still fails its usefulness floor (96 < 124) and both wrong caps (17 > 5, 15 > 3); the adjudication of
   its version 1 wrong answers above is unchanged, as no wrong answer moved.

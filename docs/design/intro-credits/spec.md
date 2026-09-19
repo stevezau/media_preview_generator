@@ -42,8 +42,8 @@ self-test, the Settings row, the Inspector "Credit text" lane, and the accuracy 
 tooltip; §14 2026-09-18). The harness gate passes 5 of 5 on the 80 hand-checked files (movies40 + tv40) on both
 decode paths and fails 3 of 5 on the harder 205-movie set — a disclosed detector-gap limitation, not fixed here
 (§5.4, §13 item 14; owner, 2026-09-18): ships at "Medium" now, "High" needs a second source until that gap closes.
-Rule J version 2 (final review, §14 2026-09-19) narrowed that gap (205 Medium useful 90 → 96, no early answer added)
-and fixed §13 item 13; the 205 still fails 3 of 5.
+Rule J version 2 (final review, §14 2026-09-19) narrowed that gap (205 Medium useful 90 → 96, no early answer added),
+fixed §13 item 13 and stopped text that never leaves the screen reading as a roll; the 205 still fails 3 of 5.
 Rulings T-R1–T-R9 and contradictions C1–C7 resolved while planning phase 3 are in §14. Lab matrix
 (`evidence/lab/phase3-results.md`): 15 of 16 rows pass on storage and on the `plex` host's real NVIDIA and Intel GPUs;
 row 14 is partial (no NVIDIA-side contamination during the Intel self-test, but `intel_gpu_top` never showed Intel
@@ -350,8 +350,16 @@ taken from the rapidocr_onnxruntime 1.4.4 wheel), pinned at `/app/models/ch_PP-O
 3. Keep runs ≥ 15 s; pick the **last** one (credits sit at the end).
 4. **Anchor:** start only where two credit samples are adjacent (a lone scene-text frame 24 s before the roll glued
    itself on — Undisputed). One step at most, and never over a gap longer than the 24 s join: a frame further ahead
-   was joined by dark frames alone, so it is the roll's own first card on black (WILL; rule J version 2).
-5. **Refine** with the 1 fps decode: walk back from the coarse start through contiguous credit frames (gaps ≤ 2.5 s),
+   was joined by dark frames alone, so every keyframe between is dark, and it is kept as the start, lit or dark (WILL's
+   first card on black; on the sets 3 of the 9 such first frames are lit, all on the roll by frame check; rule J
+   version 2). The cost is lit scene text followed by more than 24 s of dark keyframes before the roll (§13 item 14).
+5. **Text all through** (rule J version 2): no answer unless the tail holds at least 30 s of keyframes before the run
+   and fewer than 80 % of those carry any text box. Text that never leaves the screen (a burnt-in timecode, a channel
+   bug, subtitles from the first frame) makes runs anywhere: the lab's Synth Audio test pattern was answered on every
+   episode. Every file of the sets has at least 84 s of the tail before its run and a share of at most 0.54. The
+   costs: a roll longer than the tail less 30 s gets no answer, and so would a file whose channel logo or ticker text
+   detection boxes on 80 % of the story (unmeasured: no set file has one).
+6. **Refine** with the 1 fps decode: walk back from the coarse start through contiguous credit frames (gaps ≤ 2.5 s),
    then back over the fade (luma < 12, steps ≤ 4 s).
 
 **Measured** on 80 files with chapter truth (40 movies, 40 TV; 3 movie truths corrected by frame checks,
@@ -379,15 +387,15 @@ it reads this file's own frames (§5.5 rule 6; owner, 2026-09-16). It also agree
 as an independent source (rule 7 still shortens). The skip ends at the roll's last credit frame, refined at 1 fps to
 the roll's last contiguous credit frame (no fade step), when more than 30 s of the file follows the roll (a scene
 after the credits); otherwise it runs to the end of the file. The end mirrors the start's anchor (rule J version 2,
-§13 item 13): when the run's last credit keyframe is a lit frame further from the one before it than 1.5 × the run's
-credit spacing, with a lit keyframe without text between them, it is scene text the 24 s join glued on, so the end is
-refined from the credit keyframe before it and the 1 fps walk stops where the scene starts. That moves an end, never
-makes one: whether an end is kept is still judged on the run's latest credit keyframe. Emby still gets the start only
-(§6.3 R1).
-Rule J version 1 shipped as measured; version 2 (`CREDITS_TEXT_VERSION` 2, the anchor's 24 s limit and the end's
-step back) is the one tuning so far, and cleared the owner's bar: no more early answers at any level on either set,
-Medium more useful. Every answer more than 10 s early or 30 s late, shaped like epilogue cards, or with an end, and
-every answer a rule change moves by more than 10 s, is frame-checked and adjudicated in
+§13 item 13): when the run's last credit keyframe is a lit frame further from the one before it than 1.5 × the
+spacing of the run's other credit keyframes, with a lit keyframe without text between them, it is scene text the 24 s
+join glued on, so the end is refined from the credit keyframe before it and the 1 fps walk stops where the scene
+starts. Whether there is an end is decided exactly as version 1 did, from the latest credit keyframe and the 1 fps
+walk from it; the step back then moves that end earlier and never makes one. Emby still gets the start only (§6.3 R1).
+Rule J version 1 shipped as measured; version 2 (`CREDITS_TEXT_VERSION` 2: the anchor's 24 s limit, the end's step
+back, text all through) is the one tuning so far, and cleared the owner's bar: no more early answers at any level on
+either set, Medium more useful. Every answer more than 10 s early or 30 s late, shaped like epilogue cards, or with an
+end, and every answer a rule change moves by more than 10 s, is frame-checked and adjudicated in
 `evidence/eval/phase3-harness.md`; further tuning must beat version 2 the same way. Epilogue text cards touching the
 roll, or joined to it over black, become the start (pinned in `test_rule_j.TestEpilogueCards`); the harness
 frame-checks every answer shaped like that.
@@ -395,8 +403,8 @@ frame-checks every answer shaped like that.
 **Harness** (`evidence/eval/phase3-harness.md`; the app's own `find_credits` and `decide()`, not the prototype):
 - Rule J alone on the 80 (this spec's own bar: ≥ 59 within 10 s, ≤ 1 early): version 2 on the GPU decode 64 within
   10 s / 1 early / 7 late / 3 none, on the CPU decode 59 / 1 / 8 / 8 — both meet the bar (version 1: 63 / 1 / 8 / 3
-  and 58 / 1 / 9 / 8, the CPU one file short). The two decode paths scale the frame differently (`scale_cuda` vs
-  swscale) and don't always agree.
+  and 58 / 1 / 9 / 8, the CPU one file short), both versions measured on the same tree after the intra-only thinning.
+  The two decode paths scale the frame differently (`scale_cuda` vs swscale) and don't always agree.
 - Q4 gate, check by check: the 80 (movies40 + tv40) passes 5 of 5 on both decode paths. The 205 movies fails 3 of 5
   (Medium useful 96 < Plex's 124; Medium wrong 17 > cap 5; High wrong 15 > cap 3; version 1: Medium useful 90) but
   passes both "never looser than Plex" checks by a wide margin. The failure is a detector gap, not a truth problem:
@@ -406,6 +414,8 @@ frame-checks every answer shaped like that.
 - Ends (Q3): 19 set rows (17 distinct files) got an end in version 1's first run; published for 6 files at High and 8
   at Medium. Version 2 moved no credits-text end on either set, and the two decisions it newly publishes with an end
   keep the scene or stop on logos. No end swallowed a scene.
+- Every set answer version 2 moved is the anchor's. The end's rules and the text-all-through step move no answer on
+  either set or decode path, and no online decision.
 
 ### 5.5 Combining evidence
 Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
@@ -881,8 +891,9 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     chose the CPU on that iGPU, so nothing beyond the self-test's own frames ran on it.
 13. ~~A lone credit-text keyframe inside a scene, within 24 s of the roll, joins rule J's run and extends it over
     that scene~~ — **fixed in rule J version 2** (§5.4): the end steps back over a lit credit keyframe glued on after
-    a scene frame, and the 1 fps walk stops where the scene starts. Measured on Rick and Morty S01E04's CPU decode
-    (the skip ended 11.5 s into the scene; it now ends on the roll's last frame); no end in either set moved.
+    a scene frame, and the 1 fps walk stops where the scene starts. Whether there is an end is still decided from the
+    latest credit keyframe, so the step back never makes one. Measured on Rick and Morty S01E04's CPU decode (the
+    skip ended 11.5 s into the scene; it now ends on the roll's last frame); no end in either set moved.
 14. **Credit text answers late when a roll's opening section is names over bright footage, or is split by a gap
     longer than 24 s** (rule J's `coarse_start` takes the roll's last run) — the one measured reason on-screen
     credit text alone misses the usefulness and precision gate on the harder 205-movie set (§5.4 "Harness"; owner,
@@ -890,7 +901,12 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     by rule J version 2:** the anchor no longer steps off a roll's first card across more than 24 s of dark frames
     (205: Medium useful 90 → 96, no early answer added), but the last-run selection stands; every rule measured to
     reach back to earlier blocks added early answers or gained one file for tuned parameters
-    (`evidence/eval/phase3-harness.md` "Tried and not taken"). Its third shape — a roll whose first card sits just
+    (`evidence/eval/phase3-harness.md` "Tried and not taken"). **The anchor's limit carries a risk the other way:**
+    the frame it keeps may be lit (3 of the 9 on the sets, all on the roll), so scene text on a lit frame followed by
+    more than 24 s of dark keyframes before the roll becomes the start, early by that stretch; no set file has that
+    shape, and nothing in the rows tells it from a lit title card. Likewise subtitles on a dark scene after text-free
+    story, joined to the roll, start early; version 2's text-all-through step only catches text on screen through
+    most of the tail before the run (§5.4 step 5). Its third shape — a roll whose first card sits just
     above the luma-30 dark line and whose other credit keyframes span under 15 s (Rick and Morty S01E04 on the GPU
     decode, no answer) — has a measured candidate, 2 boxes at luma 30–33, that answers it and six more of the season
     within 1 s but put one 205-set movie's start on its epilogue cards; not shipped.
@@ -1289,10 +1305,14 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   and a revived run doesn't count a file again. Files no run can check still take their turn when listed.
 - 2026-09-19 · Final review, rule J lane (the owner asked for the credit-text gaps to be finished; tuning ships only
   under the owner's own bar, Q4/Q5): rule J version 2 (`CREDITS_TEXT_VERSION` 2, so stored answers are asked again).
-  The anchor never steps over a gap longer than the 24 s join, and the end steps back over scene text glued on after
-  the roll (§5.4, §13 items 13–14). Both sets and both decode paths: no early answer added at any level; Medium useful
-  80 57 → 58 (CPU 54 → 55), 205 90 → 96; rule J alone on the 80 64 / 1 (CPU 59 / 1, now meeting §5.4 too); every
-  moved answer frame-checked (`evidence/eval/phase3-harness.md` "Rule J version 2"). Measured and not shipped: walking
+  The anchor never steps over a gap longer than the 24 s join; the end steps back over scene text glued on after the
+  roll, with whether there is an end still decided as in version 1; and text on screen through most of the tail
+  before the run gives no answer (the lab's Synth Audio timecode; §5.4 steps 4–5, §13 items 13–14). Both sets and both
+  decode paths, both versions measured on the same tree after the intra-only thinning: no early answer added at any
+  level; Medium useful 80 57 → 58 (CPU 54 → 55), 205 90 → 96; rule J alone on the 80 64 / 1 (CPU 59 / 1, now meeting
+  §5.4 too); every moved answer frame-checked, all of them the anchor's (`evidence/eval/phase3-harness.md` "Rule J
+  version 2"). Known and pinned, no set file has either: a lit scene-text frame the anchor keeps across dark
+  keyframes, and subtitles on a dark scene after text-free story. Measured and not shipped: walking
   back to earlier runs, merging runs over text-carrying gaps, a lower box count next to a run, a lit-only anchor, and
   2 boxes at luma 30–33 (the last would answer E04 on the GPU but put one movie's start on its epilogue cards). The
   205's gate still fails 3 of 5; credit text alone stays at "Medium" as ruled on 2026-09-18.

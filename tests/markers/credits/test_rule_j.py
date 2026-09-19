@@ -15,6 +15,7 @@ from media_preview_generator.markers.credits import rule_j
 from media_preview_generator.markers.credits.rule_j import Coarse
 
 FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "markers" / "credits_rule_j_80.json.gz"
+SYNTH_FIXTURE = FIXTURE.with_name("credits_synth_lab.json.gz")
 
 
 def dark(t: float, boxes: int = 0, luma: float = 10.0) -> tuple[float, int, float]:
@@ -205,14 +206,28 @@ class TestAnchorSpacing:
     )  # fmt: skip
     def test_the_anchor_steps_only_over_a_gap_the_24_s_join_can_bridge(self, gap_s, start):
         # WILL: the roll's first card, then 65 s of dark empty keyframes before the next card text detection sees. Only
-        # credit_runs' dark bridge joins across more than 24 s, so every frame between is dark and the lone frame is a
-        # card on black, not scene text the join glued on; stepping over it put the start 72 s late.
+        # credit_runs' dark bridge joins across more than 24 s, so every keyframe between is dark: the 24 s join didn't
+        # glue the first frame on, and stepping over it put the start 72 s late.
         body = [bright(t) for t in range(0, 400, 2)]
         empties = [dark(400 + t) for t in range(2, int(gap_s), 2)]
         rows = [*body, dark(400, 1), *empties, *[dark(400 + gap_s + t, 2) for t in range(0, 60, 2)]]
         assert rule_j.credit_runs(rows) == [(200, len(rows) - 1)]
         coarse = rule_j.coarse_start(rows)
         assert coarse is not None and coarse.pts_s == start
+
+    @pytest.mark.parametrize("first", [dark(400, 1), bright(400, 3)], ids=["dark-card", "lit-frame"])
+    def test_a_first_frame_the_dark_bridge_joined_is_kept_lit_or_dark(self, first):
+        # What the 24 s limit keys on is the gap, not the frame: a lit first frame is kept too. On the harness's sets
+        # that is right (RocknRolla's lit end-title card, 3 boxes at luma 33.2, frame-checked), and it is the rule's
+        # measured cost as well: a lit scene-text frame followed by more than 24 s of dark keyframes before the roll
+        # becomes the start, that far early (spec §13 item 14). With the lit frame 24 s or nearer, one step as before.
+        body = [bright(t) for t in range(0, 400, 2)]
+        rows = [*body, first, *[dark(t) for t in range(402, 430, 2)], *[dark(t, 2) for t in range(430, 490, 2)]]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 400.0
+        near = [*body, first, *[dark(t) for t in range(402, 424, 2)], *[dark(t, 2) for t in range(424, 490, 2)]]
+        coarse = rule_j.coarse_start(near)
+        assert coarse is not None and coarse.pts_s == 424.0
 
     def test_a_scene_keyed_after_the_roll_cannot_reach_the_yardstick(self):
         # The Q3 shape: a post-credits scene 30 s past the roll's last credit frame. The slice stops at the run's
@@ -537,6 +552,31 @@ class TestSceneTextGluedOntoTheEnd:
         roll_to_462 = [dark(459, 5), dark(460, 5), dark(461, 5), dark(462, 4), *fine[4:]]
         assert rule_j.credits_end(rows, coarse, roll_to_462, self.DURATION_S) == 462.0
 
+    def test_whether_there_is_an_end_is_decided_from_the_latest_credit_keyframe(self):
+        # The final review's repro: after the roll (cards to 460 s), a lit empty keyframe, then a lit logo with text
+        # at 476 s that stays on screen to 485 s, in a 511 s file. Walked from 476 s the end reaches 485 s, 26 s before
+        # the end of the file, so version 1 had no end. Deciding it from the stepped-back keyframe instead would stop
+        # the skip at 461 s, on the logo, 50 s before the end of the file.
+        rows = [*self.ROLL, bright(466), bright(470), bright(476, 3)]
+        coarse = rule_j.coarse_start(rows)
+        assert rule_j.end_keyframe_s(rows, coarse) == 460.0
+        fine = [dark(459, 5), dark(460, 5), dark(461, 5), *[bright(t) for t in range(462, 475)],
+                *[bright(t, 4) for t in range(475, 486)], *[bright(t) for t in range(486, 497)]]  # fmt: skip
+        assert rule_j.refine_end(rows, coarse, fine) == 461.0  # where an end would be
+        assert rule_j.credits_end(rows, coarse, fine, 511.0) is None
+        # With 5 s more of the file, 31 s follow the logo: version 1 kept an end at 485 s, version 2 moves it to 461 s.
+        assert rule_j.credits_end(rows, coarse, fine, 516.0) == 461.0
+
+    def test_the_spacing_leaves_the_glued_keyframe_out(self):
+        # Three credit keyframes (100, 106, 116 s): all three gaps' median is the 10 s glued-on gap itself, which is
+        # never more than 1.5 x itself, so the step back could never fire on a run of three or four. Without it the
+        # spacing is 6 s, and 10 s is past 9 s.
+        rows = [bright(0), bright(60), dark(100, 1), dark(106, 1), bright(110), bright(116, 3)]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and (coarse.pts_s, rule_j.coarse_end_s(rows, coarse)) == (100.0, 116.0)
+        assert rule_j.end_keyframe_s(rows, coarse) == 106.0
+        assert rule_j._typical_spacing([rows[2], rows[3], rows[5]]) == 10.0
+
     def test_it_moves_an_end_and_never_makes_one(self):
         # Under Siege's shape: the roll's last card 30.5 s before the end of the file, then a lit logo with a line of
         # text 7 s before it. Stepping back would leave more than 30 s and stop the skip on the logos; Q3 is judged on
@@ -545,6 +585,90 @@ class TestSceneTextGluedOntoTheEnd:
         coarse = rule_j.coarse_start(rows)
         assert rule_j.end_keyframe_s(rows, coarse) == 460.0
         assert rule_j.credits_end(rows, coarse, _UnreadRows(), 490.5) is None
+
+
+def _synth() -> dict:
+    return {item["name"]: item for item in json.loads(gzip.decompress(SYNTH_FIXTURE.read_bytes()))["items"]}
+
+
+class TestTextAllThrough:
+    """Text on screen all through the tail is not a roll (the lab's Synth Audio episodes, final review): no answer
+    unless at least 30 s of the tail precede the run and fewer than 80 % of those keyframes carry any text."""
+
+    @pytest.mark.parametrize(
+        "name",
+        [f"Synth Audio (2022) - S0{s}E0{e}" for s, e in ((1, 1), (1, 2), (1, 3), (1, 4), (2, 1), (2, 2))],
+    )
+    def test_a_test_pattern_with_a_running_timecode_gets_no_answer(self, name):
+        # The app's own GPU decode of the lab file: every frame carries the timecode, and the 1-7 % of frames that read
+        # 3+ boxes make runs anywhere. Version 1 answered all six (the lab published S01E02's 244.6 s).
+        item = _synth()[name]
+        key, fine = _rows(item["key"]), _rows(item["fine"])
+        coarse = rule_j.coarse_start(key)
+        assert coarse is not None and item["version_1_start_s"] is not None
+        assert sum(row[1] >= 1 for row in key) >= 0.99 * len(key)
+        assert rule_j.text_all_through(key, coarse)
+        assert rule_j.credits_start(key, fine) is None
+
+    @pytest.mark.parametrize("name", ["Synth Credits (2024)", "Synth Credits Open (2025)"])
+    def test_a_synthetic_roll_after_story_keeps_its_answer(self, name):
+        item = _synth()[name]
+        key, fine = _rows(item["key"]), _rows(item["fine"])
+        assert not rule_j.text_all_through(key, rule_j.coarse_start(key))
+        assert rule_j.credits_start(key, fine) == item["version_1_start_s"] == 541.0
+
+    @staticmethod
+    def _tail(story: list, roll_at: float) -> list:
+        return [*story, *[dark(roll_at + 2 * i, 4) for i in range(30)]]
+
+    @pytest.mark.parametrize(
+        ("story_s", "answered"),
+        [(29.9, False), (30.0, True)],  # the run must start 30 s or more into the tail
+    )  # fmt: skip
+    def test_a_run_needs_30_s_of_tail_before_it(self, story_s, answered):
+        rows = self._tail([bright(1000 + 2 * i) for i in range(15)], 1000 + story_s)
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 1000 + story_s
+        assert rule_j.text_all_through(rows, coarse) is not answered
+
+    @pytest.mark.parametrize(
+        ("texted", "answered"),
+        [(7, True), (8, False), (10, False)],  # of 10 keyframes before the run, any box counts: 80 % or more is text
+    )  # fmt: skip
+    def test_the_text_share_before_the_run_decides(self, texted, answered):
+        # Lit frames with 1-2 boxes (a timecode, a bug) aren't credit frames, but they are text on screen.
+        story = [bright(1000 + 10 * i, 1 if i < texted else 0) for i in range(10)]
+        rows = self._tail(story, 1100)
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 1100.0
+        assert rule_j.text_all_through(rows, coarse) is not answered
+        assert (rule_j.credits_start(rows, []) is None) is not answered
+
+    SUBTITLE = [dark(t, 1 if t % 6 else 0, 15.0) for t in range(0, 450, 2)]  # a line on two keyframes in three
+
+    @pytest.mark.parametrize(
+        ("lead", "start"),
+        [
+            ([], None),                                                    # from the tail's first keyframe: 30 s floor
+            ([dark(t - 20, 0, 15.0) for t in range(0, 20, 2)], None),      # 20 s of dark without text first: floor
+            ([bright(t - 100, 1) for t in range(0, 100, 2)], None),        # 100 s of lit story, subtitled throughout
+            ([bright(t - 100, 1 if t % 6 else 0) for t in range(0, 100, 2)], 2.0),  # subtitled on 2 in 3: 65 % text
+        ],
+    )  # fmt: skip
+    def test_a_subtitled_dark_scene_is_no_answer_only_when_text_fills_the_tail_before_it(self, lead, start):
+        # Rule J reads a dark frame with one box as a credit frame, so a subtitled dark scene is one long run. Lit
+        # frames with one box aren't credit frames, but they are text on screen before it.
+        rows = [*lead, *self.SUBTITLE]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 2.0
+        assert rule_j.credits_start(rows, []) == start
+
+    def test_subtitles_on_a_dark_scene_after_text_free_story_still_start_early(self):
+        # Pinned as a known limit: after 200 s of lit story without text, the tail before the run is text-free, so the
+        # subtitled dark scene reads as the roll's opening and the start is 250 s before a roll at 450 s.
+        story = [bright(t - 200) for t in range(0, 200, 2)]
+        rows = [*story, *self.SUBTITLE, *[dark(t, 4) for t in range(450, 510, 2)]]
+        assert rule_j.credits_start(rows, []) == 2.0
 
 
 class TestAShortRollOverACardJustBrighterThanDark:
@@ -563,7 +687,8 @@ class TestAShortRollOverACardJustBrighterThanDark:
            (1195.611, 0, 146.1), (1198.406, 3, 145.6), (1200.157, 0, 134.5), (1206.122, 0, 83.3), (1216.549, 0, 142.1),
            (1226.976, 0, 142.1), (1236.652, 0, 168.6), (1242.491, 0, 172.7), (1243.742, 0, 139.6), (1247.705, 0, 156.5),
            (1256.046, 10, 130.7), (1257.548, 2, 42.4), (1259.049, 2, 210.5), (1261.051, 2, 164.3), (1264.054, 0, 30.0)]  # fmt: skip
-    # The CPU decode's 1 fps rows of the end window the app now reads, 1 s before the roll's last card on (1182.0 s).
+    # The CPU decode's 1 fps rows from 1 s before the roll's last card (1182.0 s) to 1202 s. The app's end window runs
+    # on to 20 s past the latest credit keyframe (1198.4 s); the rows past 1202 s only tell that an end exists.
     CPU_END = [(1182.0, 5, 31.9), (1183.0, 12, 34.5), (1184.0, 14, 36.0), (1185.0, 2, 30.9), (1186.0, 3, 31.6),
                (1187.0, 0, 153.2), (1188.0, 2, 130.7), (1189.0, 3, 131.1), (1190.0, 1, 130.6), (1191.0, 1, 130.6),
                (1192.0, 1, 157.4), (1193.0, 1, 155.6), (1194.0, 1, 154.0), (1195.0, 0, 153.7), (1196.0, 0, 146.1),

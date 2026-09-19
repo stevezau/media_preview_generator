@@ -136,11 +136,25 @@ class TestFindCredits:
         assert phases == ["Reading the credits…", "Refining the credits start…", "Finding where the credits end…"]
         assert len(probes) == 1
 
+    def test_text_on_screen_all_through_the_tail_is_no_answer_and_nothing_more_is_decoded(self, monkeypatch, probes):
+        # A running timecode on every keyframe (1 box on a lit frame), reading 3 boxes now and then after the first
+        # 100 s: rule J finds a run 100 s into the tail, but every keyframe before it carries text, so there is no roll
+        # and no refine window is decoded.
+        timecode = [(5100.0 + 2 * i, 3 if i >= 50 and i % 5 == 0 else 1, 120.0) for i in range(450)]
+        decodes = Decodes(timecode)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                       count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert rule_j.coarse_start(timecode).pts_s == 5200.0
+        assert (result.start_s, result.end_s, result.fine_rows, result.end_rows) == (None, None, (), ())
+        assert len(decodes.calls) == 1
+
     def test_the_end_window_is_read_around_the_rolls_last_card_when_scene_text_joined_the_run(
         self, monkeypatch, probes
     ):
         # Spec §13 item 13: a lit text frame in the scene, 12 s after the roll's last card, joins the run. The end window
-        # is decoded around that card (5898 s), not the scene's text (5910 s), and the skip stops on the roll.
+        # is decoded from the roll's last card (5898 s) to 20 s past the scene's text (5910 s): whether there is an end
+        # is decided from the latest credit keyframe exactly as before, and the skip then stops on the roll.
         glued = [
             (5900.0, 0, 120.0),
             (5904.0, 0, 120.0),
@@ -153,7 +167,7 @@ class TestFindCredits:
                                        count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
         coarse = rule_j.coarse_start(STORY + ROLL + glued)
         assert rule_j.coarse_end_s(STORY + ROLL + glued, coarse) == 5910.0
-        assert (decodes.calls[2]["start_s"], decodes.calls[2]["length_s"]) == (5897.0, 21.0)
+        assert (decodes.calls[2]["start_s"], decodes.calls[2]["length_s"]) == (5897.0, 5910.0 + 20.0 - 5897.0)
         assert result.end_s == 5899.0
 
     def test_the_decoded_windows_cover_everything_the_refinements_read(self, monkeypatch, probes):
@@ -203,11 +217,14 @@ class TestFindCredits:
                               count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
         assert decodes.calls[0]["start_s"] == 870.0
 
-    def test_a_roll_at_the_start_of_the_file_refines_from_0(self, monkeypatch, probes):
+    def test_a_roll_less_than_30_s_into_the_tail_gets_no_answer(self, monkeypatch, probes):
+        # A file shorter than its tail whose roll starts 10 s in. With under 30 s of the tail before the run, rule J
+        # can't tell it from text on screen from the first frame (rule_j.STORY_BEFORE_RUN_S), so there is no answer and
+        # no refine window; version 1 refined it from 0 s.
         roll = [(10.0 + 2 * i, 2, 12.0) for i in range(20)]
         decodes = Decodes(roll, [])
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
-        detector.find_credits(
+        result = detector.find_credits(
             "/m/short.mkv",
             duration_ms=50_000,
             is_episode=False,
@@ -216,7 +233,9 @@ class TestFindCredits:
             gpu=None,
             gpu_device_path=None,
         )
-        assert (decodes.calls[1]["start_s"], decodes.calls[1]["length_s"]) == (0.0, 11.0)
+        assert rule_j.coarse_start(roll).pts_s == 10.0
+        assert (result.start_s, result.end_s) == (None, None)
+        assert len(decodes.calls) == 1
 
 
 class FakePool:

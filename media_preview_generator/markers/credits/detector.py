@@ -23,8 +23,9 @@ if TYPE_CHECKING:
 
 # Stored with every answer. Bump it when rule J, the tail lengths, the frame format or the model change: stored answers
 # of another version are asked again, even for decided types (spec §14 2026-09-14 "Local detectors").
-# 2: the anchor never steps over a gap the 24 s join can't bridge, and the end steps back over scene text glued onto the
-# roll (spec §13 items 13 and 14, phase3-harness.md "Rule J version 2").
+# 2: the anchor never steps over a gap the 24 s join can't bridge, the end steps back over scene text glued onto the
+# roll, and text on screen all through the tail gives no answer (spec §13 items 13 and 14, phase3-harness.md "Rule J
+# version 2").
 CREDITS_TEXT_VERSION = 2
 READING_PHASE = "Reading the credits…"
 REFINING_PHASE = "Refining the credits start…"
@@ -39,11 +40,13 @@ class CreditsTextResult:
     """What one file's ending gave.
 
     Attributes:
-        start_s: The credits start, or None when the tail holds no credit run.
+        start_s: The credits start, or None when the tail holds no credit run or its text is on screen all through the
+            tail (``rule_j.text_all_through``).
         end_s: Where the skip ends (Q3), or None: it runs to the end of the file.
         key_rows: The tail's keyframe rows (the harness keeps them).
-        fine_rows: The 1 fps rows before the coarse start (empty without a run).
-        end_rows: The 1 fps rows around the run's last credit keyframe (empty unless more than 30 s follows it).
+        fine_rows: The 1 fps rows before the coarse start (empty without an answer).
+        end_rows: The 1 fps rows from 1 s before ``rule_j.end_keyframe_s`` to 20 s past the run's latest credit keyframe
+            (empty unless more than 30 s follows that keyframe).
     """
 
     start_s: float | None
@@ -110,7 +113,7 @@ def find_credits(
         path, start_s=tail_start, length_s=None, keyframes_only=True, fps=None, keep_every=keep_every, **decode
     )
     coarse = rule_j.coarse_start(key_rows)
-    if coarse is None:
+    if coarse is None or rule_j.text_all_through(key_rows, coarse):
         return CreditsTextResult(None, None, tuple(key_rows), (), ())
     show(REFINING_PHASE)
     fine_start = max(0.0, coarse.pts_s - rule_j.REFINE_BEFORE_S)
@@ -124,9 +127,11 @@ def find_credits(
     if not rule_j.keeps_a_scene_after(last_keyframe, duration_s):
         return CreditsTextResult(start_s, None, tuple(key_rows), tuple(fine_rows), ())
     show(REFINING_END_PHASE)
-    end_keyframe = rule_j.end_keyframe_s(key_rows, coarse)  # never later than last_keyframe: 30 s+ follows it too
-    end_start = max(0.0, end_keyframe - rule_j.REFINE_END_BEFORE_S)
-    end_length = end_keyframe + rule_j.REFINE_END_AFTER_S - end_start
+    # From where the end's walk starts to where the latest credit keyframe's walk may reach: credits_end decides
+    # whether there is an end from the latest one, then where it is from end_keyframe_s (the same keyframe unless the
+    # end steps back over scene text; then at most 24 s earlier, the join's reach).
+    end_start = max(0.0, rule_j.end_keyframe_s(key_rows, coarse) - rule_j.REFINE_END_BEFORE_S)
+    end_length = last_keyframe + rule_j.REFINE_END_AFTER_S - end_start
     end_rows = frames.decode_rows(path, start_s=end_start, length_s=end_length, keyframes_only=False, fps=1, **decode)
     end_s = rule_j.credits_end(key_rows, coarse, end_rows, duration_s)
     return CreditsTextResult(start_s, end_s, tuple(key_rows), tuple(fine_rows), tuple(end_rows))
