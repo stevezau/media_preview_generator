@@ -238,6 +238,38 @@ class TestPlexTab:
         _open_tab(authed_page, app_url, server)
         expect(authed_page.locator("#markersStatusBlock .markers-detection")).to_have_text("Off", timeout=5000)
 
+    @pytest.mark.parametrize(
+        ("detection", "badge"),
+        [({"intro": "scheduled", "credits": "scheduled"}, "On"), ({"intro": "never", "credits": "never"}, "Off")],
+        ids=["detection-on", "detection-off"],
+    )
+    def test_detection_and_database_rows_explain_themselves(
+        self, authed_page: Page, app_url: str, detection, badge
+    ) -> None:
+        server = _plex_server()
+        details = _plex_ready_details(detection=detection)
+        _mock_server_page(authed_page, server, _status(server, "ready", "", details))
+        _open_tab(authed_page, app_url, server)
+        block = authed_page.locator("#markersStatusBlock")
+        expect(block.locator(".markers-detection")).to_have_text(badge, timeout=5000)
+
+        def tip_of(label: str) -> str:
+            value = block.locator(".markers-kv-label", has_text=label).locator("xpath=following-sibling::div[1]")
+            icon = value.locator(".info-icon")
+            expect(icon).to_have_count(1)
+            return icon.get_attribute("data-bs-original-title") or icon.get_attribute("title")
+
+        assert tip_of("Plex's own detection") == (
+            "Whether Plex finds intros and credits itself (Plex settings → Library → Generate intro / credits video "
+            'markers). When on, Plex can analyse a file again and replace our markers; "When Plex has its own '
+            'markers" below decides what happens then.'
+        )
+        assert tip_of("Database location") == (
+            "The folder of Plex's library database, as this app sees it. Markers are written straight into this "
+            "database, so it has to be on a local disk of the machine Plex runs on: a database on a network share "
+            "can't be written safely."
+        )
+
     def test_ready_plex_whose_plex_pass_couldnt_be_checked_shows_the_warning(
         self, authed_page: Page, app_url: str
     ) -> None:
@@ -613,7 +645,29 @@ class TestJellyfinTab:
         _open_tab(authed_page, app_url, server)
         block = authed_page.locator("#markersStatusBlock")
         expect(block).to_contain_text("Update needed", timeout=5000)
+        expect(block.locator(".markers-plugin-installed")).to_have_text("— installed 1.2.0.0")
         expect(authed_page.locator("#markersInstallPluginBtn")).to_have_text("Update")
+
+    @pytest.mark.parametrize(("vendor", "server_id"), [("jellyfin", "jf-1"), ("emby", "emby-1")])
+    def test_plugin_outdated_without_a_version_says_it_isnt_known(
+        self, authed_page: Page, app_url: str, vendor, server_id
+    ) -> None:
+        server = _vendor_server(vendor, server_id)
+        status = _status(
+            server,
+            "plugin_outdated",
+            "Update Media Preview Bridge (installed unknown) to get markers support",
+            {"plugin_version": None},
+        )
+        _mock_server_page(authed_page, server, status)
+        _open_tab(authed_page, app_url, server)
+        block = authed_page.locator("#markersStatusBlock")
+        expect(block.locator(".markers-plugin-installed")).to_have_text("— installed version unknown", timeout=5000)
+        plugin_row = block.locator(".markers-kv-label", has_text="Plugin").locator("xpath=following-sibling::div[1]")
+        tip = plugin_row.locator(".info-icon")
+        assert (tip.get_attribute("data-bs-original-title") or tip.get_attribute("title")) == (
+            "This version of the plugin can't take intro and credits markers. Update installs the newest version."
+        )
 
     def test_ready_shows_version_and_what_it_can_show(self, authed_page: Page, app_url: str) -> None:
         server = _vendor_server("jellyfin", "jf-1")
@@ -781,6 +835,7 @@ class TestEmbyTab:
         _mock_server_page(authed_page, server, status)
         _open_tab(authed_page, app_url, server)
         expect(authed_page.locator("#markersStatusBlock")).to_contain_text("Update needed", timeout=5000)
+        expect(authed_page.locator("#markersStatusBlock .markers-plugin-installed")).to_have_text("— installed 0.9.0.0")
         expect(authed_page.locator("#markersInstallPluginBtn")).to_have_text("Update")
 
     def test_ready_shows_the_version_without_a_warning(self, authed_page: Page, app_url: str) -> None:

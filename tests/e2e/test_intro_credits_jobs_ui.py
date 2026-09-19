@@ -235,7 +235,8 @@ class TestStartJobModalIntroCredits:
         tip = page.locator("#jobKindMarkersInfo.info-icon")
         assert (tip.get_attribute("data-bs-original-title") or tip.get_attribute("title")) == (
             "Finds Skip Intro / Skip Credits markers for the chosen libraries and sends them to every server with "
-            "Intro & Credits turned on. Runs at low priority on the same workers as previews."
+            "Intro & Credits turned on. Runs at low priority by default (change it under Priority below) on the same "
+            "workers as previews."
         )
 
         page.locator("#jobKindPreviews").check()

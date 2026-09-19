@@ -140,19 +140,21 @@
                 : badge('ok', '✓ local disk');
             rows.push(kvRow(
                 'Database location',
-                `<span class="font-monospace text-break me-1">${esc(dirname(details.db_path))}</span>${disk}`,
+                `<span class="font-monospace text-break me-1">${esc(dirname(details.db_path))}</span>${disk}`
+                    + infoIcon('The folder of Plex\'s library database, as this app sees it. Markers are written straight into this database, so it has to be on a local disk of the machine Plex runs on: a database on a network share can\'t be written safely.'),
             ));
         }
         const detectionOn = plexDetectionOn(details.detection);
+        const detectionTip = infoIcon('Whether Plex finds intros and credits itself (Plex settings → Library → Generate intro / credits video markers). When on, Plex can analyse a file again and replace our markers; "When Plex has its own markers" below decides what happens then.');
         if (detectionOn === true) {
             const keepsPlex = ((status.settings || {}).plex || {}).on_plex_redetect === 'keep_plex';
             const outcome = keepsPlex ? "it can replace ours; Plex's are kept" : 'it can replace ours; we put them back';
             rows.push(kvRow(
                 "Plex's own detection",
-                `${badge('warn', 'On', 'markers-detection')} <span class="text-muted">${esc(outcome)}</span>`,
+                `${badge('warn', 'On', 'markers-detection')} <span class="text-muted">${esc(outcome)}</span>${detectionTip}`,
             ));
         } else if (detectionOn === false) {
-            rows.push(kvRow("Plex's own detection", badge('off', 'Off', 'markers-detection')));
+            rows.push(kvRow("Plex's own detection", badge('off', 'Off', 'markers-detection') + detectionTip));
         }
         // A ready Plex can still carry a warning: Plex Pass couldn't be checked, so jobs wait instead of writing.
         const warning = capability.state === 'ready'
@@ -166,6 +168,15 @@
             <span id="markersInstallResult" class="small ms-2"></span>`;
     }
 
+    // The plugin reports its version but no minimum exists: what's missing is its markers feature, so the row names
+    // the installed version and nothing it would have to invent.
+    function outdatedPluginRow(details) {
+        const installed = details.plugin_version ? `installed ${details.plugin_version}` : 'installed version unknown';
+        return kvRow('Plugin', `${badge('warn', 'Update needed')} <span class="text-muted markers-plugin-installed">— ${esc(installed)}</span>`
+            + infoIcon('This version of the plugin can\'t take intro and credits markers. Update installs the newest version.')
+            + installButton('Update'));
+    }
+
     function renderJellyfinStatus(status) {
         const capability = status.capability || {};
         const details = capability.details || {};
@@ -174,7 +185,7 @@
         if (capability.state === 'ready') {
             rows.push(kvRow('Plugin', badge('ok', details.plugin_version ? `${details.plugin_version} ✓` : 'Installed ✓')));
         } else if (capability.state === 'plugin_outdated') {
-            rows.push(kvRow('Plugin', badge('warn', 'Update needed') + installButton('Update')));
+            rows.push(outdatedPluginRow(details));
         } else if (capability.state === 'needs_plugin') {
             rows.push(kvRow('Plugin', badge('bad', 'Not installed') + installButton('Install')));
         }
@@ -190,7 +201,7 @@
         if (capability.state === 'ready') {
             rows.push(kvRow('Plugin', badge('ok', details.plugin_version ? `${details.plugin_version} ✓` : 'Installed ✓')));
         } else if (capability.state === 'plugin_outdated') {
-            rows.push(kvRow('Plugin', badge('warn', 'Update needed') + installButton('Update')));
+            rows.push(outdatedPluginRow(details));
         } else if (capability.state === 'needs_plugin') {
             // catalog_listed is false (not in Emby's catalog) or null (catalog couldn't be read, e.g. Emby
             // unreachable for that one call): either way there's no Install button to offer, only the manual guide.
