@@ -9,6 +9,8 @@ from __future__ import annotations
 import pytest
 from playwright.sync_api import Page, expect
 
+from .conftest import get_free_port
+
 # ``fetch`` with no X-CSRFToken header, the way a call site that forgot it would send it.
 _BARE_POST = """async (url) => {
     const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
@@ -91,3 +93,44 @@ class TestLoginFormWithCsrf:
         page.locator('button[type="submit"]').click()
 
         expect(page.locator(".alert-warning")).to_contain_text("This sign-in page expired.", timeout=3000)
+
+
+@pytest.mark.e2e
+class TestSignOut:
+    def test_the_navs_logout_signs_out(self, authed_page: Page, app_url: str, complete_setup: None) -> None:
+        authed_page.goto(f"{app_url}/logs")
+
+        authed_page.locator("#navLogoutBtn").click()
+
+        expect(authed_page).to_have_url(f"{app_url}/login", timeout=5000)
+        authed_page.goto(f"{app_url}/logs")
+        expect(authed_page).to_have_url(f"{app_url}/login", timeout=5000)
+
+    def test_another_app_on_this_host_cant_sign_the_user_out(
+        self, authed_page: Page, app_url: str, complete_setup: None
+    ) -> None:
+        # A page on another port of this host is the same site, so the browser sends the session cookie with anything
+        # it makes it fetch; a link it follows sends it from any site. (An <img> sends it too, but the browser throws
+        # away an image request's HTML answer, so a test can't tell what the app did with it.)
+        other_app = f"http://localhost:{get_free_port()}/"  # nothing listens: the route answers
+        page = f'<script>window.location.href = "{app_url}/logout";</script>'
+        authed_page.route(other_app, lambda route: route.fulfill(status=200, content_type="text/html", body=page))
+
+        with authed_page.expect_request(f"{app_url}/logout") as request:
+            authed_page.goto(other_app)
+        assert "session=" in (request.value.all_headers().get("cookie") or "")
+
+        expect(authed_page.locator("#logoutConfirm")).to_contain_text("Sign out?", timeout=5000)
+        authed_page.goto(f"{app_url}/logs")
+        expect(authed_page).to_have_url(f"{app_url}/logs")
+        expect(authed_page.locator("#navLogoutBtn")).to_be_visible()
+
+    def test_opening_logout_asks_first_and_its_button_signs_out(
+        self, authed_page: Page, app_url: str, complete_setup: None
+    ) -> None:
+        authed_page.goto(f"{app_url}/logout")
+        expect(authed_page.locator("#logoutConfirm")).to_contain_text("Sign out?")
+
+        authed_page.locator("#logoutConfirmBtn").click()
+
+        expect(authed_page).to_have_url(f"{app_url}/login", timeout=5000)

@@ -302,6 +302,9 @@ The web interface uses token-based authentication:
    out of date, reload the page. Webhooks aren't affected (they use the webhook secret). A script must send the API
    token in a header on every request, as below: signing in once with `POST /api/auth/login` and reusing the cookie
    no longer works for changes. See [Reference — Authentication](reference.md#authentication).
+7. **Signing out** — **Logout** signs out this browser only; other browsers stay signed in, even after you change the
+   token. To sign every browser out, delete `flask_secret.key` from the config folder (or change `FLASK_SECRET_KEY`,
+   if you set it) and restart the container (see [Reference — Authentication](reference.md#authentication)).
 
 API authentication:
 

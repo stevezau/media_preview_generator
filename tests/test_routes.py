@@ -299,12 +299,27 @@ class TestLoginLogout:
         assert "/login" not in resp.headers.get("Location", "")
 
     def test_logout_clears_session(self, authed_client):
-        resp = authed_client.get("/logout", follow_redirects=False)
+        resp = authed_client.post("/logout", follow_redirects=False)
         assert resp.status_code == 302
+        assert resp.headers["Location"].endswith("/login")
         # Subsequent request should require login
         resp2 = authed_client.get("/", follow_redirects=False)
         assert resp2.status_code == 302
         assert "/login" in resp2.headers.get("Location", "")
+
+    def test_logout_get_only_asks_and_keeps_the_session(self, authed_client):
+        # Any page can make the browser GET /logout (an <img>), so a GET must not sign out.
+        resp = authed_client.get("/logout")
+
+        assert resp.status_code == 200
+        assert b'id="logoutConfirm"' in resp.data
+        assert authed_client.get("/", follow_redirects=False).status_code == 200
+
+    def test_logout_get_when_signed_out_goes_to_login(self, client):
+        resp = client.get("/logout", follow_redirects=False)
+
+        assert resp.status_code == 302
+        assert resp.headers["Location"].endswith("/login")
 
     def test_login_rate_limit_exceeded(self, client):
         """After 5 POSTs to /login, 6th returns 429.

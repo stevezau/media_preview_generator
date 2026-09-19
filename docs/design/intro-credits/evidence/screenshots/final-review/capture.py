@@ -226,6 +226,16 @@ def start_job_shot(context, app_url: str) -> None:
     page.close()
 
 
+def logout_confirm_shot(context, app_url: str) -> None:
+    # Opening /logout only asks now; the nav's Logout button (a form) looks exactly as before.
+    page = dashboard(context.new_page(), app_url, [])
+    page.goto(f"{app_url}/logout")
+    confirm = page.locator("#logoutConfirm")
+    expect(confirm).to_be_visible(timeout=5000)
+    shot(page, "logout-confirm-page", confirm, page.locator("nav.navbar"), pad=0)
+    page.close()
+
+
 def login_shot(browser, app_url: str) -> None:
     context = browser.new_context(viewport=VIEWPORT)
     page = context.new_page()
@@ -262,6 +272,7 @@ def main() -> None:
             inspector_shot(context, app_url)
             server_tab_shots(context, app_url)
             start_job_shot(context, app_url)
+            logout_confirm_shot(context, app_url)
             context.close()
             login_shot(browser, app_url)
             browser.close()

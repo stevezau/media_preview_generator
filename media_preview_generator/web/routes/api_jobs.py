@@ -16,6 +16,7 @@ from ..auth import (
     get_auth_method,
     is_authenticated,
     regenerate_token,
+    start_signed_in_session,
     validate_token,
 )
 from ..jobs import (
@@ -199,8 +200,7 @@ def api_login():
     token = data.get("token", "")
 
     if validate_token(token):
-        session["authenticated"] = True
-        session.permanent = True
+        start_signed_in_session()
         return jsonify({"success": True})
 
     return jsonify({"success": False, "error": "Invalid token"}), 401

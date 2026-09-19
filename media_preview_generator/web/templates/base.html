@@ -305,9 +305,13 @@
                         </button>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link" href="{{ url_for('main.logout') }}">
-                            <i class="bi bi-box-arrow-right me-1"></i>Logout
-                        </a>
+                        {# A POST with the page's token: a plain link would let any page sign the user out. #}
+                        <form method="post" action="{{ url_for('main.logout') }}" class="m-0">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button type="submit" class="nav-link w-100 text-start" id="navLogoutBtn">
+                                <i class="bi bi-box-arrow-right me-1"></i>Logout
+                            </button>
+                        </form>
                     </li>
                 </ul>
                 </div>{# /.offcanvas-body #}

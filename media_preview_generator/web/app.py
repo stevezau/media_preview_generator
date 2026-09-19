@@ -562,6 +562,10 @@ _CSRF_REFUSED_MESSAGE = (
 )
 
 
+# Sec-Fetch-Site values of a request one of this app's own pages made ("none": the user typed or bookmarked it).
+_OWN_FETCH_SITES = frozenset({"same-origin", "none"})
+
+
 def _install_csrf_protection(app: Flask) -> None:
     """Require a CSRF token on every state-changing request that relies on the browser session.
 
@@ -570,17 +574,17 @@ def _install_csrf_protection(app: Flask) -> None:
     came from one of this app's own pages. Two kinds of request don't use the session, so need no token: one with a
     valid API token header (a script), and a webhook receiver, which checks its own secret on every call.
 
+    A browser request that says it came from another origin (``Sec-Fetch-Site``, which pages can't set or fake) is
+    refused even with a token: another app on this host (a different port is the same site for cookies) could have
+    read one. Older browsers and scripts send no such header, and the token alone decides.
+
     Args:
-        app: The app, with every blueprint registered.
+        app: The app.
     """
-    from flask import jsonify, render_template, request
+    from flask import jsonify, redirect, render_template, request, url_for
     from flask_wtf.csrf import CSRFError
 
     from .auth import _check_token_headers
-
-    for view in app.view_functions.values():
-        if getattr(view, "is_webhook_receiver", False):
-            csrf.exempt(view)
 
     @app.before_request
     def _require_csrf_for_browser_requests():
@@ -588,7 +592,12 @@ def _install_csrf_protection(app: Flask) -> None:
             return
         if _check_token_headers():
             return
-        csrf.protect(apply_exemptions=True)
+        if getattr(app.view_functions.get(request.endpoint), "is_webhook_receiver", False):
+            return
+        fetch_site = request.headers.get("Sec-Fetch-Site")
+        if fetch_site is not None and fetch_site not in _OWN_FETCH_SITES:
+            raise CSRFError(f"The request came from another site (Sec-Fetch-Site: {fetch_site}).")
+        csrf.protect()
 
     @app.errorhandler(CSRFError)
     def _csrf_refused(error: CSRFError):
@@ -601,6 +610,9 @@ def _install_csrf_protection(app: Flask) -> None:
             return jsonify({"error": "Authentication required"}), 401
         if request.endpoint == "main.login":
             return render_template("login.html", page_expired=True), 400
+        if request.endpoint == "main.logout":
+            # A Logout button on a page older than this session: the confirm page carries a fresh token.
+            return redirect(url_for("main.logout"))
         return jsonify({"error": _CSRF_REFUSED_MESSAGE}), 400
 
 

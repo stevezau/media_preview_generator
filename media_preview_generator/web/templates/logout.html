@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}Sign out - Media Preview Generator{% endblock %}
+
+{% block content %}
+{# GET /logout: a page anywhere can make the browser open this URL, so it only asks; the button signs out. #}
+<div class="container py-5">
+    <div class="card section-card mx-auto" style="max-width: 28rem;" id="logoutConfirm">
+        <div class="card-body p-4">
+            <h1 class="h5 mb-2"><i class="bi bi-box-arrow-right me-2"></i>Sign out?</h1>
+            {% if auth_external %}
+            <p class="text-muted small mb-4">Sign-in is handled by your proxy or VPN: sign out there to leave. This only clears this app's own session.</p>
+            {% else %}
+            <p class="text-muted small mb-4">You'll need your token to sign in again.</p>
+            {% endif %}
+            <form method="post" action="{{ url_for('main.logout') }}" class="d-flex gap-2">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn btn-primary" id="logoutConfirmBtn">Sign out</button>
+                <a class="btn btn-outline-secondary" href="{{ url_for('main.index') }}">Cancel</a>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

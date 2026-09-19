@@ -741,8 +741,19 @@ as a hidden `csrf_token` field. Without it (or with a stale one) the request is 
   `/server/{server_id}`) never need it: they check their own webhook secret on every call.
 - The setup wizard sends it too, including before setup is finished when its routes need no sign-in.
 - With `AUTH_METHOD=external`, browser requests still need it; scripts behind the proxy should send the API token.
-- The token lasts as long as the browser session. Signing out, or changing the API token, ends the session, so a tab
-  still open from before has to be reloaded.
+- A browser request that says it came from another origin (the browser-set `Sec-Fetch-Site` header is anything but
+  `same-origin` or `none`) is refused even with a valid token: another app on the same host, on a different port,
+  counts as the same site for cookies. Requests without the header (older browsers, scripts) rely on the token alone.
+- The token lasts as long as the browser's signed-in session, up to 7 days after its last visit. Signing in starts a
+  new session, so nothing from before it (a token another page may have read) stays valid. With
+  `AUTH_METHOD=external` this app never sees a sign-in, so the `Sec-Fetch-Site` check above is what refuses such a
+  token; its **Logout** only clears this app's session (sign out at your proxy or VPN).
+- Signing out (`POST /logout`, the nav's **Logout**; opening `/logout` only asks), or changing the API token, ends
+  **this browser's** session, and a tab still open from before has to be reloaded. Other browsers stay signed in:
+  each session lives in a signed cookie in its browser, and the app keeps no list of sessions to end, even when the
+  API token changes. To sign every browser out, delete `flask_secret.key` from the config folder (or change
+  `FLASK_SECRET_KEY`, if you set it) and restart the container: every session cookie stops being valid, and each
+  browser signs in again with the current token.
 
 ### Setup & Settings Endpoints
 
@@ -1361,6 +1372,7 @@ unless noted.
 |---|---|---|
 | GET | `/api/auth/status` | Session auth state — used by the UI on page load |
 | POST | `/api/auth/login` · `/api/auth/logout` | Session login/logout (cookie-based, for the browser: needs the page's CSRF token; scripts send the API token instead) |
+| POST | `/logout` | Sign this browser out (the nav's **Logout**, with the page's CSRF token). `GET /logout` only shows a "Sign out?" page |
 | POST | `/api/token/regenerate` | Rotate the stored API token (disabled when `WEB_AUTH_TOKEN` is set) |
 | POST | `/api/token/set` | Set a custom token — min 8 chars; returns `{success: false, error: ...}` on validation failure |
 
