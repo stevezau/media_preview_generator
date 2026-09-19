@@ -1,5 +1,5 @@
-"""ffprobe wrapper for duration, chapters and the container's first timestamp, and the bounded kill it shares with the
-fingerprint ffmpeg.
+"""ffprobe wrapper for duration, chapters, the container's first timestamp and the first video packets' headers, and
+the bounded kill it shares with the fingerprint ffmpeg.
 
 A process stuck in an uninterruptible read on a stalled network mount can't die until that read returns, and it holds
 its pipes until then. Collecting it with a plain ``wait()`` or ``communicate()`` -- what ``subprocess.run`` does after
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -143,6 +144,14 @@ def _ms(value: object) -> int | None:
         return None
 
 
+def _seconds(value: object) -> float | None:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None  # "N/A", or absent
+    return seconds if math.isfinite(seconds) else None
+
+
 def probe_media(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> MediaProbe:
     """Read duration, chapters and the container's first timestamp.
 
@@ -162,21 +171,8 @@ def probe_media(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> MediaPro
         ProbeTimeoutError: ffprobe ran past ``timeout_s``.
         ProbeError: ffprobe missing, failed or returned invalid JSON.
     """
-    stuck = stuck_processes(FFPROBE_REAPER)
-    if stuck >= MAX_STUCK_FFPROBES:
-        raise ProbeStalledError(f"Not reading {path}: {stuck} earlier ffprobes are still stuck reading their files")
     cmd = [ffprobe, "-v", "error", "-print_format", "json", "-show_format", "-show_chapters", path]
-    try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    except OSError as exc:
-        raise ProbeError(f"ffprobe failed for {path}: {type(exc).__name__}: {exc}") from exc
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout_s)
-    except subprocess.TimeoutExpired as exc:
-        kill_and_collect(proc, what=f"ffprobe reading {os.path.basename(path)}", reaper_name=FFPROBE_REAPER)
-        raise ProbeTimeoutError(f"ffprobe failed for {path}: {type(exc).__name__}: {exc}") from exc
-    if proc.returncode != 0:
-        raise ProbeError(f"ffprobe exited {proc.returncode} for {path}: {(stderr or '').strip()[:300]}")
+    stdout = _run_ffprobe(cmd, path, timeout_s)
     try:
         data = json.loads(stdout or "")
     except ValueError as exc:
@@ -194,3 +190,74 @@ def probe_media(path: str, *, ffprobe: str, timeout_s: float = 60.0) -> MediaPro
     return MediaProbe(
         duration_ms=_ms(fmt.get("duration")), chapters=tuple(chapters), start_time_ms=_ms(fmt.get("start_time"))
     )
+
+
+@dataclass(frozen=True)
+class VideoPacket:
+    """One video packet's header.
+
+    Attributes:
+        pts_s: Its presentation time in seconds, None when the container gives none.
+        keyframe: Whether it decodes on its own.
+    """
+
+    pts_s: float | None
+    keyframe: bool
+
+
+def video_packets(path: str, *, ffprobe: str, packets: int, timeout_s: float = 60.0) -> tuple[VideoPacket, ...]:
+    """The first ``packets`` packet headers of the file's main video stream.
+
+    Read from the start of the file up to those packets (not the whole file), and nothing is decoded. ``V`` leaves out
+    cover art and thumbnails, which are single-picture streams.
+
+    Args:
+        path: Media file.
+        ffprobe: ffprobe binary.
+        packets: How many video packets to read.
+        timeout_s: Hard timeout, as for :func:`probe_media`.
+
+    Returns:
+        The packets in the file's order; fewer when the stream is shorter, none when the file has no video.
+
+    Raises:
+        ProbeStalledError: ``MAX_STUCK_FFPROBES`` earlier ffprobes are still stuck; none is started.
+        ProbeTimeoutError: ffprobe ran past ``timeout_s``.
+        ProbeError: ffprobe missing, failed or returned something other than its JSON packet list.
+    """
+    cmd = [ffprobe, "-v", "error", "-select_streams", "V:0", "-read_intervals", f"%+#{packets}",
+           "-show_entries", "packet=pts_time,flags", "-of", "json", path]  # fmt: skip
+    stdout = _run_ffprobe(cmd, path, timeout_s)
+    try:
+        data = json.loads(stdout or "")
+    except ValueError as exc:
+        raise ProbeError(f"ffprobe returned invalid JSON for {path}") from exc
+    raw = data.get("packets", []) if isinstance(data, dict) else None
+    if not isinstance(raw, list) or not all(isinstance(packet, dict) for packet in raw):
+        raise ProbeError(f"ffprobe returned an unexpected packet list for {path}")
+    return tuple(VideoPacket(_seconds(packet.get("pts_time")), "K" in str(packet.get("flags", ""))) for packet in raw)
+
+
+def _run_ffprobe(cmd: list[str], path: str, timeout_s: float) -> str:
+    """Run ffprobe with a hard timeout and a bounded kill; its stdout.
+
+    Raises:
+        ProbeStalledError: ``MAX_STUCK_FFPROBES`` earlier ffprobes are still stuck; none is started.
+        ProbeTimeoutError: ffprobe ran past ``timeout_s``.
+        ProbeError: ffprobe missing or exited non-zero.
+    """
+    stuck = stuck_processes(FFPROBE_REAPER)
+    if stuck >= MAX_STUCK_FFPROBES:
+        raise ProbeStalledError(f"Not reading {path}: {stuck} earlier ffprobes are still stuck reading their files")
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except OSError as exc:
+        raise ProbeError(f"ffprobe failed for {path}: {type(exc).__name__}: {exc}") from exc
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        kill_and_collect(proc, what=f"ffprobe reading {os.path.basename(path)}", reaper_name=FFPROBE_REAPER)
+        raise ProbeTimeoutError(f"ffprobe failed for {path}: {type(exc).__name__}: {exc}") from exc
+    if proc.returncode != 0:
+        raise ProbeError(f"ffprobe exited {proc.returncode} for {path}: {(stderr or '').strip()[:300]}")
+    return stdout

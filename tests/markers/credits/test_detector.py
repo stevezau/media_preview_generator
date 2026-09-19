@@ -13,7 +13,7 @@ from media_preview_generator.markers.credits import detector, frames, rule_j
 from media_preview_generator.markers.credits.textdet_helper import TextDetUnavailableError
 from media_preview_generator.markers.models import Candidate, FileIdentity, MarkerType, Source
 from media_preview_generator.markers.pipeline import DetectorUnavailableError
-from media_preview_generator.markers.probe import ProbeTimeoutError
+from media_preview_generator.markers.probe import MediaProbe, ProbeStalledError, ProbeTimeoutError
 from media_preview_generator.markers.store import FileRecord, MarkerStore
 from media_preview_generator.processing.generator import CodecNotSupportedError
 from media_preview_generator.servers.base import ServerType
@@ -53,16 +53,28 @@ class Decodes:
 START_TIME_S = 1.4  # the container's own first timestamp, as ffprobe gives it
 
 
+class _Probes(list):
+    """Every probe call's arguments; the start time probe answers ``START_TIME_S``, the intra-only check ``stride``."""
+
+    stride: int | None = None
+    intra_calls: list[dict]
+
+
 @pytest.fixture
 def probes(monkeypatch):
-    """The start time probe: every call's arguments, answering ``START_TIME_S``."""
-    calls: list[dict] = []
+    calls = _Probes()
+    calls.intra_calls = []
 
     def probe(path, ffmpeg, **kwargs):
         calls.append({"path": path, "ffmpeg": ffmpeg, **kwargs})
         return START_TIME_S
 
+    def intra_only_stride(path, ffmpeg, **kwargs):
+        calls.intra_calls.append({"path": path, "ffmpeg": ffmpeg, **kwargs})
+        return calls.stride
+
     monkeypatch.setattr(detector.frames, "container_start_s", probe)
+    monkeypatch.setattr(detector.frames, "intra_only_stride", intra_only_stride)
     return calls
 
 
@@ -77,9 +89,11 @@ class TestFindCredits:
         (call,) = decodes.calls
         assert call == {"path": MOVIE.canonical_path, "ffmpeg": "/ff", "start_s": 5100.0, "length_s": None,
                         "keyframes_only": True, "fps": None, "gpu": "NVIDIA", "gpu_device_path": "cuda:0",
-                        "count_boxes": count, "cancel_check": None, "start_time_s": START_TIME_S}  # fmt: skip
+                        "count_boxes": count, "cancel_check": None, "start_time_s": START_TIME_S,
+                        "keep_every": None}  # fmt: skip
         assert phases == ["Reading the credits…"]
         assert probes == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": None}]
+        assert probes.intra_calls == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": None}]
 
     def test_a_roll_to_the_end_of_the_file_is_refined_before_it_and_left_open_ended(self, monkeypatch, probes):
         cancel = lambda: False  # noqa: E731
@@ -99,8 +113,9 @@ class TestFindCredits:
                                     "length_s": 21.0, "keyframes_only": False, "fps": 1, "gpu": None,
                                     "gpu_device_path": None, "count_boxes": count, "cancel_check": cancel,
                                     "start_time_s": START_TIME_S}  # fmt: skip
-        assert decodes.calls[0]["start_time_s"] == START_TIME_S
+        assert (decodes.calls[0]["start_time_s"], decodes.calls[0]["keep_every"]) == (START_TIME_S, None)
         assert probes == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": cancel}]
+        assert probes.intra_calls == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": cancel}]
         assert phases == ["Reading the credits…", "Refining the credits start…"]
 
     def test_a_scene_after_the_roll_is_read_for_where_the_credits_end(self, monkeypatch, probes):
@@ -136,6 +151,23 @@ class TestFindCredits:
         coarse = rule_j.coarse_start(STORY + ROLL + SCENE)
         assert result.start_s == coarse.pts_s - rule_j.REFINE_BEFORE_S
         assert result.end_s == rule_j.coarse_end_s(STORY + ROLL + SCENE, coarse) + rule_j.REFINE_END_AFTER_S
+
+    def test_an_intra_only_stream_has_only_its_keyframe_pass_thinned(self, monkeypatch, probes):
+        # Every frame of an intra-only stream is a keyframe: the keyframe pass decodes one packet in the stride (one per
+        # 2 s, the spacing rule J was measured at). The refine windows already keep one frame a second and stay as they
+        # are: thinned too, a 1 fps window of a 24 fps file would keep one frame in 48 seconds.
+        probes.stride = 48
+        decodes = Decodes(STORY + ROLL + SCENE, FINE, END)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                       count_boxes=count, gpu="NVIDIA", gpu_device_path="cuda:0")  # fmt: skip
+        assert (result.start_s, result.end_s) == (5690.0, 5899.0)
+        assert decodes.calls[0] == {"path": MOVIE.canonical_path, "ffmpeg": "/ff", "start_s": 5100.0, "length_s": None,
+                                    "keyframes_only": True, "fps": None, "gpu": "NVIDIA", "gpu_device_path": "cuda:0",
+                                    "count_boxes": count, "cancel_check": None, "start_time_s": START_TIME_S,
+                                    "keep_every": 48}  # fmt: skip
+        assert ["keep_every" in call for call in decodes.calls[1:]] == [False, False]
+        assert probes.intra_calls == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": None}]
 
     def test_a_cancelled_job_is_not_probed_or_decoded(self, monkeypatch):
         monkeypatch.setattr(detector.frames, "probe_media", lambda path, **kwargs: pytest.fail("probed anyway"))
@@ -314,6 +346,35 @@ class TestDetect:
         assert ctx.store.credits_text_timed_out_at(identity) == NOW
         assert detector.credits_text_needs_worker(MOVIE, ctx) is False  # settled on the checking thread for a day
 
+    def test_a_packet_probe_that_times_out_waits_a_day_like_a_decode(self, monkeypatch, pool, ctx):
+        # The real find_credits and intra-only check: the start time is read, then ffprobe stalls on the packets.
+        def packets_stalled(path, **kwargs):
+            raise ProbeTimeoutError(f"ffprobe failed for {path}: TimeoutExpired")
+
+        monkeypatch.setattr(frames, "probe_media", lambda path, **kwargs: MediaProbe(6_000_000, ()))
+        monkeypatch.setattr(frames, "video_packets", packets_stalled)
+        monkeypatch.setattr(frames, "decode_rows", lambda path, **kwargs: pytest.fail("decoded anyway"))
+        with pytest.raises(
+            DetectorUnavailableError, match="reading the video packets of Movie \\(2020\\).mkv timed out"
+        ):
+            detector.detect_credits_text(MOVIE, ctx=ctx)
+        identity = FileIdentity(MOVIE.canonical_path, MOVIE.size, MOVIE.mtime_ns)
+        assert ctx.store.credits_text_timed_out_at(identity) == NOW
+        assert detector.credits_text_needs_worker(MOVIE, ctx) is False
+
+    def test_a_packet_probe_not_started_for_earlier_stuck_ones_records_nothing(self, monkeypatch, pool, ctx):
+        # The mount's fault, not this file's: no answer this run, and the file isn't left alone for a day.
+        def gated(path, **kwargs):
+            raise ProbeStalledError(f"Not reading {path}: 2 earlier ffprobes are still stuck reading their files")
+
+        monkeypatch.setattr(frames, "probe_media", lambda path, **kwargs: MediaProbe(6_000_000, ()))
+        monkeypatch.setattr(frames, "video_packets", gated)
+        monkeypatch.setattr(frames, "decode_rows", lambda path, **kwargs: pytest.fail("decoded anyway"))
+        with pytest.raises(DetectorUnavailableError, match="could not read the video packets of Movie \\(2020\\).mkv"):
+            detector.detect_credits_text(MOVIE, ctx=ctx)
+        identity = FileIdentity(MOVIE.canonical_path, MOVIE.size, MOVIE.mtime_ns)
+        assert ctx.store.credits_text_timed_out_at(identity) is None
+
     def test_an_unknown_duration_is_no_answer(self, pool, ctx):
         rec = FileRecord(9, "/m/x.mkv", 1, 1, None, None, True)
         with pytest.raises(DetectorUnavailableError, match="duration"):
@@ -417,27 +478,31 @@ class TestCheckStage:
         assert out is None
 
 
-@pytest.mark.integration
-@pytest.mark.timeout(600)
-@pytest.mark.parametrize(("scene_s", "expected_end"), [(0, None), (60, 540.0)])
-def test_real_decode_and_detection_on_a_generated_roll(tmp_path, monkeypatch, scene_s, expected_end):
-    import os
+FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+
+@pytest.fixture
+def real_model(monkeypatch):
+    """ffmpeg, with the text detection model set for the helper; skips without either or the font."""
     import shutil
-    import subprocess as sp
 
     from media_preview_generator.markers.credits import textdet_helper
 
     model = os.environ.get(textdet_helper.MODEL_ENV, textdet_helper.DEFAULT_MODEL_PATH)
     ffmpeg = shutil.which("ffmpeg")
-    font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    if not (ffmpeg and os.path.isfile(model) and os.path.isfile(font)):
+    if not (ffmpeg and os.path.isfile(model) and os.path.isfile(FONT)):
         pytest.skip("needs ffmpeg, the DejaVuSans font and the text detection model")
     monkeypatch.setenv(textdet_helper.MODEL_ENV, model)
-    clip = tmp_path / "movie.mkv"
-    # 420 s of text-free gradients, then 120 s of names scrolling up over black (a new line every 3 s, 20 px/s), then
-    # optionally a 60 s scene after the credits (Q3).
+    return ffmpeg
+
+
+def _generated_roll(path, ffmpeg: str, *, scene_s: int, gop: int) -> str:
+    """420 s of text-free gradients, then 120 s of names scrolling up over black (a new line every 3 s, 20 px/s), then
+    optionally a scene after the credits (Q3); a keyframe every ``gop`` frames at 24 fps."""
+    import subprocess as sp
+
     roll = ",".join(
-        f"drawtext=fontfile={font}:text='NAME {i}':fontcolor=white:fontsize=24:x=(w-tw)/2:y=h-20*t+{i * 60}"
+        f"drawtext=fontfile={FONT}:text='NAME {i}':fontcolor=white:fontsize=24:x=(w-tw)/2:y=h-20*t+{i * 60}"
         for i in range(40)
     )
     inputs = ["-f", "lavfi", "-i",
@@ -452,18 +517,58 @@ def test_real_decode_and_detection_on_a_generated_roll(tmp_path, monkeypatch, sc
         ]
     streams = "".join(f"[{i}:v]" for i in range(len(inputs) // 4))
     sp.run([ffmpeg, "-v", "error", *inputs, "-filter_complex", f"{streams}concat=n={len(inputs) // 4}:v=1:a=0[v]", "-map", "[v]",
-            "-c:v", "libx264", "-preset", "veryfast", "-g", "48", "-pix_fmt", "yuv420p", str(clip)], check=True)  # fmt: skip
+            "-c:v", "libx264", "-preset", "veryfast", "-g", str(gop), "-pix_fmt", "yuv420p", str(path)], check=True)  # fmt: skip
+    return str(path)
+
+
+def _find_credits_on_the_cpu(clip: str, ffmpeg: str, *, duration_s: int, frames_read: list[int] | None = None):
+    from media_preview_generator.markers.credits import textdet_helper
+
     # A throwaway pool of this test's own, closed here: the app's singleton (``get_textdet_pool``) is never closed,
     # since ``close_all`` ends a pool permanently.
     pool = textdet_helper.TextDetectorPool()
+
+    def count_boxes(planes):
+        if frames_read is not None:
+            frames_read.append(len(planes))
+        return pool.count_boxes(planes, gpu=None, gpu_device_path=None)
+
     try:
-        result = detector.find_credits(str(clip), duration_ms=(540 + scene_s) * 1000, is_episode=False, ffmpeg=ffmpeg,
-                                       count_boxes=lambda p: pool.count_boxes(p, gpu=None, gpu_device_path=None),
-                                       gpu=None, gpu_device_path=None)  # fmt: skip
+        return detector.find_credits(clip, duration_ms=duration_s * 1000, is_episode=False, ffmpeg=ffmpeg,
+                                     count_boxes=count_boxes, gpu=None, gpu_device_path=None)  # fmt: skip
     finally:
         pool.close_all()
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize(("scene_s", "expected_end"), [(0, None), (60, 540.0)])
+def test_real_decode_and_detection_on_a_generated_roll(tmp_path, real_model, scene_s, expected_end):
+    clip = _generated_roll(tmp_path / "movie.mkv", real_model, scene_s=scene_s, gop=48)
+    result = _find_credits_on_the_cpu(clip, real_model, duration_s=540 + scene_s)
     assert result.start_s is not None and abs(result.start_s - 420.0) <= 10.0
     if expected_end is None:
         assert result.end_s is None and result.end_rows == ()
     else:
         assert result.end_s is not None and abs(result.end_s - expected_end) <= 3.0
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(900)
+def test_an_intra_only_encode_answers_like_a_normal_one(tmp_path, real_model):
+    # Every frame a keyframe: read in full, the keyframe pass would put all 14400 frames of this tail through text
+    # detection. Thinned before decode it reads about what the 2 s GOP encode of the same picture does, and answers
+    # the same start and end.
+    import itertools
+
+    answers = {}
+    frames_read: dict[int, list[int]] = {48: [], 1: []}
+    for gop in (48, 1):
+        clip = _generated_roll(tmp_path / f"gop{gop}.mkv", real_model, scene_s=60, gop=gop)
+        answers[gop] = _find_credits_on_the_cpu(clip, real_model, duration_s=600, frames_read=frames_read[gop])
+    normal, intra = answers[48], answers[1]
+    assert normal.start_s is not None and intra.start_s is not None and abs(intra.start_s - normal.start_s) <= 2.0
+    assert normal.end_s is not None and intra.end_s is not None and abs(intra.end_s - normal.end_s) <= 2.0
+    assert min(later[0] - earlier[0] for earlier, later in itertools.pairwise(intra.key_rows)) >= 2.0
+    assert len(intra.key_rows) <= 600 / frames.INTRA_ONLY_SPACING_S + 1
+    assert sum(frames_read[1]) <= 1.1 * sum(frames_read[48])

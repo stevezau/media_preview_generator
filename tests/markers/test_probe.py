@@ -16,9 +16,11 @@ from media_preview_generator.markers.probe import (
     ProbeError,
     ProbeStalledError,
     ProbeTimeoutError,
+    VideoPacket,
     ffprobe_path_for,
     kill_and_collect,
     probe_media,
+    video_packets,
 )
 
 RUN = "media_preview_generator.markers.probe.subprocess.Popen"
@@ -369,3 +371,72 @@ def test_two_stuck_ffprobes_keep_a_third_from_starting(monkeypatch):
         for proc in started:
             proc.released.set()
         _join_reapers(probe.FFPROBE_REAPER)
+
+
+class TestVideoPackets:
+    def test_reads_the_first_packets_of_the_main_video_stream_only(self):
+        payload = {"packets": [{"pts_time": "0.000000", "flags": "K__"}, {"pts_time": "0.041667", "flags": "___"},
+                               {"pts_time": "N/A", "flags": "K_D"}, {"flags": "K__"}, {"pts_time": "0.125000"}]}  # fmt: skip
+        proc = _ok(payload)
+        with patch(RUN, return_value=proc) as run:
+            packets = video_packets("/m/a.mkv", ffprobe="/usr/bin/ffprobe", packets=24)
+        args, kwargs = run.call_args
+        # V, not v: cover art is a single-picture video stream. From the start of the file, headers only.
+        assert args[0] == ["/usr/bin/ffprobe", "-v", "error", "-select_streams", "V:0", "-read_intervals", "%+#24",
+                           "-show_entries", "packet=pts_time,flags", "-of", "json", "/m/a.mkv"]  # fmt: skip
+        assert kwargs == {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True}
+        assert proc.communicate.call_args.kwargs == {"timeout": 60.0}
+        assert packets == (VideoPacket(0.0, True), VideoPacket(0.041667, False), VideoPacket(None, True),
+                           VideoPacket(None, True), VideoPacket(0.125, False))  # fmt: skip
+
+    def test_the_count_and_the_timeout_are_the_callers(self):
+        proc = _ok({"packets": []})
+        with patch(RUN, return_value=proc) as run:
+            video_packets("/m/a.mkv", ffprobe="ffprobe", packets=7, timeout_s=12.5)
+        assert run.call_args.args[0][6] == "%+#7"
+        assert proc.communicate.call_args.kwargs == {"timeout": 12.5}
+
+    @pytest.mark.parametrize("stdout", ['{"packets": []}', "{\n\n}"], ids=["empty-list", "no-list"])
+    def test_a_file_without_video_has_no_packets(self, stdout):
+        with patch(RUN, return_value=_proc(stdout=stdout)):
+            assert video_packets("/m/a.m4a", ffprobe="ffprobe", packets=24) == ()
+
+    @pytest.mark.parametrize("value", ["inf", "nan", "-inf", "", None, [1]])
+    def test_a_time_that_isnt_a_finite_number_is_none(self, value):
+        with patch(RUN, return_value=_ok({"packets": [{"pts_time": value, "flags": "K__"}]})):
+            assert video_packets("/m/a.mkv", ffprobe="ffprobe", packets=1) == (VideoPacket(None, True),)
+
+    @pytest.mark.parametrize(
+        "stdout",
+        ["not json", "[]", '{"packets": {}}', '{"packets": ["K__"]}', '{"packets": null}'],
+        ids=["invalid", "top-level-list", "packets-dict", "packet-not-a-dict", "packets-null"],
+    )
+    def test_anything_but_its_packet_list_is_a_probe_error(self, stdout):
+        with patch(RUN, return_value=_proc(stdout=stdout)):
+            with pytest.raises(ProbeError) as caught:
+                video_packets("/m/a.mkv", ffprobe="ffprobe", packets=24)
+        assert type(caught.value) is ProbeError
+
+    def test_a_non_zero_exit_is_a_probe_error(self):
+        with patch(RUN, return_value=_proc(returncode=1, stdout='{"packets": []}', stderr="Invalid data")):
+            with pytest.raises(ProbeError, match="ffprobe exited 1 for /m/a.mkv: Invalid data") as caught:
+                video_packets("/m/a.mkv", ffprobe="ffprobe", packets=24)
+        assert type(caught.value) is ProbeError
+
+    def test_a_timeout_kills_ffprobe_with_a_bounded_wait(self):
+        proc = _proc()
+        proc.communicate.side_effect = [subprocess.TimeoutExpired(cmd="ffprobe", timeout=30), ("", "")]
+        with patch(RUN, return_value=proc):
+            with pytest.raises(ProbeTimeoutError, match="ffprobe failed for /m/a.mkv: TimeoutExpired"):
+                video_packets("/m/a.mkv", ffprobe="ffprobe", packets=24, timeout_s=30.0)
+        proc.kill.assert_called_once_with()
+        assert proc.communicate.call_args.kwargs == {"timeout": probe.KILL_WAIT_S}
+
+    def test_none_is_started_while_earlier_ffprobes_are_stuck(self, monkeypatch):
+        # The same cap as the duration probe's: they share the count of ffprobes left stuck on a stalled mount.
+        monkeypatch.setitem(probe._stuck, probe.FFPROBE_REAPER, probe.MAX_STUCK_FFPROBES)
+        with patch(RUN) as run:
+            with pytest.raises(ProbeStalledError, match="Not reading /m/a.mkv: 2 earlier ffprobes are still stuck"):
+                video_packets("/m/a.mkv", ffprobe="ffprobe", packets=24)
+            monkeypatch.setitem(probe._stuck, probe.FFPROBE_REAPER, 0)
+        run.assert_not_called()

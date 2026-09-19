@@ -8,10 +8,12 @@ arrives, so memory stays bounded whatever the file's keyframe spacing.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import os
 import queue
 import re
 import signal
+import statistics
 import subprocess
 import tempfile
 import threading
@@ -23,7 +25,7 @@ import numpy as np
 from loguru import logger
 
 from ...processing.hwaccel import hwaccel_decode_args
-from ..probe import ProbeError, ProbeTimeoutError, ffprobe_path_for, probe_media
+from ..probe import ProbeError, ProbeStalledError, ProbeTimeoutError, ffprobe_path_for, probe_media, video_packets
 from .rule_j import Row
 
 FRAME_W = 320
@@ -34,6 +36,15 @@ FFMPEG_THREADS = 2
 CHUNK_FRAMES = 64
 DECODE_TIMEOUT_S = 600.0
 PROBE_TIMEOUT_S = 30.0
+# A stream whose first this-many video packets are all keyframes is intra-only (ProRes, DNxHD, MJPEG, an all-I H.264):
+# every frame is a keyframe. A normal stream's keyframes are a GOP apart (x264 won't put IDR frames closer than
+# min-keyint, keyint/10 capped at the frame rate: 23-25 frames at its default keyint of 250, 4 at a 2 s GOP), so 24
+# keyframes in a row is never a normal stream.
+INTRA_CHECK_PACKETS = 24
+# The keyframe spacing rule J was measured at: the median gap between keyframes is 2.0 s on the median file of the
+# 80 (1.46 s at the 10th percentile, 8.1 s at the 90th). An intra-only stream's keyframe pass keeps one packet per
+# this much and drops the rest before they are decoded.
+INTRA_ONLY_SPACING_S = 2.0
 _Y_BYTES = FRAME_W * FRAME_H
 _NV12_BYTES = _Y_BYTES * 3 // 2
 # Every showinfo line is matched, `pts_time:NOPTS` included: a line that can't be read has to drop its own frame's row,
@@ -96,6 +107,7 @@ def decode_command(
     fps: int | None,
     gpu: str | None,
     gpu_device_path: str | None,
+    keep_every: int | None = None,
 ) -> tuple[list[str], bool]:
     """The spec §5.4 ffmpeg command for one decode.
 
@@ -108,6 +120,10 @@ def decode_command(
         fps: Frames per second to keep (the refine window), or None for every decoded frame.
         gpu: The worker's GPU type, None on a CPU worker.
         gpu_device_path: The worker's device.
+        keep_every: Decode one packet in this many of the first ordinary video stream (the one
+            :func:`intra_only_stride` measured), counted from the seek point; the rest are still read from the file
+            but dropped before the decoder (an intra-only stream's keyframe pass, where every packet decodes on its
+            own). None decodes every packet: the command is then exactly the spec's.
 
     Returns:
         The argv, and whether decode runs on the GPU.
@@ -118,6 +134,13 @@ def decode_command(
     if fps:
         video_filter = f"fps={fps},{video_filter}"
     command = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", str(FFMPEG_THREADS), *decode.args]
+    if keep_every:
+        # An input bitstream filter (ffmpeg 7.1+) drops the packets between the demuxer and the decoder: thinned by a
+        # filter after it, a 4K ProRes tail still decodes every frame (measured 490 s of CPU per 900 s tail). Only on
+        # V:0, the stream the stride was measured on: ffmpeg may decode another video stream, which must not be
+        # thinned. ``n`` counts packets from the seek, the comma is escaped from the filter list, and with only
+        # ``drop`` set ``noise`` leaves every kept packet's bytes alone.
+        command += ["-bsf:V:0", f"noise=drop=mod(n\\,{keep_every})"]
     if keyframes_only:
         command += ["-skip_frame", "nokey"]
     command += ["-ss", f"{start_s:.3f}"]
@@ -173,6 +196,57 @@ def container_start_s(
     except ProbeError as exc:
         raise FrameDecodeError(f"could not read the start time of {name}: {exc}") from exc
     return (probe.start_time_ms or 0) / 1000.0
+
+
+def intra_only_stride(path: str, ffmpeg: str, *, cancel_check: Callable[[], bool] | None = None,
+                      timeout_s: float = PROBE_TIMEOUT_S) -> int | None:  # fmt: skip
+    """How many packets of an intra-only stream the keyframe pass decodes one of; None for any other stream.
+
+    Every frame of an intra-only stream is a keyframe, so ``-skip_frame nokey`` skips nothing: the keyframe pass would
+    decode and read every frame of the tail for text, past the decode timeout, and never answer. It is told from the
+    first ``INTRA_CHECK_PACKETS`` packet flags rather than the codec, so an all-I H.264 or HEVC counts as well as
+    ProRes, DNxHD or MJPEG, and the stride is ``INTRA_ONLY_SPACING_S`` over their frame interval (48 at 24 fps).
+    Thinning saves the decode and the text detection, not the reading: the tail is still read from disk in full.
+
+    Args:
+        path: The media file.
+        ffmpeg: The ffmpeg binary (ffprobe is taken from beside it).
+        cancel_check: True once the job is cancelled; checked before probing.
+        timeout_s: Hard limit for the probe (plus ``probe.KILL_WAIT_S``).
+
+    Returns:
+        The stride. None when those packets aren't all keyframes, their times give no frame interval, the stride would
+        be 1, or ffprobe fails on them (not a timeout or a stall, which raise): the file is then read the ordinary
+        way, exactly as before this check existed.
+
+    Raises:
+        DecodeCancelledError: Already cancelled (nothing is probed).
+        DecodeTimeoutError: ffprobe ran past ``timeout_s``, as :func:`container_start_s` does.
+        FrameDecodeError: Earlier ffprobes are still stuck, so this one wasn't started.
+    """
+    name = os.path.basename(path)
+    if cancel_check and cancel_check():
+        raise DecodeCancelledError(f"cancelled before decoding {name}")
+    try:
+        packets = video_packets(
+            path, ffprobe=ffprobe_path_for(ffmpeg), packets=INTRA_CHECK_PACKETS, timeout_s=timeout_s
+        )
+    except ProbeTimeoutError as exc:
+        raise DecodeTimeoutError(f"reading the video packets of {name} timed out after {timeout_s:g} s") from exc
+    except ProbeStalledError as exc:
+        raise FrameDecodeError(f"could not read the video packets of {name}: {exc}") from exc
+    except ProbeError as exc:
+        logger.debug("Couldn't read the video packets of {}, so it is read the ordinary way: {}", name, exc)
+        return None
+    if len(packets) < INTRA_CHECK_PACKETS or not all(packet.keyframe for packet in packets):
+        return None
+    times = sorted(packet.pts_s for packet in packets if packet.pts_s is not None)
+    intervals = [later - earlier for earlier, later in itertools.pairwise(times) if later > earlier]
+    if not intervals:
+        logger.debug("{} is intra-only but its packets carry no times, so it is read the ordinary way", name)
+        return None
+    stride = round(INTRA_ONLY_SPACING_S / statistics.median(intervals))
+    return stride if stride > 1 else None
 
 
 def _read_frames(stream: BinaryIO, frames: queue.Queue, stop: threading.Event) -> None:
@@ -371,6 +445,7 @@ def decode_rows(
     cancel_check: Callable[[], bool] | None = None,
     timeout_s: float = DECODE_TIMEOUT_S,
     start_time_s: float | None = None,
+    keep_every: int | None = None,
 ) -> list[Row]:
     """:func:`decode_command` then :func:`run_decode` (other arguments as there).
 
@@ -397,7 +472,7 @@ def decode_rows(
         raise DecodeCancelledError(f"cancelled before decoding {name}")
     command, hw_active = decode_command(
         ffmpeg, path, start_s=start_s, length_s=length_s, keyframes_only=keyframes_only, fps=fps, gpu=gpu,
-        gpu_device_path=gpu_device_path,
+        gpu_device_path=gpu_device_path, keep_every=keep_every,
     )  # fmt: skip
     offset_s = (
         container_start_s(path, ffmpeg, timeout_s=min(PROBE_TIMEOUT_S, timeout_s))

@@ -60,6 +60,40 @@ def recording(tmp_path_factory):
     return ffmpeg, str(path)
 
 
+@pytest.fixture(scope="module")
+def intra_clips(tmp_path_factory):
+    """The same 20 s of moving picture as an all-I H.264 at 24 fps, an MJPEG at 25 fps, and a 2 s GOP H.264."""
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("no ffmpeg")
+    root = tmp_path_factory.mktemp("intra")
+    encodes = {
+        "all-i.mkv": (24, ["-c:v", "libx264", "-g", "1", "-pix_fmt", "yuv420p"]),
+        "mjpeg.avi": (25, ["-c:v", "mjpeg", "-q:v", "5", "-pix_fmt", "yuvj420p"]),
+        "gop48.mkv": (24, ["-c:v", "libx264", "-g", "48", "-pix_fmt", "yuv420p"]),
+    }
+    for name, (rate, codec) in encodes.items():
+        subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", f"testsrc2=size=320x180:rate={rate}:duration=20",
+                        *codec, str(root / name)], check=True)  # fmt: skip
+    # Two video streams: an MJPEG thumbnail track first, the long-GOP main picture second and default. ffmpeg decodes
+    # the main one; the stride is measured on the first.
+    two = root / "two-streams.mkv"
+    subprocess.run([ffmpeg, "-v", "error", "-i", str(root / "mjpeg.avi"), "-i", str(root / "gop48.mkv"), "-map", "0:v",
+                    "-map", "1:v", "-c", "copy", "-disposition:v:0", "0", "-disposition:v:1", "default", str(two)],
+                   check=True)  # fmt: skip
+    return ffmpeg, {name: str(root / name) for name in [*encodes, "two-streams.mkv"]}
+
+
+def _pixels(planes):
+    """Stands in for text detection: each frame's pixel sum, so a decoded frame can be compared exactly."""
+    return [int(plane.sum()) for plane in planes]
+
+
+def _intra_rows(ffmpeg, path, **kwargs):
+    return frames.decode_rows(path, ffmpeg=ffmpeg, start_s=3.0, length_s=None, keyframes_only=True, fps=None,
+                              count_boxes=_pixels, **kwargs)  # fmt: skip
+
+
 def _rows(clip, **kwargs):
     ffmpeg, path = clip
     return frames.decode_rows(path, ffmpeg=ffmpeg, count_boxes=lambda planes: [0] * len(planes), **kwargs)
@@ -111,4 +145,57 @@ def test_cuda_gives_the_same_timestamps(clip):
         clip, start_s=30.0, length_s=None, keyframes_only=True, fps=None, gpu="NVIDIA", gpu_device_path="cuda:0"
     )
     assert [r[0] for r in gpu] == [r[0] for r in cpu]
+    assert all(abs(a[2] - b[2]) < 3 for a, b in zip(cpu, gpu, strict=True))
+
+
+@pytest.mark.parametrize(("name", "stride"), [("all-i.mkv", 48), ("mjpeg.avi", 50), ("gop48.mkv", None)])
+def test_intra_only_streams_are_told_from_their_packets(intra_clips, name, stride):
+    ffmpeg, clips = intra_clips
+    assert frames.intra_only_stride(clips[name], ffmpeg) == stride
+
+
+@pytest.mark.parametrize(("name", "stride"), [("all-i.mkv", 48), ("mjpeg.avi", 50)])
+def test_a_thinned_pass_decodes_one_frame_per_two_seconds_untouched(intra_clips, name, stride):
+    ffmpeg, clips = intra_clips
+    every = _intra_rows(ffmpeg, clips[name], gpu=None, gpu_device_path=None)
+    thinned = _intra_rows(ffmpeg, clips[name], gpu=None, gpu_device_path=None, keep_every=stride)
+    assert len(every) == 17 * stride // 2  # all of them, 3–20 s: skip_frame nokey skips nothing here
+    assert [row[0] for row in thinned] == [3.0 + 2 * i for i in range(9)]
+    # Packets are dropped, never altered: each kept frame decodes to exactly what it is when every frame is read.
+    by_pts = {row[0]: row for row in every}
+    assert thinned == [by_pts[row[0]] for row in thinned]
+
+
+def test_only_the_measured_stream_is_thinned(intra_clips):
+    # The first video stream is intra-only, but ffmpeg decodes the other one: its keyframes must all be read, or the
+    # pass would find no frames and store "no credits" for the file.
+    ffmpeg, clips = intra_clips
+    path = clips["two-streams.mkv"]
+    assert frames.intra_only_stride(path, ffmpeg) == 50
+    every = _intra_rows(ffmpeg, path, gpu=None, gpu_device_path=None)
+    assert [row[0] for row in every] == [4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0]  # the 2 s GOP's keyframes
+    assert _intra_rows(ffmpeg, path, gpu=None, gpu_device_path=None, keep_every=50) == every
+
+
+@pytest.mark.gpu
+def test_cuda_thins_an_intra_only_pass_the_same_way(intra_clips):
+    if shutil.which("nvidia-smi") is None:
+        pytest.skip("no NVIDIA GPU")
+    ffmpeg, clips = intra_clips
+    cpu = _intra_rows(ffmpeg, clips["all-i.mkv"], gpu=None, gpu_device_path=None, keep_every=48)
+    gpu = _intra_rows(ffmpeg, clips["all-i.mkv"], gpu="NVIDIA", gpu_device_path="cuda:0", keep_every=48)
+    assert [r[0] for r in gpu] == [r[0] for r in cpu] == [3.0 + 2 * i for i in range(9)]
+    assert all(abs(a[2] - b[2]) < 3 for a, b in zip(cpu, gpu, strict=True))
+
+
+@pytest.mark.gpu
+def test_vaapi_thins_an_intra_only_pass_the_same_way(intra_clips):
+    node = vaapi_node()
+    if node is None:
+        pytest.skip("no Intel or AMD render node")
+    device, vendor = node
+    ffmpeg, clips = intra_clips
+    cpu = _intra_rows(ffmpeg, clips["all-i.mkv"], gpu=None, gpu_device_path=None, keep_every=48)
+    gpu = _intra_rows(ffmpeg, clips["all-i.mkv"], gpu=vendor, gpu_device_path=device, keep_every=48)
+    assert [r[0] for r in gpu] == [r[0] for r in cpu] == [3.0 + 2 * i for i in range(9)]
     assert all(abs(a[2] - b[2]) < 3 for a, b in zip(cpu, gpu, strict=True))
