@@ -26,6 +26,7 @@ from media_preview_generator.markers.credits.frames import (
     DecodeTimeoutError,
     FrameDecodeError,
     GpuDecodeError,
+    KeyframeThinning,
 )
 from media_preview_generator.markers.probe import (
     MediaProbe,
@@ -33,6 +34,7 @@ from media_preview_generator.markers.probe import (
     ProbeStalledError,
     ProbeTimeoutError,
     VideoPacket,
+    VideoPackets,
 )
 
 FF = "/usr/lib/jellyfin-ffmpeg/ffmpeg"
@@ -115,11 +117,11 @@ class TestCommand:
                        "-skip_frame", "nokey", "-ss", "12.250", "-copyts", "-i", MOVIE, *TAIL,
                        "-vf", f"{scale},showinfo", "-f", "rawvideo", "-"]  # fmt: skip
 
-    def test_no_stride_is_the_spec_command_exactly(self):
-        # What every file that isn't intra-only gets (the detector passes keep_every=None): the command the 80 and the
-        # 205 were measured with, byte for byte.
+    def test_no_thinning_is_the_spec_command_exactly(self):
+        # What every file that is neither intra-only nor VP9 gets (the detector passes keep_every=None and
+        # drop_non_key=False): the command the 80 and the 205 were measured with, byte for byte.
         cmd, _ = frames.decode_command(FF, MOVIE, start_s=5100.0, length_s=None, keyframes_only=True, fps=None,
-                                       gpu="NVIDIA", gpu_device_path="cuda:1", keep_every=None)  # fmt: skip
+                                       gpu="NVIDIA", gpu_device_path="cuda:1", keep_every=None, drop_non_key=False)  # fmt: skip
         assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2",
                        "-hwaccel", "cuda", "-hwaccel_device", "1", "-hwaccel_output_format", "cuda",
                        "-skip_frame", "nokey", "-ss", "5100.000", "-copyts", "-i", MOVIE, *TAIL,
@@ -143,6 +145,46 @@ class TestCommand:
                        "-bsf:V:0", "noise=drop=mod(n\\,48)", "-skip_frame", "nokey", "-ss", "5100.000", "-copyts",
                        "-i", MOVIE, *TAIL, "-vf", f"{scale},showinfo", "-f", "rawvideo", "-"]  # fmt: skip
         assert cmd[cmd.index("-bsf:V:0") + 1] == r"noise=drop=mod(n\,48)"
+
+    # One -bsf:V:0 per command: a second would replace the first. noise drops a packet whose expression is non-zero,
+    # and both terms are 0 or more, so the sum drops what either term drops.
+    PACKET_DROPS = {
+        (None, False): None,
+        (48, False): r"noise=drop=mod(n\,48)",
+        (None, True): "noise=drop=not(key)",
+        (48, True): r"noise=drop=not(key)+mod(n\,48)",
+    }
+
+    @pytest.mark.parametrize(("keep_every", "drop_non_key"), list(PACKET_DROPS), ids=["plain", "intra-only", "vp9",
+                                                                                       "vp9-intra-only"])  # fmt: skip
+    @pytest.mark.parametrize(
+        ("gpu", "device", "hw_args", "scale"),
+        [
+            (None, None, [], "scale=320:180,format=nv12"),
+            ("NVIDIA", "cuda:0", ["-hwaccel", "cuda", "-hwaccel_device", "0", "-hwaccel_output_format", "cuda"], "scale_cuda=320:180:format=nv12,hwdownload,format=nv12"),
+        ],
+        ids=["cpu", "cuda"],
+    )  # fmt: skip
+    @pytest.mark.parametrize("keyframe_pass", [True, False], ids=["keyframe-pass", "refine"])
+    def test_every_packet_drop_cell_builds_its_own_argv(self, keep_every, drop_non_key, gpu, device, hw_args, scale,
+                                                        keyframe_pass):  # fmt: skip
+        # The whole matrix: VP9 or not × intra-only or not × CPU or GPU × keyframe pass or 1 fps refine. The detector
+        # never passes a drop to a refine decode (test_detector); these refine rows pin that the command itself adds
+        # nothing it wasn't asked for.
+        window = (
+            {"start_s": 5100.0, "length_s": None, "keyframes_only": True, "fps": None}
+            if keyframe_pass
+            else {"start_s": 5680.0, "length_s": 21.0, "keyframes_only": False, "fps": 1}
+        )
+        cmd, _ = frames.decode_command(FF, MOVIE, **window, gpu=gpu, gpu_device_path=device, keep_every=keep_every,
+                                       drop_non_key=drop_non_key)  # fmt: skip
+        bsf = self.PACKET_DROPS[(keep_every, drop_non_key)]
+        seek = ["-skip_frame", "nokey", "-ss", "5100.000"] if keyframe_pass else ["-ss", "5680.000", "-t", "21.000"]
+        video_filter = f"{scale},showinfo" if keyframe_pass else f"fps=1,{scale},showinfo"
+        assert cmd == [FF, "-nostdin", "-hide_banner", "-loglevel", "info", "-threads", "2", *hw_args,
+                       *(["-bsf:V:0", bsf] if bsf else []), *seek, "-copyts", "-i", MOVIE, *TAIL,
+                       "-vf", video_filter, "-f", "rawvideo", "-"]  # fmt: skip
+        assert cmd.count("-bsf:V:0") == (1 if bsf else 0)
 
     @pytest.mark.parametrize(
         ("duration_ms", "episode", "expected"),
@@ -859,26 +901,36 @@ class TestDecodeRows:
             frames.container_start_s("/m/Recording.ts", FF)
         assert type(caught.value) is FrameDecodeError
 
-    def test_the_stride_reaches_the_command(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("keep_every", "drop_non_key", "bsf"),
+        [(50, False, r"noise=drop=mod(n\,50)"), (None, True, "noise=drop=not(key)"),
+         (50, True, r"noise=drop=not(key)+mod(n\,50)")],
+    )  # fmt: skip
+    def test_the_packet_drops_reach_the_command(self, monkeypatch, keep_every, drop_non_key, bsf):
         seen: dict = {}
         monkeypatch.setattr(frames, "run_decode", lambda command, **kwargs: seen.update(command=command) or [])
         frames.decode_rows(MOVIE, ffmpeg=FF, start_s=5100.0, length_s=None, keyframes_only=True, fps=None, gpu=None,
-                           gpu_device_path=None, count_boxes=lambda p: [0] * len(p), start_time_s=0.0, keep_every=50)  # fmt: skip
+                           gpu_device_path=None, count_boxes=lambda p: [0] * len(p), start_time_s=0.0,
+                           keep_every=keep_every, drop_non_key=drop_non_key)  # fmt: skip
         expected, _ = frames.decode_command(FF, MOVIE, start_s=5100.0, length_s=None, keyframes_only=True, fps=None,
-                                            gpu=None, gpu_device_path=None, keep_every=50)  # fmt: skip
-        assert seen["command"] == expected and "noise=drop=mod(n\\,50)" in expected
+                                            gpu=None, gpu_device_path=None, keep_every=keep_every,
+                                            drop_non_key=drop_non_key)  # fmt: skip
+        assert seen["command"] == expected
+        assert expected[expected.index("-bsf:V:0") + 1] == bsf
 
 
 def _packets(count: int, *, fps: float = 24.0, start_s: float = 0.0, keyframe: bool = True) -> list[VideoPacket]:
     return [VideoPacket(round(start_s + i / fps, 6), keyframe) for i in range(count)]
 
 
-class TestIntraOnlyStride:
+class TestKeyframeThinning:
     @pytest.fixture
     def probed(self, monkeypatch):
-        """Every packet probe's arguments; it answers ``probed.packets`` (or raises ``probed.error``)."""
+        """Every packet probe's arguments; it answers ``probed.codec`` and ``probed.packets`` (or raises
+        ``probed.error``)."""
 
         class Probed(list):
+            codec: str | None = "h264"
             packets: list[VideoPacket] = []
             error: Exception | None = None
 
@@ -888,7 +940,7 @@ class TestIntraOnlyStride:
             calls.append({"path": path, **kwargs})
             if calls.error:
                 raise calls.error
-            return tuple(calls.packets)
+            return VideoPackets(calls.codec, tuple(calls.packets))
 
         monkeypatch.setattr(frames, "video_packets", video_packets)
         return calls
@@ -901,7 +953,7 @@ class TestIntraOnlyStride:
         probed.packets = _packets(
             24, fps=fps, start_s=30000.0
         )  # a recording's PCR base changes nothing: only gaps count
-        assert frames.intra_only_stride(MOVIE, FF) == stride
+        assert frames.keyframe_thinning(MOVIE, FF) == KeyframeThinning(stride, False)
         # The ffprobe beside the configured ffmpeg, 24 packets, the probe's short bound: handing ffprobe the ffmpeg
         # binary or its 60 s default would only show up in production.
         assert probed == [{"path": MOVIE, "ffprobe": frames.ffprobe_path_for(FF), "packets": 24, "timeout_s": 30.0}]
@@ -909,21 +961,44 @@ class TestIntraOnlyStride:
     def test_the_millisecond_times_of_a_matroska_file_give_the_same_stride(self, probed):
         # Matroska stores milliseconds: 24 fps reads 0, 42, 83, 125 … ms, gaps of 41 and 42.
         probed.packets = [VideoPacket(round(i / 24, 3), True) for i in range(24)]
-        assert frames.intra_only_stride(MOVIE, FF) == 48
+        assert frames.keyframe_thinning(MOVIE, FF).keep_every == 48
 
     def test_packets_out_of_order_or_repeated_or_without_a_time_still_give_the_frame_interval(self, probed):
         packets = _packets(26)
         probed.packets = [packets[1], packets[0], *packets[2:10], VideoPacket(None, True), *packets[10:22], packets[21]]
         assert len(probed.packets) == 24
-        assert frames.intra_only_stride(MOVIE, FF) == 48
+        assert frames.keyframe_thinning(MOVIE, FF).keep_every == 48
         probed.packets = packets[23::-1]  # listed last to first: every gap between neighbours is negative
-        assert frames.intra_only_stride(MOVIE, FF) == 48
+        assert frames.keyframe_thinning(MOVIE, FF).keep_every == 48
 
     def test_one_jump_in_the_times_leaves_the_frame_interval_alone(self, probed):
         # A timestamp discontinuity (a splice, a dropped run of frames) among the packets: the typical gap is the
         # frame interval, where an average over them would read one frame per half second.
         probed.packets = [*_packets(12), *_packets(12, start_s=10.0)]
-        assert frames.intra_only_stride(MOVIE, FF) == 48
+        assert frames.keyframe_thinning(MOVIE, FF).keep_every == 48
+
+    NORMAL_GOP = [VideoPacket(0.0, True), *_packets(23, start_s=1 / 24, keyframe=False)]
+
+    @pytest.mark.parametrize(
+        ("codec", "drop_non_key"),
+        [("vp9", True), ("h264", False), ("hevc", False), ("av1", False), ("vp8", False), ("mpeg2video", False),
+         ("mpeg4", False), ("vc1", False), ("mjpeg", False), (None, False)],
+    )  # fmt: skip
+    @pytest.mark.parametrize(("intra_only", "keep_every"), [(False, None), (True, 48)], ids=["gop", "intra-only"])
+    def test_only_vp9_drops_its_non_key_packets_and_the_stride_is_decided_apart(self, probed, codec, drop_non_key,
+                                                                               intra_only, keep_every):  # fmt: skip
+        # VP9's decoder never reads -skip_frame (every hwaccel decodes inside it); every other decoder honours it, so
+        # its command stays the spec's (measured per codec in phase3-harness.md). The codec comes from the one ffprobe
+        # that reads the packets: no second process per file.
+        probed.codec = codec
+        probed.packets = _packets(24) if intra_only else self.NORMAL_GOP
+        assert frames.keyframe_thinning(MOVIE, FF) == KeyframeThinning(keep_every, drop_non_key)
+        assert len(probed) == 1
+
+    def test_a_short_vp9_stream_still_drops_its_non_key_packets(self, probed):
+        # Too few packets to call it intra-only says nothing about its decoder.
+        probed.codec, probed.packets = "vp9", self.NORMAL_GOP[:10]
+        assert frames.keyframe_thinning(MOVIE, FF) == KeyframeThinning(None, True)
 
     @pytest.mark.parametrize(
         "packets",
@@ -941,29 +1016,29 @@ class TestIntraOnlyStride:
     )
     def test_anything_else_is_read_the_ordinary_way(self, probed, packets):
         probed.packets = packets
-        assert frames.intra_only_stride(MOVIE, FF) is None
+        assert frames.keyframe_thinning(MOVIE, FF) == KeyframeThinning(None, False)
 
     def test_packets_that_cant_be_read_leave_the_file_read_the_ordinary_way(self, probed, loguru_caplog):
         # The start time probe on the same file already succeeded: failing here too would only lose an answer the file
         # could get the ordinary way.
         probed.error = ProbeError("ffprobe exited 1 for /media/Movie (2020)/Movie.mkv: invalid data")
-        assert frames.intra_only_stride(MOVIE, FF) is None
+        assert frames.keyframe_thinning(MOVIE, FF) == KeyframeThinning(None, False)
         assert "Couldn't read the video packets of Movie.mkv, so it is read the ordinary way" in loguru_caplog.text
 
     def test_a_probe_that_times_out_is_a_decode_timeout(self, probed):
         probed.error = ProbeTimeoutError("ffprobe failed for /media/Movie (2020)/Movie.mkv: TimeoutExpired")
         with pytest.raises(DecodeTimeoutError, match="reading the video packets of Movie.mkv timed out after 7 s"):
-            frames.intra_only_stride(MOVIE, FF, timeout_s=7.0)
+            frames.keyframe_thinning(MOVIE, FF, timeout_s=7.0)
         assert probed[0]["timeout_s"] == 7.0
 
     def test_a_probe_not_started_for_earlier_stuck_ones_is_no_answer_this_time(self, probed):
         # Not this file's fault, and not a timeout of its own: no answer this run, nothing recorded against it.
         probed.error = ProbeStalledError("Not reading x: 2 earlier ffprobes are still stuck reading their files")
         with pytest.raises(FrameDecodeError, match="could not read the video packets of Movie.mkv: Not reading x") as e:
-            frames.intra_only_stride(MOVIE, FF)
+            frames.keyframe_thinning(MOVIE, FF)
         assert type(e.value) is FrameDecodeError
 
     def test_a_cancelled_job_is_not_probed(self, probed):
         with pytest.raises(DecodeCancelledError, match="cancelled before decoding Movie.mkv"):
-            frames.intra_only_stride(MOVIE, FF, cancel_check=lambda: True)
+            frames.keyframe_thinning(MOVIE, FF, cancel_check=lambda: True)
         assert probed == []

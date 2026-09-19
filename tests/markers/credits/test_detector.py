@@ -54,27 +54,27 @@ START_TIME_S = 1.4  # the container's own first timestamp, as ffprobe gives it
 
 
 class _Probes(list):
-    """Every probe call's arguments; the start time probe answers ``START_TIME_S``, the intra-only check ``stride``."""
+    """Every probe call's arguments; the start time probe answers ``START_TIME_S``, the packet probe ``thinning``."""
 
-    stride: int | None = None
-    intra_calls: list[dict]
+    thinning = frames.KeyframeThinning()
+    thinning_calls: list[dict]
 
 
 @pytest.fixture
 def probes(monkeypatch):
     calls = _Probes()
-    calls.intra_calls = []
+    calls.thinning_calls = []
 
     def probe(path, ffmpeg, **kwargs):
         calls.append({"path": path, "ffmpeg": ffmpeg, **kwargs})
         return START_TIME_S
 
-    def intra_only_stride(path, ffmpeg, **kwargs):
-        calls.intra_calls.append({"path": path, "ffmpeg": ffmpeg, **kwargs})
-        return calls.stride
+    def keyframe_thinning(path, ffmpeg, **kwargs):
+        calls.thinning_calls.append({"path": path, "ffmpeg": ffmpeg, **kwargs})
+        return calls.thinning
 
     monkeypatch.setattr(detector.frames, "container_start_s", probe)
-    monkeypatch.setattr(detector.frames, "intra_only_stride", intra_only_stride)
+    monkeypatch.setattr(detector.frames, "keyframe_thinning", keyframe_thinning)
     return calls
 
 
@@ -90,10 +90,10 @@ class TestFindCredits:
         assert call == {"path": MOVIE.canonical_path, "ffmpeg": "/ff", "start_s": 5100.0, "length_s": None,
                         "keyframes_only": True, "fps": None, "gpu": "NVIDIA", "gpu_device_path": "cuda:0",
                         "count_boxes": count, "cancel_check": None, "start_time_s": START_TIME_S,
-                        "keep_every": None}  # fmt: skip
+                        "keep_every": None, "drop_non_key": False}  # fmt: skip
         assert phases == ["Reading the credits…"]
         assert probes == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": None}]
-        assert probes.intra_calls == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": None}]
+        assert probes.thinning_calls == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": None}]
 
     def test_a_roll_to_the_end_of_the_file_is_refined_before_it_and_left_open_ended(self, monkeypatch, probes):
         cancel = lambda: False  # noqa: E731
@@ -113,9 +113,10 @@ class TestFindCredits:
                                     "length_s": 21.0, "keyframes_only": False, "fps": 1, "gpu": None,
                                     "gpu_device_path": None, "count_boxes": count, "cancel_check": cancel,
                                     "start_time_s": START_TIME_S}  # fmt: skip
-        assert (decodes.calls[0]["start_time_s"], decodes.calls[0]["keep_every"]) == (START_TIME_S, None)
+        tail = decodes.calls[0]
+        assert (tail["start_time_s"], tail["keep_every"], tail["drop_non_key"]) == (START_TIME_S, None, False)
         assert probes == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": cancel}]
-        assert probes.intra_calls == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": cancel}]
+        assert probes.thinning_calls == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": cancel}]
         assert phases == ["Reading the credits…", "Refining the credits start…"]
 
     def test_a_scene_after_the_roll_is_read_for_where_the_credits_end(self, monkeypatch, probes):
@@ -186,22 +187,43 @@ class TestFindCredits:
         assert result.start_s == coarse.pts_s - rule_j.REFINE_BEFORE_S
         assert result.end_s == rule_j.coarse_end_s(STORY + ROLL + SCENE, coarse) + rule_j.REFINE_END_AFTER_S
 
-    def test_an_intra_only_stream_has_only_its_keyframe_pass_thinned(self, monkeypatch, probes):
-        # Every frame of an intra-only stream is a keyframe: the keyframe pass decodes one packet in the stride (one per
-        # 2 s, the spacing rule J was measured at). The refine windows already keep one frame a second and stay as they
-        # are: thinned too, a 1 fps window of a 24 fps file would keep one frame in 48 seconds.
-        probes.stride = 48
+    @pytest.mark.parametrize(
+        ("keep_every", "drop_non_key"), [(48, False), (None, True), (48, True)], ids=["intra-only", "vp9", "vp9-intra-only"]
+    )  # fmt: skip
+    @pytest.mark.parametrize(("gpu", "device"), [("NVIDIA", "cuda:0"), (None, None)], ids=["gpu", "cpu"])
+    def test_only_the_keyframe_pass_is_thinned(self, monkeypatch, probes, keep_every, drop_non_key, gpu, device):
+        # An intra-only stream's keyframe pass decodes one packet in the stride (one per 2 s, the spacing rule J was
+        # measured at); a VP9 stream's drops the packets that aren't keyframes, as its decoder ignores -skip_frame. The
+        # refine windows must see every frame and stay as they are: thinned, a 1 fps window of a 24 fps file would keep
+        # one frame in 48 seconds, and a VP9 one only its keyframes.
+        probes.thinning = frames.KeyframeThinning(keep_every, drop_non_key)
         decodes = Decodes(STORY + ROLL + SCENE, FINE, END)
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
         result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
-                                       count_boxes=count, gpu="NVIDIA", gpu_device_path="cuda:0")  # fmt: skip
+                                       count_boxes=count, gpu=gpu, gpu_device_path=device)  # fmt: skip
         assert (result.start_s, result.end_s) == (5690.0, 5899.0)
         assert decodes.calls[0] == {"path": MOVIE.canonical_path, "ffmpeg": "/ff", "start_s": 5100.0, "length_s": None,
-                                    "keyframes_only": True, "fps": None, "gpu": "NVIDIA", "gpu_device_path": "cuda:0",
+                                    "keyframes_only": True, "fps": None, "gpu": gpu, "gpu_device_path": device,
                                     "count_boxes": count, "cancel_check": None, "start_time_s": START_TIME_S,
-                                    "keep_every": 48}  # fmt: skip
-        assert ["keep_every" in call for call in decodes.calls[1:]] == [False, False]
-        assert probes.intra_calls == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": None}]
+                                    "keep_every": keep_every, "drop_non_key": drop_non_key}  # fmt: skip
+        refine = {"path": MOVIE.canonical_path, "ffmpeg": "/ff", "keyframes_only": False, "fps": 1, "gpu": gpu,
+                  "gpu_device_path": device, "count_boxes": count, "cancel_check": None, "start_time_s": START_TIME_S}  # fmt: skip
+        assert decodes.calls[1:] == [{**refine, "start_s": 5680.0, "length_s": 21.0},
+                                     {**refine, "start_s": 5897.0, "length_s": 21.0}]  # fmt: skip
+        assert probes.thinning_calls == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": None}]
+
+    def test_a_keyframe_pass_with_no_frames_is_no_roll_and_nothing_more_is_decoded(self, monkeypatch, probes):
+        # A VP9 file whose container flags no packet in the tail as a keyframe: every packet is dropped before the
+        # decoder and ffmpeg exits 0 with no frames (measured on 8.1.2). On the CPU that is a tail without a roll, like
+        # any file without a keyframe in its tail; on the GPU run_decode calls it a GPU failure, so the worker's CPU
+        # rerun reaches this (TestDetect.test_a_gpu_decode_failure_is_a_codec_error_for_the_workers_cpu_rerun).
+        probes.thinning = frames.KeyframeThinning(None, True)
+        decodes = Decodes([])
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                       count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert result == detector.CreditsTextResult(None, None, (), (), ())
+        assert len(decodes.calls) == 1 and decodes.calls[0]["drop_non_key"] is True
 
     def test_a_cancelled_job_is_not_probed_or_decoded(self, monkeypatch):
         monkeypatch.setattr(detector.frames, "probe_media", lambda path, **kwargs: pytest.fail("probed anyway"))
@@ -535,7 +557,11 @@ def real_model(monkeypatch):
     return ffmpeg
 
 
-def _generated_roll(path, ffmpeg: str, *, scene_s: int, gop: int) -> str:
+H264 = ["-c:v", "libx264", "-preset", "veryfast"]
+VP9 = ["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-row-mt", "1", "-b:v", "1M"]
+
+
+def _generated_roll(path, ffmpeg: str, *, scene_s: int, gop: int, encoder: list[str] = H264) -> str:
     """420 s of text-free gradients, then 120 s of names scrolling up over black (a new line every 3 s, 20 px/s), then
     optionally a scene after the credits (Q3); a keyframe every ``gop`` frames at 24 fps."""
     import subprocess as sp
@@ -556,7 +582,7 @@ def _generated_roll(path, ffmpeg: str, *, scene_s: int, gop: int) -> str:
         ]
     streams = "".join(f"[{i}:v]" for i in range(len(inputs) // 4))
     sp.run([ffmpeg, "-v", "error", *inputs, "-filter_complex", f"{streams}concat=n={len(inputs) // 4}:v=1:a=0[v]", "-map", "[v]",
-            "-c:v", "libx264", "-preset", "veryfast", "-g", str(gop), "-pix_fmt", "yuv420p", str(path)], check=True)  # fmt: skip
+            *encoder, "-g", str(gop), "-pix_fmt", "yuv420p", str(path)], check=True)  # fmt: skip
     return str(path)
 
 
@@ -611,3 +637,21 @@ def test_an_intra_only_encode_answers_like_a_normal_one(tmp_path, real_model):
     assert min(later[0] - earlier[0] for earlier, later in itertools.pairwise(intra.key_rows)) >= 2.0
     assert len(intra.key_rows) <= 600 / frames.INTRA_ONLY_SPACING_S + 1
     assert sum(frames_read[1]) <= 1.1 * sum(frames_read[48])
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(900)
+def test_a_vp9_encode_is_read_from_its_keyframes_like_an_h264_one(tmp_path, real_model):
+    # VP9's decoder ignores -skip_frame: without its non-key packets dropped before the decoder, the keyframe pass would
+    # put all 14400 frames of this tail through text detection (24 a second). With the drop it reads the keyframes
+    # the H.264 encode of the same picture has, and answers the same start and end.
+    answers = {}
+    frames_read: dict[str, list[int]] = {"h264": [], "vp9": []}
+    for name, encoder, suffix in (("h264", H264, "mkv"), ("vp9", VP9, "webm")):
+        clip = _generated_roll(tmp_path / f"{name}.{suffix}", real_model, scene_s=60, gop=48, encoder=encoder)
+        answers[name] = _find_credits_on_the_cpu(clip, real_model, duration_s=600, frames_read=frames_read[name])
+    h264, vp9 = answers["h264"], answers["vp9"]
+    assert h264.start_s is not None and vp9.start_s is not None and abs(vp9.start_s - h264.start_s) <= 2.0
+    assert h264.end_s is not None and vp9.end_s is not None and abs(vp9.end_s - h264.end_s) <= 2.0
+    assert len(vp9.key_rows) <= 600 / 2 + 5  # a keyframe every 2 s (and one at each cut the encoder chose)
+    assert sum(frames_read["vp9"]) <= 1.1 * sum(frames_read["h264"])

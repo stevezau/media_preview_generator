@@ -17,6 +17,7 @@ from media_preview_generator.markers.probe import (
     ProbeStalledError,
     ProbeTimeoutError,
     VideoPacket,
+    VideoPackets,
     ffprobe_path_for,
     kill_and_collect,
     probe_media,
@@ -374,20 +375,23 @@ def test_two_stuck_ffprobes_keep_a_third_from_starting(monkeypatch):
 
 
 class TestVideoPackets:
-    def test_reads_the_first_packets_of_the_main_video_stream_only(self):
+    def test_reads_the_codec_and_first_packets_of_the_main_video_stream_only(self):
         payload = {"packets": [{"pts_time": "0.000000", "flags": "K__"}, {"pts_time": "0.041667", "flags": "___"},
-                               {"pts_time": "N/A", "flags": "K_D"}, {"flags": "K__"}, {"pts_time": "0.125000"}]}  # fmt: skip
+                               {"pts_time": "N/A", "flags": "K_D"}, {"flags": "K__"}, {"pts_time": "0.125000"}],
+                   "programs": [], "streams": [{"codec_name": "vp9"}]}  # fmt: skip
         proc = _ok(payload)
         with patch(RUN, return_value=proc) as run:
-            packets = video_packets("/m/a.mkv", ffprobe="/usr/bin/ffprobe", packets=24)
+            probed = video_packets("/m/a.webm", ffprobe="/usr/bin/ffprobe", packets=24)
         args, kwargs = run.call_args
-        # V, not v: cover art is a single-picture video stream. From the start of the file, headers only.
+        # V, not v: cover art is a single-picture video stream. From the start of the file, headers only; the codec
+        # comes from the same ffprobe, so the keyframe pass costs no second process per file.
         assert args[0] == ["/usr/bin/ffprobe", "-v", "error", "-select_streams", "V:0", "-read_intervals", "%+#24",
-                           "-show_entries", "packet=pts_time,flags", "-of", "json", "/m/a.mkv"]  # fmt: skip
+                           "-show_entries", "packet=pts_time,flags:stream=codec_name", "-of", "json", "/m/a.webm"]  # fmt: skip
         assert kwargs == {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True}
         assert proc.communicate.call_args.kwargs == {"timeout": 60.0}
-        assert packets == (VideoPacket(0.0, True), VideoPacket(0.041667, False), VideoPacket(None, True),
-                           VideoPacket(None, True), VideoPacket(0.125, False))  # fmt: skip
+        assert probed == VideoPackets("vp9", (VideoPacket(0.0, True), VideoPacket(0.041667, False),
+                                              VideoPacket(None, True), VideoPacket(None, True),
+                                              VideoPacket(0.125, False)))  # fmt: skip
 
     def test_the_count_and_the_timeout_are_the_callers(self):
         proc = _ok({"packets": []})
@@ -396,21 +400,33 @@ class TestVideoPackets:
         assert run.call_args.args[0][6] == "%+#7"
         assert proc.communicate.call_args.kwargs == {"timeout": 12.5}
 
-    @pytest.mark.parametrize("stdout", ['{"packets": []}', "{\n\n}"], ids=["empty-list", "no-list"])
-    def test_a_file_without_video_has_no_packets(self, stdout):
+    @pytest.mark.parametrize(
+        "stdout", ['{"packets": [], "streams": []}', '{"packets": []}', "{\n\n}"], ids=["empty-lists", "no-streams", "no-lists"]
+    )  # fmt: skip
+    def test_a_file_without_video_has_no_codec_and_no_packets(self, stdout):
         with patch(RUN, return_value=_proc(stdout=stdout)):
-            assert video_packets("/m/a.m4a", ffprobe="ffprobe", packets=24) == ()
+            assert video_packets("/m/a.m4a", ffprobe="ffprobe", packets=24) == VideoPackets(None, ())
+
+    @pytest.mark.parametrize("value", ["", None, 7, ["vp9"]], ids=["empty", "null", "number", "list"])
+    def test_a_codec_name_that_isnt_a_name_is_none(self, value):
+        payload = {"packets": [{"pts_time": "0.0", "flags": "K__"}], "streams": [{"codec_name": value}]}
+        with patch(RUN, return_value=_ok(payload)):
+            assert video_packets("/m/a.mkv", ffprobe="ffprobe", packets=1) == VideoPackets(
+                None, (VideoPacket(0.0, True),)
+            )
 
     @pytest.mark.parametrize("value", ["inf", "nan", "-inf", "", None, [1]])
     def test_a_time_that_isnt_a_finite_number_is_none(self, value):
         with patch(RUN, return_value=_ok({"packets": [{"pts_time": value, "flags": "K__"}]})):
-            assert video_packets("/m/a.mkv", ffprobe="ffprobe", packets=1) == (VideoPacket(None, True),)
+            assert video_packets("/m/a.mkv", ffprobe="ffprobe", packets=1).packets == (VideoPacket(None, True),)
 
     @pytest.mark.parametrize(
         "stdout",
-        ["not json", "[]", '{"packets": {}}', '{"packets": ["K__"]}', '{"packets": null}'],
-        ids=["invalid", "top-level-list", "packets-dict", "packet-not-a-dict", "packets-null"],
-    )
+        ["not json", "[]", '{"packets": {}}', '{"packets": ["K__"]}', '{"packets": null}',
+         '{"packets": [], "streams": {}}', '{"packets": [], "streams": ["vp9"]}', '{"packets": [], "streams": null}'],
+        ids=["invalid", "top-level-list", "packets-dict", "packet-not-a-dict", "packets-null", "streams-dict",
+             "stream-not-a-dict", "streams-null"],
+    )  # fmt: skip
     def test_anything_but_its_packet_list_is_a_probe_error(self, stdout):
         with patch(RUN, return_value=_proc(stdout=stdout)):
             with pytest.raises(ProbeError) as caught:

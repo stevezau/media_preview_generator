@@ -1,5 +1,5 @@
-"""ffprobe wrapper for duration, chapters, the container's first timestamp and the first video packets' headers, and
-the bounded kill it shares with the fingerprint ffmpeg.
+"""ffprobe wrapper for duration, chapters, the container's first timestamp, the main video stream's codec and first
+packet headers, and the bounded kill it shares with the fingerprint ffmpeg.
 
 A process stuck in an uninterruptible read on a stalled network mount can't die until that read returns, and it holds
 its pipes until then. Collecting it with a plain ``wait()`` or ``communicate()`` -- what ``subprocess.run`` does after
@@ -205,8 +205,22 @@ class VideoPacket:
     keyframe: bool
 
 
-def video_packets(path: str, *, ffprobe: str, packets: int, timeout_s: float = 60.0) -> tuple[VideoPacket, ...]:
-    """The first ``packets`` packet headers of the file's main video stream.
+@dataclass(frozen=True)
+class VideoPackets:
+    """The main video stream's codec and first packet headers.
+
+    Attributes:
+        codec: ffprobe's ``codec_name`` for the stream (``h264``, ``vp9``), None when the file has no video stream or
+            ffprobe names none.
+        packets: The packets in the file's order.
+    """
+
+    codec: str | None
+    packets: tuple[VideoPacket, ...]
+
+
+def video_packets(path: str, *, ffprobe: str, packets: int, timeout_s: float = 60.0) -> VideoPackets:
+    """The codec and the first ``packets`` packet headers of the file's main video stream, from one ffprobe.
 
     Read from the start of the file up to those packets (not the whole file), and nothing is decoded. ``V`` leaves out
     cover art and thumbnails, which are single-picture streams.
@@ -218,15 +232,15 @@ def video_packets(path: str, *, ffprobe: str, packets: int, timeout_s: float = 6
         timeout_s: Hard timeout, as for :func:`probe_media`.
 
     Returns:
-        The packets in the file's order; fewer when the stream is shorter, none when the file has no video.
+        The stream's codec, and its packets: fewer when the stream is shorter, none when the file has no video.
 
     Raises:
         ProbeStalledError: ``MAX_STUCK_FFPROBES`` earlier ffprobes are still stuck; none is started.
         ProbeTimeoutError: ffprobe ran past ``timeout_s``.
-        ProbeError: ffprobe missing, failed or returned something other than its JSON packet list.
+        ProbeError: ffprobe missing, failed or returned something other than its JSON packet and stream lists.
     """
     cmd = [ffprobe, "-v", "error", "-select_streams", "V:0", "-read_intervals", f"%+#{packets}",
-           "-show_entries", "packet=pts_time,flags", "-of", "json", path]  # fmt: skip
+           "-show_entries", "packet=pts_time,flags:stream=codec_name", "-of", "json", path]  # fmt: skip
     stdout = _run_ffprobe(cmd, path, timeout_s)
     try:
         data = json.loads(stdout or "")
@@ -235,7 +249,14 @@ def video_packets(path: str, *, ffprobe: str, packets: int, timeout_s: float = 6
     raw = data.get("packets", []) if isinstance(data, dict) else None
     if not isinstance(raw, list) or not all(isinstance(packet, dict) for packet in raw):
         raise ProbeError(f"ffprobe returned an unexpected packet list for {path}")
-    return tuple(VideoPacket(_seconds(packet.get("pts_time")), "K" in str(packet.get("flags", ""))) for packet in raw)
+    streams = data.get("streams", [])
+    if not isinstance(streams, list) or not all(isinstance(stream, dict) for stream in streams):
+        raise ProbeError(f"ffprobe returned an unexpected stream list for {path}")
+    codec = streams[0].get("codec_name") if streams else None
+    return VideoPackets(
+        codec if isinstance(codec, str) and codec else None,
+        tuple(VideoPacket(_seconds(packet.get("pts_time")), "K" in str(packet.get("flags", ""))) for packet in raw),
+    )
 
 
 def _run_ffprobe(cmd: list[str], path: str, timeout_s: float) -> str:

@@ -290,16 +290,20 @@ selection (NVIDIA / Intel / AMD, same as previews) with CPU fallback; a decode t
 frames is a GPU failure (worker CPU rerun), while a decode that times out (600 s) is "no answer" and isn't decoded
 again for a day unless the file changes or the run is forced (T-R7). **Intra-only streams** (every frame a keyframe:
 ProRes, DNxHD, MJPEG, all-I H.264/HEVC) make `-skip_frame nokey` skip nothing, so the keyframe pass would decode and
-text-check every frame of the tail and time out. `frames.intra_only_stride` reads the first 24 video packet flags
+text-check every frame of the tail and time out. `frames.keyframe_thinning` reads the first 24 video packet flags
 with ffprobe; when all 24 are keyframes and their times give a stride above 1, the keyframe pass adds the input
 bitstream filter `-bsf:V:0 noise=drop=mod(n\,N)` (ffmpeg 7.1+; the image ships 8.x) with N = 2.0 s over the median
 frame interval (48 at 24 fps) — the median file's median keyframe gap in the 80-file set (1.46 s p10, 8.1 s p90),
 the spacing rule J was measured at. Packets are dropped before the decoder, so the decode and text detection are
-thinned but the whole tail is still read from disk. The two 1 fps refine decodes are unchanged. Any other stream, or
-a probe that errors, gets the command above unchanged. A probe that times out (30 s) is "no answer" for a day, like a
-decode timeout (T-R7); one that isn't started because earlier ffprobes are stuck on the mount is "no answer" this run
-only, with nothing recorded against the file. The start-time probe (`frames.container_start_s`) is handled the same
-way.
+thinned but the whole tail is still read from disk. **VP9** (the same ffprobe's `codec_name`) skips nothing either:
+FFmpeg's VP9 decoder never reads `-skip_frame`, and every hwaccel decodes inside it, so its keyframe pass drops the
+packets not flagged as keyframes instead (`noise=drop=not(key)`, or `not(key)+mod(n\,N)` for an all-key VP9); a VP9
+tail with no flagged keyframe gives no frames, a GPU failure whose CPU rerun finds no roll. The two 1 fps refine
+decodes are unchanged. Any other stream (every other decoder honors `-skip_frame`, measured per codec in
+`evidence/eval/phase3-harness.md`), or a probe that errors, gets the command above unchanged. A probe that times out
+(30 s) is "no answer" for a day, like a decode timeout (T-R7); one that isn't started because earlier ffprobes are
+stuck on the mount is "no answer" this run only, with nothing recorded against the file. The start-time probe
+(`frames.container_start_s`) is handled the same way.
 
 **Text detector.** RapidOCR **detection model only** (no recognition) at the frame's own 320 px
 (`det_limit_side_len=320, det_limit_type="max"`) — same hits as default upscaling (19/19, 0 false), far cheaper.

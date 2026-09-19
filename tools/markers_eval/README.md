@@ -188,15 +188,16 @@ on every file again, even when `CREDITS_TEXT_VERSION` stays the same.
 
 That re-run doesn't decode again unless it has to. Every decode the detector asks for (the tail's keyframes, each
 1 fps window) is kept under `$MARKERS_EVAL_CACHE/credits_decodes` (`decode_cache.DecodeCache`) keyed on the file's
-identity, the exact ffmpeg command the app builds (window, decode path, hwaccel arguments, scaler and intra-only
+identity, the exact ffmpeg command the app builds (window, decode path, hwaccel arguments, scaler and keyframe
 thinning), the text detection backend that actually counted the boxes, and a digest of the code that turns a command
 into rows: the detector's sources bar `rule_j.py` and `detector.py` (`credits_text.RULE_FILES`), reported as
 `decode_digest`. The backend is what the helper pool's self-test chose (`webgpu <device>` or `cpu`, reported as
 `text_detection`), not what the run asked for: a GPU run whose self-test fell back to the CPU shares a CPU run's rows,
 and a GPU run's CPU reruns still count on the GPU, so they never serve a CPU run. Rows are kept only when the backend
 was the same before and after the decode. The two per-file probes the detector makes, the container's start and the
-intra-only stride, are kept the same way (a probe that timed out or stalled is not; an ffprobe error on the stride
-probe reads as "not intra-only", and that is kept until its entry is deleted). So a change to rule J re-runs the app's own
+keyframe thinning (intra-only stride, VP9's drop of non-key packets), are kept the same way (a probe that timed out or
+stalled is not; an ffprobe error on the packet probe reads as "no thinning", so a VP9 or intra-only file's keyframe
+pass reads every frame, and that is kept until its entry is deleted). So a change to rule J re-runs the app's own
 `find_credits` against stored rows in seconds and decodes only the windows the new rule asks for that no earlier run
 did (the summary's `decodes` counts both); a change to the decode code, the text detection or its model pin decodes
 everything again. A GPU decode that failed is kept as that failure, so the CPU rerun doesn't retry the GPU each time;

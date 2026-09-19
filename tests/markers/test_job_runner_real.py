@@ -539,10 +539,10 @@ class TestCreditTextOnTheWorkers:
         pool = MagicMock()
         pool.count_boxes.return_value = [0]
         monkeypatch.setattr(frames, "decode_rows", decode_rows)
-        # The detector reads the container's start time and whether the video is intra-only once per file before its
-        # decodes: part of the faked decode.
+        # The detector reads the container's start time and which packets its keyframe pass drops once per file before
+        # its decodes: part of the faked decode.
         monkeypatch.setattr(frames, "container_start_s", lambda *args, **kwargs: 0.0)
-        monkeypatch.setattr(frames, "intra_only_stride", lambda *args, **kwargs: None)
+        monkeypatch.setattr(frames, "keyframe_thinning", lambda *args, **kwargs: frames.KeyframeThinning())
         monkeypatch.setattr(detector, "get_textdet_pool", lambda: pool)
         yield SimpleNamespace(path=str(media), store=store, publisher=publisher, decodes=decodes, effects=effects,
                               pool=pool)  # fmt: skip

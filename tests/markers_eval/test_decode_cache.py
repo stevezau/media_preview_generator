@@ -24,7 +24,7 @@ class _Decoder:
         self.gpu_fails = gpu_fails
         monkeypatch.setattr(frames, "decode_rows", self.decode_rows)
         monkeypatch.setattr(frames, "container_start_s", self.container_start_s)
-        monkeypatch.setattr(frames, "intra_only_stride", lambda *args, **kwargs: None)
+        monkeypatch.setattr(frames, "keyframe_thinning", lambda *args, **kwargs: frames.KeyframeThinning())
 
     def container_start_s(self, path, ffmpeg, *, cancel_check=None, timeout_s=frames.PROBE_TIMEOUT_S):
         self.probes.append(path)
@@ -70,15 +70,16 @@ def test_a_decode_runs_once_per_file_command_and_decode_code(tmp_path, monkeypat
     assert len(decoder.decodes) == 1
     # Every part of the command is in the key: the window, the frame choice, the decode path.
     for changed in ({"start_s": 5101.0}, {"length_s": 21.0}, {"keyframes_only": False, "fps": 1}, {"gpu": None},
-                    {"start_time_s": 30000.0}, {"keep_every": 48}):  # fmt: skip
+                    {"start_time_s": 30000.0}, {"keep_every": 48}, {"drop_non_key": True},
+                    {"keep_every": 48, "drop_non_key": True}):  # fmt: skip
         cache.decode_rows(str(media), **_kwargs(**changed))
-    assert len(decoder.decodes) == 7
+    assert len(decoder.decodes) == 9
     DecodeCache(tmp_path / "cache", digest="code-2", backend=lambda: "gpu cuda:0").decode_rows(str(media), **_kwargs())
-    assert len(decoder.decodes) == 8
+    assert len(decoder.decodes) == 10
     os.utime(media, ns=(1, 1))  # a replaced file is another file
     cache.decode_rows(str(media), **_kwargs())
-    assert len(decoder.decodes) == 9
-    assert (cache.decoded, cache.reused) == (8, 1)
+    assert len(decoder.decodes) == 11
+    assert (cache.decoded, cache.reused) == (10, 1)
 
 
 def test_the_backend_that_counted_the_boxes_is_in_the_key(tmp_path, monkeypatch, media):
@@ -128,37 +129,38 @@ def test_rows_are_kept_only_under_the_one_backend_that_counted_them(tmp_path, mo
     assert len(decoder.decodes) == (2 if kept_under else 3)
 
 
-def test_the_intra_only_probe_runs_once_per_file_and_its_failures_are_not_kept(tmp_path, monkeypatch, media):
+def test_the_packet_probe_runs_once_per_file_and_its_failures_are_not_kept(tmp_path, monkeypatch, media):
     calls = []
+    vp9_intra = frames.KeyframeThinning(48, True)
 
-    def stride(path, ffmpeg, *, cancel_check=None, timeout_s=frames.PROBE_TIMEOUT_S):
+    def thinning(path, ffmpeg, *, cancel_check=None, timeout_s=frames.PROBE_TIMEOUT_S):
         calls.append((path, ffmpeg, cancel_check, timeout_s))
         if len(calls) == 1:
             raise frames.DecodeTimeoutError("reading the video packets timed out")
-        return 48
+        return vp9_intra
 
-    monkeypatch.setattr(frames, "intra_only_stride", stride)
+    monkeypatch.setattr(frames, "keyframe_thinning", thinning)
     cache = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu")
     with pytest.raises(frames.DecodeTimeoutError):
-        cache.intra_only_stride(str(media), "/ff")
+        cache.keyframe_thinning(str(media), "/ff")
     cancelled = object()
-    assert cache.intra_only_stride(str(media), "/ff", cancel_check=cancelled, timeout_s=12.0) == 48
-    assert DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu").intra_only_stride(str(media), "/ff") == 48
+    assert cache.keyframe_thinning(str(media), "/ff", cancel_check=cancelled, timeout_s=12.0) == vp9_intra
+    # Both fields come back from disk, as the type the detector reads them from.
+    stored = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu").keyframe_thinning(str(media), "/ff")
+    assert stored == vp9_intra and isinstance(stored, frames.KeyframeThinning)
     assert calls == [(str(media), "/ff", None, frames.PROBE_TIMEOUT_S), (str(media), "/ff", cancelled, 12.0)]
-    monkeypatch.setattr(frames, "intra_only_stride", lambda *args, **kwargs: None)
+    monkeypatch.setattr(frames, "keyframe_thinning", lambda *args, **kwargs: frames.KeyframeThinning())
     other = tmp_path / "B (2002).mkv"
     other.write_bytes(b"y")
-    assert (
-        DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu").intra_only_stride(str(other), "/ff") is None
-    )
-    monkeypatch.setattr(frames, "intra_only_stride", lambda *args, **kwargs: pytest.fail("probed again"))
-    assert (
-        DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu").intra_only_stride(str(other), "/ff") is None
-    )
+    fresh = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu")
+    assert fresh.keyframe_thinning(str(other), "/ff") == frames.KeyframeThinning()
+    monkeypatch.setattr(frames, "keyframe_thinning", lambda *args, **kwargs: pytest.fail("probed again"))
+    fresh = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu")
+    assert fresh.keyframe_thinning(str(other), "/ff") == frames.KeyframeThinning()
 
 
 def test_the_probes_take_exactly_the_arguments_the_real_ones_take():
-    for name in ("container_start_s", "intra_only_stride"):
+    for name in ("container_start_s", "keyframe_thinning"):
         real = inspect.signature(getattr(frames, name)).parameters
         served = inspect.signature(getattr(DecodeCache, name)).parameters
         assert [p for p in served if p != "self"] == list(real), name
@@ -199,12 +201,13 @@ def test_the_real_decode_gets_every_argument_it_was_asked_for(tmp_path, monkeypa
             start_time_s=12.5,
             timeout_s=90.0,
             keep_every=48,
+            drop_non_key=True,
         ),  # fmt: skip
     )
     (kwargs,) = decoder.decodes
     assert kwargs == {"ffmpeg": "/ff", "start_s": 5680.0, "length_s": 21.0, "keyframes_only": False, "fps": 1,
                       "gpu": "NVIDIA", "gpu_device_path": "cuda:0", "count_boxes": count_boxes, "cancel_check": None,
-                      "timeout_s": 90.0, "start_time_s": 12.5, "keep_every": 48}  # fmt: skip
+                      "timeout_s": 90.0, "start_time_s": 12.5, "keep_every": 48, "drop_non_key": True}  # fmt: skip
 
 
 def test_the_cache_takes_exactly_the_arguments_the_real_decode_takes():
@@ -252,7 +255,7 @@ def test_a_failure_that_is_not_the_gpus_is_never_kept(tmp_path, monkeypatch, med
 
 def test_serving_puts_the_cache_in_front_of_the_frames_module_and_always_restores_it(tmp_path, monkeypatch):
     _Decoder(monkeypatch)
-    names = ("decode_rows", "container_start_s", "intra_only_stride")
+    names = ("decode_rows", "container_start_s", "keyframe_thinning")
     real = [getattr(frames, name) for name in names]
     cache = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "gpu cuda:0")
     with cache.serving():

@@ -84,6 +84,34 @@ def intra_clips(tmp_path_factory):
     return ffmpeg, {name: str(root / name) for name in [*encodes, "two-streams.mkv"]}
 
 
+@pytest.fixture(scope="module")
+def vp9_clips(tmp_path_factory):
+    """The same 20 s of moving picture as VP9: a 2 s GOP in WebM and in Matroska, every frame a keyframe, and a single
+    keyframe at 0 s."""
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("no ffmpeg")
+    encoders = subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
+    if "libvpx-vp9" not in encoders:
+        pytest.skip("no VP9 encoder")
+    root = tmp_path_factory.mktemp("vp9")
+    vp9 = ["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-b:v", "1M"]
+    encodes = {
+        "gop48.webm": [*vp9, "-g", "48", "-keyint_min", "48"],
+        "gop48.mkv": [*vp9, "-g", "48", "-keyint_min", "48"],
+        "all-key.webm": [*vp9, "-g", "1"],
+        "one-key.webm": [*vp9, "-g", "9999", "-keyint_min", "9999"],
+    }
+    for name, codec in encodes.items():
+        subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=20",
+                        *codec, str(root / name)], check=True)  # fmt: skip
+    return ffmpeg, {name: str(root / name) for name in encodes}
+
+
+def _thinned_rows(ffmpeg, path, thinning, **kwargs):
+    return _intra_rows(ffmpeg, path, keep_every=thinning.keep_every, drop_non_key=thinning.drop_non_key, **kwargs)
+
+
 def _pixels(planes):
     """Stands in for text detection: each frame's pixel sum, so a decoded frame can be compared exactly."""
     return [int(plane.sum()) for plane in planes]
@@ -151,7 +179,7 @@ def test_cuda_gives_the_same_timestamps(clip):
 @pytest.mark.parametrize(("name", "stride"), [("all-i.mkv", 48), ("mjpeg.avi", 50), ("gop48.mkv", None)])
 def test_intra_only_streams_are_told_from_their_packets(intra_clips, name, stride):
     ffmpeg, clips = intra_clips
-    assert frames.intra_only_stride(clips[name], ffmpeg) == stride
+    assert frames.keyframe_thinning(clips[name], ffmpeg) == frames.KeyframeThinning(stride, False)
 
 
 @pytest.mark.parametrize(("name", "stride"), [("all-i.mkv", 48), ("mjpeg.avi", 50)])
@@ -171,7 +199,7 @@ def test_only_the_measured_stream_is_thinned(intra_clips):
     # pass would find no frames and store "no credits" for the file.
     ffmpeg, clips = intra_clips
     path = clips["two-streams.mkv"]
-    assert frames.intra_only_stride(path, ffmpeg) == 50
+    assert frames.keyframe_thinning(path, ffmpeg) == frames.KeyframeThinning(50, False)
     every = _intra_rows(ffmpeg, path, gpu=None, gpu_device_path=None)
     assert [row[0] for row in every] == [4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0]  # the 2 s GOP's keyframes
     assert _intra_rows(ffmpeg, path, gpu=None, gpu_device_path=None, keep_every=50) == every
@@ -199,3 +227,76 @@ def test_vaapi_thins_an_intra_only_pass_the_same_way(intra_clips):
     gpu = _intra_rows(ffmpeg, clips["all-i.mkv"], gpu=vendor, gpu_device_path=device, keep_every=48)
     assert [r[0] for r in gpu] == [r[0] for r in cpu] == [3.0 + 2 * i for i in range(9)]
     assert all(abs(a[2] - b[2]) < 3 for a, b in zip(cpu, gpu, strict=True))
+
+
+VP9_KEYFRAMES = [4.0 + 2 * i for i in range(8)]  # a keyframe every 2 s, read from 3 s
+
+
+@pytest.mark.parametrize(
+    ("name", "thinning"),
+    [("gop48.webm", (None, True)), ("gop48.mkv", (None, True)), ("all-key.webm", (48, True)),
+     ("one-key.webm", (None, True))],
+)  # fmt: skip
+def test_a_vp9_stream_is_told_from_the_packet_probe(vp9_clips, name, thinning):
+    ffmpeg, clips = vp9_clips
+    assert frames.keyframe_thinning(clips[name], ffmpeg) == frames.KeyframeThinning(*thinning)
+
+
+@pytest.mark.parametrize("name", ["gop48.webm", "gop48.mkv"])
+def test_a_vp9_keyframe_pass_reads_its_keyframes_untouched(vp9_clips, name):
+    # VP9's decoder ignores -skip_frame nokey: without the drop the pass returns every frame of the window.
+    ffmpeg, clips = vp9_clips
+    every = _intra_rows(ffmpeg, clips[name], gpu=None, gpu_device_path=None)
+    keyframes = _thinned_rows(ffmpeg, clips[name], frames.keyframe_thinning(clips[name], ffmpeg), gpu=None,
+                              gpu_device_path=None)  # fmt: skip
+    assert len(every) == 17 * 24
+    assert [row[0] for row in keyframes] == VP9_KEYFRAMES
+    by_pts = {row[0]: row for row in every}
+    assert keyframes == [by_pts[row[0]] for row in keyframes]
+
+
+def test_an_all_key_vp9_stream_is_thinned_to_one_frame_per_two_seconds(vp9_clips):
+    # Both drops in one -bsf:V:0: every packet is a keyframe, so the stride does the thinning.
+    ffmpeg, clips = vp9_clips
+    rows = _thinned_rows(ffmpeg, clips["all-key.webm"], frames.KeyframeThinning(48, True), gpu=None,
+                         gpu_device_path=None)  # fmt: skip
+    assert [row[0] for row in rows] == [3.0 + 2 * i for i in range(9)]
+
+
+def test_a_vp9_tail_without_a_keyframe_reads_no_frames_on_the_cpu(vp9_clips):
+    # Every packet is dropped and ffmpeg still exits 0: no rows, which rule J reads as a tail without a roll.
+    ffmpeg, clips = vp9_clips
+    assert _thinned_rows(ffmpeg, clips["one-key.webm"], frames.KeyframeThinning(None, True), gpu=None,
+                         gpu_device_path=None) == []  # fmt: skip
+
+
+@pytest.mark.gpu
+def test_cuda_reads_a_vp9_keyframe_pass_the_same_way(vp9_clips):
+    if shutil.which("nvidia-smi") is None:
+        pytest.skip("no NVIDIA GPU")
+    ffmpeg, clips = vp9_clips
+    drop = frames.KeyframeThinning(None, True)
+    cpu = _thinned_rows(ffmpeg, clips["gop48.webm"], drop, gpu=None, gpu_device_path=None)
+    gpu = _thinned_rows(ffmpeg, clips["gop48.webm"], drop, gpu="NVIDIA", gpu_device_path="cuda:0")
+    assert [r[0] for r in gpu] == [r[0] for r in cpu] == VP9_KEYFRAMES
+    assert all(abs(a[2] - b[2]) < 3 for a, b in zip(cpu, gpu, strict=True))
+    # No keyframe in the window: a GPU failure, so the worker reruns the file on the CPU (which reads no roll).
+    with pytest.raises(frames.GpuDecodeError, match="decoded no frames"):
+        _thinned_rows(ffmpeg, clips["one-key.webm"], drop, gpu="NVIDIA", gpu_device_path="cuda:0")
+
+
+@pytest.mark.gpu
+def test_vaapi_reads_a_vp9_keyframe_pass_the_same_way(vp9_clips):
+    # Intel and AMD only: storage has an NVIDIA render node, so this skips there and runs in the lab image.
+    node = vaapi_node()
+    if node is None:
+        pytest.skip("no Intel or AMD render node")
+    device, vendor = node
+    ffmpeg, clips = vp9_clips
+    drop = frames.KeyframeThinning(None, True)
+    cpu = _thinned_rows(ffmpeg, clips["gop48.webm"], drop, gpu=None, gpu_device_path=None)
+    gpu = _thinned_rows(ffmpeg, clips["gop48.webm"], drop, gpu=vendor, gpu_device_path=device)
+    assert [r[0] for r in gpu] == [r[0] for r in cpu] == VP9_KEYFRAMES
+    assert all(abs(a[2] - b[2]) < 3 for a, b in zip(cpu, gpu, strict=True))
+    with pytest.raises(frames.GpuDecodeError, match="decoded no frames"):
+        _thinned_rows(ffmpeg, clips["one-key.webm"], drop, gpu=vendor, gpu_device_path=device)

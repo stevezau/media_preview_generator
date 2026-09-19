@@ -2,7 +2,7 @@
 
 Rule J is pure (rows in, answer out); the hour a ``credits-text`` run takes on storage is the decoding and text
 detection behind the rows. :class:`DecodeCache` keeps each decode's rows keyed on the file's identity, the exact ffmpeg
-command the app builds for it (window, keyframes or 1 fps, hwaccel arguments, scaler and intra-only stride all
+command the app builds for it (window, keyframes or 1 fps, hwaccel arguments, scaler and keyframe thinning all
 included), the text detection backend that counted the boxes, and a digest of the code that turns a command into rows
 (``credits_text.decode_digest``). The app's own ``find_credits`` then runs unchanged against it: a rule change re-reads
 stored rows and decodes only the windows it hasn't read before, while a change to the decode code, the text detection
@@ -25,7 +25,7 @@ from media_preview_generator.markers.credits import frames
 
 
 class DecodeCache:
-    """``decode_rows``, ``container_start_s`` and ``intra_only_stride`` with :mod:`frames`' own signatures, answered
+    """``decode_rows``, ``container_start_s`` and ``keyframe_thinning`` with :mod:`frames`' own signatures, answered
     from disk when this exact decode or probe of this exact file was run before by the same decode code and, for rows,
     the same text detection backend.
 
@@ -57,7 +57,7 @@ class DecodeCache:
         self.reused = 0
         # The real functions, taken before :meth:`serving` puts this cache's own in their place on the module.
         self._container_start_s, self._decode_rows = frames.container_start_s, frames.decode_rows
-        self._intra_only_stride = frames.intra_only_stride
+        self._keyframe_thinning = frames.keyframe_thinning
 
     def _entry(self, path: str, what: str) -> Path:
         st = os.stat(path)
@@ -86,21 +86,21 @@ class DecodeCache:
         self._write(entry, {"start_s": start_s})
         return start_s
 
-    def intra_only_stride(
+    def keyframe_thinning(
         self,
         path: str,
         ffmpeg: str,
         *,
         cancel_check: Callable[[], bool] | None = None,
         timeout_s: float = frames.PROBE_TIMEOUT_S,
-    ) -> int | None:
-        """:func:`frames.intra_only_stride`, once per file identity (a timeout or a stuck ffprobe raises, uncached)."""
-        entry = self._entry(path, f"stride|{ffmpeg}")
+    ) -> frames.KeyframeThinning:
+        """:func:`frames.keyframe_thinning`, once per file identity (a timeout or a stuck ffprobe raises, uncached)."""
+        entry = self._entry(path, f"thinning|{ffmpeg}")
         if entry.exists():
-            return json.loads(entry.read_text())["keep_every"]
-        keep_every = self._intra_only_stride(path, ffmpeg, cancel_check=cancel_check, timeout_s=timeout_s)
-        self._write(entry, {"keep_every": keep_every})
-        return keep_every
+            return frames.KeyframeThinning(**json.loads(entry.read_text()))
+        thinning = self._keyframe_thinning(path, ffmpeg, cancel_check=cancel_check, timeout_s=timeout_s)
+        self._write(entry, thinning._asdict())
+        return thinning
 
     def decode_rows(
         self,
@@ -118,6 +118,7 @@ class DecodeCache:
         timeout_s: float = frames.DECODE_TIMEOUT_S,
         start_time_s: float | None = None,
         keep_every: int | None = None,
+        drop_non_key: bool = False,
     ) -> list[frames.Row]:
         """:func:`frames.decode_rows`, once per file identity, exact command, start time and text detection backend.
 
@@ -132,7 +133,7 @@ class DecodeCache:
         """
         command, _ = frames.decode_command(
             ffmpeg, path, start_s=start_s, length_s=length_s, keyframes_only=keyframes_only, fps=fps, gpu=gpu,
-            gpu_device_path=gpu_device_path, keep_every=keep_every,
+            gpu_device_path=gpu_device_path, keep_every=keep_every, drop_non_key=drop_non_key,
         )  # fmt: skip
         if start_time_s is None:
             start_time_s = self.container_start_s(path, ffmpeg, cancel_check=cancel_check)
@@ -151,7 +152,7 @@ class DecodeCache:
             rows = self._decode_rows(
                 path, ffmpeg=ffmpeg, start_s=start_s, length_s=length_s, keyframes_only=keyframes_only, fps=fps,
                 gpu=gpu, gpu_device_path=gpu_device_path, count_boxes=count_boxes, cancel_check=cancel_check,
-                timeout_s=timeout_s, start_time_s=start_time_s, keep_every=keep_every,
+                timeout_s=timeout_s, start_time_s=start_time_s, keep_every=keep_every, drop_non_key=drop_non_key,
             )  # fmt: skip
         except frames.GpuDecodeError as exc:
             self._keep(path, what, before, {"gpu_error": str(exc)})
@@ -168,7 +169,7 @@ class DecodeCache:
     def serving(self) -> Iterator[None]:
         """Answer the detector's decodes and probes from this cache inside the block (``detector.find_credits`` reads
         these functions off the :mod:`frames` module at call time)."""
-        names = ("decode_rows", "container_start_s", "intra_only_stride")
+        names = ("decode_rows", "container_start_s", "keyframe_thinning")
         saved = {name: getattr(frames, name) for name in names}
         for name in names:
             setattr(frames, name, getattr(self, name))

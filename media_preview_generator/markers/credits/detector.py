@@ -77,7 +77,9 @@ def find_credits(
     An intra-only stream (every frame a keyframe: ProRes, DNxHD, MJPEG, an all-I H.264) has its keyframe pass thinned
     before the decoder to one frame per ``frames.INTRA_ONLY_SPACING_S``, the keyframe spacing rule J was measured at;
     decoded and read for text in full it would run past the decode timeout and never answer (the tail is still read
-    from disk in full). Every other file's decodes are exactly as before.
+    from disk in full). A VP9 stream's decoder ignores ``-skip_frame``, so its keyframe pass drops the packets not
+    flagged as keyframes before the decoder instead (``frames.keyframe_thinning``). Every other file's decodes, and
+    every file's 1 fps refine decodes, are exactly as before.
 
     Args:
         path: The media file (read only).
@@ -105,13 +107,14 @@ def find_credits(
     show = phase or (lambda _text: None)
     show(READING_PHASE)
     start_time_s = frames.container_start_s(path, ffmpeg, cancel_check=cancel_check)
-    keep_every = frames.intra_only_stride(path, ffmpeg, cancel_check=cancel_check)
+    thinning = frames.keyframe_thinning(path, ffmpeg, cancel_check=cancel_check)
     decode = {"ffmpeg": ffmpeg, "gpu": gpu, "gpu_device_path": gpu_device_path, "count_boxes": count_boxes,
               "cancel_check": cancel_check, "start_time_s": start_time_s}  # fmt: skip
     tail_start = frames.tail_start_s(duration_ms, is_episode=is_episode)
     key_rows = frames.decode_rows(
-        path, start_s=tail_start, length_s=None, keyframes_only=True, fps=None, keep_every=keep_every, **decode
-    )
+        path, start_s=tail_start, length_s=None, keyframes_only=True, fps=None, keep_every=thinning.keep_every,
+        drop_non_key=thinning.drop_non_key, **decode,
+    )  # fmt: skip
     coarse = rule_j.coarse_start(key_rows)
     if coarse is None or rule_j.text_all_through(key_rows, coarse):
         return CreditsTextResult(None, None, tuple(key_rows), (), ())
