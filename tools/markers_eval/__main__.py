@@ -86,11 +86,12 @@ def cmd_credits_text(args: argparse.Namespace) -> int:
         sys.exit("No ffmpeg found (pass --ffmpeg)")
     root = Path(args.cache or os.environ.get("MARKERS_EVAL_CACHE") or Path.home() / ".cache/markers_eval")
     baseline = Path(args.plex_baseline) if args.plex_baseline else evidence_dir() / DEFAULT_BASELINE
+    before = json.loads(Path(args.changed_since).read_text())["details"] if args.changed_since else None
     try:
         summary, details, passed = run_credits_text(
             decode=args.decode, gpu_device=args.gpu_device, sets=tuple(args.sets.split(",")), online=args.online,
             cache_root=root, ffmpeg=ffmpeg, ffprobe=ffprobe_path_for(ffmpeg), baseline_path=baseline,
-            sheets_dir=Path(args.sheets) if args.sheets else None,
+            sheets_dir=Path(args.sheets) if args.sheets else None, before=before,
         )  # fmt: skip
     except UnknownSetError as exc:
         # A set that never ran must never look like a set that passed. Only this error: any other one (a corrupt
@@ -134,6 +135,11 @@ def main(argv: list[str] | None = None) -> int:
         "--sheets",
         help="write frame-check sheets (answers >10 s early, >30 s late, epilogue-like, with an end) to this "
         "local-only folder",
+    )
+    text.add_argument(
+        "--changed-since",
+        help="an earlier run's --json file: list every answer that moved more than 10 s against it (and give each "
+        "sheets with --sheets)",
     )
     text.add_argument("--ffmpeg")
     text.add_argument("--cache")

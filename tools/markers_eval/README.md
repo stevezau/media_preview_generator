@@ -183,8 +183,24 @@ takes about 25 minutes. Both are the reported runs: `--decode gpu` is the produc
 through the helper pool), `--decode cpu` proves the CPU worker path gives the same gate. Answers are cached under
 `$MARKERS_EVAL_CACHE/credits_text` per file identity, detector version, decode path and kind, and a digest of the
 detector's source (`credits_text.DETECTOR_SOURCES`: `markers/credits/*.py`, the probe and the decode arguments,
-reported as `detector_digest`). A re-run of unchanged code is free; any change to that code measures every file
-again, even when `CREDITS_TEXT_VERSION` stays the same.
+reported as `detector_digest`). A re-run of unchanged code is free; any change to that code runs the app's detector
+on every file again, even when `CREDITS_TEXT_VERSION` stays the same.
+
+That re-run doesn't decode again unless it has to. Every decode the detector asks for (the tail's keyframes, each
+1 fps window) is kept under `$MARKERS_EVAL_CACHE/credits_decodes` (`decode_cache.DecodeCache`) keyed on the file's
+identity, the exact ffmpeg command the app builds (window, decode path, hwaccel arguments and scaler), the text
+detection that counted the boxes (a GPU run's CPU reruns still count on the GPU, so they never serve a CPU run) and a
+digest of the code that turns a command into rows: the detector's sources bar `rule_j.py` and `detector.py`
+(`credits_text.RULE_FILES`), reported as `decode_digest`. So a change to rule J re-runs the app's own `find_credits`
+against stored rows in seconds and decodes only the windows the new rule asks for that no earlier run did (the
+summary's `decodes` counts both); a change to the decode code, the text detection or its model pin decodes
+everything again. A GPU decode that failed is kept as that failure, so the CPU rerun doesn't retry the GPU each time;
+a one-off failure stays until its entry is deleted. Entries are written whole or not at all.
+
+- `--changed-since OLD.json`: an earlier run's `--json` file. Every set row whose credits text start or end moved by
+  more than 10 s, or gained or lost one, is listed in `changed` (names, both answers against the truth or the file's
+  end, and what High and Medium now publish). With `--sheets`, only those rows get sheets: the rest were looked at
+  on the earlier run. This is Q5's frame check of a rule change: every answer it moves is looked at.
 
 - `--online`: also the 43 verified online cases at the app's three source settings, with credit text added the way the
   pipeline adds it — only to cases whose credits the online answers and Plex's markers leave undecided. The count is
@@ -192,7 +208,9 @@ again, even when `CREDITS_TEXT_VERSION` stays the same.
 - `--sheets DIR`: a 4×2 contact sheet of the 80 s around every credits text answer worth a look (more than 10 s early,
   more than 30 s late, shaped like epilogue cards, or with an end, which gets a second sheet around the end) for Q5's
   adjudication. The summary always lists which files and why, sheets or not. The sheets hold real frames: keep the
-  folder local, never under `/data*`.
+  folder local, never under `/data*`. A sheet is named by the file and the second it tiles around
+  (`<set>-<hash>-<s>.jpg`, `<set>-<hash>-end-<s>.jpg`), and one that exists isn't written again, so a re-run into
+  the same folder adds only sheets for answers that moved.
 - `--decode`, `--gpu-device`, `--sets`, `--ffmpeg`, `--cache`, `--plex-baseline`, `--json` work as in `report`.
 
 ## Text detection bench

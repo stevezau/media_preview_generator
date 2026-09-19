@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,6 +15,7 @@ from media_preview_generator.markers.credits.detector import CREDITS_TEXT_VERSIO
 from media_preview_generator.markers.credits.frames import GpuDecodeError
 from media_preview_generator.markers.probe import Chapter, MediaProbe
 from tools.markers_eval import credits_text as ct
+from tools.markers_eval.decode_cache import DecodeCache
 from tools.markers_eval.plex import PlexMarker
 
 DUR = 6_000_000
@@ -160,6 +162,71 @@ def test_epilogue_like(rows, start, expected):
 def test_sheet_reasons(monkeypatch, text, end, truth, epilogue, reasons):
     monkeypatch.setattr(ct, "epilogue_like", lambda rows, start: epilogue)
     assert ct.sheet_reasons({"text": text, "text_end": end, "truth": truth}, []) == reasons
+
+
+def _row(path, text, end=None, truth=5600.0, medium=None):
+    return {"file": path, "name": path.split("/")[2], "text": text, "text_end": end, "truth": truth, "duration": 6000.0,
+            "medium": medium, "high": None}  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "moved"),
+    [
+        ((5600.0, None), (5610.0, None), []),                 # 10 s exactly: not moved
+        ((5600.0, None), (5589.9, None), ["start"]),
+        ((5600.0, 5800.0), (5600.0, 5811.0), ["end"]),
+        ((5600.0, None), (5580.0, 5800.0), ["start", "end"]),  # an end gained
+        ((5600.0, 5800.0), (5600.0, None), ["end"]),           # an end lost
+        ((None, None), (5600.0, None), ["start"]),             # an answer gained
+        ((5600.0, None), (None, None), ["start"]),             # an answer lost
+        ((None, None), (None, None), []),
+    ],
+)  # fmt: skip
+def test_changed_answers_lists_every_start_or_end_that_moved_more_than_10_s(before, after, moved):
+    path = "/m/A (2001)/A.mkv"
+    changed = ct.changed_answers({"movies40": [_row(path, *after)]}, {"movies40": [_row(path, *before)]})
+    assert [c["moved"] for c in changed] == ([moved] if moved else [])
+    if moved:
+        assert (changed[0]["start_before"], changed[0]["end_before"]) == before
+        assert changed[0]["set"] == "movies40" and changed[0]["detail"]["text"] == after[0]
+
+
+def test_changed_answers_compare_each_set_with_its_own_rows():
+    # A movie in both movies40 and the 205 is compared per set; a set or a file the earlier run lacks is skipped.
+    path, other = "/m/A (2001)/A.mkv", "/m/B (2002)/B.mkv"
+    now = {"movies40": [_row(path, 5500.0)], "movie_credit_truth": [_row(path, 5500.0), _row(other, 5000.0)],
+           "tv40": [_row("/tv/T/S01/T - S01E01.mkv", 1000.0)]}  # fmt: skip
+    before = {"movies40": [_row(path, 5500.0)], "movie_credit_truth": [_row(path, 5600.0)]}
+    changed = ct.changed_answers(now, before)
+    assert [(c["set"], c["detail"]["file"]) for c in changed] == [("movie_credit_truth", path)]
+
+
+def test_a_changed_entry_holds_names_and_distances_never_a_path():
+    path = "/m/A (2001)/A.mkv"
+    (change,) = ct.changed_answers(
+        {"movies40": [_row(path, 5520.0, 5900.0, medium=(5520.0, 5900.0))]}, {"movies40": [_row(path, 5640.0)]}
+    )
+    entry = ct._changed_entry(change)
+    assert entry == {"set": "movies40", "name": "A (2001)", "moved": ["start", "end"],
+                     "start_minus_truth": [40.0, -80.0], "end_minus_duration": [None, -100.0],
+                     "medium_minus_truth": -80.0, "high_minus_truth": None}  # fmt: skip
+    assert "/" not in json.dumps(entry)
+
+
+def test_sheets_are_named_by_time_and_never_written_twice(tmp_path):
+    detail = _row("/m/A (2001)/A.mkv", 5520.4, 5900.0)
+    with patch.object(ct.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
+        ct._write_sheets("/ff", tmp_path, "movies40", detail)
+    outs = [call.args[0][-1] for call in run.call_args_list]
+    assert [Path(out).name.rsplit("-", 1)[1] for out in outs] == ["5520.jpg", "5900.jpg"]
+    assert Path(outs[1]).name.startswith(Path(outs[0]).name.rsplit("-", 1)[0] + "-end")
+    assert [call.args[0][4] for call in run.call_args_list] == ["5480.4", "5860.0"]  # -ss: 40 s before each
+    for out in outs:
+        Path(out).write_bytes(b"jpg")
+    with patch.object(ct.subprocess, "run") as again:
+        ct._write_sheets("/ff", tmp_path, "movies40", detail)
+        ct._write_sheets("/ff", tmp_path, "movies40", {**detail, "text_end": None})
+    assert again.call_count == 0
 
 
 def test_the_pipeline_reads_credit_text_only_for_online_cases_left_undecided():
@@ -514,6 +581,9 @@ def test_the_run_hands_its_decode_path_and_tools_to_every_part(tmp_path, monkeyp
     root, kwargs = run.seen["cache"]
     assert root == tmp_path / "cache"
     assert kwargs.pop("probe").__self__.__class__.__name__ == "FakeProbes"
+    decodes = kwargs.pop("decodes")
+    assert isinstance(decodes, DecodeCache) and decodes.digest == ct.decode_digest()
+    assert decodes.counter == ("gpu cuda:1" if decode == "gpu" else "cpu")  # the boxes' text detection, as _counter
     assert kwargs == {"ffmpeg": "/ff", "decode": decode, "gpu_device": gpu_device, "count_boxes": run.count_boxes}
     assert run.seen["probes"] == (tmp_path / "cache", "/ffp")
     assert run.seen["hdr_ffprobe"] == {"/ffp"}
@@ -571,6 +641,28 @@ def test_rule_j_below_the_spec_fails_a_gate_whose_sets_pass(tmp_path, monkeypatc
     assert all(all(g["checks"].values()) for g in summary["gate"].values())
     assert summary["rule_j_80"]["meets_spec"] is False
     assert passed is False
+
+
+def test_a_run_lists_and_sheets_every_answer_that_moved_since_an_earlier_run(tmp_path, monkeypatch):
+    run = _GateRun(tmp_path, monkeypatch)
+    _, details, _ = run()
+    assert "changed" not in run()[0]
+    before = json.loads(json.dumps(details))
+    before["movie_credit_truth"][1]["text"] = 5480.0  # X2: 5501 now, 21 s later than before
+    before["tv40"][0]["text"] = 4995.0  # 6 s: not a change
+    written = []
+    monkeypatch.setattr(ct, "_write_sheet", lambda ffmpeg, path, around, out: written.append((path, around, out)))
+    # Every row is worth a look on its own run; against an earlier one only the row that moved gets a sheet.
+    monkeypatch.setattr(ct, "sheet_reasons", lambda detail, key_rows: ["late >30 s"])
+    summary, _, _ = ct.run_credits_text(decode="gpu", gpu_device="cuda:0", sets=("80", "205"), online=False,
+                                        cache_root=tmp_path / "cache", ffmpeg="/ff", ffprobe="/ffp",
+                                        baseline_path=tmp_path / "b.json", sheets_dir=tmp_path / "sheets",
+                                        before=before)  # fmt: skip
+    assert [(c["set"], c["name"], c["moved"]) for c in summary["changed"]] == [
+        ("movie_credit_truth", "X2 (2011)", ["start"])
+    ]
+    assert summary["changed"][0]["start_minus_truth"] == [-20.0, 1.0]
+    assert [(path, around) for path, around, _ in written] == [("/m/X2 (2011)/X2.mkv", 5501.0)]
 
 
 def test_only_the_chosen_set_is_run_and_judged(tmp_path, monkeypatch):

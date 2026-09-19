@@ -10,6 +10,7 @@ Summaries hold counts and folder names only; details (``--json``) hold paths and
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -36,6 +37,7 @@ from .cache import ProbeCache
 from .credits import _name, _truth, judge_credits
 from .data import evidence_dir
 from .decisions import ORDER
+from .decode_cache import DecodeCache
 from .online import SETTINGS, case_file, case_key, load_online, online_verdicts, tally
 from .plex import PlexMarker, first_marker, load_baseline, server_candidates
 
@@ -53,7 +55,12 @@ PACKAGE_ROOT = Path(credits_package.__file__).parents[2]
 # The credit text detector and the package code outside it that shapes its answers: the tail decode's arguments and
 # the probe. tests/markers_eval pins that every package module these files import is listed here or changes no answer.
 DETECTOR_SOURCES = ("markers/credits/*.py", "markers/probe.py", "processing/hwaccel.py")
+# The detector files that choose which windows are decoded (so they are in the ffmpeg command, the decode cache's key)
+# but never what a decode of a given command returns: :func:`decode_digest` leaves them out.
+RULE_FILES = ("markers/credits/rule_j.py", "markers/credits/detector.py")
 SHEET_TIMEOUT_S = 300
+# Q5: every answer that moves by more than this against an earlier run is frame-checked.
+CHANGED_BY_S = 10.0
 HDR_PROBE_TIMEOUT_S = 60
 
 
@@ -74,7 +81,9 @@ def detector_files(root: Path = PACKAGE_ROOT, patterns: Sequence[str] = DETECTOR
     return sorted({path for pattern in patterns for path in root.glob(pattern)})
 
 
-def detector_digest(root: Path = PACKAGE_ROOT, patterns: Sequence[str] = DETECTOR_SOURCES) -> str:
+def detector_digest(
+    root: Path = PACKAGE_ROOT, patterns: Sequence[str] = DETECTOR_SOURCES, *, leave_out: Sequence[str] = ()
+) -> str:
     """A digest of the credit text detector's source (:data:`DETECTOR_SOURCES`), part of every cached answer's key.
 
     ``CREDITS_TEXT_VERSION`` only moves when stored answers in users' ``markers.db`` must be asked again, so it stays
@@ -84,14 +93,34 @@ def detector_digest(root: Path = PACKAGE_ROOT, patterns: Sequence[str] = DETECTO
     Args:
         root: The ``media_preview_generator`` package folder.
         patterns: Globs under ``root``.
+        leave_out: Files under ``root`` not to hash (:func:`decode_digest`).
 
     Returns:
         16 hex characters.
     """
     digest = hashlib.sha256()
     for path in detector_files(root, patterns):
-        digest.update(path.relative_to(root).as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
+        relative = path.relative_to(root).as_posix()
+        if relative not in leave_out:
+            digest.update(relative.encode() + b"\0" + path.read_bytes() + b"\0")
     return digest.hexdigest()[:16]
+
+
+def decode_digest(root: Path = PACKAGE_ROOT, patterns: Sequence[str] = DETECTOR_SOURCES) -> str:
+    """A digest of the code that turns an ffmpeg command into rows, part of every cached decode's key
+    (:class:`decode_cache.DecodeCache`): the detector's sources bar :data:`RULE_FILES`.
+
+    The text detection model needs no digest of its own: ``textdet`` refuses a model whose SHA-256 isn't the one it
+    pins, and the pin is in these files.
+
+    Args:
+        root: The ``media_preview_generator`` package folder.
+        patterns: Globs under ``root``.
+
+    Returns:
+        16 hex characters.
+    """
+    return detector_digest(root, patterns, leave_out=RULE_FILES)
 
 
 @dataclass
@@ -435,6 +464,7 @@ class CreditsTextCache:
         gpu_device: str | None,
         count_boxes: Callable[[np.ndarray], list[int]],
         probe: Callable[[str], MediaProbe],
+        decodes: DecodeCache | None = None,
     ) -> None:
         """Create the cache (``root/credits_text``).
 
@@ -445,6 +475,8 @@ class CreditsTextCache:
             gpu_device: The GPU worker's device (ignored on the CPU path).
             count_boxes: Text boxes per chunk of luma planes.
             probe: A file's duration.
+            decodes: Where the detector's decodes are kept across detector changes, or None to decode every time an
+                answer isn't cached.
 
         Raises:
             ValueError: ``root`` is under /data*.
@@ -454,15 +486,17 @@ class CreditsTextCache:
         self._root = root / "credits_text"
         self._root.mkdir(parents=True, exist_ok=True)
         self._ffmpeg, self._decode, self._gpu_device = ffmpeg, decode, gpu_device
-        self._count_boxes, self._probe = count_boxes, probe
+        self._count_boxes, self._probe, self._decodes = count_boxes, probe, decodes
         self.detector_digest = detector_digest()
         self.gpu_fallbacks: set[str] = set()
 
     def _find(self, path: str, *, is_episode: bool, gpu: str | None) -> CreditsTextResult:
-        return find_credits(
-            path, duration_ms=self._probe(path).duration_ms, is_episode=is_episode, ffmpeg=self._ffmpeg,
-            count_boxes=self._count_boxes, gpu=gpu, gpu_device_path=self._gpu_device if gpu else None,
-        )  # fmt: skip
+        serving = self._decodes.serving() if self._decodes is not None else contextlib.nullcontext()
+        with serving:
+            return find_credits(
+                path, duration_ms=self._probe(path).duration_ms, is_episode=is_episode, ffmpeg=self._ffmpeg,
+                count_boxes=self._count_boxes, gpu=gpu, gpu_device_path=self._gpu_device if gpu else None,
+            )  # fmt: skip
 
     def result(self, path: str, *, is_episode: bool) -> dict:
         """The app's own answer for one file.
@@ -537,6 +571,64 @@ def _write_sheet(ffmpeg: str, path: str, around_s: float, out: Path) -> None:
         logger.warning("No frame-check sheet {}: ffmpeg exited {}", out.name, proc.returncode)
 
 
+def changed_answers(
+    details: Mapping[str, list[dict]], before: Mapping[str, list[dict]], *, by_s: float = CHANGED_BY_S
+) -> list[dict]:
+    """Every set row whose credits text start or end moved by more than ``by_s`` against an earlier run (Q5: each is
+    frame-checked), or gained or lost one.
+
+    Args:
+        details: This run's per-set rows (``text``, ``text_end``).
+        before: An earlier run's (its ``--json`` file's ``details``); rows it doesn't have are left out.
+        by_s: How far an answer must move to count.
+
+    Returns:
+        One entry per changed row: the row, ``moved`` (``start`` and/or ``end``) and the earlier run's answers.
+    """
+
+    def moved(old: float | None, new: float | None) -> bool:
+        return (old is None) != (new is None) or (old is not None and abs(new - old) > by_s)
+
+    changed = []
+    for name, rows in details.items():
+        earlier = {f["file"]: f for f in before.get(name, [])}
+        for f in rows:
+            old = earlier.get(f["file"])
+            if old is None:
+                continue
+            what = [label for label, key in (("start", "text"), ("end", "text_end")) if moved(old[key], f[key])]
+            if what:
+                changed.append({"set": name, "detail": f, "moved": what, "start_before": old["text"],
+                                "end_before": old["text_end"]})  # fmt: skip
+    return changed
+
+
+def _minus(value: float | None, base: float) -> float | None:
+    return None if value is None else round(value - base, 1)
+
+
+def _changed_entry(change: dict) -> dict:
+    """One row of the changed-answers table: names and numbers only, never a path."""
+    f = change["detail"]
+    return {"set": change["set"], "name": f["name"], "moved": change["moved"],
+            "start_minus_truth": [_minus(change["start_before"], f["truth"]), _minus(f["text"], f["truth"])],
+            "end_minus_duration": [_minus(change["end_before"], f["duration"]), _minus(f["text_end"], f["duration"])],
+            "medium_minus_truth": _minus(f["medium"][0] if f["medium"] else None, f["truth"]),
+            "high_minus_truth": _minus(f["high"][0] if f["high"] else None, f["truth"])}  # fmt: skip
+
+
+def _write_sheets(ffmpeg: str, sheets_dir: Path, name: str, detail: dict) -> None:
+    """Sheets around one row's start and end, named by the file and the time, so a re-run writes only new ones."""
+    sheets_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{name}-{hashlib.sha1(detail['file'].encode(), usedforsecurity=False).hexdigest()[:10]}"
+    for label, around in (("", detail["text"]), ("-end", detail["text_end"])):
+        if around is None:
+            continue
+        out = sheets_dir / f"{stem}{label}-{around:.0f}.jpg"
+        if not out.exists():
+            _write_sheet(ffmpeg, detail["file"], around, out)
+
+
 def _sheet_entry(name: str, detail: dict, reasons: list[str]) -> dict:
     """One row of the frame-check table: names and numbers only, never a path."""
     end = detail["text_end"]
@@ -556,6 +648,7 @@ def run_credits_text(
     ffprobe: str,
     baseline_path: Path,
     sheets_dir: Path | None,
+    before: Mapping[str, list[dict]] | None = None,
 ) -> tuple[dict, dict, bool]:
     """Every row for the chosen sets (``80`` = movies40 + tv40, ``205`` = the 205-movie set).
 
@@ -569,6 +662,8 @@ def run_credits_text(
         ffprobe: ffprobe binary.
         baseline_path: Plex's markers.
         sheets_dir: Where to write frame-check sheets, or None for none.
+        before: An earlier run's details (``--changed-since``): every answer that moved against it is listed
+            (``changed``), and only those get sheets (the others were looked at on that run).
 
     Returns:
         The summary (counts and names), details (paths; local-only), and whether the gate passed (rule J on the 80
@@ -597,11 +692,16 @@ def run_credits_text(
     passed = True
     count_boxes, close = _counter(decode, gpu_device)
     try:
+        # The text detection _counter counts with: every box of a GPU run, its CPU reruns' included, is the GPU's.
+        counter = f"gpu {gpu_device}" if decode == "gpu" else "cpu"
+        decodes = DecodeCache(cache_root, digest=decode_digest(), counter=counter)
         cache = CreditsTextCache(
-            cache_root, ffmpeg=ffmpeg, decode=decode, gpu_device=gpu_device, count_boxes=count_boxes, probe=probes.probe
-        )
+            cache_root, ffmpeg=ffmpeg, decode=decode, gpu_device=gpu_device, count_boxes=count_boxes,
+            probe=probes.probe, decodes=decodes,
+        )  # fmt: skip
         summary: dict = {"decode": decode, "detector_version": CREDITS_TEXT_VERSION,
-                         "detector_digest": cache.detector_digest, "sets": {}, "gate": {}, "sheets": []}  # fmt: skip
+                         "detector_digest": cache.detector_digest, "decode_digest": decodes.digest, "sets": {},
+                         "gate": {}, "sheets": []}  # fmt: skip
         for group in (g for g in ("80", "205") if g in sets):
             parts = []
             for name in GATE_SETS[group]:
@@ -627,12 +727,9 @@ def run_credits_text(
                     if not reasons:
                         continue
                     summary["sheets"].append(_sheet_entry(name, f, reasons))
-                    if sheets_dir is not None:
-                        sheets_dir.mkdir(parents=True, exist_ok=True)
-                        stem = f"{name}-{hashlib.sha1(f['file'].encode(), usedforsecurity=False).hexdigest()[:10]}"
-                        _write_sheet(ffmpeg, f["file"], f["text"], sheets_dir / f"{stem}.jpg")
-                        if f["text_end"] is not None:
-                            _write_sheet(ffmpeg, f["file"], f["text_end"], sheets_dir / f"{stem}-end.jpg")
+                    # Against an earlier run, only the answers that moved need looking at again (below).
+                    if sheets_dir is not None and before is None:
+                        _write_sheets(ffmpeg, sheets_dir, name, f)
             merged = merge_rows(parts)
             files_in_group = sum(len(r.files) for r in parts)
             checks = gate_checks(merged, files_in_group)
@@ -644,6 +741,13 @@ def run_credits_text(
             passed = passed and rule.meets_spec()
         if online:
             summary["online"], details["online"] = _online(evidence, baseline, cache)
+        if before is not None:
+            changed = changed_answers({name: details[name] for name in kinds_of if name in details}, before)
+            summary["changed"] = [_changed_entry(change) for change in changed]
+            if sheets_dir is not None:
+                for change in changed:
+                    _write_sheets(ffmpeg, sheets_dir, change["set"], change["detail"])
+        summary["decodes"] = {"decoded": decodes.decoded, "reused": decodes.reused}
     finally:
         close()
     summary["gpu_fallbacks"] = sorted(cache.gpu_fallbacks)

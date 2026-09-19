@@ -1,0 +1,225 @@
+"""The credits text decode cache: one decode per file, command and decode code; the app's detector runs through it."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+
+from media_preview_generator.markers.credits import detector, frames
+from media_preview_generator.markers.probe import MediaProbe
+from tools.markers_eval import credits_text as ct
+from tools.markers_eval.decode_cache import DecodeCache
+
+DUR = 6_000_000
+
+
+class _Decoder:
+    """Stands in for ffmpeg + text detection: records every real decode and probe, answers rows per window."""
+
+    def __init__(self, monkeypatch, *, gpu_fails=False):
+        self.decodes, self.probes = [], []
+        self.gpu_fails = gpu_fails
+        monkeypatch.setattr(frames, "decode_rows", self.decode_rows)
+        monkeypatch.setattr(frames, "container_start_s", self.container_start_s)
+
+    def container_start_s(self, path, ffmpeg, *, cancel_check=None, timeout_s=frames.PROBE_TIMEOUT_S):
+        self.probes.append(path)
+        return 0.0
+
+    def decode_rows(self, path, **kwargs):
+        self.decodes.append(kwargs)
+        if self.gpu_fails and kwargs["gpu"] is not None:
+            raise frames.GpuDecodeError("ffmpeg exited 69 on the GPU")
+        if kwargs["keyframes_only"]:  # the tail: story, then a dark roll from 5700 s
+            return [(float(t), 0, 120.0) for t in range(5100, 5700, 4)] + [
+                (float(t), 2, 10.0) for t in range(5700, 5990, 2)
+            ]
+        start = kwargs["start_s"]
+        window = range(int(start), int(start + (kwargs["length_s"] or 21)))
+        return [(float(t), 2, 10.0) if t >= 5700 else (float(t), 0, 120.0) for t in window]
+
+
+def _kwargs(**overrides):
+    kwargs = {"ffmpeg": "/ff", "start_s": 5100.0, "length_s": None, "keyframes_only": True, "fps": None, "gpu": "NVIDIA",
+              "gpu_device_path": "cuda:0", "count_boxes": lambda p: [0] * len(p), "start_time_s": 0.0}  # fmt: skip
+    return {**kwargs, **overrides}
+
+
+@pytest.fixture
+def media(tmp_path):
+    path = tmp_path / "A (2001).mkv"
+    path.write_bytes(b"x")
+    return path
+
+
+def test_a_decode_runs_once_per_file_command_and_decode_code(tmp_path, monkeypatch, media):
+    decoder = _Decoder(monkeypatch)
+    cache = DecodeCache(tmp_path / "cache", digest="code-1", counter="gpu cuda:0")
+    first = cache.decode_rows(str(media), **_kwargs())
+    assert cache.decode_rows(str(media), **_kwargs()) == first
+    assert (
+        DecodeCache(tmp_path / "cache", digest="code-1", counter="gpu cuda:0").decode_rows(str(media), **_kwargs())
+        == first
+    )
+    assert len(decoder.decodes) == 1
+    # Every part of the command is in the key: the window, the frame choice, the decode path.
+    for changed in ({"start_s": 5101.0}, {"length_s": 21.0}, {"keyframes_only": False, "fps": 1}, {"gpu": None},
+                    {"start_time_s": 30000.0}):  # fmt: skip
+        cache.decode_rows(str(media), **_kwargs(**changed))
+    assert len(decoder.decodes) == 6
+    DecodeCache(tmp_path / "cache", digest="code-2", counter="gpu cuda:0").decode_rows(str(media), **_kwargs())
+    assert len(decoder.decodes) == 7
+    os.utime(media, ns=(1, 1))  # a replaced file is another file
+    cache.decode_rows(str(media), **_kwargs())
+    assert len(decoder.decodes) == 8
+    assert (cache.decoded, cache.reused) == (7, 1)
+
+
+def test_the_text_detection_that_counted_the_boxes_is_in_the_key(tmp_path, monkeypatch, media):
+    # A GPU run's CPU rerun of a file the card can't decode builds exactly the CPU run's command, but counts its boxes
+    # on the GPU helper: the CPU run must not be handed those rows, nor the GPU run the CPU's.
+    decoder = _Decoder(monkeypatch)
+    cpu_command = _kwargs(gpu=None, gpu_device_path=None)
+    DecodeCache(tmp_path / "cache", digest="d", counter="gpu cuda:0").decode_rows(str(media), **cpu_command)
+    DecodeCache(tmp_path / "cache", digest="d", counter="cpu").decode_rows(str(media), **cpu_command)
+    assert len(decoder.decodes) == 2
+    DecodeCache(tmp_path / "cache", digest="d", counter="cpu").decode_rows(str(media), **cpu_command)
+    assert len(decoder.decodes) == 2
+
+
+def test_a_write_cut_short_leaves_no_entry_behind(tmp_path, monkeypatch, media):
+    # A run killed while writing must not leave half a JSON file that every later run fails to read.
+    from tools.markers_eval import decode_cache
+
+    decoder = _Decoder(monkeypatch)
+    real_dump = decode_cache.json.dump
+
+    def dies(data, handle):
+        handle.write('{"rows": [[5100.0, 0')
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(decode_cache.json, "dump", dies)
+    with pytest.raises(KeyboardInterrupt):
+        DecodeCache(tmp_path / "cache", digest="d", counter="cpu").decode_rows(str(media), **_kwargs())
+    assert list((tmp_path / "cache/credits_decodes").glob("*.json")) == []
+    monkeypatch.setattr(decode_cache.json, "dump", real_dump)
+    rows = DecodeCache(tmp_path / "cache", digest="d", counter="cpu").decode_rows(str(media), **_kwargs())
+    assert rows == decoder.decode_rows(str(media), **_kwargs()) and len(decoder.decodes) == 3
+
+
+def test_the_real_decode_gets_every_argument_it_was_asked_for(tmp_path, monkeypatch, media):
+    decoder = _Decoder(monkeypatch)
+    count_boxes = object()
+    DecodeCache(tmp_path / "cache", digest="d", counter="gpu cuda:0").decode_rows(
+        str(media),
+        **_kwargs(
+            start_s=5680.0,
+            length_s=21.0,
+            keyframes_only=False,
+            fps=1,
+            count_boxes=count_boxes,
+            start_time_s=12.5,
+            timeout_s=90.0,
+        ),  # fmt: skip
+    )
+    (kwargs,) = decoder.decodes
+    assert kwargs == {"ffmpeg": "/ff", "start_s": 5680.0, "length_s": 21.0, "keyframes_only": False, "fps": 1,
+                      "gpu": "NVIDIA", "gpu_device_path": "cuda:0", "count_boxes": count_boxes, "cancel_check": None,
+                      "timeout_s": 90.0, "start_time_s": 12.5}  # fmt: skip
+
+
+def test_the_start_time_is_probed_once_per_file_when_not_given(tmp_path, monkeypatch, media):
+    decoder = _Decoder(monkeypatch)
+    cache = DecodeCache(tmp_path / "cache", digest="d", counter="gpu cuda:0")
+    cache.decode_rows(str(media), **_kwargs(start_time_s=None))
+    cache.decode_rows(str(media), **_kwargs(start_time_s=None))
+    assert decoder.probes == [str(media)]
+    assert decoder.decodes[0]["start_time_s"] == 0.0
+
+
+def test_a_gpu_decode_failure_is_kept_and_raised_again_without_decoding(tmp_path, monkeypatch, media):
+    decoder = _Decoder(monkeypatch, gpu_fails=True)
+    cache = DecodeCache(tmp_path / "cache", digest="d", counter="gpu cuda:0")
+    for _ in range(2):
+        with pytest.raises(frames.GpuDecodeError, match="exited 69"):
+            cache.decode_rows(str(media), **_kwargs())
+    assert len(decoder.decodes) == 1
+
+
+def test_a_failure_that_is_not_the_gpus_is_never_kept(tmp_path, monkeypatch, media):
+    # A timeout or a cancel is "no answer this time": the next run must decode again.
+    calls = []
+
+    def times_out(path, **kwargs):
+        calls.append(kwargs)
+        raise frames.DecodeTimeoutError("decoding timed out after 600 s")
+
+    monkeypatch.setattr(frames, "decode_rows", times_out)
+    cache = DecodeCache(tmp_path / "cache", digest="d", counter="gpu cuda:0")
+    for _ in range(2):
+        with pytest.raises(frames.DecodeTimeoutError):
+            cache.decode_rows(str(media), **_kwargs())
+    assert len(calls) == 2
+
+
+def test_serving_puts_the_cache_in_front_of_the_frames_module_and_always_restores_it(tmp_path, monkeypatch):
+    _Decoder(monkeypatch)
+    real = frames.decode_rows, frames.container_start_s
+    cache = DecodeCache(tmp_path / "cache", digest="d", counter="gpu cuda:0")
+    with cache.serving():
+        assert (frames.decode_rows, frames.container_start_s) == (cache.decode_rows, cache.container_start_s)
+    assert (frames.decode_rows, frames.container_start_s) == real
+    with pytest.raises(RuntimeError), cache.serving():
+        raise RuntimeError("the detector failed")
+    assert (frames.decode_rows, frames.container_start_s) == real
+
+
+def test_the_cache_refuses_data_folders():
+    with pytest.raises(ValueError, match="/data"):
+        DecodeCache(Path("/data/cache"), digest="d", counter="cpu")
+
+
+def test_a_rule_change_reruns_the_apps_detector_on_stored_decodes(tmp_path, monkeypatch, media):
+    # The point of the cache: the answer cache misses on a new detector digest, the app's own find_credits runs again,
+    # and every window it asks for is one it asked for before.
+    decoder = _Decoder(monkeypatch)
+    decodes = DecodeCache(tmp_path / "cache", digest="decode-code", counter="gpu cuda:0")
+
+    def cache():
+        return ct.CreditsTextCache(tmp_path / "cache", ffmpeg="/ff", decode="gpu", gpu_device="cuda:0",
+                                   count_boxes=lambda p: [0] * len(p), probe=lambda p: MediaProbe(DUR, ()),
+                                   decodes=decodes)  # fmt: skip
+
+    monkeypatch.setattr(ct, "detector_digest", lambda: "rule-1")
+    first = cache().result(str(media), is_episode=False)
+    windows = len(decoder.decodes)
+    assert first["start_s"] == 5700.0 and windows == 2  # the tail, then the refine window
+    monkeypatch.setattr(ct, "detector_digest", lambda: "rule-2")
+    assert cache().result(str(media), is_episode=False) == first
+    assert len(decoder.decodes) == windows
+    assert frames.decode_rows == decoder.decode_rows  # served only while the detector ran
+    # A rule that asks for another window decodes just that one.
+    monkeypatch.setattr(detector.rule_j, "REFINE_BEFORE_S", 30.0)
+    monkeypatch.setattr(ct, "detector_digest", lambda: "rule-3")
+    cache().result(str(media), is_episode=False)
+    assert len(decoder.decodes) == windows + 1
+    assert decoder.decodes[-1]["start_s"] == 5670.0
+
+
+def test_the_decode_digest_ignores_the_rule_and_follows_everything_else(tmp_path):
+    patterns = ("markers/credits/*.py", "processing/hwaccel.py")
+    for path in ("markers/credits/rule_j.py", "markers/credits/detector.py", "markers/credits/frames.py",
+                 "processing/hwaccel.py"):  # fmt: skip
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text("A = 1\n")
+    before = ct.decode_digest(tmp_path, patterns)
+    for rule_file in ct.RULE_FILES:
+        (tmp_path / rule_file).write_text("A = 2\n")
+    assert ct.decode_digest(tmp_path, patterns) == before
+    assert ct.detector_digest(tmp_path, patterns) != ct.detector_digest(tmp_path, patterns, leave_out=ct.RULE_FILES)
+    for decode_file in ("markers/credits/frames.py", "processing/hwaccel.py"):
+        (tmp_path / decode_file).write_text("A = 3\n")
+        assert ct.decode_digest(tmp_path, patterns) != before
+        before = ct.decode_digest(tmp_path, patterns)
