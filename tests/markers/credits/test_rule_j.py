@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import itertools
 import json
 import re
 from collections import Counter
@@ -596,19 +597,33 @@ class TestTextAllThrough:
     unless at least 30 s of the tail precede the run and fewer than 80 % of those keyframes carry any text."""
 
     @pytest.mark.parametrize(
-        "name",
-        [f"Synth Audio (2022) - S0{s}E0{e}" for s, e in ((1, 1), (1, 2), (1, 3), (1, 4), (2, 1), (2, 2))],
-    )
-    def test_a_test_pattern_with_a_running_timecode_gets_no_answer(self, name):
-        # The app's own GPU decode of the lab file: every frame carries the timecode, and the 1-7 % of frames that read
-        # 3+ boxes make runs anywhere. Version 1 answered all six (the lab published S01E02's 244.6 s).
+        ("name", "version_1_start_s"),
+        [("Synth Audio (2022) - S01E02", 178.007), ("Synth Audio (2022) - S01E04", 106.007),
+         ("Synth Audio (2022) - S02E01", 260.007)],
+    )  # fmt: skip
+    def test_a_test_pattern_with_a_running_timecode_gets_no_answer(self, name, version_1_start_s):
+        # The app's own GPU decode of the lab file, one keyframe per 2 s: every keyframe carries the timecode, and the
+        # few that read 3+ boxes make a run on these three episodes. Version 1 answered each; only the guard stops it.
         item = _synth()[name]
         key, fine = _rows(item["key"]), _rows(item["fine"])
         coarse = rule_j.coarse_start(key)
-        assert coarse is not None and item["version_1_start_s"] is not None
-        assert sum(row[1] >= 1 for row in key) >= 0.99 * len(key)
+        assert coarse is not None and item["version_1_start_s"] == version_1_start_s
+        assert min(later[0] - earlier[0] for earlier, later in itertools.pairwise(key)) >= 1.0  # keyframes only
+        assert all(row[1] >= 1 for row in key)
+        assert rule_j.refine_start(key, coarse, fine) == version_1_start_s  # what version 2 answers without the guard
         assert rule_j.text_all_through(key, coarse)
         assert rule_j.credits_start(key, fine) is None
+
+    @pytest.mark.parametrize(
+        "name", ["Synth Audio (2022) - S01E01", "Synth Audio (2022) - S01E03", "Synth Audio (2022) - S02E02"]
+    )
+    def test_the_other_timecode_episodes_have_no_run_on_their_keyframes(self, name):
+        # Read from every frame (the VP9 decode before its non-key packets were dropped), these made runs too; on
+        # their keyframes the 3-box frames are too few and too far apart to join into one.
+        item = _synth()[name]
+        key = _rows(item["key"])
+        assert rule_j.coarse_start(key) is None and item["version_1_start_s"] is None
+        assert all(row[1] >= 1 for row in key) and len(key) <= 300 / 2 + 2
 
     @pytest.mark.parametrize("name", ["Synth Credits (2024)", "Synth Credits Open (2025)"])
     def test_a_synthetic_roll_after_story_keeps_its_answer(self, name):
