@@ -24,8 +24,8 @@ if TYPE_CHECKING:
 # Stored with every answer. Bump it when rule J, the tail lengths, the frame format or the model change: stored answers
 # of another version are asked again, even for decided types (spec §14 2026-09-14 "Local detectors").
 # 2: the anchor never steps over a gap the 24 s join can't bridge, the end steps back over scene text glued onto the
-# roll, and text on screen all through the tail gives no answer (spec §13 items 13 and 14, phase3-harness.md "Rule J
-# version 2").
+# roll, text on screen all through the tail gives no answer, and a roll the tail opens on is read from 120 s before the
+# tail (spec §13 items 13 and 14, phase3-harness.md "Rule J version 2").
 CREDITS_TEXT_VERSION = 2
 READING_PHASE = "Reading the credits…"
 REFINING_PHASE = "Refining the credits start…"
@@ -78,8 +78,14 @@ def find_credits(
     before the decoder to one frame per ``frames.INTRA_ONLY_SPACING_S``, the keyframe spacing rule J was measured at;
     decoded and read for text in full it would run past the decode timeout and never answer (the tail is still read
     from disk in full). A VP9 stream's decoder ignores ``-skip_frame``, so its keyframe pass drops the packets not
-    flagged as keyframes before the decoder instead (``frames.keyframe_thinning``). Every other file's decodes, and
-    every file's 1 fps refine decodes, are exactly as before.
+    flagged as keyframes before the decoder instead (``frames.keyframe_thinning``). Nothing else is thinned: other
+    files' keyframe passes and every file's 1 fps refine decodes are decoded in full.
+
+    A roll can begin before the tail does. When the run starts under 30 s into the tail and nothing lit comes before it
+    (``rule_j.opens_on_the_run``), the keyframes of the ``rule_j.READ_BEFORE_TAIL_S`` before the tail are read through
+    the same keyframe pass, and rule J runs on both when the run continues into them (``rule_j.joined_before``). That
+    window can give no keyframe at all; on the GPU no frames is a GPU failure, and the worker's CPU rerun then gives
+    the same no answer.
 
     Args:
         path: The media file (read only).
@@ -110,15 +116,25 @@ def find_credits(
     thinning = frames.keyframe_thinning(path, ffmpeg, cancel_check=cancel_check)
     decode = {"ffmpeg": ffmpeg, "gpu": gpu, "gpu_device_path": gpu_device_path, "count_boxes": count_boxes,
               "cancel_check": cancel_check, "start_time_s": start_time_s}  # fmt: skip
+
+    def keyframes(start_s: float, length_s: float | None) -> list[rule_j.Row]:
+        return frames.decode_rows(
+            path, start_s=start_s, length_s=length_s, keyframes_only=True, fps=None, keep_every=thinning.keep_every,
+            drop_non_key=thinning.drop_non_key, **decode,
+        )  # fmt: skip
+
     tail_start = frames.tail_start_s(duration_ms, is_episode=is_episode)
-    key_rows = frames.decode_rows(
-        path, start_s=tail_start, length_s=None, keyframes_only=True, fps=None, keep_every=thinning.keep_every,
-        drop_non_key=thinning.drop_non_key, **decode,
-    )  # fmt: skip
+    key_rows = keyframes(tail_start, None)
     coarse = rule_j.coarse_start(key_rows)
+    if coarse is not None and tail_start > 0 and rule_j.opens_on_the_run(key_rows, coarse):
+        before_start = max(0.0, tail_start - rule_j.READ_BEFORE_TAIL_S)
+        joined = rule_j.joined_before(keyframes(before_start, tail_start - before_start), key_rows)
+        if joined is not None:
+            key_rows, coarse = joined, rule_j.coarse_start(joined)
     if coarse is None or rule_j.text_all_through(key_rows, coarse):
         return CreditsTextResult(None, None, tuple(key_rows), (), ())
     show(REFINING_PHASE)
+    # max() can't bind while text_all_through holds an answered run 30 s past its first row; it keeps -ss non-negative.
     fine_start = max(0.0, coarse.pts_s - rule_j.REFINE_BEFORE_S)
     fine_length = coarse.pts_s + rule_j.REFINE_AFTER_S - fine_start
     fine_rows = frames.decode_rows(
@@ -133,7 +149,7 @@ def find_credits(
     # From where the end's walk starts to where the latest credit keyframe's walk may reach: credits_end decides
     # whether there is an end from the latest one, then where it is from end_keyframe_s (the same keyframe unless the
     # end steps back over scene text; then at most 24 s earlier, the join's reach).
-    end_start = max(0.0, rule_j.end_keyframe_s(key_rows, coarse) - rule_j.REFINE_END_BEFORE_S)
+    end_start = max(0.0, rule_j.end_keyframe_s(key_rows, coarse) - rule_j.REFINE_END_BEFORE_S)  # as fine_start
     end_length = last_keyframe + rule_j.REFINE_END_AFTER_S - end_start
     end_rows = frames.decode_rows(path, start_s=end_start, length_s=end_length, keyframes_only=False, fps=1, **decode)
     end_s = rule_j.credits_end(key_rows, coarse, end_rows, duration_s)

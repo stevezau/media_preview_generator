@@ -14,7 +14,8 @@ the items that differ).
 Version 2 (spec §13 items 13 and 14, ``evidence/eval/phase3-harness.md``) adds three things the prototype never had:
 the anchor never steps over a gap longer than the 24 s join (:func:`coarse_start`), the end steps back over scene text
 the join glued on after the roll (:func:`end_keyframe_s`), and text on screen all through the tail is not a roll
-(:func:`text_all_through`). The 80 files move to 64 / 1 / 7 / 4.
+(:func:`text_all_through`, with a roll the tail opens on judged together with the keyframes before the tail,
+:func:`opens_on_the_run`). The 80 files move to 64 / 1 / 7 / 4.
 ``coarse_end_s`` reads the run's latest credit frame in presentation order for the same reason, so Q3's end means the
 end of the roll rather than whichever of its keyframes ffmpeg emitted last, and ``fade_back`` never steps onto a later
 row. Everywhere else rows stay in ffmpeg's output order, the anchor's distance included: the measured keyframe rows
@@ -44,15 +45,20 @@ REFINE_END_BEFORE_S = 1.0
 REFINE_END_AFTER_S = 20.0
 # A roll follows story. Text on screen all through the tail makes credit runs wherever its frames read enough boxes: a
 # dark frame with any, or a lit one that reads 3 now and then (the lab's burnt-in timecode). So there is no answer
-# unless the tail holds at least this much before the run (84 s or more on every file of the harness's sets). The
-# cost: a roll longer than the tail less this, 420 s of an episode's 450 s or 870 s of a movie's 900 s, gets no answer
-# (spec §5.4 "Frames": measured episode rolls p95 267 s, movie rolls at most 852 s) ...
+# unless the rows hold at least this much before the run (84 s or more on every file of the harness's sets) ...
 STORY_BEFORE_RUN_S = 30.0
 # ... and fewer than this share of those keyframes carry any text. The harness's 245 files reach 0.54 (a stand-up
-# special); the lab's Synth Audio test pattern with its running timecode, 0.99 to 1.00. The cost, unmeasured on real
-# files as no set file has one: a channel logo or ticker read as a box on this share of the story loses a real roll's
-# answer too.
+# special); the lab's Synth Audio test pattern with its running timecode, 1.00. The cost: a channel logo or ticker
+# boxed on this share of the story loses a real roll's answer too. On 51 broadcast recordings with channel logos (final
+# review) that was one answer (Live Rescue S02E01 on the GPU decode, 0.895), against five wrong ones this share and
+# the 30 s above took away over both decode paths.
 TEXT_ALL_THROUGH_SHARE = 0.8
+# When the run is under STORY_BEFORE_RUN_S into the tail and only dark rows (luma under 30) come before it there, the
+# roll may have begun before the tail (the lab's Heeramandi episodes: 462 s rolls against a 450 s tail), so the
+# keyframes of this much before the tail are read too, and the run is judged on both when it continues into them
+# (:func:`opens_on_the_run`, :func:`joined_before`). With 30 s of rows still wanted before the run, a roll that began up
+# to 90 s before the tail is answered.
+READ_BEFORE_TAIL_S = 120.0
 
 
 @dataclass(frozen=True)
@@ -206,7 +212,8 @@ def text_all_through(rows: Sequence[Row], coarse: Coarse) -> bool:
     ``TEXT_ALL_THROUGH_SHARE`` of those keyframes carry any text box at all, lit or dark.
 
     It can't tell that text from a logo or ticker on screen over real story either: such a file loses its answer when
-    text detection boxes the logo on that share of the keyframes (no file of the harness's sets comes near). And it
+    text detection boxes the logo on that share of the keyframes (no file of the harness's sets comes near; one of 51
+    broadcast recordings did, ``evidence/eval/phase3-harness.md``). And it
     doesn't catch text that comes and goes: subtitles on a dark scene after text-free story are credit frames to rule
     J, and a run of them joined to the roll still starts early (``test_rule_j.TestTextAllThrough``).
 
@@ -221,6 +228,57 @@ def text_all_through(rows: Sequence[Row], coarse: Coarse) -> bool:
         return True
     before = [row for row in rows if row[0] < coarse.pts_s]
     return sum(1 for row in before if row[1] >= 1) >= TEXT_ALL_THROUGH_SHARE * len(before)
+
+
+def opens_on_the_run(rows: Sequence[Row], coarse: Coarse, params: RuleParams = RULE_J) -> bool:
+    """Whether a run too close to the first row for :func:`text_all_through` may have begun before the rows do.
+
+    True when the run starts less than ``STORY_BEFORE_RUN_S`` after the first row and every row before its first credit
+    frame is dark (luma under ``params.dark``, as the dark bridge counts it: a roll's own dark ground reads 18 on the
+    lab's Heeramandi episodes). The detector then reads ``READ_BEFORE_TAIL_S`` more, and keeps it only when the run
+    continues into it (:func:`joined_before`). A run after a lit frame is not cut off by the tail -- story came first --
+    so nothing more is read and it stays without an answer (a story caption 28 s into a tail, followed by 400 s of
+    story, is one such run).
+
+    Args:
+        rows: Keyframe rows of the tail, in decode order.
+        coarse: The run's anchored start.
+        params: Rule thresholds.
+
+    Returns:
+        Whether the rows before the tail are worth reading.
+    """
+    if coarse.pts_s - min(row[0] for row in rows) >= STORY_BEFORE_RUN_S:
+        return False
+    first = credit_runs(rows, params)[-1][0]
+    return all(row[2] < params.dark for row in rows[:first])
+
+
+def joined_before(before: Sequence[Row], rows: Sequence[Row], params: RuleParams = RULE_J) -> list[Row] | None:
+    """The rows read before the tail put ahead of the tail's own, when the tail's run continues into them.
+
+    Rows of ``before`` at or after the tail's first row are the tail's own and are dropped. The join is kept only when
+    its anchored start (:func:`coarse_start`) lies before the tail's first row: the roll really began before the tail.
+    A run that stays inside the tail (dark story before a caption run, then lit story in the rows before) is judged on
+    the tail alone, as before, and has no answer. So is a roll whose one card before the tail the anchor steps over
+    (more than 1.5 x the roll's spacing from the next card, and within 24 s of it): no answer, where the same rows read
+    as one longer tail would answer on the next card. The run's first row instead of its anchored start would keep that
+    roll, but also a lone dark subtitle frame before the tail, followed by dark rows and a caption run on a night scene
+    in it, which is story. The run must still start 30 s after the first row read (:func:`text_all_through`), so a roll
+    that began more than ``READ_BEFORE_TAIL_S`` − ``STORY_BEFORE_RUN_S`` (90 s) before the tail has no answer either.
+
+    Args:
+        before: Keyframe rows of the window before the tail, in decode order.
+        rows: Keyframe rows of the tail, in decode order.
+        params: Rule thresholds.
+
+    Returns:
+        The joined rows, or None when the tail is to be judged alone.
+    """
+    tail_first_s = min(row[0] for row in rows)
+    joined = [*(row for row in before if row[0] < tail_first_s), *rows]
+    coarse = coarse_start(joined, params)
+    return joined if coarse is not None and coarse.pts_s < tail_first_s else None
 
 
 def fade_back(rows: Sequence[Row], index: int, floor_s: float) -> float:

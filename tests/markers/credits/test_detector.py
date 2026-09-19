@@ -239,10 +239,85 @@ class TestFindCredits:
                               count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
         assert decodes.calls[0]["start_s"] == 870.0
 
+    @pytest.mark.parametrize(
+        "thinning",
+        [frames.KeyframeThinning(), frames.KeyframeThinning(48, False), frames.KeyframeThinning(None, True)],
+    )
+    def test_a_roll_the_tail_opens_on_is_read_from_before_the_tail(self, monkeypatch, probes, thinning):
+        # An episode's 450 s tail starts at 870 s inside a roll that began at 858 s. The keyframes of the 120 s before
+        # the tail are read through the same keyframe pass (an intra-only stride or VP9's packet drop included), the
+        # rows the two windows share are kept once, and rule J runs on both: 108 s of story now precede the roll.
+        probes.thinning = thinning
+        tail = [(870.0 + 2 * i, 3, 10.0) for i in range(225)]  # 870-1318 s, the roll to the end of the file
+        before = [(750.0 + 2 * i, 0, 120.0) for i in range(54)] + [(858.0 + 2 * i, 3, 10.0) for i in range(7)]
+        fine = [(float(t), 0, 120.0) for t in range(838, 858)] + [(float(t), 3, 10.0) for t in range(858, 860)]
+        decodes = Decodes(tail, before, fine)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        result = detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
+                                       count_boxes=count, gpu="NVIDIA", gpu_device_path="cuda:0")  # fmt: skip
+        keyframe_pass = {"path": EPISODE.canonical_path, "ffmpeg": "/ff", "keyframes_only": True, "fps": None,
+                         "gpu": "NVIDIA", "gpu_device_path": "cuda:0", "count_boxes": count, "cancel_check": None,
+                         "start_time_s": START_TIME_S, "keep_every": thinning.keep_every,
+                         "drop_non_key": thinning.drop_non_key}  # fmt: skip
+        assert decodes.calls[0] == {**keyframe_pass, "start_s": 870.0, "length_s": None}
+        assert decodes.calls[1] == {**keyframe_pass, "start_s": 750.0, "length_s": 120.0}
+        assert result.key_rows == (*before[:-1], *tail)  # the 870 s row of the window before is the tail's own
+        assert (decodes.calls[2]["start_s"], decodes.calls[2]["length_s"]) == (838.0, 21.0)
+        assert (result.start_s, result.end_s) == (858.0, None)
+
+    def test_a_run_after_story_in_the_tails_first_30_s_reads_nothing_before_the_tail(self, monkeypatch, probes):
+        # Story, then a 24 s run of captions 28 s into the tail, then story (a broadcast episode's CPU decode): story
+        # came first, so nothing before the tail is read and the run is too close to the tail's start to answer.
+        tail = [(870.0 + 2 * i, 0, 120.0) for i in range(14)] + [(898.0 + 2 * i, 2, 10.0) for i in range(13)]
+        tail += [(924.0 + 2 * i, 0, 120.0) for i in range(170)]
+        decodes = Decodes(tail)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        result = detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
+                                       count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert rule_j.coarse_start(tail).pts_s == 898.0
+        assert (result.start_s, result.end_s) == (None, None)
+        assert len(decodes.calls) == 1
+
+    def test_rows_before_the_tail_that_dont_carry_the_run_on_are_dropped(self, monkeypatch, probes):
+        # Captions on a night scene 10 s into the tail: nothing lit before them, so the window before the tail is read,
+        # but it is lit story: the run didn't begin before the tail, so it is judged on the tail alone -- no answer.
+        tail = [(870.0 + 2 * i, 0, 22.0) for i in range(5)] + [(880.0 + 2 * i, 1, 22.0) for i in range(12)]
+        tail += [(904.0 + 2 * i, 0, 120.0) for i in range(200)]
+        before = [(750.0 + 2 * i, 0, 120.0) for i in range(60)]
+        decodes = Decodes(tail, before)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        result = detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
+                                       count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert (decodes.calls[1]["start_s"], decodes.calls[1]["length_s"]) == (750.0, 120.0)
+        assert (result.start_s, result.end_s, result.key_rows) == (None, None, tuple(tail))
+        assert len(decodes.calls) == 2
+
+    def test_a_tail_less_than_120_s_into_the_file_reads_from_its_start(self, monkeypatch, probes):
+        # A 500 s episode: the tail starts at 50 s, so the window before it is the file's first 50 s.
+        tail = [(50.0 + 2 * i, 3, 10.0) for i in range(224)]
+        decodes = Decodes(tail, [])
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        result = detector.find_credits(EPISODE.canonical_path, duration_ms=500_000, is_episode=True, ffmpeg="/ff",
+                                       count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert (decodes.calls[1]["start_s"], decodes.calls[1]["length_s"]) == (0.0, 50.0)
+        assert (result.start_s, len(decodes.calls)) == (None, 2)
+
+    def test_a_roll_longer_than_the_rows_before_the_tail_too_gets_no_answer(self, monkeypatch, probes):
+        # The window before the tail is the roll as well: the run still starts under 30 s after the first row read.
+        tail = [(870.0 + 2 * i, 3, 10.0) for i in range(225)]
+        before = [(750.0 + 2 * i, 3, 10.0) for i in range(60)]
+        decodes = Decodes(tail, before)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        result = detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
+                                       count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert (result.start_s, result.end_s, result.fine_rows) == (None, None, ())
+        assert len(decodes.calls) == 2
+
     def test_a_roll_less_than_30_s_into_the_tail_gets_no_answer(self, monkeypatch, probes):
         # A file shorter than its tail whose roll starts 10 s in. With under 30 s of the tail before the run, rule J
-        # can't tell it from text on screen from the first frame (rule_j.STORY_BEFORE_RUN_S), so there is no answer and
-        # no refine window; version 1 refined it from 0 s.
+        # can't tell it from text on screen from the first frame (rule_j.STORY_BEFORE_RUN_S), and the tail starts at
+        # the start of the file, so there is nothing before it to read: no answer and no refine window; version 1
+        # refined it from 0 s.
         roll = [(10.0 + 2 * i, 2, 12.0) for i in range(20)]
         decodes = Decodes(roll, [])
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)

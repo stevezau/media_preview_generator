@@ -647,12 +647,14 @@ class TestTextAllThrough:
         assert rule_j.text_all_through(rows, coarse) is not answered
 
     @pytest.mark.parametrize(
-        ("texted", "answered"),
-        [(7, True), (8, False), (10, False)],  # of 10 keyframes before the run, any box counts: 80 % or more is text
+        ("keyframes", "texted", "answered"),
+        [(10, 7, True), (10, 8, False), (10, 10, False), (100, 79, True), (100, 80, False)],  # any box counts
     )  # fmt: skip
-    def test_the_text_share_before_the_run_decides(self, texted, answered):
-        # Lit frames with 1-2 boxes (a timecode, a bug) aren't credit frames, but they are text on screen.
-        story = [bright(1000 + 10 * i, 1 if i < texted else 0) for i in range(10)]
+    def test_the_text_share_before_the_run_decides(self, keyframes, texted, answered):
+        # Lit frames with 1-2 boxes (a timecode, a bug) aren't credit frames, but they are text on screen. The run
+        # answers below 80 % of the keyframes before it, not at 80 %.
+        step = 100 / keyframes
+        story = [bright(1000 + step * i, 1 if i < texted else 0) for i in range(keyframes)]
         rows = self._tail(story, 1100)
         coarse = rule_j.coarse_start(rows)
         assert coarse is not None and coarse.pts_s == 1100.0
@@ -684,6 +686,97 @@ class TestTextAllThrough:
         story = [bright(t - 200) for t in range(0, 200, 2)]
         rows = [*story, *self.SUBTITLE, *[dark(t, 4) for t in range(450, 510, 2)]]
         assert rule_j.credits_start(rows, []) == 2.0
+
+
+class TestARollThatBeganBeforeTheTail:
+    """A run less than 30 s into the tail may be a roll the tail cut into (the lab's Heeramandi episodes: 462 s rolls
+    against a 450 s tail). The detector reads before the tail only when nothing lit comes before the run."""
+
+    ROLL = [dark(1000 + 2 * i, 3) for i in range(100)]  # 1000-1198 s
+
+    @pytest.mark.parametrize(
+        ("before", "reads_on"),
+        [
+            ([], True),                                          # the tail opens on the roll
+            ([dark(980 + 2 * i) for i in range(10)], True),       # 20 s of black first
+            ([dark(980 + 2 * i) for i in range(9)] + [bright(998)], False),  # a lit frame 2 s before the run
+            ([bright(980 + 2 * i) for i in range(10)], False),    # 20 s of story first
+            ([dark(970 + 2 * i) for i in range(15)], False),      # 30 s of black: text_all_through judges it
+        ],
+    )  # fmt: skip
+    def test_the_rows_before_the_tail_are_read_only_when_nothing_lit_precedes_a_run_under_30_s_in(
+        self, before, reads_on
+    ):
+        rows = [*before, *self.ROLL]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 1000.0
+        assert rule_j.opens_on_the_run(rows, coarse) is reads_on
+
+    def test_a_story_caption_28_s_into_the_tail_stays_without_an_answer(self):
+        # A real broadcast episode on the CPU decode (Mayday S12E10): lit story, a 25 s run of captions 28 s into the
+        # tail, then 400 s of story; its real roll is 17 s long, too short to be a run. Story came first, so nothing
+        # before the tail is read and the run stays too close to the tail's start to answer.
+        rows = [bright(2250 + 2 * i) for i in range(14)] + [dark(2278 + 2 * i, 2) for i in range(13)]
+        rows += [bright(2304 + 2 * i) for i in range(198)]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 2278.0
+        assert not rule_j.opens_on_the_run(rows, coarse)
+        assert rule_j.credits_start(rows, []) is None
+
+    @staticmethod
+    def _before(roll_from: float) -> list:
+        # The 120 s window before a tail at 1000 s: story, then the roll's cards from roll_from on (one row the tail
+        # shares, at 1000 s, which the join drops).
+        story = [bright(880 + 2 * i) for i in range(int((roll_from - 880) / 2))]
+        return [*story, *[dark(t, 3) for t in range(int(roll_from), 1001, 2)]]
+
+    @pytest.mark.parametrize(
+        ("roll_from", "start"),
+        [
+            (988.0, 988.0),  # 12 s before the tail (the Heeramandi shape): 108 s of story before it
+            (910.0, 910.0),  # 90 s before: 30 s of story, just enough
+            (900.0, None),  # 100 s before: 20 s of story, too little to tell it from text all through the tail
+        ],
+    )  # fmt: skip
+    def test_the_roll_starts_where_it_began_before_the_tail_up_to_90_s_before(self, roll_from, start):
+        joined = rule_j.joined_before(self._before(roll_from), self.ROLL)
+        assert joined is not None and joined[-len(self.ROLL) :] == self.ROLL
+        assert [row[0] for row in joined].count(1000.0) == 1
+        coarse = rule_j.coarse_start(joined)
+        assert coarse is not None and coarse.pts_s == roll_from
+        assert rule_j.credits_start(joined, []) == start
+
+    def test_a_roll_whose_one_card_before_the_tail_the_anchor_steps_over_gets_no_answer(self):
+        # Pinned as a known cost: the roll's first card at 996 s, then its ground (luma 18) from the tail at 1000 s and
+        # cards every 6 s from 1006 s. The anchor steps over the 996 s card (10 s to the next, over 1.5 x 6 s), so the
+        # joined run's start is inside the tail and the join is dropped: no answer, where one longer tail answers
+        # 1006 s. Keeping the join on the run's first row instead would also keep a lone dark subtitle frame before the
+        # tail, and a night scene's captions after it, as a roll.
+        before = [bright(880 + 2 * i) for i in range(58)] + [dark(996, 3), dark(998, 0, 18.4)]
+        tail = [dark(1000, 0, 18.4), dark(1003, 0, 18.4)] + [dark(1006 + 6 * i, 3, 18.4) for i in range(30)]
+        coarse = rule_j.coarse_start(tail)
+        assert coarse is not None and coarse.pts_s == 1006.0 and rule_j.opens_on_the_run(tail, coarse)
+        assert rule_j.joined_before(before, tail) is None
+        assert rule_j.credits_start(tail, []) is None
+        assert rule_j.credits_start([*before, *tail], []) == 1006.0
+
+    @pytest.mark.parametrize(
+        "before",
+        [
+            [bright(880 + 2 * i) for i in range(60)],  # lit story right up to the tail
+            [dark(880 + 2 * i, 0, 22.0) for i in range(60)],  # a night scene without text
+        ],
+    )  # fmt: skip
+    def test_a_run_that_stays_inside_the_tail_is_judged_on_the_tail_alone(self, before):
+        # A caption run on a dark scene 10 s into the tail looks like a roll the tail opened on (nothing lit before it),
+        # but the rows before the tail don't carry it on: it didn't begin before the tail, so the join is dropped and
+        # the run stays too close to the tail's start to answer.
+        tail = [dark(1000 + 2 * i, 0, 22.0) for i in range(5)] + [dark(1010 + 2 * i, 1, 22.0) for i in range(12)]
+        tail += [bright(1034 + 2 * i) for i in range(200)]
+        coarse = rule_j.coarse_start(tail)
+        assert coarse is not None and coarse.pts_s == 1010.0 and rule_j.opens_on_the_run(tail, coarse)
+        assert rule_j.joined_before(before, tail) is None
+        assert rule_j.credits_start(tail, []) is None
 
 
 class TestAShortRollOverACardJustBrighterThanDark:

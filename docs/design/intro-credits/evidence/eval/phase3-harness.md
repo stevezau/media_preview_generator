@@ -575,18 +575,85 @@ GPU decode's keyframe rows, with version 1's answer and 1 fps refine rows on the
 so their rows are the same before and after the VP9 fix, byte for byte. The two margins are wide on the sets: 84 s
 against the 30 s floor, 0.54 against 0.8. What it costs, and what it doesn't catch:
 
-- **A roll longer than the tail less 30 s gets no answer**: over 420 s on an episode (450 s tail) or 870 s on a movie
-  (900 s tail). Version 1 answered those near the start of the tail. Spec §5.4 "Frames" measured episode rolls at p95
-  267 s and movie rolls at 852 s at the most, and no file of either set comes close.
-- **A channel logo or ticker over real story would cost the real roll's answer** if text detection boxes it on 80 %
-  of the story's keyframes. It can't be told from the timecode by these rows. Unmeasured: none of the sets' files has
-  one (their highest share is 0.54, the 40 episodes' 0.17), so a recording with a network logo is the case to check
-  before trusting the guard on live TV recordings.
+- **A roll that starts less than 30 s into the tail, or before it, had no answer** in round 2: 420 s or more before
+  the end of an episode, 870 s of a movie. Version 1 answered those, its 20 s refine reaching back past the tail's
+  start. Round 3 reads before the tail when the tail opens on the roll: "A roll that began before the tail" below.
+- **A channel logo or ticker over real story costs the real roll's answer** when text detection boxes it on 80 % of
+  the story's keyframes; these rows can't tell it from the timecode. None of the sets' files comes near (0.54 at the
+  most, the 40 episodes 0.17). The final review measured 51 broadcast recordings with on-screen channel logos (39
+  episodes of 13 shows from 12 channels, 12 sports events), both decode paths, with frame checks. Against version 1
+  the guard, with the 30 s floor, changed six answers: five wrong answers gone (GPU: Bondi Rescue S14E12, a boxing
+  event; CPU: Live Rescue S02E01, the boxing event, Mayday S12E10 by the floor) and one right answer lost (Live Rescue
+  S02E01 on the GPU, 0.895 of its story's keyframes boxed). The share stays at 0.8 in this round.
 - **Text that comes and goes still starts early.** Subtitles on a dark scene are credit frames to rule J (a dark
   frame needs one box). When text fills the tail before them, the guard catches them. When they follow story with
   less text than that and are joined to the roll, the start lands on the scene, pinned as a known limit
   (`test_a_subtitled_dark_scene_is_no_answer_only_when_text_fills_the_tail_before_it`,
   `test_subtitles_on_a_dark_scene_after_text_free_story_still_start_early`).
+
+### A roll that began before the tail (final review, round 3)
+
+The 30 s floor took answers version 1 gave: a roll that starts before the tail, or in its first 30 s, has too few
+rows before it to judge. The lab scale run's chapter truth has 10 of its 400 episodes' credits starting 420 s or more
+before the end. Five are real: Heeramandi S01E01, E02, E03, E06 and E08, whose credits chapters run 461.6–463.4 s
+against the 450 s tail. The other five are chapter mislabels (1,365–2,578 s: an opening-credits chapter, and credits
+chapters in mid-episode). No episode's credits start 420–450 s before the end. No lab movie's credits are longer than
+870 s.
+
+**The change.** It happens when the run starts under 30 s into the tail and every row before its first credit frame is
+dark, luma under 30 (`rule_j.opens_on_the_run`). "Dark" is the dark bridge's own line, not black: on the CPU decode
+two of the Heeramandi tails open on an empty frame of the roll's own ground at luma 18. The detector then reads the
+keyframes of the 120 s before the tail. It uses the same keyframe pass, VP9's packet drop and the intra-only stride
+included. It keeps them only when the run carries on into them, so that its start lies before the tail's first row
+(`rule_j.joined_before`; a row the two windows share is kept once). Rule J and the guard then run on both; otherwise
+the tail is judged alone, as in round 2. Two shapes stay without an answer:
+- A run after a lit frame is not cut off by the tail (story came first), so nothing more is read. That is the
+  broadcast shape the floor removed on the CPU decode: Mayday S12E10, a 25 s run of story captions 28 s into the tail,
+  with the real 17 s roll at about 2,682 s too short to be a run.
+- A caption run on a night scene 10 s into the tail, after dark story (luma 22), is read on. But the rows before the
+  tail don't carry the run, so they are dropped
+  (`test_a_run_that_stays_inside_the_tail_is_judged_on_the_tail_alone`).
+
+The guard still wants 30 s of rows before the run. So a roll that began up to 90 s before the tail is answered, and
+one that began 90–120 s before it is not (`test_the_roll_starts_where_it_began_before_the_tail_up_to_90_s_before`).
+
+**Measured** with the app's own `find_credits` through the decode cache, versions 1, 2 (round 2) and 3 on each path.
+Answers are against the chapter. The broadcast files have no chapter truth, so they are compared with round 2's
+frame-checked verdicts.
+
+| Files | Decode | Version 1 | Round 2 | Round 3 |
+|---|---|---|---|---|
+| Heeramandi E01, E02, E03, E06, E08 | GPU | −5.0, −4.0, −4.0, −5.0, −5.0 | none × 5 | −5.0, −4.0, −4.0, −5.0, −5.0 |
+| The same | CPU | −5.0, −4.0, −4.0, +13.0, +13.0 | none × 5 | −5.0, −4.0, −4.0, −5.0, −5.0 |
+| 51 broadcast recordings | GPU, CPU | | | the same as round 2 on every file, starts and ends; Mayday S12E10 (CPU) still no answer |
+| Synth Audio (6), Synth Credits (2) | GPU, CPU | | | the same as round 2 (their tails start at 0 s: nothing before them) |
+
+Every Heeramandi answer was frame-checked (1 fps, the 20 s around it). It lands on the roll's first card, "Music &
+Direction", as it fades in over black after the last scene. The chapter starts 4–5 s later on the second card, so
+the answers are right. Each read one window more (the 120 s before the tail, 65–75 keyframes). No end was found or
+moved: each roll runs to the end of the file.
+
+**Nothing else moves.**
+- On the decode cache pinned at round 2's decode digest, the app's `find_credits` over every set row (285 on the
+  GPU, 80 on the CPU) asked for 0 windows round 2 hadn't stored, and gave 0 answers different from round 2. The run
+  closest to the tail's start on either set is 84.1 s in, so the floor never fires there.
+- The final runs decoded everything again, since the VP9 fix changed the decode digest (`a14a0d3dde8e82fe`). The
+  GPU run over the 80, the 205 and the 43 online cases made 568 decodes, and the CPU run over the 80 made 154. They
+  give every number of round 2's final runs, row for row: rule J alone on the 80 64 / 1 / 7 / 3 (CPU 59 / 1 / 8 / 8),
+  the gate rows and checks, ends, and online decisions, with `--changed-since` listing 0 answers. The self-test chose
+  the GPU (11.55 against 18.33 ms). The long-roll, broadcast and synth files were decoded again too (114 windows on
+  the GPU, 116 on the CPU) and gave the table above.
+
+What is left: three kinds of roll still get no answer, and the lab's truth has none of them.
+- A roll that starts 0–30 s into the tail after a scene.
+- A roll that began more than 90 s before the tail: credits over 540 s on an episode, 990 s on a movie.
+- A roll with only its first card before the tail, when the anchor steps over that card (it is more than 1.5 × the
+  roll's spacing from the next card, and within 24 s of it). The join is judged on the anchored start, which then
+  lies inside the tail. Judging it on the run's first row instead would keep this roll. It would also keep a lone dark
+  subtitle frame before the tail followed by a night scene's captions, which is story. Precision first, so the
+  anchored start decides.
+
+Pinned in `test_rule_j.TestARollThatBeganBeforeTheTail` and `test_detector.TestFindCredits`.
 
 ### VP9's keyframe pass (final review)
 
@@ -680,5 +747,9 @@ epilogue cards.
 - **Two early shapes are known and unmeasured on real files**, as neither set holds one: a lit scene-text frame
   followed by more than 24 s of dark keyframes before the roll (the anchor keeps it, first change), and subtitles on a
   dark scene after text-free story, joined to the roll (third change). Both are pinned in `test_rule_j.py`.
+- **The guard's share against channel logos** cost one right answer on 51 broadcast recordings for five wrong ones
+  removed; whether 0.8 is the right share is a separate measured question.
+- **Rolls that start 0–30 s into the tail after a scene, or more than 90 s before it,** get no answer (none in the
+  lab's chapter truth).
 - The 205's gate still fails its usefulness floor (96 < 124) and both wrong caps (17 > 5, 15 > 3); the adjudication of
   its version 1 wrong answers above is unchanged, as no wrong answer moved.

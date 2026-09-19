@@ -360,9 +360,18 @@ taken from the rapidocr_onnxruntime 1.4.4 wheel), pinned at `/app/models/ch_PP-O
 5. **Text all through** (rule J version 2): no answer unless the tail holds at least 30 s of keyframes before the run
    and fewer than 80 % of those carry any text box. Text that never leaves the screen (a burnt-in timecode, a channel
    bug, subtitles from the first frame) makes runs anywhere: the lab's Synth Audio test pattern was answered on every
-   episode. Every file of the sets has at least 84 s of the tail before its run and a share of at most 0.54. The
-   costs: a roll longer than the tail less 30 s gets no answer, and so would a file whose channel logo or ticker text
-   detection boxes on 80 % of the story (unmeasured: no set file has one).
+   episode. Every file of the sets has at least 84 s of the tail before its run and a share of at most 0.54. When the
+   run is under 30 s into the tail and nothing lit comes before it in the tail (luma under 30), the roll may have
+   begun before the tail. The keyframes of the 120 s before the tail are then read through the same keyframe pass.
+   They are kept only when the run carries on into them, and the run is judged on both (final review, round 3). This
+   answers the lab's five Heeramandi episodes, whose 462 s credits start before the 450 s tail, on the roll's first
+   card. The costs: a roll that starts 0–30 s into the tail after a scene gets no answer. So does one that began more
+   than 90 s before the tail (30 s of rows are still wanted before the run). So does one with only its first card
+   before the tail when the anchor steps over it (the join is judged on the anchored start). The lab scale run's 400
+   episodes have none of them: its 10 credits chapters starting 420 s or more before the end are those five and five
+   mislabels. A file whose channel logo text detection boxes on 80 % of the story
+   loses its answer too: on 51 broadcast recordings with channel logos that was one right answer, against five wrong
+   ones the step removed (`evidence/eval/phase3-harness.md`).
 6. **Refine** with the 1 fps decode: walk back from the coarse start through contiguous credit frames (gaps ≤ 2.5 s),
    then back over the fade (luma < 12, steps ≤ 4 s).
 
@@ -913,7 +922,12 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     most of the tail before the run (§5.4 step 5). Its third shape — a roll whose first card sits just
     above the luma-30 dark line and whose other credit keyframes span under 15 s (Rick and Morty S01E04 on the GPU
     decode, no answer) — has a measured candidate, 2 boxes at luma 30–33, that answers it and six more of the season
-    within 1 s but put one 205-set movie's start on its epilogue cards; not shipped.
+    within 1 s but put one 205-set movie's start on its epilogue cards; not shipped. **Rolls the tail cuts into:**
+    version 2's 30 s floor (§5.4 step 5) left a roll starting before the tail, or in its first 30 s, without an
+    answer. Round 3 reads the 120 s before the tail when nothing lit comes before the run in the tail, and keeps it
+    when the run carries on into it. That answers the lab's five Heeramandi episodes on the roll's first card. A
+    roll that starts 0–30 s into the tail after a scene still gets none. So does one that began more than 90 s before
+    the tail, and one whose only card before the tail the anchor steps over. The lab's chapter truth has none of them.
 
 ## 14. Decisions log
 
@@ -1320,3 +1334,12 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   back to earlier runs, merging runs over text-carrying gaps, a lower box count next to a run, a lit-only anchor, and
   2 boxes at luma 30–33 (the last would answer E04 on the GPU but put one movie's start on its epilogue cards). The
   205's gate still fails 3 of 5; credit text alone stays at "Medium" as ruled on 2026-09-18.
+- 2026-09-19 · Final review, rule J lane round 3 (`CREDITS_TEXT_VERSION` stays 2; no stored answer holds round 2's):
+  a run under 30 s into the tail with nothing lit before it is read on into the 120 s before the tail, and judged on
+  both when it carries on into them (§5.4 step 5). It gives back what version 2's 30 s floor took: the lab's five
+  Heeramandi episodes, whose 462 s credits start before the 450 s tail, are answered on the roll's first card on both
+  decode paths (version 1's answers; the chapters start one card later). It doesn't bring back the broadcast wrong
+  answer the floor removed (Mayday S12E10 on the CPU: story came first, so nothing before the tail is read). Every
+  other answer is unchanged: every set row on round 2's stored decodes (0 new windows), the 51 broadcast recordings
+  and the lab's synthetic files. The harness now keys its stored answers on the text detection backend actually used
+  and the GPU device, and its stored decodes on the ffmpeg build.
