@@ -28,7 +28,7 @@ from loguru import logger
 from media_preview_generator.markers import credits as credits_package
 from media_preview_generator.markers.credits import rule_j
 from media_preview_generator.markers.credits.detector import CREDITS_TEXT_VERSION, CreditsTextResult, find_credits
-from media_preview_generator.markers.credits.frames import GpuDecodeError
+from media_preview_generator.markers.credits.frames import FRAME_H, FRAME_W, GpuDecodeError
 from media_preview_generator.markers.decide import DecisionContext, DecisionStatus, decide
 from media_preview_generator.markers.models import Candidate, MarkerType, Source
 from media_preview_generator.markers.probe import MediaProbe
@@ -536,8 +536,24 @@ class CreditsTextCache:
         return data
 
 
-def _counter(decode: str, gpu_device: str) -> tuple[Callable[[np.ndarray], list[int]], Callable[[], None]]:
-    """The app's own box counter for this decode path, and the one call that stops its helpers.
+@dataclass(frozen=True)
+class TextDetection:
+    """The app's own box counter for one decode path.
+
+    Attributes:
+        count_boxes: Text boxes per chunk of luma planes.
+        backend: What counts them right now: ``cpu``, or the GPU backend and its helper's device (``webgpu cuda:0``);
+            None before the first request, when the helper's self-test hasn't chosen yet.
+        close: Stops every helper, once, at the end of the whole run.
+    """
+
+    count_boxes: Callable[[np.ndarray], list[int]]
+    backend: Callable[[], str | None]
+    close: Callable[[], None]
+
+
+def _counter(decode: str, gpu_device: str) -> TextDetection:
+    """The app's own box counter for this decode path.
 
     The pool is the process's own (``get_textdet_pool``), exactly as a worker gets it, and ``close_all`` is called once
     at the end of the whole run: it stops every helper permanently (controller note N3).
@@ -546,9 +562,15 @@ def _counter(decode: str, gpu_device: str) -> tuple[Callable[[np.ndarray], list[
 
     pool = textdet_helper.get_textdet_pool()
     gpu = "NVIDIA" if decode == "gpu" else None
-    return (
-        lambda planes: pool.count_boxes(planes, gpu=gpu, gpu_device_path=gpu_device if gpu else None)
-    ), pool.close_all
+    device = gpu_device if gpu else None
+
+    def backend() -> str | None:
+        used = pool.backend_of(gpu, device)
+        return used if used in (None, "cpu") else f"{used} {textdet_helper.device_key(gpu, device)}"
+
+    return TextDetection(
+        lambda planes: pool.count_boxes(planes, gpu=gpu, gpu_device_path=device), backend, pool.close_all
+    )
 
 
 def _rows_summary(rows: TextRows) -> dict:
@@ -690,17 +712,20 @@ def run_credits_text(
     rule = RuleTally()
     kinds: dict[str, RuleTally] = {}
     passed = True
-    count_boxes, close = _counter(decode, gpu_device)
+    detection = _counter(decode, gpu_device)
+    count_boxes = detection.count_boxes
     try:
-        # The text detection _counter counts with: every box of a GPU run, its CPU reruns' included, is the GPU's.
-        counter = f"gpu {gpu_device}" if decode == "gpu" else "cpu"
-        decodes = DecodeCache(cache_root, digest=decode_digest(), counter=counter)
+        # One blank frame starts the helper and its self-test, so the decode cache knows from the first file on which
+        # backend counts the boxes (a GPU's self-test can pick the CPU).
+        count_boxes(np.zeros((1, FRAME_H, FRAME_W), dtype=np.uint8))
+        decodes = DecodeCache(cache_root, digest=decode_digest(), backend=detection.backend)
         cache = CreditsTextCache(
             cache_root, ffmpeg=ffmpeg, decode=decode, gpu_device=gpu_device, count_boxes=count_boxes,
             probe=probes.probe, decodes=decodes,
         )  # fmt: skip
         summary: dict = {"decode": decode, "detector_version": CREDITS_TEXT_VERSION,
-                         "detector_digest": cache.detector_digest, "decode_digest": decodes.digest, "sets": {},
+                         "detector_digest": cache.detector_digest, "decode_digest": decodes.digest,
+                         "text_detection": detection.backend(), "sets": {},
                          "gate": {}, "sheets": []}  # fmt: skip
         for group in (g for g in ("80", "205") if g in sets):
             parts = []
@@ -749,7 +774,7 @@ def run_credits_text(
                     _write_sheets(ffmpeg, sheets_dir, change["set"], change["detail"])
         summary["decodes"] = {"decoded": decodes.decoded, "reused": decodes.reused}
     finally:
-        close()
+        detection.close()
     summary["gpu_fallbacks"] = sorted(cache.gpu_fallbacks)
     return summary, details, passed
 

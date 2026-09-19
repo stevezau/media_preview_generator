@@ -523,7 +523,14 @@ class _GateRun:
         for name, rows in {**GATE_FILES, "adjudicated": {}}.items():
             (evidence / f"credits/{name}.json").write_text(json.dumps(rows))
         run = self
-        count_boxes = object()
+        self.counted = []
+
+        def count_boxes(planes):
+            run.counted.append(planes.shape)
+            return [0] * len(planes)
+
+        def backend():
+            return "webgpu cuda:0" if run.counted else None
 
         class FakeProbes:
             def __init__(self, root, *, ffprobe):
@@ -551,7 +558,7 @@ class _GateRun:
 
         def counter(decode, gpu_device):
             run.seen["counter"] = (decode, gpu_device)
-            return count_boxes, close
+            return ct.TextDetection(count_boxes, backend, close)
 
         def hdr_kind(path, *, ffprobe):
             run.seen.setdefault("hdr_ffprobe", set()).add(ffprobe)
@@ -572,6 +579,42 @@ class _GateRun:
                                    baseline_path=self.tmp_path / "b.json", sheets_dir=None)  # fmt: skip
 
 
+@pytest.mark.parametrize(
+    ("decode", "verdict", "backend"),
+    [
+        ("gpu", None, None),                      # before the helper's first request: no key yet
+        ("gpu", "webgpu", "webgpu cuda:1"),       # the self-test kept the card: keyed on it
+        ("gpu", "cpu", "cpu"),                    # the self-test chose the CPU: a CPU run's key
+        ("cpu", "cpu", "cpu"),                    # a CPU run
+    ],
+)  # fmt: skip
+def test_the_counter_reports_the_backend_the_pool_actually_used(monkeypatch, decode, verdict, backend):
+    # This string is the decode cache's key: a GPU run whose self-test chose the CPU must share a CPU run's rows.
+    from media_preview_generator.markers.credits import textdet_helper
+
+    asked = []
+
+    class Pool:
+        def backend_of(self, gpu, gpu_device_path):
+            asked.append((gpu, gpu_device_path))
+            return verdict
+
+        def count_boxes(self, planes, *, gpu, gpu_device_path):
+            asked.append(("count", gpu, gpu_device_path))
+            return [0] * len(planes)
+
+        def close_all(self):
+            asked.append("closed")
+
+    monkeypatch.setattr(textdet_helper, "get_textdet_pool", Pool)
+    detection = ct._counter(decode, "cuda:1")
+    assert detection.backend() == backend
+    gpu, device = ("NVIDIA", "cuda:1") if decode == "gpu" else (None, None)
+    detection.count_boxes([object()])
+    detection.close()
+    assert asked == [(gpu, device), ("count", gpu, device), "closed"]
+
+
 @pytest.mark.parametrize(("decode", "gpu_device"), [("gpu", "cuda:1"), ("cpu", "cuda:0")])
 def test_the_run_hands_its_decode_path_and_tools_to_every_part(tmp_path, monkeypatch, decode, gpu_device):
     # A --decode cpu run that measured the GPU path (or the wrong card) would still report "decode": "cpu".
@@ -583,7 +626,9 @@ def test_the_run_hands_its_decode_path_and_tools_to_every_part(tmp_path, monkeyp
     assert kwargs.pop("probe").__self__.__class__.__name__ == "FakeProbes"
     decodes = kwargs.pop("decodes")
     assert isinstance(decodes, DecodeCache) and decodes.digest == ct.decode_digest()
-    assert decodes.counter == ("gpu cuda:1" if decode == "gpu" else "cpu")  # the boxes' text detection, as _counter
+    # The helper is started on one blank frame before the first file, so the cache is told a backend from the start.
+    assert run.counted[0] == (1, 180, 320) and decodes._backend() == "webgpu cuda:0"
+    assert summary["text_detection"] == "webgpu cuda:0"
     assert kwargs == {"ffmpeg": "/ff", "decode": decode, "gpu_device": gpu_device, "count_boxes": run.count_boxes}
     assert run.seen["probes"] == (tmp_path / "cache", "/ffp")
     assert run.seen["hdr_ffprobe"] == {"/ffp"}

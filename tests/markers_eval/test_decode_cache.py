@@ -58,11 +58,13 @@ def media(tmp_path):
 
 def test_a_decode_runs_once_per_file_command_and_decode_code(tmp_path, monkeypatch, media):
     decoder = _Decoder(monkeypatch)
-    cache = DecodeCache(tmp_path / "cache", digest="code-1", counter="gpu cuda:0")
+    cache = DecodeCache(tmp_path / "cache", digest="code-1", backend=lambda: "gpu cuda:0")
     first = cache.decode_rows(str(media), **_kwargs())
     assert cache.decode_rows(str(media), **_kwargs()) == first
     assert (
-        DecodeCache(tmp_path / "cache", digest="code-1", counter="gpu cuda:0").decode_rows(str(media), **_kwargs())
+        DecodeCache(tmp_path / "cache", digest="code-1", backend=lambda: "gpu cuda:0").decode_rows(
+            str(media), **_kwargs()
+        )
         == first
     )
     assert len(decoder.decodes) == 1
@@ -71,7 +73,7 @@ def test_a_decode_runs_once_per_file_command_and_decode_code(tmp_path, monkeypat
                     {"start_time_s": 30000.0}, {"keep_every": 48}):  # fmt: skip
         cache.decode_rows(str(media), **_kwargs(**changed))
     assert len(decoder.decodes) == 7
-    DecodeCache(tmp_path / "cache", digest="code-2", counter="gpu cuda:0").decode_rows(str(media), **_kwargs())
+    DecodeCache(tmp_path / "cache", digest="code-2", backend=lambda: "gpu cuda:0").decode_rows(str(media), **_kwargs())
     assert len(decoder.decodes) == 8
     os.utime(media, ns=(1, 1))  # a replaced file is another file
     cache.decode_rows(str(media), **_kwargs())
@@ -79,16 +81,88 @@ def test_a_decode_runs_once_per_file_command_and_decode_code(tmp_path, monkeypat
     assert (cache.decoded, cache.reused) == (8, 1)
 
 
-def test_the_text_detection_that_counted_the_boxes_is_in_the_key(tmp_path, monkeypatch, media):
+def test_the_backend_that_counted_the_boxes_is_in_the_key(tmp_path, monkeypatch, media):
     # A GPU run's CPU rerun of a file the card can't decode builds exactly the CPU run's command, but counts its boxes
     # on the GPU helper: the CPU run must not be handed those rows, nor the GPU run the CPU's.
     decoder = _Decoder(monkeypatch)
     cpu_command = _kwargs(gpu=None, gpu_device_path=None)
-    DecodeCache(tmp_path / "cache", digest="d", counter="gpu cuda:0").decode_rows(str(media), **cpu_command)
-    DecodeCache(tmp_path / "cache", digest="d", counter="cpu").decode_rows(str(media), **cpu_command)
+    DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "webgpu cuda:0").decode_rows(str(media), **cpu_command)
+    DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu").decode_rows(str(media), **cpu_command)
     assert len(decoder.decodes) == 2
-    DecodeCache(tmp_path / "cache", digest="d", counter="cpu").decode_rows(str(media), **cpu_command)
+    DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu").decode_rows(str(media), **cpu_command)
     assert len(decoder.decodes) == 2
+
+
+def test_a_gpu_worker_whose_self_test_chose_the_cpu_shares_the_cpu_rows(tmp_path, monkeypatch, media):
+    # The key is the backend the helper really used, not the one asked for: a GPU run whose self-test picked the CPU
+    # counted exactly as a CPU run does, and a later run on a GPU the self-test kept doesn't get those rows.
+    decoder = _Decoder(monkeypatch)
+    DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu").decode_rows(str(media), **_kwargs())
+    DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu").decode_rows(str(media), **_kwargs())
+    assert len(decoder.decodes) == 1
+    DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "webgpu cuda:0").decode_rows(str(media), **_kwargs())
+    assert len(decoder.decodes) == 2
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "kept_under"),
+    [
+        (None, "webgpu cuda:0", "webgpu cuda:0"),  # the helper's first request: kept under what it chose
+        ("webgpu cuda:0", "cpu", None),            # demoted mid-decode: counted by both, never kept
+        (None, None, None),                        # nothing counted: no backend to keep it under
+    ],
+)  # fmt: skip
+def test_rows_are_kept_only_under_the_one_backend_that_counted_them(tmp_path, monkeypatch, media, before, after,
+                                                                    kept_under):  # fmt: skip
+    decoder = _Decoder(monkeypatch)
+    answers = iter([before, after])
+    DecodeCache(tmp_path / "cache", digest="d", backend=lambda: next(answers)).decode_rows(str(media), **_kwargs())
+    served_from_disk = []
+    for backend in ("webgpu cuda:0", "cpu"):
+        cache = DecodeCache(tmp_path / "cache", digest="d", backend=lambda b=backend: b)
+        cache.decode_rows(str(media), **_kwargs())
+        if cache.reused:
+            served_from_disk.append(backend)
+    # A decode kept under one backend is reused by that backend's run only; every other run decodes again.
+    assert served_from_disk == ([kept_under] if kept_under else [])
+    assert len(decoder.decodes) == (2 if kept_under else 3)
+
+
+def test_the_intra_only_probe_runs_once_per_file_and_its_failures_are_not_kept(tmp_path, monkeypatch, media):
+    calls = []
+
+    def stride(path, ffmpeg, *, cancel_check=None, timeout_s=frames.PROBE_TIMEOUT_S):
+        calls.append((path, ffmpeg, cancel_check, timeout_s))
+        if len(calls) == 1:
+            raise frames.DecodeTimeoutError("reading the video packets timed out")
+        return 48
+
+    monkeypatch.setattr(frames, "intra_only_stride", stride)
+    cache = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu")
+    with pytest.raises(frames.DecodeTimeoutError):
+        cache.intra_only_stride(str(media), "/ff")
+    cancelled = object()
+    assert cache.intra_only_stride(str(media), "/ff", cancel_check=cancelled, timeout_s=12.0) == 48
+    assert DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu").intra_only_stride(str(media), "/ff") == 48
+    assert calls == [(str(media), "/ff", None, frames.PROBE_TIMEOUT_S), (str(media), "/ff", cancelled, 12.0)]
+    monkeypatch.setattr(frames, "intra_only_stride", lambda *args, **kwargs: None)
+    other = tmp_path / "B (2002).mkv"
+    other.write_bytes(b"y")
+    assert (
+        DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu").intra_only_stride(str(other), "/ff") is None
+    )
+    monkeypatch.setattr(frames, "intra_only_stride", lambda *args, **kwargs: pytest.fail("probed again"))
+    assert (
+        DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu").intra_only_stride(str(other), "/ff") is None
+    )
+
+
+def test_the_probes_take_exactly_the_arguments_the_real_ones_take():
+    for name in ("container_start_s", "intra_only_stride"):
+        real = inspect.signature(getattr(frames, name)).parameters
+        served = inspect.signature(getattr(DecodeCache, name)).parameters
+        assert [p for p in served if p != "self"] == list(real), name
+        assert [served[p].default for p in real] == [real[p].default for p in real], name
 
 
 def test_a_write_cut_short_leaves_no_entry_behind(tmp_path, monkeypatch, media):
@@ -104,17 +178,17 @@ def test_a_write_cut_short_leaves_no_entry_behind(tmp_path, monkeypatch, media):
 
     monkeypatch.setattr(decode_cache.json, "dump", dies)
     with pytest.raises(KeyboardInterrupt):
-        DecodeCache(tmp_path / "cache", digest="d", counter="cpu").decode_rows(str(media), **_kwargs())
+        DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu").decode_rows(str(media), **_kwargs())
     assert list((tmp_path / "cache/credits_decodes").glob("*.json")) == []
     monkeypatch.setattr(decode_cache.json, "dump", real_dump)
-    rows = DecodeCache(tmp_path / "cache", digest="d", counter="cpu").decode_rows(str(media), **_kwargs())
+    rows = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu").decode_rows(str(media), **_kwargs())
     assert rows == decoder.decode_rows(str(media), **_kwargs()) and len(decoder.decodes) == 3
 
 
 def test_the_real_decode_gets_every_argument_it_was_asked_for(tmp_path, monkeypatch, media):
     decoder = _Decoder(monkeypatch)
     count_boxes = object()
-    DecodeCache(tmp_path / "cache", digest="d", counter="gpu cuda:0").decode_rows(
+    DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "gpu cuda:0").decode_rows(
         str(media),
         **_kwargs(
             start_s=5680.0,
@@ -144,7 +218,7 @@ def test_the_cache_takes_exactly_the_arguments_the_real_decode_takes():
 
 def test_the_start_time_is_probed_once_per_file_when_not_given(tmp_path, monkeypatch, media):
     decoder = _Decoder(monkeypatch)
-    cache = DecodeCache(tmp_path / "cache", digest="d", counter="gpu cuda:0")
+    cache = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "gpu cuda:0")
     cache.decode_rows(str(media), **_kwargs(start_time_s=None))
     cache.decode_rows(str(media), **_kwargs(start_time_s=None))
     assert decoder.probes == [str(media)]
@@ -153,7 +227,7 @@ def test_the_start_time_is_probed_once_per_file_when_not_given(tmp_path, monkeyp
 
 def test_a_gpu_decode_failure_is_kept_and_raised_again_without_decoding(tmp_path, monkeypatch, media):
     decoder = _Decoder(monkeypatch, gpu_fails=True)
-    cache = DecodeCache(tmp_path / "cache", digest="d", counter="gpu cuda:0")
+    cache = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "gpu cuda:0")
     for _ in range(2):
         with pytest.raises(frames.GpuDecodeError, match="exited 69"):
             cache.decode_rows(str(media), **_kwargs())
@@ -169,7 +243,7 @@ def test_a_failure_that_is_not_the_gpus_is_never_kept(tmp_path, monkeypatch, med
         raise frames.DecodeTimeoutError("decoding timed out after 600 s")
 
     monkeypatch.setattr(frames, "decode_rows", times_out)
-    cache = DecodeCache(tmp_path / "cache", digest="d", counter="gpu cuda:0")
+    cache = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "gpu cuda:0")
     for _ in range(2):
         with pytest.raises(frames.DecodeTimeoutError):
             cache.decode_rows(str(media), **_kwargs())
@@ -178,26 +252,27 @@ def test_a_failure_that_is_not_the_gpus_is_never_kept(tmp_path, monkeypatch, med
 
 def test_serving_puts_the_cache_in_front_of_the_frames_module_and_always_restores_it(tmp_path, monkeypatch):
     _Decoder(monkeypatch)
-    real = frames.decode_rows, frames.container_start_s
-    cache = DecodeCache(tmp_path / "cache", digest="d", counter="gpu cuda:0")
+    names = ("decode_rows", "container_start_s", "intra_only_stride")
+    real = [getattr(frames, name) for name in names]
+    cache = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "gpu cuda:0")
     with cache.serving():
-        assert (frames.decode_rows, frames.container_start_s) == (cache.decode_rows, cache.container_start_s)
-    assert (frames.decode_rows, frames.container_start_s) == real
+        assert [getattr(frames, name) for name in names] == [getattr(cache, name) for name in names]
+    assert [getattr(frames, name) for name in names] == real
     with pytest.raises(RuntimeError), cache.serving():
         raise RuntimeError("the detector failed")
-    assert (frames.decode_rows, frames.container_start_s) == real
+    assert [getattr(frames, name) for name in names] == real
 
 
 def test_the_cache_refuses_data_folders():
     with pytest.raises(ValueError, match="/data"):
-        DecodeCache(Path("/data/cache"), digest="d", counter="cpu")
+        DecodeCache(Path("/data/cache"), digest="d", backend=lambda: "cpu")
 
 
 def test_a_rule_change_reruns_the_apps_detector_on_stored_decodes(tmp_path, monkeypatch, media):
     # The point of the cache: the answer cache misses on a new detector digest, the app's own find_credits runs again,
     # and every window it asks for is one it asked for before.
     decoder = _Decoder(monkeypatch)
-    decodes = DecodeCache(tmp_path / "cache", digest="decode-code", counter="gpu cuda:0")
+    decodes = DecodeCache(tmp_path / "cache", digest="decode-code", backend=lambda: "gpu cuda:0")
 
     def cache():
         return ct.CreditsTextCache(tmp_path / "cache", ffmpeg="/ff", decode="gpu", gpu_device="cuda:0",

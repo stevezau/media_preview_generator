@@ -2,8 +2,8 @@
 
 Rule J is pure (rows in, answer out); the hour a ``credits-text`` run takes on storage is the decoding and text
 detection behind the rows. :class:`DecodeCache` keeps each decode's rows keyed on the file's identity, the exact ffmpeg
-command the app builds for it (window, keyframes or 1 fps, hwaccel arguments and scaler all included), the text
-detection that counted the boxes, and a digest of the code that turns a command into rows
+command the app builds for it (window, keyframes or 1 fps, hwaccel arguments, scaler and intra-only stride all
+included), the text detection backend that counted the boxes, and a digest of the code that turns a command into rows
 (``credits_text.decode_digest``). The app's own ``find_credits`` then runs unchanged against it: a rule change re-reads
 stored rows and decodes only the windows it hasn't read before, while a change to the decode code, the text detection
 or the model's pin reads everything again.
@@ -25,22 +25,25 @@ from media_preview_generator.markers.credits import frames
 
 
 class DecodeCache:
-    """``decode_rows`` and ``container_start_s`` with :mod:`frames`' own signatures, answered from disk when this exact
-    decode of this exact file was run before by the same decode code and the same text detection.
+    """``decode_rows``, ``container_start_s`` and ``intra_only_stride`` with :mod:`frames`' own signatures, answered
+    from disk when this exact decode or probe of this exact file was run before by the same decode code and, for rows,
+    the same text detection backend.
 
     A GPU decode that failed (:class:`frames.GpuDecodeError`: ffmpeg exited non-zero on the GPU or gave no frames, as
     for a codec the card can't decode) is kept as that failure, so the harness's CPU rerun of the file doesn't try the
     GPU again on every run. A one-off failure is kept too, until its entry is deleted or the decode code changes.
     """
 
-    def __init__(self, root: Path, *, digest: str, counter: str) -> None:
+    def __init__(self, root: Path, *, digest: str, backend: Callable[[], str | None]) -> None:
         """Create the cache (``root/credits_decodes``).
 
         Args:
             root: Cache folder; must not be under /data*.
             digest: The digest of the code that turns a command into rows (``credits_text.decode_digest``).
-            counter: Which text detection counts the boxes (``gpu cuda:0``, ``cpu``). It isn't in the command: a GPU
-                run's CPU rerun of a file the card can't decode builds the CPU run's command but counts on the GPU.
+            backend: The text detection backend counting the boxes right now (``webgpu cuda:0``, ``cpu``), None
+                before its first request. It isn't in the command: a GPU run's CPU rerun of a file the card can't
+                decode builds the CPU run's command but counts on the GPU helper, and the helper's own self-test can
+                put a GPU worker's counting on the CPU.
 
         Raises:
             ValueError: ``root`` is under /data*.
@@ -49,11 +52,12 @@ class DecodeCache:
             raise ValueError("the decode cache must not live under /data*")
         self._root = root / "credits_decodes"
         self._root.mkdir(parents=True, exist_ok=True)
-        self.digest, self.counter = digest, counter
+        self.digest, self._backend = digest, backend
         self.decoded = 0
         self.reused = 0
         # The real functions, taken before :meth:`serving` puts this cache's own in their place on the module.
         self._container_start_s, self._decode_rows = frames.container_start_s, frames.decode_rows
+        self._intra_only_stride = frames.intra_only_stride
 
     def _entry(self, path: str, what: str) -> Path:
         st = os.stat(path)
@@ -82,6 +86,22 @@ class DecodeCache:
         self._write(entry, {"start_s": start_s})
         return start_s
 
+    def intra_only_stride(
+        self,
+        path: str,
+        ffmpeg: str,
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+        timeout_s: float = frames.PROBE_TIMEOUT_S,
+    ) -> int | None:
+        """:func:`frames.intra_only_stride`, once per file identity (a timeout or a stuck ffprobe raises, uncached)."""
+        entry = self._entry(path, f"stride|{ffmpeg}")
+        if entry.exists():
+            return json.loads(entry.read_text())["keep_every"]
+        keep_every = self._intra_only_stride(path, ffmpeg, cancel_check=cancel_check, timeout_s=timeout_s)
+        self._write(entry, {"keep_every": keep_every})
+        return keep_every
+
     def decode_rows(
         self,
         path: str,
@@ -99,7 +119,12 @@ class DecodeCache:
         start_time_s: float | None = None,
         keep_every: int | None = None,
     ) -> list[frames.Row]:
-        """:func:`frames.decode_rows`, once per file identity, exact command, start time and text detection.
+        """:func:`frames.decode_rows`, once per file identity, exact command, start time and text detection backend.
+
+        Rows are kept under the backend that counted them. A decode whose backend changed on the way (a GPU helper
+        demoted to the CPU mid-decode) or can't be told (no count was made) is used but not kept. A decode that starts
+        before the helper's first request is kept under the backend it ends on, so a caller that must not mix backends
+        in one entry makes one count first (the harness counts a blank frame before its first file).
 
         Raises:
             frames.GpuDecodeError: This GPU decode failed, now or on an earlier run.
@@ -111,13 +136,16 @@ class DecodeCache:
         )  # fmt: skip
         if start_time_s is None:
             start_time_s = self.container_start_s(path, ffmpeg, cancel_check=cancel_check)
-        entry = self._entry(path, f"rows|{self.counter}|{start_time_s!r}|{json.dumps(command)}")
-        if entry.exists():
-            stored = json.loads(entry.read_text())
-            self.reused += 1
-            if "gpu_error" in stored:
-                raise frames.GpuDecodeError(stored["gpu_error"])
-            return [(float(pts), int(boxes), float(luma)) for pts, boxes, luma in stored["rows"]]
+        what = f"{start_time_s!r}|{json.dumps(command)}"
+        before = self._backend()
+        if before is not None:
+            entry = self._entry(path, f"rows|{before}|{what}")
+            if entry.exists():
+                stored = json.loads(entry.read_text())
+                self.reused += 1
+                if "gpu_error" in stored:
+                    raise frames.GpuDecodeError(stored["gpu_error"])
+                return [(float(pts), int(boxes), float(luma)) for pts, boxes, luma in stored["rows"]]
         self.decoded += 1
         try:
             rows = self._decode_rows(
@@ -126,18 +154,26 @@ class DecodeCache:
                 timeout_s=timeout_s, start_time_s=start_time_s, keep_every=keep_every,
             )  # fmt: skip
         except frames.GpuDecodeError as exc:
-            self._write(entry, {"gpu_error": str(exc)})
+            self._keep(path, what, before, {"gpu_error": str(exc)})
             raise
-        self._write(entry, {"rows": [list(row) for row in rows]})
+        self._keep(path, what, before, {"rows": [list(row) for row in rows]})
         return rows
+
+    def _keep(self, path: str, what: str, before: str | None, data: dict) -> None:
+        after = self._backend()
+        if after is not None and before in (None, after):
+            self._write(self._entry(path, f"rows|{after}|{what}"), data)
 
     @contextlib.contextmanager
     def serving(self) -> Iterator[None]:
-        """Answer the detector's decodes from this cache inside the block (``detector.find_credits`` reads both
-        functions off the :mod:`frames` module at call time)."""
-        saved = frames.decode_rows, frames.container_start_s
-        frames.decode_rows, frames.container_start_s = self.decode_rows, self.container_start_s
+        """Answer the detector's decodes and probes from this cache inside the block (``detector.find_credits`` reads
+        these functions off the :mod:`frames` module at call time)."""
+        names = ("decode_rows", "container_start_s", "intra_only_stride")
+        saved = {name: getattr(frames, name) for name in names}
+        for name in names:
+            setattr(frames, name, getattr(self, name))
         try:
             yield
         finally:
-            frames.decode_rows, frames.container_start_s = saved
+            for name, function in saved.items():
+                setattr(frames, name, function)
