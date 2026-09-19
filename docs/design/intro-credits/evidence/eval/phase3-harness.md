@@ -548,13 +548,14 @@ sets: Rick and Morty S01E04 on the CPU decode (in the online cases, which run on
 
 ### Text on screen all through the tail (the third change)
 
-The lab's Synth Audio episodes are five minutes of a test pattern with a burnt-in running timecode and no credits.
-Rule J counts boxes, so it can't tell a timecode (or a channel logo, a ticker, subtitles) from a card. The timecode
-puts text on 99.3–100 % of the rows the keyframe pass returns, and the 1.5–7.3 % that read 3 boxes are credit frames
-that join into runs anywhere. Version 1 answered all six episodes, 5.9 to 244.6 s into the file, and the lab published
-S01E02's 244.6 s. (On these VP9 files the GPU decode's keyframe pass returned every frame, 24 a second, though the
-packets are not all keyframes, so the intra-only thinning doesn't apply; why is not yet known. Text detection on such
-a tail costs about 24 times a normal one's.)
+The lab's Synth Audio episodes are five minutes of a VP9 test pattern with a burnt-in running timecode and no credits.
+Rule J counts boxes, so it can't tell a timecode (or a channel logo, a ticker, subtitles) from a card. Version 1
+answered all six episodes, 5.9 to 244.6 s into the file, and the lab published S01E02's 244.6 s. Those answers came
+from every frame of the tail, 24 a second: until the fix below ("VP9's keyframe pass"), a VP9 file's keyframe pass
+decoded every frame. There the timecode put text on 99.3–100 % of the rows, and the 1.5–7.3 % that read 3 boxes were
+credit frames that joined into runs anywhere. Read from its keyframes (one per 2 s), as every other file is, the
+timecode puts text on every row, and the few that read 3 boxes join into a run on three episodes on the GPU decode
+(two on the CPU); the other episodes have no run at all.
 
 A roll follows story, so version 2 answers only when the tail holds at least 30 s of keyframes before the run and
 fewer than 80 % of those carry any text box, lit or dark (`rule_j.text_all_through`; the detector then decodes nothing
@@ -562,14 +563,17 @@ more). Measured on the app's own decodes:
 
 | Files | Tail before the run | Share of those rows with text | Version 1 → 2 |
 |---|---|---|---|
-| Synth Audio, 6 episodes (GPU decode) | 5.9–244.6 s | 0.993–1.000 | 6 answers → none |
+| Synth Audio, 6 episodes, every frame (the VP9 decode before its fix, GPU) | 5.9–244.6 s | 0.993–1.000 | 6 answers → none |
+| Synth Audio, 6 episodes, keyframes (GPU decode) | 106.0–260.0 s (the 3 with a run) | 1.000 | 3 answers → none; 3 have no run |
+| Synth Audio, 6 episodes, keyframes (CPU decode) | 166.0 and 270.0 s (the 2 with a run) | 1.000 | 2 answers → none; 4 have no run |
 | Synth Credits and Synth Credits Open (a synthetic roll after story) | 541.5 and 541.8 s | 0.00 | 541.0 s → 541.0 s |
 | The sets' 245 files, GPU decode | 84.1 s at the least | 0.54 at the most (a stand-up special) | no answer changed |
 | The 80, CPU decode | 84.1 s at the least | 0.46 at the most | no answer changed |
 
-Those rows are pinned in `test_rule_j.TestTextAllThrough` (`tests/fixtures/markers/credits_synth_lab.json.gz`). The
-two margins are wide on the sets: 84 s against the 30 s floor, 0.54 against 0.8. What it costs, and what it doesn't
-catch:
+Those rows are pinned in `test_rule_j.TestTextAllThrough` (`tests/fixtures/markers/credits_synth_lab.json.gz`: the
+GPU decode's keyframe rows, with version 1's answer and 1 fps refine rows on them). The Synth Credits files are H.264,
+so their rows are the same before and after the VP9 fix, byte for byte. The two margins are wide on the sets: 84 s
+against the 30 s floor, 0.54 against 0.8. What it costs, and what it doesn't catch:
 
 - **A roll longer than the tail less 30 s gets no answer**: over 420 s on an episode (450 s tail) or 870 s on a movie
   (900 s tail). Version 1 answered those near the start of the tail. Spec §5.4 "Frames" measured episode rolls at p95
@@ -583,6 +587,58 @@ catch:
   less text than that and are joined to the roll, the start lands on the scene, pinned as a known limit
   (`test_a_subtitled_dark_scene_is_no_answer_only_when_text_fills_the_tail_before_it`,
   `test_subtitles_on_a_dark_scene_after_text_free_story_still_start_early`).
+
+### VP9's keyframe pass (final review)
+
+**Cause.** FFmpeg's VP9 decoder (`libavcodec/vp9.c`) never reads `-skip_frame` (no reference to `skip_frame` at
+n8.0.1, n8.1 or master), and every hwaccel (CUDA, VAAPI, QSV) decodes inside it, so `-skip_frame nokey` skipped
+nothing on VP9 on either path. The decoders that honor it at n8.1: H.264, HEVC, MPEG-1/2, VC-1, MPEG-4 part 2, VP8,
+and AV1 through a hwaccel or dav1d. A VP9 movie's 900 s tail put about 21,600 frames through text detection, which on
+the CPU runs into the 600 s decode timeout (no answer, tried again every day), and rule J read 24 rows a second instead
+of the keyframe spacing it was measured at.
+
+**Fix.** `frames.keyframe_thinning` takes the stream's `codec_name` from the ffprobe that already reads the first 24
+packet flags (no second process per file). A VP9 keyframe pass adds `-bsf:V:0 noise=drop=not(key)`, which drops the
+packets not flagged as keyframes before the decoder; an all-key VP9 gets `not(key)+mod(n\,N)` in the one filter
+(`noise` drops a packet whose expression is non-zero). Every other codec's command is byte for byte what it was, and
+the 1 fps refine decodes are unchanged. A VP9 tail with no flagged keyframe gives no frames and ffmpeg exits 0: on the
+GPU that is a GPU failure (`run_decode`), and the worker's CPU rerun reads it as a tail without a roll, like any file
+without a keyframe in its tail. Nothing is retried.
+
+**Per codec**, with the image's ffmpeg 8.1.2 (`media_preview_generator:final-review`) on storage's Quadro P5000: 30 s
+clips of `testsrc2` at 24 fps with a keyframe every 2 s (`-g 48`), the app's own keyframe-pass command
+(`frames.decode_command`, with the thinning `frames.keyframe_thinning` gives the clip) from 10 s. Cells are frames out,
+with the ones `showinfo` marks `iskey:1` in brackets; "exit" is a GPU decode that fails, which the worker reruns on the
+CPU (this card has no AV1 or VP8 decode).
+
+| Clip | Before: CPU | Before: CUDA | After: CPU | After: CUDA | Keyframe-pass argv |
+|---|---:|---:|---:|---:|---|
+| H.264, .mkv | 10 (10) | 10 (10) | 10 (10) | 10 (10) | identical |
+| H.264, .mp4 | 10 (10) | 10 (10) | 10 (10) | 10 (10) | identical |
+| H.264, .ts | 10 (10) | 10 (10) | 10 (10) | 10 (10) | identical |
+| HEVC, .mkv | 10 (10) | 10 (10) | 10 (10) | 10 (10) | identical |
+| **VP9, .webm** | **480 (10)** | **480 (10)** | 10 (10) | 10 (10) | `-bsf:V:0 noise=drop=not(key)` added |
+| **VP9, .mkv** | **480 (10)** | **480 (10)** | 10 (10) | 10 (10) | `-bsf:V:0 noise=drop=not(key)` added |
+| VP9, every frame a keyframe, .webm | 10 (10) | 10 (10) | 10 (10) | 10 (10) | `noise=drop=mod(n\,48)` → `noise=drop=not(key)+mod(n\,48)` |
+| VP9, one keyframe (at 0 s), .webm | 480 (0) | 480 (0) | 0, exit 0 | 0, exit 0 | `-bsf:V:0 noise=drop=not(key)` added |
+| AV1 (SVT-AV1), .mkv | 10 (10) | exit 69 | 10 (10) | exit 69 | identical |
+| AV1 (SVT-AV1), .webm | 10 (10) | exit 69 | 10 (10) | exit 69 | identical |
+| VP8, .webm | 10 (10) | exit 218 | 10 (10) | exit 218 | identical |
+| MPEG-2, .ts | 11 (11) | 11 (11) | 11 (11) | 11 (11) | identical |
+| MPEG-4 part 2, .avi | 11 (11) | 11 (11) | 11 (11) | 11 (11) | identical |
+| MPEG-4 part 2, .mp4 | 11 (11) | 11 (11) | 11 (11) | 11 (11) | identical |
+
+Every row now comes out keyframes only, and every non-VP9 row's argv and frames are the same as before. The 11-frame
+rows are the 10 GOP keyframes plus the I-frame those encoders put on the clip's last frame.
+
+**The sets.** No file of the 80 (51 H.264, 28 HEVC, 1 AV1) or the 205 (90 H.264, 114 HEVC, 1 AV1) is VP9, and none of
+the lab scale run's 685 movies and episodes is (392 H.264, 292 HEVC, 1 AV1); its folders' 34 VP9 files are all
+trailers, which the pipeline skips as extras. So the harness proves the other half: with the decode cache keyed on the
+decode digest from before the fix (`d8c83e982a5c30a7`, the round-2 final runs'), a window is served from the cache
+only when the fixed code builds the byte-identical command for it. The GPU run over the 80, the 205 and the 43 online
+cases decoded 0 windows of 568, and the CPU run over the 80 0 of 154; every answer, set row, gate check, `rule_j_80`
+row and online decision is identical to the round-2 final runs. The only files whose answers can move are VP9 files
+(on the lab, the six Synth Audio episodes above: no answer before the guard, and none after).
 
 ### Tried and not taken
 
