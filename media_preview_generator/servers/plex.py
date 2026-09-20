@@ -924,9 +924,11 @@ class PlexServer(MediaServer):
 
         Returns the envelope documented on
         :meth:`MediaServer.previews_readiness`. Plex sections:
-        ``connection``, ``version``, ``library_settings`` (FSEvent
-        prefs — server-wide), ``server_config_folder`` (writable
-        probe), ``vendor_extraction``, ``path_mappings``.
+        ``connection``, ``version``, ``markers`` (Intro & Credits —
+        only when the feature is on, plus one row when it is off),
+        ``library_settings`` (FSEvent prefs — server-wide),
+        ``server_config_folder`` (writable probe),
+        ``vendor_extraction``, ``path_mappings``.
 
         Plex has no plugin architecture and no trickplay geometry knob;
         most "checks" are server-wide prefs or filesystem state.
@@ -1010,6 +1012,19 @@ class PlexServer(MediaServer):
                 ],
             }
         )
+
+        # --- Intro & Credits (spec §7 item 6) -----------------------
+        # Built from the facts the Intro & Credits tab already asked for, never a second probe; a server with
+        # the feature off gets the one row that says so and nothing else (plan P-R6).
+        from ..markers import readiness as markers_readiness
+
+        marker_facts = markers_readiness.marker_facts(self, self._server_config)
+        if marker_facts.enabled is False:
+            sections.append(markers_readiness.off_section())
+        elif marker_facts.on:
+            marker_section = markers_readiness.plex_section(marker_facts)
+            if marker_section is not None:
+                sections.append(marker_section)
 
         # --- Library settings (server-wide FSEvent prefs) -----------
         library_checks: list[dict[str, Any]] = []

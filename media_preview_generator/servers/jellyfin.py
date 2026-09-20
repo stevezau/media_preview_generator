@@ -1630,6 +1630,12 @@ class JellyfinServer(EmbyApiClient):
         ``vendor_extraction``. (Path mappings are a Plex-only concept —
         Jellyfin's webhook plugin reports paths the way Jellyfin sees
         them, so no mapping section is emitted here.)
+
+        Intro & Credits adds no second plugin section: with the feature
+        on, the plugin is required, so the existing ``plugin_installed``
+        row escalates to critical and a ``markers_plugin_outdated`` row
+        joins it when the installed build can't take markers. With the
+        feature off, one ``markers`` row says so (plan P-R6).
         """
         # Probe plugin first — all downstream checks depend on its state.
         plugin = self.check_plugin_installed()
@@ -1666,7 +1672,15 @@ class JellyfinServer(EmbyApiClient):
         # tiles into Jellyfin's data folder and the plugin is the only thing
         # that registers them there with the correct ThumbnailCount.
         off_media = self._off_media()
-        plugin_required = bool(mode_a_library_names) or off_media
+        # Intro & Credits needs the plugin too, and unconditionally: it is the only route markers have into
+        # Jellyfin. So the switch being on makes this same row required, instead of adding a second plugin row
+        # the install controls wouldn't key on (plan Task 9 Step 2). Built from the facts the Intro & Credits
+        # tab already asked for, never a second probe.
+        from ..markers import readiness as markers_readiness
+
+        marker_facts = markers_readiness.marker_facts(self, self._config)
+        markers_on = marker_facts.on
+        plugin_required = bool(mode_a_library_names) or off_media or markers_on
 
         sections: list[dict[str, Any]] = []
 
@@ -1776,11 +1790,12 @@ class JellyfinServer(EmbyApiClient):
         # in parens for users following the docs.
         if plugin_installed:
             plugin_mode = "Instant activation"
-        elif mode_a_library_names:
-            # Plugin absent but a library has scan-extraction disabled
-            # — the "next scan" fallback doesn't apply here, so saying
-            # "Activates on next scan" would contradict the red critical
-            # row below.
+        elif plugin_required:
+            # Plugin absent while something needs it (a library with
+            # scan-extraction disabled, off-media trickplay, or Intro &
+            # Credits) — the "next scan" fallback doesn't apply here, so
+            # saying "Activates on next scan" would contradict the red
+            # critical row below.
             plugin_mode = "Plugin required — not installed"
         else:
             plugin_mode = "Activates on next scan"
@@ -1812,96 +1827,131 @@ class JellyfinServer(EmbyApiClient):
             }
         # Plugin-absence is only a valid "Mode B choice" when every library
         # has scan-extraction enabled (so Jellyfin itself adopts our tiles
-        # on the next scan). If any library is configured for Mode A —
+        # on the next scan) AND this server isn't being sent intro and
+        # credits markers. If any library is configured for Mode A —
         # ``ExtractTrickplayImagesDuringLibraryScan=false`` — plugin
         # absence means nothing ever registers the tiles and previews
-        # never render in the player. In that state the row is a real
-        # failure, not advisory.
+        # never render in the player; with markers on, nothing carries
+        # them either. In those states the row is a real failure, not
+        # advisory.
         plugin_ok = plugin_installed or not plugin_required
         if plugin_installed:
-            plugin_severity = "info"
+            # With Intro & Credits on the plugin is required either way, so the passing row is a passing
+            # REQUIRED row rather than an info row servers.js would drop from the card entirely.
+            plugin_severity = "critical" if markers_on else "info"
             plugin_reason = plugin.get("error") or ""
             plugin_current = plugin.get("version") or "installed"
         elif plugin_required:
             plugin_severity = "critical"
             probe_error = plugin.get("error") or ""
+            why: list[str] = []
+            if markers_on:
+                why.append(markers_readiness.PLUGIN_MISSING_REASON)
             if off_media:
                 # Off-media has no media-adjacent fallback: only the plugin
                 # can register tiles in Jellyfin's data folder correctly.
-                plugin_reason = (
+                why.append(
                     "Plugin required because this server stores trickplay off the media "
                     "drive (in Jellyfin's data folder). Only the Media Preview Bridge "
                     "plugin can register those tiles with the correct thumbnail count — "
                     "without it, scrubbing previews will not render. Install the plugin, "
                     "or turn off 'Store trickplay off the media drive' for this server."
-                    + (f" Probe: {probe_error}" if probe_error else "")
                 )
-            else:
+            elif mode_a_library_names:
                 libs = ", ".join(mode_a_library_names)
-                plugin_reason = (
+                why.append(
                     f"Plugin required because scan-time extraction is disabled on: {libs}. "
                     f"Without the plugin, this app's published tiles never get adopted by "
                     f"Jellyfin and scrubbing previews will not render. Either install the "
                     f"plugin (for instant activation) or re-enable scan-time extraction on "
                     f"the listed libraries (Jellyfin will adopt our tiles on its next scan)."
-                    + (f" Probe: {probe_error}" if probe_error else "")
                 )
+            plugin_reason = " ".join(why) + (f" Probe: {probe_error}" if probe_error else "")
             plugin_current = "not installed"
         else:
             plugin_severity = "info"
             plugin_reason = plugin.get("error") or ""
             plugin_current = "not installed"
+        plugin_checks: list[dict[str, Any]] = [
+            {
+                "id": "plugin_installed",
+                "label": plugin_mode,
+                "docs_anchor": "plugin",
+                "tooltip": (
+                    markers_readiness.JELLYFIN_PLUGIN_TOOLTIP
+                    if markers_on
+                    else "Optional plugin for instant preview activation"
+                ),
+                "explanation": (
+                    "<p><strong>What it is:</strong> the Media Preview Bridge plugin is a "
+                    "small Jellyfin plugin we publish alongside this app. When installed, "
+                    "it exposes an internal endpoint this app calls to register published "
+                    "previews directly with Jellyfin's trickplay manager — instantly, without "
+                    "waiting for a library scan.</p>"
+                    "<p><strong>How previews get activated:</strong></p>"
+                    "<ul>"
+                    "<li><strong>With the plugin installed:</strong> new previews appear in "
+                    "the player the moment generation completes. Near-zero latency.</li>"
+                    "<li><strong>Without the plugin:</strong> Jellyfin adopts our tiles on "
+                    "its next library scan (usually within minutes) or at worst on the 3 AM "
+                    "scheduled 'Refresh Trickplay Images' task. Fully functional — just slower.</li>"
+                    "</ul>"
+                    "<p><strong>When the plugin is required:</strong> if any library has "
+                    "<code>ExtractTrickplayImagesDuringLibraryScan</code> set to <em>false</em> "
+                    "(scan-time extraction disabled), plugin absence is a hard "
+                    "failure — nothing registers our tiles and the scrubber stays blank. "
+                    "Either install the plugin or enable scan-extraction on those libraries.</p>"
+                    "<p><strong>Install / uninstall:</strong> both require a Jellyfin restart "
+                    "(~30 seconds). Published tiles stay on disk either way — switching modes "
+                    "is non-destructive and reversible.</p>"
+                    + (
+                        "<p><strong>Intro &amp; Credits:</strong> this server is set to receive intro and "
+                        "credits markers, and the plugin is the only route they have into Jellyfin. Without "
+                        "it the markers are decided and stored here, and wait.</p>"
+                        if markers_on
+                        else ""
+                    )
+                ),
+                "ok": plugin_ok,
+                "severity": plugin_severity,
+                "current": plugin_current,
+                "recommended": "installed" if plugin_required else "installed (optional)",
+                "actions": plugin_actions,
+                "reason": plugin_reason,
+                "meta": {
+                    "version": plugin.get("version") or "",
+                    "mode_a_libraries": list(mode_a_library_names),
+                    "plugin_required": plugin_required,
+                },
+            }
+        ]
+        # "Too old for markers" is its own row: the installed plugin works for previews, so the row above
+        # stays passing (plan Task 9 Step 2 — one plugin section, whose first check keeps the ``current``
+        # convention the install controls read).
+        outdated_check = markers_readiness.outdated_plugin_check(marker_facts, vendor="jellyfin", offer_update=True)
+        if outdated_check is not None:
+            plugin_checks.append(outdated_check)
+        # The section summary follows its own checks: a section that fails only on the recommended "too old"
+        # row must not summarise itself as critical (the list-page glyph trusts this line when checks is empty).
+        plugin_section_ok = plugin_ok and outdated_check is None
+        if any(check["ok"] is False and check["severity"] == "critical" for check in plugin_checks):
+            plugin_section_severity = "critical"
+        elif not plugin_section_ok:
+            plugin_section_severity = "recommended"
+        else:
+            plugin_section_severity = plugin_severity
         sections.append(
             {
                 "id": "plugin",
                 "title": "Media Preview Bridge plugin",
                 "docs_anchor": "plugin",
-                "ok": plugin_ok,
-                "severity": plugin_severity,
-                "checks": [
-                    {
-                        "id": "plugin_installed",
-                        "label": plugin_mode,
-                        "docs_anchor": "plugin",
-                        "tooltip": "Optional plugin for instant preview activation",
-                        "explanation": (
-                            "<p><strong>What it is:</strong> the Media Preview Bridge plugin is a "
-                            "small Jellyfin plugin we publish alongside this app. When installed, "
-                            "it exposes an internal endpoint this app calls to register published "
-                            "previews directly with Jellyfin's trickplay manager — instantly, without "
-                            "waiting for a library scan.</p>"
-                            "<p><strong>How previews get activated:</strong></p>"
-                            "<ul>"
-                            "<li><strong>With the plugin installed:</strong> new previews appear in "
-                            "the player the moment generation completes. Near-zero latency.</li>"
-                            "<li><strong>Without the plugin:</strong> Jellyfin adopts our tiles on "
-                            "its next library scan (usually within minutes) or at worst on the 3 AM "
-                            "scheduled 'Refresh Trickplay Images' task. Fully functional — just slower.</li>"
-                            "</ul>"
-                            "<p><strong>When the plugin is required:</strong> if any library has "
-                            "<code>ExtractTrickplayImagesDuringLibraryScan</code> set to <em>false</em> "
-                            "(scan-time extraction disabled), plugin absence is a hard "
-                            "failure — nothing registers our tiles and the scrubber stays blank. "
-                            "Either install the plugin or enable scan-extraction on those libraries.</p>"
-                            "<p><strong>Install / uninstall:</strong> both require a Jellyfin restart "
-                            "(~30 seconds). Published tiles stay on disk either way — switching modes "
-                            "is non-destructive and reversible.</p>"
-                        ),
-                        "ok": plugin_ok,
-                        "severity": plugin_severity,
-                        "current": plugin_current,
-                        "recommended": "installed" if plugin_required else "installed (optional)",
-                        "actions": plugin_actions,
-                        "reason": plugin_reason,
-                        "meta": {
-                            "version": plugin.get("version") or "",
-                            "mode_a_libraries": list(mode_a_library_names),
-                            "plugin_required": plugin_required,
-                        },
-                    }
-                ],
+                "ok": plugin_section_ok,
+                "severity": plugin_section_severity,
+                "checks": plugin_checks,
             }
         )
+        if marker_facts.enabled is False:
+            sections.append(markers_readiness.off_section())
 
         # --- Off-media config-dir mount (off-media only) -------------
         # In off-media mode this app writes tiles into Jellyfin's config dir,

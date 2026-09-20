@@ -738,6 +738,23 @@ class MediaServer(ABC):
         frontend heuristics. Subclasses emit the sections relevant to
         their vendor.
 
+        Two rules the card's frontend imposes on every emitted check:
+
+        * ``severity`` is never ``"info"`` on a row that must be seen.
+          ``servers.js _partitionChecks`` drops info rows on purpose, so
+          a row with nothing to fix is ``"recommended"`` with
+          ``ok: True`` and lands in "All good".
+        * The plugin install controls key on ``section.id == "plugin"``
+          and read that section's FIRST check's ``current``, which is
+          ``"not installed"`` or a version string. A vendor adding
+          plugin rows keeps both conventions.
+
+        Intro & Credits rows follow the same envelope and are built in
+        :mod:`media_preview_generator.markers.readiness` from the facts
+        the server Edit tab already computed — never a second probe, and
+        never at all for a server with the feature switched off (which
+        gets one row saying so).
+
         Default raises ``NotImplementedError``. Concrete subclasses
         override.
         """

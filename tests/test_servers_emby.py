@@ -30,6 +30,7 @@ def _emby_config(
     auth=_SENTINEL,
     libraries: list[Library] | None = None,
     url: str = "http://emby:8096",
+    markers: dict | None = None,
 ) -> ServerConfig:
     """Build a ServerConfig with a sensible default auth dict.
 
@@ -47,6 +48,7 @@ def _emby_config(
         url=url,
         auth=auth,
         libraries=libraries or [],
+        markers=markers or {},
     )
 
 
@@ -2116,3 +2118,253 @@ class TestPluginNames:
         server = make_server()
         server._request = MagicMock(side_effect=side_effect, return_value=resp)
         assert server.get_plugin_names() is None
+
+
+class TestEmbyMarkersReadiness:
+    """Intro & Credits on Emby's Setup Health card (plan phase 4 Task 9 Step 2).
+
+    Emby's previews need no plugin, so both rows are new here. They use the section id ``plugin`` and the
+    first-check ``current`` convention ("not installed" or a version) that the shipped install controls read.
+    """
+
+    MARKERS_ON = {"enabled": True, "library_ids": None, "emby": {"on_emby_redetect": "restore"}}
+    MARKERS_OFF = {"enabled": False, "library_ids": None, "emby": {"on_emby_redetect": "restore"}}
+
+    def _wire(self):
+        good_options = {
+            "ExtractTrickplayImagesDuringLibraryScan": False,
+            "ExtractChapterImagesDuringLibraryScan": False,
+            "EnableRealtimeMonitor": True,
+        }
+
+        def fake_request(method, url, **kwargs):
+            if url == "/System/Info":
+                return MagicMock(
+                    status_code=200,
+                    json=MagicMock(return_value={"Version": "4.10.0.40"}),
+                    raise_for_status=MagicMock(),
+                )
+            if url == "/Library/VirtualFolders":
+                return MagicMock(
+                    status_code=200,
+                    json=MagicMock(return_value=[{"Name": "Movies", "ItemId": "m", "LibraryOptions": good_options}]),
+                    raise_for_status=MagicMock(),
+                )
+            if url == "/ScheduledTasks":
+                return MagicMock(
+                    status_code=200,
+                    json=MagicMock(
+                        return_value=[
+                            {
+                                "Name": "Generate Trickplay Images",
+                                "Key": "RefreshTrickplayImages",
+                                "Id": "sched-trickplay-id",
+                                "Triggers": [{"Type": "DailyTrigger", "TimeOfDayTicks": 108_000_000_000}],
+                                "State": "Idle",
+                                "Description": "Creates trickplay previews for videos.",
+                            }
+                        ]
+                    ),
+                    raise_for_status=MagicMock(),
+                )
+            raise AssertionError(f"unexpected {method} {url}")
+
+        return fake_request
+
+    def _readiness(
+        self,
+        markers: dict,
+        capability: dict,
+        *,
+        catalog_listed=_SENTINEL,
+        calls: list | None = None,
+        server=None,
+    ):
+        def status_payload(live, config):
+            if calls is not None:
+                calls.append((live, config.id))
+            return {
+                "server_id": config.id,
+                "server_type": "emby",
+                "enabled": True,
+                "settings": {},
+                "capability": capability,
+                "can_show": ["intro", "credits"],
+                "libraries": [],
+            }
+
+        emby = server if server is not None else EmbyServer(_emby_config(markers=markers))
+        # ``catalog_listed`` unset means the client's own catalogue read must never be reached.
+        listed = patch.object(
+            EmbyServer,
+            "bridge_catalog_listed",
+            return_value=catalog_listed,
+            side_effect=None if catalog_listed is not _SENTINEL else AssertionError("catalogue read not expected"),
+        )
+        with (
+            patch.object(EmbyServer, "_request", side_effect=self._wire()),
+            patch("media_preview_generator.markers.inspect.server_status_payload", status_payload),
+            listed,
+        ):
+            return emby.previews_readiness()
+
+    @staticmethod
+    def _capability(state: str, **details) -> dict:
+        return {"state": state, "message": "", "details": details, "warning": ""}
+
+    @staticmethod
+    def _plugin_section(payload: dict) -> dict:
+        sections = [s for s in payload["sections"] if s["id"] == "plugin"]
+        assert len(sections) == 1, f"expected exactly one plugin section, got {len(sections)}"
+        return sections[0]
+
+    def test_feature_off_emits_the_one_row_and_no_plugin_section(self):
+        """P-R6, and the badge: an Emby that isn't sent markers must not grow a plugin section at all.
+
+        ``servers.js _deriveBadgeState`` reads the plugin section's first check to label the card "ready
+        (instant)" / "ready (next scan)" — emitting one for a user who never asked for markers would relabel
+        every Emby card.
+        """
+        calls: list = []
+
+        payload = self._readiness(self.MARKERS_OFF, self._capability("ready"), calls=calls)
+
+        assert [s["id"] for s in payload["sections"] if s["id"] == "plugin"] == []
+        section = next(s for s in payload["sections"] if s["id"] == "markers")
+        assert section["title"] == "Intro & Credits"
+        row = section["checks"][0]
+        assert row["id"] == "markers_off"
+        assert row["label"] == "Intro & Credits is off for this server"
+        assert row["severity"] == "recommended"
+        assert row["ok"] is True
+        assert row["current"] is None and row["recommended"] is None
+        assert calls == [], "the capability of a server with the feature off must never be probed"
+        assert payload["overall_ok"] is True
+
+    def test_plugin_missing_and_listed_in_the_catalogue_offers_the_install(self):
+        calls: list = []
+        emby = EmbyServer(_emby_config(markers=self.MARKERS_ON))
+
+        payload = self._readiness(
+            self.MARKERS_ON, self._capability("needs_plugin", catalog_listed=True), calls=calls, server=emby
+        )
+
+        # The status is asked for THIS live client and THIS server's config — passing None would take
+        # ``_preview_capability``'s "couldn't set up a connection" branch and the rows below would vanish.
+        assert calls == [(emby, "emby-1")]
+        section = self._plugin_section(payload)
+        assert [c["id"] for c in section["checks"]] == ["markers_plugin_installed"]
+        # The subheading the card prints over the rows; the plugin's name is the row's own label.
+        assert section["title"] == "Plugin"
+        row = section["checks"][0]
+        assert row["label"] == "Media Preview Bridge for Emby plugin"
+        assert row["severity"] == "critical"
+        assert row["ok"] is False
+        # The install controls read this exact value off the section's FIRST check.
+        assert row["current"] == "not installed"
+        assert row["recommended"] == "installed"
+        assert row["reason"] == "Without it, nothing can send markers to this server."
+        assert row["tooltip"] == "Emby takes intro and credits markers only through this plugin."
+        assert row["actions"]["enable"]["action"] == "install_plugin"
+        assert row["fix_action"] == "enable"
+        assert payload["overall_ok"] is False
+        assert [s["id"] for s in payload["sections"] if s["id"] == "markers"] == []
+
+    def test_plugin_missing_and_not_in_the_catalogue_has_no_button(self):
+        """No action → the shipped "Change in Emby UI" badge, and the manual-install reason."""
+        payload = self._readiness(self.MARKERS_ON, self._capability("needs_plugin", catalog_listed=False))
+
+        row = self._plugin_section(payload)["checks"][0]
+        assert row["actions"] == {}
+        assert "fix_action" not in row
+        assert row["reason"] == (
+            "This Emby's plugin catalogue doesn't list it. Install it by hand — the guide is in the Intro & "
+            "Credits tab."
+        )
+        assert payload["overall_ok"] is False
+
+    def test_an_unreadable_catalogue_offers_no_button_but_claims_nothing(self):
+        """Same rule as the Edit tab: only a confirmed listing offers the button.
+
+        A catalogue that couldn't be read is not a catalogue that doesn't list the plugin — saying so would
+        make the card contradict the Intro & Credits tab, which stays quiet about it.
+        """
+        payload = self._readiness(self.MARKERS_ON, self._capability("needs_plugin", catalog_listed=None))
+
+        row = self._plugin_section(payload)["checks"][0]
+        assert row["actions"] == {}
+        assert row["reason"] == (
+            "Couldn't read this Emby's plugin catalogue. Install it by hand — the guide is in the Intro & Credits tab."
+        )
+
+    def test_installed_plugin_with_markers_support_passes(self):
+        payload = self._readiness(self.MARKERS_ON, self._capability("ready", plugin_version="1.4.0"))
+
+        section = self._plugin_section(payload)
+        assert [c["id"] for c in section["checks"]] == ["markers_plugin_installed"]
+        row = section["checks"][0]
+        assert row["ok"] is True
+        assert row["severity"] == "critical"
+        assert row["current"] == "1.4.0"
+        assert row["actions"] == {}
+        assert payload["overall_ok"] is True
+
+    def test_installed_plugin_without_a_version_still_reads_as_installed(self):
+        """The install controls only ask "is it the string 'not installed'" — never emit that when it is."""
+        payload = self._readiness(self.MARKERS_ON, self._capability("ready"))
+
+        assert self._plugin_section(payload)["checks"][0]["current"] == "installed"
+
+    def test_outdated_plugin_adds_a_recommended_row_with_an_update(self):
+        payload = self._readiness(
+            self.MARKERS_ON, self._capability("plugin_outdated", plugin_version="1.2.0"), catalog_listed=True
+        )
+
+        checks = self._plugin_section(payload)["checks"]
+        assert [c["id"] for c in checks] == ["markers_plugin_installed", "markers_plugin_outdated"]
+        assert checks[0]["current"] == "1.2.0"
+        assert checks[0]["ok"] is True
+        outdated = checks[1]
+        assert outdated["label"] == "The plugin is too old for intro and credits markers"
+        assert outdated["severity"] == "recommended"
+        assert outdated["ok"] is False
+        assert (outdated["current"], outdated["recommended"]) == ("1.2.0", "newest")
+        assert outdated["reason"] == "Previews still work. Markers wait until it's updated."
+        # Not "install_plugin" — see the Jellyfin twin: an update can't wait on "the plugin appeared".
+        assert outdated["actions"]["enable"]["action"] == "update_plugin"
+        assert outdated["fix_action"] == "enable"
+        # A recommendation never turns the card's header red.
+        assert payload["overall_ok"] is True
+
+    def test_outdated_plugin_not_in_the_catalogue_has_no_update_button(self):
+        payload = self._readiness(
+            self.MARKERS_ON, self._capability("plugin_outdated", plugin_version="1.2.0"), catalog_listed=False
+        )
+
+        outdated = self._plugin_section(payload)["checks"][1]
+        assert outdated["actions"] == {}
+        assert "fix_action" not in outdated
+
+    @pytest.mark.parametrize("state", ["unreachable", "misconfigured", "unknown"])
+    def test_a_capability_that_knows_nothing_emits_no_section(self, state):
+        payload = self._readiness(self.MARKERS_ON, self._capability(state))
+
+        assert [s["id"] for s in payload["sections"] if s["id"] in ("plugin", "markers")] == []
+        assert payload["overall_ok"] is True
+
+    @pytest.mark.parametrize(
+        ("state", "extra"),
+        [
+            ("needs_plugin", {"catalog_listed": True}),
+            ("needs_plugin", {"catalog_listed": False}),
+            ("plugin_outdated", {"plugin_version": "1.2.0"}),
+            ("ready", {"plugin_version": "1.4.0"}),
+        ],
+    )
+    def test_no_marker_row_is_ever_severity_info(self, state, extra):
+        """``servers.js _partitionChecks`` drops every ``info`` row, so one here would never render."""
+        payload = self._readiness(self.MARKERS_ON, self._capability(state, **extra), catalog_listed=True)
+
+        rows = [c for s in payload["sections"] for c in s["checks"] if c["id"].startswith("markers_")]
+        assert rows, "expected at least one Intro & Credits row"
+        assert all(row["severity"] in ("critical", "recommended") for row in rows)

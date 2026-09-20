@@ -1933,3 +1933,353 @@ class TestPlexMarkerHelpers:
     def test_marker_detection_prefs_unreachable(self, plex_server_under_test):
         plex_server_under_test._connect.side_effect = RuntimeError("down")
         assert plex_server_under_test.get_marker_detection_prefs() == {"intro": None, "credits": None}
+
+
+class TestPlexMarkersReadiness:
+    """The Intro & Credits rows Plex's Setup Health card emits (plan phase 4 Task 9; spec §7 item 6).
+
+    Every row is read from the capability report the Intro & Credits tab already asks for, so these tests
+    drive ``markers.inspect.server_status_payload`` — the one source of truth — and assert the rows it
+    produces, not a second probe.
+    """
+
+    CONFIRMED = {"db_write_confirmed_at": "2026-01-01T00:00:00Z", "on_plex_redetect": "restore"}
+
+    def _server(self, markers: dict | None, config_folder: str = "/plex"):
+        from media_preview_generator.servers.base import ServerConfig
+
+        cfg = ServerConfig(
+            id="plex-1",
+            type=ServerType.PLEX,
+            name="Plex",
+            enabled=True,
+            url="http://plex:32400",
+            auth={"token": "t"},
+            libraries=[],
+            output={"plex_config_folder": config_folder},
+            markers=markers if markers is not None else {},
+        )
+        return PlexServer(cfg)
+
+    def _readiness(self, server, capability: dict | None, calls: list | None = None):
+        """Run ``previews_readiness`` with every non-marker probe stubbed out."""
+
+        def status_payload(live, config):
+            if calls is not None:
+                calls.append((live, config.id))
+            return {
+                "server_id": config.id,
+                "server_type": "plex",
+                "enabled": True,
+                "settings": {},
+                "capability": capability,
+                "can_show": ["intro", "credits"],
+                "libraries": [],
+            }
+
+        prefs = MagicMock(
+            status_code=200,
+            json=MagicMock(return_value={"MediaContainer": {"Setting": []}}),
+            raise_for_status=MagicMock(),
+        )
+        with (
+            patch.object(PlexServer, "test_connection") as tc,
+            patch("media_preview_generator.servers.plex.requests.get", return_value=prefs),
+            patch.object(PlexServer, "get_vendor_extraction_status") as vs,
+            patch("media_preview_generator.markers.inspect.server_status_payload", status_payload),
+        ):
+            tc.return_value = ConnectionResult(ok=True, message="Connected", version="1.43.0")
+            vs.return_value = {"extracting_count": 0, "stopped_count": 0, "skipped_count": 0, "total": 0}
+            return server.previews_readiness()
+
+    @staticmethod
+    def _capability(state: str, **details) -> dict:
+        return {"state": state, "message": "", "details": details, "warning": ""}
+
+    @staticmethod
+    def _failing_critical(payload: dict) -> list[str]:
+        """Ids of every failing critical check — what ``overall_ok`` is derived from."""
+        return [
+            check["id"]
+            for section in payload["sections"]
+            for check in section["checks"]
+            if check["ok"] is False and check["severity"] == "critical"
+        ]
+
+    @staticmethod
+    def _marker_checks(payload: dict) -> dict[str, dict]:
+        """Every emitted Intro & Credits row, by id."""
+        return {
+            check["id"]: check
+            for section in payload["sections"]
+            if section["id"] == "markers"
+            for check in section["checks"]
+        }
+
+    def test_feature_off_emits_only_the_one_row_and_probes_nothing(self):
+        """P-R6: a server that isn't sent markers gets one row, in All good, and no capability probe.
+
+        The probe matters: reading the capability of every Plex server would lock its database for a user
+        who never asked for markers.
+        """
+        calls: list = []
+        server = self._server({"enabled": False, "library_ids": None, "plex": self.CONFIRMED})
+
+        payload = self._readiness(server, self._capability("ready"), calls)
+
+        section = next(s for s in payload["sections"] if s["id"] == "markers")
+        assert section["title"] == "Intro & Credits"
+        assert [c["id"] for c in section["checks"]] == ["markers_off"]
+        row = section["checks"][0]
+        assert row["label"] == "Intro & Credits is off for this server"
+        # ``recommended`` + ``ok`` puts it in "All good"; ``info`` would be dropped by _partitionChecks.
+        assert row["severity"] == "recommended"
+        assert row["ok"] is True
+        assert row["current"] is None and row["recommended"] is None
+        assert row["reason"] == "Nothing here is checked until you switch it on."
+        assert row["actions"] == {}
+        assert calls == [], "the capability of a server with the feature off must never be probed"
+
+    def test_a_server_with_no_markers_block_gets_the_off_row(self):
+        """A server added before Intro & Credits existed reads as off, not as unknown."""
+        payload = self._readiness(self._server(None), self._capability("ready"))
+        assert list(self._marker_checks(payload)) == ["markers_off"]
+
+    def test_legacy_config_server_emits_no_markers_section(self, plex_wrapper, tmp_path):
+        """A PlexServer built from the legacy single-server Config has no per-server markers block."""
+        plex_wrapper._config.plex_config_folder = str(tmp_path)
+        payload = self._readiness(plex_wrapper, self._capability("ready"))
+        assert [s["id"] for s in payload["sections"] if s["id"] == "markers"] == []
+
+    def test_everything_healthy_shows_four_passing_rows(self, tmp_path):
+        """Feature on, capability READY: all four facts are known and good."""
+        calls: list = []
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED}, str(tmp_path))
+        capability = self._capability(
+            "ready",
+            plex_pass=True,
+            lock_holder=True,
+            fs_type="ext4",
+            detection={"intro": "never", "credits": "never"},
+        )
+
+        payload = self._readiness(server, capability, calls)
+
+        # The status is asked for THIS live client and THIS server's config — passing None would take
+        # ``_preview_capability``'s "couldn't set up a connection" branch and every row below would vanish.
+        assert calls == [(server, "plex-1")]
+        checks = self._marker_checks(payload)
+        assert set(checks) == {
+            "markers_plex_pass",
+            "markers_plex_tag_row",
+            "markers_plex_db_local",
+            "markers_plex_detection",
+        }
+        assert all(c["ok"] is True for c in checks.values())
+        assert checks["markers_plex_pass"]["current"] == "active"
+        assert checks["markers_plex_tag_row"]["current"] == "present"
+        assert checks["markers_plex_db_local"]["current"] == "this machine"
+        assert checks["markers_plex_detection"]["current"] == "Off"
+        # A passing row never keeps the failure wording.
+        assert checks["markers_plex_pass"]["label"] == "Plex Pass is active"
+        assert checks["markers_plex_detection"]["label"] == "Plex's own detection is off"
+        assert all(c["reason"] is None for c in checks.values())
+        assert payload["overall_ok"] is True
+
+    def test_no_plex_pass_is_critical_with_the_approved_copy(self, tmp_path):
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED}, str(tmp_path))
+        capability = self._capability("needs_pass", plex_pass=False, lock_holder=True, fs_type="ext4")
+
+        payload = self._readiness(server, capability)
+
+        checks = self._marker_checks(payload)
+        row = checks["markers_plex_pass"]
+        assert row["label"] == "Skip buttons need Plex Pass"
+        assert row["severity"] == "critical"
+        assert row["ok"] is False
+        assert (row["current"], row["recommended"]) == ("not active", "active")
+        assert row["reason"] == "Markers are still written, but nobody sees a skip button."
+        assert row["tooltip"] == ("Plex only shows Skip Intro and Skip Credits to viewers on a server with Plex Pass.")
+        # Nothing this app can toggle → no actions, so the card shows the shipped "Change in Plex UI" badge.
+        assert row["actions"] == {}
+        # The check stopped at Plex Pass, so the tag row and Plex's detection are simply unknown.
+        assert "markers_plex_tag_row" not in checks
+        assert "markers_plex_detection" not in checks
+        # The database it got past IS known.
+        assert checks["markers_plex_db_local"]["ok"] is True
+        # ...and the Plex Pass row is what fails the card, not another probe in the wiring.
+        assert self._failing_critical(payload) == ["markers_plex_pass"]
+        assert payload["overall_ok"] is False
+
+    def test_database_on_another_machine_is_critical_and_the_rest_unknown(self, tmp_path):
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED}, str(tmp_path))
+        capability = self._capability("needs_local_db", fs_type="nfs4", db_path="/plex/db")
+
+        payload = self._readiness(server, capability)
+
+        checks = self._marker_checks(payload)
+        assert list(checks) == ["markers_plex_db_local"]
+        row = checks["markers_plex_db_local"]
+        assert row["label"] == "Plex's library database isn't on this machine"
+        assert row["severity"] == "critical"
+        assert row["ok"] is False
+        assert (row["current"], row["recommended"]) == ("another machine", "this machine")
+        assert row["reason"] == (
+            "Run the Plex marker helper next to Plex, or run this app on the same machine as Plex."
+        )
+        assert self._failing_critical(payload) == ["markers_plex_db_local"]
+        assert payload["overall_ok"] is False
+
+    def test_plex_running_on_another_copy_of_the_database_is_the_same_row(self):
+        """``lock_holder`` False + needs_local_db — a local file, but not the one Plex has open."""
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED})
+        capability = self._capability(
+            "needs_local_db", fs_type="ext4", lock_holder=False, db_path="/plex/db", plex_pass=True
+        )
+
+        payload = self._readiness(server, capability)
+
+        checks = self._marker_checks(payload)
+        assert checks["markers_plex_db_local"]["ok"] is False
+        assert checks["markers_plex_db_local"]["current"] == "another machine"
+        # Plex answered, so Plex Pass is known even though the write is refused.
+        assert checks["markers_plex_pass"]["ok"] is True
+
+    def test_missing_marker_list_is_critical_and_detection_is_a_recommendation(self):
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED})
+        capability = self._capability(
+            "needs_plex_detection_once",
+            plex_pass=True,
+            lock_holder=True,
+            fs_type="ext4",
+            detection={"intro": "scheduled", "credits": "never"},
+        )
+
+        payload = self._readiness(server, capability)
+
+        checks = self._marker_checks(payload)
+        tag = checks["markers_plex_tag_row"]
+        assert tag["label"] == "Plex hasn't made its marker list yet"
+        assert tag["severity"] == "critical"
+        assert tag["ok"] is False
+        assert (tag["current"], tag["recommended"]) == ("missing", "present")
+        assert tag["reason"] == (
+            "Turn on Plex's own intro detection for one library and play a file, then check again."
+        )
+        assert tag["tooltip"] == (
+            "Plex builds this list the first time it finds a marker itself. This app never creates it."
+        )
+        detection = checks["markers_plex_detection"]
+        assert detection["label"] == "Plex's own detection can replace your markers"
+        assert detection["severity"] == "recommended"
+        assert detection["ok"] is False
+        assert (detection["current"], detection["recommended"]) == ("On", "Off")
+        assert detection["reason"] == "Plex settings → Library → Generate intro and credits video markers."
+        assert detection["actions"] == {}
+
+    @pytest.mark.parametrize(
+        ("detection", "expected"),
+        [
+            ({"intro": "never", "credits": "never"}, True),
+            ({"intro": "scheduled", "credits": "never"}, False),
+            ({"intro": "never", "credits": "asap"}, False),
+            ({"intro": None, "credits": "never"}, True),
+        ],
+    )
+    def test_detection_row_matches_the_edit_tabs_rule(self, detection, expected):
+        """Same rule as ``markers_server_tab.js plexDetectionOn``: anything but ``never`` counts as on."""
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED})
+        capability = self._capability("ready", plex_pass=True, lock_holder=True, fs_type="ext4", detection=detection)
+
+        checks = self._marker_checks(self._readiness(server, capability))
+
+        assert checks["markers_plex_detection"]["ok"] is expected
+
+    @pytest.mark.parametrize("detection", [{"intro": None, "credits": None}, None, "nonsense"])
+    def test_unreadable_detection_prefs_emit_no_row(self, detection):
+        """Plex hides these prefs on a server without Plex Pass — an unknown fact says nothing."""
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED})
+        capability = self._capability("ready", plex_pass=True, lock_holder=True, fs_type="ext4", detection=detection)
+
+        assert "markers_plex_detection" not in self._marker_checks(self._readiness(server, capability))
+
+    @pytest.mark.parametrize("state", ["unreachable", "misconfigured", "unsupported_schema", "unknown"])
+    def test_a_capability_that_knows_nothing_emits_no_section(self, state):
+        """No facts → no rows, rather than a guessed row: the card must not cry wolf."""
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED})
+
+        payload = self._readiness(server, self._capability(state))
+
+        assert [s["id"] for s in payload["sections"] if s["id"] == "markers"] == []
+
+    def test_unreadable_settings_emit_no_section_rather_than_the_off_row(self, tmp_path):
+        """Settings that can't be read are unknown, not "off" — the card says nothing either way."""
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED}, str(tmp_path))
+
+        def boom(raw, server_type):
+            raise RuntimeError("settings.json is unreadable")
+
+        with patch("media_preview_generator.markers.settings.load_server", boom):
+            payload = self._readiness(server, self._capability("ready", plex_pass=True, lock_holder=True))
+
+        assert [s["id"] for s in payload["sections"] if s["id"] == "markers"] == []
+
+    def test_a_failing_status_read_emits_no_section(self, tmp_path):
+        """The Setup Health card survives an Intro & Credits status that raised."""
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED}, str(tmp_path))
+
+        def boom(live, config):
+            raise RuntimeError("markers.db is unreadable")
+
+        prefs = MagicMock(
+            status_code=200,
+            json=MagicMock(return_value={"MediaContainer": {"Setting": []}}),
+            raise_for_status=MagicMock(),
+        )
+        with (
+            patch.object(PlexServer, "test_connection") as tc,
+            patch("media_preview_generator.servers.plex.requests.get", return_value=prefs),
+            patch.object(PlexServer, "get_vendor_extraction_status") as vs,
+            patch("media_preview_generator.markers.inspect.server_status_payload", boom),
+        ):
+            tc.return_value = ConnectionResult(ok=True, message="Connected")
+            vs.return_value = {"extracting_count": 0, "stopped_count": 0, "skipped_count": 0, "total": 0}
+            payload = server.previews_readiness()
+
+        assert [s["id"] for s in payload["sections"] if s["id"] == "markers"] == []
+        assert payload["overall_ok"] is True
+
+    @pytest.mark.parametrize(
+        "capability_kwargs",
+        [
+            {"state": "ready", "plex_pass": True, "lock_holder": True, "detection": {"intro": "never"}},
+            {"state": "needs_pass", "plex_pass": False, "lock_holder": True},
+            {"state": "needs_local_db", "fs_type": "nfs4"},
+            {
+                "state": "needs_plex_detection_once",
+                "plex_pass": True,
+                "lock_holder": True,
+                "detection": {"intro": "scheduled"},
+            },
+        ],
+    )
+    def test_no_marker_row_is_ever_severity_info(self, capability_kwargs):
+        """``servers.js _partitionChecks`` drops every ``info`` row, so one here would never render."""
+        kwargs = dict(capability_kwargs)
+        state = kwargs.pop("state")
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED})
+
+        payload = self._readiness(server, self._capability(state, **kwargs))
+
+        rows = self._marker_checks(payload)
+        assert rows, "expected at least one Intro & Credits row"
+        assert all(row["severity"] in ("critical", "recommended") for row in rows.values())
+
+    def test_the_section_sits_before_library_settings(self):
+        """Mockup order: Intro & Credits rows read first inside a bucket."""
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED})
+        capability = self._capability("ready", plex_pass=True, lock_holder=True, fs_type="ext4")
+
+        ids = [s["id"] for s in self._readiness(server, capability)["sections"]]
+
+        assert ids.index("markers") < ids.index("library_settings")

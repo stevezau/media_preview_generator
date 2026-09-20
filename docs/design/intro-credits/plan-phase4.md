@@ -704,8 +704,10 @@ nothing on movies and non-anime TV, or dropped with the numbers that say so — 
 `[lane-parallel]` **[visible UI — from Task 2's pack]** — spec §7 item 6, §6.3 (`Capability`), §3.1 (Pass, tag row,
 DB location, forced detection), §13 items 4 and 5; P-R5, P-R6; memory `feedback_setup_health_ux_pattern`.
 
-**Files:**
-- Create: `tests/markers/test_readiness_markers.py`
+**Files** *(as shipped: the rows are built once in a new module and asserted in each vendor's existing suite, not
+in a `tests/markers/test_readiness_markers.py` — the behaviour under test is each vendor's envelope, and a
+fourth file would have duplicated the three vendor fixtures)*:
+- Create: `media_preview_generator/markers/readiness.py` (the facts, the copy and the row builders)
 - Modify: `media_preview_generator/servers/plex.py` (`previews_readiness()` 922–1463),
   `media_preview_generator/servers/jellyfin.py` (1617–2499), `media_preview_generator/servers/emby.py`
   (838–1231), `media_preview_generator/servers/base.py` (the envelope docstring 693–745),
@@ -713,9 +715,9 @@ DB location, forced detection), §13 items 4 and 5; P-R5, P-R6; memory `feedback
   `tests/test_api_servers.py`, `tests/e2e/test_intro_credits_server_tab.py`
 
 **Steps**
-- [ ] **Step 1:** One new section per vendor (`markers`), built from the **existing** capability report and server
+- [x] **Step 1:** One new section per vendor (`markers`), built from the **existing** capability report and server
   status rather than new probes — the Edit tab already shows these facts, and two sources of truth would drift.
-- [ ] **Step 2: The checks the roadmap names** — five §7 bullets, six checks, and **two of them are not new rows**.
+- [x] **Step 2: The checks the roadmap names** — five §7 bullets, six checks, and **two of them are not new rows**.
   - Plex (all new): Plex Pass missing (critical), marker tag row absent (critical — and the app must never create
     it), database not on this machine (critical, with the agent from Task 10 as the recommended fix once it
     exists), Plex's own detection may overwrite ours (recommended).
@@ -727,24 +729,28 @@ DB location, forced detection), §13 items 4 and 5; P-R5, P-R6; memory `feedback
   - Emby: `emby.py` has no plugin section at all, so **both** rows are new there, and they must use the same
     `section.id` (`plugin`) and first-check `current` convention (`"not installed"` / a version) that the JS already
     reads.
-- [ ] **Step 3: Every row carries `current` and `recommended`**, an ⓘ, a `docs_anchor`, and an action only where one
+- [x] **Step 3: Every row carries `current` and `recommended`**, an ⓘ, a `docs_anchor`, and an action only where one
   genuinely exists (install/update the plugin). A row with no action uses the shipped `Change in <vendor> UI` badge —
   there is no "Manual" chip any more (`servers.js:2302`).
-- [ ] **Step 4: P-R6** — the section appears only when that server has Intro & Credits on, plus one row saying so when
+- [x] **Step 4: P-R6** — the section appears only when that server has Intro & Credits on, plus one row saying so when
   it is off, emitted as `severity: "recommended"`, `ok: true` so it lands in "All good". **Never `info`**:
   `_partitionChecks` drops `info` rows (`servers.js:2138`, `:2262`).
-- [ ] **Step 5:** Unit cells per vendor × check × ok/not-ok, asserting the emitted dict (id, severity, current,
+- [x] **Step 5:** Unit cells per vendor × check × ok/not-ok, asserting the emitted dict (id, severity, current,
   recommended, actions), not a count — including a cell proving the off-server row is `recommended`+`ok`, and a cell
   proving Jellyfin still emits exactly one `plugin` section with the install controls' `current` convention intact.
   e2e: the rows land in the right bucket with the right badge.
-- [ ] **Step 6:** Screenshot to the owner beside Task 2's mockup before the commit.
+- [ ] **Step 6:** Screenshot to the owner beside Task 2's mockup before the commit. *(Shot from the running app
+  into `evidence/design/phase4/shots/built-11-health-plex.png`, `built-11b-health-markers-off.png` and
+  `built-12-health-emby.png`; still needs the owner's eyes.)*
 
-**Proves:** `tests/markers/test_readiness_markers.py`, `tests/test_servers_plex.py`,
-`tests/test_servers_jellyfin.py`, `tests/test_servers_emby.py`, `tests/test_api_servers.py`,
-`tests/e2e/test_intro_credits_server_tab.py`.
+**Proves:** `tests/test_servers_plex.py`, `tests/test_servers_jellyfin.py`, `tests/test_servers_emby.py`,
+`tests/test_api_servers.py`, `tests/e2e/test_intro_credits_server_tab.py`.
 **Done when:** each of the six checks fires on a server that has the problem and stays quiet on one that doesn't,
 each shows current → recommended, Jellyfin's existing plugin section and its install controls still work unchanged,
-and no JS changed (if any did, say why).
+and no JS changed (if any did, say why). *JS did change, twice, and both were the new rows exposing an existing
+assumption: the card's "ready (instant)" sub-label read any `plugin` section, which Emby's markers plugin now also
+is, so it keys on the previews row's id; and the plugin **update** button waited for the plugin to appear, which is
+already true when updating, so it now waits for the row to clear on a server that answers again.*
 
 ---
 
@@ -782,6 +788,16 @@ later"); Q3. High-risk: it writes a Plex database from another machine.
   run it beside Plex, and that it is the only supported way to write a Plex on another host.
 - [ ] **Step 7:** Deep review before the lab row: this is the one part of phase 4 that can corrupt a user's Plex
   database from another machine.
+- [ ] **Step 8 (handed over by Task 9):** A **bounded capability check for UI callers.** Task 9's Setup Health rows
+  reuse `markers.inspect.server_status_payload`, so the Servers page now runs the Plex marker capability once per
+  markers-on Plex server, **sequentially, on every page load** — and that waits on Plex's SQLite lock with
+  `BUSY_TIMEOUT_S = 30.0` (`publishers/plex_db.py:62`) plus `get_server_status()` and
+  `get_marker_detection_prefs()`. `CapabilityCache` keeps a healthy answer 60 s but a not-ready one only
+  `NOT_READY_TTL_S = 5.0` s (`markers/inspect.py:56-58`), so an unhealthy Plex re-probes on nearly every load.
+  Task 10 already owns `plex_db.py`: give the publisher a short-deadline / `ui_details=False` variant for
+  readiness-style callers (or let `marker_facts` read only an already-cached answer), and correct
+  `servers.js`'s "Each probe is ~200-1500ms" note again once it is bounded. Raised by the Architecture Review of
+  Task 9; deferred there only because `plex_db.py` belongs to this task.
 
 **Proves:** `tests/markers/test_plex_remote.py`, `tests/test_plex_marker_agent.py`, the existing
 `tests/markers/test_plex_db_publisher.py` unchanged, and lab row 12.

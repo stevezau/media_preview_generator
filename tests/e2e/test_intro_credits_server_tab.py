@@ -961,3 +961,157 @@ class TestEmbyTab:
         block = authed_page.locator("#markersStatusBlock")
         expect(block.locator(".alert-warning")).to_contain_text("Couldn't check this server (ValueError)", timeout=5000)
         expect(block).not_to_contain_text("Not installed")
+
+
+@pytest.mark.e2e
+class TestSetupHealthMarkerRows:
+    """Servers → Edit → Setup Health: where the Intro & Credits rows land, and what badge they carry.
+
+    The payload is built by the real backend builder rather than hand-copied JSON, so a change to a row's
+    severity or copy shows up here as a bucket or badge change instead of passing against a stale fixture.
+    """
+
+    def _open_health(self, page: Page, app_url: str, server: dict, payload: dict | list) -> dict:
+        """Open Setup Health with ``payload`` served for the readiness probe.
+
+        A list serves its first envelope until the page installs a plugin, then one envelope per probe with
+        the last repeating — the shape a "click, then poll while the server restarts" flow needs. (The page
+        probes readiness more than once before that: once per card on /servers, once on opening the modal.)
+        """
+        details = _plex_ready_details() if server["type"] == "plex" else {}
+        captured = _mock_server_page(page, server, _status(server, "ready", "", details))
+        envelopes = payload if isinstance(payload, list) else [payload]
+        captured["probes_after_install"] = 0
+
+        def readiness(route: Route) -> None:
+            if not captured["installs"]:
+                _fulfill(route, envelopes[0])
+                return
+            index = min(1 + captured["probes_after_install"], len(envelopes) - 1)
+            captured["probes_after_install"] += 1
+            _fulfill(route, envelopes[index])
+
+        # Registered last, so it wins over the generic readiness stub inside _mock_server_page.
+        page.route("**/api/servers/*/previews-readiness", readiness)
+        page.goto(f"{app_url}/servers")
+        page.wait_for_load_state("domcontentloaded")
+        edit_btn = page.locator(f".edit-server-btn[data-id='{server['id']}']")
+        edit_btn.wait_for(state="visible", timeout=10000)
+        edit_btn.click()
+        expect(page.locator("#editServerModal")).to_be_visible(timeout=5000)
+        page.locator('#editServerModal [data-bs-target="#edit-tab-health"]').click()
+        expect(page.locator("#edit-tab-health")).to_be_visible(timeout=5000)
+        return captured
+
+    def test_failing_rows_split_across_must_fix_and_recommended(self, authed_page: Page, app_url: str) -> None:
+        from media_preview_generator.markers.readiness import MarkerFacts, plex_section
+
+        facts = MarkerFacts(
+            enabled=True,
+            state="needs_pass",
+            details={
+                "plex_pass": False,
+                "lock_holder": True,
+                "fs_type": "ext4",
+                "detection": {"intro": "scheduled", "credits": "never"},
+            },
+        )
+        payload = {"vendor": "plex", "overall_ok": False, "sections": [plex_section(facts)]}
+
+        self._open_health(authed_page, app_url, _plex_server(), payload)
+
+        must_fix = authed_page.locator("#editReadinessBody details[data-tier='critical']")
+        expect(must_fix).to_contain_text("Intro & Credits", timeout=5000)
+        expect(must_fix).to_contain_text("Skip buttons need Plex Pass")
+        expect(must_fix).to_contain_text("Markers are still written, but nobody sees a skip button.")
+        expect(must_fix).to_contain_text("not active")
+        expect(must_fix).to_contain_text("active")
+        # Nothing this app can toggle → the shipped badge, and no "Manual" chip.
+        expect(must_fix).to_contain_text("Change in Plex UI")
+        expect(must_fix).not_to_contain_text("Manual")
+
+        # The Recommended bucket stays folded while there is anything to fix — open it like a user would.
+        recommended = authed_page.locator("#editReadinessBody details[data-tier='recommended']")
+        recommended.locator("summary").click()
+        expect(recommended).to_contain_text("Plex's own detection can replace your markers")
+        expect(recommended).to_contain_text("Change in Plex UI")
+        # Every recommended row carries the shipped Dismiss link.
+        expect(recommended.get_by_text("Dismiss")).to_be_visible()
+
+        expect(authed_page.locator("#editReadinessBadge")).to_have_text("action needed")
+
+    def test_the_feature_off_row_lands_in_all_good(self, authed_page: Page, app_url: str) -> None:
+        """P-R6: emitted as recommended + ok, so it reads as a passing row rather than being dropped."""
+        from media_preview_generator.markers.readiness import off_section
+
+        payload = {"vendor": "plex", "overall_ok": True, "sections": [off_section()]}
+
+        self._open_health(authed_page, app_url, _plex_server(), payload)
+
+        all_good = authed_page.locator("#editReadinessBody details[data-tier='ok']")
+        expect(all_good).to_contain_text("Intro & Credits", timeout=5000)
+        expect(all_good).to_contain_text("Intro & Credits is off for this server")
+        expect(all_good).to_contain_text("Nothing here is checked until you switch it on.")
+        # No value pair on this row — the label already says the state.
+        expect(all_good).not_to_contain_text("Currently")
+        expect(authed_page.locator("#editReadinessBody details[data-tier='critical']")).to_have_count(0)
+        expect(authed_page.locator("#editReadinessBadge")).to_have_text("ready")
+
+    def test_embys_markers_plugin_does_not_relabel_the_card(self, authed_page: Page, app_url: str) -> None:
+        """Emby's markers rows share the ``plugin`` section id with Jellyfin's previews plugin.
+
+        That id drives the header's sub-label, which says how PREVIEWS activate. Emby previews never touch a
+        plugin, so a healthy Emby must still read "ready" — not Jellyfin's "ready (instant)".
+        """
+        from media_preview_generator.markers.readiness import MarkerFacts, emby_plugin_section
+
+        facts = MarkerFacts(enabled=True, state="ready", details={"plugin_version": "1.4.0"})
+        payload = {"vendor": "emby", "overall_ok": True, "sections": [emby_plugin_section(facts)]}
+
+        self._open_health(authed_page, app_url, _vendor_server("emby", "emby-1"), payload)
+
+        all_good = authed_page.locator("#editReadinessBody details[data-tier='ok']")
+        expect(all_good).to_contain_text("Media Preview Bridge for Emby plugin", timeout=5000)
+        expect(authed_page.locator("#editReadinessBadge")).to_have_text("ready")
+
+    def test_updating_an_outdated_plugin_waits_for_the_server_to_come_back(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        """The update button must not report success while the server is still restarting.
+
+        The plugin is already installed, so "is it installed" is true from the first poll; and while the
+        server restarts it can't be read, so the "too old" row can't be built either — both halves of the
+        convergence test have to hold before the toast.
+        """
+        from media_preview_generator.markers.readiness import MarkerFacts, emby_plugin_section
+
+        outdated = MarkerFacts(enabled=True, state="plugin_outdated", details={"plugin_version": "1.2.0"})
+        updated = MarkerFacts(enabled=True, state="ready", details={"plugin_version": "1.4.0"})
+        envelopes = [
+            {
+                "vendor": "emby",
+                "overall_ok": True,
+                "sections": [emby_plugin_section(outdated, catalog_listed=True)],
+            },
+            # Mid-restart: Emby can't be read, so no plugin section is built at all.
+            {"vendor": "emby", "overall_ok": True, "sections": []},
+            {"vendor": "emby", "overall_ok": True, "sections": [emby_plugin_section(updated)]},
+        ]
+
+        captured = self._open_health(authed_page, app_url, _vendor_server("emby", "emby-1"), envelopes)
+        recommended = authed_page.locator("#editReadinessBody details[data-tier='recommended']")
+        expect(recommended).to_contain_text("The plugin is too old", timeout=5000)
+        recommended.get_by_text("Apply recommended").click()
+
+        # The confirmation modal, then the update itself.
+        submit = authed_page.locator("#readinessConfirmSubmit")
+        expect(submit).to_be_visible(timeout=5000)
+        submit.click()
+        expect(authed_page.locator(".toast", has_text="Applied")).to_be_visible(timeout=30000)
+
+        assert captured["installs"], "the update must POST the install-plugin route"
+        # The first probe after the POST saw a restarting server and must NOT have been accepted.
+        assert captured["probes_after_install"] >= 2, (
+            f"converged after {captured['probes_after_install']} probe(s) — the restarting one was accepted"
+        )
+        expect(authed_page.locator("#editReadinessBody")).not_to_contain_text("The plugin is too old")

@@ -38,6 +38,7 @@ def _jelly_config(
     libraries: list[Library] | None = None,
     url: str = "http://jellyfin:8096",
     output: dict | None = None,
+    markers: dict | None = None,
 ) -> ServerConfig:
     if auth is _SENTINEL:
         auth = dict(_DEFAULT_AUTH)
@@ -50,6 +51,7 @@ def _jelly_config(
         auth=auth,
         libraries=libraries or [],
         output=output or {},
+        markers=markers or {},
     )
 
 
@@ -3259,3 +3261,261 @@ class TestBridgeAccess:
         server._request.assert_called_once_with(
             "GET", "/MediaPreviewBridge/Markers/ffffffffffffffffffffffffffffffff", timeout=10
         )
+
+
+class TestJellyfinMarkersReadiness:
+    """Intro & Credits on Jellyfin's Setup Health card (plan phase 4 Task 9 Step 2).
+
+    Jellyfin already has a plugin row and the install controls key on ``section.id === 'plugin'`` reading its
+    FIRST check's ``current``. So the feature escalates that row rather than adding a second one, and only
+    "the plugin is too old" is a new row.
+    """
+
+    MARKERS_ON = {"enabled": True, "library_ids": None}
+    MARKERS_OFF = {"enabled": False, "library_ids": None}
+
+    def _wire(self, *, plugin_installed: bool, mode_a: bool | None = None):
+        """Every probe previews_readiness makes, with the plugin and the library mode as asked.
+
+        ``mode_a`` defaults to the mode this app recommends for the plugin state, so a test that says
+        nothing about libraries gets healthy library rows and an ``overall_ok`` that means the markers rows.
+        """
+        if mode_a is None:
+            mode_a = plugin_installed
+        options = {
+            "EnableTrickplayImageExtraction": True,
+            "SaveTrickplayWithMedia": True,
+            "ExtractTrickplayImagesDuringLibraryScan": not mode_a,
+            "EnableRealtimeMonitor": True,
+        }
+
+        def fake_request(method, url, **kwargs):
+            if url == "/MediaPreviewBridge/Ping":
+                if not plugin_installed:
+                    return MagicMock(status_code=404, json=MagicMock(return_value={}))
+                return MagicMock(
+                    status_code=200,
+                    json=MagicMock(return_value={"ok": True, "version": "10.11.0.3"}),
+                )
+            if url == "/System/Info":
+                return MagicMock(
+                    status_code=200,
+                    json=MagicMock(return_value={"Version": "10.11.8"}),
+                    raise_for_status=MagicMock(),
+                )
+            if url == "/System/Configuration":
+                return MagicMock(
+                    status_code=200,
+                    json=MagicMock(
+                        return_value={
+                            "TrickplayOptions": {
+                                "TileWidth": 10,
+                                "TileHeight": 10,
+                                "Interval": 10000,
+                                "WidthResolutions": [320],
+                            }
+                        }
+                    ),
+                    raise_for_status=MagicMock(),
+                )
+            if url == "/Library/VirtualFolders":
+                return MagicMock(
+                    status_code=200,
+                    json=MagicMock(return_value=[{"Name": "Movies", "ItemId": "m", "LibraryOptions": options}]),
+                    raise_for_status=MagicMock(),
+                )
+            if url == "/ScheduledTasks":
+                return MagicMock(
+                    status_code=200,
+                    json=MagicMock(return_value=[]),
+                    raise_for_status=MagicMock(),
+                )
+            raise AssertionError(f"unexpected {method} {url}")
+
+        return fake_request
+
+    def _readiness(
+        self,
+        markers: dict,
+        capability: dict,
+        *,
+        plugin_installed: bool,
+        mode_a: bool | None = None,
+        calls: list | None = None,
+        server=None,
+    ):
+        def status_payload(live, config):
+            if calls is not None:
+                calls.append((live, config.id))
+            return {
+                "server_id": config.id,
+                "server_type": "jellyfin",
+                "enabled": True,
+                "settings": {},
+                "capability": capability,
+                "can_show": ["intro", "credits", "recap", "preview"],
+                "libraries": [],
+            }
+
+        jelly = server if server is not None else JellyfinServer(_jelly_config(markers=markers))
+        with (
+            patch.object(
+                JellyfinServer, "_request", side_effect=self._wire(plugin_installed=plugin_installed, mode_a=mode_a)
+            ),
+            patch("media_preview_generator.markers.inspect.server_status_payload", status_payload),
+        ):
+            return jelly.previews_readiness()
+
+    @staticmethod
+    def _capability(state: str, **details) -> dict:
+        return {"state": state, "message": "", "details": details, "warning": ""}
+
+    @staticmethod
+    def _plugin_section(payload: dict) -> dict:
+        sections = [s for s in payload["sections"] if s["id"] == "plugin"]
+        assert len(sections) == 1, f"expected exactly one plugin section, got {len(sections)}"
+        return sections[0]
+
+    def test_feature_off_leaves_the_plugin_row_alone_and_adds_the_one_row(self):
+        """P-R6 + "no second plugin row": the off state changes nothing about the previews plugin row."""
+        payload = self._readiness(self.MARKERS_OFF, self._capability("ready"), plugin_installed=True)
+
+        section = self._plugin_section(payload)
+        assert [c["id"] for c in section["checks"]] == ["plugin_installed"]
+        # Untouched: previews-only severity, and the previews wording.
+        assert section["checks"][0]["severity"] == "info"
+        assert section["checks"][0]["tooltip"] == "Optional plugin for instant preview activation"
+        markers = next(s for s in payload["sections"] if s["id"] == "markers")
+        assert [c["id"] for c in markers["checks"]] == ["markers_off"]
+        assert markers["checks"][0]["severity"] == "recommended"
+        assert markers["checks"][0]["ok"] is True
+
+    def test_feature_on_escalates_the_existing_row_instead_of_adding_one(self):
+        """Plugin missing on a Mode B server: advisory for previews, a blocker once markers are on."""
+        calls: list = []
+        jelly = JellyfinServer(_jelly_config(markers=self.MARKERS_ON))
+
+        payload = self._readiness(
+            self.MARKERS_ON, self._capability("needs_plugin"), plugin_installed=False, calls=calls, server=jelly
+        )
+
+        # The status is asked for THIS live client and THIS server's config — passing None would take
+        # ``_preview_capability``'s "couldn't set up a connection" branch and mis-word the row below.
+        assert calls == [(jelly, "jelly-1")]
+        section = self._plugin_section(payload)
+        assert [c["id"] for c in section["checks"]] == ["plugin_installed"]
+        row = section["checks"][0]
+        assert row["severity"] == "critical"
+        assert row["ok"] is False
+        # The install controls read this exact value off the section's FIRST check.
+        assert row["current"] == "not installed"
+        assert row["recommended"] == "installed"
+        assert row["label"] == "Plugin required — not installed"
+        assert row["reason"].startswith("Without it, nothing can send markers to this server.")
+        assert row["tooltip"] == (
+            "Jellyfin takes intro and credits markers only through this plugin. Installing it restarts Jellyfin."
+        )
+        assert row["actions"]["enable"]["action"] == "install_plugin"
+        # ...and it is this row that fails the card, not some other probe in the wiring.
+        failing = [
+            c["id"]
+            for s in payload["sections"]
+            for c in s["checks"]
+            if c["ok"] is False and c["severity"] == "critical"
+        ]
+        assert failing == ["plugin_installed"]
+        assert payload["overall_ok"] is False
+        # No second plugin row, and no "off" row on a server that has the feature on.
+        assert [s["id"] for s in payload["sections"] if s["id"] == "markers"] == []
+
+    def test_feature_off_with_plugin_missing_stays_advisory(self):
+        """The same Mode B server without markers keeps today's behaviour exactly."""
+        payload = self._readiness(self.MARKERS_OFF, self._capability("ready"), plugin_installed=False)
+
+        row = self._plugin_section(payload)["checks"][0]
+        assert row["severity"] == "info"
+        assert row["ok"] is True
+        assert row["label"] == "Activates on next scan"
+        assert row["recommended"] == "installed (optional)"
+        assert payload["overall_ok"] is True
+
+    def test_markers_reason_is_added_to_the_previews_reason_not_instead_of_it(self):
+        """A Mode A server with markers on has two reasons to install the plugin; it must read both."""
+        payload = self._readiness(
+            self.MARKERS_ON, self._capability("needs_plugin"), plugin_installed=False, mode_a=True
+        )
+
+        reason = self._plugin_section(payload)["checks"][0]["reason"]
+        assert reason.startswith("Without it, nothing can send markers to this server.")
+        assert "scan-time extraction is disabled on: Movies" in reason
+
+    def test_installed_plugin_with_markers_support_passes_as_a_required_row(self):
+        payload = self._readiness(
+            self.MARKERS_ON, self._capability("ready", plugin_version="10.11.0.3"), plugin_installed=True
+        )
+
+        section = self._plugin_section(payload)
+        assert [c["id"] for c in section["checks"]] == ["plugin_installed"]
+        row = section["checks"][0]
+        assert row["ok"] is True
+        # Critical + ok renders as a passing "Required" row; info would be dropped by _partitionChecks.
+        assert row["severity"] == "critical"
+        assert row["current"] == "10.11.0.3"
+        assert payload["overall_ok"] is True
+
+    def test_outdated_plugin_adds_a_recommended_row_and_leaves_the_first_check_intact(self):
+        payload = self._readiness(
+            self.MARKERS_ON,
+            self._capability("plugin_outdated", plugin_version="1.2.0"),
+            plugin_installed=True,
+        )
+
+        checks = self._plugin_section(payload)["checks"]
+        assert [c["id"] for c in checks] == ["plugin_installed", "markers_plugin_outdated"]
+        # The install controls' convention: first check, ``current`` is a version (not "not installed").
+        assert checks[0]["current"] == "10.11.0.3"
+        assert checks[0]["ok"] is True
+        outdated = checks[1]
+        assert outdated["label"] == "The plugin is too old for intro and credits markers"
+        assert outdated["severity"] == "recommended"
+        assert outdated["ok"] is False
+        assert (outdated["current"], outdated["recommended"]) == ("1.2.0", "newest")
+        assert outdated["reason"] == "Previews still work. Markers wait until it's updated."
+        assert outdated["tooltip"] == (
+            "This version of the plugin can't take intro and credits markers. Updating installs the newest version."
+        )
+        # Not "install_plugin": the plugin IS installed, so the card's install-convergence poll would report
+        # success on its first read, while Jellyfin is still restarting.
+        assert outdated["actions"]["enable"]["action"] == "update_plugin"
+        # Pinned, not inferred: the recommended value is a word, and servers.js would guess from truthiness.
+        assert outdated["fix_action"] == "enable"
+        # A recommendation never turns the card's header red.
+        assert payload["overall_ok"] is True
+
+    def test_outdated_plugin_without_a_version_says_so(self):
+        payload = self._readiness(self.MARKERS_ON, self._capability("plugin_outdated"), plugin_installed=True)
+
+        outdated = self._plugin_section(payload)["checks"][1]
+        assert outdated["current"] == "unknown"
+
+    @pytest.mark.parametrize("state", ["unreachable", "misconfigured", "unknown"])
+    def test_an_unreadable_capability_adds_no_markers_row(self, state):
+        """The plugin row still escalates (the feature is on), but nothing is claimed about the build."""
+        payload = self._readiness(self.MARKERS_ON, self._capability(state), plugin_installed=True)
+
+        checks = self._plugin_section(payload)["checks"]
+        assert [c["id"] for c in checks] == ["plugin_installed"]
+
+    @pytest.mark.parametrize(
+        ("state", "installed"),
+        [("needs_plugin", False), ("ready", True), ("plugin_outdated", True), ("unknown", True)],
+    )
+    def test_no_marker_row_is_ever_severity_info(self, state, installed):
+        payload = self._readiness(
+            self.MARKERS_ON, self._capability(state, plugin_version="1.2.0"), plugin_installed=installed
+        )
+
+        rows = [c for s in payload["sections"] for c in s["checks"] if c["id"].startswith("markers_")]
+        assert all(row["severity"] in ("critical", "recommended") for row in rows)
+        # With the feature on, the plugin row is required — never an info row the card would drop.
+        assert self._plugin_section(payload)["checks"][0]["severity"] == "critical"

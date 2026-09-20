@@ -841,9 +841,12 @@ class EmbyServer(EmbyApiClient):
         Returns the envelope documented on
         :meth:`MediaServer.previews_readiness`. Emby sections:
         ``connection``, ``version``, ``library_settings``,
-        ``vendor_extraction``. Emby has no plugin architecture and no
-        server-wide trickplay geometry knob, so those sections are
-        absent.
+        ``vendor_extraction``. Emby previews need no plugin and Emby has
+        no server-wide trickplay geometry knob, so those sections are
+        absent — except that a server set to receive intro and credits
+        markers gains a ``plugin`` section for the Media Preview Bridge
+        the markers go through, and a server with the feature off gains
+        the one ``markers`` row that says so (plan P-R6).
 
         Emby's sidecar auto-discovery works purely by filename
         convention — every library-flag issue is advisory (wasted-CPU
@@ -937,6 +940,30 @@ class EmbyServer(EmbyApiClient):
                 ],
             }
         )
+
+        # --- Intro & Credits (spec §7 item 6) -----------------------
+        # Built from the facts the Intro & Credits tab already asked for, never a second probe; a server with
+        # the feature off gets the one row that says so and nothing else (plan P-R6). The section id is
+        # ``plugin`` and its first check's ``current`` is "not installed" or a version: the Setup Health
+        # install controls read exactly that.
+        from ..markers import readiness as markers_readiness
+
+        marker_facts = markers_readiness.marker_facts(self, self._config)
+        markers_section_ok = True
+        if marker_facts.enabled is False:
+            sections.append(markers_readiness.off_section())
+        elif marker_facts.on:
+            # The capability report carries the catalogue answer only while the plugin is missing; the "too
+            # old" row needs the same fact to offer an update, and that read is cached per server URL.
+            listed = None if marker_facts.plugin_takes_markers is not False else self.bridge_catalog_listed()
+            plugin_section = markers_readiness.emby_plugin_section(marker_facts, catalog_listed=listed)
+            if plugin_section is not None:
+                sections.append(plugin_section)
+                # Only a critical failure gates the header's red banner — the "too old" row is a
+                # recommendation and belongs in the amber bucket, same rule as Plex's overall_ok.
+                markers_section_ok = not any(
+                    check["ok"] is False and check["severity"] == "critical" for check in plugin_section["checks"]
+                )
 
         # --- Library settings — per-library per-flag rows ------------
         library_checks: list[dict[str, Any]] = []
@@ -1224,8 +1251,9 @@ class EmbyServer(EmbyApiClient):
         return {
             "vendor": "emby",
             # Emby library-flag issues are advisory; scheduled-task absence
-            # breaks registration entirely, so it joins overall_ok.
-            "overall_ok": connection_ok and sched_section_ok,
+            # breaks registration entirely, so it joins overall_ok. So does a
+            # missing markers plugin on a server set to receive markers.
+            "overall_ok": connection_ok and sched_section_ok and markers_section_ok,
             "sections": sections,
         }
 

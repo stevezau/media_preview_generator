@@ -155,7 +155,11 @@
         });
         // Per-card connection + readiness probe — sequential per server
         // to avoid hammering 3+ servers in parallel from the same
-        // browser tab. Each probe is ~200-1500ms. Connection runs
+        // browser tab. Each probe is ~200-1500ms, except on a Plex with
+        // Intro & Credits switched on: its readiness now includes the
+        // marker capability check, which waits on Plex's SQLite lock
+        // (30 s deadline, cached 60 s — 5 s while it isn't healthy).
+        // Connection runs
         // first and returns its status; when the server is unreachable
         // we SKIP the readiness probe (the endpoint would error out and
         // paint a misleading "unknown" glyph when the real problem is
@@ -1901,7 +1905,8 @@
     //   amber "recommendations"   — non-critical issues only
     //   green "ready (instant)"   — Jellyfin + plugin installed
     //   green "ready (next scan)" — Jellyfin without plugin (Mode B is valid)
-    //   green "ready"             — everything ok, no plugin concept (Plex/Emby)
+    //   green "ready"             — everything ok, no previews plugin (Plex/Emby;
+    //                               an Emby markers plugin doesn't change this)
     //
     // Walks sections[] and rolls up severity. Drives the sub-label
     // off the plugin section's current state — no vendor branching
@@ -1926,9 +1931,17 @@
                     anyRecommended = true;
                 }
             }
-            if (section.id === 'plugin' && section.checks && section.checks.length) {
+            if (section.id === 'plugin' && section.checks && section.checks.length
+                && section.checks[0].id === 'plugin_installed') {
                 // Plugin section carries the installed bit in the first row's
                 // ``current`` value ("installed"/"not installed"/version).
+                //
+                // Keyed on the row id, not just the section id: the sub-label
+                // below says how PREVIEWS activate, which only Jellyfin's
+                // Bridge plugin decides. Emby's Intro & Credits plugin shares
+                // the section id (the install controls key on it) but has
+                // nothing to do with previews — reading it here would label a
+                // healthy Emby "ready (instant)".
                 pluginInstalled = section.checks[0].current !== 'not installed';
             }
             for (const check of section.checks || []) {
@@ -2518,6 +2531,25 @@
                         (d) => _pluginInstalledFromEnvelope(d) === expected,
                         { deadlineMs: 90_000, intervalMs: 3_000 },
                     );
+                } else if (action.action === 'update_plugin') {
+                    // An update can't wait on "the plugin appeared" — it was
+                    // already there, so that predicate is true on the first
+                    // poll and we'd report success while the server is still
+                    // restarting.
+                    //
+                    // Both halves are needed. "The row is gone" alone is also
+                    // true mid-restart (the server can't be read, so the row
+                    // can't be built) — and the probe returns a degraded 200,
+                    // not an error, so nothing else would keep us polling.
+                    // Requiring the plugin to read as installed as well means
+                    // we wait for the server to answer again before believing
+                    // the row cleared.
+                    await reprobeUntilConverged(
+                        serverId,
+                        serverType,
+                        (d) => _pluginInstalledFromEnvelope(d) === true && !_hasFailingCheck(d, check.id),
+                        { deadlineMs: 90_000, intervalMs: 3_000 },
+                    );
                 } else {
                     await runReadinessProbe(serverId, serverType);
                 }
@@ -2567,6 +2599,13 @@
             }
             case 'uninstall_plugin': {
                 const r = await api('POST', `/api/servers/${encoded}/uninstall-plugin`, {});
+                return { ok: !!(r.data && r.data.ok) && r.ok, error: r.data && r.data.error, status: r.status };
+            }
+            case 'update_plugin': {
+                // Same endpoint: it installs the newest build over the old
+                // one. Named apart only so the caller waits for the right
+                // thing (see _runCheckAction).
+                const r = await api('POST', `/api/servers/${encoded}/install-plugin`, {});
                 return { ok: !!(r.data && r.data.ok) && r.ok, error: r.data && r.data.error, status: r.status };
             }
             case 'sync_trickplay_options': {
@@ -2660,6 +2699,16 @@
 
         const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
         modal.show();
+    }
+
+    // Whether an envelope still carries this check, failing. Used by
+    // reprobeUntilConverged to wait out an action whose effect is "this row
+    // goes away" rather than a state flip (plugin update).
+    function _hasFailingCheck(data, checkId) {
+        if (!checkId) return false;
+        return ((data && data.sections) || []).some(
+            (s) => (s.checks || []).some((c) => c.id === checkId && c.ok === false),
+        );
     }
 
     // Read plugin-installed bit from a unified envelope. Used by
