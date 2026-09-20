@@ -81,12 +81,15 @@ confirmation for destructive changes.
 once per file from chapters, online databases (TheIntroDB, IntroDB.app,
 SkipDB), season audio matching, and the on-screen credit roll (the GPU when a
 self-test shows it's faster, otherwise the CPU), then published to every server
-that has it — direct database write for Plex (Plex Pass, same machine as Plex),
-the Media Preview Bridge plugin for Jellyfin, and the Media Preview Bridge for
-Emby plugin. Precision over coverage: by default a marker only ships when
-chapters say so or independent sources agree, so a missing skip button is
-preferred over a wrong one. Off until you turn it on, per server. See the
-[Intro & Credits guide](docs/guides.md#intro--credits).
+that has it — direct database write for Plex (Plex Pass; on the same machine as
+Plex, or through the small [Plex marker agent](plex-marker-agent/README.md)
+container when Plex runs on another machine), the Media Preview Bridge plugin
+for Jellyfin, and the Media Preview Bridge for Emby plugin. Precision over
+coverage: by default a marker only ships when chapters say so or independent
+sources agree, so a missing skip button is preferred over a wrong one. The
+Preview Inspector can also adjust, add and lock a marker by hand, and Setup
+Health checks each server's Intro & Credits setup. Off until you turn it on,
+per server. See the [Intro & Credits guide](docs/guides.md#intro--credits).
 
 ---
 

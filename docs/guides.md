@@ -581,12 +581,12 @@ drag-to-reorder:
 
 | Source | Notes |
 |---|---|
-| Chapters inside the file | Free, exact when present (~1 in 9 seasons in a sampled library). An intro chapter much longer than the rest of the season's (more than twice their median length and more than 30 s longer than it, with at least 2 other episodes carrying one) doesn't decide alone: another source that isn't a server's own marker has to agree. |
+| Chapters inside the file | Free, exact when present (~1 in 9 seasons in a sampled library). On a TV episode (a file whose name has a season and an episode number) a chapter named `Ending` counts as credits, since anime names its ending that way; on a movie it doesn't, because there it is usually the last scene. `End` alone never counts. An intro chapter much longer than the rest of the season's (more than twice their median length and more than 30 s longer than it, with at least 2 other episodes carrying one) doesn't decide alone: another source that isn't a server's own marker has to agree. |
 | TheIntroDB | Optional **API key** (masked once saved). Works without one (500 lookups/day); your own free key raises that. Off by default — see the note below. |
 | IntroDB.app | No key needed, TV only. |
 | SkipDB | Free, only counts an answer matched to your file's own length. |
 | Matching audio across a season | TV intros. Finds the theme tune a season's episodes share and **confirms** an intro another source found. On its own it was 91 right, 13 wrong and 14 missed on 118 test episodes — too many wrong to decide alone — so it never publishes an intro by itself at either setting. Season audio (or the previous-season hint, below) plus a server's own marker isn't enough either, since a server's intro detection matches audio too: that episode goes to **Needs review**. Needs an ffmpeg with chromaprint, which the amd64 Docker image has; elsewhere Settings shows **Not available** and why. CPU, about 2 s per episode, at most 2 at once. See [Season audio and weekly releases](#season-audio-and-weekly-releases). |
-| On-screen credit text | Finds where the credit roll starts from text on screen in the last 15 minutes of a movie (7.5 of an episode), and stops the skip at the last credit when a scene follows the roll (Emby skips to the end of the file). Tested alone on 80 files: within 10 s on 64, more than 30 s early on 1. A file with text on screen through most of its ending (a burnt-in timecode, or a channel logo it reads as text) gets no answer. Credits already running when those last minutes begin are still found, by reading 2 more minutes back. Credits that start in the first 30 seconds of those minutes right after a scene, or more than 1½ minutes before them, get no answer. At **High** another source has to agree; at **Medium** it can publish alone. On TV recordings with a channel logo or other on-screen graphics it is about as accurate as Plex's own credits detection, not better. At **Medium** it skipped into the story on 5–6 of the 39 episodes we checked and put credits on 4–5 of 12 sports broadcasts, which have none. **High** is the safer setting for those libraries: it skipped into the story on 2 and put credits on at most 1 sports broadcast, but found the credits on only 3–4 episodes. Uses your GPU when a quick self-test shows it is faster than the CPU and finds the same text; otherwise the CPU (about 10–30 s per file; 4K without a GPU up to about 2 min). A file where every frame is a keyframe (ProRes, DNxHD, MJPEG, all-intra H.264) is checked for text one frame every 2 seconds at the end; its whole ending is still read from disk, so a very high-bitrate one on a slow network share can still time out. It is then left alone for a day unless it changes or you Re-detect it. |
+| On-screen credit text | Finds where the credit roll starts from text on screen in the last 15 minutes of a movie (7.5 of an episode), and stops the skip at the last credit when a scene follows the roll (Emby skips to the end of the file). Tested alone on 80 files: within 10 s on 66 (61 when decoded on the CPU), more than 30 s early on 1. Text that stays in one place through the story (a channel logo, a score bug, a ticker) is ignored, and a file with text on screen through most of its ending (a burnt-in timecode, say) still gets no answer. Credits already running when those last minutes begin are still found, by reading 2 more minutes back. Credits that start in the first 30 seconds of those minutes right after a scene, or more than 1½ minutes before them, get no answer. At **High** another source has to agree; at **Medium** it can publish alone. On TV recordings with a channel logo or other on-screen graphics it is about as accurate as Plex's own credits detection, not better. At **Medium** it skipped into the story on 4–5 of the 39 episodes we checked and put credits on 4–5 of 12 sports broadcasts, which have none. **High** is the safer setting for those libraries: it skipped into the story on 2 and put credits on at most 1 sports broadcast, but found the credits on only 3–4 episodes. Uses your GPU when a quick self-test shows it is faster than the CPU and finds the same text; otherwise the CPU (about 10–30 s per file; 4K without a GPU up to about 2 min). A file where every frame is a keyframe (ProRes, DNxHD, MJPEG, all-intra H.264) is checked for text one frame every 2 seconds at the end; its whole ending is still read from disk, so a very high-bitrate one on a slow network share can still time out. It is then left alone for a day unless it changes or you Re-detect it. |
 | Markers already on your servers | Second opinion only — see below. |
 
 **"Publish when"** decides how sure the app must be before it writes anything:
@@ -606,9 +606,10 @@ credits that the server's own marker correctly stops before. Once credits are de
 markers can also move the credits start later — when none of them already covers the decided start and one starts
 more than 10 seconds later — so an "End Credits" chapter placed on the last shot of the story doesn't skip that shot;
 the Inspector then says "Shortened to Plex's own credits start". Intro ends are never moved this way. A Jellyfin or
-Emby server's markers imported by its own intro-database plugin (e.g. an AniSkip-style importer) never do that and
+Emby server's markers imported by its own intro-database plugin (e.g. an AniSkip importer) never do that and
 don't count as an independent second opinion — they join the online-database group instead of adding a vote of their
-own. Plex keeps one marker set per item, so when a Plex item has another version whose length differs from this
+own. AniSkip itself is not a source: it matched IntroDB to within 44 ms on 21 % of intros, against 10 % between the
+two intro databases already counted as one, and nothing in the library carries the id it needs. Plex keeps one marker set per item, so when a Plex item has another version whose length differs from this
 file's by more than 2 seconds (or the lengths can't be read), that server's markers aren't used for this file at all.
 Emby keeps each version's markers apart (see [Emby](#emby-the-media-preview-bridge-for-emby-plugin)), so its
 markers are read only from the file's own version and no such check applies. Season audio and a server's own marker never confirm each
@@ -620,8 +621,9 @@ themselves, but 57 credits and 36 intros came out shorter than they should be, 6
 those old markers of ours counted as a second opinion, and 1 credits and 2 intros went to Needs review instead of
 being written.
 
-**"Never overwrite my edits"** (on by default) means a marker you lock always wins over detection. **Adjust** in the
-Inspector drags a marker to where it really is — or adds one where nothing was found — and saving it locks it.
+**"Never overwrite my edits"** (on by default) says a marker you lock is never replaced by detection. Today a lock
+wins whether the switch is on or off; to let detection decide a type again, **Unlock** it. See
+[Adjusting, adding and locking markers](#adjusting-adding-and-locking-markers).
 
 **TheIntroDB** is used without the site's written permission (its terms restrict server-side use); it's off by
 default, and pasting your own free key is optional and entirely up to you. The key is masked (`****`) everywhere it's
@@ -671,6 +673,41 @@ that brought the new one are checked again by a **Season: …** job (see
 [Webhook follow-ups and retries](#webhook-follow-ups-and-retries)), so the season ends with the same markers whatever
 order its episodes arrived in.
 
+### Adjusting, adding and locking markers
+
+The Inspector's Intro & Credits tab has three buttons for setting a marker yourself. Adjust stays greyed out until a job
+has read the file's length.
+
+- **Adjust** opens the editor on the timeline. Drag the handle at each edge of a marker, or type the times. **Save and
+  publish to N servers** saves; **Cancel** throws the edit away. A time that looks odd (an intro shorter or longer than
+  most, credits that don't run to the end) gets a warning and is still saved. Only two things are refused: a marker
+  outside the file, and one that ends before it starts.
+- **Add a marker where nothing was found.** On a file where no source found a marker, Adjust still opens. A type with
+  no marker shows **Add intro**, **Add credits**, **Add recap** or **Add preview** where its bar would be. It puts a
+  marker on the timeline at a starting time that is round on purpose, so it can't be mistaken for something the app
+  found: an intro or recap from 0:00 to 0:30, credits the last 60 seconds, a preview the last 30. Drag it to where it
+  really is. **Remove** takes back a marker you added before you save it.
+- **Saving locks.** There is no adjusted-but-unlocked marker. A saved marker is locked and published straight away to
+  every server that has the file and has Intro & Credits on. Detection and later jobs leave it alone.
+- **Lock** on its own locks the times the app already decided, unchanged, and publishes them. Once anything on the file
+  is locked the same button reads **Unlock**. It asks first, then drops the lock. Your times stay on the servers for
+  now; the next check decides those types again and may move them, and **Re-detect** does that straight away. Unlock
+  publishes nothing.
+- **Your marker wins over "Keep Plex's" and "Keep Emby's".** See [Plex](#plex-writing-straight-into-plexs-database)
+  and [Emby](#emby-the-media-preview-bridge-for-emby-plugin) for the row message.
+- **Recap and preview** stay editable, with a note per server: only Jellyfin shows them. Where a server can't show a
+  type the editor says so ("Only Jellyfin shows recaps. Plex has no recap marker, so this one won't reach it.") and
+  leaves that type out of the save when no server with Intro & Credits on could show it. **Emby and credits:** an edited credits
+  *end* is accepted, but Emby's Skip Credits always skips to the end of the file, and the editor says so.
+
+A save is one web request, so it is bounded. Your times are saved and locked before any server is contacted, so a
+server that fails can't lose your edit. Each call to a server waits at most 8 seconds, and Plex's database waits at most
+8 seconds for its locks. A server the request hasn't started on within 25 seconds isn't started: its row says
+"Couldn't publish to this server in time; the next Intro & Credits run publishes it". These are per-call limits and a
+start gate, not a cap on the whole request, so a server already under way can take a few times 8 seconds. If an
+Intro & Credits job is running on the same file, the row says "Intro & Credits is running for this file; the next run
+publishes your marker".
+
 ### Season view in the Inspector
 
 For a TV episode, the Inspector's Intro & Credits tab has a **This episode** / **Whole season** switch. **Whole
@@ -695,8 +732,9 @@ Plex has no API or plugin system for markers, so this app writes them directly i
 exact place Plex stores its own. Because that's unsupported by Plex, it's **opt-in with a one-time confirmation** the
 first time you turn it on for a Plex server:
 
-- **The app must run on the same machine as Plex.** SQLite's write mode (WAL) doesn't work over a network filesystem,
-  so a network-mounted database stays read-only.
+- **The app must run on the same machine as Plex, or you run the Plex marker agent next to Plex.** SQLite's write
+  mode (WAL) doesn't work over a network filesystem, so a network-mounted database stays read-only. See
+  [Plex on another machine](#plex-on-another-machine-the-plex-marker-agent).
 - **Map Plex's config folder into both containers from the identical host path.** On unRAID specifically, don't mix
   `/mnt/user` and `/mnt/cache` between the two containers — even though both paths can reach the same files, Plex and
   this app must open the database through the exact same path for the app's same-host proof to succeed.
@@ -723,6 +761,29 @@ first time you turn it on for a Plex server:
   it is worked out again from what Plex shows.
 - Tested against Plex 1.43. If a future Plex update changes the database's shape, the app stops writing and shows a
   message rather than guessing.
+
+### Plex on another machine: the Plex marker agent
+
+If this app and Plex run on different machines, run the **Plex marker agent** next to Plex. It is a small container of
+its own (`plex-marker-agent/` in the repository, image `ghcr.io/stevezau/plex-marker-agent`) with Plex's config folder
+mounted. The app asks it to do the database write on Plex's machine. It is the only supported way to write markers to a
+Plex on another machine: without it that Plex stays read-only for markers. If the app and Plex are on the same machine,
+don't run it.
+
+1. Run the agent as its [README](../plex-marker-agent/README.md) says: the compose file, the settings (`AGENT_TOKEN`,
+   `PLEX_CONFIG`, `PUID`/`PGID`) and the key.
+2. In the app: **Servers → your Plex → Edit → Intro & Credits → Plex marker agent**. Switch it on, enter its **Address**
+   (for example `http://plex-host.lan:9494`) and the **Shared key**, the same value as `AGENT_TOKEN`. The key is masked
+   once saved. The one-time database-write confirmation still applies.
+3. The line under the address shows the state: **Connected**, **Can't reach it**, **Key refused** or **Update needed**.
+   **Check again** asks now. The agent has its own version, and a version the app doesn't accept is refused on the first
+   call, in either direction, with a message saying which side to update.
+
+The agent only ever writes the marker rows of one item into Plex's library database. It refuses a database that isn't
+on a local disk of its own machine, a database schema it doesn't know, and a Plex that has no marker list yet, with the
+same messages a same-machine setup gives. While it isn't answering, markers wait in this app and the next Intro &
+Credits run sends them. Setup Health shows a row for it (see
+[Previews Readiness](guides/previews-readiness.md#intro-credits)).
 
 ### Jellyfin: the Media Preview Bridge plugin
 
@@ -922,7 +983,7 @@ table covers every state the check can report, using its exact wording:
 | Log line "season_audio had no answer for \<file\> this time: Not fingerprinting \<episode\>: N earlier fingerprint ffmpegs are still stuck reading their files" | Earlier fingerprint reads stalled on the media mount and can't be stopped until it answers; no more are started meanwhile, so episodes that still need fingerprinting get no season audio answer (nothing is held against the files) | Check the media mount (NFS/SMB) is responding. It clears on its own once the stuck reads finish; the next run matches the season |
 | A file fails with "Couldn't read the file: Not reading \<path\>: N earlier ffprobes are still stuck reading their files", or a log line "season_audio (or credits_text) had no answer for \<file\> this time: … Not reading \<path\>: N earlier ffprobes are still stuck reading their files" | Earlier ffprobe reads stalled on the media mount; until they finish no new ffprobe is started, so new files can't be checked | Check the media mount is responding; it clears on its own once the stuck reads finish, and the files are tried again on the next run |
 | *(Plex)* Red "✕ Not active" next to Plex Pass: "This Plex server has no Plex Pass, so Plex won't show any markers." | Plex hides all markers — even ones already in its database — without Plex Pass | Add Plex Pass to this Plex server |
-| *(Plex)* "Plex's database is on a network share (…). The app must run on the same machine as Plex to write markers; Plex stays read-only." | SQLite's write mode doesn't work over NFS/SMB/CIFS | Run this app on the same machine as Plex |
+| *(Plex)* "Plex's database is on a network share (…). The app must run on the same machine as Plex to write markers; Plex stays read-only." | SQLite's write mode doesn't work over NFS/SMB/CIFS | Run this app on the same machine as Plex, or run the [Plex marker agent](#plex-on-another-machine-the-plex-marker-agent) next to Plex. With an agent, the same kind of message means the *agent's* mount is a network share |
 | *(Plex)* "Plex's database is on a filesystem this app doesn't recognise as a local disk (…); Plex stays read-only." | The app couldn't prove the folder is a real local disk, so it refuses to risk Plex's database | Check the mount; open an issue if it's genuinely local |
 | *(Plex)* "Plex is running, but not with the database file this app sees at …. Mount the exact folder Plex uses, on the same machine (on unRAID, the same /mnt/cache or /mnt/user path Plex uses)." | The app proves it shares Plex's live database lock before ever writing; this Plex has a different copy open | Map Plex's config folder into both containers from the identical host path |
 | *(Plex)* "Plex doesn't have its database open through this folder right now (Plex is stopped, or this app sees a different path to the file). Markers are only written while Plex is running." | Same same-host proof, failing because nothing has the database open | Start Plex; recheck the mounted path |

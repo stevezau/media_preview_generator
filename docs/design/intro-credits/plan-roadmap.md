@@ -222,12 +222,24 @@ be updated again, and the app counted its own earlier markers as a server's seco
 `evidence/eval/phase3-harness.md`, `evidence/eval/broadcast-tv.md`.
 
 ### Phase 4 — Polish (plan: `plan-phase4.md`)
-Adjust/Lock editor in the Inspector (drag handles, keyboard nudge, lock, publish to every owner immediately),
-AniSkip source (anime; MAL id + episodeLength), Setup Health checks (plugin missing/outdated, Plex Pass missing,
-marker tag row absent, DB not local, Plex detection overwrite risk), helper container for Plex on another machine,
-docs (README, `docs/reference.md`, `docs/guides.md`), trim evidence before release.
-Decide how a locked marker meets **Keep Plex's** / **Keep Emby's**: today the server's own markers of a kept type win
-over a locked one (spec §6.2 step 6); a locked type could bypass kept types, or go to Emby with `ReplaceOwn`.
+- [x] **Adjust / Lock / Unlock editor in the Inspector** (drag handles, typed times, save = lock = publish to every
+  owner immediately; `POST` and `DELETE /api/markers/item/markers`), including adding a marker where nothing was found
+  and Edit on every row of the Season view. A marker you adjust or lock **wins over "Keep Plex's" / "Keep Emby's"**
+  (spec §5.5 rule 1, §14 2026-09-20). Recap and preview stay editable with a per-server note.
+- [x] **Setup Health checks** for Intro & Credits: Plex Pass, marker tag row, database not on this machine, Plex's own
+  detection, the plugin rows (missing, too old), and the Plex marker agent's connection
+  (`docs/guides/previews-readiness.md`).
+- [x] **Plex marker agent** (`plex-marker-agent/`, its own image, bearer key, protocol version) for a Plex on another
+  machine. It is the only supported way to write markers to such a Plex.
+- [x] **Anime `Ending` chapters read as credits on TV episodes** (Task 15; a movie's `Ending` does not).
+- [x] **Credit-text rule J version 3** (where a frame's text is; `evidence/eval/phase3-harness.md`).
+- [x] **Docs** (README, `docs/reference.md`, `docs/guides.md`, `docs/guides/previews-readiness.md`, FAQ, getting started).
+- [x] **AniSkip: measured and not taken** (`evidence/eval/aniskip-facts.md`). No source was added.
+- [ ] **Not done here:** trimming the evidence folder before release (plan Task 12, needs the owner's list); the
+  phase-4 lab matrix and the rows added to the phase 1–3 matrices (Task 13; only row 12, the agent, has run, in
+  `evidence/lab/phase4-row12-agent.md`); the PR and close-out (Task 14). Spec §13 item 17 (markers this app wrote to Plex
+  read as Plex's own after `markers.db` is lost, and a lock is lost with it) is still an owner decision, recorded as a
+  known limit.
 
 ## Owner checkpoints (ask, don't assume)
 1. Plex lab claim token (https://plex.tv/claim, valid 4 min) — phase 1 lab tasks.

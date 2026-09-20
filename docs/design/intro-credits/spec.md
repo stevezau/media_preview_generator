@@ -172,7 +172,7 @@ real library mounted read-only.
 | **TheIntroDB** v3 | **35 / 8 / 0** | 23 / 4 / 16 | `GET https://api.theintrodb.org/v3/media?tmdb_id&season&episode&duration_ms`; `credits.end_ms=null` = end of file; `null` start = 0; arrays may hold several segments |
 | IntroDB.app | 26 / 13 / 4 | 17 / 4 / 22 | `GET https://api.introdb.app/segments?imdb_id&season&episode` (no duration); TV only |
 | SkipDB | 16 / 17 / 10 | 8 / 25 / 10 | Measured on the daily ODbL dump matched by id + duration ±5% (R&M "outros" are the last 7 s). **Build uses the read API** `GET https://api.skipdb.tv/api/segments?imdb_id&season&episode&duration&adjust=conservative` (120 req/min), accepting only `match` exact/shifted (§14) |
-| AniSkip | n/a | n/a | Anime only (MAL id + `episodeLength`); phase 4 |
+| AniSkip | — | — | Anime only (MAL id + `episodeLength`). **Measured 2026-09-20, not taken** (`evidence/eval/aniskip-facts.md`): nothing in the library carries a MAL id, its numbering is per MAL entry and not the library's, and where it answers on intros it matches IntroDB to ≤ 44 ms on 21 % of them, so it is not independent (§5.5 rule 8) |
 
 **Coverage** on a random prod sample of 200 TV episodes + 120 movies (`evidence/coverage/`):
 
@@ -594,7 +594,7 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    from others — IntroDB + TheIntroDB always count as one source. Server markers written by an importer plugin count
    as the database it imports (by the plugin's name): an IntroDB or TheIntroDB importer's as IntroDB + TheIntroDB, a
    SkipDB importer's as SkipDB (so SkipDB and its copy never agree). An AniSkip importer's also count as IntroDB +
-   TheIntroDB until phase 4 measures what they copy (precision first). When the database can't be told (no name
+   TheIntroDB, permanently: phase 4 measured it (2026-09-20) and AniSkip matches IntroDB to ≤ 44 ms on 21 % of intros (14 of 68), against 10 % (7 of 72) between TheIntroDB and IntroDB, which are already one source (`evidence/eval/aniskip-facts.md` "Is it independent?"). When the database can't be told (no name
    matches, or the server has importers of more than one database) they count as IntroDB + TheIntroDB, as before.
    Season audio and its previous-season hint count as one source (the same method on the same show).
    SkipDB intro starts also match TheIntroDB's to ≤ 44 ms on the Daredevil S03 episodes both cover
@@ -661,7 +661,7 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    `on_plex_redetect` = `restore` (default) or `keep_plex`; Emby `on_emby_redetect` = `restore` or `keep_emby`.
    `keep_plex` keeps Plex's markers (§14 2026-09-14), not stored as evidence.
 7. **Outcomes** per server: markers written / reused / needs review / skipped + reason.
-8. **Manual edit** in the Inspector: no job — save, lock, publish to every owner immediately.
+8. **Manual edit** in the Inspector: no job — save, lock, publish to every owner immediately (`POST /api/markers/item/markers`; `DELETE` on the same route unlocks and publishes nothing). It is one web request, so it is bounded: the save and the lock land before any server is contacted, each call to a server is capped at 8 s (`PUBLISH_NOW_SERVER_TIMEOUT_S`; Plex's database waits the same 8 s for its locks), and a server the fan-out hasn't started 25 s in isn't started (`PUBLISH_NOW_DEADLINE_S`, a start gate, not a cancellation, so a server already under way can run to a small multiple of 8 s). A server not reached says so in its row and is published by the next run; a job already running on the same file makes the request give up on the whole publish after 2 s. No retries, and no thread that outlives the request.
 
 ### 6.3 Publishers
 `MarkerPublisher` (parallel to `OutputAdapter`): `capability() -> Ready | Disabled | NeedsConfirmation |
@@ -861,15 +861,21 @@ Show a mockup and confirm wording before building each screen.
    same "Not available" badge and reason as season audio's row when this container can't run it (Task 10's copy).
 3. **Preview Inspector → "Intro & Credits" tab:** decision lane + evidence lanes (Chapters, Season audio, Credit
    text, online sources, each server's current markers) in two zoom windows (first / last 3 min); per-server "will
-   add / will replace"; Adjust, Lock, Re-detect, Publish.
+   add / will replace"; Adjust, Lock/Unlock, Re-detect, Publish. Adjust also opens on a file where nothing
+   was found: a type with no marker carries `+ Add <type>`, which seeds a round starting time (intro/recap 0:00–0:30,
+   credits the last 60 s, preview the last 30 s) to drag. Save = lock = publish. Recap and preview stay editable,
+   with a per-server note (only Jellyfin shows them); an edited Emby credits end carries the Emby note.
 4. **Inspector → Season view:** per-episode intro/credits, evidence chips, per-server dots, "Needs review". "Publish N
    to M servers" = a normal-priority Intro & Credits job for exactly that season's episodes, named `Intro & Credits:
    <show> · Season N` (or `· Specials`); an identical pending or running job is reused (R4). Review opens that
-   episode; editing is phase 4.
+   episode, and every row's **Edit** opens that episode in the marker editor.
 5. **Dashboard → job queue:** Intro & Credits jobs linked under the preview job; per-server "Markers written × N /
    reused / needs review / skipped (reason)"; source counts.
 6. **Setup Health:** plugin missing/outdated, Plex Pass missing, Plex marker tag row absent, Plex DB not local, Plex
-   detection overwrite risk.
+   detection overwrite risk, and — when a Plex marker agent is set up — the agent's connection (unreachable, key
+   refused, version mismatch, beside a different Plex). Built (phase 4): a `markers` section of the previews-readiness
+   envelope, only for a server with Intro & Credits on (one "off" row otherwise, emitted `recommended` + `ok: true`
+   because `servers.js _partitionChecks` drops `info` rows); documented in `docs/guides/previews-readiness.md`.
 
 ## 8. Settings and migration
 
@@ -921,6 +927,7 @@ setting, and `settings.json` never stores it (§5.4).
 | Settings / migration | `config/__init__.py`, `web/settings_manager.py`, `upgrade.py` |
 | Server Edit dialog tabs | `web/templates/servers.html` (`#edit-tab-general`, `-health`, `-libraries`, `-paths`, `-excludes`, …) |
 | Inspector | `web/templates/bif_viewer.html` ("Preview Inspector", page route `web/routes/pages.py` `bif_viewer()`), data API `web/routes/api_bif.py` |
+| Setup Health (Intro & Credits rows) | `markers/readiness.py` (rows), `servers/plex.py`, `servers/jellyfin.py`, `servers/emby.py` `previews_readiness()` (`servers/base.py` documents the envelope), `web/routes/api_servers.py`, `web/static/js/servers.js` `renderReadiness` |
 | Webhooks | `web/routes/api_plex_webhook.py`, `api_vendor_webhook.py`, `web/webhooks.py` (`_execute_webhook_job`, `webhook_delay` debounce) |
 | Jellyfin plugin | `jellyfin-plugin/` (net9, v10.11.0.3), `.github/workflows/jellyfin-plugin.yml` (tag push / dispatch) |
 | PR image | `.github/workflows/docker-pr.yml` (`pull_request_target` to main/dev, label `build-docker`, ignores `docs/**`) |
@@ -1137,7 +1144,10 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     each part's `extra_data` recording what we wrote (a lab key of ours survived Plex's analyze and its credits
     `final` migration, which each rewrote the part in the other form, and a forced refresh; Plex's forced credits
     detection is untested;
-    `evidence/lab/phase1-results.md` "Findings 1 and 2"), or accept this as a known limit.
+    `evidence/lab/phase1-results.md` "Findings 1 and 2"), or accept this as a known limit. **A lock makes the same loss worse**: a lock lives only in `markers.db` (Plex has no
+    place for it), so losing that file loses the user's own edit, not just its provenance. A marker of the user's that Plex
+    still shows then reads as Plex's own, and under "Keep Plex's" it is kept as such, but nothing marks it locked.
+    Known limit until the owner decides the `extra_data` key above.
 18. **The Emby plugin's in-flight `Replacing` set needs a plugin release to be told apart.** The plugin saves its
     store before it writes the chapter rows, so after an Emby crash in between the item can still show the set the
     write is replacing. The app reads those rows as ours from `Replacing*Ticks`, which `emby-plugin/` now answers but
@@ -1702,3 +1712,29 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     here and frame-checked there.
   - The 205's gate still fails 3 of 5; credit text alone stays at "Medium" as ruled on 2026-09-18.
     `evidence/eval/phase3-harness.md` "Rule J version 3", `evidence/eval/broadcast-tv.md` "Rule J version 3".
+- 2026-09-21 · **AniSkip: measured, not taken** (spec §4, §5.5 rule 8; plan phase 4 Task 1, D3, D4). No source is added
+  in phase 4, so `SOURCE_IDS`, the settings block and the schema version don't change. Reasons, from
+  `evidence/eval/aniskip-facts.md`: nothing in the library carries a MAL id and the two maps that would supply one have no
+  licence; AniSkip numbers episodes per MAL entry, which the library's season and episode numbers don't match for a
+  third of the anime on disk, and a wrong pick returns another episode's times; it is not a coverage win; and it is
+  probably not independent. The independence test is rule 8's own: AniSkip and IntroDB give the same intro to ≤ 44 ms on
+  14 of 68 episodes both answer (21 %), against 7 of 72 (10 %) between TheIntroDB and IntroDB. Rule 8's interim ruling
+  is therefore permanent: an AniSkip importer's copies stay in the IntroDB + TheIntroDB group.
+- 2026-09-21 · **A save from the Inspector is bounded** (§6.2 step 8; plan ruling P-R1). It saves and locks first, then
+  publishes inline to each owner: each call to a server waits at most 8 s (`PUBLISH_NOW_SERVER_TIMEOUT_S`, Plex's database
+  locks included), and a server not started within 25 s (`PUBLISH_NOW_DEADLINE_S`) isn't started, its row says so and the
+  next run publishes it. A job running the same file makes the request leave the publish to the next run (2 s wait).
+  Cost accepted: the 25 s is a start gate, so one server already under way can outlast it by a small multiple of 8 s.
+- 2026-09-21 · **Saving is locking, and the editor clamps rather than judges** (§5.5 rule 1, rule 2; plan P-R2, P-R3).
+  There is no adjusted-but-unlocked marker. A marker the user saves keeps two of rule 2's bounds (inside the file, ends
+  after it starts); the 3 s minimum, the intro cap and the position windows exist to catch a wrong source and are not
+  applied, so the editor warns and still saves. Adding a marker where nothing was found starts from a round time
+  (intro/recap 0:00–0:30, credits the last 60 s, preview the last 30 s) so it can't be read as something detected.
+  `respect_locks` does not gate a lock: it stays in the settings block, but a lock wins whatever it is set to.
+- 2026-09-21 · **Setup Health gets an Intro & Credits section** (§7 item 6, §9; plan D6, P-R5, P-R6). The method stays
+  `previews_readiness()` and the envelope gains a `markers` section (or plugin rows for Jellyfin and Emby) built from the
+  facts the Edit tab already computed, so the two can't disagree. A server with the feature off gets one `recommended`,
+  `ok: true` row and is never contacted for the rest. Its copy calls the Plex marker agent "the Plex marker helper", the
+  Edit tab calls it "Plex marker agent"; the docs say both.
+- 2026-09-21 · **§13 item 17 gains a lock note** (D7). A lock lives only in `markers.db`, so losing it loses the user's
+  edit, not just its provenance. The `extra_data` ownership key stays the owner's pending decision; nothing new is built.

@@ -287,7 +287,7 @@ Shared detection settings — one file is detected once, whatever the publish ru
 | `detect.credits` | bool | `true` | TV episodes and movies. |
 | `detect.recap` | bool | `false` | Jellyfin's player is the only one with a Skip Recap button. |
 | `publish_when` | `"high"` \| `"medium"` | `"high"` | **High:** chapters publish on their own unless two other independent sources agree on something different (then Needs review); without chapters, two independent sources must agree. **Medium:** also accepts a single source that checks the file's own cut — chapters, on-screen credit text (credits), or a SkipDB `exact`/`shifted` match (intros and recaps only). IntroDB, TheIntroDB, season audio and markers already on servers never decide alone at either level, and season audio (or `season_audio_previous`) with markers already on servers isn't an agreeing pair on its own. |
-| `respect_locks` | bool | `true` | A locked marker is never replaced by detection. The Inspector's **Adjust** drags a marker, or adds one for a type nothing was found for; saving locks it and publishes it to every owner at once. |
+| `respect_locks` | bool | `true` | Settings → "Never overwrite my edits". Stored and returned, but **a lock wins whatever it is set to**: the marker editor only writes a lock you asked for, and dropping it would republish over your edit with no way back. To let detection decide a type again, unlock it (`DELETE /api/markers/item/markers`). The Inspector's **Adjust** drags a marker, or adds one for a type nothing was found for; saving it locks it and publishes it to every owner at once (`POST /api/markers/item/markers`). |
 | `sources` | array | see above | Evidence sources, in checking/precedence order. Reordering in the UI reorders this array. |
 | `sources[].id` | one of `chapters`, `theintrodb`, `introdb`, `skipdb`, `season_audio`, `credits_text`, `server_markers` | — | `credits_text` runs where text detection is available (see `GET /api/markers/sources/local`); it decides credits alone only at `"medium"`. `season_audio` runs where ffmpeg has chromaprint (see `GET /api/markers/sources/local`); it only confirms intros another source found. Its previous-season hint is stored as `season_audio_previous` evidence (not a settings id). |
 | `sources[].enabled` | bool | varies | `theintrodb` defaults to `false` (used without the vendor's written permission); the rest default to `true`. |
@@ -302,7 +302,11 @@ Credits tab**.
 {
   "enabled": false,
   "library_ids": null,
-  "plex": {"db_write_confirmed_at": null, "on_plex_redetect": "restore"}
+  "plex": {
+    "db_write_confirmed_at": null,
+    "on_plex_redetect": "restore",
+    "agent": {"enabled": false, "url": "", "token": ""}
+  }
 }
 ```
 
@@ -317,6 +321,29 @@ An Emby server's block has `"emby": {"on_emby_redetect": "restore"}` in place of
 | `emby.on_emby_redetect` | `"restore"` \| `"keep_emby"` | `"restore"` | Edit → Intro & Credits "When Emby has its own markers": `restore` is "Use ours", `keep_emby` is "Keep Emby's". Markers from Emby's own intro detection (Emby Premiere) or another plugin: `restore` has the Media Preview Bridge for Emby plugin replace them with ours (`ReplaceOwn`); `keep_emby` leaves a type Emby has markers of and shows ours only for the other types (row message e.g. "1 marker(s); keeping Emby's intro"). The plugin still stores ours for a kept type and shows them once Emby's are gone; the next job that checks the file records them as ours again (or writes them, when it finds none of Emby's left). Remembered per server item in `markers.db`. **A marker you adjust or lock in the Inspector overrides this setting for its type**: it is sent with `ReplaceOwn` anyway and the row says "Replaced Emby's own marker…". |
 | `plex.db_write_confirmed_at` | ISO-8601 timestamp \| `null` | `null` | Set once the one-time "Send intro & credits markers to Plex?" confirmation is accepted. Clearing it while `enabled` stays `true` in the same request is rejected (400) — send `enabled: false` in the same PUT to revoke. |
 | `plex.on_plex_redetect` | `"restore"` \| `"keep_plex"` | `"restore"` | Edit → Intro & Credits "When Plex has its own markers": `restore` is "Use ours", `keep_plex` is "Keep Plex's". What a job does when Plex shows markers of a decided type that aren't ours: `restore` writes ours over them; `keep_plex` keeps Plex's markers of that type on every later run (forced ones included) until the setting is switched to `restore` or Plex has none of that type left (row message e.g. "Keeping Plex's credits", or "1 marker(s); keeping Plex's credits"). Under `keep_plex`, "not ours" means not what the job would write and not what the item record says this app left there, so markers on an item with no record of that type (a first publish, a reset `markers.db`, a re-added server) are kept too. Decided per type, and remembered per server item in `markers.db`. Markers that are gone are written again either way. **A marker you adjust or lock in the Inspector overrides this setting for its type**: its rows and `pv:` key are written over Plex's own and the row says "Replaced Plex's own marker…". |
+| `plex.agent` | object | `{"enabled": false, "url": "", "token": ""}` | Edit → Intro & Credits → Plex marker agent: a [Plex marker agent](#plex-marker-agent) beside a Plex on another machine, which does the database write there. Plex servers only. |
+| `plex.agent.enabled` | bool | `false` | `true` needs `url` and `token` set (400 otherwise: "Set the Plex marker agent's address and shared key before turning it on"). The database-write confirmation (`plex.db_write_confirmed_at`) still applies. |
+| `plex.agent.url` | string | `""` | `http` or `https` address, e.g. `http://plex-host.lan:9494`. A trailing `/` is dropped. 400 for a query string, fragment, or a username/password in it. |
+| `plex.agent.token` | string | `""` | The key both sides share (the agent's `AGENT_TOKEN`). Printable ASCII, no spaces. `GET`/`POST` return a set key as `****`; posting `****` (or leaving `token` out) keeps the stored key. Never logged. |
+
+### Plex marker agent
+
+The small container for a Plex on another machine (`plex-marker-agent/`, image `ghcr.io/stevezau/plex-marker-agent`). Its
+setup, compose file, build steps, version rules and endpoint contract are in its
+[README](../plex-marker-agent/README.md); the app side is `media_preview_generator/markers/publishers/plex_remote.py`.
+The agent's own settings:
+
+| Variable | Notes |
+|---|---|
+| `AGENT_TOKEN` | Required. The key both sides share (Bearer token); it is what the app's `plex.agent.token` must equal. Never logged. |
+| `PLEX_CONFIG_DIR` | Plex's config folder as the agent's container sees it. The database path is derived from it; the app never sends a path. |
+| `PLEX_CONFIG` | Compose only: Plex's config folder on the agent's host, mounted at `/plex`. Required. |
+| `AGENT_PORT` | Port to listen on. Default `9494`. |
+| `AGENT_BIND` | Compose only: the host address to publish on. Default `0.0.0.0`. |
+| `PUID` / `PGID` | The user that owns Plex's database. Default `1000`. |
+
+Every request carries `Authorization: Bearer <AGENT_TOKEN>` and `X-Marker-Agent-Protocol: 1`, and every answer carries
+the agent's version and the protocols it speaks; a mismatch in either direction is refused before anything is written.
 
 ### Job kind `intro_credits`
 
@@ -461,6 +488,8 @@ per type (the rest add up under "other").
 | GET | `/api/markers/sources/usage` | Today's online-lookup usage per source |
 | GET | `/api/markers/item` | Inspector data for one file |
 | POST | `/api/markers/item/redetect` | Re-run Intro & Credits for one file, asking every source again |
+| POST | `/api/markers/item/markers` | Save your own markers for one file, lock them and publish to every owning server |
+| DELETE | `/api/markers/item/markers` | Unlock one or more marker types of one file |
 | GET | `/api/markers/season` | Inspector Season view data for one episode's season |
 | POST | `/api/markers/season/publish` | Queue an Intro & Credits job for the episodes of one episode's season |
 | GET | `/api/markers/sources/local` | Whether season audio matching and on-screen credit text can run in this container |
@@ -484,6 +513,7 @@ files already done), `library_name` (job title).
 **Response:** `200` with `server_id`, `server_type`, `enabled`, `settings` (as stored), `capability` (`{state,
 message, details, warning}`, checked as if Intro & Credits were already on — one of `ready`, `disabled`,
 `needs_confirmation`, `needs_plugin`, `plugin_outdated`, `needs_pass`, `needs_local_db`,
+`agent_unavailable` (the Plex marker agent didn't answer, refused the key, is the wrong version or is beside another Plex),
 `needs_plex_detection_once`, `unsupported_schema`, `unreachable`, `misconfigured`, or `unknown` when the check itself
 failed; `warning` is `""` unless a `ready` Plex couldn't confirm Plex Pass, in which case jobs wait instead of
 writing; on Emby, `needs_plugin` carries `details.catalog_listed`: `true` when Emby's plugin catalog lists the plugin,
@@ -538,6 +568,89 @@ server is disabled. `500` with a JSON error when the file's data can't be built.
 re-detect queued or running, that job's id is returned instead of starting a second one (a double-click, or clicking
 again before the first finishes, doesn't spend the online sources' daily budget twice). `400` when the path isn't a
 file inside a server library. `503` when the config directory isn't writable.
+
+#### POST /api/markers/item/markers
+
+Saves your own markers for one file, locks them, and publishes them to every owning server inside the request. Saving is
+locking: there is no adjusted-but-unlocked marker. The save lands before any server is contacted, so a server that fails
+can't lose it.
+
+**Request:** the file, as `path` (inside a server library) or `server_id` + `item_id` (+ `version_file`, as in
+`GET /api/markers/item`), plus `markers`: a non-empty list with one entry per type.
+
+```json
+{
+  "path": "/media/tv/Show/Season 1/Show - S01E02.mkv",
+  "markers": [
+    {"type": "intro", "start_ms": 30000, "end_ms": 92000},
+    {"type": "credits", "start_ms": 1320000, "end_ms": null}
+  ]
+}
+```
+
+`type` is `intro`, `credits`, `recap` or `preview`. `start_ms` and `end_ms` are whole milliseconds; `end_ms` `null` or
+left out means "runs to the end of the file", and an end up to 2 s past the file's length is clamped to it. Only two
+bounds apply to your own marker: it must be inside the file and must end after it starts. The 3 s minimum, the intro
+length cap and the position windows that catch a wrong source are not applied.
+
+**Response:** `200` with the file's stored markers and one row per owning server:
+
+```json
+{
+  "canonical_path": "/media/tv/Show/Season 1/Show - S01E02.mkv",
+  "duration_ms": 1440000,
+  "markers": {
+    "intro": {"type": "intro", "start_ms": 30000, "end_ms": 92000, "locked": true, "locked_at": "2026-09-21T10:15:02+00:00"}
+  },
+  "servers": [
+    {
+      "server_id": "plex-default",
+      "server_name": "Plex",
+      "server_type": "plex",
+      "result": "written",
+      "message": "…",
+      "can_show": ["intro", "credits"],
+      "cant_show": [],
+      "notes": [],
+      "replaced_own": []
+    }
+  ]
+}
+```
+
+`markers` holds every stored marker of the file, keyed by type. Per server, `result` is `written`, `unchanged`,
+`waiting`, `failed`, `not_enabled` (Intro & Credits is off there), `nothing_to_publish` or `needs_review`; `message` is
+the same wording a job's row carries. `can_show` is what that server type can display and `cant_show` the saved types it
+can't (Plex and Emby take no recap or preview). `notes` are per-field notes: on Emby an edited credits `end` is accepted
+and published start-only, and the note says so. `replaced_own` lists the types whose own markers that server lost to
+your lock although it is set to keep its own (`keep_plex` / `keep_emby`).
+
+The publish is bounded: each call to a server waits at most 8 s, and a server the publish hasn't started on 25 s after
+it began is not contacted: its row is `failed` with "Couldn't publish to this server in time; the next Intro & Credits
+run publishes it". These are per-call limits and a start gate, not a cap on the whole request. A job already running on
+the same file gives a `waiting` row, "Intro & Credits is running for this file; the next run publishes your marker".
+
+**Errors:** `400` for a body it can't save from (a duplicate type, a marker outside the file or ending before it
+starts, a non-integer time), a path outside every server library, or a type no enabled owner can show. `404` for an
+unknown server or item. `409` when the server is off, no server with Intro & Credits on has the file
+(`"reason": "no_marker_owner"`), the file was never analysed (`"reason": "not_analysed"`) or changed on disk since it was
+analysed (`"reason": "file_changed"`). `503` when the config directory isn't writable.
+
+#### DELETE /api/markers/item/markers
+
+Drops your lock on one or more marker types. Nothing is published: the servers keep showing your times until the next
+run decides those types again.
+
+**Request:** the file as above, plus `types`: a non-empty list of `intro`, `credits`, `recap`, `preview`.
+
+```json
+{"path": "/media/tv/Show/Season 1/Show - S01E02.mkv", "types": ["intro"]}
+```
+
+**Response:** `200` with `canonical_path`, `unlocked` (the requested types that were locked; the rest were already
+unlocked), `markers` (the file's remaining stored markers) and `decisions`, by type, for the requested types that have
+one: `{"intro": {"status": "needs_review", "reason": "unlocked; the next run decides this type again"}}`. `400`, `404`
+and `503` as above; `409` when the server is off or the file was never analysed.
 
 #### GET /api/markers/season
 

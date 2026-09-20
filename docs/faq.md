@@ -45,7 +45,7 @@ Yes — run the Docker image on Docker Desktop with the WSL2 backend. If you hav
 
 **Does this generate chapter thumbnails?**
 
-No. This tool only generates **video preview thumbnails** (the timeline-scrubbing strip). It does not generate chapter thumbnails, intro/credit detection, or other server-side media analysis.
+No. Previews are only the **video preview thumbnails** (the timeline-scrubbing strip). It does not generate chapter thumbnails or other server-side media analysis. Separately, and off until you turn it on per server, it can send **Skip Intro / Skip Credits markers** to your servers. See the [Intro & Credits guide](guides.md#intro--credits).
 
 **Can I use this without a GPU?**
 
