@@ -56,18 +56,26 @@ _END_OF_FILE_MS = 2_000
 CAPABILITY_TTL_S = 60.0
 # Problems (plugin missing, server restarting after a plugin install) usually clear up soon.
 NOT_READY_TTL_S = 5.0
+# The longest a UI capability check waits for Plex's SQLite locks, per check. ``plex_db.BUSY_TIMEOUT_S`` (30 s) is a
+# job's budget and ``capability()`` spends it twice, so an unhealthy Plex cost a Servers-page load a minute — and,
+# through an agent that accepts but never answers, the same again. A job keeps the full wait; a page must answer.
+UI_DB_WAIT_S = 5.0
+# How long a caller waits for a check already in flight before it is served the answer that check is refreshing.
+# Without it the readiness probes of 8 gunicorn threads queue behind one slow server (wrapper.sh:53).
+CACHE_LOCK_WAIT_S = 1.0
 # Not a publisher Capability: the check itself failed, so nothing is known about the server.
 CAPABILITY_UNKNOWN = "unknown"
+_MISSING = object()
 
 
 class CapabilityCache:
     """Capability answers per server: ready ones reused for ``ttl_s``, any other state (or a ready one with a warning)
     for ``not_ready_ttl_s``.
 
-    The Edit tab and the Inspector ask on every load, and one Plex check can wait ``plex_db.BUSY_TIMEOUT_S`` on a busy
-    database: this read lane deliberately keeps the job-length wait (a shortened one would report a busy Plex as
-    unreachable on a page load, which is worse than a slow page), and this cache is what keeps it to once a minute.
-    Only the Inspector's *publish* path shortens it, through ``publisher_for(db_timeout_s=…)``. An entry
+    The Edit tab, the Servers page's readiness card and the Inspector all ask on every load, so a check here is
+    bounded twice over: ``_checked_as_if_on`` gives Plex ``UI_DB_WAIT_S`` rather than a job's lock budget, and a
+    caller that finds a check already running waits only ``lock_wait_s`` for it before being served the answer that
+    check is refreshing. Only a server never checked at all has to wait for the check itself. An entry
     only counts while the server's config is unchanged, so a saved server (switch, libraries, database folder, URL,
     credentials) is checked again at once; there is no settings-saved hook to clear it. A plugin install or uninstall
     isn't a config change, so those routes call ``forget``.
@@ -78,6 +86,7 @@ class CapabilityCache:
         ttl_s: float = CAPABILITY_TTL_S,
         clock: Callable[[], float] = time.monotonic,
         not_ready_ttl_s: float = NOT_READY_TTL_S,
+        lock_wait_s: float = CACHE_LOCK_WAIT_S,
     ) -> None:
         """Create an empty cache.
 
@@ -85,9 +94,12 @@ class CapabilityCache:
             ttl_s: How long a ready answer is reused.
             clock: Monotonic seconds (tests inject a fake clock).
             not_ready_ttl_s: How long any other answer is reused.
+            lock_wait_s: How long to wait for a check already running for the same server before serving the
+                answer it is refreshing instead.
         """
         self.ttl_s = ttl_s
         self.not_ready_ttl_s = not_ready_ttl_s
+        self.lock_wait_s = lock_wait_s
         self._clock = clock
         self._guard = threading.Lock()
         self._entries: dict[tuple[str, str], tuple[float, str, Any]] = {}
@@ -102,13 +114,19 @@ class CapabilityCache:
             compute: Produces the answer on a miss.
 
         Returns:
-            A copy of the answer.
+            A copy of the answer — the stored one, even when it is past its TTL, rather than queueing behind a
+            check another thread is already running for this server.
         """
         key = (config.id, variant)
         fingerprint = _config_fingerprint(config)
         with self._guard:
             lock = self._locks.setdefault(key, threading.Lock())
-        with lock:
+        if not lock.acquire(timeout=self.lock_wait_s):
+            stale = self._stored(key, fingerprint)
+            if stale is not _MISSING:
+                return stale
+            lock.acquire()  # never checked, so there is nothing to serve: this caller has to wait for the check
+        try:
             with self._guard:
                 entry = self._entries.get(key)
                 saved_since = entry is not None and entry[1] != fingerprint
@@ -127,6 +145,20 @@ class CapabilityCache:
                         if self._locks.get(key) is lock:
                             del self._locks[key]
             return copy.deepcopy(value)
+        finally:
+            lock.release()
+
+    def _stored(self, key: tuple[str, str], fingerprint: str) -> Any:
+        """This server's stored answer whatever its age, or ``_MISSING``.
+
+        A saved server is deliberately not served from here: its answer describes settings the user has since
+        changed, which is exactly the case the fingerprint exists to catch.
+        """
+        with self._guard:
+            entry = self._entries.get(key)
+        if entry is None or entry[1] != fingerprint:
+            return _MISSING
+        return copy.deepcopy(entry[2])
 
     def _ttl_for(self, answer: Any) -> float:
         # The status tab caches a capability dict, the Inspector just the state.
@@ -238,7 +270,10 @@ def _checked_as_if_on(server: Any, config: ServerConfig, settings: ServerMarkers
     preview = dataclasses.replace(
         settings, enabled=True, db_write_confirmed_at=settings.db_write_confirmed_at or "preview"
     )
-    publisher = publisher_for(server, config, settings=preview)
+    # A page load, not a job: Plex's locks get ``UI_DB_WAIT_S``, not a job's budget spent twice over. ``ui_details``
+    # stays on — Plex's own detection settings are one HTTP request, and both this tab and the Setup Health card's
+    # "Plex's own detection can replace your markers" row are built from them.
+    publisher = publisher_for(server, config, settings=preview, db_timeout_s=UI_DB_WAIT_S)
     if publisher is None:
         return _capability(Capability.NEEDS_PLUGIN, "No marker publisher for this server type")
     report = publisher.capability()
@@ -398,8 +433,9 @@ def _capability_state(server: Any, cfg: ServerConfig) -> str:
 
 
 def _checked_state(server: Any, cfg: ServerConfig) -> str:
-    # Only the state is shown: Plex's own detection settings (one more Plex request) are the Edit tab's.
-    publisher = publisher_for(server, cfg, ui_details=False)
+    # Only the state is shown: Plex's own detection settings (one more Plex request) are the Edit tab's. Bounded like
+    # the Edit tab's check — this too is a page load, not a job.
+    publisher = publisher_for(server, cfg, ui_details=False, db_timeout_s=UI_DB_WAIT_S)
     return Capability.NEEDS_PLUGIN.value if publisher is None else publisher.capability().state.value
 
 

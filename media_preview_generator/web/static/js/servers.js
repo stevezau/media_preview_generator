@@ -155,11 +155,14 @@
         });
         // Per-card connection + readiness probe — sequential per server
         // to avoid hammering 3+ servers in parallel from the same
-        // browser tab. Each probe is ~200-1500ms, except on a Plex with
-        // Intro & Credits switched on: its readiness now includes the
-        // marker capability check, which waits on Plex's SQLite lock
-        // (30 s deadline, cached 60 s — 5 s while it isn't healthy).
-        // Connection runs
+        // browser tab. Each probe is ~200-1500ms; on a Plex with Intro &
+        // Credits switched on the readiness also runs the marker
+        // capability check, which waits on Plex's SQLite lock for
+        // markers.inspect.UI_DB_WAIT_S (5 s) per check rather than a
+        // job's 30 s budget, and is cached 60 s — 5 s while it isn't
+        // healthy. A load that finds a check already running for the
+        // same server is served the last answer instead of queueing
+        // behind it. Connection runs
         // first and returns its status; when the server is unreachable
         // we SKIP the readiness probe (the endpoint would error out and
         // paint a misleading "unknown" glyph when the real problem is

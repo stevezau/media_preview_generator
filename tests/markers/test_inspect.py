@@ -1826,6 +1826,145 @@ def test_fingerprint_change_drops_the_keys_lock():
     assert cache._locks[("a", "status")] is not old_lock
 
 
+class TestAUiCheckIsBounded:
+    """Phase 4 Task 10 Step 8: a Servers-page or Inspector load must not wait a job's lock budget.
+
+    ``capability()`` spends ``plex_db.BUSY_TIMEOUT_S`` twice (the lock probe, then the read-only checks), and a
+    not-ready answer is cached only ``NOT_READY_TTL_S``, so an unhealthy Plex re-probed on nearly every load.
+    """
+
+    def test_the_edit_tab_check_gives_plex_the_ui_deadline(self, factory):
+        inspect.server_status_payload(
+            MagicMock(), server_config("plex", ServerType.PLEX, markers=_plex_markers(enabled=True))
+        )
+        assert factory.calls[0]["db_timeout_s"] == inspect.UI_DB_WAIT_S
+
+    def test_the_inspectors_state_check_gives_plex_the_ui_deadline_too(self, factory):
+        cfg = server_config("plex", ServerType.PLEX, markers=_plex_markers(enabled=True))
+        inspect._checked_state(MagicMock(), cfg)
+        assert factory.calls[0]["db_timeout_s"] == inspect.UI_DB_WAIT_S
+        # Plex's own detection settings are one more Plex request and only the Edit tab shows them.
+        assert factory.calls[0]["ui_details"] is False
+
+    def test_the_edit_tab_check_still_asks_for_plexs_own_detection_settings(self, factory):
+        """``ui_details`` stays on here: the Edit tab AND the Setup Health card's "Plex's own detection can
+        replace your markers" row are both built from ``details["detection"]``, which nothing else reads."""
+        inspect.server_status_payload(
+            MagicMock(), server_config("plex", ServerType.PLEX, markers=_plex_markers(enabled=True))
+        )
+        assert factory.calls[0].get("ui_details", True) is True
+
+    def test_it_is_shorter_than_a_jobs_budget(self):
+        from media_preview_generator.markers.publishers import plex_db
+
+        assert 0 < inspect.UI_DB_WAIT_S < plex_db.BUSY_TIMEOUT_S
+
+    def test_a_second_load_is_served_the_stale_answer_rather_than_queueing(self):
+        """The queueing this fixes: 8 gunicorn threads all waiting on one slow server's check."""
+        import threading
+
+        now = [0.0]
+        cache = inspect.CapabilityCache(ttl_s=60.0, clock=lambda: now[0], lock_wait_s=0.05)
+        cfg = server_config("plex", ServerType.PLEX)
+        cache.get(cfg, "status", lambda: "ready")
+        now[0] = 100.0  # the entry is long past its TTL, so a second caller would normally recompute
+
+        in_check, release = threading.Event(), threading.Event()
+
+        def slow():
+            in_check.set()
+            release.wait(5)
+            return "fresh"
+
+        first = threading.Thread(target=lambda: cache.get(cfg, "status", slow))
+        first.start()
+        assert in_check.wait(5)
+        computed = []
+
+        def second():
+            computed.append("ran")
+            return "second"
+
+        assert cache.get(cfg, "status", second) == "ready"  # the stale answer, not a queued 30 s wait
+        assert computed == [], "a caller that gave up on the lock must not start its own check"
+        release.set()
+        first.join(5)
+        assert cache.get(cfg, "status", lambda: "unused") == "fresh"
+
+    def test_a_check_that_raises_still_releases_the_lock(self):
+        """Both call sites let the exception out of ``get``, so a server whose check throws hits this on every
+        load. A lost release would wedge that server's key: later callers wait ``lock_wait_s`` and get a stale
+        answer, and a server never checked before would block on the retry acquire forever."""
+        cache = inspect.CapabilityCache(clock=lambda: 0.0, lock_wait_s=0.05)
+        cfg = server_config("plex", ServerType.PLEX)  # unchanged config: the saved-since branch never runs
+
+        def boom():
+            raise RuntimeError("Plex is down")
+
+        with pytest.raises(RuntimeError):
+            cache.get(cfg, "status", boom)
+
+        assert cache._locks[("plex", "status")].acquire(blocking=False) is True
+        cache._locks[("plex", "status")].release()
+        assert cache.get(cfg, "status", lambda: "ready") == "ready"
+
+    def test_a_server_never_checked_still_waits_for_the_check(self):
+        """There is nothing stale to serve, so the alternative would be an answer invented out of nothing."""
+        import threading
+
+        cache = inspect.CapabilityCache(clock=lambda: 0.0, lock_wait_s=0.05)
+        cfg = server_config("plex", ServerType.PLEX)
+        in_check, release = threading.Event(), threading.Event()
+
+        def slow():
+            in_check.set()
+            release.wait(5)
+            return "ready"
+
+        first = threading.Thread(target=lambda: cache.get(cfg, "status", slow))
+        first.start()
+        assert in_check.wait(5)
+        answers = []
+        second = threading.Thread(target=lambda: answers.append(cache.get(cfg, "status", lambda: "unused")))
+        second.start()
+        second.join(0.3)
+        assert second.is_alive(), "with nothing cached the second caller has to wait"
+        release.set()
+        first.join(5)
+        second.join(5)
+        assert answers == ["ready"]
+
+    def test_a_saved_server_is_checked_again_rather_than_served_its_old_answer(self):
+        """The fingerprint is the whole point: the stale answer describes settings the user has just changed."""
+        import threading
+
+        now = [0.0]
+        cache = inspect.CapabilityCache(ttl_s=60.0, clock=lambda: now[0], lock_wait_s=0.05)
+        before = server_config("plex", ServerType.PLEX, markers={"enabled": False, "library_ids": None})
+        after = server_config("plex", ServerType.PLEX, markers={"enabled": True, "library_ids": None})
+        cache.get(before, "status", lambda: "old")
+        now[0] = 100.0  # past the TTL, so the first caller really runs a check
+        in_check, release = threading.Event(), threading.Event()
+
+        def slow():
+            in_check.set()
+            release.wait(5)
+            return "ready"
+
+        first = threading.Thread(target=lambda: cache.get(before, "status", slow))
+        first.start()
+        assert in_check.wait(5)
+        answers = []
+        second = threading.Thread(target=lambda: answers.append(cache.get(after, "status", lambda: "new")))
+        second.start()
+        second.join(0.3)
+        assert second.is_alive(), "a saved server must not be served the answer from before the save"
+        release.set()
+        first.join(5)
+        second.join(5)
+        assert answers == ["new"]
+
+
 def test_failed_check_after_a_save_still_evicts_the_old_answer_and_lock():
     cache = inspect.CapabilityCache(clock=lambda: 0.0)
     before = server_config("a", ServerType.JELLYFIN, markers={"enabled": False, "library_ids": None})
