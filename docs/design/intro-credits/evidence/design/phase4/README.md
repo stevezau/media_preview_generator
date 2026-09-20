@@ -37,14 +37,15 @@ Nothing here is wired up; buttons don't do anything and the times don't move.
 | 12 | Setup Health, Jellyfin and Emby — plugin missing, plugin too old | `12-health-jellyfin-emby.png` |
 | 13 | Servers → Edit → Intro & Credits — the Plex marker helper, four states | `13-plex-helper.png` |
 
-## Adding a marker by hand (added 2026-09-21, awaiting owner sign-off)
+## Adding a marker by hand (drawn 2026-09-21; built the same day to the answers relayed with the go-ahead)
 
-The editor can only move a marker detection already found. These surfaces cover making one where nothing was found.
-Strings are in `ui-copy.md` §9.
+The editor could only move a marker detection already found. These surfaces cover making one where nothing was
+found. Strings are in `ui-copy.md` §9. One thing changed while building: the Add buttons moved from inside the
+Decision lane's track to their own row under it, because a bar's grab handle was taking the click — see §9.
 
 | # | Surface | Screenshot |
 |---|---|---|
-| 14 | Nothing found for a type — the Add affordance, before and after Adjust, and the Option B variant | `14-add-nothing-found.png` |
+| 14 | Nothing found for a type — the Add affordance, before and after Adjust | `14-add-nothing-found.png` |
 | 15 | The just-added marker — starting times, the "not something we found" line, Remove | `15-add-just-added.png` |
 | 16 | A movie — one window, so one place to add | `16-add-movie.png` |
 | 17 | A type no enabled server can show — the offer greyed, and why | `17-add-cant-show.png` |

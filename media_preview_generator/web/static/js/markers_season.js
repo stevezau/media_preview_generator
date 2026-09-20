@@ -42,7 +42,7 @@
     };
     // Every state without its own colour (off, none, skipped) is the plain grey .mk-dot.
     const LEGEND = 'Dots: green = server shows this marker, amber = waiting, red = failed, grey = server not enabled, skipped or nothing sent yet';
-    const EDIT_TIP = 'Adjust this episode\'s intro and credits.';
+    const EDIT_TIP = 'Adjust this episode\'s intro and credits, or add one that wasn\'t found.';
 
     const cache = new Map();
     // media_file → the canonical path setPath reported for it (a file's canonical path doesn't change).
@@ -131,9 +131,12 @@
         return button;
     }
 
-    // Edit is on every row, including one nothing was decided for: whether a file can be adjusted at all depends on
-    // what each server can show, which the season payload doesn't carry — the episode's own tab answers that, and
-    // says why when the answer is no. Nothing here says "published": the row's dots carry that, per server.
+    // Edit is on every row, including one nothing was decided for — that row opens the editor on its Add buttons.
+    // Whether any of them can be pressed depends on what each server can show, which the season payload doesn't
+    // carry, so the episode's own tab answers that and says why when the answer is no. The only row the click still
+    // refuses is one whose length isn't known, so there is no timeline to put a marker on: a file no job has looked
+    // at, or one a job looked at but couldn't read a duration for. It toasts instead.
+    // Nothing here says "published": the row's dots carry that, per server.
     function actionCell(episode) {
         const td = el('td', 'mk-season-action');
         const edit = rowButton('Edit', EDIT_TIP);

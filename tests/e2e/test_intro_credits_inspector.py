@@ -1222,7 +1222,8 @@ class TestAdjustEditor:
         expect(_field(page, "credits", "start")).to_have_value("1:55:00")
         expect(_save_button(page)).to_have_text("Save and publish to 1 server")
 
-    def test_a_file_nothing_was_decided_for_cant_be_adjusted(self, authed_page: Page, app_url: str) -> None:
+    def test_a_file_no_job_has_looked_at_cant_be_adjusted(self, authed_page: Page, app_url: str) -> None:
+        """No length means no timeline, so there is nothing to drag *and* nowhere to add one."""
         inspector = _Inspector(authed_page, app_url, not_checked())
         inspector.open_result()
         page = inspector.open_tab()
@@ -1307,7 +1308,7 @@ class TestTypesAServerCantShow:
         expect(_field(page, "intro", "start")).to_be_disabled()
         expect(_save_button(page)).to_have_text("Save")
         expect(_save_button(page)).to_be_disabled()
-        expect(page.locator(".mk-edit-pending")).to_have_text("")
+        expect(page.locator(".mk-edit-pending")).to_have_text("Nothing to save yet")
 
 
 def every_result() -> dict:
@@ -1765,3 +1766,506 @@ class TestEditorTimeHelpers:
         ]
         spoken = authed_page.evaluate("() => [14000, 6912000, 61000].map((ms) => window.markersEditor.spokenTime(ms))")
         assert spoken == ["0 minutes 14 seconds", "1 hour 55 minutes 12 seconds", "1 minute 1 second"]
+
+
+# ---------------------------------------------------------------------------
+# Adding a marker by hand (phase 4, built 2026-09-21 to the answers relayed with the go-ahead)
+# ---------------------------------------------------------------------------
+
+_STARTING_TIMES = "Starting times, not something we found — drag them to where they really are."
+
+
+def nothing_found() -> dict:
+    """South Park with the intro found and nothing else: credits, recap and preview all have no answer."""
+    payload = south_park()
+    payload["decisions"]["credits"] = _decision("no_evidence")
+    payload["decisions"]["recap"] = _decision("no_evidence")
+    payload["evidence"] = [_evidence("chapters", "intro", 11_000, 37_000)]
+    return payload
+
+
+def nothing_found_at_all() -> dict:
+    payload = nothing_found()
+    payload["decisions"]["intro"] = _decision("no_evidence")
+    payload["evidence"] = []
+    return payload
+
+
+def _add(page: Page, mtype: str):
+    return page.locator(f'.mk-add[data-add-type="{mtype}"]')
+
+
+def _remove(page: Page, mtype: str):
+    return _strip(page, mtype).locator(".mk-edit-remove")
+
+
+def _tooltip(locator) -> str | None:
+    """A Bootstrap tooltip moves the element's ``title`` into ``data-bs-original-title`` once it is initialised."""
+    return locator.get_attribute("data-bs-original-title") or locator.get_attribute("title")
+
+
+@pytest.mark.e2e
+class TestAddAMarker:
+    def test_a_type_with_nothing_found_offers_an_add_on_the_row_under_its_lane(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        inspector = _Inspector(authed_page, app_url, nothing_found())
+        page = _open_editor(inspector)
+
+        # The intro was found, so it has a bar and a strip; the other three have an Add on the row under their
+        # window's lane.
+        expect(_strip(page, "intro")).to_be_visible()
+        expect(page.locator(".mk-edit-strip")).to_have_count(1)
+        expect(_add(page, "recap")).to_have_text("Add recap")
+        expect(_add(page, "credits")).to_have_text("Add credits")
+        expect(_add(page, "preview")).to_have_text("Add preview")
+        expect(_add(page, "intro")).to_have_count(0)
+        # Each Add sits in the window that shows that type.
+        expect(page.locator('.mk-window[data-window="opening"] .mk-add')).to_have_count(1)
+        expect(page.locator('.mk-window[data-window="ending"] .mk-add')).to_have_count(2)
+        assert _tooltip(_add(page, "credits")) == (
+            "Puts a marker on the timeline at a starting time. Drag it to where it really is, then save."
+        )
+
+    def test_adjust_opens_on_a_file_where_nothing_was_found_at_all(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, nothing_found_at_all())
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        expect(page.locator("#markersAdjustBtn")).to_be_enabled()
+        page.locator("#markersAdjustBtn").click()
+        expect(page.locator(".mk-edit-actions")).to_be_visible()
+
+        expect(page.locator(".mk-edit-strip")).to_have_count(0)
+        expect(page.locator(".mk-add")).to_have_count(4)
+        expect(page.locator(".mk-edit-pending")).to_have_text("Nothing to save yet")
+        expect(_save_button(page)).to_have_text("Save")
+        expect(_save_button(page)).to_be_disabled()
+        assert inspector.save_bodies == []
+
+    @pytest.mark.parametrize(
+        ("mtype", "start", "end", "length"),
+        [
+            ("intro", "0:00", "0:30", "30 seconds long"),
+            ("recap", "0:00", "0:30", "30 seconds long"),
+            ("credits", "21:02", "22:02", "60 seconds long"),
+            ("preview", "21:32", "22:02", "30 seconds long"),
+        ],
+    )
+    def test_each_type_starts_from_its_own_deliberate_times(
+        self, authed_page: Page, app_url: str, mtype: str, start: str, end: str, length: str
+    ) -> None:
+        """Round by design (addSeed): the file is 22:02, so a tail seed lands on an obviously chosen boundary."""
+        inspector = _Inspector(authed_page, app_url, nothing_found_at_all())
+        page = _open_editor(inspector)
+
+        _add(page, mtype).click()
+        expect(_strip(page, mtype)).to_be_visible()
+        expect(_field(page, mtype, "start")).to_have_value(start)
+        expect(_field(page, mtype, "end")).to_have_value(end)
+        expect(_strip(page, mtype)).to_contain_text(length)
+        expect(_strip(page, mtype)).to_contain_text(_STARTING_TIMES)
+        # The offer is gone now that the marker is on the timeline.
+        expect(_add(page, mtype)).to_have_count(0)
+
+    @pytest.mark.parametrize("mtype", ["credits", "preview"])
+    def test_a_tail_seed_runs_to_the_end_of_the_file(self, authed_page: Page, app_url: str, mtype: str) -> None:
+        inspector = _Inspector(authed_page, app_url, nothing_found_at_all())
+        page = _open_editor(inspector)
+
+        _add(page, mtype).click()
+        expect(_strip(page, mtype).locator("input[role='switch']")).to_be_checked()
+        expect(_field(page, mtype, "end")).to_be_disabled()
+        # No "credits usually run to the end" warning, and no "earlier than credits usually start" either.
+        expect(_strip(page, mtype)).not_to_contain_text("This will still be saved.")
+
+    def test_the_starting_times_line_goes_as_soon_as_an_edge_moves(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, nothing_found_at_all())
+        page = _open_editor(inspector)
+
+        _add(page, "intro").click()
+        expect(_strip(page, "intro")).to_contain_text(_STARTING_TIMES)
+
+        _handle(page, "opening", "start").press("ArrowRight")
+
+        expect(_field(page, "intro", "start")).to_have_value("0:01")
+        expect(_strip(page, "intro")).not_to_contain_text(_STARTING_TIMES)
+
+    def test_a_nudge_a_bound_swallows_leaves_the_starting_times_line_saying_the_truth(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        """The intro seed already starts at 0:00, so ArrowLeft clamps back to 0 and nothing actually moved."""
+        inspector = _Inspector(authed_page, app_url, nothing_found_at_all())
+        page = _open_editor(inspector)
+
+        _add(page, "intro").click()
+        _handle(page, "opening", "start").press("ArrowLeft")
+
+        expect(_field(page, "intro", "start")).to_have_value("0:00")
+        expect(_strip(page, "intro")).to_contain_text(_STARTING_TIMES)
+
+    def test_typing_a_time_also_takes_the_starting_times_line_away(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, nothing_found_at_all())
+        page = _open_editor(inspector)
+
+        _add(page, "credits").click()
+        expect(_strip(page, "credits")).to_contain_text(_STARTING_TIMES)
+
+        _field(page, "credits", "start").fill("21:10")
+
+        expect(_field(page, "credits", "start")).to_have_value("21:10")
+        expect(_strip(page, "credits")).not_to_contain_text(_STARTING_TIMES)
+
+    def test_typing_into_the_end_box_also_takes_the_starting_times_line_away(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        """An added intro's end box is open (no "runs to the end" switch), so it is the other typed edge."""
+        inspector = _Inspector(authed_page, app_url, nothing_found_at_all())
+        page = _open_editor(inspector)
+
+        _add(page, "intro").click()
+        _field(page, "intro", "end").fill("0:45")
+
+        expect(_field(page, "intro", "end")).to_have_value("0:45")
+        expect(_strip(page, "intro")).to_contain_text("45 seconds long")
+        expect(_strip(page, "intro")).not_to_contain_text(_STARTING_TIMES)
+
+    def test_typing_something_that_is_not_a_time_leaves_the_starting_times_line_up(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        """Nothing moved -- the model keeps its last good value -- so the disclaimer is still true."""
+        inspector = _Inspector(authed_page, app_url, nothing_found_at_all())
+        page = _open_editor(inspector)
+
+        _add(page, "intro").click()
+        _field(page, "intro", "start").fill("abc")
+
+        expect(_field(page, "intro", "start")).to_have_class(re.compile(r"\bis-invalid\b"))
+        expect(_strip(page, "intro")).to_contain_text(_STARTING_TIMES)
+        expect(_save_button(page)).to_be_disabled()
+
+    def test_the_runs_to_the_end_switch_counts_as_a_move_even_on_the_same_millisecond(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        """Turning it off changes what the save sends (a time instead of null), so the disclaimer stops being true."""
+        inspector = _Inspector(authed_page, app_url, nothing_found_at_all())
+        page = _open_editor(inspector)
+
+        _add(page, "credits").click()
+        expect(_field(page, "credits", "end")).to_have_value("22:02")
+        expect(_strip(page, "credits")).to_contain_text(_STARTING_TIMES)
+
+        _strip(page, "credits").locator("input[role='switch']").uncheck()
+
+        # The end lands on the same millisecond it already had; only what gets sent changed.
+        expect(_field(page, "credits", "end")).to_have_value("22:02")
+        expect(_strip(page, "credits")).not_to_contain_text(_STARTING_TIMES)
+
+    def test_add_then_adjust_then_save_shows_what_each_server_did(self, authed_page: Page, app_url: str) -> None:
+        """The whole path: nothing found, added by hand, dragged, saved, and one row per server."""
+        inspector = _Inspector(authed_page, app_url, nothing_found())
+        inspector.save_answer = (
+            200,
+            {
+                "canonical_path": _MEDIA_FILE,
+                "duration_ms": _DURATION,
+                "markers": {
+                    "intro": _saved("intro", 11_000, 37_000),
+                    "credits": _saved("credits", 1_272_000, _DURATION),
+                },
+                "servers": [
+                    _row("plex-1", "Plex", "plex", "written", message="2 marker(s)."),
+                    _row("jf-1", "Jellyfin", "jellyfin", "failed", message="Can't reach this server"),
+                    _row("emby-1", "Emby", "emby", "written", message="2 marker(s)."),
+                ],
+            },
+        )
+        page = _open_editor(inspector)
+
+        _add(page, "credits").click()
+        expect(_field(page, "credits", "start")).to_have_value("21:02")
+        # Drag it 10 s earlier with the keyboard, the way a user fixes a starting time.
+        _handle(page, "ending", "start").press("Shift+ArrowLeft")
+        expect(_field(page, "credits", "start")).to_have_value("20:52")
+        expect(page.locator(".mk-edit-pending")).to_have_text("Intro 0:11–0:37 · Credits 20:52 →")
+        expect(_save_button(page)).to_have_text("Save and publish to 3 servers")
+
+        with page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
+        ):
+            _save_button(page).click()
+
+        # The added type is sent as an ordinary user marker, with null meaning "runs to the end of the file".
+        [body] = inspector.save_bodies
+        assert body["path"] == _MEDIA_FILE
+        assert body["markers"] == [
+            {"type": "intro", "start_ms": 11_000, "end_ms": 37_000},
+            {"type": "credits", "start_ms": 1_252_000, "end_ms": None},
+        ]
+
+        expect(_server_card(page, "plex-1").locator(".mk-plan")).to_have_text("Updated")
+        expect(_server_card(page, "jf-1").locator(".mk-plan")).to_have_text("Couldn't reach it")
+        expect(_server_card(page, "jf-1")).to_contain_text(
+            "Your times are saved. This server gets them at the next Check servers run."
+        )
+        expect(page.locator(".mk-saved")).to_contain_text("Saved and locked. Your times stay until you unlock them.")
+
+    def test_nothing_can_be_added_or_removed_while_the_save_is_in_flight(self, authed_page: Page, app_url: str) -> None:
+        """A synthetic click reaches both handlers, so the `editing.saving` guards are what say no."""
+        inspector = _Inspector(authed_page, app_url, nothing_found())
+        held: list[Route] = []
+        page = _open_editor(inspector)
+        _add(page, "credits").click()
+        expect(page.locator(".mk-edit-strip")).to_have_count(2)
+
+        authed_page.route("**/api/markers/item/markers", lambda route: held.append(route))
+        _save_button(page).click()
+        expect(page.locator(".mk-edit-save")).to_contain_text("Saving…")
+
+        expect(_add(page, "recap")).to_be_disabled()
+        _add(page, "recap").dispatch_event("click")
+        expect(page.locator(".mk-edit-strip")).to_have_count(2)
+
+        expect(_remove(page, "credits")).to_be_disabled()
+        _remove(page, "credits").dispatch_event("click")
+        expect(page.locator(".mk-edit-strip")).to_have_count(2)
+
+        held[0].fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"markers": {"credits": _saved("credits", 1_262_000, _DURATION)}, "servers": []}),
+        )
+        expect(page.locator(".mk-saved")).to_be_visible(timeout=5000)
+
+    def test_add_on_a_movie_offers_only_the_ending_windows_types(self, authed_page: Page, app_url: str) -> None:
+        """A movie has no opening window, so an intro or recap can't be added to one at all."""
+        payload = movie()
+        payload["decisions"]["credits"] = _decision("no_evidence")
+        payload["evidence"] = []
+        payload["servers"] = [_server("jf-1", "Jellyfin", "jellyfin", "nothing_to_publish", [])]
+        inspector = _Inspector(authed_page, app_url, payload)
+        page = _open_editor(inspector)
+
+        expect(page.locator("#markersInspectorBody")).to_contain_text("Adjusting this movie.")
+        expect(page.locator('.mk-window[data-window="opening"]')).to_have_count(0)
+        expect(page.locator(".mk-add")).to_have_count(2)
+        expect(_add(page, "intro")).to_have_count(0)
+        expect(_add(page, "recap")).to_have_count(0)
+
+        # 2:00:00 long, so the credits seed is the last minute of it.
+        _add(page, "credits").click()
+        expect(_field(page, "credits", "start")).to_have_value("1:59:00")
+        expect(_field(page, "credits", "end")).to_have_value("2:00:00")
+        expect(_save_button(page)).to_have_text("Save and publish to 1 server")
+
+    def test_a_type_no_server_can_show_offers_an_add_that_says_why_it_cant_be_pressed(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        payload = nothing_found()
+        payload["servers"] = [
+            _server("s-plex", "Plex", "plex", "will_add", []),
+            _server("s-emby", "Emby", "emby", "will_add", []),
+        ]
+        inspector = _Inspector(authed_page, app_url, payload)
+        page = _open_editor(inspector)
+
+        refusal = (
+            "Recaps can't be added here: neither Plex nor Emby has a recap marker, and no other server has this file."
+        )
+        expect(_add(page, "recap")).to_be_disabled()
+        assert _tooltip(_add(page, "recap")) == refusal
+        expect(page.locator('.mk-window[data-window="opening"]')).to_contain_text(refusal)
+        # Credits, which both of them do show, is offered as normal on the same screen.
+        expect(_add(page, "credits")).to_be_enabled()
+
+        # A synthetic click reaches the handler even though the button is disabled, so the guard in addType is
+        # what actually says no -- not just the browser refusing to fire on a disabled button.
+        _add(page, "recap").dispatch_event("click")
+        expect(_strip(page, "recap")).to_have_count(0)
+        assert inspector.save_bodies == []
+
+    def test_remove_takes_a_just_added_marker_back_out_and_leaves_the_rest(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        inspector = _Inspector(authed_page, app_url, nothing_found())
+        page = _open_editor(inspector)
+
+        _add(page, "credits").click()
+        expect(page.locator(".mk-edit-pending")).to_have_text("Intro 0:11–0:37 · Credits 21:02 →")
+        assert _tooltip(_remove(page, "credits")) == "Take this one back out. Nothing has been saved yet."
+        # A marker detection found has no Remove: Unlock and Re-detect are what drop one of those.
+        expect(_remove(page, "intro")).to_have_count(0)
+
+        _remove(page, "credits").click()
+
+        expect(_strip(page, "credits")).to_have_count(0)
+        expect(_add(page, "credits")).to_be_visible()
+        expect(page.locator(".mk-edit-pending")).to_have_text("Intro 0:11–0:37")
+        expect(_strip(page, "intro")).to_be_visible()
+        assert inspector.save_bodies == []
+
+    def test_removing_the_only_added_marker_puts_the_action_bar_back_to_empty(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        """Nothing was found here, so taking the one addition back out leaves the edit with nothing to save."""
+        inspector = _Inspector(authed_page, app_url, nothing_found_at_all())
+        page = _open_editor(inspector)
+
+        _add(page, "credits").click()
+        expect(page.locator(".mk-edit-pending")).to_have_text("Credits 21:02 →")
+        expect(_save_button(page)).to_be_enabled()
+
+        _remove(page, "credits").click()
+
+        expect(page.locator(".mk-edit-pending")).to_have_text("Nothing to save yet")
+        expect(page.locator(".mk-edit-pending")).to_have_class(re.compile(r"\bmk-edit-empty\b"))
+        expect(_save_button(page)).to_have_text("Save")
+        expect(_save_button(page)).to_be_disabled()
+        expect(_add(page, "credits")).to_be_visible()
+
+    def test_cancel_after_adding_sends_nothing_and_leaves_the_file_as_it_was(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        inspector = _Inspector(authed_page, app_url, nothing_found())
+        page = _open_editor(inspector)
+
+        _add(page, "credits").click()
+        expect(_strip(page, "credits")).to_be_visible()
+
+        page.locator(".mk-edit-cancel").click()
+
+        expect(page.locator(".mk-edit-actions")).to_have_count(0)
+        expect(page.locator(".mk-add")).to_have_count(0)
+        expect(page.locator(".mk-chips")).to_contain_text("Credits: No markers found")
+        expect(page.locator(".mk-chips")).not_to_contain_text("Locked by you")
+        assert inspector.save_bodies == []
+
+    def test_a_type_whose_detection_is_off_can_still_be_added(self, authed_page: Page, app_url: str) -> None:
+        """Spec §5.5 rule 1: a locked user marker wins even for a type whose detection is off."""
+        inspector = _Inspector(authed_page, app_url, south_park())
+        page = _open_editor(inspector)
+
+        # south_park() has recap and preview switched off, and says so above the timeline.
+        expect(page.locator(".mk-chips")).to_contain_text("Recap: Detection off")
+        expect(_add(page, "recap")).to_be_enabled()
+
+        _add(page, "recap").click()
+        expect(_field(page, "recap", "start")).to_have_value("0:00")
+        expect(page.locator(".mk-edit-pending")).to_contain_text("Recap 0:00–0:30")
+
+
+def known_without_a_length() -> dict:
+    """A file a job looked at but ffprobe reported no duration for, so nothing can be placed on its timeline."""
+    payload = nothing_found_at_all()
+    payload["duration_ms"] = None
+    return payload
+
+
+def short_file(duration_ms: int) -> dict:
+    """Nothing found, and shorter than the credits seed's own minute."""
+    payload = nothing_found_at_all()
+    payload["duration_ms"] = duration_ms
+    return payload
+
+
+@pytest.mark.e2e
+class TestAddSeedBounds:
+    """The `max(0, ...)` in addSeed, and the intro/recap seed that deliberately has no clamp."""
+
+    @pytest.mark.parametrize(
+        ("duration", "mtype", "start", "end"),
+        [
+            # Long enough that the seed is the plain subtraction.
+            (1_322_000, "credits", 1_262_000, 1_322_000),
+            (1_322_000, "preview", 1_292_000, 1_322_000),
+            # Shorter than the seed: without the clamp these would be -20 s and -10 s, which the API answers 400 for.
+            (40_000, "credits", 0, 40_000),
+            (20_000, "preview", 0, 20_000),
+            # The head types are never clamped -- an end past the file is meant to be refused on screen.
+            (1_322_000, "intro", 0, 30_000),
+            (20_000, "intro", 0, 30_000),
+            (20_000, "recap", 0, 30_000),
+        ],
+    )
+    def test_the_seed_is_clamped_at_zero_for_the_tail_types_only(
+        self, authed_page: Page, app_url: str, duration: int, mtype: str, start: int, end: int
+    ) -> None:
+        inspector = _Inspector(authed_page, app_url, nothing_found_at_all())
+        inspector.open_result()
+        inspector.open_tab()
+        seed = authed_page.evaluate("([d, t]) => window.markersEditor.addSeed({duration_ms: d}, t)", [duration, mtype])
+        assert seed == {"start": start, "end": end, "toEnd": mtype in ("credits", "preview")}
+
+    def test_a_credits_seed_on_a_short_file_starts_at_zero_and_warns_rather_than_refusing(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        """P-R2: the clamp keeps it saveable, and the ordinary "earlier than credits usually start" warning shows."""
+        inspector = _Inspector(authed_page, app_url, short_file(40_000))
+        page = _open_editor(inspector)
+
+        _add(page, "credits").click()
+        expect(_field(page, "credits", "start")).to_have_value("0:00")
+        expect(_field(page, "credits", "end")).to_have_value("0:40")
+        expect(_strip(page, "credits").locator("input[role='switch']")).to_be_checked()
+        expect(_strip(page, "credits")).to_contain_text(
+            "That's earlier than credits usually start. This will still be saved."
+        )
+        expect(_save_button(page)).to_be_enabled()
+
+        with page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
+        ):
+            _save_button(page).click()
+        assert inspector.save_bodies[0]["markers"] == [{"type": "credits", "start_ms": 0, "end_ms": None}]
+
+    def test_an_intro_seed_past_the_end_of_a_very_short_file_is_refused_on_screen(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        """Deliberately unclamped: a 20 s file gets the shipped refusal, not a silent 400 from the API."""
+        inspector = _Inspector(authed_page, app_url, short_file(20_000))
+        page = _open_editor(inspector)
+
+        _add(page, "intro").click()
+        expect(_strip(page, "intro")).to_contain_text("That's past the end of the file (0:20).")
+        expect(_save_button(page)).to_be_disabled()
+        assert inspector.save_bodies == []
+
+
+@pytest.mark.e2e
+class TestAddRefusedWithoutALength:
+    def test_a_file_whose_length_is_not_known_cannot_be_adjusted_or_added_to(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        """A job looked at this file but ffprobe gave no duration -- no timeline, so nothing to put a marker on."""
+        inspector = _Inspector(authed_page, app_url, known_without_a_length())
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        expect(page.locator("#markersInspectorBody")).to_contain_text(
+            "The file's length isn't known yet, so there is no timeline."
+        )
+        expect(page.locator("#markersAdjustBtn")).to_be_disabled()
+        expect(page.locator(".mk-add")).to_have_count(0)
+        expect(page.locator("#markersRedetectBtn")).to_be_enabled()
+
+    def test_no_server_with_intro_and_credits_on_disables_every_add_and_says_why(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        """The other half of reachNote's refusal: nobody to name, because no enabled owner has the file at all."""
+        payload = nothing_found_at_all()
+        for server in payload["servers"]:
+            server["markers_enabled"] = False
+        inspector = _Inspector(authed_page, app_url, payload)
+        page = _open_editor(inspector)
+
+        refusal = "Intros can't be added here: no server with Intro & Credits on has this file."
+        expect(_add(page, "intro")).to_be_disabled()
+        assert _tooltip(_add(page, "intro")) == refusal
+        expect(page.locator('.mk-window[data-window="opening"]')).to_contain_text(refusal)
+        expect(page.locator(".mk-add:not([disabled])")).to_have_count(0)
+        expect(_save_button(page)).to_have_text("Save")
+        expect(_save_button(page)).to_be_disabled()
+
+        _add(page, "intro").dispatch_event("click")
+        expect(page.locator(".mk-edit-strip")).to_have_count(0)
+        assert inspector.save_bodies == []

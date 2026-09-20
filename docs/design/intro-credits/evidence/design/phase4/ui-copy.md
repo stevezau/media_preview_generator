@@ -6,7 +6,8 @@ disagree, this file is wrong and gets fixed, not paraphrased.
 
 Rendered, in the app's own theme: [`index.html`](index.html) · screenshots in [`shots/`](shots/).
 
-**Status:** awaiting owner sign-off (checkpoint 6). Nothing below is built yet.
+**Status:** Tasks 5, 6, 9, 10 and §9 are built. Notes marked *changed while building* record where the shipped UI
+differs from the drawing, and why.
 
 Wording rules applied: plain English, present tense, no internal setting names in the first sentence,
 tooltips ≤ 120 characters.
@@ -245,7 +246,7 @@ bounds, a type no server can show — is the adjusted marker's behaviour unchang
 Behaviour, not wording: `Adjust` stops being disabled on a file where nothing was found. It is still disabled on a
 file no job has looked at, and on one whose length isn't known — neither has a timeline to put a marker on.
 
-### The Add affordance, in the empty Decision lane
+### The Add affordance, on the row under the Decision lane
 
 | Element | String |
 |---|---|
@@ -253,6 +254,13 @@ file no job has looked at, and on one whose length isn't known — neither has a
 | Button ⓘ | `Puts a marker on the timeline at a starting time. Drag it to where it really is, then save.` |
 | Action bar's pending list, before anything is added | `Nothing to save yet` |
 | Save button, before anything is added | `Save` (disabled — the shipped "no server" label, reused) |
+
+**Where it sits (changed while building, 2026-09-21).** The checkpoint pack drew the Add buttons *inside* the
+Decision lane's track. They can't live there: a bar that reaches the left edge of the window puts its grab handle
+(`z-index: 3`) over the button and swallows the click — the e2e for "a type whose detection is off" caught it, with
+the intro's start handle intercepting every click on `Add recap`. They now sit on their own row directly under the
+Decision lane, aligned with its track the way `.mk-edit-strip` and `.mk-window-note` already are, and sticky at the
+left edge on a phone. Nothing else about them changed.
 
 ### The just-added marker
 
@@ -283,6 +291,11 @@ passes the container's timestamps through as they are.) On a file of ordinary ep
 inside the usual bounds, so the editor opens with no warning already showing. Nothing is taken from the season, the
 neighbouring episodes or the sources.
 
+**Adding both credits and preview to one file gives two overlapping markers** (`[length−60s, end]` and
+`[length−30s, end]`). Neither bound refuses an overlap, and nothing on screen says the two collide — accepted: the
+user is adding them precisely because they are about to drag them apart, and inventing a rule here would be the
+kind of guess the starting times exist to avoid.
+
 The `max(0, …)` is load-bearing, not decoration: without it a file shorter than the seed gets a negative start, which
 the editor's own `refusalFor()` does not catch (it checks `start >= duration`, not `start < 0`) and the API then
 refuses with a 400. With the clamp, a short file gets a legal marker and the shipped warning
@@ -299,10 +312,12 @@ The shipped sentence with one word changed, because nothing has been put there t
 |---|---|
 | Nothing found for it, and no server can show it (the Add button is on screen, disabled) | `Recaps can't be added here: neither Plex nor Emby has a recap marker, and no other server has this file.` |
 | Found, and no server can show it (shipped, unchanged) | `Recaps can't be adjusted here: neither Plex nor Emby has a recap marker, and no other server has this file.` |
+| Nothing found for it, and no enabled owner has the file at all | `Intros can't be added here: no server with Intro & Credits on has this file.` |
+| Found, and no enabled owner has the file at all (shipped, unchanged) | `Intros can't be adjusted here: no server with Intro & Credits on has this file.` |
 | Added, and some server can show it (shipped, unchanged) | `Only Jellyfin shows recaps. Plex and Emby have no recap marker, so this one won't reach them.` |
 
 The same generated sentence with the same vendor list; only `adjusted` / `added` differs, chosen by whether that type
-has a marker yet. The "no server with Intro & Credits on has this file" variant is unchanged too.
+has a marker yet. The "no server with Intro & Credits on has this file" variant takes that same one-word swap.
 
 ### Season view
 
@@ -339,15 +354,11 @@ exactly like one from the moment it is on the timeline.
 6. **`Save and publish to 3 servers`** — the count includes only servers with Intro & Credits on that can show
    at least one type you changed. Is that the count you'd expect to read there?
 
-### Added 2026-09-21, with §9
+### Added 2026-09-21, with §9 — answers relayed to the build lane the same day
 
-7. **One way in, or two** (surface 14) — the Add buttons appear only once `Adjust` has opened the editor, so there is
-   one entry point and one label. Option B also puts `+ Add credits` in the read-only lane, next to
-   `Credits: no markers found`, which opens the editor straight onto that type. More discoverable, one more control.
-   The pack recommends one way in.
-8. **`Add preview` on a movie** (surface 16) — a movie's one window covers credits and preview, so the button is
-   offered there too. Almost no movie has a preview. Leave it, or leave preview out of movies?
-9. **A type whose detection is switched off** — `Add preview` still appears for it, because spec §5.5 rule 1 says a
-   locked user marker wins "even for a type whose detection is off". The chip above still reads
-   `Preview: Detection off` (surfaces 14 and 16 both draw that pair). Right, or should a switched-off type have
-   nothing to add?
+7. ~~**One way in, or two** (surface 14)~~ **Answered: one way in.** `Adjust` is the only route and the Add buttons
+   appear once the editor is open. The read-only-lane variant was dropped; the discoverability risk is understood
+   and accepted.
+8. ~~**`Add preview` on a movie** (surface 16)~~ **Answered: keep it**, consistent with the window's other types.
+9. ~~**A type whose detection is switched off**~~ **Answered: keep offering Add**, per spec §5.5 rule 1, and the chip
+   goes on reading `Preview: Detection off` so the state stays visible.

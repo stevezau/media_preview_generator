@@ -471,3 +471,117 @@ class TestUnlock:
             json={"path": str(tmp_path / "outside.mkv"), "types": ["intro"]},
         )
         assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Adding a marker by hand (phase 4, built 2026-09-21 to the answers relayed with the go-ahead)
+# ---------------------------------------------------------------------------
+
+# The starting times markers_inspector.addSeed() puts on the timeline, in this route's body shape. ``end_ms: None``
+# is how "runs to the end of the file" is sent, which is what the credits and preview seeds turn the switch on for.
+# These are a copy, not the source: ``TestAddSeedBounds`` in tests/e2e/test_intro_credits_inspector.py drives the
+# shipped ``window.markersEditor.addSeed`` itself, so change both files together.
+ADD_HEAD_MS = 30_000
+ADD_TAIL_MS = {"credits": 60_000, "preview": 30_000}
+
+
+def _seed(duration_ms: int, mtype: str, *, clamp: bool = True) -> dict:
+    tail = ADD_TAIL_MS.get(mtype)
+    if tail is None:
+        return {"type": mtype, "start_ms": 0, "end_ms": ADD_HEAD_MS}
+    start = duration_ms - tail
+    return {"type": mtype, "start_ms": max(0, start) if clamp else start, "end_ms": None}
+
+
+@pytest.fixture
+def shorter_than_the_seed(app, media):
+    """A 40 s file: shorter than the credits seed's own minute, so the clamp is all that keeps it legal."""
+    path = media / "tv" / "Show" / "Short.mkv"
+    path.write_bytes(b"x" * 50)
+    st = os.stat(path)
+    rec = get_marker_store().upsert_file(
+        FileIdentity(str(path), st.st_size, st.st_mtime_ns), duration_ms=40_000, season_key=None, is_movie=False
+    )
+    return str(path), rec
+
+
+class TestAddAMarkerByHand:
+    """A type detection found nothing for goes through this same route: there is no add route, and none is needed."""
+
+    @pytest.mark.parametrize("mtype", ["intro", "credits", "recap", "preview"])
+    def test_a_type_with_no_stored_row_at_all_is_saved_and_reads_back(
+        self, client, servers, known, episode, published, mtype
+    ):
+        """The claim the feature rests on, proved against the database rather than read off the code."""
+        store = get_marker_store()
+        assert T(mtype) not in store.get_markers(known.id)
+        assert T(mtype) not in store.get_decisions(known.id)
+
+        entry = _seed(DUR, mtype)
+        resp = _save(client, episode, [entry])
+        assert resp.status_code == 200
+
+        end = DUR if entry["end_ms"] is None else entry["end_ms"]
+        stored = store.get_markers(known.id)[T(mtype)]
+        assert (stored.start_ms, stored.end_ms, stored.locked) == (entry["start_ms"], end, True)
+        decision = store.get_decisions(known.id)[T(mtype)]
+        assert decision.status is DecisionStatus.DECIDED
+        assert decision.reason == LOCKED_BY_USER
+        answered = resp.get_json()["markers"][mtype]
+        assert (answered["start_ms"], answered["end_ms"], answered["locked"]) == (entry["start_ms"], end, True)
+
+    def test_the_request_body_is_the_same_one_an_adjusted_marker_sends(
+        self, client, servers, known, episode, published
+    ):
+        """No added/adjusted flag reaches the API: an added marker is a user marker like any other."""
+        _save(client, episode, [_seed(DUR, "credits")])
+        [call] = published.calls
+        assert call["path"] == episode
+        assert get_marker_store().get_locked(known.id) == {
+            T.CREDITS: Marker(T.CREDITS, DUR - 60_000, DUR, ("user",), locked=True)
+        }
+
+    def test_adding_one_type_leaves_a_type_already_decided_alone(self, client, servers, known, episode, published):
+        store = get_marker_store()
+        store.save_user_markers(known.id, [Marker(T.INTRO, 11_000, 37_000, ("chapters",))], settings_fingerprint="fp")
+
+        resp = _save(client, episode, [_seed(DUR, "credits")])
+        assert resp.status_code == 200
+        markers = store.get_markers(known.id)
+        assert (markers[T.INTRO].start_ms, markers[T.INTRO].end_ms) == (11_000, 37_000)
+        # Every stored marker comes back, not only the one just sent, so the Inspector keeps the untouched type.
+        assert set(resp.get_json()["markers"]) == {"intro", "credits"}
+
+    @pytest.mark.parametrize("mtype", ["recap", "preview"])
+    def test_a_type_no_enabled_owner_can_show_is_refused_whether_added_or_adjusted(
+        self, client, only_plex_and_emby, known, episode, mtype
+    ):
+        """The editor disables that type's Add button; if one ever got through, the API still says no."""
+        resp = _save(client, episode, [_seed(DUR, mtype)])
+        assert resp.status_code == 400
+        assert mtype in resp.get_json()["error"]
+        assert get_marker_store().get_markers(known.id) == {}
+
+    @pytest.mark.parametrize("mtype", ["credits", "preview"])
+    def test_the_clamped_tail_seed_is_legal_on_a_file_shorter_than_the_seed(
+        self, client, servers, published, shorter_than_the_seed, mtype
+    ):
+        path, rec = shorter_than_the_seed
+        entry = _seed(40_000, mtype)
+        assert entry["start_ms"] == max(0, 40_000 - ADD_TAIL_MS[mtype])
+
+        resp = _save(client, path, [entry])
+        assert resp.status_code == 200
+        stored = get_marker_store().get_markers(rec.id)[T(mtype)]
+        assert (stored.start_ms, stored.end_ms) == (entry["start_ms"], 40_000)
+
+    def test_without_the_clamp_the_same_seed_would_be_refused(self, client, servers, shorter_than_the_seed):
+        """Why ``max(0, ...)`` is in addSeed: refusalFor() checks ``start >= duration``, never ``start < 0``."""
+        path, rec = shorter_than_the_seed
+        unclamped = _seed(40_000, "credits", clamp=False)
+        assert unclamped["start_ms"] == -20_000
+
+        resp = _save(client, path, [unclamped])
+        assert resp.status_code == 400
+        assert "inside the file" in resp.get_json()["error"]
+        assert get_marker_store().get_markers(rec.id) == {}

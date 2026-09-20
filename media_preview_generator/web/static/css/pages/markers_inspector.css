@@ -430,6 +430,67 @@ html[data-bs-theme="light"] .mk-edit-type {
     font-size: 0.8rem;
 }
 
+/* Adding a marker by hand: the offers sit on their own row under the Decision lane, aligned with its track.
+   Dashed and quiet, so an offer never reads as a decision. They can't sit inside the track: a bar reaching the
+   left edge puts its grab handle (z-index 3) over the button and takes the click. */
+.mk-adds {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
+    margin-top: 0.4rem;
+    margin-left: calc(132px + 1rem);
+}
+
+.mk-add {
+    height: 20px;
+    padding: 0 0.45rem;
+    font-size: 0.72rem;
+    line-height: 18px;
+    font-weight: 500;
+    color: var(--bs-secondary-color);
+    background: transparent;
+    border: 1px dashed var(--bs-border-color);
+    border-radius: 4px;
+    white-space: nowrap;
+}
+
+.mk-add:hover:not(:disabled),
+.mk-add:focus-visible:not(:disabled) {
+    color: #e5a00d;
+    border-color: #e5a00d;
+}
+
+html[data-bs-theme="light"] .mk-add:hover:not(:disabled),
+html[data-bs-theme="light"] .mk-add:focus-visible:not(:disabled) {
+    color: #a86f00;
+    border-color: #a86f00;
+}
+
+.mk-add:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+.mk-add .bi {
+    font-size: 0.7rem;
+}
+
+/* A link, so taking a just-added marker back out never competes with Save. */
+.mk-edit-remove {
+    padding: 0;
+    border: 0;
+    background: none;
+    font-size: 0.78rem;
+}
+
+/* The pending slot is monospace times; its empty state is a sentence, so it reads as one. */
+.mk-edit-pending.mk-edit-empty {
+    font-family: var(--bs-body-font-family);
+    font-size: 0.8rem;
+    color: var(--bs-secondary-color);
+}
+
 @media (max-width: 575.98px) {
     /* The strip lives inside the timeline so it sits under the bar it edits. On a phone the timeline scrolls
      * sideways, so the strip sticks to the left edge instead of sliding out of view with it. */
@@ -438,6 +499,13 @@ html[data-bs-theme="light"] .mk-edit-type {
         left: 0;
         margin-left: 0;
         max-width: calc(100vw - 3rem);
+    }
+
+    /* Same reason as the strip: the Add row must stay reachable while the timeline scrolls under it. */
+    .mk-adds {
+        position: sticky;
+        left: 0;
+        margin-left: 0;
     }
 
     .mk-edit-hint-wide {

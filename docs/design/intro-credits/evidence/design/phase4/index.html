@@ -72,11 +72,12 @@
 
 /* ---- NEW styles "add a marker by hand" would add to css/pages/markers_inspector.css ---- */
 
-/* Where a type's bar would be if anything had been found: the offer to put one there by hand.
-   Dashed, quiet, and never the amber of a real decision — nothing has been added yet. */
+/* The offers sit on their own row under the Decision lane, aligned with its track. Dashed and quiet, so an offer
+   never reads as a decision. They can't sit inside the track: a bar reaching the left edge puts its grab handle
+   (z-index 3) over the button and takes the click. */
 .mk-adds {
-    position: absolute; top: 50%; left: 4px; transform: translateY(-50%);
-    display: flex; align-items: center; gap: .35rem;
+    display: flex; flex-wrap: wrap; align-items: center; gap: .35rem;
+    margin-top: .4rem; margin-left: calc(132px + 1rem);
 }
 .mk-add {
     height: 20px; padding: 0 .45rem;
@@ -102,7 +103,8 @@
       <p class="text-muted mb-0" style="max-width:80ch">
         Built from the app's own stylesheets and markup with made-up data, so what you see here is what the built
         screen looks like. Nothing in this pack is wired up: buttons don't do anything, times don't move.
-        Approve the look and the wording, or mark up what should change, before any of it is built.
+        Tasks 5, 6, 9, 10 and surfaces 14&ndash;18 are built; notes marked <em>settled</em> or
+        <em>changed while building</em> record where the shipped screen differs from the drawing, and why.
       </p>
     </div>
     <button type="button" class="btn btn-sm btn-outline-secondary" id="themeBtn">
@@ -1043,7 +1045,7 @@
 <section class="pack-sec mb-5" id="s14">
   <div class="pack-num mb-1">Surface 14 &middot; Preview Inspector &rarr; Intro &amp; Credits &middot; <span class="text-warning">new</span></div>
   <h2 class="h5">Nothing was found for a type &mdash; the offer to put one there by hand</h2>
-  <p class="text-muted small mb-3" style="max-width:80ch">Today the Decision lane just says what wasn't found, and there is nothing on screen to drag for that type; on a file where <em>nothing</em> was found, <em>Adjust</em> is greyed out entirely. The offer to add one lives inside the editor, in the empty lane where that type's bar would be. <strong>Adjust is the only way in</strong> &mdash; it now opens whenever the file has been checked and its length is known, even if nothing was found at all.</p>
+  <p class="text-muted small mb-3" style="max-width:80ch">Today the Decision lane just says what wasn't found, and there is nothing on screen to drag for that type; on a file where <em>nothing</em> was found, <em>Adjust</em> is greyed out entirely. The offer to add one lives inside the editor, on a row directly under the Decision lane (inside the lane, a bar that reaches the left edge puts its grab handle over the button and takes the click). <strong>Adjust is the only way in</strong> &mdash; it now opens whenever the file has been checked and its length is known, even if nothing was found at all.</p>
 
   <div class="mock" id="shot-s14">
     <div class="mock-cap">Before &middot; Northern Lights &middot; S02E09 &middot; the intro was found, the credits weren't</div>
@@ -1103,14 +1105,13 @@
           <div class="mk-axis"><span style="left:0%">40:00</span><span style="left:33.333%">41:00</span><span style="left:66.667%">42:00</span><span style="left:100%">43:00</span></div>
           <div class="mk-lane mk-lane-decision" data-lane="Decision">
             <div class="mk-lane-label"><span class="text-truncate">Decision</span></div>
-            <div class="mk-track">
-              <span class="mk-adds">
-                <button class="mk-add" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
-                        title="Puts a marker on the timeline at a starting time. Drag it to where it really is, then save."><i class="bi bi-plus-lg me-1"></i>Add credits</button>
-                <button class="mk-add" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
-                        title="Puts a marker on the timeline at a starting time. Drag it to where it really is, then save."><i class="bi bi-plus-lg me-1"></i>Add preview</button>
-              </span>
-            </div>
+            <div class="mk-track"></div>
+          </div>
+          <div class="mk-adds">
+            <button class="mk-add" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
+                    title="Puts a marker on the timeline at a starting time. Drag it to where it really is, then save."><i class="bi bi-plus-lg me-1"></i>Add credits</button>
+            <button class="mk-add" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
+                    title="Puts a marker on the timeline at a starting time. Drag it to where it really is, then save."><i class="bi bi-plus-lg me-1"></i>Add preview</button>
           </div>
           <div class="mk-lane" data-lane="Credit text">
             <div class="mk-lane-label"><span class="text-truncate">Credit text</span></div>
@@ -1134,29 +1135,12 @@
       <button class="btn btn-sm btn-primary" type="button" disabled>Save</button>
     </div>
 
-    <div class="mock-cap mt-4">Option B &middot; the same offer in the read-only lane, without opening the editor first</div>
-    <div class="card mk-window">
-      <div class="card-body mk-scroll py-2">
-        <div class="mk-zoom">
-          <div class="mk-lane mk-lane-decision" data-lane="Decision">
-            <div class="mk-lane-label"><span class="text-truncate">Decision</span></div>
-            <div class="mk-track">
-              <span class="mk-adds">
-                <span class="mk-lane-note">Credits: no markers found</span>
-                <button class="mk-add" type="button"><i class="bi bi-plus-lg me-1"></i>Add credits</button>
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
   </div>
 
-  <p class="pack-q small mt-3 mb-0"><strong>To settle: one way in, or two?</strong>
-  Drawn above, the only way in is <em>Adjust</em>, and the Add buttons appear once the editor is open &mdash; one entry
-  point, one label, and the same route whether you are fixing a marker or making one. Option B also puts
-  <em>Add credits</em> in the lane you are already looking at, which opens the editor straight onto that type. It is
-  more discoverable and one more control on a screen that already has a lot. The pack recommends the first.</p>
+  <p class="pack-note small mt-3 mb-0"><strong>Settled 2026-09-21: one way in.</strong>
+  <em>Adjust</em> is the only route, and the Add buttons appear once the editor is open &mdash; one entry point, one
+  label, and the same route whether you are fixing a marker or making one. The alternative drawn here at checkpoint
+  time, a second <em>Add credits</em> in the read-only lane, was dropped.</p>
 </section>
 
 <!-- ===================== 15. The just-added marker ===================== -->
@@ -1184,11 +1168,11 @@
                 <span class="mk-bar-text">Intro 0:00&ndash;0:30</span>
                 <button class="mk-handle mk-handle-end" type="button" aria-label="Intro end, 0 minutes 30 seconds"></button>
               </span>
-              <span class="mk-adds" style="left:22%">
-                <button class="mk-add" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
-                        title="Puts a marker on the timeline at a starting time. Drag it to where it really is, then save."><i class="bi bi-plus-lg me-1"></i>Add recap</button>
-              </span>
             </div>
+          </div>
+          <div class="mk-adds">
+            <button class="mk-add" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
+                    title="Puts a marker on the timeline at a starting time. Drag it to where it really is, then save."><i class="bi bi-plus-lg me-1"></i>Add recap</button>
           </div>
           <div class="mk-edit-strip">
             <span class="mk-edit-type">Intro</span>
@@ -1326,11 +1310,11 @@
                 <span class="mk-bar-text">Credits 1:51:30 &rarr;</span>
                 <button class="mk-handle mk-handle-end" type="button" aria-label="Credits end, 1 hour 52 minutes 30 seconds"></button>
               </span>
-              <span class="mk-adds">
-                <button class="mk-add" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
-                        title="Puts a marker on the timeline at a starting time. Drag it to where it really is, then save."><i class="bi bi-plus-lg me-1"></i>Add preview</button>
-              </span>
             </div>
+          </div>
+          <div class="mk-adds">
+            <button class="mk-add" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
+                    title="Puts a marker on the timeline at a starting time. Drag it to where it really is, then save."><i class="bi bi-plus-lg me-1"></i>Add preview</button>
           </div>
           <div class="mk-edit-strip">
             <span class="mk-edit-type">Credits</span>
@@ -1367,9 +1351,9 @@
     </div>
   </div>
 
-  <p class="pack-q small mt-3 mb-0"><strong>To settle:</strong> a movie's ending window covers credits <em>and</em>
-  preview, so <em>Add preview</em> is offered on a movie too. Almost no movie has one. Leave it (it costs nothing and
-  someone's cut may need it), or leave preview out of movies entirely?</p>
+  <p class="pack-note small mt-3 mb-0"><strong>Settled 2026-09-21: keep it.</strong> A movie's ending window covers
+  credits <em>and</em> preview, so <em>Add preview</em> is offered on a movie too, consistent with the window's other
+  type. Almost no movie has one, but it costs nothing and someone's cut may need it.</p>
 </section>
 
 <!-- ===================== 17. A type no server can show ===================== -->
@@ -1395,11 +1379,11 @@
                 <span class="mk-bar-text">Intro 0:11&ndash;0:37</span>
                 <button class="mk-handle mk-handle-end" type="button" aria-label="Intro end, 0 minutes 37 seconds"></button>
               </span>
-              <span class="mk-adds" style="left:22%">
-                <button class="mk-add" type="button" disabled data-bs-toggle="tooltip" data-bs-placement="top"
-                        title="Recaps can't be added here: neither Plex nor Emby has a recap marker, and no other server has this file."><i class="bi bi-plus-lg me-1"></i>Add recap</button>
-              </span>
             </div>
+          </div>
+          <div class="mk-adds">
+            <button class="mk-add" type="button" disabled data-bs-toggle="tooltip" data-bs-placement="top"
+                    title="Recaps can't be added here: neither Plex nor Emby has a recap marker, and no other server has this file."><i class="bi bi-plus-lg me-1"></i>Add recap</button>
           </div>
           <div class="mk-edit-strip">
             <span class="mk-edit-type">Intro</span>

@@ -620,9 +620,8 @@ themselves, but 57 credits and 36 intros came out shorter than they should be, 6
 those old markers of ours counted as a second opinion, and 1 credits and 2 intros went to Needs review instead of
 being written.
 
-**"Never overwrite my edits"** (on by default) means a marker you lock always wins over detection. In this release
-the Inspector only shows markers and offers **Re-detect**; adjusting and locking markers there comes in a later
-update.
+**"Never overwrite my edits"** (on by default) means a marker you lock always wins over detection. **Adjust** in the
+Inspector drags a marker to where it really is — or adds one where nothing was found — and saving it locks it.
 
 **TheIntroDB** is used without the site's written permission (its terms restrict server-side use); it's off by
 default, and pasting your own free key is optional and entirely up to you. The key is masked (`****`) everywhere it's
@@ -637,8 +636,9 @@ when this happens mid-run.
 
 When the sources don't clear the bar above for a marker — nothing agrees, or two credible answers disagree — that
 marker isn't sent to any server and the file shows **Needs review**, even when its other markers were sent. Nothing
-is guessed. Adding markers by hand in the Inspector comes in a later update; for now, **Re-detect** in the Inspector
-asks every source again.
+is guessed. **Re-detect** in the Inspector asks every source again, and **Adjust** lets you put the marker where it
+really is by hand — including for a type nothing was found for at all, where **Add intro** / **Add credits** puts one
+on the timeline at a starting time for you to drag. Saving it locks it, so later checks leave it alone.
 
 Two reasons are specific to TV intros: "Season audio and a server's own marker agree, but both come from matching
 audio; needs another source", and "Intro chapter is much longer than the rest of the season's".

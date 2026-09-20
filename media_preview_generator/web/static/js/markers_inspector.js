@@ -6,7 +6,9 @@
 // and cached per file. Every piece of text goes through textContent.
 //
 // Adjust opens the editor over the same two zoom windows: the Decision bar grows a drag handle at each edge, each
-// edited type gets a strip with typed times, and one action bar saves the lot through POST /api/markers/item/markers
+// edited type gets a strip with typed times, and a type nothing was found for carries an Add button where its bar
+// would be, which seeds a deliberately round starting time (addSeed) you then drag. One action bar saves the lot
+// through POST /api/markers/item/markers
 // (save = lock = publish to every owner, plan ruling P-R3) and shows what each server did. Unlock is
 // DELETE /api/markers/item/markers behind a confirmation. Copy is lifted verbatim from the owner-approved pack,
 // docs/design/intro-credits/evidence/design/phase4/ui-copy.md.
@@ -92,7 +94,20 @@
     };
     const LOCK_TIP = 'Keep these times exactly as they are. Later checks won\'t change them.';
     const UNLOCK_TIP = 'Let later checks set these times again.';
-    // The Season view's Edit reaches files the mockup's editor never does: one with no intro or credits to drag.
+    // --- adding a marker by hand (built 2026-09-21 to the answers relayed with the go-ahead) ---
+    const ADD_TIP = 'Puts a marker on the timeline at a starting time. Drag it to where it really is, then save.';
+    const REMOVE_TIP = 'Take this one back out. Nothing has been saved yet.';
+    const STARTING_TIMES = 'Starting times, not something we found — drag them to where they really are.';
+    const NOTHING_TO_SAVE = 'Nothing to save yet';
+    // The times a hand-added marker starts from. Round on purpose: the audio and text detectors practically never
+    // answer a whole 30 seconds from 0:00 or exactly the last minute, so a starting time can't be read as something
+    // this app found. Near enough the truth that the drag is short, and inside the bounds warningsFor() checks, so
+    // the editor opens with no warning already showing.
+    const ADD_HEAD_MS = 30000;
+    const ADD_TAIL_MS = { credits: 60000, preview: 30000 };
+    // The Season view's Edit reaches a file the editor can't open at all: one whose length isn't known, so there is
+    // no timeline to put a marker on. That is a file no job has looked at, or one a job looked at but couldn't read
+    // a duration for. A file merely missing an intro or credits opens on its Add buttons.
     const NOTHING_TO_ADJUST = 'Nothing to adjust on this episode yet — Re-detect checks the file now.';
 
     const cache = new Map();
@@ -273,7 +288,10 @@
         win.types.forEach(function (type) {
             const d = (payload.decisions || {})[type] || {};
             const typeLabel = TYPE_LABELS[type];
-            if (editing && editing.model[type]) {
+            // While editing, a type with no bar of its own says nothing here: its Add sits on the row below.
+            if (editing && !editing.model[type]) {
+                return;
+            } else if (editing && editing.model[type]) {
                 l.track.appendChild(editBar(type, win, payload));
             } else if (d.status === 'decided' && d.marker) {
                 const node = bar(d.marker, win, duration, 'mk-bar-result', `${typeLabel} ${laneRange(d.marker, duration)}`);
@@ -293,8 +311,33 @@
             }
         });
         if (notes.length) note(l.track, notes.join(' · '));
-        else if (!l.track.children.length) note(l.track, 'Nothing decided');
+        // While editing, an empty track is the point — the Add row under it says what to do about it.
+        else if (!editing && !l.track.children.length) note(l.track, 'Nothing decided');
         return l.row;
+    }
+
+    // The offer to make a marker by hand, on its own row directly under the Decision lane and aligned with its
+    // track. It can't live *in* the track: a bar that reaches the left edge puts its grab handle (z-index 3) over
+    // the button and takes the click.
+    // A type no server with Intro & Credits on can show stays on screen, disabled, saying why — the same answer
+    // Task 5 gives an adjustable one.
+    function addButtons(types, payload) {
+        const wrap = el('div', 'mk-adds');
+        types.forEach(function (type) {
+            const reachable = vendorsFor(payload, type).shown.length > 0;
+            const button = el('button', 'mk-add');
+            button.type = 'button';
+            button.dataset.addType = type;
+            button.disabled = editing.saving || !reachable;
+            button.setAttribute('data-bs-toggle', 'tooltip');
+            button.setAttribute('data-bs-placement', 'top');
+            button.title = reachable ? ADD_TIP : reachNote(type, payload);
+            button.appendChild(el('i', 'bi bi-plus-lg me-1'));
+            button.appendChild(el('span', '', `Add ${TYPE_WORDS[type]}`));
+            button.addEventListener('click', function () { addType(type); });
+            wrap.appendChild(button);
+        });
+        return wrap;
     }
 
     function renderWindow(win, payload) {
@@ -314,6 +357,8 @@
         }
         zoom.append(axis, decisionLane(win, payload));
         if (editing) {
+            const adds = win.types.filter(function (type) { return !editing.model[type]; });
+            if (adds.length) zoom.appendChild(addButtons(adds, payload));
             win.types.forEach(function (type) {
                 if (editing.model[type]) zoom.appendChild(editStrip(type, payload));
             });
@@ -355,6 +400,17 @@
                 zoom.appendChild(el('div', 'mk-window-note small text-muted', shortenedNote(type, d.shortened_by)));
             }
         });
+        // A type that could be added but has nowhere to go: its Add button is disabled, so the reason lives here,
+        // where it has room to wrap. A type already in the edit says it in its own strip instead.
+        if (editing) {
+            win.types.forEach(function (type) {
+                if (editing.model[type] || vendorsFor(payload, type).shown.length) return;
+                const line = el('div', 'mk-window-note small text-muted');
+                line.appendChild(el('i', 'bi bi-slash-circle me-1'));
+                line.appendChild(el('span', '', reachNote(type, payload)));
+                zoom.appendChild(line);
+            });
+        }
         scroll.appendChild(zoom);
         card.append(header, scroll);
         return card;
@@ -575,15 +631,40 @@
         return null;
     }
 
-    // A type is adjustable when one of the two zoom windows shows it and something put a bar there to drag.
-    function editableTypes(payload) {
+    // Every type the two zoom windows show, in the order they appear on screen. A movie has no opening window, so
+    // it never lists intro or recap — which is why neither can be added to one.
+    function windowTypes(payload) {
         const out = [];
         windowsFor(payload).forEach(function (win) {
             win.types.forEach(function (type) {
-                if (decisionSeed(payload, type)) out.push(type);
+                if (out.indexOf(type) === -1) out.push(type);
             });
         });
         return out;
+    }
+
+    // A type is adjustable when one of the two zoom windows shows it and something put a bar there to drag.
+    function editableTypes(payload) {
+        return windowTypes(payload).filter(function (type) { return !!decisionSeed(payload, type); });
+    }
+
+    // A type a window shows that nothing was found for: there is no bar to drag, so the editor offers to make one.
+    // The complement of editableTypes over the same list, so between them they cover every type on screen exactly
+    // once. A type whose detection is off is included on purpose — spec §5.5 rule 1 lets a locked user marker win
+    // "even for a type whose detection is off".
+    function addableTypes(payload) {
+        return windowTypes(payload).filter(function (type) { return !decisionSeed(payload, type); });
+    }
+
+    // Where a hand-added marker starts. The tail types are clamped at 0 because refusalFor() checks
+    // `start >= duration`, not `start < 0`: an unclamped seed on a file shorter than the seed would sail past the
+    // editor and come back 400 from the API. An intro or recap needs no clamp — 0:00–0:30 past the end of a shorter
+    // file is refused by the same "inside the file" bound any other marker gets.
+    function addSeed(payload, type) {
+        const duration = payload.duration_ms;
+        const tail = ADD_TAIL_MS[type];
+        if (!tail) return { start: 0, end: ADD_HEAD_MS, toEnd: false };
+        return { start: Math.max(0, duration - tail), end: duration, toEnd: true };
     }
 
     function resolved(type) {
@@ -640,13 +721,15 @@
         if (!vendors.shown.length) {
             const missing = vendors.missing;
             const plurals = capitalise(TYPE_PLURALS[type]);
+            // Nothing has been put there yet, so the refusal says "added"; a type detection found says "adjusted".
+            const verb = decisionSeed(payload, type) ? 'adjusted' : 'added';
             // Nothing to name: no server with Intro & Credits on has this file at all, so the save would be refused
             // whatever the times were (the API answers 409 for it).
-            if (!missing.length) return `${plurals} can't be adjusted here: no server with Intro & Credits on has this file.`;
+            if (!missing.length) return `${plurals} can't be ${verb} here: no server with Intro & Credits on has this file.`;
             let who = `${missing[0]} has no ${word} marker`;
             if (missing.length === 2) who = `neither ${missing[0]} nor ${missing[1]} has a ${word} marker`;
             else if (missing.length > 2) who = `none of ${joinWith(missing, 'and')} has a ${word} marker`;
-            return `${plurals} can't be adjusted here: ${who}, and no other server has this file.`;
+            return `${plurals} can't be ${verb} here: ${who}, and no other server has this file.`;
         }
         if (!vendors.missing.length) return '';
         const shows = vendors.shown.length === 1 ? 'shows' : 'show';
@@ -733,6 +816,8 @@
         const model = editing.model[type];
         const duration = payload.duration_ms;
         const snapped = Math.round(ms / 1000) * 1000;
+        // Compared after the clamp, so an arrow key that a bound swallows leaves "Starting times" saying the truth.
+        const was = { start: model.start, end: model.end, toEnd: model.toEnd };
         if (edge === 'start') {
             const ceiling = (model.toEnd ? duration : model.end) - MIN_LENGTH_MS;
             model.start = Math.min(Math.max(0, snapped), Math.max(0, ceiling));
@@ -743,6 +828,7 @@
             model.toEnd = TO_END_TYPES.indexOf(type) !== -1 && model.end >= duration - END_OF_FILE_MS;
             model.badEnd = false;
         }
+        if (model.start !== was.start || model.end !== was.end || model.toEnd !== was.toEnd) model.untouched = false;
         refreshType(type);
         refreshActions(payload);
     }
@@ -771,10 +857,12 @@
         } else if (edge === 'start') {
             model.badStart = false;
             model.start = ms;
+            model.untouched = false;
         } else {
             model.badEnd = false;
             model.toEnd = false;
             model.end = ms;
+            model.untouched = false;
         }
         refreshType(type);
         refreshActions(payload);
@@ -788,9 +876,13 @@
         input.id = 'mkRunsToEnd-' + type;
         input.addEventListener('change', function () {
             const model = editing.model[type];
+            const was = { end: model.end, toEnd: model.toEnd };
             model.toEnd = input.checked;
             model.badEnd = false;
             if (!model.toEnd) model.end = Math.min(payload.duration_ms, Math.max(model.start + MIN_LENGTH_MS, model.end));
+            // Toggling the switch changes what the save sends (`end_ms: null` versus a time), so it counts as a
+            // move even when the end lands on the same millisecond.
+            if (model.end !== was.end || model.toEnd !== was.toEnd) model.untouched = false;
             refreshType(type);
             refreshActions(payload);
         });
@@ -827,10 +919,23 @@
         }
         strip.appendChild(keyboardHint());
         strip.appendChild(infoIcon('Tab to a handle, then use the arrow keys. You can also type a time straight into the boxes.'));
+        if (editing.model[type].added) strip.appendChild(removeButton(type));
         const messages = el('div', 'mk-edit-messages');
         strip.appendChild(messages);
         editing.ui[type] = Object.assign(editing.ui[type] || {}, { length: length, messages: messages });
         return strip;
+    }
+
+    // Its tooltip rides on the button, the way Adjust, Lock and Add carry theirs, rather than a separate ⓘ.
+    function removeButton(type) {
+        const button = el('button', 'btn btn-link mk-edit-remove text-danger-emphasis', 'Remove');
+        button.type = 'button';
+        button.disabled = editing.saving;
+        button.setAttribute('data-bs-toggle', 'tooltip');
+        button.setAttribute('data-bs-placement', 'top');
+        button.title = REMOVE_TIP;
+        button.addEventListener('click', function () { removeType(type); });
+        return button;
     }
 
     function message(icon, className, text) {
@@ -896,6 +1001,8 @@
                 lines.push(message('bi-slash-circle', 'text-danger-emphasis', note));
             } else {
                 if (note) lines.push(message('bi-info-circle', 'text-muted', note));
+                // Only while the seed is still untouched: once an edge moves these are the user's times, not ours.
+                if (model.untouched) lines.push(message('bi-info-circle', 'text-muted', STARTING_TIMES));
                 if (refusal) lines.push(message('bi-x-circle', 'text-danger-emphasis', refusal));
                 else warningsFor(type, payload).forEach(function (text) {
                     lines.push(message('bi-exclamation-triangle', 'text-warning-emphasis', text));
@@ -982,7 +1089,11 @@
             const model = editing.model[type];
             return model.badStart || model.badEnd || !!refusalFor(type, payload);
         });
-        actions.pending.textContent = pendingText(payload);
+        const listed = pendingText(payload);
+        // Nothing on the timeline yet (or every added marker taken back out): the slot says so instead of sitting
+        // empty, and drops the monospace it uses for times.
+        actions.pending.textContent = listed || NOTHING_TO_SAVE;
+        actions.pending.classList.toggle('mk-edit-empty', !listed);
         actions.save.textContent = saveLabel(payload);
         actions.save.disabled = blocked || !sentTypes().length;
     }
@@ -995,7 +1106,10 @@
         const working = !!editing || busy;
         if (redetect) redetect.disabled = !path || working;
         if (!adjust || !lock) return;
-        adjust.disabled = working || !payload.known || !payload.duration_ms || !editableTypes(payload).length;
+        // A file where nothing was found still has somewhere to go: the editor opens on its Add buttons. What it
+        // still needs is a length — without one there is no timeline to put a marker on.
+        adjust.disabled = working || !payload.known || !payload.duration_ms
+            || !(editableTypes(payload).length || addableTypes(payload).length);
         const locked = lockedTypes(payload);
         lock.disabled = working || (!locked.length && !lockableTypes(payload).length);
         setLockButton(lock, locked.length > 0);
@@ -1022,7 +1136,8 @@
         const payload = shown && shown.payload;
         if (!payload || !payload.duration_ms || editing) return false;
         const types = editableTypes(payload);
-        if (!types.length) return false;
+        // A file with nothing found still opens: every type a window shows carries an Add button instead of a bar.
+        if (!types.length && !addableTypes(payload).length) return false;
         const model = {};
         types.forEach(function (type) {
             const seed = decisionSeed(payload, type);
@@ -1032,6 +1147,8 @@
                 toEnd: TO_END_TYPES.indexOf(type) !== -1 && seed.end >= payload.duration_ms - END_OF_FILE_MS,
                 // Owner ruling: only a type no enabled server can show at all is refused.
                 editable: vendorsFor(payload, type).shown.length > 0,
+                added: false,
+                untouched: false,
                 badStart: false,
                 badEnd: false,
             };
@@ -1039,10 +1156,54 @@
         editing = { types: types, model: model, saving: false, ui: {}, actions: null };
         results = null;
         render(payload, shown.item);
-        // Focus follows the button that was pressed into the editor, so a keyboard user is already on a handle.
-        const first = $('markersInspectorBody').querySelector('.mk-handle:not([disabled])');
+        // Focus follows the button that was pressed into the editor, so a keyboard user is already on a handle — or,
+        // when there is nothing to drag yet, on the first Add.
+        const first = $('markersInspectorBody').querySelector('.mk-handle:not([disabled]), .mk-add:not([disabled])');
         if (first) first.focus({ preventScroll: true });
         return true;
+    }
+
+    // The types on screen, in the order the two windows show them.
+    function modelTypes(payload) {
+        return windowTypes(payload).filter(function (type) { return !!editing.model[type]; });
+    }
+
+    // Put a marker on the timeline where detection found nothing. It is an ordinary edited marker from here on:
+    // the same drag, the same bounds, the same save, the same lock.
+    function addType(type) {
+        const payload = shown && shown.payload;
+        if (!editing || editing.saving || !payload || editing.model[type]) return;
+        if (!vendorsFor(payload, type).shown.length) return;
+        const seed = addSeed(payload, type);
+        editing.model[type] = {
+            start: seed.start,
+            end: seed.end,
+            toEnd: seed.toEnd,
+            editable: true,
+            added: true,
+            untouched: true,
+            badStart: false,
+            badEnd: false,
+        };
+        editing.types = modelTypes(payload);
+        render(payload, shown.item);
+        const ui = editing.ui[type] || {};
+        if (ui.startHandle && !ui.startHandle.disabled) ui.startHandle.focus({ preventScroll: true });
+    }
+
+    // Only a marker added in this edit can be taken back out. One detection found is dropped with Unlock or
+    // Re-detect, which is a different thing: it has already reached the servers.
+    function removeType(type) {
+        const payload = shown && shown.payload;
+        if (!editing || editing.saving || !payload) return;
+        const model = editing.model[type];
+        if (!model || !model.added) return;
+        delete editing.model[type];
+        delete editing.ui[type];
+        editing.types = modelTypes(payload);
+        render(payload, shown.item);
+        const back = $('markersInspectorBody').querySelector(`.mk-add[data-add-type="${type}"]`);
+        if (back && !back.disabled) back.focus({ preventScroll: true });
     }
 
     function cancelEdit() {
@@ -1431,7 +1592,8 @@
 
     // The Season view's Edit: show that episode's tab, then open the editor on it. Whatever the user did while this
     // file's payload was in flight wins — another file, or "Whole season" — so the editor never opens over someone
-    // else's file or inside the hidden episode view. A file with nothing to adjust says so rather than doing nothing.
+    // else's file or inside the hidden episode view. A file the editor can't open at all says so rather than doing
+    // nothing — which now means one with no length, not one with no markers.
     async function editFile(item) {
         await loadMarkersInspector(item);
         const episodeView = $('markersEpisodeView');
@@ -1500,5 +1662,8 @@
         parseClock: parseClock,
         spokenTime: spokenTime,
         lengthText: lengthText,
+        // Pure, and the one place the starting times are decided: exported so the clamp can be pinned on a file
+        // shorter than the seed, which no rendered payload is.
+        addSeed: addSeed,
     };
 })();

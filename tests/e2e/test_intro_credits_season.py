@@ -25,8 +25,10 @@ from .test_intro_credits_inspector import (
     _result,
     _save_button,
     _saved,
+    known_without_a_length,
     locked_payload,
     not_checked,
+    nothing_found_at_all,
     south_park,
 )
 
@@ -489,7 +491,7 @@ class TestSeasonRowEdit:
         expect(_row(page, "E03").locator(".mk-season-action button")).to_have_text(["Review", "Edit"])
         edit = _action(page, "E01", "Edit")
         assert (edit.get_attribute("data-bs-original-title") or edit.get_attribute("title")) == (
-            "Adjust this episode's intro and credits."
+            "Adjust this episode's intro and credits, or add one that wasn't found."
         )
 
     def test_edit_opens_that_episode_in_the_editor_with_the_season_a_click_away(
@@ -627,13 +629,76 @@ class TestSeasonRowEdit:
         with page.expect_response(_is_item, timeout=5000):
             _action(page, "E04", "Edit").click()
 
-        # startEditing's other refusal (a known file with nothing decided) shares this return path and this toast.
+        # The only row Edit still refuses: no length means no timeline, so there is nowhere to add one either.
         expect(page.locator("#toastBody")).to_contain_text(
             "Nothing to adjust on this episode yet — Re-detect checks the file now.", timeout=5000
         )
         expect(page.locator(".mk-edit-actions")).to_have_count(0)
         # The tab the user landed on still explains the state itself.
         expect(page.locator("#markersInspectorBody .mk-not-checked")).to_be_visible()
+
+    def test_edit_on_a_row_with_nothing_found_opens_the_editor_on_its_add_buttons(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        """This row used to toast; now it is the whole point of Add."""
+
+        def _nothing_found_e04(route: Route) -> None:
+            asked = parse_qs(urlparse(route.request.url).query).get("path", [_MEDIA_FILE])[0]
+            payload = copy.deepcopy(nothing_found_at_all() if asked.endswith("E04.mkv") else south_park())
+            payload["canonical_path"] = asked
+            _fulfill_json(route, payload)
+
+        view = _Season(authed_page, app_url, season())
+        view.item_handler = _nothing_found_e04
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+
+        with page.expect_response(_is_item, timeout=5000):
+            _action(page, "E04", "Edit").click()
+
+        expect(page.locator(".mk-edit-actions")).to_be_visible(timeout=5000)
+        expect(page.locator("#toastBody")).not_to_contain_text("Nothing to adjust on this episode yet")
+        expect(page.locator(".mk-add")).to_have_count(4)
+        expect(page.locator(".mk-edit-pending")).to_have_text("Nothing to save yet")
+        assert view.save_bodies == []
+
+    def test_edit_on_a_known_file_with_no_duration_says_why(self, authed_page: Page, app_url: str) -> None:
+        """The other half of the toast's condition: a job saw this file, but ffprobe reported no duration."""
+
+        def _no_length_e04(route: Route) -> None:
+            asked = parse_qs(urlparse(route.request.url).query).get("path", [_MEDIA_FILE])[0]
+            payload = copy.deepcopy(known_without_a_length() if asked.endswith("E04.mkv") else south_park())
+            payload["canonical_path"] = asked
+            _fulfill_json(route, payload)
+
+        view = _Season(authed_page, app_url, season())
+        view.item_handler = _no_length_e04
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+
+        with page.expect_response(_is_item, timeout=5000):
+            _action(page, "E04", "Edit").click()
+
+        expect(page.locator("#toastBody")).to_contain_text(
+            "Nothing to adjust on this episode yet — Re-detect checks the file now.", timeout=5000
+        )
+        expect(page.locator(".mk-edit-actions")).to_have_count(0)
+        expect(page.locator("#markersInspectorBody")).to_contain_text(
+            "The file's length isn't known yet, so there is no timeline."
+        )
+
+    def test_every_rows_edit_says_it_can_add_one_that_wasnt_found(self, authed_page: Page, app_url: str) -> None:
+        view = _Season(authed_page, app_url, season())
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+
+        tip = "Adjust this episode's intro and credits, or add one that wasn't found."
+        for episode in ("E01", "E02", "E03", "E04"):
+            edit = _action(page, episode, "Edit")
+            assert (edit.get_attribute("data-bs-original-title") or edit.get_attribute("title")) == tip
 
     def test_a_save_answering_after_the_user_moves_on_still_refreshes_the_season(
         self, authed_page: Page, app_url: str
