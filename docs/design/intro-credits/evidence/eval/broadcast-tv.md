@@ -502,3 +502,23 @@ step is clustering over the story's boxes: 0.1 ms at the median and under 30 ms 
 measured, against 8–13 s of decode. The band steps are a sort and a walk over the tail's rows. This measurement ran
 from the harness's stored decodes on both paths (4 new windows on the GPU, 2 on the CPU; the rest reused).
 `CREDITS_TEXT_VERSION` goes to 3, so every stored answer is asked again.
+
+### The walk's cadence, capped (2026-09-21)
+
+`rule_j.reach_back`'s step limit now takes the smaller of the run's credit-frame spacing on the rows it reads and on
+the rows **as they were decoded**, so the overlay step can no longer widen the walk's own step by thinning the run
+(`phase3-harness.md`, "The walk's cadence, capped by the run as decoded"). Re-run here on both paths from the stored
+decodes (0 decoded, 82 windows reused on the GPU and 84 on the CPU): **every one of the 51 answers is identical**,
+at credits text, High and Medium, so every table above stands as written.
+
+Two things this page's own rows say about that walk, measured on the same runs:
+
+- **The walk itself is short here.** `reach_back` moves the start on 3 of the 51 on the GPU path and 6 on the CPU,
+  and never by more than **12.5 s**. The longer moves — up to 156 s — are `same_roll` merges, which have no distance
+  limit by design.
+- **The channel the cap does not close is live on this population.** `in_band` reads the median middle of a frame's
+  *remaining* boxes, so dropping an overlay can move a keyframe *into* the roll's band. Over the 17 files with an
+  overlay on the GPU path, it puts **36 keyframes into** the band that were out of it as decoded (and takes 261
+  out). No answer of the 51 moves because of them — the walk still has to reach them at the roll's own cadence, and
+  on these files it does not — but it is the shape that makes "how early step 4 can put a start" unbounded, and it
+  happens on real broadcast rows, not only in a unit shape.

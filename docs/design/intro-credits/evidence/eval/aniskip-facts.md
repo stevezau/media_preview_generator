@@ -97,8 +97,14 @@ all**, which is the whole of §2 below.
 chapters and the other sources.
 
 **"Ending" is our credits, not our preview — measured, not assumed.** Of the anime files that carry *both* a credits
-chapter and a preview chapter of their own, AniSkip's `ed` start is nearer the credits chapter in **236 of 236**, within
-5 s of it in **211**, and within 5 s of the preview chapter in **0**.
+chapter and a preview chapter of their own, AniSkip's `ed` start is nearer the credits chapter in **319 of 320**, within
+5 s of it in **279**, and within 5 s of the preview chapter in **0**.
+
+> **Re-measured 2026-09-21.** The numbers above were 236 of 236 / 211 / 0 when this page was written, because
+> `analyze.py` asked `chapter_candidates()` without the episode kind and so never saw a bare `Ending` chapter as
+> credits. Every file here is an anime episode, so the app itself has read them as credits since phase 4, Task 15.
+> With the kind passed, 84 more files have both chapter kinds; one of them is nearer its preview chapter, and none of
+> the 320 is within 5 s of it.
 
 Two cautions for whoever writes the client:
 
@@ -458,6 +464,20 @@ several segments of a type, the earliest is taken — checked, and no source did
 run the same day comes back almost entirely `unavailable`. The row above is the first run of the day; a re-run needs a
 fresh day or the owner's key.
 
+> **The chapter rows here and in the next table are out of date and were not re-run (2026-09-21).** They were
+> produced by `compare.py` asking
+> `chapter_candidates()` without the episode kind, so a bare `Ending` chapter was not credits to it, though it has
+> been credits to the app since phase 4, Task 15. `compare.py` has been fixed, but re-running it spends about 120
+> lookups of TheIntroDB's anonymous daily allowance, so it was not re-run for this correction and **the five other
+> rows are the 2026-09-20 run's**. What *is* measured, offline on the same 120 files with today's classifier: passing
+> the kind adds a credits chapter to **8 more of the 120** and moves no intro. Neither "any source at all" nor the
+> "only source" counts moves with it — every one of the 8 already has a credits answer from another source — so §6's
+> decision reads the same. The published 40 / 27 cannot be reproduced offline (today's classifier reads 37 / 21 on
+> the same files without the kind, 37 / 29 with it), which is why the rows are flagged rather than rewritten:
+> something other than Task 15 has moved the chapter classifier since, and finding it is not this correction's
+> business. The two figures that decide anything here — "AniSkip is the only source with an answer for 2 intros and
+> 0 credits" and "4 intros and 10 credits against the three online sources" — are unmoved either way.
+
 **The sobering result: AniSkip is the only source with an answer for 2 of 120 intros and 0 of 120 credits.** Against
 the three online sources alone it is the only answer for 4 intros (3%) and 10 credits (8%). On this library AniSkip is
 not a coverage win — IntroDB already answers more anime episodes than it does. Its value would be as a source that
@@ -499,16 +519,23 @@ their **start**:
 |---|---:|---:|---:|---:|---:|
 | intro | 1,080 | 610 (56%) | 93 | **55 (5.1%)** | 322 |
 | intro, cut matched within 2 s | 580 | 499 (86%) | 51 | **30 (5.2%)** | — |
-| credits | 849 | 383 (45%) | 39 | **25 (2.9%)** | 402 |
-| credits, cut matched within 2 s | 367 | 333 (91%) | 18 | **16 (4.4%)** | — |
+| credits | 1,087 | 510 (47%) | 52 | **34 (3.1%)** | 491 |
+| credits, cut matched within 2 s | 487 | 441 (91%) | 23 | **23 (4.7%)** | — |
 
 Median |delta| is 1.1 s for intros and 1.0 s for credits — when it is right it is very right.
 
+> **The two credits rows were re-measured on 2026-09-21** and are the only rows on this page that moved. They read
+> 849 / 383 (45%) / 39 / 25 (2.9%) / 402 and 367 / 333 (91%) / 18 / 16 (4.4%) when the page was written, because
+> `analyze.py` asked `chapter_candidates()` without the episode kind: a bare `Ending` chapter was not credits to it,
+> though it has been credits to the app since phase 4, Task 15, and every file scored here is an anime episode. The
+> 238 `Ending`/`End` files join the credits truth. The intro rows are untouched — the kind decides no intro name —
+> and the wrong rate the gate reads goes **up**, 2.9% → 3.1%, so nothing below changes direction.
+
 **But the wrong rate is the number that matters, and it does not pass the Q4 gate shape** (≤ 2% of files wrong at
 Medium, ≤ 1% at High). 5.1% of anime intros with a chapter get an answer more than 15 s from that chapter, and
-tightening the cut band to ≤ 2 s does **not** help (5.2%). Some of that is chapter-truth noise — 581 of the 1,080
-intro chapters are a lone generic "Intro" which may be the cold open (§5) — but restricting to files with a *specific*
-opening chapter still leaves 23 wrong of 408 answered (5.6%).
+tightening the cut band to ≤ 2 s does **not** help (5.2%); credits fail both caps too, at 3.1%. Some of that is
+chapter-truth noise — 581 of the 1,080 intro chapters are a lone generic "Intro" which may be the cold open (§5) —
+but restricting to files with a *specific* opening chapter still leaves 23 wrong of 408 answered (5.6%).
 
 **Every one of these numbers is a lower bound on the risk**, because they are measured *after* the mapping resolved the
 right MAL id. §2 shows what the same source returns when it does not.
@@ -530,8 +557,8 @@ regex:**
 | gone from disk since the parts dump was taken | 49 |
 | no chapters at all | 1,270 (41% of those read) |
 | an intro chapter the app would accept | 1,080 |
-| a credits chapter the app would accept | 849 |
-| both | 730 |
+| a credits chapter the app would accept | 1,087 (849 before Task 15 — see the side finding below) |
+| both | 950 |
 | a recap chapter | 40 |
 | a preview chapter | 549 |
 
@@ -548,16 +575,27 @@ That is already **25× the 43-case online set**, for the cost of one ffprobe pas
    chapter", which is the right question for precision but says nothing about the 41% of anime files with no chapter —
    exactly the files AniSkip would be *for*. Those need frame checks.
 
-**A side finding worth the owner's attention, now measured.** `Ending` is the third most common credits-ish chapter
-name in this library's anime (230 chapters, after `End Credits` 337 and `Credits` 275), and the app's classifier
-deliberately does **not** treat it as credits — `chapters.py:24`: "'End'/'Ending' alone are common final-scene names
-in movies, so they are deliberately not credits." **On anime that chapter is the ED.** 238 anime files carry an
-`Ending`/`End` chapter; on the 149 where AniSkip also has an `ed`, its start is within 5 s of the chapter in **127
-(85%)**, within 1 s in 78, and more than 15 s away in 9 — median |delta| **1.0 s**.
+**A side finding worth the owner's attention, now measured — and since acted on.** `Ending` is the third most common
+credits-ish chapter name in this library's anime (230 chapters, after `End Credits` 337 and `Credits` 275). **On anime
+that chapter is the ED.** 238 anime files carry an `Ending`/`End` chapter; on the 149 where AniSkip also has an `ed`,
+its start is within 5 s of the chapter in **127 (85%)**, within 1 s in 78, and more than 15 s away in 9 — median
+|delta| **1.0 s**.
 
-That is 238 files of free credits coverage. But the rule is **global**, and the comment it would change was written
-for movies, so it needs an anime-only scope (or the same measurement on movies) before anyone touches it. Spec §5.1
-question, not this task's.
+That is 238 files of free credits coverage, and it needed an episode-only scope, because the rule is global and a
+film's "Ending" is its last scene.
+
+> **Shipped 2026-09-20 (phase 4, Task 15), so this page's "the app's classifier deliberately does not treat it as
+> credits" is out of date.** `chapters.py` now reads a bare `Ending` as credits **on an episode**, judged by the kind
+> the file's own path gives (`ids_from_path`); `End` alone is still a scene name everywhere. What the page quoted —
+> "'End'/'Ending' alone are common final-scene names in movies, so they are deliberately not credits" — is not in the
+> file any more. The measurement behind Task 15 is `evidence/eval/phase4-chapters.md`: 282 of 4,346 anime episodes
+> carry a bare `Ending`, against 1 of 9,904 movies.
+>
+> Every credits number on this page was re-derived on 2026-09-21 with the kind passed, because `analyze.py` and
+> `compare.py` were still asking `chapter_candidates()` without it. §1.4 and §4 carry the new rows; the "credits
+> chapter the app would accept" count above is 1,087, not 849. **The §6 decision does not move**: chapters getting
+> better makes AniSkip worth less, and AniSkip's own credits wrong rate against the wider truth is 3.1%, still over
+> both Q4 caps.
 
 **Cost to build the truth set:**
 
@@ -569,8 +607,8 @@ question, not this task's.
 | Frame-check every AniSkip-vs-chapter disagreement | ~15 s/file (phase-3 harness rate) | scales with the count |
 
 **Total: about one hour of machine time and two to four hours of review** for a truth set of roughly 1,100 anime
-intros and 850 credits — far past the "aim for the scale of the existing online set (43 cases) or better" the plan
-asks for. None of it needs the `plex` host and none of it writes to the library.
+intros and 1,100 credits (850 before Task 15) — far past the "aim for the scale of the existing online set (43
+cases) or better" the plan asks for. None of it needs the `plex` host and none of it writes to the library.
 
 ---
 
@@ -586,7 +624,7 @@ it is the value and the dependency:
 | **Neither id-map repo has a licence.** | **Owner decision** | An owner ruling, like the TheIntroDB one in spec §13 item 1. |
 | **AniSkip has no terms of use of any kind** — MIT on the code, nothing on the service or the data. | **Owner decision** | A second ruling. Mitigations are the same as TheIntroDB's: off by default, degrade cleanly. |
 | **It is not independent of IntroDB** (§4). | Design | None — keep spec §5.5 rule 8's interim ruling and make it permanent. But it is what removes most of the remaining value. |
-| **It fails the Q4 gate shape on the chapter truth**: 5.1% of anime intros with a chapter get an answer more than 15 s away, against caps of 2% (Medium) and 1% (High) — and tightening the cut band to ≤ 2 s does not help. | **Blocks publishing** | Task 8's gate would have to reject it at both settings on this evidence. It could still be useful as an *agreeing* source that never decides. |
+| **It fails the Q4 gate shape on the chapter truth**: 5.1% of anime intros and 3.1% of anime credits with a chapter get an answer more than 15 s away, against caps of 2% (Medium) and 1% (High) — and tightening the cut band to ≤ 2 s does not help. | **Blocks publishing** | Task 8's gate would have to reject it at both settings on this evidence. It could still be useful as an *agreeing* source that never decides. |
 | **1,599 files (34% of the anime) are absolute-numbered** and only 333 carry the absolute number in the file name. | Scope | Skip them, and say so. A TVDB key is not worth three shows. |
 
 **If the owner wants one sentence: AniSkip is buildable, but on this library it would add a marker to about 2% of
@@ -596,9 +634,9 @@ before Task 7 starts, rather than build it and let Task 8's gate reject it.
 
 Two things worth doing regardless of the AniSkip decision, both found on the way here:
 
-- The app's chapter classifier does not treat `Ending` as credits. Measured here: on anime it is the ED (§5) —
-  238 files, AniSkip's `ed` within 5 s of it in 85%. Free coverage, but the rule is global and was written for
-  movies, so it needs an anime-only scope (spec §5.1).
+- ~~The app's chapter classifier does not treat `Ending` as credits.~~ **Done, 2026-09-20 (phase 4, Task 15):** a
+  bare `Ending` is credits on an episode, judged by the kind the file's path gives. Measured here first: on anime it
+  is the ED (§5) — 238 files, AniSkip's `ed` within 5 s of it in 85%.
 - 581 of 1,080 anime intro chapters are a lone generic `Intro` with no specific opening chapter in the file, so spec
   §5.1's cold-open rule cannot fire and the app takes them at face value. Worth a look before anything publishes from
   an anime intro chapter.

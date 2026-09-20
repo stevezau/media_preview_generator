@@ -855,8 +855,10 @@ put together here:
    - **Reach back** (`rule_j.reach_back`, step 7). Step the start back over earlier keyframes whose text is in the
      roll's band and which keep the roll's own cadence: no further from the frame the walk is on than
      `ANCHOR_SPACING_FACTOR` × the spacing of the run's credit frames — the anchor's own yardstick — and never more
-     than the 24 s join. This is what catches names over bright footage at the head of a roll: those frames read 1–2
-     boxes, under the 3 a lit frame needs, so the run began after them. Two things the walk does **not** do, each
+     than the 24 s join. (Since 2026-09-21 that spacing is the smaller of the run's on the rows this step reads and
+     on the rows as decoded, so step 4 cannot widen it: "The walk's cadence, capped by the run as decoded".) This is
+     what catches names over bright footage at the head of a roll: those frames read 1–2 boxes, under the 3 a lit
+     frame needs, so the run began after them. Two things the walk does **not** do, each
      measured: it does not honour the dark bridge (`credit_runs` has already joined everything that reaches, so a
      stretch the run stopped at holds a lit frame; crossing it as well puts two more of the 205 over 10 s before
      their chapter), and it does not step onto a row of the run itself (the anchor has already ruled on those —
@@ -913,18 +915,48 @@ it is pinned by `test_rule_j.TestOverlayBoxes.test_a_split_roll_can_be_gathered_
 papered over. Three ways of reading round it were measured and each cost a measured broadcast answer ("Tried and not
 taken", below).
 
-**What is measured is not a guarantee, and the bound is the 24 s join, not version 2.** Dropping boxes thins the
-chosen run's credit frames, which grows the spacing the anchor measures, which can stop the anchor stepping over a
-frame the join glued on; the start then lands up to that join *earlier* than version 2 put it, on story. It is the
-overlay step's own bound, demonstrable with the band steps stubbed out and on a file with an ordinary single run —
-and it applies to the cancel shape above as much as anywhere else, so that shape is bounded by the join too, not by
-version 2 (`rule_j.overlay_boxes`' docstring says the same).
+**What is measured is not a guarantee, and there is no bound — not version 2, and not the 24 s join.** Dropping
+boxes thins the chosen run's credit frames, which grows the spacing the anchor measures, which can stop the anchor
+stepping over a frame the join glued on; the start then lands up to that join *earlier* than version 2 put it, on
+story. That much is the overlay step's own doing, demonstrable with the band steps stubbed out and on a file with
+an ordinary single run — and it applies to the cancel shape above as much as anywhere else, so that shape is not
+bounded by version 2 either (`rule_j.overlay_boxes`' docstring says the same).
 `TestOverlayBoxes.test_thinning_a_run_can_stop_the_anchor_stepping` pins a synthetic one, both as shipped and with
 the band steps stubbed out: a channel logo over story,
 a lit shop front 20 s before the roll, and a roll whose cards alternate with bug-only frames. Version 2 answers the
 roll's first card at 500 s; version 3 answers the shop front at 480 s, and does so with the band steps stubbed out
-too, so shipping the overlay half alone carries the same bound. Nothing in the 285, the lab's 8 or the 51 does it —
-that is the evidence, and it is the whole of it.
+too, so shipping the overlay half alone carries that risk as well. Nothing in the 285, the lab's 8 or the 51 does
+it — that is the evidence, and it is the whole of it.
+
+**The 24 s join is the *anchor's* bound and only the anchor's; the walk's reach is bounded by the tail.** This was
+published as "bounded by the 24 s join" and it was wrong: `_anchored` takes at most `ANCHOR_MAX_STEPS` = 1 step, but
+`reach_back`'s `while at > 0` loop has no step limit, and both of the things the walk reads move under the overlay
+step. Two channels, measured on synthetic tails (2026-09-21):
+
+- **The cadence.** `reach_back`'s limit is `ANCHOR_SPACING_FACTOR ×` the run's own spacing, measured on the rows the
+  rule reads. Thinning takes credit frames out of the run, so that spacing *grows*, so the limit grows — and a wider
+  limit is a longer walk, not one longer step. On a tail whose band is identical raw and thinned and whose cadence
+  alone moves (4 s → 8 s), the band steps alone answered 540.0 s and the pair answered **242.5 s, 297.5 s earlier**.
+  **This channel is closed**, below: the walk's cadence is now capped by the run as it was decoded.
+- **Which frames are in the band.** `in_band` reads the median middle of a frame's *remaining* boxes. A story
+  keyframe carrying a corner bug and one box in the roll's band reads a middle between the two and is out of the
+  band as decoded; drop the bug and it reads the band box alone and is in it. The walk crosses such frames at the
+  roll's own cadence, however many there are. On a synthetic tail of them the pair answers the file's **first row**,
+  the whole tail before the band steps' own 540.0 s. **This channel is open**, and the cap does not touch it. It is
+  not theoretical on the population step 4 was built for: over the 17 of the 51 broadcast recordings that have an
+  overlay, dropping it puts **36 keyframes into** the roll's band that were out of it as decoded (and takes 261
+  out). No broadcast answer moves because of them — the walk still has to reach them at the roll's own cadence, and
+  on these files it does not — but the flip itself happens on real files, not only in a unit shape.
+
+Both are pinned in `TestReachBack` (`test_the_walk_never_outreaches_the_runs_cadence_as_decoded`,
+`test_dropping_a_bug_can_put_a_story_keyframe_in_the_band`), so neither can be lost again. Nothing in the 285, the
+lab's 8 or the 51 broadcast recordings does either.
+
+**What the walk actually reaches, measured.** Over the set rows on the GPU decode, `reach_back` moves the start on
+18 of them and never by more than **10.2 s**; over the 51 broadcast recordings, on 3 files (GPU) and 6 (CPU), never
+by more than **12.5 s**. The longer moves on those files — up to 156 s — are `same_roll` merges, which have no
+distance limit by design (a roll the join split can be split anywhere). So the walk's measured reach is a dozen
+seconds against a worst case with no bound at all; that gap is the disclosure, not a reassurance.
 
 Neither half is monotone on its own. Inside the chosen run the anchor's start can move either way under the overlay
 step, because dropping boxes changes which frames are credit frames and so the spacing. And the guard is not sealed
@@ -1062,6 +1094,35 @@ touched:
 - A "boxes in a screen corner don't count" test was measured and dropped: it takes Come from Away's and Revenant's
   real answers away outright, and moves three more on the 205.
 
+> **Swept on the overlay half alone, and re-run with both halves live (2026-09-21).** The band table above
+> cross-validates ("neither the overlay half nor that narrowing moves a set answer at any of these cells"); these
+> five numbers did not — only the shipped cell had been measured on the pair. They are re-run below through the
+> committed `credits-text --sweep`, which runs the **whole rule** in every cell (`tools/markers_eval/README.md`), on
+> the GPU decode over the 80 and the 204 (`Paradise (2024)` is out — see "The walk's cadence, capped"), 20 cells,
+> 0 decodes but one. The flat band holds, and one number gains a ceiling the old sweep never looked for.
+>
+> | Constant | Cells | 80: rule J / Medium useful / wrong | 204: Medium useful / wrong | 204: alone useful / wrong |
+> |---|---|---|---|---|
+> | `OVERLAY_KEYFRAME_SHARE` | 0.02 – 0.15 (**0.05**) | 66 / 60 / 1 | 101 / 15 | 123 / 35 |
+> | | 0.01 | **65** / 60 / 1 | 101 / 15 | 123 / 35 |
+> | | 0.20 | 66 / 60 / 1 | **100 / 16** | **122 / 36** |
+> | `OVERLAY_SPAN_SHARE` | 0.7, **0.8**, 0.9 | 66 / 60 / 1 | 101 / 15 | 123 / 35 |
+> | `OVERLAY_IOU` | 0.4, **0.5**, 0.6 | 66 / 60 / 1 | 101 / 15 | 123 / 35 |
+> | `OVERLAY_LEAST` | 3, **4**, 6, 8 | 66 / 60 / 1 | 101 / 15 | 123 / 35 |
+> | `OVERLAY_CONTAINMENT` | 0.5, **0.6**, 0.7 | 66 / 60 / 1 | 101 / 15 | 123 / 35 |
+> | | 0.8 | 66 / 60 / 1 | **100 / 16** | **122 / 36** |
+>
+> The two cells that move lose the same file, the overlay half's one gain (Gaurav Gupta): at a keyframe share of
+> 0.20 the stage backdrop is seen too rarely to be an overlay, and at 0.8 containment its boxes are no longer
+> swallowed. **`OVERLAY_CONTAINMENT` was never swept before** — 0.7 is where its safe band ends, and the shipped 0.6
+> sits in the middle of it. Everything else reads exactly as the overlay half alone read it, so the pair takes
+> nothing away at any of these cells. The 80 alone was swept the same way on the **CPU** decode (20 cells, one new
+> window between them): the same flat band, with 0.01 again the only cell that moves it (rule J 61 → 60).
+>
+> The band's own two numbers were re-run on the CPU 80 with both halves live at the same time, to check the claim
+> above rather than repeat it: 16 px 59 / 55, 24 px 61 / 56, **32 px 61 / 57**, 40–64 px 61 / 57; share 0.3 and 0.4
+> 61 / 57, **0.5** 61 / 57, 0.6 and 0.7 61 / **56**. That is the GPU table's shape on the other path.
+
 **How often the overlay step fires.** Files with at least one overlay: 2 of 40 (movies40, GPU; 1 on the CPU), 0 of 40
 (tv40, both paths), 5 of 205, 3 of the lab's 8, and 17 of 51 broadcast files on the GPU path, 14 on the CPU.
 
@@ -1070,9 +1131,18 @@ touched:
 No answer moves. The six Synth Audio episodes (a test pattern with a burnt-in timecode) still get none — two or three
 overlays are found on each of the three that made a run, and the run loses its credit frames to them, so they are
 refused one step earlier than version 2's guard refused them — and Synth Credits and Synth Credits Open still answer
-541.0 s with no overlay at all. `credits_synth_lab.json.gz` rebuilds byte-identical, and its builder now patches
-`rule_j.overlay_boxes` off beside `rule_j.text_all_through` to keep measuring what version 1 answered. Pinned in
-`test_rule_j.TestTextAllThrough`, `TestOverlayBoxes.test_the_labs_burnt_in_timecode_is_an_overlay` and
+541.0 s with no overlay at all. `credits_synth_lab.json.gz` rebuilds byte-identical, and its builder patches every
+step version 1 didn't have off — `rule_j.text_all_through`, `rule_j.overlay_boxes`, `rule_j.same_roll` and
+`rule_j.reach_back` — to keep measuring what version 1 answered.
+
+> **It patched only the first two when this was written, which left it unable to rebuild at all; fixed 2026-09-21.**
+> The refine window `find_credits` decodes is measured from the coarse start, and `same_roll` and `reach_back` move
+> that start on three of the six Synth Audio episodes once the guard is off — by 104 to 215 s. Run as committed, the
+> builder stopped on the second file with "the fine rows are no longer the fixture's", so the lab fixture could not
+> be rebuilt at all. With all four patched off, a real rebuild on the lab's files (GPU decode, `--decode gpu`) comes
+> back **byte-identical**, and `test_credits_synth_fixture.TestVersion1View` pins the four.
+
+Pinned in `test_rule_j.TestTextAllThrough`, `TestOverlayBoxes.test_the_labs_burnt_in_timecode_is_an_overlay` and
 `TestWhereRuleJReadsPositions.test_the_band_steps_only_ever_move_a_start_earlier_and_never_an_end`.
 
 ### Tried and not taken (this round)
@@ -1123,6 +1193,68 @@ two files that are not cancelled are in `broadcast-tv.md`, "Rule J version 3".
 | High, GPU | 4 / 2, 0 false | 4 / 2, 0 false | 4 / 2, 0 false | 4 / 2, 0 false |
 | High, CPU | 3 / 2, 1 false | 3 / **3**, 1 false | 3 / 2, 1 false | 3 / 2, 1 false |
 
+### The walk's cadence, capped by the run as decoded (2026-09-21)
+
+`reach_back`'s limit is `ANCHOR_SPACING_FACTOR ×` the spacing of the run's credit frames, and it measured that
+spacing on the rows the rule reads — the ones the overlay step thinned. Thinning takes credit frames out of the run,
+so the spacing between the ones left grows, so the limit grows; and the walk has no step limit, so a wider limit is a
+longer walk, not one longer step. `rule_j.reach_back` now takes the smaller of that spacing and the same run's
+spacing **on the rows as they were decoded**, so the overlay step can never lend the walk a step the run did not have
+before its boxes were dropped. Nothing else changes: the band test, the run the walk starts from, the anchor and the
+ends are untouched, and with no overlay the cap is a no-op because both row lists are the same rows.
+
+- Date: 2026-09-21, on `storage`; same host, ffmpeg (`8.0.1-3ubuntu2`), driver and Python as the runs above.
+- Code: `feat/markers-detection` at `d6aa8e1` against that tree plus this change. Decode digest `35a0f3918608d3be`
+  on both arms — `rule_j.py` is not in it — so both read the same rows. Detector digests `01398d20f2db2d23` and
+  `d882b59add6ccbb0`, so no answer was served from the other arm's cache.
+- **The 205 is 204 here, on every arm.** `Paradise (2024)`'s 1080p release, which the set's truth was built on, was
+  replaced on disk by a 2160p one on 2026-09-20, so its stored truth cannot be scored against the file that is
+  there. Its version 3 answer was `wrong` at every level, so these arms' 205 rows read one lower than the tables
+  above (Medium wrong 16 → 15, credits text alone 36 → 35, High wrong 15 → 14).
+- **Decodes.** On the GPU path the "a rule change costs no decodes" claim held exactly: the HEAD arm decoded 0 and
+  reused 76 (most of its answers were still in the answer cache), the capped arm decoded **0** and reused **566**.
+  On the CPU path it did **not**, and the reason is not the cache: every published CPU run covered the 80 alone
+  (`--sets 80`), so the 205's and the online cases' CPU windows had never been decoded at all. The HEAD CPU arm
+  decoded **398** of them and reused 155; the capped arm then read all **553** back with **0** decoded. This is the
+  first CPU run over the 205.
+- **The GPU self-test, comparing boxes, on this host.** The self-test used to let the GPU serve when it found the
+  *same number* of boxes as the CPU; it now compares the boxes themselves (`textdet_helper.self_test`), which is what
+  rule J version 3 reads. Measured here on the Quadro P5000 after the change:
+  `Credit text detection on cuda:0: GPU (median 10.64 ms per frame, CPU 16.07 ms; GPU/CPU 0.6569 per round)` --- the
+  20 frames' boxes matched the CPU's corner for corner in all 7 rounds, so the GPU still serves, at the same speeds
+  as the runs above
+  (12.71 / 19.08 ms on 2026-09-19, 11.2--11.4 ms at the top of this file). Command:
+  `EXPECT_WEBGPU=1 MEDIA_PREVIEW_TEXTDET_MODEL=<det_infer.onnx> pytest -m gpu
+  tests/markers/credits/test_textdet_helper_integration.py` (1 passed, 6.9 s). That check demands the GPU rather than
+  accepting a CPU fallback, so it is the one that would catch a GPU whose boxes differ.
+
+**Before and after** (`--sets 80,205 --online` on each path; the 205 is the 204 above):
+
+| Arm | Decode | Rule J on the 80: within 10 s / early | 80 Medium useful / wrong | 204 Medium useful / wrong | 204 alone useful / wrong |
+|---|---|---:|---:|---:|---:|
+| HEAD | GPU | 66 / 1 | 60 / 1 | 101 / 15 | 123 / 35 |
+| **capped** | GPU | 66 / 1 | 60 / 1 | 101 / 15 | 123 / 35 |
+| HEAD | CPU | 61 / 1 | 57 / 1 | 90 / 15 | 111 / 30 |
+| **capped** | CPU | 61 / 1 | 57 / 1 | 90 / 15 | 111 / 30 |
+
+**Nothing moved.** `--changed-since` lists 0 answers on both paths, and every file's credits-text answer, end, and
+High and Medium decisions were compared run against run whatever the size of the move: **no file of the 284 set rows
+moved at any level on either path**, and the 43 online cases decide identically at all three settings. Frame-check
+sheets are the same set (183 on the GPU, 188 on the CPU). The Q4 gate reads exactly as it did: the 80 pass 5 of 5 on
+both paths, the 204 fail the same 3 of 5.
+
+**The 51 broadcast recordings**, both decode paths, from the stored decodes (**0 decoded** on either arm; 82 windows
+reused on the GPU, 84 on the CPU): **every one of the 51 answers is identical on both arms**, at credits text, High
+and Medium. Credit text over the 34 rolls stays 13 useful / 4 wrong / 17 missed on the GPU and 11 / 6 / 17 on the
+CPU, the end-card and sports rows unchanged.
+
+**The risk that cuts the other way, measured.** Thinning also reveals a roll's *real*, sparser cadence where some of
+the roll's own frames were credit frames only because the overlay sat on them; there the wider limit is the right one
+and a cap under-reaches. On the files that have an overlay the thinned cadence is actually wider than the raw one on
+**one** of the 51 broadcast recordings (GPU) and none (CPU), and equal on the rest — and on none of them, nor on any
+of the 284 set rows (7 with an overlay on the GPU, 5 on the CPU) nor the lab's 8, does the cap move the coarse start.
+That is the whole of the cost measured: nothing.
+
 ### What is still open
 
 - **§13 item 14 (late starts): narrowed again, not closed.** On the 205, credits text alone is 123 useful against
@@ -1133,9 +1265,19 @@ two files that are not cancelled are in `broadcast-tv.md`, "Rule J version 3".
 - The 205's gate still fails its usefulness floor (101 < 124) and both wrong caps (16 > 5, 15 > 3); no wrong answer
   moved except the one that stopped being wrong, so version 1's adjudication of the rest stands.
 - **The two halves cancel on a split roll that fills its own tail** ("The order of the two, and why"). Unreachable on
-  anything measured, pinned, and not fixed: every fix measured cost a real broadcast answer. It is *not* bounded by
-  version 2 — step 4's own thinning applies here as everywhere, so the answer can be up to the 24 s join earlier, on
-  story. The owner may prefer to ship one half.
+  anything measured, pinned, and not fixed: every fix measured cost a real broadcast answer.
+- **How early the pair can answer has no bound.** This read "up to the 24 s join earlier, on story" and that was
+  wrong: the join bounds the anchor's one step, not the walk, which has no step limit ("What is measured is not a
+  guarantee", above). The worst case the owner is choosing on is **a start anywhere in the tail**, on story, and
+  neither half is safe from it on its own — the anchor channel is the overlay half's alone (it reproduces with the
+  band steps stubbed out), and the walk channel needs both. The cadence channel is closed by the cap
+  (`rule_j.reach_back`); the one that remains is `in_band` reading a frame's *remaining* boxes, so dropping a corner
+  bug can put a story keyframe in the roll's band. **If the owner wants this shape gone, the choice is not "ship one
+  half" — it is shipping the band half alone**, which reads the rows as decoded, so no start of it moves under the
+  overlay step at all and every answer it gives is one the band test and the roll's own cadence chose on the rows
+  ffmpeg produced. That costs the overlay half's measured broadcast gain (Medium's wrong answers on the 34 rolls,
+  GPU path, 5 → 3, `broadcast-tv.md`) and its one set answer (Gaurav Gupta). Shipping the overlay half alone keeps
+  the anchor channel, so it buys nothing here.
 - **§13 item 15 (broadcast TV): narrowed, and one right answer worse on the CPU decode.** The overlay step can't see
   a graphic whose box breathes enough to split into groups that each span under 80 % of the story (Bondi Rescue
   S14E12's network promo strapline), nor one that comes and goes (MasterChef Junior S03E02's contestant name

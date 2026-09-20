@@ -345,9 +345,10 @@ taken from the rapidocr_onnxruntime 1.4.4 wheel), pinned at `/app/models/ch_PP-O
   e.g. `__EGL_VENDOR_LIBRARY_FILENAMES`) before the session is created. Without it the NVIDIA ICD fails and Dawn
   silently uses llvmpipe at 430 ms/frame.
 - **Guard:** use the GPU only when `get_vulkan_device_info()` reports a hardware device and a 20-frame self-test on
-  that device counts exactly the CPU's boxes, faster — a GPU that only matches the CPU's speed, or counts different
-  boxes, doesn't pass. Otherwise CPU. A GPU helper runs on the WebGPU EP device whose `pci_bus_id` matches the
-  worker GPU's; with no PCI match it falls back to the CPU, except on a host with a single WebGPU device when the
+  that device finds exactly the CPU's boxes, in the same places, faster — a GPU that only matches the CPU's speed, or
+  finds the same *number* of boxes somewhere else, doesn't pass (it compared counts alone until 2026-09-21, which
+  was a complete test only while rule J read a row's count; version 3 reads where the boxes are). Otherwise CPU.
+  A GPU helper runs on the WebGPU EP device whose `pci_bus_id` matches the worker GPU's; with no PCI match it falls back to the CPU, except on a host with a single WebGPU device when the
   worker's PCI address is unknown (T-R3) — the EP lists every display PCI device from sysfs, not only
   Vulkan-capable ones (storage's own ASPEED BMC VGA is listed beside the P5000), so refusing the GPU whenever
   several devices are listed would disable it on ordinary servers.
@@ -425,7 +426,10 @@ and its answer is version 2's (`rule_j.boxes_of`).
    version 2). The cost is lit scene text followed by more than 24 s of dark keyframes before the roll (§13 item 14).
 7. **Reach back** (rule J version 3, §13 item 14): step the start back over earlier keyframes whose text is in the
    roll's band and which keep the roll's own cadence — no further from the frame the walk is on than 1.5 × the spacing
-   of the run's credit frames (the anchor's yardstick), and never more than the 24 s join. This is what catches a roll
+   of the run's credit frames (the anchor's yardstick), and never more than the 24 s join. That spacing is the
+   smaller of the run's on the rows this step reads and on the rows **as they were decoded**, so step 4's thinning
+   can never widen it: thinning takes credit frames out of the run, and this walk has no step limit, so a wider
+   limit is a longer walk (2026-09-21, `evidence/eval/phase3-harness.md`). This is what catches a roll
    whose opening is names over bright footage: those frames read 1–2 boxes, under the 3 a lit frame needs, so the run
    began after them. The cadence is what keeps the walk out of story, whose text is sporadic. The dark bridge is not
    honoured here — step 2 has already joined everything it reaches, so a stretch the run stopped at holds a lit frame,
@@ -814,8 +818,8 @@ Owner (2026-09-13): marker work must respect the GPU and CPU workers exactly lik
    (`VK_DRIVER_FILES`, `__EGL_VENDOR_LIBRARY_FILENAMES`) that hide other GPUs — the plex host has NVIDIA + Intel; a
    driver crash or hang can't take the web app down; the WebGPU plugin has a known Linux hang at shutdown without
    adapters (ORT PR #29591). On start the helper runs a 20-frame self-test against CPU and falls back to a CPU
-   helper unless it counts exactly the same boxes, faster; result cached per device for the process lifetime. A GPU
-   helper that crashes or fails during a request, or that fails to answer between requests, moves its device to the
+   helper unless it finds exactly the same boxes, corner for corner, faster; result cached per device for the
+   process lifetime. A GPU helper that crashes or fails during a request, or that fails to answer between requests, moves its device to the
    CPU helper for the rest of that run of the app, with one WARNING. A helper with no request for 10 minutes exits
    (code 75) and is started again on demand without a new self-test; one within 5 s of that idle exit is replaced
    before the next request instead of racing its own timer. On a timeout, cancel or failure the helper's whole
@@ -946,8 +950,8 @@ setting, and `settings.json` never stores it (§5.4).
 - `frames.py`: tail length by kind (T-R4), row order and non-increasing rows (T-R5), luma/pts rounding and the
   `-copyts` start-time subtraction (T-R6), chunked decode and cancel between chunks, decode/timeout error mapping
   (T-R7).
-- `textdet_helper.py`: self-test picks GPU/CPU by exact box count, not speed alone; crash or a between-request
-  failure → CPU for the process lifetime; idle exit and the 5 s replace margin (T-R8); process-group kill and pipe
+- `textdet_helper.py`: self-test picks GPU/CPU by the exact boxes both sides find, not their count and not speed
+  alone; crash or a between-request failure → CPU for the process lifetime; idle exit and the 5 s replace margin (T-R8); process-group kill and pipe
   reaper; device → PCI mapping (T-R3); the availability check's once-per-process lock (M17).
 - `detector.py` and rule J: the anonymised 80-file fixture (`test_reproduces_the_spec_table`) and the decision
   matrix through `decide()` — chapters/credits-text-alone/agreement cells exist and pass.
@@ -1667,7 +1671,10 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     story — a channel or score bug, a ticker, a burnt-in timecode — doesn't count as text inside the run, and a run
     that leaves fewer than two credit frames without it is not a roll. The thresholds (IoU 0.5, 80 % of the story's
     span, 5 % of its rows, 4 sightings, 60 % containment) sit in a flat safe band: no set answer moves at any
-    keyframe share from 0.02 to 0.15.
+    keyframe share from 0.02 to 0.15. Re-swept 2026-09-21 with **both** halves live (the original sweep was the
+    overlay half alone) through the committed `credits-text --sweep`: the band holds (GPU over the 80 and the 204,
+    CPU over the 80), and the one number never swept before, containment, is flat from 0.5 to 0.7 and loses the
+    overlay half's own gain at 0.8.
   - **A roll the 24 s join split, put back together from the band its text keeps to** (steps 5 and 7). An earlier
     kept run whose text sits in the last run's band (median box middle within 32 px, a tenth of the frame) and whose
     gap to it never stops carrying text (half the keyframes between) is the same roll; and a keyframe before the
@@ -1683,12 +1690,22 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     `test_rule_j.TestOverlayBoxes.test_the_band_steps_never_walk_the_start_back_over_the_bug`. **The two halves do
     cancel on one shape** — a roll that fills most of its own tail and that the join split has its own text inside
     step 4's story, so the merge is refused and the answer usually stays where version 2 had it. Unreachable on anything
-    measured, pinned, and not fixed: the three fixes measured each cost a real broadcast answer. Step 4's own bound
-    applies to this shape too, so "stays where version 2 had it" is the usual case and not a guarantee: thinning a
-    run grows the spacing the anchor measures, so step 4 can stop the anchor stepping over a glued-on frame and put a
-    start up to the 24 s join earlier than version 2, on story. That reproduces with the band steps stubbed out, so
-    it is the overlay step's own bound rather than an artefact of the pairing; nothing measured does it, and it is
-    pinned (`test_rule_j.TestOverlayBoxes.test_thinning_a_run_can_stop_the_anchor_stepping`) rather than argued.
+    measured, pinned, and not fixed: the three fixes measured each cost a real broadcast answer. Step 4's own
+    non-monotonicity applies to this shape too, so "stays where version 2 had it" is the usual case and not a
+    guarantee: thinning a run grows the spacing the anchor measures, so step 4 can stop the anchor stepping over a
+    glued-on frame and put a start up to the 24 s join earlier than version 2, on story. That reproduces with the
+    band steps stubbed out, so it is the overlay step's own doing, and it is pinned
+    (`test_rule_j.TestOverlayBoxes.test_thinning_a_run_can_stop_the_anchor_stepping`) rather than argued.
+  - **How early step 4 can put a start is not bounded** (corrected 2026-09-21; it read "up to the 24 s join"). The
+    join bounds the *anchor*, which takes one step; step 7's walk has no step limit, and both of the things it reads
+    move under step 4. Its **cadence** did: thinning grows the run's spacing and so the walk's own limit, which on a
+    synthetic tail put a start 297.5 s before the band steps alone. That is closed — the walk's cadence is capped by
+    the run as it was decoded (`rule_j.reach_back`), which moves no answer of either set on either decode path, none
+    of the 51 broadcast recordings and none of the lab's 8. What remains open is **which frames are in the band**:
+    `in_band` reads the median middle of a frame's *remaining* boxes, so dropping a corner bug can put a story
+    keyframe in the roll's band, and a synthetic tail of them answers the file's first row. Both are pinned
+    (`test_rule_j.TestReachBack`), nothing measured does either, and the real worst case is a start anywhere in the
+    tail.
   - **Sets, both decode paths, against the positions commit:** no early answer added at any level and no verdict
     became `wrong` — the 205 has one *fewer* (Medium wrong 17 → 16, credits text alone 37 → 36). Medium useful 80
     58 → 60 (CPU 55 → 57), 205 96 → 101; credits text alone on the 205 116 → 123 useful with 41 → 35 late; rule J
@@ -1738,3 +1755,17 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   Edit tab calls it "Plex marker agent"; the docs say both.
 - 2026-09-21 · **§13 item 17 gains a lock note** (D7). A lock lives only in `markers.db`, so losing it loses the user's
   edit, not just its provenance. The `extra_data` ownership key stays the owner's pending decision; nothing new is built.
+- 2026-09-21 · **Rule J step 7's cadence is capped by the run as it was decoded** (`CREDITS_TEXT_VERSION` stays 3;
+  no stored answer moves). Step 4's thinning grew the run's credit-frame spacing and so the walk's own step limit,
+  and the walk has no limit on how many steps it takes, so a wider limit was a longer walk: on a synthetic tail it
+  put a start 297.5 s before the band steps alone. The walk now takes the smaller of that spacing and the same run's spacing on the rows
+  as decoded. Measured HEAD against it on **both decode paths** over the 80, the 204 (`Paradise (2024)`'s file was
+  replaced on disk) and the 43 online cases, and over the 51 broadcast recordings: **no answer, end or decision
+  moves anywhere**, and the Q4 gate reads the same. This is the first CPU run over the 205 — every published CPU run
+  covered the 80 — so it decoded 398 windows; the capped arm then reused all 553.
+  `evidence/eval/phase3-harness.md` "The walk's cadence, capped by the run as decoded".
+- 2026-09-21 · **The GPU text-detection self-test compares the boxes both backends find, not how many.** It gated on
+  `count()`, which was a complete test only while rule J read a row's box count; version 3 reads where the boxes
+  are, so a backend finding the same *number* of boxes in different *places* passed and then answered differently
+  from the CPU path — and this self-test is the only runtime check there is. It now compares `detect()`, which costs
+  the same (`count` is `len(detect(...))`). §5.4 Guard; pinned in `test_textdet_helper`.

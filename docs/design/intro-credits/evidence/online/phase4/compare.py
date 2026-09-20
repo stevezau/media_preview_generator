@@ -1,8 +1,9 @@
 """AniSkip against the app's other sources, on a random sample of the same anime episodes.
 
 The other online sources are asked through the app's **own** clients, chapters through its own
-``chapter_candidates()``, and Plex's markers come from the phase-2 read-only dump — so this measures
-the sources as the app sees them, not a second implementation.
+``chapter_candidates()`` with the episode kind the file's path gives (``ids_from_path``, which is what
+decides whether a bare ``Ending`` chapter is credits), and Plex's markers come from the phase-2
+read-only dump — so this measures the sources as the app sees them, not a second implementation.
 
 The sample is drawn from every resolved episode, including the ones AniSkip answers 404 for, so the
 coverage column is not biased towards AniSkip.
@@ -26,6 +27,7 @@ from loguru import logger  # noqa: E402
 
 logger.remove()  # the clients log every lookup at DEBUG; this script prints its own summary
 
+from media_preview_generator.markers.external_ids import ids_from_path  # noqa: E402
 from media_preview_generator.markers.models import MarkerType, MediaIds  # noqa: E402
 from media_preview_generator.markers.probe import Chapter, MediaProbe  # noqa: E402
 from media_preview_generator.markers.sources import introdb, skipdb, theintrodb  # noqa: E402
@@ -117,7 +119,7 @@ def build(sample_size: int) -> list[dict]:
             ),
         )
         chapter_row: dict[str, list] = {}
-        for candidate in chapter_candidates(probe):
+        for candidate in chapter_candidates(probe, is_episode=ids_from_path(entry["file"]).is_episode):
             if candidate.type is MarkerType.INTRO:
                 chapter_row.setdefault("intro", [secs(candidate.start_ms), secs(candidate.end_ms)])
             elif candidate.type is MarkerType.CREDITS:

@@ -1,7 +1,11 @@
 """What the AniSkip sweep returned, and how it scores against the files' own chapters.
 
 Uses the app's own ``chapter_candidates()`` so the truth is the chapter the app would actually take,
-cold-open rule and all. Prints every number ``eval/aniskip-facts.md`` §1.4, §4 and §5 report.
+cold-open rule and all -- including the episode kind, which the file's own path gives
+(``ids_from_path``) exactly as the app derives it. That kind is what decides whether a bare
+``Ending`` chapter is credits (phase 4, Task 15), and every file here is an anime episode, so
+leaving it out measured a classifier this population never meets. Prints every number
+``eval/aniskip-facts.md`` §1.4, §4 and §5 report.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[5]))
 
+from media_preview_generator.markers.external_ids import ids_from_path  # noqa: E402
 from media_preview_generator.markers.models import MarkerType  # noqa: E402
 from media_preview_generator.markers.probe import Chapter, MediaProbe  # noqa: E402
 from media_preview_generator.markers.sources.chapters import chapter_candidates  # noqa: E402
@@ -119,7 +124,7 @@ def chapter_truth(chapters: dict[str, dict], sweep_by_file: dict[str, dict]) -> 
         probe = MediaProbe(
             duration_ms, tuple(Chapter(c["start_ms"], c["end_ms"], c["name"]) for c in probe_row["chapters"])
         )
-        candidates = chapter_candidates(probe)
+        candidates = chapter_candidates(probe, is_episode=ids_from_path(path).is_episode)
         intro = [c for c in candidates if c.type is MarkerType.INTRO]
         credits = [c for c in candidates if c.type is MarkerType.CREDITS]
         entry = {}
@@ -206,7 +211,7 @@ def ed_is_not_preview(chapters: dict[str, dict], sweep_by_file: dict[str, dict])
             (row or {}).get("duration_ms"),
             tuple(Chapter(c["start_ms"], c["end_ms"], c["name"]) for c in probe_row["chapters"]),
         )
-        candidates = chapter_candidates(probe)
+        candidates = chapter_candidates(probe, is_episode=ids_from_path(path).is_episode)
         credits = [c for c in candidates if c.type is MarkerType.CREDITS]
         preview = [c for c in candidates if c.type is MarkerType.PREVIEW]
         if not (credits and preview):
