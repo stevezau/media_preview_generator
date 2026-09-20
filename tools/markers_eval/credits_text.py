@@ -179,7 +179,9 @@ def text_candidates(start_s: float | None, end_s: float | None = None) -> list[C
     return [Candidate(MarkerType.CREDITS, int(round(start_s * 1000)), end_ms, Source.CREDITS_TEXT)]
 
 
-def epilogue_like(key_rows: Sequence[rule_j.Row], start_s: float | None) -> bool:
+def epilogue_like(
+    key_rows: Sequence[rule_j.Row], start_s: float | None, overlays: Sequence[rule_j.Box] | None = None
+) -> bool:
     """Whether a frame check must look at an answer for epilogue cards (spec §5.4: they aren't credits; rule J can't
     tell them from a roll they touch, ``test_rule_j.TestEpilogueCards``).
 
@@ -187,17 +189,30 @@ def epilogue_like(key_rows: Sequence[rule_j.Row], start_s: float | None) -> bool
     text), or a credit keyframe in the run's first 30 s is followed by the next one 10 s or more later (cards joined to
     the roll over a gap or black).
 
+    The run and its frames are read the way rule J read them (``rule_j.overlay_boxes``), so the shape judged here is
+    the shape the answer came from -- a channel bug's boxes are not what makes a frame look dense. It is bounded by
+    ``run_index``, not by ``index``: version 3 can reach a start back before the run, and slicing from there in decode
+    order covers rows that aren't the run's -- and gives nothing at all when the row the walk reached was emitted
+    after it.
+
     Args:
         key_rows: The tail's keyframe rows, in decode order.
         start_s: The answer, or None.
+        overlays: The overlays ``find_credits`` found (``CreditsTextResult.overlays``); None gathers them from
+            ``key_rows``, which is right only for a file whose rows are the tail's alone. On the branch that reads the
+            120 s before the tail they are not, and gathering again would call a roll that began before the tail its
+            own overlay -- the one thing the detector refuses to do.
 
     Returns:
         Whether the answer is shaped like epilogue cards.
     """
-    coarse = rule_j.coarse_start(key_rows)
+    found = rule_j.overlay_boxes(key_rows) if overlays is None else tuple(overlays)
+    rows = rule_j.without_overlays(key_rows, found)
+    coarse = rule_j.coarse_start(key_rows, without=rows)
     if coarse is None or start_s is None:
         return False
-    run = list(key_rows[coarse.index : coarse.end_index + 1])
+    first = coarse.index if coarse.run_index is None else coarse.run_index
+    run = list(rows[first : coarse.end_index + 1])
     dense = next((row[0] for row in run if row[1] >= 3), None)
     if dense is not None and dense - start_s > 10:
         return True
@@ -353,7 +368,9 @@ def merge_rows(parts: Iterable[TextRows]) -> TextRows:
     return merged
 
 
-def sheet_reasons(detail: dict, key_rows: Sequence[rule_j.Row]) -> list[str]:
+def sheet_reasons(
+    detail: dict, key_rows: Sequence[rule_j.Row], overlays: Sequence[rule_j.Box] | None = None
+) -> list[str]:
     """Why a file's credits text answer gets a frame-check sheet (Q5, I7); empty: it doesn't.
 
     Every answer more than 10 s early (10–30 s early included), more than 30 s late, shaped like epilogue cards, or
@@ -362,6 +379,7 @@ def sheet_reasons(detail: dict, key_rows: Sequence[rule_j.Row]) -> list[str]:
     Args:
         detail: One file's row (``text``, ``text_end``, ``truth``).
         key_rows: The file's keyframe rows.
+        overlays: The overlays the run was read without (:func:`epilogue_like`).
 
     Returns:
         The reasons, in reporting order.
@@ -376,7 +394,7 @@ def sheet_reasons(detail: dict, key_rows: Sequence[rule_j.Row]) -> list[str]:
         reasons.append("early 10-30 s")
     if start > truth + 30:
         reasons.append("late >30 s")
-    if epilogue_like(key_rows, start):
+    if epilogue_like(key_rows, start, overlays):
         reasons.append("epilogue-like")
     if detail["text_end"] is not None:
         reasons.append("end kept")
@@ -510,9 +528,11 @@ class CreditsTextCache:
             is_episode: The file is a TV episode (a 450 s tail, T-R4).
 
         Returns:
-            ``{"start_s", "end_s", "key", "fine", "end"}`` (from the cache when this identity, detector version and
-            source, ffmpeg build, decode path and GPU, text detection backend and kind were read before). An answer
-            whose text detection backend changed while the file was read is returned but not kept.
+            ``{"start_s", "end_s", "key", "fine", "end", "overlays"}`` (from the cache when this identity, detector
+            version and source, ffmpeg build, decode path and GPU, text detection backend and kind were read before).
+            ``overlays`` is what rule J read the run without, which :func:`epilogue_like` has to be handed rather
+            than gather again. An answer whose text detection backend changed while the file was read is returned but
+            not kept.
         """
         if self._build is None:
             self._build = ffmpeg_build(self._ffmpeg)
@@ -540,7 +560,8 @@ class CreditsTextCache:
             fell_back.write_text("")
             self.gpu_fallbacks.add(_name(path))
         data = {"start_s": found.start_s, "end_s": found.end_s, "key": rows_to_json(found.key_rows),
-                "fine": rows_to_json(found.fine_rows), "end": rows_to_json(found.end_rows)}  # fmt: skip
+                "fine": rows_to_json(found.fine_rows), "end": rows_to_json(found.end_rows),
+                "overlays": [list(box) for box in found.overlays]}  # fmt: skip
         if self._backend() == backend:
             cached.write_text(json.dumps(data))
         return data
@@ -760,7 +781,10 @@ def run_credits_text(
                 for f in rows.files:
                     # Read without a guard on purpose: the answer cache's key carries detector_digest, which hashes
                     # every credits module, so an entry from before rows held positions can never be served here.
-                    reasons = sheet_reasons(f, rows_from_json(results[f["file"]]["key"]))
+                    stored = results[f["file"]]
+                    reasons = sheet_reasons(
+                        f, rows_from_json(stored["key"]), [tuple(box) for box in stored["overlays"]]
+                    )
                     if not reasons:
                         continue
                     summary["sheets"].append(_sheet_entry(name, f, reasons))

@@ -192,14 +192,18 @@ through the helper pool), `--decode cpu` proves the CPU worker path gives the sa
 decodes below; an answer whose backend changed while its file was read isn't kept), kind, and a digest of the
 detector's source (`credits_text.DETECTOR_SOURCES`: `markers/credits/*.py`, the probe and the decode arguments,
 reported as `detector_digest`). A re-run of unchanged code is free; any change to that code runs the app's detector
-on every file again, even when `CREDITS_TEXT_VERSION` stays the same.
+on every file again, even when `CREDITS_TEXT_VERSION` stays the same. A stored answer keeps the boxes rule J read the
+run without (`overlays`, from `CreditsTextResult`) beside its rows, because `epilogue_like` has to be handed them
+rather than gather them again: on the branch that reads the 120 s before the tail, `key` is the joined rows, and a
+roll that began before the tail is exactly the shape that must not be read as its own overlay.
 
 Each stored row is `[pts, box count, luma, [[left, top, right, bottom], ...]]`: the frame's time in seconds from the
 start of the file, how many text boxes it holds, its mean luma, and where those boxes are in the frame's own 320×180
 pixels (spec §5.4 "What a row holds"). `decode_cache.rows_from_json` reads a stored row back into the tuple
 `frames.decode_rows` returns, so a rule can be measured on the boxes without decoding anything:
 `DecodeCache(...).serving()` puts the cache behind the app's own `find_credits`, and a row's fourth field is the
-positions. Rule J reads the first three fields only.
+positions. Rule J version 3 reads the fourth field in `overlay_boxes`, `same_roll` and `reach_back` (spec §5.4
+steps 4, 5 and 7); everything else it does reads the first three.
 
 That re-run doesn't decode again unless it has to. Every decode the detector asks for (the tail's keyframes, each
 1 fps window) is kept under `$MARKERS_EVAL_CACHE/credits_decodes` (`decode_cache.DecodeCache`) keyed on the file's
@@ -277,7 +281,8 @@ MEDIA_PREVIEW_TEXTDET_MODEL=... python -m tools.markers_eval.credits_synth_fixtu
 ```
 
 Rebuilds `tests/fixtures/markers/credits_synth_lab.json.gz` from the lab's synthetic files
-(`evidence/lab/synth`, git-ignored) through the app's own `find_credits`, with `rule_j.text_all_through` patched off —
-the view rule J version 1 had when the fixture's `version_1_start_s` was measured. Every file is decoded again and
+(`evidence/lab/synth`, git-ignored) through the app's own `find_credits`, with `rule_j.text_all_through` and
+`rule_j.overlay_boxes` patched off — the view rule J version 1 had when the fixture's `version_1_start_s` was
+measured. Every file is decoded again and
 checked against the fixture it replaces: each row's time, box count and mean luma must match row for row, or the build
 stops. Only the positions are new, and they come from the same text detection call the counts came from.

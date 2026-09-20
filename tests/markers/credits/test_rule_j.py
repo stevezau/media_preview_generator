@@ -20,8 +20,14 @@ SYNTH_FIXTURE = FIXTURE.with_name("credits_synth_lab.json.gz")
 
 
 def cards(boxes: int) -> tuple[rule_j.Box, ...]:
-    """Text boxes stacked down the frame, one per box: where a row with this many boxes might hold them. Rule J never
-    reads them (:class:`TestRuleJReadsPtsCountAndLuma`); rows carry them for the rules that will."""
+    """Text boxes stacked down the frame, one per box, centred: where a row with this many boxes might hold them.
+
+    Version 3 reads them in three places (:class:`TestWhereRuleJReadsPositions`, :class:`TestOverlayBoxes`). Centred
+    is the roll's own band, so these rows carry text the band steps can reach for; and box *n* is in the same place
+    on every row these make, which to :func:`rule_j.overlay_boxes` is a channel bug -- text right across the story in
+    one spot. That is why a tail of them carrying text all through has no answer (:class:`TestTextAllThrough`'s
+    subtitled rows), and why a fixture that wants two different bands must move its boxes (:func:`band_row`).
+    """
     return tuple((40, 20 + 30 * n, 280, 44 + 30 * n) for n in range(boxes))
 
 
@@ -178,6 +184,8 @@ class TestAnchorSpacing:
         assert rule_j._run_spacing(rows, first, last, rule_j.RULE_J) == 2.0
         coarse = rule_j.coarse_start(rows)
         assert coarse is not None and coarse.pts_s == 502.0  # the first roll row emitted, not the lone frame
+        # Version 3's reach back never steps back onto a row of the run, so the anchor's ruling stands here.
+        assert coarse.run_index is None
 
     def test_only_the_runs_credit_frames_set_the_gap_not_every_keyframe_in_it(self):
         # tv-31's shape: a 4 s credit cadence carried on 2 s keyframes, the empties between them bridged into the run
@@ -355,11 +363,11 @@ class TestRefine:
         # Pinned as measured (Q5): the anchor's distance is read in decode order, so a swapped pair at the run's
         # start reads as a negative gap and the first emitted credit row (102 s) is the start, not the earlier 100 s
         # one. Comparing in presentation order instead moves the coarse start of 4 of the 80 files (movie-11, -28,
-        # -38, tv-26) earlier, so it is a rule change for the harness gate, not a fix.
+        # -38, tv-26) earlier, so it is a rule change for the harness gate, not a fix. Version 3's reach back walks in
+        # presentation order but never onto a row of the run, so it leaves this alone.
         body = [bright(t) for t in range(0, 100, 2)]
         rows = [*body, dark(102, 1), dark(100, 1), *[dark(t, 1) for t in range(104, 132, 2)]]
-        coarse = rule_j.coarse_start(rows)
-        assert coarse == Coarse(index=50, end_index=65, pts_s=102.0)
+        assert rule_j.coarse_start(rows) == Coarse(index=50, end_index=65, pts_s=102.0)
 
 
 class TestEpilogueCards:
@@ -675,20 +683,28 @@ class TestTextAllThrough:
     SUBTITLE = [dark(t, 1 if t % 6 else 0, 15.0) for t in range(0, 450, 2)]  # a line on two keyframes in three
 
     @pytest.mark.parametrize(
-        ("lead", "start"),
+        ("lead", "coarse_s", "start"),
         [
-            ([], None),                                                    # from the tail's first keyframe: 30 s floor
-            ([dark(t - 20, 0, 15.0) for t in range(0, 20, 2)], None),      # 20 s of dark without text first: floor
-            ([bright(t - 100, 1) for t in range(0, 100, 2)], None),        # 100 s of lit story, subtitled throughout
-            ([bright(t - 100, 1 if t % 6 else 0) for t in range(0, 100, 2)], 2.0),  # subtitled on 2 in 3: 65 % text
+            ([], 2.0, None),                                               # from the tail's first keyframe: 30 s floor
+            ([dark(t - 20, 0, 15.0) for t in range(0, 20, 2)], 2.0, None),  # 20 s of dark without text: floor
+            ([bright(t - 100, 1) for t in range(0, 100, 2)], -100.0, None),  # 100 s of lit story, subtitled throughout
+            ([bright(t - 100, 1 if t % 6 else 0) for t in range(0, 100, 2)], -98.0, None),  # subtitled on 2 in 3
         ],
     )  # fmt: skip
-    def test_a_subtitled_dark_scene_is_no_answer_only_when_text_fills_the_tail_before_it(self, lead, start):
+    def test_a_subtitled_dark_scene_is_no_answer(self, lead, coarse_s, start):
         # Rule J reads a dark frame with one box as a credit frame, so a subtitled dark scene is one long run. Lit
-        # frames with one box aren't credit frames, but they are text on screen before it.
+        # frames with one box aren't credit frames, but they are text on screen before it -- and read raw (which is
+        # what ``coarse_start`` without ``without=`` does) version 3's reach back takes them, because a subtitle sits
+        # in the same band as the cards it can't tell itself from. It walks the start to the first subtitled frame,
+        # which leaves no rows before the run, so the 30 s floor answers None on the two leads with lit story
+        # before the scene, whose coarse start version 2 put at 2.0: the early answer this shape gave is gone,
+        # not moved. ``credits_start`` reaches the same None by
+        # the other half of version 3 as well -- one subtitle line in one place right across the story is an overlay,
+        # and the fourth lead has no run left at all without it. The 0.8 share itself is pinned by
+        # ``test_the_text_share_before_the_run_decides``.
         rows = [*lead, *self.SUBTITLE]
         coarse = rule_j.coarse_start(rows)
-        assert coarse is not None and coarse.pts_s == 2.0
+        assert coarse is not None and coarse.pts_s == coarse_s
         assert rule_j.credits_start(rows, []) == start
 
     def test_subtitles_on_a_dark_scene_after_text_free_story_still_start_early(self):
@@ -977,6 +993,8 @@ class TestEightyFiles:
 
     def test_no_start_lands_on_the_last_frame_of_its_own_run(self):
         # The shape of the bug the anchor's yardstick fixed: a coarse start walked all the way to ``end_index``.
+        # These rows carry no positions, so version 3 never moves the start before the run and the indices
+        # still bracket it.
         for item in _fixture()["items"]:
             key = _rows(item["key"])
             coarse = rule_j.coarse_start(key)
@@ -1019,44 +1037,15 @@ class TestEightyFiles:
             assert set(item) == {"id", "kind", "duration_s", "truth_s", "key", "fine", "expected_error_s"}
 
 
-class TestRuleJReadsPtsCountAndLuma:
-    """A row carries its text boxes' positions for the rules that need them (spec §13 items 14 and 15). Rule J reads
-    the first three fields only, so no answer of its own can move when the boxes arrive beside them."""
+class TestWhereRuleJReadsPositions:
+    """Version 3 is the first rule to read where a frame's text is (spec §13 items 14 and 15), in three places:
+    :func:`rule_j.overlay_boxes`, :func:`rule_j.same_roll` and :func:`rule_j.reach_back`.
 
-    @staticmethod
-    def _with_positions(rows: list, spread: int = 0) -> list[rule_j.Row]:
-        """The same rows, each with boxes somewhere in the frame -- a different place per row, so a rule that read
-        them would answer differently."""
-        return [
-            (pts, count, luma, tuple((n + spread, i % 150, n + 40 + spread, i % 150 + 20) for n in range(count)))
-            for i, (pts, count, luma) in enumerate(rows)
-        ]
-
-    @pytest.mark.parametrize("spread", [0, 37])
-    def test_every_one_of_the_80_files_answers_the_same_with_positions_on_its_rows(self, spread):
-        for item in _fixture()["items"]:
-            key, fine = _rows(item["key"]), _rows(item["fine"])
-            with_boxes_key = self._with_positions(key, spread)
-            with_boxes_fine = self._with_positions(fine, spread)
-            assert rule_j.credits_start(with_boxes_key, with_boxes_fine) == rule_j.credits_start(key, fine), item["id"]
-            coarse, plain_coarse = rule_j.coarse_start(with_boxes_key), rule_j.coarse_start(key)
-            assert coarse == plain_coarse, item["id"]
-            if coarse is None:
-                continue
-            assert rule_j.coarse_end_s(with_boxes_key, coarse) == rule_j.coarse_end_s(key, plain_coarse), item["id"]
-            assert rule_j.end_keyframe_s(with_boxes_key, coarse) == rule_j.end_keyframe_s(key, plain_coarse), item["id"]
-            assert rule_j.text_all_through(with_boxes_key, coarse) == rule_j.text_all_through(key, plain_coarse)
-            assert rule_j.credits_end(
-                with_boxes_key, coarse, with_boxes_fine, item["duration_s"]
-            ) == rule_j.credits_end(key, plain_coarse, fine, item["duration_s"]), item["id"]
-
-    def test_the_lab_files_answer_the_same_with_their_own_positions(self):
-        # The lab fixture's rows are the app's own, so these are the real boxes, not made-up ones.
-        for item in _synth().values():
-            key, fine = _synth_rows(item["key"]), _synth_rows(item["fine"])
-            bare = [row[:3] for row in key]
-            assert rule_j.coarse_start(key) == rule_j.coarse_start(bare), item["name"]
-            assert rule_j.credits_start(key, fine) == rule_j.credits_start(bare, [row[:3] for row in fine])
+    The band steps only ever move a **start** earlier. The overlay step is the one that changes what a frame holds --
+    :func:`rule_j.without_overlays` recounts ``row[1]`` -- so which of the run's frames are credit frames, and with
+    them the run's own bounds and the anchor's spacing, move under it; they are pinned in :class:`TestOverlayBoxes`.
+    Everything else still reads the count and the luma alone, as it always did, and a row that carries no positions
+    answers exactly what version 2 answered."""
 
     @pytest.mark.parametrize("boxes", [0, 1, 3])
     def test_a_frame_is_a_credit_frame_on_its_count_wherever_its_boxes_are(self, boxes):
@@ -1065,3 +1054,672 @@ class TestRuleJReadsPtsCountAndLuma:
         for luma in (10.0, 120.0):
             assert rule_j.is_credit((1.0, boxes, luma, corner)) is rule_j.is_credit((1.0, boxes, luma, middle))
             assert rule_j.is_credit((1.0, boxes, luma, corner)) is rule_j.is_credit((1.0, boxes, luma))
+
+    def test_rows_without_positions_answer_exactly_as_version_2(self):
+        # The 80-file fixture's rows carry no boxes (the prototype never recorded them), so neither step can fire and
+        # every one of its pinned answers above is version 2's. `run_index` is None on all 80: nothing reached back.
+        for item in _fixture()["items"]:
+            coarse = rule_j.coarse_start(_rows(item["key"]))
+            assert coarse is None or coarse.run_index is None, item["id"]
+
+    def test_a_row_that_does_not_say_where_its_text_is_is_never_the_rolls(self):
+        assert rule_j.boxes_of((1.0, 2, 10.0)) == ()
+        assert rule_j.in_band((1.0, 2, 10.0), 160.0) is False
+
+    def test_the_band_steps_only_ever_move_a_start_earlier_and_never_an_end(self):
+        # The lab fixture's rows are the app's own, so these are real boxes, not made-up ones.
+        for item in _synth().values():
+            key, fine = _synth_rows(item["key"]), _synth_rows(item["fine"])
+            bare = [row[:3] for row in key]
+            with_boxes, without = rule_j.coarse_start(key), rule_j.coarse_start(bare)
+            assert (with_boxes is None) == (without is None), item["name"]
+            if with_boxes is None:
+                continue
+            assert with_boxes.pts_s <= without.pts_s, item["name"]
+            assert with_boxes.end_index == without.end_index, item["name"]
+            assert rule_j.coarse_end_s(key, with_boxes) == rule_j.coarse_end_s(bare, without), item["name"]
+            assert rule_j.end_keyframe_s(key, with_boxes) == rule_j.end_keyframe_s(bare, without), item["name"]
+            assert rule_j.credits_end(key, with_boxes, fine, 100000.0) == rule_j.credits_end(
+                bare, without, [row[:3] for row in fine], 100000.0
+            ), item["name"]
+
+
+def band_row(t: float, boxes: int, centre: int, luma: float = 120.0) -> rule_j.Row:
+    """A lit frame whose boxes sit around ``centre`` across the frame."""
+    return (t, boxes, luma, tuple((centre - 30, 20 + 30 * n, centre + 29, 44 + 30 * n) for n in range(boxes)))
+
+
+class TestSameRoll:
+    """An earlier run is the last run's own roll when its text sits in the same band and the text between them never
+    stops (spec §13 item 14: a roll the 24 s join split, answered from a later block)."""
+
+    OPENING = [band_row(t, 3, 160, 10.0) for t in range(400, 440, 2)]  # names on black, one block
+    ROLL = [band_row(t, 3, 160, 10.0) for t in range(500, 560, 2)]  # the crawl, the last run
+    # Lit frames with 1-2 boxes: text on screen, but not credit frames, which is why the 24 s join broke.
+    NAMES_OVER_FOOTAGE = [band_row(t, 2, 160) for t in range(440, 500, 2)]
+
+    def _rows(self, between):
+        return [*[band_row(t, 0, 160) for t in range(0, 400, 2)], *self.OPENING, *between, *self.ROLL]
+
+    def test_two_runs_in_one_band_with_text_all_the_way_between_are_one_roll(self):
+        rows = self._rows(self.NAMES_OVER_FOOTAGE)
+        runs = rule_j.credit_runs(rows)
+        assert len(runs) == 2
+        # The names between are 2 s apart, so the walk alone would reach 400 too: assert the merge itself, as the two
+        # refusal tests below do. `TestTheTwoHalvesTogether` has the row where only the merge can get there.
+        assert rule_j.same_roll(rows, runs, rule_j.RULE_J) == 0
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 400.0
+        assert coarse.run_index is not None  # the end still belongs to the last run
+
+    def test_an_earlier_run_in_another_band_is_left_alone(self):
+        # The earlier block sits hard against the left edge: `same_roll` refuses it on the band. The end-to-end
+        # assertion below is refused by the walk's *cadence*, not its band -- the last in-band row before the roll is
+        # 62 s back, well past 1.5 x its 2 s. `TestReachBack.test_it_stops_at_a_credit_frame_outside_the_band` is the
+        # row that pins the band half of the same refusal.
+        rows = [
+            *[band_row(t, 0, 160) for t in range(0, 400, 2)],
+            *[band_row(t, 3, 40, 10.0) for t in range(400, 440, 2)],
+            *[band_row(t, 2, 40) for t in range(440, 500, 2)],
+            *self.ROLL,
+        ]
+        runs = rule_j.credit_runs(rows)
+        assert len(runs) == 2
+        assert rule_j.same_roll(rows, runs, rule_j.RULE_J) == 1
+        assert rule_j.coarse_start(rows).pts_s == 500.0  # the last run's own first card, nothing reached back
+
+    def test_an_earlier_run_is_left_alone_when_the_text_between_stops(self):
+        # Text on one keyframe in three between the two runs: under "at least half".
+        between = [band_row(t, 2 if t % 6 == 0 else 0, 160) for t in range(440, 500, 2)]
+        rows = self._rows(between)
+        runs = rule_j.credit_runs(rows)
+        assert len(runs) == 2
+        assert rule_j.same_roll(rows, runs, rule_j.RULE_J) == 1
+        # The reach back takes the one boxed keyframe 2 s before the roll and stops: the next is 6 s further, past
+        # 1.5 x the roll's own 2 s cadence.
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 498.0
+
+    def test_nothing_between_the_two_runs_is_no_evidence_and_no_merge(self):
+        # A lit frame at the earlier run's own last credit time ends the dark bridge (TestRuns) and leaves no keyframe
+        # strictly between the two runs. "The text never stops" then has nothing to read, so the merge is refused
+        # rather than made on the band alone.
+        rows = [
+            *[band_row(t, 0, 160) for t in range(0, 400, 2)],
+            *[band_row(t, 3, 160, 10.0) for t in (400, 420, 438)],
+            band_row(438, 0, 160),
+            *[band_row(t, 3, 160, 10.0) for t in range(470, 510, 2)],
+        ]
+        runs = rule_j.credit_runs(rows)
+        assert len(runs) == 2
+        assert rule_j.same_roll(rows, runs, rule_j.RULE_J) == 1
+
+    def test_two_runs_whose_times_run_the_wrong_way_round_are_never_merged(self):
+        # ffmpeg's output order can leave a later run at a lower index, so `runs[-2]` isn't always earlier in time.
+        # Such a pair has no keyframe between it by construction, which is what refuses it.
+        rows = [
+            *[band_row(t, 3, 160, 10.0) for t in (500, 530, 560)],
+            *[band_row(t, 3, 160, 10.0) for t in (400, 420, 440)],
+        ]
+        assert rule_j.same_roll(rows, [(0, 2), (3, 5)], rule_j.RULE_J) == 1
+
+    def test_the_walk_after_a_merge_keeps_the_cadence_of_the_block_it_starts_in(self):
+        # The roll opens on 2 s cards, runs names over footage, and closes on 16 s cards. The walk starts in the
+        # opening block, so its limit is that block's 1.5 x 2 s -- not the last run's 24 s, which would carry it over
+        # the story's in-band text every 10 s and all the way to the first row.
+        rows = [
+            *[band_row(t, 2 if t % 10 == 0 else 0, 160) for t in range(0, 400, 2)],
+            *[band_row(t, 3, 160, 10.0) for t in range(400, 442, 2)],
+            *[band_row(t, 2, 160) for t in range(442, 500, 2)],
+            *[band_row(t, 3, 160, 10.0) for t in range(500, 564, 16)],
+        ]
+        runs = rule_j.credit_runs(rows)
+        assert rule_j.same_roll(rows, runs, rule_j.RULE_J) == 0
+        assert rule_j._run_spacing(rows, *runs[0], rule_j.RULE_J) == 2.0
+        assert rule_j._run_spacing(rows, *runs[-1], rule_j.RULE_J) == 16.0
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 400.0
+
+    def test_the_end_still_reads_the_run_when_the_start_has_reached_back(self):
+        # The roll opens on a block 20 s per card, runs names over footage for 160 s, and closes on a run 5 s per
+        # card with scene text the join glued on 14 s after its last card. `end_keyframe_s` steps back over that text
+        # only because the spacing it measures is the last run's own (1.5 x 5 s): read from the reached-back start it
+        # would be the merged median, 20 s, and the glued frame would become the end.
+        rows = [
+            *[band_row(t, 0, 160) for t in range(0, 300, 2)],
+            *[band_row(t, 3, 160, 10.0) for t in (300, 320, 340)],
+            *[band_row(t, 2, 160) for t in range(342, 500, 2)],
+            *[band_row(t, 3, 160, 10.0) for t in (500, 505, 510, 515, 520)],
+            band_row(527, 0, 160),
+            band_row(534, 3, 160),
+        ]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 300.0 and coarse.run_index is not None
+        assert rule_j.coarse_end_s(rows, coarse) == 534.0
+        assert rule_j.end_keyframe_s(rows, coarse) == 520.0
+        read_from_the_start = rule_j.Coarse(coarse.index, coarse.end_index, coarse.pts_s)
+        assert rule_j.end_keyframe_s(rows, read_from_the_start) == 534.0
+
+    def test_a_roll_of_dark_frames_with_no_boxes_at_all_has_no_band(self):
+        # `min_boxes` counts boxes, but the dark bridge can join blank dark frames into a run; such a run has no band
+        # and nothing is merged into it.
+        rows = [
+            *[band_row(t, 0, 160) for t in range(0, 400, 2)],
+            *self.OPENING,
+            *self.NAMES_OVER_FOOTAGE,
+            *[band_row(500, 1, 160, 10.0), *[band_row(t, 0, 160, 10.0) for t in range(502, 560, 2)]],
+        ]
+        runs = rule_j.credit_runs(rows)
+        assert rule_j.band_of(rows, runs[-1][0], runs[-1][1], rule_j.RULE_J) == 160.0
+        bare = [row[:3] for row in rows]  # the same rows with nothing to say where their text is
+        assert rule_j.band_of(bare, runs[-1][0], runs[-1][1], rule_j.RULE_J) is None
+        assert rule_j.same_roll(bare, runs, rule_j.RULE_J) == len(runs) - 1
+
+
+class TestTheTwoHalvesTogether:
+    """The cells no single-mechanism class covers: the band steps read the rows the overlay step left, which is how
+    the detector and :func:`rule_j.credits_start` always run them (spec §5.4 steps 4, 5 and 7).
+
+    The matrix is ``without`` (None or set) x merge (fired or not) x reach back (fired or not). ``TestSameRoll`` and
+    ``TestReachBack`` cover the ``without=None`` half, and ``TestOverlayBoxes`` the cells with one run and no merge.
+    These are the rest. The bug here sits **in the cards' own band**, which is the case that matters: out of it the
+    walk would never take it whichever rows it read.
+    """
+
+    BUG = (140, 150, 180, 166)  # a lower-third, centred like the cards
+    STORY = [band_row(t, 0, 160) for t in range(0, 400, 2)]
+    OPENING = [band_row(t, 3, 160, 10.0) for t in range(400, 440, 2)]  # names on black, one block
+    NAMES_OVER_FOOTAGE = [band_row(t, 1, 160) for t in range(440, 500, 2)]  # lit, one box: not a credit frame
+    # Text on every other keyframe: half of them, which `same_roll` merges across, but 4 s apart, which is further
+    # than the walk's own cadence reaches (1.5 x the roll's 2 s). Only the merge can cross this.
+    SPARSE_NAMES = [band_row(t, 1 if t % 4 == 0 else 0, 160) for t in range(440, 500, 2)]
+    ROLL = [band_row(t, 3, 160, 10.0) for t in range(500, 560, 2)]
+
+    @classmethod
+    def _bug(cls, i: int) -> rule_j.Box:
+        """The bug as the detector reads it: a pixel or two different every sighting."""
+        left, top, right, bottom = cls.BUG
+        return (left + i % 3, top - i % 2, right - i % 2, bottom + i % 3)
+
+    @classmethod
+    def _under_the_bug(cls, rows: list[rule_j.Row]) -> list[rule_j.Row]:
+        return [(row[0], row[1] + 1, row[2], (*row[3], cls._bug(i))) for i, row in enumerate(rows)]
+
+    def test_the_merge_and_the_walk_both_fire_through_the_bug(self):
+        # A split roll under a lower-third bug, with the names over footage sparse enough that the walk can't cross
+        # them: only `same_roll` reaches the opening block, so this really is the merge's own cell. Read as decoded
+        # the bug is a box in the roll's band on every frame of the story, so the walk crosses the whole file anyway;
+        # read without it the roll is put back together by the merge and the start is the opening block's first card.
+        rows = self._under_the_bug([*self.STORY, *self.OPENING, *self.SPARSE_NAMES, *self.ROLL])
+        overlays = rule_j.overlay_boxes(rows)
+        assert len(overlays) == 1 and rule_j._iou(overlays[0], self.BUG) >= rule_j.OVERLAY_IOU
+        runs = rule_j.credit_runs(rows)
+        assert len(runs) == 2
+        read = rule_j.without_overlays(rows, overlays)
+        assert rule_j.same_roll(read, runs, rule_j.RULE_J) == 0  # the merge fires, and it is what reaches 400
+        assert rule_j.coarse_start(rows).pts_s == 0.0  # what reading the rows as decoded would give
+        coarse = rule_j.coarse_start(rows, without=read)
+        assert coarse is not None and coarse.pts_s == 400.0
+        assert coarse.run_index is not None  # the end still belongs to the last run
+        # Without the merge the walk gets nowhere: the sparse names are 4 s apart, the roll's cadence reaches 3 s.
+        assert rule_j.reach_back(read, runs[-1][0], *runs[-1], run=range(runs[-1][0], runs[-1][1] + 1)) == runs[-1][0]
+        # `credits_start` still refuses the file: the guard counts the rows **as they were decoded**, and a bug on
+        # every keyframe of the story is the share it is there to refuse (spec §5.4 step 8). The overlay step never
+        # buys a file past it.
+        assert rule_j.credits_start(rows, []) is None
+
+    def test_the_walk_fires_alone_through_the_bug(self):
+        # No earlier run to merge: names over bright footage run straight into the roll. The walk still has to read
+        # the rows without the bug, or it crosses the story on it instead of stopping where the names begin.
+        story = [band_row(t, 0, 160) for t in range(0, 440, 2)]
+        rows = self._under_the_bug([*story, *self.NAMES_OVER_FOOTAGE, *self.ROLL])
+        assert len(rule_j.credit_runs(rows)) == 1
+        assert rule_j.coarse_start(rows).pts_s == 0.0
+        coarse = rule_j.coarse_start(rows, without=rule_j.without_overlays(rows, rule_j.overlay_boxes(rows)))
+        assert coarse is not None and coarse.pts_s == 440.0
+        assert coarse.run_index is not None
+
+    def test_a_file_with_no_overlay_answers_what_the_band_steps_alone_answer(self):
+        # The cell that shows the overlay step costs nothing where there is no overlay: the same split roll with no
+        # bug on it. `overlay_boxes` finds nothing, `without_overlays` hands the rows back, and both calls agree.
+        rows = [*self.STORY, *self.OPENING, *self.NAMES_OVER_FOOTAGE, *self.ROLL]
+        assert rule_j.overlay_boxes(rows) == ()
+        assert rule_j.coarse_start(rows) == rule_j.coarse_start(rows, without=rule_j.without_overlays(rows, ()))
+        assert rule_j.coarse_start(rows).pts_s == 400.0
+
+
+class TestReachBack:
+    """A keyframe before the start is more of the same roll when its text is in the roll's band and it keeps the
+    roll's own cadence."""
+
+    ROLL = [band_row(t, 3, 160, 10.0) for t in range(500, 560, 2)]  # 2 s cadence, so the walk reaches 3 s
+
+    def test_it_reads_presentation_order_not_ffmpegs(self):
+        # Six of the 80 files emit the roll's keyframes in swapped pairs. Read in decode order the walk would compare
+        # the wrong pair of times and stop at the first swap; read in presentation order it reaches the whole block.
+        pairs = [row for t in range(470, 500, 4) for row in (band_row(t + 2, 2, 160), band_row(t, 2, 160))]
+        rows = [*[band_row(t, 0, 160) for t in range(0, 470, 2)], *pairs, *self.ROLL]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 470.0
+
+    def test_it_never_steps_onto_a_frame_the_start_already_passed(self):
+        # A row inside the roll's own span emitted before the run. Walking in decode order would take it and start the
+        # skip 12 s inside the roll -- the mistake `fade_back` and `coarse_end_s` were each fixed for.
+        rows = [
+            *[band_row(t, 0, 160) for t in range(0, 496, 2)],
+            band_row(512, 2, 160),
+            band_row(496, 2, 160),
+            band_row(498, 2, 160),
+            *self.ROLL,
+        ]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 496.0
+
+    def test_it_walks_over_lit_names_over_footage_in_the_band(self):
+        rows = [*[band_row(t, 0, 160) for t in range(0, 470, 2)], *[band_row(t, 2, 160) for t in range(470, 500, 2)],
+                *self.ROLL]  # fmt: skip
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 470.0
+
+    def test_it_stops_at_text_outside_the_band(self):
+        rows = [*[band_row(t, 0, 160) for t in range(0, 470, 2)], *[band_row(t, 2, 40) for t in range(470, 500, 2)],
+                *self.ROLL]  # fmt: skip
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 500.0
+
+    def test_it_stops_at_a_credit_frame_outside_the_band(self):
+        # The band is the only thing the walk steps onto, and this is the row that makes that mean something. Names
+        # over footage in the roll's band carry the walk back from 500 to 440; the next frame back is an earlier
+        # *kept run*, at the roll's own 2 s cadence and well inside the walk's reach, but hard against the left edge
+        # -- the run `same_roll` just refused on that band. Taking any credit frame, whatever its band, would step
+        # onto it and walk to 400, making the merge's own test moot.
+        earlier = [band_row(t, 3, 40, 10.0) for t in range(400, 440, 2)]
+        names = [band_row(t, 2, 160) for t in range(440, 500, 2)]  # lit, two boxes: in band, not credit frames
+        rows = [*[band_row(t, 0, 160) for t in range(0, 400, 2)], *earlier, *names, *self.ROLL]
+        runs = rule_j.credit_runs(rows)
+        assert len(runs) == 2
+        assert rule_j.same_roll(rows, runs, rule_j.RULE_J) == 1  # the earlier run is refused on its band
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 440.0  # the names, not the out-of-band run behind them
+
+    def test_it_stops_at_a_gap_wider_than_the_rolls_own_cadence(self):
+        # Text in the band every 8 s: sporadic signage, not a roll's steady rate, and 8 s is past 1.5 x the roll's 2 s.
+        rows = [*[band_row(t, 2 if t % 8 == 0 else 0, 160) for t in range(0, 500, 2)], *self.ROLL]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 500.0
+
+    def test_it_does_not_cross_a_dark_stretch_the_run_stopped_at(self):
+        # `credit_runs` has already joined everything the dark bridge reaches, so a stretch the run stopped at holds a
+        # lit frame; letting the walk cross it as well took four of the 205's starts 20-70 s further early.
+        rows = [
+            *[band_row(t, 0, 160) for t in range(0, 440, 2)],
+            *[band_row(t, 2, 160) for t in range(440, 460, 2)],  # names over footage, in the band
+            *[band_row(t, 0, 160, 10.0) for t in range(460, 500, 2)],  # 40 s of black without text
+            *self.ROLL,
+        ]
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 500.0
+
+
+def band(t: float, boxes: int, centre: int, luma: float = 120.0, jitter: int = 0) -> rule_j.Row:
+    """A frame whose boxes sit around ``centre``, each one a pixel or two off the last (as the detector reads them)."""
+    return (
+        float(t),
+        boxes,
+        luma,
+        tuple(
+            (centre - 39 + jitter % 3, 20 + 30 * n + jitter % 2, centre + 38 - jitter % 2, 44 + 30 * n + jitter % 3)
+            for n in range(boxes)
+        ),
+    )
+
+
+class TestOverlayBoxes:
+    """Text that sits in one place right across the story is a channel or score bug, a ticker or a burnt-in timecode,
+    not credits (spec §13 item 15). Which run is the last one is still read from the rows as they were decoded; inside
+    that run the boxes the overlay left decide which frames are credit frames (``coarse_start(..., without=...)``).
+
+    The shape is the measured one: a channel logo the detector boxes now and then over lit story, and on every
+    keyframe of a night scene where it stands out on black -- and a dark frame needs only one box, so that scene reads
+    as a credit run (Live Rescue S03E01's night fire call under the A&E logo, 146 s early).
+    """
+
+    BUG = (4, 6, 46, 24)  # a channel logo, top left
+    STORY = range(1000, 1300, 2)  # 150 lit keyframes
+    NIGHT = range(1300, 1342, 2)  # 21 dark ones: a 40 s run
+    ROLL = range(1400, 1460, 2)
+
+    @classmethod
+    def _bug(cls, i: int) -> rule_j.Box:
+        """The bug as the detector reads it: its quadrilateral breathes a pixel or two with the picture behind it, so
+        no two sightings are the same box and only ``OVERLAY_IOU`` gathers them (IoU here is 0.79 at worst)."""
+        left, top, right, bottom = cls.BUG
+        return (left + i % 3, top - i % 2, right - i % 2, bottom + i % 3)
+
+    @classmethod
+    def _tail(cls, every: int = 4, *, roll: bool = False, bug_until: float = 1e9) -> list[rule_j.Row]:
+        rows = [
+            (t, 1, 120.0, (cls._bug(i),)) if i % every == 0 and t <= bug_until else (t, 0, 120.0, ())
+            for i, t in enumerate(cls.STORY)
+        ]
+        rows += [(t, 1, 12.0, (cls._bug(i),)) if t <= bug_until else (t, 0, 12.0, ()) for i, t in enumerate(cls.NIGHT)]
+        if roll:
+            rows += [(t, 0, 120.0, ()) for t in range(1342, 1400, 2)]
+            rows += [
+                (t, 3, 8.0, tuple((60, 30 + 12 * n + i, 260, 48 + 12 * n + i) for n in range(3)))
+                for i, t in enumerate(cls.ROLL)
+            ]
+        return rows
+
+    @staticmethod
+    def _overlays(rows: list[rule_j.Row]) -> tuple[rule_j.Box, ...]:
+        return rule_j.overlay_boxes(rows)
+
+    def test_a_bug_over_a_night_scene_is_an_overlay_and_leaves_no_run(self):
+        rows = self._tail()
+        coarse = rule_j.coarse_start(rows)
+        assert coarse is not None and coarse.pts_s == 1300.0  # what version 2 answers: 300 s of story skipped
+        assert not rule_j.text_all_through(rows, coarse)  # 25 % of the keyframes before it carry text, under 80 %
+        assert self._overlays(rows) == (self._bug(0),)
+        assert rule_j.coarse_start(rows, without=rule_j.without_overlays(rows, self._overlays(rows))) is None
+        assert rule_j.credits_start(rows, []) is None
+
+    def test_sightings_of_one_bug_are_gathered_by_overlap_not_equality(self):
+        # Every sighting is a different box; at IoU 1.0 each would be its own group and none would be seen often
+        # enough. Pins OVERLAY_IOU: the worst pair here overlaps 0.79.
+        rows = self._tail()
+        boxes = {row[3][0] for row in rows if row[3]}
+        assert len(boxes) > 4 and len(self._overlays(rows)) == 1
+        assert min(rule_j._iou(a, b) for a in boxes for b in boxes) >= rule_j.OVERLAY_IOU
+
+    def test_a_real_roll_under_the_same_bug_still_answers_on_its_first_card(self):
+        rows = self._tail(roll=True)
+        overlays = self._overlays(rows)
+        assert len(overlays) == 1
+        coarse = rule_j.coarse_start(rows, without=rule_j.without_overlays(rows, overlays))
+        assert coarse is not None and coarse.pts_s == 1400.0
+        assert rule_j.credits_start(rows, []) == 1400.0
+
+    def test_thinning_a_run_can_stop_the_anchor_stepping(self, monkeypatch):
+        # The overlay step is not monotone in either direction, and this is the direction the two halves' own
+        # write-ups got wrong: dropping boxes thins the chosen run's credit frames, which grows the spacing the
+        # anchor measures, which can stop the anchor stepping over a frame the 24 s join glued on. The start then
+        # lands **earlier** than version 2's, bounded by that join, on an ordinary single run with no split roll.
+        # A channel logo over story, a lit shop front 20 s before the roll, and a roll whose cards alternate with
+        # frames the logo is the only text on: the run's raw cadence is 8 s so the anchor steps over the shop front,
+        # and its cadence without the logo is 16 s so 1.5 x 16 covers the 20 s gap and it doesn't. Both publish.
+        signs = ((150, 30, 250, 50), (150, 60, 250, 80), (150, 90, 250, 110))
+        card = (60, 40, 260, 58)
+        rows = [
+            (float(t), 1, 120.0, (self._bug(i),)) if i % 4 == 0 else (float(t), 0, 120.0, ())
+            for i, t in enumerate(range(0, 480, 2))
+        ]
+        rows.append((480.0, 4, 120.0, (self._bug(1), *signs)))  # the shop front
+        rows += [(float(t), 0, 120.0, ()) for t in range(482, 500, 2)]
+        carded, bug_only = {500, 516, 528, 532}, {510, 524}
+        for i, t in enumerate(range(500, 700, 2)):
+            if t in carded:
+                rows.append((float(t), 2, 12.0, (self._bug(i), card)))
+            elif t in bug_only:
+                rows.append((float(t), 1, 12.0, (self._bug(i),)))
+            else:
+                rows.append((float(t), 0, 12.0, ()))
+        bare = [row[:3] for row in rows]
+        assert self._overlays(rows) == (self.BUG,)
+        assert len(rule_j.credit_runs(rows)) == 1  # no split roll, no merge
+        assert rule_j.coarse_start(bare).pts_s == 500.0  # version 2: the roll's first card
+        assert rule_j.credits_start(bare, []) == 500.0
+        assert rule_j.credits_start(rows, []) == 480.0  # version 3: the shop front, 20 s of story earlier
+        # And it is the overlay step's own bound, not something the band steps bring: five places in the code and the
+        # docs say "reproduces with the band steps stubbed out", so stub them and say it here.
+        monkeypatch.setattr(rule_j, "same_roll", lambda rows, runs, params=rule_j.RULE_J: len(runs) - 1)
+        monkeypatch.setattr(
+            rule_j, "reach_back", lambda rows, index, first, last, params=rule_j.RULE_J, *, run=None: index
+        )
+        assert rule_j.credits_start(rows, []) == 480.0
+
+    def test_a_split_roll_can_be_gathered_as_its_own_overlay(self):
+        # The one place version 3's two halves work against each other, pinned so it can't be lost (spec §13 item 14,
+        # `rule_j.overlay_boxes`). The roll fills most of its tail: opening cards, then names over bright footage,
+        # then the closing crawl, all in one band. The join splits it, so the opening block and the names are "story"
+        # to the overlay step, their text is held at one place across all of it, and it is gathered exactly as a
+        # channel bug would be. `same_roll` then reads the keyframes between the blocks as blank and refuses the
+        # merge the band step exists for, leaving the answer where version 2 had it (not *earlier* than version 2 --
+        # see `test_thinning_a_run_can_stop_the_anchor_stepping` for the way this step can do that).
+        rows = [band(t, 0, 160) for t in range(0, 40, 2)]
+        rows += [band(t, 3, 160, 10.0, i) for i, t in enumerate(range(40, 80, 2))]
+        rows += [band(t, 2, 160, 120.0, i) for i, t in enumerate(range(80, 500, 2))]
+        rows += [band(t, 3, 160, 10.0, i) for i, t in enumerate(range(500, 700, 2))]
+        runs = rule_j.credit_runs(rows)
+        assert len(runs) == 2
+        assert rule_j.same_roll(rows, runs, rule_j.RULE_J) == 0  # the band step alone puts the roll back together
+        assert rule_j.coarse_start(rows).pts_s == 40.0  # ... and answers on its first card
+        overlays = self._overlays(rows)
+        assert len(overlays) == 2  # the roll's own two card lines, gathered as if they never moved
+        assert rule_j.same_roll(rule_j.without_overlays(rows, overlays), runs, rule_j.RULE_J) == 1  # merge refused
+        assert rule_j.coarse_start(rows, without=rule_j.without_overlays(rows, overlays)).pts_s == 500.0
+
+    def test_the_band_steps_never_walk_the_start_back_over_the_bug(self):
+        # Version 3's two halves, in order. The roll's cards and the bug are both text, so read as decoded the bug is
+        # in the roll's band on every keyframe of the story and ``reach_back`` walks the start the whole way back to
+        # the first one. The overlays are dropped first, so the walk has nothing to step onto and the start stays on
+        # the roll's first card. Measured: read raw, this shape cost two right answers on the CPU decode of the 51
+        # broadcast recordings (`evidence/eval/broadcast-tv.md`, "Rule J version 3").
+        rows = [(t, 1, 120.0, (self._bug(i),)) for i, t in enumerate(range(1000, 1400, 2))]  # the bug over story
+        rows += [
+            (t, 3, 8.0, (self._bug(i), (2, 60, 44, 78), (6, 90, 48, 108)))  # cards in the bug's own band
+            for i, t in enumerate(self.ROLL)
+        ]
+        raw = rule_j.coarse_start(rows)
+        assert raw is not None and raw.pts_s == 1000  # the walk crossed the whole story on the bug
+        overlays = self._overlays(rows)
+        assert len(overlays) == 1
+        coarse = rule_j.coarse_start(rows, without=rule_j.without_overlays(rows, overlays))
+        assert coarse is not None and coarse.pts_s == 1400.0
+        assert coarse.run_index is None  # nothing reached back at all
+
+    def test_the_run_is_still_the_one_the_rows_as_decoded_give(self):
+        # The bug's night scene comes after the roll. Version 2 would answer on it; dropping the bug's boxes before
+        # finding the runs would hand the answer to the roll instead. The run stays the last raw one, and it holds no
+        # credit frame of its own, so there is no answer -- the story the bug sat on is never published.
+        roll = [
+            (t, 4, 8.0, (self._bug(i), *((60, 30 + 12 * n, 260, 48 + 12 * n) for n in range(3))))
+            for i, t in enumerate(range(940, 1000, 2))
+        ]
+        rows = [*roll, *self._tail()]
+        assert rule_j.coarse_start(rows).pts_s == 1300.0
+        overlays = self._overlays(rows)
+        assert len(overlays) == 1
+        assert rule_j.coarse_start(rows, without=rule_j.without_overlays(rows, overlays)) is None
+
+    def test_a_run_the_bug_leaves_one_credit_frame_of_is_not_a_roll(self):
+        # One frame is not a run: ``credit_runs`` can't return one, and taking it would make a start that is also its
+        # own end. Mayday S11E11's engine-animation telemetry under the National Geographic logo, on both paths.
+        rows = [
+            *[(t, 1, 120.0, (self._bug(i),)) for i, t in enumerate(self.STORY)],
+            *[(t, 1, 12.0, (self._bug(i),)) for i, t in enumerate(range(1300, 1340, 2))],
+            (1340, 2, 12.0, (self._bug(1), (60, 100, 260, 118))),
+        ]
+        # Read as decoded, every story frame's one box is the bug, in the run's own band and at its own cadence, so
+        # the band steps walk the start right across the story to 1000 -- which is why the overlays are dropped first
+        # (:class:`TestWhereRuleJReadsPositions`, and ``coarse_start``'s own docstring).
+        assert rule_j.coarse_start(rows).pts_s == 1000
+        overlays = self._overlays(rows)
+        assert len(overlays) == 1
+        assert rule_j.coarse_start(rows, without=rule_j.without_overlays(rows, overlays)) is None
+
+    @pytest.mark.parametrize(("every", "found"), [(4, True), (20, True), (24, False)])
+    def test_how_often_the_bug_has_to_be_boxed_over_the_story(self, every, found):
+        # The night scene is the run, so only the lit story's own 150 rows count, against a share of 7.5 sightings:
+        # every 20th keyframe is 8 of them and every 24th is 7. A logo boxed this thinly is still an overlay.
+        assert bool(rule_j.overlay_boxes(self._tail(every))) is found
+
+    def test_a_bug_that_leaves_the_screen_half_way_through_the_story_is_not_an_overlay(self):
+        # The bug is boxed just as often, and the night scene is still a run -- a subtitle keeps it one once the bug
+        # has gone -- so only its span decides. It covers 150 s of a 298 s story, under OVERLAY_SPAN_SHARE.
+        subtitle = (60, 140, 260, 160)
+        rows = self._tail(bug_until=1150)
+        rows = [row if row[0] <= 1150 or row[0] < 1300 else (row[0], 1, 12.0, (subtitle,)) for row in rows]
+        assert rule_j.credit_runs(rows)[-1:] == [(len(rows) - 21, len(rows) - 1)]
+        assert rule_j.overlay_boxes(rows) == ()
+
+    def test_a_promo_lower_third_is_not_an_overlay(self):
+        # On for 40 s in the middle of the story: often enough, but nowhere near across it.
+        promo = (40, 140, 280, 164)
+        rows = [(t, 1, 120.0, (promo,)) if 1200 <= t < 1240 else (t, 0, 120.0, ()) for t in self.STORY]
+        rows += [(t, 1, 12.0, (self._bug(i),)) for i, t in enumerate(self.NIGHT)]
+        assert rule_j.overlay_boxes(rows) == ()
+
+    def test_a_bug_seen_only_inside_the_run_is_the_runs_own_text(self):
+        # A roll long enough to fill the tail puts its own cards in the same place for most of the rows (the lab's
+        # Heeramandi episodes, a 462 s roll against a 450 s tail). Nothing of it is seen outside the run, so it stays.
+        rows = [(1000 + 2 * i, 0, 120.0, ()) for i in range(25)]
+        rows += [
+            (1050 + 2 * i, 3, 8.0, ((60, 40, 260, 58), (60, 70, 260, 88), (60, 100, 260, 118))) for i in range(200)
+        ]
+        assert rule_j.overlay_boxes(rows) == ()
+        assert rule_j.credits_start(rows, []) == 1050.0
+
+    def test_the_refine_rows_are_read_without_the_bug_too(self):
+        # The 1 fps rows before the roll are a dark scene the bug is the only text on. Read as they are, the walk back
+        # takes every one of them and the start lands 20 s early; read without it, it stops on the roll's first card.
+        rows = self._tail(roll=True)
+        fine = [(float(t), 1, 12.0, (self._bug(t - 1380),)) for t in range(1380, 1400)]
+        fine += [
+            (float(t), 3, 8.0, ((60, 30, 260, 48), (60, 42, 260, 60), (60, 54, 260, 72))) for t in range(1400, 1402)
+        ]
+        overlays = self._overlays(rows)
+        coarse = rule_j.coarse_start(rows, without=rule_j.without_overlays(rows, overlays))
+        assert rule_j.refine_start(rows, coarse, fine) == 1380.0  # what reading them as they are would give
+        assert rule_j.credits_start(rows, fine) == 1400.0
+
+    def test_a_start_the_bug_pushed_later_can_carry_a_run_past_the_30_s_floor(self):
+        # One of the two ways version 3 can *gain* an answer (the other is the share, below). The guard counts each
+        # row's own text as it was decoded, but both its tests are measured from the start, and dropping the bug's
+        # boxes moves that start later. This row is the 30 s floor: version 2 refuses the file because the run opens
+        # 28 s into the tail; version 3 starts on the cards 60 s in. No file of the sets, the lab or the 51
+        # broadcast recordings has it.
+        rows = [
+            (1000.0 + 2 * i, 1, 120.0, (self._bug(i),)) if i % 4 == 0 else (1000.0 + 2 * i, 0, 120.0, ())
+            for i in range(14)
+        ]
+        rows += [(1028.0 + 2 * i, 1, 12.0, (self._bug(i),)) for i in range(16)]  # the bug over a night scene
+        rows += [(1060.0 + 2 * i, 2, 12.0, (self._bug(i), (60, 40, 260, 58))) for i in range(30)]  # the roll
+        v2 = rule_j.coarse_start(rows)
+        assert v2.pts_s == 1028.0 and rule_j.text_all_through(rows, v2)  # version 2: no answer
+        overlays = self._overlays(rows)
+        v3 = rule_j.coarse_start(rows, without=rule_j.without_overlays(rows, overlays))
+        assert v3.pts_s == 1060.0 and not rule_j.text_all_through(rows, v3)
+        assert rule_j.credits_start(rows, []) == 1060.0
+
+    def test_a_start_the_bug_pushed_later_can_drop_the_guards_share(self):
+        # The guard's other test, the same way: its window is everything before the start, so moving the start moves
+        # the window's edge and the share with it. Here the 30 s floor is clear for both versions and the *share*
+        # alone decides. Version 2's run opens on the bug's night scene, so the 20 keyframes before it all carry the
+        # bug and the share is 1.00 -- refused. Without the bug those frames aren't credit frames, the run opens on
+        # the real cards 122 s in, and the 30 dark keyframes the dark bridge had swept into the run are now before
+        # the start and blank: 0.51, under the 0.80, so the file gains an answer version 2 refused.
+        card = (60, 40, 260, 58)
+        rows = [(1000.0 + 2 * i, 1, 120.0, (self._bug(i),)) for i in range(20)]  # lit story under the bug
+        rows += [(1040.0 + 2 * i, 1, 12.0, (self._bug(i),)) for i in range(11)]  # the bug over a night scene
+        rows += [(1062.0 + 2 * i, 0, 12.0, ()) for i in range(30)]  # blank dark: the dark bridge sweeps these in
+        rows += [(1122.0 + 2 * i, 2, 12.0, (self._bug(i), card)) for i in range(40)]  # the roll
+        bare = [row[:3] for row in rows]
+        v2 = rule_j.coarse_start(bare)
+        assert v2.pts_s == 1040.0 and v2.pts_s - rows[0][0] >= rule_j.STORY_BEFORE_RUN_S  # the floor is clear
+        assert rule_j.text_all_through(bare, v2) and rule_j.credits_start(bare, []) is None  # refused on the share
+        v3 = rule_j.coarse_start(rows, without=rule_j.without_overlays(rows, self._overlays(rows)))
+        assert v3.pts_s == 1122.0
+        assert not rule_j.text_all_through(rows, v3)
+        assert rule_j.credits_start(rows, []) == 1122.0
+
+    def test_a_roll_the_bug_started_early_keeps_only_its_own_first_card(self):
+        # A stand-up special's stage backdrop signage, boxed in one place through the act: the 24 s join glues the
+        # last of it onto the roll, and dropping it moves the start onto the roll's first card (the 205's Gaurav
+        # Gupta Market Down Hai, 32 s early -> 10 s).
+        backdrop = (20, 30, 120, 50)
+        rows = [(t, 2, 40.0, (backdrop, (150, 30, 250, 50))) for t in range(850, 1000, 2)]  # story: 2 boxes, not credit
+        rows += [(t, 3, 40.0, (backdrop, (150, 30, 250, 50), (150, 60, 250, 80))) for t in range(1000, 1280, 2)]
+        rows += [(t, 1, 40.0, (backdrop,)) for t in range(1280, 1300, 2)]
+        rows += [(t, 3, 8.0, ((60, 40, 260, 58), (60, 70, 260, 88), (60, 100, 260, 118))) for t in range(1300, 1360, 2)]
+        assert rule_j.coarse_start(rows).pts_s == 1000.0
+        overlays = rule_j.overlay_boxes(rows)
+        assert overlays == (backdrop, (150, 30, 250, 50))  # both signs are on screen through the act
+        coarse = rule_j.coarse_start(rows, without=rule_j.without_overlays(rows, overlays))
+        assert coarse is not None and coarse.pts_s == 1300.0
+
+    def test_a_credit_line_crossing_the_bug_keeps_its_own_box(self):
+        # Containment, not overlap: only text the bug swallows is dropped.
+        across = (0, 6, 300, 24)
+        rows = [*self._tail(), *[(1400 + 2 * i, 1, 8.0, (across,)) for i in range(20)]]
+        kept = rule_j.without_overlays(rows, rule_j.overlay_boxes(rows))
+        assert [row[1] for row in kept[-20:]] == [1] * 20
+
+    @pytest.mark.parametrize(
+        ("card", "dropped"),
+        # A credit line at the bug's own height, reaching further and further out of it: wholly inside, then 0.61
+        # inside, then 0.56. Either side of OVERLAY_CONTAINMENT, which no equality test would pin.
+        [((30, 6, 48, 24), True), ((30, 6, 60, 24), True), ((30, 6, 63, 24), False)],
+    )
+    def test_how_far_inside_the_bug_a_box_has_to_lie(self, card, dropped):
+        overlay = (0, 4, 48, 26)
+        inside = rule_j._inside(card, overlay)
+        assert (inside >= rule_j.OVERLAY_CONTAINMENT) is dropped, inside
+        assert rule_j._iou(card, overlay) < rule_j.OVERLAY_IOU  # overlap alone would keep every one of them
+        kept = rule_j.without_overlays([(1000.0, 1, 8.0, (card,))], (overlay,))
+        assert kept[0][1] == (0 if dropped else 1)
+
+    @pytest.mark.parametrize(("sightings", "found"), [(3, False), (4, True)])
+    def test_a_short_story_needs_the_four_sighting_floor(self, sightings, found):
+        # 20 story keyframes, so the 5 % share would let two far-apart boxes make an overlay. OVERLAY_LEAST is what
+        # stops a coarsely keyed tail doing that.
+        story = range(1000, 1040, 2)
+        step = (len(story) - 1) // (sightings - 1)
+        rows = [
+            (t, 1, 120.0, (self._bug(i),)) if i % step == 0 and i <= step * (sightings - 1) else (t, 0, 120.0, ())
+            for i, t in enumerate(story)
+        ]
+        rows += [(t, 1, 12.0, (self._bug(i),)) for i, t in enumerate(range(1040, 1082, 2))]
+        assert sum(1 for row in rows[: len(story)] if row[1]) == sightings
+        assert rule_j.OVERLAY_KEYFRAME_SHARE * len(story) < rule_j.OVERLAY_LEAST  # the floor is what decides here
+        assert bool(rule_j.overlay_boxes(rows)) is found
+
+    def test_rows_without_positions_have_no_overlay_and_keep_their_counts(self):
+        # The 80-file fixture's rows were measured before positions were recorded; rule J answers them as it did.
+        rows = [(1000 + 2 * i, 1, 12.0) for i in range(200)]
+        assert rule_j.overlay_boxes(rows) == ()
+        assert [row[1] for row in rule_j.without_overlays(rows, (self.BUG,))] == [1] * 200
+
+    def test_a_row_list_that_isnt_the_same_rows_is_refused(self):
+        rows = self._tail()
+        with pytest.raises(ValueError, match="same rows"):
+            rule_j.coarse_start(rows, without=rows[:-1])
+
+    def test_a_story_with_no_time_in_it_is_not_looked_at(self):
+        # Every story row at the same pts: the span test would read "0 s apart or more", which every group clears.
+        rows = [(1000.0, 1, 120.0, (self._bug(i),)) for i in range(6)]
+        rows += [(1000.0 + 2 * i, 1, 12.0, (self._bug(i),)) for i in range(1, 16)]
+        assert rule_j.credit_runs(rows) and rule_j.overlay_boxes(rows) == ()
+
+    def test_a_file_with_no_run_is_not_looked_at(self):
+        rows = [(1000 + 2 * i, 1, 120.0, (self.BUG,)) for i in range(200)]  # lit: one box is never a credit frame
+        assert rule_j.credit_runs(rows) == []
+        assert rule_j.overlay_boxes(rows) == ()
+
+    @pytest.mark.parametrize(
+        "name", ["Synth Audio (2022) - S01E02", "Synth Audio (2022) - S01E04", "Synth Audio (2022) - S02E01"]
+    )
+    def test_the_labs_burnt_in_timecode_is_an_overlay(self, name):
+        # The three episodes whose keyframes made a run: the guard refused them, and now there is no run to refuse.
+        item = _synth()[name]
+        key = _synth_rows(item["key"])
+        overlays = rule_j.overlay_boxes(key)
+        assert rule_j.coarse_start(key) is not None and overlays
+        assert rule_j.coarse_start(key, without=rule_j.without_overlays(key, overlays)) is None
+
+    @pytest.mark.parametrize("name", ["Synth Credits (2024)", "Synth Credits Open (2025)"])
+    def test_the_labs_synthetic_roll_has_no_overlay(self, name):
+        item = _synth()[name]
+        key, fine = _synth_rows(item["key"]), _synth_rows(item["fine"])
+        assert rule_j.overlay_boxes(key) == ()
+        assert rule_j.credits_start(key, fine) == 541.0

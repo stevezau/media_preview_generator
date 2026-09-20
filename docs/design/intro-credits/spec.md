@@ -376,21 +376,78 @@ frame is decoded or read twice for them: measured over 910 decodes (the sets, th
 files on both decode paths), they add a median 8.0 KB and at most 373.3 KB of rows per decode, and 15 µs per frame of
 text detection against its 11–17 ms. The helper protocol carries
 them (`{"id": n, "boxes": [[[left, top, right, bottom], …], …]}`, one list per frame) and the harness stores them with
-every cached decode. **Rule J reads the first three fields and nothing else**, so no answer of its own moves; the
-positions are there for the rules that need them (§13 items 14 and 15).
+every cached decode. **Rule J version 3 reads the positions in three places** (steps 4, 5 and 7 below); everything else — whether a frame
+is a credit frame, which runs there are, where the run ends and whether text fills the tail — reads the count and the
+luma, as it always did. A row that doesn't carry positions (the 80-file fixture's, built from the prototype's own
+measurements) is read as a frame whose text could be anywhere, so it has no overlay, is never taken for a roll's own,
+and its answer is version 2's (`rule_j.boxes_of`).
 
-**Rule "J"** per frame `[pts, boxes, luma_mean]` (the first three fields above):
+**Rule "J"** per frame `[pts, boxes, luma_mean, positions]`:
 1. Credit frame = (`luma < 30` and `boxes ≥ 1`) or (`luma ≥ 30` and `boxes ≥ 3`). Bright frames need more text:
    signage in a lit scene gave 3+ boxes for minutes (Checkin' It Twice, −864 s under a looser rule).
 2. Join credit frames into runs across gaps ≤ 24 s; dark empty frames never break a run (Summit of the Gods: 24 s of
    dark keyframes split the roll).
-3. Keep runs ≥ 15 s; pick the **last** one (credits sit at the end).
-4. **Anchor:** start only where two credit samples are adjacent (a lone scene-text frame 24 s before the roll glued
+3. Keep runs ≥ 15 s; pick the **last** one (credits sit at the end). Steps 1–3 read the rows exactly as they were
+   decoded, so which runs there are, which one is last, and how long it has to be, never depend on step 4.
+4. **Text that never moves** (rule J version 3, §13 item 15): a box position the detector keeps finding right across
+   the **story** — the rows before the run step 3 picked — is a channel or score bug, a ticker or a burnt-in timecode,
+   not credits, and inside the run it doesn't count as text at all. The story's boxes are gathered into groups by
+   overlap (IoU ≥ 0.5 against the group's first box); a group is an overlay when its first and last sighting are
+   ≥ 80 % of the story apart and it was seen ≥ 4 times and ≥ 5 % of the story's row count (sightings are boxes, so two
+   boxes of one frame on the same spot count twice); a box lying ≥ 60 % inside one is dropped and the frame recounted.
+   **Steps 5–7 and the end all read the rows this step leaves**, and so does the 1 fps refine at step 9. A run left
+   with fewer than two credit frames is not a roll and there is no answer: a bug over a night scene is all of it, and
+   one credit frame would make a start that is also its own end. Gathering only the story's boxes, and picking the run
+   before dropping any of them, is what keeps a roll long enough to fill the tail (the lab's Heeramandi episodes) from
+   being read as its own overlay, and stops the step unmasking an earlier, worse run. Step 8 still counts the rows as
+   they were decoded, so an overlay this step doesn't find still costs the file its answer; but its tests are measured
+   from a start this step may have moved later, so a run it pushes past the 30 s floor can gain an answer version 2
+   refused (no set, lab or broadcast file does). **It is not monotone the other way either:** thinning the run grows
+   the spacing step 6 measures, so it can stop the anchor stepping over a glued-on frame and put a start up to the
+   24 s join *earlier* than version 2, on story
+   (`test_rule_j.TestOverlayBoxes.test_thinning_a_run_can_stop_the_anchor_stepping`; no set, lab or broadcast file
+   does that either, and that measurement is the whole of the evidence).
+   The thresholds were chosen on the 80, the 205 and the lab files,
+   where the only answer they move is one 205 movie's, 22 s closer to its truth; on 51 broadcast recordings they take
+   Medium's wrong answers from 6 to 4 on the GPU decode. The costs: a bug that leaves the screen before the credits
+   (its span is measured against the story, so a wrong answer only moves later), and in-show graphics, name captions
+   and epilogue cards, which move (`evidence/eval/broadcast-tv.md`).
+5. **Same roll** (rule J version 3, §13 item 14): an earlier kept run is the same roll as the last one when its text
+   sits in the last run's own horizontal band — the median middle of its boxes within 32 px of the last run's, a tenth
+   of the frame's width (`rule_j.band_of`) — and at least half the keyframes between the two runs carry a text box.
+   A roll keeps its layout from card to card and its text never stops; a scene's signs, captions and lower thirds do
+   neither. Neither test is a distance, so a roll the 24 s join split anywhere in the tail is put back together. The
+   start then comes from the earliest run of the roll, and the end still from the last (`rule_j.same_roll`).
+6. **Anchor:** start only where two credit samples are adjacent (a lone scene-text frame 24 s before the roll glued
    itself on — Undisputed). One step at most, and never over a gap longer than the 24 s join: a frame further ahead
    was joined by dark frames alone, so every keyframe between is dark, and it is kept as the start, lit or dark (WILL's
    first card on black; on the sets 3 of the 9 such first frames are lit, all on the roll by frame check; rule J
    version 2). The cost is lit scene text followed by more than 24 s of dark keyframes before the roll (§13 item 14).
-5. **Text all through** (rule J version 2): no answer unless the tail holds at least 30 s of keyframes before the run
+7. **Reach back** (rule J version 3, §13 item 14): step the start back over earlier keyframes whose text is in the
+   roll's band and which keep the roll's own cadence — no further from the frame the walk is on than 1.5 × the spacing
+   of the run's credit frames (the anchor's yardstick), and never more than the 24 s join. This is what catches a roll
+   whose opening is names over bright footage: those frames read 1–2 boxes, under the 3 a lit frame needs, so the run
+   began after them. The cadence is what keeps the walk out of story, whose text is sporadic. The dark bridge is not
+   honoured here — step 2 has already joined everything it reaches, so a stretch the run stopped at holds a lit frame,
+   and crossing it as well puts two more of the 205 over 10 s before their chapter. Nor does it step onto a row of the
+   run itself: the anchor has already ruled on those, and undoing its step took one published answer on the 80 more
+   than 10 s early (Marvel's Daredevil S03, whose decode order put the anchor's next credit row two frames along).
+   The band is the only thing it steps onto — a credit frame out of the band is not the roll's — which is what keeps
+   step 5's refusal meaning anything end to end.
+   **Steps 5 and 7 read the rows step 4 left, and that ordering is load-bearing**: read as decoded, a keyframe whose
+   only box is a channel bug is in the roll's band whenever the bug is, and the walk crosses the whole story on it —
+   worth two of the 51 broadcast recordings' right answers on the CPU decode when the band steps were measured
+   without step 4 (`evidence/eval/broadcast-tv.md`). It costs something the other way, and that is not fixed: a roll
+   that fills most of its own tail and that the join split has its opening block and its names over footage inside
+   step 4's story, so its own text can be gathered as an overlay and step 5 then refuses the merge — the answer
+   usually stays where version 2 had it, the gain forfeited. No file of either set, the lab or the 51 has that shape,
+   and the three ways round it that were measured each cost a real broadcast answer. Step 4 is **not** monotone
+   either way, on that shape or any other: it thins the chosen run's credit frames, which grows the spacing step 6
+   measures, so it can also stop the anchor stepping over a glued-on frame and put a start up to the 24 s join
+   *earlier* than version 2, on story. Nothing in
+   the sets, the lab or the 51 does, and that measurement is the whole of the evidence
+   (`evidence/eval/phase3-harness.md`, "The order of the two, and why").
+8. **Text all through** (rule J version 2): no answer unless the tail holds at least 30 s of keyframes before the run
    and fewer than 80 % of those carry any text box. Text that never leaves the screen (a burnt-in timecode, a channel
    bug, subtitles from the first frame) makes runs anywhere: the lab's Synth Audio test pattern was answered on every
    episode. Every file of the sets has at least 84 s of the tail before its run and a share of at most 0.54. When the
@@ -404,9 +461,12 @@ positions are there for the rules that need them (§13 items 14 and 15).
    episodes have none of them: its 10 credits chapters starting 420 s or more before the end are those five and five
    mislabels. A file whose channel logo text detection boxes on 80 % of the story
    loses its answer too: on 51 broadcast recordings with channel logos that was one right answer, against five wrong
-   ones the step removed (`evidence/eval/phase3-harness.md`).
-6. **Refine** with the 1 fps decode: walk back from the coarse start through contiguous credit frames (gaps ≤ 2.5 s),
-   then back over the fade (luma < 12, steps ≤ 4 s).
+   ones the step removed (`evidence/eval/phase3-harness.md`). It counts the rows **as they were decoded**, step 4's
+   overlays included — it is the step that catches a file whose overlay step 4 doesn't find, and counting them out
+   would take those answers away.
+9. **Refine** with the 1 fps decode: walk back from the coarse start through contiguous credit frames (gaps ≤ 2.5 s),
+   then back over the fade (luma < 12, steps ≤ 4 s). The 1 fps rows are read without step 4's overlays too, so the
+   walk can't step back over a bug the keyframes already dropped.
 
 **Measured** on 80 files with chapter truth (40 movies, 40 TV; 3 movie truths corrected by frame checks,
 `evidence/credits/adjudicated.json`, sheets in `evidence/credits/framechecks/`):
@@ -419,11 +479,15 @@ positions are there for the rules that need them (§13 items 14 and 15).
 
 The table's keyframe row was measured with the prototype's 10 s refine span; the app refines over 20 s, which gives
 63 / 1 early / 8 late / 4 none on the same rows (`tests/fixtures/markers/credits_rule_j_80.json.gz`), and rule J
-version 2 (the anchor's 24 s limit, step 4) gives 64 / 1 / 7 / 4.
+version 2 (the anchor's 24 s limit, step 6) gives 64 / 1 / 7 / 4. Version 3 gives the same on that fixture: its rows
+carry no box positions, so none of its three steps fires there (its own numbers come from the harness's decode
+cache).
 
 Late cases are credits styles the rule doesn't see as "credit frames": names over bright footage or a curtain call
-(Taxi Driver, Come from Away, Revenge of the Nerds), textured or light backgrounds (The Mummy, LOTR: Return of the
-King), tiny text on black at 320 px (WILL). Late skips are harmless (viewer sees more). Misses: credits shorter
+(Taxi Driver, Come from Away, Revenge of the Nerds), textured or light backgrounds, tiny text on black at 320 px
+(WILL). Version 3's band reaches the ones whose opening still boxes some text (The Mummy and LOTR: Return of the King
+move from +82 and +175 s to +10 s); what stays late is the opening the detector finds no text on at all. Late skips
+are harmless (viewer sees more). Misses: credits shorter
 than 15 s at end of file (Animal), credits over a scene (A Season to Remember), dark-grey textured background (Land of
 the Dead), several sitcoms whose credits run squeezed over a scene. Why not preview frames: no better at 6 s, much
 worse at the default 10 s, and it would couple the two job types.
@@ -439,29 +503,34 @@ join glued on, so the end is refined from the credit keyframe before it and the 
 starts. Whether there is an end is decided exactly as version 1 did, from the latest credit keyframe and the 1 fps
 walk from it; the step back then moves that end earlier and never makes one. Emby still gets the start only (§6.3 R1).
 Rule J version 1 shipped as measured; version 2 (`CREDITS_TEXT_VERSION` 2: the anchor's 24 s limit, the end's step
-back, text all through) is the one tuning so far, and cleared the owner's bar: no more early answers at any level on
-either set, Medium more useful. Every answer more than 10 s early or 30 s late, shaped like epilogue cards, or with an
-end, and every answer a rule change moves by more than 10 s, is frame-checked and adjudicated in
-`evidence/eval/phase3-harness.md`; further tuning must beat version 2 the same way. Epilogue text cards touching the
+back, text all through) and version 3 (`CREDITS_TEXT_VERSION` 3: text that never moves, same roll, reach back — the
+first rule to read where a frame's text is) are the two tunings so far, and each cleared the owner's bar: no more
+early answers at any level on either set or either decode path — version 3 has one *fewer* on the 205 — no end moved,
+Medium more useful. Every answer more than 10 s early or 30 s late,
+shaped like epilogue cards, or with an end, and every answer a rule change moves by more than 10 s, is frame-checked
+and adjudicated in `evidence/eval/phase3-harness.md`, and every answer whose verdict changes is compared run against
+run whatever the size of the move; further tuning must beat version 3 the same way. Epilogue text cards touching the
 roll, or joined to it over black, become the start (pinned in `test_rule_j.TestEpilogueCards`); the harness
 frame-checks every answer shaped like that.
 
 **Harness** (`evidence/eval/phase3-harness.md`; the app's own `find_credits` and `decide()`, not the prototype):
-- Rule J alone on the 80 (this spec's own bar: ≥ 59 within 10 s, ≤ 1 early): version 2 on the GPU decode 64 within
-  10 s / 1 early / 7 late / 3 none, on the CPU decode 59 / 1 / 8 / 8 — both meet the bar (version 1: 63 / 1 / 8 / 3
-  and 58 / 1 / 9 / 8, the CPU one file short), both versions measured on the same tree after the intra-only thinning.
-  The two decode paths scale the frame differently (`scale_cuda` vs swscale) and don't always agree.
+- Rule J alone on the 80 (this spec's own bar: ≥ 59 within 10 s, ≤ 1 early): version 3 on the GPU decode 66 within
+  10 s / 1 early / 5 late / 3 none, on the CPU decode 61 / 1 / 7 / 8 — both meet the bar (version 2: 64 / 1 / 7 / 3 and
+  59 / 1 / 8 / 8; version 1: 63 / 1 / 8 / 3 and 58 / 1 / 9 / 8, the CPU one file short), every version measured on the
+  same tree after the intra-only thinning. The two decode paths scale the frame differently (`scale_cuda` vs swscale)
+  and don't always agree.
 - Q4 gate, check by check: the 80 (movies40 + tv40) passes 5 of 5 on both decode paths. The 205 movies fails 3 of 5
-  (Medium useful 96 < Plex's 124; Medium wrong 17 > cap 5; High wrong 15 > cap 3; version 1: Medium useful 90) but
-  passes both "never looser than Plex" checks by a wide margin. The failure is a detector gap, not a truth problem:
-  rule J's `coarse_start` takes the roll's **last** credit run, so a roll whose opening section is names over bright
-  footage, or one split by a gap longer than 24 s, answers late — a disclosed, tracked limitation (§13 item 14). The
-  rules measured to reach back to earlier blocks all added early answers or gained one file for tuned parameters.
+  (Medium useful 101 < Plex's 124; Medium wrong 16 > cap 5; High wrong 15 > cap 3; version 2: 96 and 17; version 1:
+  90) but passes both "never looser than Plex" checks by a wide margin. What is left of the gap is the roll the
+  detector never sees at all: on the 41 files version 2 answered more than 30 s late, only 34 had a text box within
+  30 s of the chapter to reach for, and 35 are still late — a disclosed, tracked limitation (§13 item 14).
 - Ends (Q3): 19 set rows (17 distinct files) got an end in version 1's first run; published for 6 files at High and 8
-  at Medium. Version 2 moved no credits-text end on either set, and the two decisions it newly publishes with an end
-  keep the scene or stop on logos. No end swallowed a scene.
-- Every set answer version 2 moved is the anchor's. The end's rules and the text-all-through step move no answer on
-  either set or decode path, and no online decision.
+  at Medium. Neither version 2 nor version 3 moved a credits-text end on either set, and the two decisions version 2
+  newly publishes with an end keep the scene or stop on logos. No end swallowed a scene.
+- Every set answer version 2 moved is the anchor's; every one version 3 moves is the roll's own band (`same_roll` or
+  `reach_back`) bar one, a stand-up special whose stage signage step 4 takes for the overlay it is. The end's rules
+  and the text-all-through step move no answer on either set or decode path, and no online decision moves under
+  either version.
 
 ### 5.5 Combining evidence
 Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
@@ -934,8 +1003,8 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
    (owner's Q4) passes 5 of 5 on the 80 (movies40 + tv40) on both decode paths and fails 3 of 5 on the 205-movie set
    — a disclosed detector-gap limitation, not tuned around (§5.4, §13). Ships at "Medium"; at "High" it needs a
    second source until that gap closes. *Done when* (Task 14): lab-proven, with the shipped image's digest recorded.
-   **Done (2026-09-19), then final-reviewed across the whole PR (2026-09-20):** rule J version 2 meets §5.4 on both
-   decode paths (GPU 64 within 10 s, CPU 59, 1 early each); the lab matrix is **16 of 16** on `final-2` (`bd9e561`,
+   **Done (2026-09-19), then final-reviewed across the whole PR (2026-09-20):** rule J version 3 meets §5.4 on both
+   decode paths (GPU 66 within 10 s, CPU 61, 1 early each; version 2 was 64 and 59); the lab matrix is **16 of 16** on `final-2` (`bd9e561`,
    `evidence/lab/phase3-results.md`), with phase 2 24 of 24 and phase 1 16 of 16 on the same image, a scale run over
    711 real files, and the published `pr-241` image's re-run of rows 1, 2, 3, 16 and phase 2's row 24 (an earlier
    `pr-241` build ran one real season on `plex`). The
@@ -983,35 +1052,76 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     credit text alone misses the usefulness and precision gate on the harder 205-movie set (§5.4 "Harness"; owner,
     2026-09-18). It ships at "Medium" now; at "High" it still needs a second source until this is fixed. **Narrowed
     by rule J version 2:** the anchor no longer steps off a roll's first card across more than 24 s of dark frames
-    (205: Medium useful 90 → 96, no early answer added), but the last-run selection stands; every rule measured to
-    reach back to earlier blocks added early answers or gained one file for tuned parameters
-    (`evidence/eval/phase3-harness.md` "Tried and not taken"). **The anchor's limit carries a risk the other way:**
+    (205: Medium useful 90 → 96, no early answer added). **Narrowed again by rule J version 3**, which reads where a
+    frame's text is: an earlier run in the last run's own band whose text never stops is the same roll, and a keyframe
+    before the start in that band, at the roll's own cadence, is more of it (§5.4 steps 5 and 7). 205: Medium useful
+    96 → 101 with one wrong answer fewer (17 → 16), credits text alone 116 → 123 useful with 41 → 35 late; the 80:
+    Medium 58 → 60 on the GPU decode and 55 → 57 on the CPU, rule J alone 64 → 66 and 59 → 61 within 10 s. No early
+    answer was added at any level on either set or either decode path and no end moved. The candidates that reach
+    back **without** reading positions all added one (`evidence/eval/phase3-harness.md` "Tried and not taken" and
+    "The band's two numbers, swept").
+    **What is left of it** is the roll the detector finds no text on at all: of the 41 files version 2 answered more
+    than 30 s late, only 34 have a text box within 30 s of the chapter for any rule to reach for (Kill Bill Vol. 2's
+    cast cards start 88 s after its chapter; Black Panther's mid-credits animation boxes nothing for 16 s), and 35 are
+    still late. **The anchor's limit carries a risk the other way:**
     the frame it keeps may be lit (3 of the 9 on the sets, all on the roll), so scene text on a lit frame followed by
     more than 24 s of dark keyframes before the roll becomes the start, early by that stretch; no set file has that
     shape, and nothing in the rows tells it from a lit title card. Likewise subtitles on a dark scene after text-free
-    story, joined to the roll, start early; version 2's text-all-through step only catches text on screen through
-    most of the tail before the run (§5.4 step 5). Its third shape — a roll whose first card sits just
+    story, joined to the roll, start early — and version 3's reach back carries the start to the first subtitled
+    frame, so where the tail then holds under 30 s of rows before it the answer is refused altogether rather than made
+    early (`test_rule_j.TestTextAllThrough`); version 2's text-all-through step only catches text on screen through
+    most of the tail before the run (§5.4 step 8). **Version 3's own cost is the same shape at the head of a roll:**
+    where a scene's own text sits in the roll's band and recurs at its cadence, the walk takes it. No file of the 80
+    or the 205 has that shape — no verdict changed at any level on either decode path — but broadcast TV is full of it
+    (item 15). **And version 3's two halves cancel on one shape:** a roll that fills most of its own tail and that
+    the join split has its opening block and its names over footage in front of the last run, which is where step 4
+    looks for its story, so the roll's own text is gathered as an overlay and step 5 refuses the merge, usually
+    leaving the answer where version 2 had it. No file of either set, the lab or the 51 broadcast recordings has the shape, and
+    it is pinned (`test_rule_j.TestOverlayBoxes.test_a_split_roll_can_be_gathered_as_its_own_overlay`) rather than
+    fixed, because the three fixes measured each cost a real broadcast answer. Step 4's own bound (item 15) applies
+    here as everywhere: it can also put a start up to the 24 s join *earlier* than version 2, likewise unobserved on
+    anything measured.
+    Its third shape — a roll whose first card sits just
     above the luma-30 dark line and whose other credit keyframes span under 15 s (Rick and Morty S01E04 on the GPU
     decode, no answer) — has a measured candidate, 2 boxes at luma 30–33, that answers it and six more of the season
     within 1 s but put one 205-set movie's start on its epilogue cards; not shipped. **Rolls the tail cuts into:**
-    version 2's 30 s floor (§5.4 step 5) left a roll starting before the tail, or in its first 30 s, without an
+    version 2's 30 s floor (§5.4 step 8) left a roll starting before the tail, or in its first 30 s, without an
     answer. Round 3 reads the 120 s before the tail when nothing lit comes before the run in the tail, and keeps it
     when the run carries on into it. That answers the lab's five Heeramandi episodes on the roll's first card. A
     roll that starts 0–30 s into the tail after a scene still gets none. So does one that began more than 90 s before
     the tail, and one whose only card before the tail the anchor steps over. The lab's chapter truth has none of them.
-15. **Credit text on broadcast TV with on-screen graphics is about as accurate as Plex's own detection, not better** —
-    51 frame-checked broadcast files (39 episodes of 13 shows with a channel or show logo, 12 sports feeds;
-    `evidence/eval/broadcast-tv.md`). At Medium it gets as many useful answers as Plex (10 of 34 rolls, only 4 (GPU) or
-    3 (CPU) of them on the same episodes), skips story on about 1 episode in 7 (6 of 39 on the GPU path, 5 on the CPU,
-    one of them an episode with only an end card; Plex 6; the Q4 gate's cap is 2 here, as on the 80) and puts credits
-    on 4 (GPU) or 5 (CPU) of the 12 sports feeds (Plex: 6). At High it skips story on 2 on both paths (cap 1) and puts
-    credits on 1 sports feed on the CPU, but answers only 4 (GPU) or 3 (CPU) of the 34 rolls. On a dark story frame
-    one box is enough (a channel logo alone); on a lit one, a logo plus a two-line promo lower-third; name captions,
-    in-show graphics and epilogue cards do the same. Both High wrong answers are credit text and Plex agreeing on the
-    same shot, and the CPU's High false answer is the same pair. Tried and not taken: ignoring boxes that sit in one
-    place on at least half the tail's keyframes (no answer moved on the 80 or 205; broadcast +2/−1 on each path), and
-    not counting text + a server's own marker as agreement at High (every broadcast High mistake gone, but every High
-    credits answer on the 80 and 205 too).
+15. **Credit text on broadcast TV with on-screen graphics is still less accurate than on anything else** — 51
+    frame-checked broadcast files (39 episodes of 13 shows with a channel or show logo, 12 sports feeds;
+    `evidence/eval/broadcast-tv.md`). On a dark story frame one box is enough (a channel logo alone); on a lit one, a
+    logo plus a two-line promo lower-third; name captions, in-show graphics and epilogue cards do the same.
+    **Narrowed by rule J version 3** (§5.4 step 4: text in one place right across the story doesn't count as text
+    inside the run, and a run left with fewer than two credit frames is not a roll), and the same version's band
+    steps (5 and 7) cost it something back. Step 4 is not monotone: thinning a run grows the spacing the anchor
+    measures, so it can put a start up to the 24 s join *earlier* than version 2, on story — pinned
+    (`test_rule_j.TestOverlayBoxes.test_thinning_a_run_can_stop_the_anchor_stepping`), unobserved on the 51, the two
+    sets and the lab, and true of the overlay step shipped alone as much as of the pair. Measured after the rule was fixed, never tuned on:
+    - **GPU decode, strictly better.** At Medium it skips story on about 1 episode in 10 (4 of 39 against 6,
+      counting the one episode with only an end card; Plex 6; the Q4 gate's cap is 2 here, as on the 80), with the
+      same useful answers as before and as many as Plex (10 of 34 rolls), and still puts credits on 4 of the 12
+      sports feeds (Plex: 6). High doesn't move.
+    - **CPU decode, one right answer worse.** Medium useful 11 → 10 and Medium wrong stays 5; High is unchanged at 2
+      wrong plus 1 false. The overlay step cancels most of what the band steps cost here but not all: MasterChef
+      Junior S03E02's contestant name caption isn't an overlay at all, and Bondi Rescue S14E12's network promo
+      strapline breathes enough to split into groups that each span under 80 % of the story. Both are in the roll's
+      band and at its cadence, and the reach back takes them (frame-checked). Against them the pair gives back Bondi
+      Rescue S15E03-E04, wrong → useful on its end card.
+    - The Q4 caps fail here under every version. Both High wrong answers are credit text and Plex agreeing on an
+      in-show graphic or an epilogue card, and the CPU's High false answer is the same pair.
+    - What is left is what the overlay step can't see because the text moves, comes and goes, or redraws itself:
+      in-show graphics (Top Gear's Stig-lap telemetry), name captions, epilogue cards, and the changing text of
+      sports studio segments.
+    - Tried and not taken: ignoring boxes that sit in one place on at least half of the **tail's** keyframes (the
+      final review's prototype: no answer moved on the 80 or 205; broadcast +2/−1 on each path — version 3 differs in
+      measuring the story rather than the tail, in picking the run before dropping anything, and in refusing a run
+      the overlay empties); suppressing the overlays before the runs are found (it moved one broadcast answer 209 s
+      earlier onto story); a "boxes in a screen corner don't count" test (it took two real answers off the sets
+      outright); and not counting text + a server's own marker as agreement at High (every broadcast High mistake
+      gone, but every High credits answer on the 80 and 205 too).
 16. **The Jellyfin plugin flushes its marker store file but not the folder** (fa3772e): after a power cut the rename
     itself can be lost, leaving the previous store file (or none on a first write), never an empty one; the app writes
     the markers again when a later job that includes the file, or a Check servers run, reads the server back and finds
@@ -1432,7 +1542,7 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   under the owner's own bar, Q4/Q5): rule J version 2 (`CREDITS_TEXT_VERSION` 2, so stored answers are asked again).
   The anchor never steps over a gap longer than the 24 s join; the end steps back over scene text glued on after the
   roll, with whether there is an end still decided as in version 1; and text on screen through most of the tail
-  before the run gives no answer (the lab's Synth Audio timecode; §5.4 steps 4–5, §13 items 13–14). Both sets and both
+  before the run gives no answer (the lab's Synth Audio timecode; §5.4 steps 6 and 8, §13 items 13–14). Both sets and both
   decode paths, both versions measured on the same tree after the intra-only thinning: no early answer added at any
   level; Medium useful 80 57 → 58 (CPU 54 → 55), 205 90 → 96; rule J alone on the 80 64 / 1 (CPU 59 / 1, now meeting
   §5.4 too); every moved answer frame-checked, all of them the anchor's (`evidence/eval/phase3-harness.md` "Rule J
@@ -1443,7 +1553,7 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   205's gate still fails 3 of 5; credit text alone stays at "Medium" as ruled on 2026-09-18.
 - 2026-09-19 · Final review, rule J lane round 3 (`CREDITS_TEXT_VERSION` stays 2; no stored answer holds round 2's):
   a run under 30 s into the tail with nothing lit before it is read on into the 120 s before the tail, and judged on
-  both when it carries on into them (§5.4 step 5). It gives back what version 2's 30 s floor took: the lab's five
+  both when it carries on into them (§5.4 step 8). It gives back what version 2's 30 s floor took: the lab's five
   Heeramandi episodes, whose 462 s credits start before the 450 s tail, are answered on the roll's first card on both
   decode paths (version 1's answers; the chapters start one card later). It doesn't bring back the broadcast wrong
   answer the floor removed (Mayday S12E10 on the CPU: story came first, so nothing before the tail is read). Every
@@ -1540,3 +1650,55 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   raises, so a failure reads exactly as it does today. Version skew is caught on the first call in either direction
   (the app sends `X-Marker-Agent-Protocol`, the agent answers its version and the protocols it implements) and
   refuses with both versions named, writing nothing. Cost if wrong: a rebuild of the container and its docs.
+- 2026-09-20 · Rule J **version 3** (`CREDITS_TEXT_VERSION` 3, so stored answers are asked again; §5.4 steps 4, 5 and
+  7; §13 items 14 and 15): the first rule to read **where** a frame's text is, in two mechanisms built and measured
+  apart and then combined and re-measured together.
+  - **Text that never moves is not credits** (step 4). Text the detector keeps finding in one place right across the
+    story — a channel or score bug, a ticker, a burnt-in timecode — doesn't count as text inside the run, and a run
+    that leaves fewer than two credit frames without it is not a roll. The thresholds (IoU 0.5, 80 % of the story's
+    span, 5 % of its rows, 4 sightings, 60 % containment) sit in a flat safe band: no set answer moves at any
+    keyframe share from 0.02 to 0.15.
+  - **A roll the 24 s join split, put back together from the band its text keeps to** (steps 5 and 7). An earlier
+    kept run whose text sits in the last run's band (median box middle within 32 px, a tenth of the frame) and whose
+    gap to it never stops carrying text (half the keyframes between) is the same roll; and a keyframe before the
+    start in that band, no further than 1.5 × the run's own credit cadence and never more than the 24 s join, is more
+    of it. Both only move a start earlier; the end is still measured from the run alone, and no end moved.
+  - **The order is load-bearing.** The runs are still picked, and `text_all_through` still counts its share, on the
+    rows as they were decoded, so step 4 can never unmask an earlier run, and step 8 never sees a keyframe it
+    emptied as blank. It can still turn a refusal into an answer: both of step 8's tests are measured from a start
+    step 4 may have moved, so it can carry a run past the 30 s floor and move the share step 8 counts. Everything
+    that reads a frame's own text — the anchor, both band steps, the ends and the 1 fps refine — reads the rows step 4
+    left. Read as decoded, the walk crosses a whole broadcast story on a channel bug's own boxes; that is worth two
+    right answers on the CPU decode of the 51 recordings, and it is pinned by
+    `test_rule_j.TestOverlayBoxes.test_the_band_steps_never_walk_the_start_back_over_the_bug`. **The two halves do
+    cancel on one shape** — a roll that fills most of its own tail and that the join split has its own text inside
+    step 4's story, so the merge is refused and the answer usually stays where version 2 had it. Unreachable on anything
+    measured, pinned, and not fixed: the three fixes measured each cost a real broadcast answer. Step 4's own bound
+    applies to this shape too, so "stays where version 2 had it" is the usual case and not a guarantee: thinning a
+    run grows the spacing the anchor measures, so step 4 can stop the anchor stepping over a glued-on frame and put a
+    start up to the 24 s join earlier than version 2, on story. That reproduces with the band steps stubbed out, so
+    it is the overlay step's own bound rather than an artefact of the pairing; nothing measured does it, and it is
+    pinned (`test_rule_j.TestOverlayBoxes.test_thinning_a_run_can_stop_the_anchor_stepping`) rather than argued.
+  - **Sets, both decode paths, against the positions commit:** no early answer added at any level and no verdict
+    became `wrong` — the 205 has one *fewer* (Medium wrong 17 → 16, credits text alone 37 → 36). Medium useful 80
+    58 → 60 (CPU 55 → 57), 205 96 → 101; credits text alone on the 205 116 → 123 useful with 41 → 35 late; rule J
+    alone on the 80 64 → 66 within 10 s (CPU 59 → 61), 1 early on each path; the 80's gate 5 of 5 on both paths, the
+    205's still failing the same 3 of 5. The 43 online cases decide identically, no end moved, and the lab fixture
+    rebuilds byte-identical. The two mechanisms take nothing from each other here: every answer the band steps move,
+    the pair moves to the same second, and step 4's one gain is on top of them.
+  - **Every answer that moved more than 10 s is frame-checked** (12 GPU rows over 9 files, 2 on the CPU), and every
+    file's verdict was compared run against run at all three levels whatever the size of the move — which is what
+    caught the one variant that added an early answer (letting the walk step back inside the run undoes the anchor).
+  - **Measured and not shipped:** the walk honouring the dark bridge, the walk inside the run, a scale-free band, no
+    band at all, a distance limit on the merge, suppressing the overlays before the runs are found, the overlay step
+    without its two-credit-frame floor, the same idea against the whole tail rather than the story, and a
+    "boxes in a screen corner don't count" test.
+  - **Measured afterwards, never tuned on — the 51 broadcast recordings** (§13 item 15,
+    `evidence/eval/broadcast-tv.md`): the GPU decode is strictly better (Medium wrong 6 → 4, nothing lost), the CPU
+    decode loses one right answer (Medium useful 11 → 10, wrong unchanged at 5, High unchanged). Step 4 cancels most
+    of what the band steps cost there but not all: MasterChef Junior S03E02's name caption is not an overlay, and
+    Bondi Rescue S14E12's promo strapline splits into groups spanning under 80 % of the story. Shipped anyway,
+    because the owner's bar is the two sets and broadcast is item 15's disclosed population; the cost is recorded
+    here and frame-checked there.
+  - The 205's gate still fails 3 of 5; credit text alone stays at "Medium" as ruled on 2026-09-18.
+    `evidence/eval/phase3-harness.md` "Rule J version 3", `evidence/eval/broadcast-tv.md` "Rule J version 3".

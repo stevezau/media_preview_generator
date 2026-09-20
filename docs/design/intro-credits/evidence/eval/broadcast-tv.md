@@ -12,6 +12,13 @@ guard costs one real answer (GPU), and removes two wrong or false answers on the
 on this population fails the Q4 gate's wrong-answer caps at Medium and High. The static-overlay prototype and the High
 rule change were both rejected.
 
+> **Superseded in part on 2026-09-20.** Rows now carry their boxes' positions, and rule J version 3 reads them in
+> two places: a run is read without the text that sits in one place all through the story (`rule_j.overlay_boxes`),
+> and a roll the 24 s join split is put back together from the band its text keeps to (`rule_j.same_roll`,
+> `rule_j.reach_back`). Everything above the last section still describes version 2, which is what that section
+> measures against. **Version 3 moves these numbers**: on the GPU path Medium's wrong answers go 6 → 4 with nothing
+> lost; on the CPU path one right answer is lost. The last section has the measurement.
+
 ## The population
 
 - **How the files were found.** The lab scale run's read-only dump of prod Plex's parts (125,956 parts) was searched by
@@ -319,3 +326,179 @@ stayed in the harness's cache. What they did:
 - Made contact sheets and 1 s strips for the frame checks.
 
 Media was only read, and every run was `nice -n 19`.
+
+## Rule J version 3 (2026-09-20): text that never moves, and what the roll's band costs here
+
+Rows carry their boxes' positions now (`phase3-harness.md`, "Rows carry their boxes' positions"), and rule J version
+3 reads them in two places. One was built for this page's problem; the other was built for the movie and TV sets and
+is measured here for its cost. **They interact, so only the pair is a result** — the single-half columns below are
+for reading the interaction, not for shipping.
+
+- **Text that never moves is not credits** (`rule_j.overlay_boxes`, spec §5.4 step 4). The idea the final review
+  could only prototype in a scratch script, re-examined first-class — and it is not the rule that shipped then.
+- **The roll's band** (`rule_j.same_roll`, `rule_j.reach_back`, steps 5 and 7). Built for §13 item 14's late starts
+  on the 205-movie set. Broadcast TV is full of the shape it can't tell from a roll.
+
+**The rule.** `rule_j.overlay_boxes` calls the rows before the run rule J would otherwise pick the **story**, and
+gathers the story's boxes into groups by overlap (IoU ≥ 0.5 against the group's first box). A group is an overlay when
+its first and last sighting are at least 80 % of the story apart, and it was seen at least 4 times and at least 5 %
+of the story's row count (sightings are boxes, not frames). `rule_j.without_overlays` then drops every box lying 60 %
+or more inside one, and recounts.
+
+Three things about **where** it is applied decide almost everything (all measured, below):
+
+- **Which run is the last one is still read from the rows as they were decoded.** Rule J picks the run first, exactly
+  as version 2 does, and only then reads that run's frames without the overlay. Suppressing before the runs are found
+  changes which run is last, and on Mayday S11E11 that moved the answer 209 s *earlier*, onto a dark engine animation
+  under its telemetry — the rule must not be able to unmask a worse run.
+- **A run the overlay leaves fewer than two credit frames of is not a roll** (`credit_runs` can't return a one-frame
+  run either, and a one-frame run makes a start that is also its own end). This is what turns Mayday S11E11 and Live
+  Rescue S03E01's CPU answer from "a bit worse" into "gone".
+- **The overlays are dropped before the band steps run.** `same_roll`'s bands and its share of texted keyframes, and
+  `reach_back`'s band test and cadence, all read the rows the overlay left. Read as decoded — which is what the band
+  half did when it was measured alone — a keyframe whose only box is the channel bug is in the roll's band whenever
+  the bug is, and the walk crosses the whole story on it. That is the difference between the "band half alone" and
+  "both" columns below, and it is worth **two** of this page's right answers on the CPU decode. It costs something
+  the other way on a shape this population doesn't have (a roll that fills its own tail and that the join split has
+  its own text inside the story, so the merge is refused): three ways of stopping that were measured, and each one
+  cost a real answer here, which is why none shipped (`phase3-harness.md`, "Tried and not taken (this round)").
+
+`rule_j.text_all_through` still counts each row's own text as it was decoded. It is the step that catches a file
+whose overlay this one doesn't find, and counting the overlay out of its counts would take those answers away. It is
+not sealed off from this step, though: **both** of its tests are measured from the run's start, which the overlay
+step moves, so that step can carry a run past its 30 s floor *and* move the share it counts — the window is
+everything before the start. So version 3 can in principle *gain* an answer version 2 refused, either way. None of
+these 51 files does, nor any file of the sets or the lab; both paths are pinned in
+`test_rule_j.TestOverlayBoxes`.
+
+**Chosen elsewhere, measured here.** Both halves' thresholds were picked on the 80, the 205 and the lab's synthetic
+files before this page was run (`phase3-harness.md`, "The band's two numbers, swept" and "The overlay's five numbers,
+swept"). What these 51 files decided is the *application points*: the three rules above. The first shape measured
+here suppressed the boxes before the runs were found and had no two-frame floor; it was chosen on the sets alone, and
+on this page it cost two useful answers on the GPU path and moved a wrong one 209 s earlier. No set answer moves
+under any of the shapes tried, which is why the sets could not choose between them. So the thresholds are held out;
+the application points are not, and this page says so.
+
+**What the overlay step finds.** Files with at least one overlay: 2 of 40 movies40 and 0 of 40 tv40 (GPU; 1 and 0 on
+the CPU), 5 of 205 movies, 3 of the lab's 8, and **17 of 51 broadcast files on the GPU path, 14 on the CPU** —
+against the final review's prototype, which found a static cluster on 6. The step itself costs a median 0.1 ms per
+file on stored rows, against 8–13 s of decode.
+
+### What the pipeline publishes now
+
+Same sources, same `decide()`, same frame-checked truth as the tables above. Counts over the 34 roll files, then the
+5 end-card files, then the 12 sports feeds (where any answer is false). "Band half" and "Overlay half" are each half
+measured alone on this tree; **version 3** is what ships.
+
+| Row | Path | Rolls (34): useful / wrong / missed | End-card files (5) | Sports (12): false / none |
+|---|---|---|---|---|
+| Plex | — | 10 / 6 / 18 | 5 none | 6 / 6 |
+| Credit text, version 2 | GPU | 13 / 7 / 14 | 1 wrong, 4 none | 8 / 4 |
+| Credit text, band half | GPU | 13 / 7 / 14 | 1 wrong, 4 none | 7 / 5 |
+| Credit text, overlay half | GPU | 13 / 4 / 17 | 1 wrong, 4 none | 8 / 4 |
+| Credit text, **version 3** | GPU | **13 / 4 / 17** | 1 wrong, 4 none | 8 / 4 |
+| Credit text, version 2 | CPU | 12 / 8 / 14 | 1 useful, 1 wrong, 3 none | 8 / 4 |
+| Credit text, band half | CPU | 11 / 9 / 14 | 2 wrong, 3 none | 8 / 4 |
+| Credit text, overlay half | CPU | 12 / 5 / 17 | 2 useful, 3 none | 8 / 4 |
+| Credit text, **version 3** | CPU | **11 / 6 / 17** | **1 useful, 1 wrong, 3 none** | 8 / 4 |
+| Medium, version 2 | GPU | 10 / 5 / 19 | 1 wrong, 4 none | 4 / 8 |
+| Medium, band half | GPU | 10 / 5 / 19 | 1 wrong, 4 none | 3 / 9 |
+| Medium, **version 3** | GPU | **10 / 3 / 21** | 1 wrong, 4 none | 4 / 8 |
+| Medium, version 2 | CPU | 10 / 4 / 20 | 1 useful, 1 wrong, 3 none | 5 / 7 |
+| Medium, band half | CPU | 9 / 6 / 19 | 2 wrong, 3 none | 5 / 7 |
+| Medium, overlay half | CPU | 10 / 3 / 21 | 2 useful, 3 none | 5 / 7 |
+| Medium, **version 3** | CPU | **9 / 4 / 21** | 1 useful, 1 wrong, 3 none | 5 / 7 |
+| High, version 2 and **version 3** | GPU | 4 / 2 / 28 | 5 none | 0 / 12 |
+| High, band half | CPU | 3 / 3 / 28 | 5 none | 1 / 11 |
+| High, version 2 and **version 3** | CPU | 3 / 2 / 29 | 5 none | 1 / 11 |
+
+**The plain answer, per path:**
+
+- **GPU: strictly better than version 2.** Medium's wrong answers go from 6 to 4 counting the end-card file; no
+  useful answer is lost, no false answer added, High doesn't move. The band half's one gain here (a false sports
+  answer removed on UFC Fight Night 278) does **not** survive the combination: that answer only went away because the
+  walk carried the start into the ticker'd studio and the guard's 0.71 text share then refused the run. With the
+  ticker dropped there is no walk, so the answer stays — 113 s earlier, still false. Sports false is 8 either way.
+- **CPU: one right answer worse than version 2, where the band half alone was two worse.** Medium useful goes 11 → 10
+  and Medium wrong stays 5; High goes back to version 2's 2 wrong, where the band half alone had 3.
+
+**The band half's CPU cost is not fully cancelled.** Two files, both frame-checked:
+
+- **MasterChef Junior S03E02** (2534 useful → 2508 wrong, 25 s of story before the credits squeeze). The FOX bug at
+  (277, 155, 307, 172) *is* found as an overlay and dropped. What the walk takes instead is a contestant's name
+  caption elsewhere in the frame, which comes and goes and is not an overlay. **Not cancelled at all.**
+- **Bondi Rescue S14E12** (2455 useful → 2305 wrong, 158 s early). The network's "THE BACHELORETTE / 7.30 Next
+  Wednesday" promo is boxed as several clusters. Two of them span the whole story and are dropped; the strapline's
+  own box breathes enough that it splits into groups spanning 176 s and 282 s of a 433 s story, under the 80 %, so
+  they survive. They are in the roll's band and at its cadence, and the walk takes them. **Partly cancelled**: the
+  band half alone put this answer at 2217 s, the pair puts it at 2305 s, and both are story (1 s strip at 2305:
+  aerial beach shots, a "HARRISON" name caption and a lifeguard interview, all under the promo).
+
+Against that, the pair gives back **Bondi Rescue S15E03-E04** on the CPU (2471 wrong → 2491 useful, the
+"www.bondirescue.com" card exactly), which neither version 2 nor the band half had.
+
+The Q4 gate applied to these 51 files, version 2 → version 3:
+
+| Check | GPU | CPU |
+|---|---|---|
+| Medium useful ≥ Plex useful (10) | pass → pass (10) | pass → pass (11 → 10, still ≥ 10) |
+| Medium wrong ≤ 2 (2 % of 51) | fail 6 (+4 false) → **fail 4** (+4 false) | fail 5 (+5 false) → fail 5 (+5 false) |
+| Medium wrong ≤ Plex wrong | pass → pass | pass → pass |
+| High wrong ≤ 1 (1 % of 51) | fail 2 → fail 2 | fail 2 (+1 false) → fail 2 (+1 false) |
+| High wrong ≤ Plex wrong | pass → pass | pass → pass |
+
+So the population still fails the wrong-answer caps. "Skips story on about 1 episode in 7" is now about 1 in 10 on
+the GPU; on the CPU it is unchanged at 1 in 8, with a different episode in the wrong column.
+
+### Every answer that moved, frame-checked
+
+Version 2 → version 3, with each half alone for reading the interaction. "—" means that half left version 2's answer
+alone.
+
+| # | File | Path | Truth | v2 | Band half | Overlay half | **v3** | Verdict |
+|---:|---|---|---|---|---|---|---|---|
+| 2 | Live Rescue S03E01 | GPU | roll 5056 | 4910 wrong | 4884 | none | **none** | The A&E and show logos are the overlay; nothing of that night fire call is a credit frame without them. A 146 s skip of story gone |
+| 2 | Live Rescue S03E01 | CPU | roll 5056 | 4910 wrong | 4792 | none | **none** | Same, once a one-frame run stopped counting |
+| 6 | Homicide Hunter S06E03 | GPU | roll 2523 | 2532 useful | 2520.9 | — | **2520.9** | still useful, 2 s before the roll instead of 9 s after |
+| 6 | Homicide Hunter S06E03 | CPU | roll 2523 | 2356 wrong | 2306 | none | **none** | The ID promo over a night scene, 167 s early, gone |
+| 7 | Homicide Hunter S06E01 | GPU, CPU | roll 2522 | 2529 useful | 2523.8 | — | **2523.8** | still useful |
+| 9 | Bondi Rescue S14E12 | CPU | card 2463 | 2455 useful | 2217 | 2462 | **2305** | **useful → wrong.** The promo strapline's box splits into groups that each span under 80 % of the story, so it isn't an overlay; the walk takes it. Frame-checked at 2305: story |
+| 10 | Bondi Rescue S15E03-E04 | CPU | card 2491 | 2471 wrong | 2087.5 | 2491 | **2491** | **wrong → useful.** Lands on the "www.bondirescue.com" card exactly |
+| 10 | Bondi Rescue S15E03-E04 | GPU | card 2491 | 2352 wrong | — | 2402 | **2402** | Still story (a surf shop under the network's promo bug), 89 s early instead of 139 s — the bug leaves the screen before the end card, so the story's own span is what it is measured against |
+| 16 | Mayday S11E11 | GPU, CPU | roll 2685 | 2549.9 wrong | — | none | **none** | Frame-checked at 2570 s: aircraft footage and an interview, still story. The run held one credit frame without the National Geographic logo |
+| 17 | Mayday S12E10 | GPU | roll 2685 | 2683.8 useful | — | 2684.8 | **2684.8** | 1 s later. The "PREMIERE" bug sits on the roll, and the roll's own cards keep the answer |
+| 24 | MasterChef Junior S03E01 | CPU | roll 2527 | 2532 useful | 2527 | — | **2527** | still useful |
+| 25 | MasterChef Junior S05E15 | GPU, CPU | roll 2472 | 2480.6 useful | 2474.3 | — | **2474.3** (CPU 2473) | still useful |
+| 26 | MasterChef Junior S03E02 | CPU | roll 2533 | 2534 useful | 2508 | — | **2508** | **useful → wrong.** A contestant's name caption, 25 s of story before the credits squeeze. The FOX bug *is* dropped; this caption is not one |
+| 32 | Grey's Anatomy S20E07 | GPU | roll 2519 | 2406 wrong | — | none | **none** | The CTV logo over a dark scene, 113 s early, gone |
+| 48 | UFC Fight Night 278 | GPU | no credits | 12519 false | none | 12519 | **12406** | still false, 113 s earlier. The band half's one gain here does not survive: with the ticker dropped there is no walk into the studio, so the guard never refuses the run |
+| 48 | UFC Fight Night 278 | CPU | no credits | 12560 false | 12404 | — | **12404** | still false, 156 s earlier |
+
+Every other file, on both paths, answers exactly what it answered before. No end moved into a scene: the only ends
+that change are the three (GPU) and three (CPU) that go away with their own wrong answers.
+
+### What it still can't reach
+
+The failure shapes above that are not text in one place all through the story:
+
+- **In-show graphics that come and go:** Top Gear S01E03's Stig-lap telemetry (156 s early, published at High because
+  Plex's marker agrees), Top Gear S05E07's studio lap-time boards.
+- **Name captions:** You Can't Ask That S02E01 and S02E02, and now MasterChef Junior S03E02, which the band's reach
+  back walks onto.
+- **A graphic whose box breathes:** Bondi Rescue S14E12's promo strapline, which splits into groups that each span
+  under 80 % of the story.
+- **Epilogue text cards on black:** 24 Hours in Police Custody S07E04 (High publishes it, Plex agreeing).
+- **Sports studio segments:** the 8 false answers per path are unchanged. Only 2 of the 12 feeds have an overlay at
+  all on the GPU path (3 on the CPU): a score bug, a clock or a ticker redraws its own text every few seconds, so its
+  boxes change size and never gather into one group, and the stats graphics and interview captions behind the false
+  answers move about the frame anyway.
+- **The bug that stops at the credits:** Bondi Rescue S15E03-E04 on the GPU keeps a wrong answer because its promo
+  bug leaves the screen before the end card.
+
+### Cost
+
+Positions were already on the rows (`phase3-harness.md`), so nothing is decoded or detected for this. The overlay
+step is clustering over the story's boxes: 0.1 ms at the median and under 30 ms at the heaviest of the row sets
+measured, against 8–13 s of decode. The band steps are a sort and a walk over the tail's rows. This measurement ran
+from the harness's stored decodes on both paths (4 new windows on the GPU, 2 on the CPU; the rest reused).
+`CREDITS_TEXT_VERSION` goes to 3, so every stored answer is asked again.

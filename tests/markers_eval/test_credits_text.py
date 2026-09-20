@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
+from media_preview_generator.markers.credits import rule_j
 from media_preview_generator.markers.credits.detector import CREDITS_TEXT_VERSION, CreditsTextResult
 from media_preview_generator.markers.credits.frames import GpuDecodeError
 from media_preview_generator.markers.probe import Chapter, MediaProbe
@@ -21,6 +22,7 @@ from tools.markers_eval.plex import PlexMarker
 DUR = 6_000_000
 # Two credit cards, one over the other: the boxes a dark row of a roll holds.
 CARDS = ((40, 24, 128, 44), (41, 55, 130, 75))
+BUG = (4, 6, 46, 24)  # a channel logo the run was read without
 FILES = [
     {"file": "/m/A (2001)/A.mkv", "credits_start": 5700.0},   # text right, Plex 40 s early: they disagree
     {"file": "/m/B (2002)/B.mkv", "credits_start": 5500.0},   # text 20 s early, Plex 15 s early: they agree
@@ -128,7 +130,8 @@ def test_merge_rows_adds_the_80s_two_halves():
     assert len(merged.files) == 5
 
 
-# One card per box, stacked down the frame: a row's boxes, which epilogue_like and rule J's coordinates ignore.
+# One card per box, stacked down the frame: a row's boxes. rule J version 3 reads them to reach a start back, and
+# epilogue_like reads the run the start belongs to (`Coarse.run_index`), not the reached-back row.
 def _cards(boxes):
     return tuple((40, 24 + 30 * n, 128, 44 + 30 * n) for n in range(boxes))
 
@@ -154,6 +157,58 @@ def test_epilogue_like(rows, start, expected):
     assert ct.epilogue_like(rows, start) is expected
 
 
+def test_epilogue_like_bounds_the_run_by_the_run_not_the_reached_back_start():
+    # Version 3 can reach a start back before the run, and the rows are in ffmpeg's output order, so slicing from
+    # `coarse.index` can cover rows that aren't the run's -- or, when the row the walk reached was emitted after the
+    # whole run, nothing at all. The shape here is the second: a lit two-box frame at 98 s, in the cards' own band,
+    # emitted last. Bounded by `run_index` the run is the 31 card and black rows and the 22 s gap in them makes the
+    # answer epilogue-shaped; bounded by `index` the slice is empty and every answer of this shape stops being
+    # frame-checked.
+    story = [(float(t), 0, 120.0, ()) for t in range(0, 98, 2)]
+    run = [(float(t), 2, 10.0, _cards(2)) for t in range(100, 110, 2)]
+    run += [(float(t), 0, 10.0, ()) for t in range(110, 130, 2)]  # black, which never breaks a run
+    run += [(float(t), 2, 10.0, _cards(2)) for t in range(130, 162, 2)]
+    rows = [*story, *run, (98.0, 2, 120.0, _cards(2))]  # the reached-back frame, emitted after the run
+    coarse = rule_j.coarse_start(rows)
+    assert (coarse.pts_s, coarse.index, coarse.run_index, coarse.end_index) == (98.0, 80, 49, 79)
+    assert ct.epilogue_like(rows, 98.0) is True
+    assert ct.epilogue_like(rows[:-1], 100.0) is True  # the same run, reached from its own first card
+
+
+def test_epilogue_like_counts_the_runs_frames_without_the_bug():
+    # The same run either way; what differs is how dense its frames read. Under the bug every card frame reads three
+    # boxes from the first, so the answer looks like a plain roll; without it, the first three-box frame is 14 s in
+    # and the answer is shaped like epilogue cards.
+    bug = (4, 6, 46, 24)
+    rows = [(float(t), 1, 120.0, (bug,)) if t % 8 == 0 else (float(t), 0, 120.0, ()) for t in range(0, 90, 2)]
+    rows += [(float(t), 3, 10.0, (*_cards(2), bug)) for t in range(90, 104, 2)]
+    rows += [(float(t), 4, 10.0, (*_cards(3), bug)) for t in range(104, 160, 2)]
+    without = rule_j.without_overlays(rows, (bug,))
+    assert rule_j.overlay_boxes(rows) == (bug,)
+    assert rule_j.coarse_start(rows).pts_s == rule_j.coarse_start(rows, without=without).pts_s == 90.0
+    assert ct.epilogue_like([(row[0], row[1], row[2], ()) for row in rows], 90.0) is False  # the raw run's counts
+    assert ct.epilogue_like(rows, 90.0) is True
+
+
+def test_epilogue_like_reads_the_run_the_way_rule_j_did():
+    # A channel bug over lit story and over a night scene that ends it. To the rows as they were decoded the run opens
+    # on that scene at 80 s; rule J read it without the bug and answered 90 s. Both the run's frames and the window
+    # the card gaps are measured in ("the run's first 30 s") hang off that start, so the verdict differs: 90 s of
+    # cards, a 12 s black gap, then more cards is epilogue-shaped from 90 s and not from 80 s. This verdict picks
+    # which answers the owner frame-checks, so it has to be the run the answer came from.
+    bug = (4, 6, 46, 24)
+    rows = [(float(t), 1, 120.0, (bug,)) if t % 8 == 0 else (float(t), 0, 120.0, ()) for t in range(0, 80, 2)]
+    rows += [(float(t), 1, 10.0, (bug,)) for t in range(80, 90, 2)]  # the night scene
+    rows += [(float(t), 3, 10.0, (*_cards(2), bug)) for t in range(90, 114, 2)]
+    rows += [(float(t), 0, 10.0, ()) for t in range(114, 126, 2)]  # black, which never breaks a run
+    rows += [(float(t), 3, 10.0, (*_cards(2), bug)) for t in range(126, 160, 2)]
+    assert rule_j.overlay_boxes(rows) == (bug,)
+    assert rule_j.coarse_start(rows).pts_s == 80.0  # the raw run opens on the night scene
+    assert rule_j.coarse_start(rows, without=rule_j.without_overlays(rows, (bug,))).pts_s == 90.0
+    assert ct.epilogue_like([(row[0], row[1], row[2], ()) for row in rows], 90.0) is False  # the raw run's shape
+    assert ct.epilogue_like(rows, 90.0) is True
+
+
 @pytest.mark.parametrize(
     ("text", "end", "truth", "epilogue", "reasons"),
     [
@@ -167,8 +222,16 @@ def test_epilogue_like(rows, start, expected):
     ],
 )  # fmt: skip
 def test_sheet_reasons(monkeypatch, text, end, truth, epilogue, reasons):
-    monkeypatch.setattr(ct, "epilogue_like", lambda rows, start: epilogue)
-    assert ct.sheet_reasons({"text": text, "text_end": end, "truth": truth}, []) == reasons
+    seen = []
+
+    def epilogue_like(rows, start, overlays):
+        seen.append(overlays)
+        return epilogue
+
+    monkeypatch.setattr(ct, "epilogue_like", epilogue_like)
+    assert ct.sheet_reasons({"text": text, "text_end": end, "truth": truth}, [], (BUG,)) == reasons
+    # The overlays the run was read without are forwarded, not re-derived: `epilogue_like`'s own docstring says why.
+    assert seen == ([] if text is None else [(BUG,)])
 
 
 def _row(path, text, end=None, truth=5600.0, medium=None):
@@ -305,7 +368,12 @@ def test_cache_runs_the_app_once_per_identity_and_version(tmp_path, monkeypatch)
     def find(path, **kwargs):
         calls.append(kwargs)
         return CreditsTextResult(
-            5702.0, 5890.0, ((5700.0, 2, 12.0, CARDS),), ((5701.0, 2, 12.0, CARDS),), ((5890.0, 2, 12.0, CARDS),)
+            5702.0,
+            5890.0,
+            ((5700.0, 2, 12.0, CARDS),),
+            ((5701.0, 2, 12.0, CARDS),),
+            ((5890.0, 2, 12.0, CARDS),),
+            (BUG,),
         )
 
     monkeypatch.setattr(ct, "find_credits", find)
@@ -317,7 +385,8 @@ def test_cache_runs_the_app_once_per_identity_and_version(tmp_path, monkeypatch)
     stored_cards = [list(box) for box in CARDS]
     assert first == second == {"start_s": 5702.0, "end_s": 5890.0, "key": [[5700.0, 2, 12.0, stored_cards]],
                                "fine": [[5701.0, 2, 12.0, stored_cards]],
-                               "end": [[5890.0, 2, 12.0, stored_cards]]}  # fmt: skip
+                               "end": [[5890.0, 2, 12.0, stored_cards]],
+                               "overlays": [list(BUG)]}  # fmt: skip
     assert len(calls) == 1
     assert (calls[0]["duration_ms"], calls[0]["gpu"], calls[0]["gpu_device_path"], calls[0]["is_episode"]) == (DUR, "NVIDIA", "cuda:0", False)  # fmt: skip
     monkeypatch.setattr(ct, "CREDITS_TEXT_VERSION", CREDITS_TEXT_VERSION + 1)
@@ -631,7 +700,7 @@ class _GateRun:
                 if path == failing_path:
                     raise RuntimeError("decode failed")
                 start = None if path in missing else GATE_ANSWERS[path]
-                return {"start_s": start, "end_s": None, "key": [], "fine": [], "end": []}
+                return {"start_s": start, "end_s": None, "key": [], "fine": [], "end": [], "overlays": [list(BUG)]}
 
         def close():
             run.closed += 1
@@ -779,7 +848,15 @@ def test_a_run_lists_and_sheets_every_answer_that_moved_since_an_earlier_run(tmp
     written = []
     monkeypatch.setattr(ct, "_write_sheet", lambda ffmpeg, path, around, out: written.append((path, around, out)))
     # Every row is worth a look on its own run; against an earlier one only the row that moved gets a sheet.
-    monkeypatch.setattr(ct, "sheet_reasons", lambda detail, key_rows: ["late >30 s"])
+    # The stub takes `overlays` positionally and records it: `run_credits_text` has to forward what the stored
+    # answer kept, or `epilogue_like` re-gathers them from rows that may be the joined ones.
+    forwarded = []
+
+    def sheet_reasons(detail, key_rows, overlays):
+        forwarded.append(overlays)
+        return ["late >30 s"]
+
+    monkeypatch.setattr(ct, "sheet_reasons", sheet_reasons)
     summary, _, _ = ct.run_credits_text(decode="gpu", gpu_device="cuda:0", sets=("80", "205"), online=False,
                                         cache_root=tmp_path / "cache", ffmpeg="/ff", ffprobe="/ffp",
                                         baseline_path=tmp_path / "b.json", sheets_dir=tmp_path / "sheets",
@@ -789,6 +866,8 @@ def test_a_run_lists_and_sheets_every_answer_that_moved_since_an_earlier_run(tmp
     ]
     assert summary["changed"][0]["start_minus_truth"] == [-20.0, 1.0]
     assert [(path, around) for path, around, _ in written] == [("/m/X2 (2011)/X2.mkv", 5501.0)]
+    # The stored answer's own overlays, by value: forwarding the key rows, or a literal [], would pass an arity check.
+    assert forwarded and forwarded == [[BUG]] * len(forwarded)
 
 
 def test_only_the_chosen_set_is_run_and_judged(tmp_path, monkeypatch):

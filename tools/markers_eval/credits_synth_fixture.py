@@ -3,8 +3,8 @@
     MEDIA_PREVIEW_TEXTDET_MODEL=... python -m tools.markers_eval.credits_synth_fixture [--decode gpu|cpu]
 
 The rows are the app's own decode of ``evidence/lab/synth`` (git-ignored; set ``MARKERS_EVAL_EVIDENCE`` from a
-worktree), read through ``detector.find_credits`` with ``rule_j.text_all_through`` patched off, which is the view rule
-J version 1 had when the fixture's ``version_1_start_s`` was measured.
+worktree), read through ``detector.find_credits`` with ``rule_j.text_all_through`` and ``rule_j.overlay_boxes`` patched
+off, which is the view rule J version 1 had when the fixture's ``version_1_start_s`` was measured.
 
 Every file is decoded again and checked against the fixture it replaces: each row's time, box count and mean luma must
 match row for row, or the build stops. The pinned answers were measured on exactly these rows; only the boxes'
@@ -79,8 +79,11 @@ def rows_of(item: dict, path: Path, *, decode: str, detect_boxes, probe) -> tupl
     Returns:
         The keyframe rows and the 1 fps refine rows.
     """
-    guard = rule_j.text_all_through
+    guard, overlays = rule_j.text_all_through, rule_j.overlay_boxes
+    # Version 1 had neither step, so neither may run here: the timecode episodes' pinned answers and their 1 fps rows
+    # are what the rule answered before either of them existed.
     rule_j.text_all_through = lambda rows, coarse: False
+    rule_j.overlay_boxes = lambda rows, params=rule_j.RULE_J: ()
     try:
         gpu = "NVIDIA" if decode == "gpu" else None
         found = find_credits(
@@ -93,7 +96,7 @@ def rows_of(item: dict, path: Path, *, decode: str, detect_boxes, probe) -> tupl
             gpu_device_path="cuda:0" if gpu else None,
         )
     finally:
-        rule_j.text_all_through = guard
+        rule_j.text_all_through, rule_j.overlay_boxes = guard, overlays
     return list(found.key_rows), list(found.fine_rows)
 
 

@@ -16,6 +16,40 @@ the anchor never steps over a gap longer than the 24 s join (:func:`coarse_start
 the join glued on after the roll (:func:`end_keyframe_s`), and text on screen all through the tail is not a roll
 (:func:`text_all_through`, with a roll the tail opens on judged together with the keyframes before the tail,
 :func:`opens_on_the_run`). The 80 files move to 64 / 1 / 7 / 4.
+Version 3 (spec §13 items 14 and 15) is the first rule to read *where* a frame's text is. Two mechanisms read it:
+
+* **Text that never moves is not credits.** A box position the detector keeps finding right across the story is a
+  channel or score bug, a ticker or a burnt-in timecode, and inside the chosen run it doesn't count as text at all
+  (:func:`overlay_boxes`, :func:`without_overlays`, ``coarse_start(rows, without=...)``).
+* **A roll the 24 s join split is put back together from where its text sits.** A roll's cards, names and crawl keep
+  to one band across the frame, so an earlier run in that band whose text never stops is the same roll
+  (:func:`same_roll`), and a keyframe before the start in that band, at the run's own cadence, is more of it
+  (:func:`reach_back`). Both only ever move a start earlier, and the end is still measured from the run alone
+  (:func:`_run_rows`).
+
+**The order of the two decides what they do to each other.** The overlays are found first, on the rows as they were
+decoded. :func:`credit_runs` goes on reading those rows, and with it :func:`opens_on_the_run`, so the overlay step
+can never unmask an earlier run; and :func:`text_all_through` counts each row's own text there too, so it never sees
+a keyframe the overlay emptied as blank. Everything else about the guard is downstream of the start: **both of its
+tests are measured from one the overlay step may have moved**, so that step can carry a run past the 30 s floor *and*
+move the share the guard counts -- the window's edge is that start -- in either direction. A file version 2 refused
+can gain an answer either way (:func:`text_all_through`; pinned by
+``test_rule_j.TestOverlayBoxes.test_a_start_the_bug_pushed_later_can_carry_a_run_past_the_30_s_floor`` and
+``...test_a_start_the_bug_pushed_later_can_drop_the_guards_share``).
+Everything that reads *a frame's own text* -- which of the run's
+frames are credit frames and the spacing the anchor measures, :func:`same_roll`'s bands and its share of texted
+keyframes between two runs, :func:`reach_back`'s band test and cadence, and the ends -- reads the rows with the
+overlays dropped. That second half is what keeps the band from walking a start over story keyframes whose only box is
+the channel bug, which is what it does on broadcast recordings when it reads them raw.
+**The overlay step is not monotone in either direction**, on its own and not only in the pair. Inside the chosen run,
+dropping boxes thins the run's credit frames, which grows the spacing the anchor measures, which can stop the anchor
+stepping over a frame the 24 s join glued on -- so a start can land up to that join *earlier* than version 2 put it,
+not only later (:func:`_anchored`; pinned by
+``test_rule_j.TestOverlayBoxes.test_thinning_a_run_can_stop_the_anchor_stepping``, which reproduces with the band
+steps stubbed out). A start it moves later can carry a run past the guard's 30 s floor, so a file version 2 refused
+can gain an answer. No file of the sets, the lab or the 51 broadcast recordings does either, and over all 285 set
+rows on both decode paths no answer of the pair is earlier than the band steps alone put it. That measurement is the
+whole of the evidence: neither direction is bounded by an argument.
 ``coarse_end_s`` reads the run's latest credit frame in presentation order for the same reason, so Q3's end means the
 end of the roll rather than whichever of its keyframes ffmpeg emitted last, and ``fade_back`` never steps onto a later
 row. Everywhere else rows stay in ffmpeg's output order, the anchor's distance included: the measured keyframe rows
@@ -26,6 +60,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from statistics import median
 
 # One text box's place in its frame: left, top, right, bottom as **inclusive** pixel indices of the frame's own
 # 320x180 -- 0 to 319 across and 0 to 179 down, so a box across the whole frame reads 0..319 and is 320 wide
@@ -33,8 +68,10 @@ from dataclasses import dataclass
 # the bounds are exact.
 Box = tuple[int, int, int, int]
 # A frame: its time in seconds from the start of the file, how many text boxes it holds, its mean luma, and where those
-# boxes are. Rule J reads the first three only -- the boxes ride along for the rules that need positions (spec §13
-# items 14 and 15), and appending them leaves every comparison, sort and index here reading what it read before.
+# boxes are. Only version 3's :func:`overlay_boxes`, :func:`same_roll` and :func:`reach_back` read the fourth field;
+# every other comparison, sort and index here is on the first three, as it was before positions arrived. A row that
+# carries only three is read as a frame whose text could be anywhere, so it has no overlay and is never taken for a
+# roll's own (:func:`boxes_of`).
 Row = tuple[float, int, float, tuple[Box, ...]]
 
 FADE_LUMA = 12.0
@@ -67,6 +104,40 @@ TEXT_ALL_THROUGH_SHARE = 0.8
 # (:func:`opens_on_the_run`, :func:`joined_before`). With 30 s of rows still wanted before the run, a roll that began up
 # to 90 s before the tail is answered.
 READ_BEFORE_TAIL_S = 120.0
+# A channel bug, a score bug, a ticker or a burnt-in timecode is text in the *same place* all through the story, while
+# a roll's text is only there for the roll. So a box position the detector keeps finding right across the story doesn't
+# count as text at all (:func:`overlay_boxes`). The five numbers below were chosen on the 80, the 205 and the lab's
+# synthetic files, never on the broadcast recordings they are for (spec §13 item 15,
+# ``evidence/eval/broadcast-tv.md``): the only set answer any of them moves is one 205 movie's, and it moves 22 s
+# closer to its truth at every keyframe share from 0.02 to 0.15 -- 0.20 loses it, 0.01 starts moving another.
+# Boxes of one overlay are rarely pixel-identical (the detector's quadrilateral breathes with the picture behind it),
+# so they are gathered by overlap rather than equality.
+OVERLAY_IOU = 0.5
+# First to last sighting, as a share of the story's own span.
+OVERLAY_SPAN_SHARE = 0.8
+# How often it has to be seen, as a multiple of the story's row count (sightings are boxes, so a group can be seen
+# more often than there are rows). A logo over busy footage is only boxed now and then -- at 320 px most of the 51
+# broadcast recordings' logos are boxed on well under half their keyframes -- so this is far below the share of
+# keyframes carrying *any* text that makes :func:`text_all_through` refuse an answer.
+OVERLAY_KEYFRAME_SHARE = 0.05
+# ... but never fewer than this many sightings, so a coarsely keyed tail (a 450 s tail can hold under 60 keyframes)
+# can't call two far-apart boxes an overlay. It is also the floor on how many rows a story needs before
+# :func:`overlay_boxes` measures its span at all, so it can't be swept to 0 or 1.
+OVERLAY_LEAST = 4
+# A box is the overlay's when this much of it lies inside. Containment, not overlap: a credit line that happens to
+# cross the bug keeps its own box, and only text the bug swallows is dropped.
+OVERLAY_CONTAINMENT = 0.6
+# Version 3: a roll's text keeps to one band across the frame. Its cards, names and crawl sit at about the same place
+# frame after frame, where a scene's signs, captions and lower thirds wander, so a frame counts as one roll's own when
+# the middle of its boxes is within this much of the middle of the roll's (:func:`in_band`). A tenth of the frame's
+# 320 px: the widest band that adds no early answer. 16 and 24 px are as safe and reach one file less (205 Medium
+# useful 99 against 100); 40 px and more -- and no band test at all -- put one more 205 answer over 10 s before its
+# chapter (`evidence/eval/phase3-harness.md`, "Rule J version 3", "The two numbers, swept").
+BAND_TOLERANCE_PX = 32.0
+# ... and its text never stops: two runs are one roll only when at least this share of the keyframes between them
+# carry a box, lit or dark. Half, and 0.4 gives the same rows; at 0.6 a measured roll is lost again and at 0.3 two
+# early answers come back.
+ROLL_TEXT_SHARE = 0.5
 
 
 @dataclass(frozen=True)
@@ -94,18 +165,168 @@ RULE_J = RuleParams()
 
 @dataclass(frozen=True)
 class Coarse:
-    """The last credit run's start after the anchor step.
+    """The last credit run's start after the anchor step and the reach back over the rest of its roll.
+
+    Every index here is into **the rows the rule read** -- the decoded rows with the overlays' boxes dropped, where
+    there were any (``coarse_start(rows, without=...)``). The two lists are the same rows in the same order, so an
+    index means the same frame in both; what differs is how much text that frame holds, which is what decides where
+    the run stops and which of its frames are credit frames. Everything that reads a ``Coarse`` back --
+    :func:`coarse_end_s`, :func:`end_keyframe_s`, :func:`refine_end`, :func:`credits_end`, :func:`_run_rows` -- has to
+    be handed the same rows :func:`coarse_start` read, and answers silently differently if it isn't
+    (``test_detector.TestFindCredits.test_the_end_window_is_read_and_walked_without_the_bug``).
 
     Attributes:
-        index: The start's row in the keyframe rows.
+        index: The start's row in those rows.
         end_index: The run's last credit row in ffmpeg's output order, which is where the run stops, not when: the
-            run's latest time is :func:`coarse_end_s`.
+            run's latest time is :func:`coarse_end_s`. With an overlay it is the run's last row that is still a credit
+            frame once the overlay's boxes are gone, which can be earlier than the run's own last row.
         pts_s: The start's time.
+        run_index: The chosen run's own anchored start, when :func:`same_roll` or :func:`reach_back` moved the start
+            back before it; None when they didn't and ``index`` is that row itself. The end reads this one
+            (:func:`_run_rows`), so reaching a start back can never move an end (Q3).
     """
 
     index: int
     end_index: int
     pts_s: float
+    run_index: int | None = None
+
+
+def boxes_of(row: Row) -> tuple[Box, ...]:
+    """Where a frame's text is, or nothing when the row doesn't say.
+
+    Every row the app decodes carries its boxes (``frames.decode_rows``), and the harness refuses a stored decode that
+    doesn't. The rows that don't are the 80-file fixture's (``tests/fixtures/markers/credits_rule_j_80.json.gz``: the
+    prototype recorded how many boxes a frame held and never where they were) and a few raw tuples in the tests -- the
+    tests' own ``dark()`` and ``bright()`` rows do carry boxes, centred, so version 3's steps fire on them. A row
+    without them is read as a frame whose text could be anywhere: it has no overlay (:func:`overlay_boxes`) and is
+    never taken for a roll's own (:func:`same_roll`, :func:`reach_back`), so its answer is version 2's.
+    """
+    return row[3] if len(row) > 3 else ()
+
+
+def _iou(a: Box, b: Box) -> float:
+    """How much two boxes overlap, over the area they cover together.
+
+    Bounds are inclusive, so a side is ``b - a + 1``.
+    """
+    left, top = max(a[0], b[0]), max(a[1], b[1])
+    right, bottom = min(a[2], b[2]), min(a[3], b[3])
+    if right < left or bottom < top:
+        return 0.0
+    both = (right - left + 1) * (bottom - top + 1)
+    return both / ((a[2] - a[0] + 1) * (a[3] - a[1] + 1) + (b[2] - b[0] + 1) * (b[3] - b[1] + 1) - both)
+
+
+def _inside(box: Box, holder: Box) -> float:
+    """The share of ``box`` that lies inside ``holder``."""
+    left, top = max(box[0], holder[0]), max(box[1], holder[1])
+    right, bottom = min(box[2], holder[2]), min(box[3], holder[3])
+    if right < left or bottom < top:
+        return 0.0
+    return ((right - left + 1) * (bottom - top + 1)) / ((box[2] - box[0] + 1) * (box[3] - box[1] + 1))
+
+
+def overlay_boxes(rows: Sequence[Row], params: RuleParams = RULE_J) -> tuple[Box, ...]:
+    """The places where text sits on screen right across the story: a channel or score bug, a ticker, a burnt-in
+    timecode.
+
+    The story is the rows before the run rule J would otherwise pick, and only the story's boxes are gathered. That is
+    what keeps a roll long enough to fill the tail out of the gather while it is **one run** -- the lab's Heeramandi
+    episodes, a 462 s roll against a 450 s tail, put the same card in the same place for most of the rows and are not
+    read as their own overlay.
+
+    **It is not a roll the 24 s join split.** That roll's opening block and its names over footage sit in front of the
+    last run, so they are story to this step, and text held at one place across them is gathered exactly as a channel
+    bug would be. :func:`same_roll` then reads the keyframes between the blocks as blank and refuses the merge the
+    band step exists for, so the answer usually comes from the later block, where version 2 had it, the gain
+    forfeited. It is the one place version 3's two halves work against each other, and it needs a roll that fills
+    most of its own tail: no file of the sets, the lab or the 51 broadcast recordings has the shape, and every answer
+    the band steps move on them, the pair moves to the same second. The answer is **not** guaranteed to be no
+    earlier than version 2's: this step's own non-monotonicity applies here as everywhere -- thinning the chosen run
+    can stop the anchor stepping over a glued-on frame (see the module docstring) -- so this shape too is bounded by
+    the 24 s join and not by version 2. Three ways of reading round it were measured and each cost a measured
+    broadcast answer -- bounding the story by the merged roll, dropping the kept runs' own rows, and reading the
+    share on
+    the rows as decoded (``evidence/eval/phase3-harness.md``, "Tried and not taken (this round)"). Pinned by
+    ``test_rule_j.TestOverlayBoxes.test_a_split_roll_can_be_gathered_as_its_own_overlay``.
+
+    Boxes are gathered by overlap (``OVERLAY_IOU`` against the first box of each group, which is what the group is
+    named by). A group is an overlay when its first and last sighting are at least ``OVERLAY_SPAN_SHARE`` of the story
+    apart, and it was seen at least ``OVERLAY_LEAST`` times and at least ``OVERLAY_KEYFRAME_SHARE`` times the story's
+    row count. Sightings are boxes, not frames: two boxes of one frame that both land on the group count twice, which
+    is a word-for-word thing only where a bug's two lines sit on top of each other.
+
+    This is not :func:`text_all_through` one box at a time. That step asks how many keyframes carry *any* text and
+    refuses an answer for the whole file; this one asks where the text is, and takes away only the boxes that never
+    move, leaving the rest of the frame to be read as usual.
+
+    Args:
+        rows: Keyframe rows of the tail, in decode order.
+        params: Rule thresholds, deciding which run the story ends at.
+
+    Returns:
+        One box per overlay (the group's first), in the order the groups were opened. Empty when the rows hold no run
+        at all -- dropping boxes only ever takes credit frames away, so a file without a run can't gain one -- or when
+        the story is too short to tell an overlay from a shot.
+    """
+
+    runs = credit_runs(rows, params)
+    if not runs:
+        return ()
+    run_from = min(row[0] for row in rows[runs[-1][0] : runs[-1][1] + 1])
+    story = [row for row in rows if row[0] < run_from]
+    if len(story) < OVERLAY_LEAST:
+        return ()
+    times = [row[0] for row in story]
+    story_s = max(times) - min(times)
+    if story_s <= 0:
+        return ()
+    groups: list[list] = []  # [box, first seen, last seen, sightings]
+    for row in story:
+        pts = row[0]
+        for box in boxes_of(row):
+            best, best_iou = None, 0.0
+            for group in groups:
+                overlap = _iou(box, group[0])
+                if overlap >= OVERLAY_IOU and overlap > best_iou:
+                    best, best_iou = group, overlap
+            if best is None:
+                groups.append([box, pts, pts, 1])
+            else:
+                best[1], best[2], best[3] = min(best[1], pts), max(best[2], pts), best[3] + 1
+    least = max(OVERLAY_LEAST, OVERLAY_KEYFRAME_SHARE * len(story))
+    return tuple(
+        box
+        for box, first_s, last_s, seen in groups
+        if last_s - first_s >= OVERLAY_SPAN_SHARE * story_s and seen >= least
+    )
+
+
+def without_overlays(rows: Sequence[Row], overlays: Sequence[Box]) -> list[Row]:
+    """The rows with every box an overlay swallows dropped, and each row's count recounted.
+
+    Args:
+        rows: Any rows of the file (the tail's keyframes, a 1 fps window).
+        overlays: :func:`overlay_boxes` of that file's tail. Empty leaves the rows as they are.
+
+    Returns:
+        Rows of the same length and order, so an index into one indexes the other.
+    """
+    if not overlays:
+        return list(rows)
+    out = []
+    for row in rows:
+        if len(row) <= 3:
+            # A row that never recorded its boxes keeps the count it was measured with, rather than losing it to an
+            # overlay found on rows that did (:func:`boxes_of`).
+            out.append(row)
+            continue
+        kept = tuple(
+            box for box in row[3] if not any(_inside(box, overlay) >= OVERLAY_CONTAINMENT for overlay in overlays)
+        )
+        out.append((row[0], len(kept), row[2], kept))
+    return out
 
 
 def is_credit(row: Row, params: RuleParams = RULE_J) -> bool:
@@ -171,26 +392,27 @@ def _run_spacing(rows: Sequence[Row], first: int, last: int, params: RuleParams)
     return _typical_spacing(sorted(credit, key=lambda row: row[0]))
 
 
-def coarse_start(rows: Sequence[Row], params: RuleParams = RULE_J) -> Coarse | None:
-    """The last credit run's anchored start, or None when the rows hold no run.
+def _credit_bounds(rows: Sequence[Row], first: int, last: int, params: RuleParams) -> tuple[int, int] | None:
+    """One run's own credit frames, as the rows the anchor reads have them, or None when fewer than two are left.
 
-    Args:
-        rows: Keyframe rows of the tail, in decode order.
-        params: Rule thresholds.
-
-    Returns:
-        The coarse start, or None.
+    :func:`credit_runs` can't return a run of one frame, and both ends of one it does return are credit frames. That
+    stops holding once the overlays are dropped: a run the bug accounted for all but one of isn't a roll either, and
+    taking it would make a start that is also its own end. With no overlay to drop this is the run itself.
     """
-    runs = credit_runs(rows, params)
-    if not runs:
-        return None
-    first, last = runs[-1]
-    # Start only where two credit samples sit next to each other: the 24 s join lets one story-scene text frame glue
-    # itself onto the roll (Undisputed: a lone scene-text frame 24 s before it). Only ever the one frame, though --
-    # see ANCHOR_MAX_STEPS. The slice below is [first:last+1], not last+2: the run's own credit frames are what the
-    # yardstick measures, so a row outside the run is out of scope whatever it is -- including the rare case where
-    # it's itself a credit frame (a trailing run under run_s gets dropped by credit_runs, so runs[-1] can leave one
-    # sitting right past last when decode order is non-monotonic).
+    credit = [i for i in range(first, last + 1) if is_credit(rows[i], params)]
+    return (credit[0], credit[-1]) if len(credit) >= 2 else None
+
+
+def _anchored(rows: Sequence[Row], first: int, last: int, params: RuleParams) -> int:
+    """One run's anchored start row, read from ``rows``: the rule's rows with the overlays' boxes dropped.
+
+    Start only where two credit samples sit next to each other: the 24 s join lets one story-scene text frame glue
+    itself onto the roll (Undisputed: a lone scene-text frame 24 s before it). Only ever the one frame, though --
+    see ANCHOR_MAX_STEPS. The slice ``_run_spacing`` measures is [first:last+1], not last+2: the run's own credit
+    frames are what the yardstick measures, so a row outside the run is out of scope whatever it is -- including the
+    rare case where it's itself a credit frame (a trailing run under ``run_s`` gets dropped by :func:`credit_runs`, so
+    ``runs[-1]`` can leave one sitting right past ``last`` when decode order is non-monotonic).
+    """
     spacing = _run_spacing(rows, first, last, params)
     steps = 0
     while first < last and steps < ANCHOR_MAX_STEPS:
@@ -207,7 +429,239 @@ def coarse_start(rows: Sequence[Row], params: RuleParams = RULE_J) -> Coarse | N
             break
         first = following
         steps += 1
-    return Coarse(index=first, end_index=last, pts_s=rows[first][0])
+    return first
+
+
+def band_of(rows: Sequence[Row], first: int, last: int, params: RuleParams = RULE_J) -> float | None:
+    """Where one run's text sits across the frame: the median horizontal middle of its credit frames' boxes.
+
+    Args:
+        rows: Keyframe rows of the tail, in decode order.
+        first: The run's first row index.
+        last: The run's last row index.
+        params: Rule thresholds, deciding which of the run's rows are credit frames.
+
+    Returns:
+        The middle in pixels of the frame's own 320 across, or None when the run's credit frames hold no box (every
+        one of them is a dark frame the detector found no text on -- ``min_boxes`` counts boxes, and a run can be
+        joined out of frames that have none).
+    """
+    centres = [
+        (box[0] + box[2] + 1) / 2 for row in rows[first : last + 1] if is_credit(row, params) for box in boxes_of(row)
+    ]
+    return median(centres) if centres else None
+
+
+def in_band(row: Row, band: float) -> bool:
+    """Whether a frame's text sits in a roll's band (:func:`band_of`), so it can be that roll's own.
+
+    ``BAND_TOLERANCE_PX`` is read in the body rather than bound as a default, so that a sweep which monkeypatches the
+    constant reaches this test as well as :func:`same_roll`'s.
+
+    Args:
+        row: The frame.
+        band: The roll's band.
+
+    Returns:
+        Whether the middle of this frame's boxes is within ``BAND_TOLERANCE_PX`` of ``band``. A frame with no box
+        never is.
+    """
+    boxes = boxes_of(row)
+    if not boxes:
+        return False
+    return abs(median((box[0] + box[2] + 1) / 2 for box in boxes) - band) <= BAND_TOLERANCE_PX
+
+
+def same_roll(rows: Sequence[Row], runs: Sequence[tuple[int, int]], params: RuleParams = RULE_J) -> int:
+    """How far back the last run's own roll reaches: the index in ``runs`` of its earliest run (spec §13 item 14).
+
+    Rule J keeps the **last** run, so a roll the 24 s join splits -- its opening block names over bright footage, a
+    long gap in the middle -- is answered from a later block, 80.7 s late against Plex at the median on the 205-movie
+    set. Two runs are one roll when both of these hold, and neither is a distance:
+
+    * **The same band.** Both runs' text sits at the same place across the frame (:func:`band_of` within
+      ``BAND_TOLERANCE_PX``). A roll keeps its layout from card to card; a scene's signs, captions and lower thirds
+      don't share one with it except by chance.
+    * **The text never stops.** At least ``ROLL_TEXT_SHARE`` of the keyframes between the two runs carry a box, and
+      there is at least one such keyframe. A roll whose opening is names over footage reads 1-2 boxes on almost every
+      keyframe -- under the 3 a lit frame needs to be a credit frame, which is why the join broke -- while story
+      between two blocks of text is mostly blank.
+
+    ``runs`` is found on the rows as they were decoded; ``rows`` here is what the rule reads, which after
+    :func:`without_overlays` is those rows without the boxes that never move. Both tests read it: a channel bug sits
+    at one place on every frame it is on, so read as decoded it carries its own band across every run of a broadcast
+    tail and makes "the text never stops" true of any two of them. An earlier run the overlay leaves fewer than two
+    credit frames of is no more a roll than the last one would be (:func:`_credit_bounds`), so the merge stops there.
+
+    The cost of reading the suppressed rows is the one place version 3's two halves work against each other: a roll
+    that fills most of its tail and that the 24 s join split has its own opening block and names over footage in front
+    of the last run, which is where :func:`overlay_boxes` looks for its story, so the roll's text can be gathered as
+    an overlay and the keyframes between the blocks then read as blank -- and this merge is refused. See
+    :func:`overlay_boxes`; no file of the sets, the lab or the 51 broadcast recordings has that shape, and every way
+    of reading round it that was measured cost a broadcast answer
+    (``evidence/eval/phase3-harness.md``, "Tried and not taken (this round)").
+
+    Args:
+        rows: Keyframe rows of the tail, in decode order, with the overlays' boxes already dropped.
+        runs: :func:`credit_runs`' runs of the rows as decoded, at least one.
+        params: Rule thresholds.
+
+    Returns:
+        The index in ``runs`` to take the start from: ``len(runs) - 1`` (the last run alone) unless an earlier run
+        joined it.
+    """
+    band = band_of(rows, runs[-1][0], runs[-1][1], params)
+    if band is None:
+        return len(runs) - 1
+    keep = len(runs) - 1
+    while keep > 0:
+        bounds = _credit_bounds(rows, *runs[keep - 1], params)
+        if bounds is None:
+            break
+        first, last = bounds
+        earlier = band_of(rows, first, last, params)
+        if earlier is None or abs(earlier - band) > BAND_TOLERANCE_PX:
+            break
+        ends = max(rows[i][0] for i in range(first, last + 1) if is_credit(rows[i], params))
+        starts = min(rows[i][0] for i in range(runs[keep][0], runs[keep][1] + 1) if is_credit(rows[i], params))
+        # No keyframe between the two runs is no evidence that the text carried across, so it is no merge -- and a
+        # pair whose times run the wrong way round (decode order can leave a later run at a lower index) has none by
+        # construction, which is how that is refused too.
+        between = [row for row in rows if ends < row[0] < starts]
+        if not between or sum(1 for row in between if row[1] >= 1) < ROLL_TEXT_SHARE * len(between):
+            break
+        keep -= 1
+    return keep
+
+
+def reach_back(
+    rows: Sequence[Row], index: int, first: int, last: int, params: RuleParams = RULE_J, *, run: range | None = None
+) -> int:
+    """Step the start back over earlier keyframes that are the roll's own (spec §13 item 14).
+
+    The roll's opening names over footage read 1-2 boxes on a lit frame, so they are not credit frames and the run
+    starts after them. A keyframe before the start is taken for more of the same roll when its text sits in the run's
+    band (:func:`in_band`) and it is no further from the frame the walk is on than the run's own cadence reaches:
+    ``ANCHOR_SPACING_FACTOR`` times the spacing of the run's credit frames, and never more than the 24 s join. The
+    cadence is what keeps the walk out of story: a roll puts text on its keyframes at a steady rate, while a scene's
+    signage is sporadic, and the first gap wider than the roll's own stops the walk.
+
+    ``first`` and ``last`` are the run the walk **starts from**, which after :func:`same_roll` merged an earlier run
+    into the roll is that earlier run, not the last one. Measuring against the last run instead would hand a block of
+    16 s cards' cadence to a walk starting in a block of 2 s cards and let it run 400 s into story.
+
+    The band is the only thing the walk steps onto -- a credit frame out of the band is not the roll's. Taking any
+    credit frame as well, whatever its band, lets the walk cross in-band text onto an earlier run :func:`same_roll`
+    has just refused on that band, which makes the merge's own test moot
+    (``test_rule_j.TestReachBack.test_it_stops_at_a_credit_frame_outside_the_band``). It moves no answer on either
+    set, the lab or the 51 broadcast recordings, on either decode path, and it can only ever take candidates away --
+    starts move later or stay -- so the narrower rule ships.
+
+    The dark bridge is deliberately not honoured here: :func:`credit_runs` has already joined everything it reaches
+    across dark frames, so a stretch the run stopped at holds a lit frame. Letting the walk cross it as well takes the
+    start into dark scenes: two more of the 205 land over 10 s before their chapter and both publish at High
+    (17 wrong against 15; ``evidence/eval/phase3-harness.md``, "Tried and not taken (this round)").
+
+    Nor does the walk step onto a row of ``run`` itself. The anchor has already ruled on those: where it stepped over a
+    glued-on frame, stepping back onto it would undo that ruling, and on Marvel's Daredevil S03 -- where decode order
+    put the anchor's next credit row two frames along -- the walk undid it twice and took the start 10 s earlier, into
+    a published answer more than 10 s before the chapter.
+
+    The rows are what the rule reads -- the decoded rows without the overlays' boxes. Read raw, a keyframe whose only
+    box is a channel bug is in the roll's band whenever the bug is, and the walk crosses the whole story on it: that
+    is what cost two right answers on the broadcast recordings when the two halves of version 3 were measured apart
+    (``evidence/eval/broadcast-tv.md``).
+
+    Args:
+        rows: Keyframe rows of the tail, in decode order, with the overlays' boxes already dropped.
+        index: The anchored start to walk back from.
+        first: The first credit row of the run ``index`` came from -- its band and cadence are the yardstick.
+        last: That run's last credit row.
+        params: Rule thresholds.
+        run: The row indices of that run, which the walk steps over rather than onto; None to walk over every earlier
+            row.
+
+    Returns:
+        The row the start walks back to, or ``index`` when nothing before it is the roll's.
+    """
+    band = band_of(rows, first, last, params)
+    if band is None:
+        return index
+    limit = min(params.gap_s, ANCHOR_SPACING_FACTOR * _run_spacing(rows, first, last, params))
+    inside = frozenset(run or ())
+    # Presentation order, not ffmpeg's: the walk asks what comes *before* this frame, and the measured keyframe rows
+    # aren't always increasing. Read in decode order a swapped pair puts a later frame before the start, and the walk
+    # steps onto it -- the start then sits inside the roll, which is the mistake ``fade_back`` and ``coarse_end_s``
+    # each had to be fixed for.
+    order = sorted(range(len(rows)), key=lambda i: rows[i][0])
+    at = order.index(index)
+    while at > 0:
+        before = at - 1
+        while before >= 0 and (order[before] in inside or not in_band(rows[order[before]], band)):
+            before -= 1
+        if before < 0 or rows[order[at]][0] - rows[order[before]][0] > limit:
+            break
+        at = before
+    return order[at]
+
+
+def coarse_start(
+    rows: Sequence[Row], params: RuleParams = RULE_J, *, without: Sequence[Row] | None = None
+) -> Coarse | None:
+    """The last credit run's start, reached back over the rest of its own roll, or None when the rows hold no run.
+
+    ``without`` is the same rows with the overlays' boxes dropped (:func:`without_overlays`). The runs are still found
+    on ``rows``, so which run is the last one, and how long it has to be, are exactly what they were before overlays
+    existed. Everything that reads a frame's own text then reads ``without``: which of a run's frames are credit
+    frames, the spacing the anchor measures, :func:`same_roll`'s bands and the share of texted keyframes between two
+    runs, and :func:`reach_back`'s band and cadence. A run whose every credit frame was the overlay's -- a channel bug
+    over a night scene -- is not a roll and gives None; a roll the bug merely sat on top of keeps its answer, and one
+    the bug started early keeps only its own first card. Passing nothing reads the rows as they are, which is what the
+    rule's own tests do.
+
+    The two steps are in that order for a reason. Read raw, :func:`reach_back` walks back over story keyframes whose
+    only box is the bug -- on broadcast recordings that is most of them -- and the band's proof goes with it.
+
+    Args:
+        rows: Keyframe rows of the tail, in decode order.
+        params: Rule thresholds.
+        without: The same rows, same order, with the overlays' boxes dropped.
+
+    Returns:
+        The coarse start, or None.
+
+    Raises:
+        ValueError: ``without`` isn't the same rows -- the two are indexed together, and a shorter or reordered list
+            would read another frame's boxes.
+    """
+    if without is not None and [row[0] for row in without] != [row[0] for row in rows]:
+        raise ValueError(f"`without` must be the same rows in the same order: {len(without)} against {len(rows)}")
+    runs = credit_runs(rows, params)
+    if not runs:
+        return None
+    read = rows if without is None else without
+    chosen = _credit_bounds(read, *runs[-1], params)
+    if chosen is None:
+        return None
+    anchored = _anchored(read, *chosen, params)
+    keep = same_roll(read, runs, params)
+    walk_run, walk_from, start = runs[-1], chosen, anchored
+    if keep != len(runs) - 1:
+        # :func:`same_roll` only merges a run whose band it could read, so these bounds are never None; falling back
+        # to the last run rather than raising keeps a mismatched ``params`` from turning into an exception here.
+        bounds = _credit_bounds(read, *runs[keep], params)
+        if bounds is not None:
+            walk_run, walk_from = runs[keep], bounds
+            start = _anchored(read, *walk_from, params)
+    # The rows the walk may not step *onto* are the whole run it starts from as it was decoded, overlay rows included:
+    # the anchor has already ruled on them, and a row the overlay emptied is no more the walk's to take.
+    start = reach_back(read, start, *walk_from, params, run=range(walk_run[0], walk_run[1] + 1))
+    return Coarse(
+        index=start,
+        end_index=chosen[1],
+        pts_s=read[start][0],
+        run_index=None if start == anchored else anchored,
+    )
 
 
 def text_all_through(rows: Sequence[Row], coarse: Coarse) -> bool:
@@ -227,7 +681,7 @@ def text_all_through(rows: Sequence[Row], coarse: Coarse) -> bool:
 
     Args:
         rows: Keyframe rows of the tail, in decode order.
-        coarse: The run's anchored start.
+        coarse: The coarse start (the run's anchored start, reached back over the rest of the roll).
 
     Returns:
         True when there should be no answer.
@@ -250,23 +704,35 @@ def opens_on_the_run(rows: Sequence[Row], coarse: Coarse, params: RuleParams = R
 
     Args:
         rows: Keyframe rows of the tail, in decode order.
-        coarse: The run's anchored start.
+        coarse: The coarse start (the run's anchored start, reached back over the rest of the roll).
         params: Rule thresholds.
 
     Returns:
         Whether the rows before the tail are worth reading.
+
+    Raises:
+        ValueError: ``rows`` holds no run, so there is none to ask about. This step finds the runs again, so it is
+            handed the rows as they were decoded, exactly as :func:`coarse_start` was -- the rows with an overlay's
+            boxes dropped can hold no run at all while ``coarse`` is still an answer (a bug over a night scene with
+            two cards in it).
     """
     if coarse.pts_s - min(row[0] for row in rows) >= STORY_BEFORE_RUN_S:
         return False
-    first = credit_runs(rows, params)[-1][0]
-    return all(row[2] < params.dark for row in rows[:first])
+    runs = credit_runs(rows, params)
+    if not runs:
+        raise ValueError("these rows hold no run: ask the rows the coarse start was found on")
+    return all(row[2] < params.dark for row in rows[: runs[-1][0]])
 
 
-def joined_before(before: Sequence[Row], rows: Sequence[Row], params: RuleParams = RULE_J) -> list[Row] | None:
+def joined_before(
+    before: Sequence[Row], rows: Sequence[Row], params: RuleParams = RULE_J, *, overlays: Sequence[Box] = ()
+) -> list[Row] | None:
     """The rows read before the tail put ahead of the tail's own, when the tail's run continues into them.
 
     Rows of ``before`` at or after the tail's first row are the tail's own and are dropped. The join is kept only when
-    its anchored start (:func:`coarse_start`) lies before the tail's first row: the roll really began before the tail.
+    its coarse start (:func:`coarse_start`) lies before the tail's first row: the roll really began before the tail.
+    Version 3's reach back can carry that start across the tail's edge itself, onto in-band text in the window read
+    before it, which is another way the same test is met.
     A run that stays inside the tail (dark story before a caption run, then lit story in the rows before) is judged on
     the tail alone, as before, and has no answer. So is a roll whose one card before the tail the anchor steps over
     (more than 1.5 x the roll's spacing from the next card, and within 24 s of it): no answer, where the same rows read
@@ -279,13 +745,16 @@ def joined_before(before: Sequence[Row], rows: Sequence[Row], params: RuleParams
         before: Keyframe rows of the window before the tail, in decode order.
         rows: Keyframe rows of the tail, in decode order.
         params: Rule thresholds.
+        overlays: The tail's own overlays (:func:`overlay_boxes`), which the joined rows are read without. They are
+            not gathered again from the joined rows: a roll that began before the tail is exactly the shape that must
+            not be read as its own overlay. Empty reads the joined rows as they are.
 
     Returns:
-        The joined rows, or None when the tail is to be judged alone.
+        The joined rows as decoded, or None when the tail is to be judged alone.
     """
     tail_first_s = min(row[0] for row in rows)
     joined = [*(row for row in before if row[0] < tail_first_s), *rows]
-    coarse = coarse_start(joined, params)
+    coarse = coarse_start(joined, params, without=without_overlays(joined, overlays) if overlays else None)
     return joined if coarse is not None and coarse.pts_s < tail_first_s else None
 
 
@@ -359,13 +828,26 @@ def credits_start(
     and the harness through it, decode the fine rows only after they know the coarse start).
 
     Returns:
-        The credits start in seconds, or None when the keyframe rows hold no credit run or its text is on screen all
-        through the tail (:func:`text_all_through`).
+        The credits start in seconds, or None when the keyframe rows hold no credit run, when the overlay leaves the
+        chosen run fewer than two credit frames (:func:`coarse_start`), or when its text is on screen all through the
+        tail (:func:`text_all_through`).
     """
-    coarse = coarse_start(rows, params)
+    overlays = overlay_boxes(rows, params)
+    rule_rows = without_overlays(rows, overlays)
+    coarse = coarse_start(rows, params, without=rule_rows)
+    # The guard counts the rows as they were decoded, exactly as the detector does: see :func:`overlay_boxes`.
     if coarse is None or text_all_through(rows, coarse):
         return None
-    return refine_start(rows, coarse, fine_rows, before_s=before_s, params=params)
+    return refine_start(rule_rows, coarse, without_overlays(fine_rows, overlays), before_s=before_s, params=params)
+
+
+def _run_rows(rows: Sequence[Row], coarse: Coarse) -> Sequence[Row]:
+    """The chosen run's own rows, from its anchored start to where it stops.
+
+    Not from ``coarse.index``: version 3's :func:`same_roll` and :func:`reach_back` may have moved the start back
+    before the run, and the end is decided from the run alone, exactly as version 2 decided it.
+    """
+    return rows[(coarse.index if coarse.run_index is None else coarse.run_index) : coarse.end_index + 1]
 
 
 def coarse_end_s(rows: Sequence[Row], coarse: Coarse, params: RuleParams = RULE_J) -> float:
@@ -379,7 +861,7 @@ def coarse_end_s(rows: Sequence[Row], coarse: Coarse, params: RuleParams = RULE_
 
     Args:
         rows: Keyframe rows of the tail, in decode order.
-        coarse: The coarse start (``index`` and ``end_index`` bound the run).
+        coarse: The coarse start (:func:`_run_rows` bounds the run; ``index`` may be earlier).
         params: Rule thresholds, deciding which of the run's rows are credit frames.
 
     Returns:
@@ -388,7 +870,7 @@ def coarse_end_s(rows: Sequence[Row], coarse: Coarse, params: RuleParams = RULE_
         case this degrades to the run's last row rather than raising on an empty ``max()``.
     """
     return max(
-        (row[0] for row in rows[coarse.index : coarse.end_index + 1] if is_credit(row, params)),
+        (row[0] for row in _run_rows(rows, coarse) if is_credit(row, params)),
         default=rows[coarse.end_index][0],
     )
 
@@ -411,7 +893,7 @@ def end_keyframe_s(rows: Sequence[Row], coarse: Coarse, params: RuleParams = RUL
 
     Args:
         rows: Keyframe rows of the tail, in decode order.
-        coarse: The coarse start (``index`` and ``end_index`` bound the run).
+        coarse: The coarse start (:func:`_run_rows` bounds the run; ``index`` may be earlier).
         params: Rule thresholds.
 
     Returns:
@@ -423,7 +905,7 @@ def end_keyframe_s(rows: Sequence[Row], coarse: Coarse, params: RuleParams = RUL
 def _end_keyframes(rows: Sequence[Row], coarse: Coarse, params: RuleParams) -> tuple[float, float | None]:
     """:func:`end_keyframe_s`, and when it stepped back over glued-on scene text, the scene's first keyframe (the
     first lit one with no text after the roll's last card; else None)."""
-    run = rows[coarse.index : coarse.end_index + 1]
+    run = _run_rows(rows, coarse)
     credit = sorted((row for row in run if is_credit(row, params)), key=lambda row: row[0])
     if len(credit) < 3:
         return coarse_end_s(rows, coarse, params), None

@@ -8,8 +8,10 @@ seconds so the item's tail window starts at 1000 s, rows keep only ``[pts, boxes
 
 The rows carry no box positions, unlike the app's own rows (``rule_j.Row``): the prototype that measured them recorded
 how many boxes a frame held and never where they were, and re-measuring these files would replace the very rows the
-port is pinned against. Rule J reads no positions, so this fixture still pins every one of its answers; a rule that
-reads them is measured on the harness's decode cache, or on ``credits_synth_lab.json.gz``
+port is pinned against. A row without positions is read as a frame whose text could be anywhere
+(``rule_j.boxes_of``), so none of rule J version 3's three position steps fires here and this fixture still pins every
+one of its answers as version 2 gave them; those steps are measured on the harness's decode cache, or on
+``credits_synth_lab.json.gz``
 (``tools/markers_eval/credits_synth_fixture.py``). Before writing, every item is checked against the prototype
 (``credits/eval_rules3.py`` ``detect``, refine span 20 s): the port on the shifted rows must give the prototype's
 error within 1.5 ms, or the script stops (an unshifted item would keep real timings; none needed it while planning).

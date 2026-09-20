@@ -269,6 +269,208 @@ class TestFindCredits:
         assert (decodes.calls[2]["start_s"], decodes.calls[2]["length_s"]) == (838.0, 21.0)
         assert (result.start_s, result.end_s) == (858.0, None)
 
+    def test_a_bug_over_the_story_doesnt_start_the_roll_early(self, monkeypatch, probes):
+        # Spec §13 item 15, the shape this rule is for: a channel logo boxed now and then over lit story, and on every
+        # keyframe of the night scene that ends it. A dark frame needs one box, so version 2 reads that scene as the
+        # roll's opening and starts 30 s of story early. The logo is in the same place right across the story, so
+        # version 3 doesn't count it inside the run and the start lands on the roll's first card -- in the keyframes
+        # and in the 1 fps rows, which are read without it too.
+        bug = (4, 6, 46, 24)
+        story = [
+            (5100.0 + 2 * i, 1, 120.0, (bug,)) if i % 4 == 0 else (5100.0 + 2 * i, 0, 120.0, ()) for i in range(285)
+        ]
+        night = [(5670.0 + 2 * i, 1, 12.0, (bug,)) for i in range(15)]  # 5670-5698 s: credit frames to version 2
+        roll = [(5700.0 + 2 * i, 3, 12.0, (*CARDS, bug)) for i in range(100)]
+        fine = [(float(t), 1, 12.0, (bug,)) for t in range(5680, 5700)]
+        fine += [(float(t), 3, 12.0, (*CARDS, bug)) for t in range(5700, 5702)]
+        decodes = Decodes(story + night + roll, fine)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=5_910_000, is_episode=False, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        rows = story + night + roll
+        assert rule_j.overlay_boxes(rows) == (bug,)
+        assert rule_j.coarse_start(rows).pts_s == 5670.0  # what version 2 answers
+        assert result.start_s == 5700.0
+        # The rows the result carries are the ones that were decoded, bug boxes and all; the overlays it read them
+        # without ride along, because anything reading the rows back has to be handed them (`epilogue_like`).
+        assert (result.key_rows, result.fine_rows, result.end_rows) == (tuple(rows), tuple(fine), ())
+        assert result.overlays == (bug,)
+        assert [(c["start_s"], c["length_s"]) for c in decodes.calls] == [(5010.0, None), (5680.0, 21.0)]
+
+    def test_the_end_window_is_read_and_walked_without_the_bug(self, monkeypatch, probes):
+        # A dark scene after the roll, under the same channel bug: to the rows as they were decoded every one of its
+        # frames is a credit frame (dark, one box), so the end would walk 19 s into the scene -- or, with a longer
+        # scene, stop being an end at all and let the skip run to the end of the file. The end keyframe, the end
+        # window and the 1 fps walk all read the run without the bug.
+        bug = (4, 6, 46, 24)
+        story = [
+            (5100.0 + 2 * i, 1, 120.0, (bug,)) if i % 4 == 0 else (5100.0 + 2 * i, 0, 120.0, ()) for i in range(300)
+        ]
+        roll = [(5700.0 + 2 * i, 3, 12.0, (*CARDS, bug)) for i in range(35)]  # 5700-5768 s
+        # ffmpeg's keyframe rows aren't always increasing (T-R5). This one is the scene's first frame, emitted inside
+        # the roll: a credit frame to the rows as they were decoded, and later than every card, so reading them would
+        # put the run's latest credit frame 2 s into the scene and stretch the end window with it.
+        roll.insert(30, (5770.0, 1, 12.0, (bug,)))
+        scene = [(5772.0 + 2 * i, 1, 12.0, (bug,)) for i in range(59)]  # 5772-5888 s, dark, the bug its only text
+        fine = [(float(t), 1, 120.0, (bug,)) for t in range(5680, 5700)]
+        fine += [(float(t), 3, 12.0, (*CARDS, bug)) for t in range(5700, 5702)]
+        end = [(float(t), 3, 12.0, (*CARDS, bug)) for t in range(5767, 5770)]
+        end += [(float(t), 1, 12.0, (bug,)) for t in range(5770, 5792)]
+        decodes = Decodes(story + roll + scene, fine, end)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        rows = story + roll + scene
+        without = rule_j.without_overlays(rows, (bug,))
+        coarse = rule_j.coarse_start(rows, without=without)
+        assert rule_j.credits_end(without, coarse, end, 6000.0) == 5788.0  # reading the 1 fps rows as they are
+        assert (result.start_s, result.end_s) == (5700.0, 5769.0)  # the roll's last 1 fps credit frame
+        assert result.overlays == (bug,)  # the return path that carries an end keeps them too
+        # The end window runs from the roll's last card to 20 s past it, not from the scene's last bug frame.
+        assert (decodes.calls[2]["start_s"], decodes.calls[2]["length_s"]) == (5767.0, 21.0)
+
+    def test_the_end_steps_back_over_scene_text_only_because_the_bug_is_gone(self, monkeypatch, probes):
+        # Version 2's end step-back (§13 item 13) needs a lit keyframe with *no* text between the roll's last card and
+        # the scene text the 24 s join glued on. Under a channel bug no keyframe ever reads zero boxes, so the step
+        # back can only ever fire on the run read without it.
+        bug = (4, 6, 46, 24)
+        story = [
+            (5100.0 + 2 * i, 1, 120.0, (bug,)) if i % 4 == 0 else (5100.0 + 2 * i, 0, 120.0, ()) for i in range(300)
+        ]
+        roll = [(5700.0 + 2 * i, 3, 12.0, (*CARDS, bug)) for i in range(21)]  # 5700-5740 s
+        glued = [(5750.0, 1, 120.0, (bug,)), (5760.0, 4, 120.0, (*CARDS, CARDS[0], bug))]  # scene, then its text
+        glued += [(5770.0 + 2 * i, 1, 120.0, (bug,)) for i in range(60)]
+        fine = [(float(t), 1, 120.0, (bug,)) for t in range(5680, 5700)]
+        fine += [(float(t), 3, 12.0, (*CARDS, bug)) for t in range(5700, 5702)]
+        end = [(float(t), 3, 12.0, (*CARDS, bug)) for t in range(5739, 5742)]
+        end += [(float(t), 1, 120.0, (bug,)) for t in range(5742, 5781)]
+        decodes = Decodes(story + roll + glued, fine, end)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        rows = story + roll + glued
+        coarse = rule_j.coarse_start(rows, without=rule_j.without_overlays(rows, (bug,)))
+        assert rule_j.end_keyframe_s(rows, coarse) == 5760.0  # reading the run as it was decoded: no step back
+        assert (decodes.calls[2]["start_s"], decodes.calls[2]["length_s"]) == (5739.0, 5760.0 + 20.0 - 5739.0)
+        assert (result.start_s, result.end_s) == (5700.0, 5741.0)  # the skip stops on the roll, not in the scene
+
+    def test_the_run_is_the_one_the_decoded_rows_give_not_the_suppressed_ones(self, monkeypatch, probes):
+        # A night scene under the bug after the roll. Version 2 answers on it; version 3 keeps it as the run the rows
+        # as decoded give, finds no credit frame of its own in it, and answers nothing. Dropping the bug's boxes
+        # *before* the runs are found would hand the answer to the earlier roll instead -- on Mayday S11E11 that moved
+        # a wrong answer 209 s earlier, onto story (evidence/eval/broadcast-tv.md).
+        bug = (4, 6, 46, 24)
+        lit = lambda t, i: (t, 1, 120.0, (bug,)) if i % 4 == 0 else (t, 0, 120.0, ())  # noqa: E731
+        rows = [lit(5100.0 + 2 * i, i) for i in range(150)]
+        rows += [(5400.0 + 2 * i, 2, 12.0, CARDS) for i in range(50)]  # a roll, with no bug on it
+        rows += [lit(5500.0 + 2 * i, i) for i in range(100)]
+        rows += [(5700.0 + 2 * i, 1, 12.0, (bug,)) for i in range(20)]  # the night scene the bug makes a run of
+        decodes = Decodes(rows)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert rule_j.overlay_boxes(rows) == (bug,)
+        assert rule_j.coarse_start(rows).pts_s == 5700.0  # what version 2 answers
+        without = rule_j.without_overlays(rows, (bug,))
+        assert rule_j.coarse_start(without).pts_s == 5400.0  # what suppressing before the runs would answer
+        assert (result.start_s, result.fine_rows) == (None, ())
+        assert result.overlays == (bug,)  # the no-answer return path keeps them as well
+        assert len(decodes.calls) == 1
+
+    def test_a_run_the_bug_leaves_too_short_asks_the_decoded_rows_for_the_runs(self, monkeypatch, probes):
+        # The run starts 16 s into the tail, so opens_on_the_run is asked; without the bug it holds two credit frames
+        # 4 s apart, which is no run at all. Everything that looks for the runs reads the rows as they were decoded --
+        # asking opens_on_the_run for the suppressed ones is a ValueError on the empty run list.
+        bug = (4, 6, 46, 24)
+        tail = [(870.0 + 2 * i, 1, 120.0, (bug,)) if i % 2 == 0 else (870.0 + 2 * i, 0, 120.0, ()) for i in range(8)]
+        tail += [(886.0 + 2 * i, 1, 12.0, (bug,)) for i in range(16)]  # 886-916 s under the bug
+        tail = [(row[0], 2, 12.0, (bug, CARDS[0])) if row[0] in (890.0, 894.0) else row for row in tail]
+        tail += [(918.0 + 2 * i, 0, 120.0, ()) for i in range(200)]
+        decodes = Decodes(tail)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        without = rule_j.without_overlays(tail, rule_j.overlay_boxes(tail))
+        coarse = rule_j.coarse_start(tail, without=without)
+        assert rule_j.overlay_boxes(tail) == (bug,) and rule_j.credit_runs(without) == []
+        assert coarse.pts_s == 890.0  # two frames left: a start, but no run
+        with pytest.raises(ValueError, match="hold no run"):
+            rule_j.opens_on_the_run(without, coarse)  # what asking the suppressed rows for the runs would do
+        assert rule_j.opens_on_the_run(tail, coarse) is False  # story came first: nothing before the tail is read
+        result = detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        # 20 s of tail before the run is under the 30 s floor, so there is no answer and no refine window either.
+        assert (result.start_s, result.fine_rows) == (None, ())
+        assert len(decodes.calls) == 1
+
+    def test_a_roll_that_began_before_the_tail_keeps_the_tails_overlays(self, monkeypatch, probes):
+        # The tail opens on a roll under the channel bug, so the 120 s before it are read. The tail holds under 30 s
+        # of story, so it has no overlay of its own; the bug is boxed on the story the join just decoded, and the
+        # overlays are not re-gathered from it -- a roll that began before the tail is exactly the shape that must not
+        # be read as its own overlay. The answer is the roll's first card, as it is without the bug.
+        bug = (4, 6, 46, 24)
+        tail = [(870.0 + 2 * i, 4, 10.0, (*CARDS, CARDS[0], bug)) for i in range(225)]  # the roll to the end
+        before = [
+            (750.0 + 2 * i, 1, 120.0, (bug,)) if i % 4 == 0 else (750.0 + 2 * i, 0, 120.0, ()) for i in range(54)
+        ]  # 750-856 s of story, the bug boxed on one keyframe in four
+        before += [(858.0 + 2 * i, 4, 10.0, (*CARDS, CARDS[0], bug)) for i in range(7)]
+        fine = [(float(t), 1, 120.0, (bug,)) if t % 4 == 0 else (float(t), 0, 120.0, ()) for t in range(838, 858)]
+        fine += [(float(t), 4, 10.0, (*CARDS, CARDS[0], bug)) for t in range(858, 860)]
+        decodes = Decodes(tail, before, fine)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        result = detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert rule_j.overlay_boxes(tail) == ()  # the tail's own story is 0 rows
+        assert rule_j.overlay_boxes([*before[:-1], *tail]) == (bug,)  # re-gathering would call the roll's bug one
+        assert (result.start_s, result.end_s) == (858.0, None)
+        assert result.key_rows == (*before[:-1], *tail)
+        assert result.overlays == ()  # the tail's own, which is none here -- not the joined rows' (bug,)
+        assert [c["start_s"] for c in decodes.calls] == [870.0, 750.0, 838.0]
+
+    def test_the_joined_rows_are_read_with_the_tails_own_overlays(self, monkeypatch, probes):
+        # The one shape where the tail both takes the join and holds an overlay: four keyframes emitted after the
+        # whole roll yet timestamped before its earliest frame, so they fall in the story `overlay_boxes` takes by
+        # time while `opens_on_the_run`'s darkness check reads decode order. Nothing measured reorders that far, but
+        # the branch has to apply the tail's overlays to the joined rows, not read them as they were decoded.
+        bug = (4, 6, 46, 24)
+        tail = [(870.0 + 2 * i, 4, 10.0, (*CARDS, CARDS[0], bug)) for i in range(225)]
+        tail += [(t, 1, 120.0, (bug,)) for t in (862.0, 864.0, 866.5, 868.5)]
+        before = [(750.0 + 2 * i, 0, 12.0, ()) for i in range(21)]
+        before += [(792.0 + 2 * i, 1, 12.0, (bug,)) if i % 4 == 0 else (792.0 + 2 * i, 0, 12.0, ()) for i in range(33)]
+        before += [(858.0 + 2 * i, 4, 10.0, (*CARDS, CARDS[0], bug)) for i in range(7)]
+        fine = [(float(t), 0, 12.0, ()) for t in range(838, 858)]
+        fine += [(float(t), 4, 10.0, (*CARDS, CARDS[0], bug)) for t in range(858, 860)]
+        decodes = Decodes(tail, before, fine)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        assert rule_j.overlay_boxes(tail) == (bug,)
+        result = detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        joined = [*(row for row in before if row[0] < 862.0), *tail]
+        assert rule_j.coarse_start(joined).pts_s == 800.0  # reading the joined rows as they were decoded
+        assert result.start_s == 858.0
+        assert result.overlays == (bug,)  # the tail's own, carried onto the joined rows
+
+    def test_the_window_before_the_tail_is_judged_without_the_bug_too(self, monkeypatch, probes):
+        # Version 3's two halves, at the join. The tail holds an overlay of its own, and the window the join decodes
+        # is lit story carrying nothing but that same bug -- in the roll's band, on every keyframe. Read as decoded,
+        # `joined_before` walks the start out of the tail and into that story, so the join is kept and the answer is
+        # 108 s early. The tail's overlays are passed down, so the walk has nothing to step onto, the run stays inside
+        # the tail, and the join is refused: the tail is judged alone and there is no answer.
+        bug = (65, 160, 105, 175)  # a lower-third, in the cards' own band
+        tail = [(870.0 + 2 * i, 3, 10.0, (*CARDS, bug)) for i in range(225)]
+        tail += [(t, 1, 120.0, (bug,)) for t in (862.0, 864.0, 866.5, 868.5)]
+        before = [(750.0 + 2 * i, 1, 120.0, (bug,)) for i in range(56)]  # 750-860 s of story under the bug
+        decodes = Decodes(tail, before)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        overlays = rule_j.overlay_boxes(tail)
+        assert overlays == (bug,)
+        joined = [*(row for row in before if row[0] < 862.0), *tail]
+        assert rule_j.joined_before(before, tail) is not None  # what reading the joined rows as decoded would do
+        assert rule_j.coarse_start(joined).pts_s == 750.0  # the walk crossed the whole window on the bug
+        assert rule_j.joined_before(before, tail, overlays=overlays) is None
+        result = detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert (result.start_s, result.end_s) == (None, None)
+        assert result.key_rows == tuple(tail)
+
     def test_a_run_after_story_in_the_tails_first_30_s_reads_nothing_before_the_tail(self, monkeypatch, probes):
         # Story, then a 24 s run of captions 28 s into the tail, then story (a broadcast episode's CPU decode): story
         # came first, so nothing before the tail is read and the run is too close to the tail's start to answer.

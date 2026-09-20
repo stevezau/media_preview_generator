@@ -1,6 +1,12 @@
 """The credit text detector (spec §5.4): keyframes of the tail → rule J → one frame a second just before its start (and
 around its end when a scene follows the roll, Q3) → one credits candidate from ``credits_text``. The pipeline registers
-it as a local detector that runs on a worker whenever it decodes (:func:`credits_text_needs_worker`)."""
+it as a local detector that runs on a worker whenever it decodes (:func:`credits_text_needs_worker`).
+
+The rows the result carries are the ones that were decoded. Rule J version 3 reads the chosen run without the text
+that sits in one place right across the story (``rule_j.overlay_boxes``, spec §13 item 15), and the 1 fps refine and
+end rows the same way -- which is also what keeps its band steps (``rule_j.same_roll``, ``rule_j.reach_back``, §13
+item 14) from walking a start back over story keyframes whose only box is a channel bug.
+"""
 
 from __future__ import annotations
 
@@ -26,7 +32,14 @@ if TYPE_CHECKING:
 # 2: the anchor never steps over a gap the 24 s join can't bridge, the end steps back over scene text glued onto the
 # roll, text on screen all through the tail gives no answer, and a roll the tail opens on is read from 120 s before the
 # tail (spec §13 items 13 and 14, phase3-harness.md "Rule J version 2").
-CREDITS_TEXT_VERSION = 2
+# 3: rule J reads where a frame's text is. Text that sits in one place right across the story -- a channel or score
+# bug, a ticker, a burnt-in timecode -- doesn't count as text inside the credit run; and a roll the 24 s join split is
+# put back together from the band its text keeps to, an earlier run in that band whose text never stops being the same
+# roll and a keyframe before the start in it, at the run's own cadence, being more of it. Starts move both ways under
+# the first and earlier only under the second, and no end moved on either set or decode path (spec §13 items 14
+# and 15, phase3-harness.md and
+# broadcast-tv.md "Rule J version 3"). Stored answers of version 2 are asked again because these starts differ.
+CREDITS_TEXT_VERSION = 3
 READING_PHASE = "Reading the credits…"
 REFINING_PHASE = "Refining the credits start…"
 REFINING_END_PHASE = "Finding where the credits end…"
@@ -47,6 +60,10 @@ class CreditsTextResult:
         fine_rows: The 1 fps rows before the coarse start (empty without an answer).
         end_rows: The 1 fps rows from 1 s before ``rule_j.end_keyframe_s`` to 20 s past the run's latest credit keyframe
             (empty unless more than 30 s follows that keyframe).
+        overlays: The text that never moved (``rule_j.overlay_boxes``), gathered from the **tail's** rows. Anything
+            reading ``key_rows`` back has to be handed these rather than gather them again: on the branch that reads
+            the 120 s before the tail, ``key_rows`` is the joined rows, and a roll that began before the tail is
+            exactly the shape that must not be read as its own overlay.
     """
 
     start_s: float | None
@@ -54,6 +71,7 @@ class CreditsTextResult:
     key_rows: tuple[rule_j.Row, ...]
     fine_rows: tuple[rule_j.Row, ...]
     end_rows: tuple[rule_j.Row, ...]
+    overlays: tuple[rule_j.Box, ...] = ()
 
 
 def find_credits(
@@ -125,14 +143,34 @@ def find_credits(
 
     tail_start = frames.tail_start_s(duration_ms, is_episode=is_episode)
     key_rows = keyframes(tail_start, None)
-    coarse = rule_j.coarse_start(key_rows)
+    # Text that never moves off one spot across the story is a channel or score bug, a ticker or a timecode, not
+    # credits, so everything that reads a frame's own text reads the rows without it: which of the run's frames are
+    # credit frames, the anchor's spacing, and the band steps' own bands and cadences (spec §13 items 14 and 15).
+    # Which run is the last one is still read from the rows as they were decoded, and so is the share
+    # text_all_through counts: that step is what catches a file whose overlay this one doesn't find, and counting the
+    # overlay out would take its answer away.
+    overlays = rule_j.overlay_boxes(key_rows)
+    rule_rows = rule_j.without_overlays(key_rows, overlays)
+    coarse = rule_j.coarse_start(key_rows, without=rule_rows)
+    # Everything that reads the *runs* rather than one run's frames reads key_rows: opens_on_the_run and joined_before
+    # both find the runs again, and they have to find the run coarse came from. The tail's overlays carry over to the
+    # joined rows and are not gathered again from them: a roll that began before the tail is exactly the shape that
+    # must not be read as its own overlay. A real bug excludes itself from the tail's own overlays on this branch --
+    # opens_on_the_run only says yes when every row before the run *in decode order* is dark, and a dark row a bug is
+    # boxed on is a credit frame, which dark frames then merge into the run. What is left is a shape nothing measured
+    # has: four or more keyframes emitted after the whole chosen run yet timestamped before its earliest frame, since
+    # overlay_boxes takes its story by time while that check reads decode order (the reordering measured on the 80 is
+    # 10-21 s, and this branch's story is under 30 s all told).
     if coarse is not None and tail_start > 0 and rule_j.opens_on_the_run(key_rows, coarse):
         before_start = max(0.0, tail_start - rule_j.READ_BEFORE_TAIL_S)
-        joined = rule_j.joined_before(keyframes(before_start, tail_start - before_start), key_rows)
+        before_rows = keyframes(before_start, tail_start - before_start)
+        joined = rule_j.joined_before(before_rows, key_rows, overlays=overlays)
         if joined is not None:
-            key_rows, coarse = joined, rule_j.coarse_start(joined)
+            key_rows = joined
+            rule_rows = rule_j.without_overlays(key_rows, overlays)
+            coarse = rule_j.coarse_start(key_rows, without=rule_rows)
     if coarse is None or rule_j.text_all_through(key_rows, coarse):
-        return CreditsTextResult(None, None, tuple(key_rows), (), ())
+        return CreditsTextResult(None, None, tuple(key_rows), (), (), overlays)
     show(REFINING_PHASE)
     # max() can't bind while text_all_through holds an answered run 30 s past its first row; it keeps -ss non-negative.
     fine_start = max(0.0, coarse.pts_s - rule_j.REFINE_BEFORE_S)
@@ -140,20 +178,20 @@ def find_credits(
     fine_rows = frames.decode_rows(
         path, start_s=fine_start, length_s=fine_length, keyframes_only=False, fps=1, **decode
     )
-    start_s = rule_j.refine_start(key_rows, coarse, fine_rows)
+    start_s = rule_j.refine_start(rule_rows, coarse, rule_j.without_overlays(fine_rows, overlays))
     duration_s = duration_ms / 1000.0
-    last_keyframe = rule_j.coarse_end_s(key_rows, coarse)
+    last_keyframe = rule_j.coarse_end_s(rule_rows, coarse)
     if not rule_j.keeps_a_scene_after(last_keyframe, duration_s):
-        return CreditsTextResult(start_s, None, tuple(key_rows), tuple(fine_rows), ())
+        return CreditsTextResult(start_s, None, tuple(key_rows), tuple(fine_rows), (), overlays)
     show(REFINING_END_PHASE)
     # From where the end's walk starts to where the latest credit keyframe's walk may reach: credits_end decides
     # whether there is an end from the latest one, then where it is from end_keyframe_s (the same keyframe unless the
     # end steps back over scene text; then at most 24 s earlier, the join's reach).
-    end_start = max(0.0, rule_j.end_keyframe_s(key_rows, coarse) - rule_j.REFINE_END_BEFORE_S)  # as fine_start
+    end_start = max(0.0, rule_j.end_keyframe_s(rule_rows, coarse) - rule_j.REFINE_END_BEFORE_S)  # as fine_start
     end_length = last_keyframe + rule_j.REFINE_END_AFTER_S - end_start
     end_rows = frames.decode_rows(path, start_s=end_start, length_s=end_length, keyframes_only=False, fps=1, **decode)
-    end_s = rule_j.credits_end(key_rows, coarse, end_rows, duration_s)
-    return CreditsTextResult(start_s, end_s, tuple(key_rows), tuple(fine_rows), tuple(end_rows))
+    end_s = rule_j.credits_end(rule_rows, coarse, rule_j.without_overlays(end_rows, overlays), duration_s)
+    return CreditsTextResult(start_s, end_s, tuple(key_rows), tuple(fine_rows), tuple(end_rows), overlays)
 
 
 def _timed_out_lately(rec: FileRecord, ctx: PipelineContext) -> bool:
