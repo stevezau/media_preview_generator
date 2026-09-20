@@ -315,7 +315,10 @@ class TextDetector:
         return [bounds(self.boxes(np.stack([plane] * 3, axis=-1))) for plane in planes]
 
     def count(self, planes: np.ndarray) -> list[int]:
-        """How many text boxes each of (n, H, W) uint8 luma planes holds (the GPU self-test compares counts)."""
+        """How many text boxes each of (n, H, W) uint8 luma planes holds.
+
+        The GPU self-test compares the boxes themselves, not this (``textdet_helper.self_test``).
+        """
         return [len(found) for found in self.detect(planes)]
 
 

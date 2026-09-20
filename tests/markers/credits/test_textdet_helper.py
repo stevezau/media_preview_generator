@@ -399,13 +399,18 @@ class TestCommand:
         assert command[-1] == "--no-selftest"
 
 
-class FakeDetector:
-    def __init__(self, counts, per_frame_s, clock):
-        self.counts, self.per_frame_s, self.clock = counts, per_frame_s, clock
+def boxes_for(count, shift=0):
+    """One frame's boxes: ``count`` of them, each ``shift`` pixels right of where the other side puts it."""
+    return tuple((10 + shift, 10 + 30 * n, 60 + shift, 30 + 30 * n) for n in range(count))
 
-    def count(self, frames):
+
+class FakeDetector:
+    def __init__(self, counts, per_frame_s, clock, shift=0):
+        self.counts, self.per_frame_s, self.clock, self.shift = counts, per_frame_s, clock, shift
+
+    def detect(self, frames):
         self.clock.now += self.per_frame_s * len(frames)
-        return self.counts[: len(frames)]
+        return [boxes_for(n, self.shift) for n in self.counts[: len(frames)]]
 
 
 class Clock:
@@ -416,15 +421,23 @@ class Clock:
 
 
 @pytest.mark.parametrize(
-    ("gpu_counts", "gpu_s", "use_gpu", "same"),
-    [([1, 0, 3], 0.005, True, True), ([1, 0, 3], 0.030, False, True), ([1, 1, 3], 0.005, False, False)],
+    ("gpu_counts", "gpu_shift", "gpu_s", "use_gpu", "same"),
+    [
+        ([1, 0, 3], 0, 0.005, True, True),
+        ([1, 0, 3], 0, 0.030, False, True),
+        ([1, 1, 3], 0, 0.005, False, False),
+        # The same number of boxes in other places. Rule J version 3 reads row[3], so this backend answers
+        # differently from the CPU path on every file with an overlay or a band step, and a count test
+        # passes it.
+        ([1, 0, 3], 40, 0.005, False, False),
+    ],
+    ids=["same-boxes-and-faster", "same-boxes-too-slow", "different-counts", "same-counts-other-places"],
 )
-def test_self_test_needs_the_same_boxes_and_more_speed(gpu_counts, gpu_s, use_gpu, same):
+def test_self_test_needs_the_same_boxes_and_more_speed(gpu_counts, gpu_shift, gpu_s, use_gpu, same):
     clock = Clock()
     frames = np.zeros((3, 180, 320), np.uint8)
-    result = th.self_test(
-        FakeDetector(gpu_counts, gpu_s, clock), FakeDetector([1, 0, 3], 0.018, clock), frames, clock=clock, warmup=1
-    )
+    gpu = FakeDetector(gpu_counts, gpu_s, clock, shift=gpu_shift)
+    result = th.self_test(gpu, FakeDetector([1, 0, 3], 0.018, clock), frames, clock=clock, warmup=1)
     assert (result.use_gpu, result.same_boxes) == (use_gpu, same)
     assert result.cpu_ms == pytest.approx(18.0) and result.gpu_ms == pytest.approx(gpu_s * 1000)
 
@@ -435,8 +448,8 @@ def test_the_self_test_warms_both_detectors_before_timing():
     gpu, cpu = FakeDetector([0] * 6, 0.001, clock), FakeDetector([0] * 6, 0.002, clock)
     seen: list[int] = []
     for detector in (gpu, cpu):
-        counted = detector.count
-        detector.count = lambda frames, counted=counted: (seen.append(len(frames)), counted(frames))[1]
+        detected = detector.detect
+        detector.detect = lambda frames, detected=detected: (seen.append(len(frames)), detected(frames))[1]
     th.self_test(gpu, cpu, frames, clock=clock, warmup=2)
     assert th.SELFTEST_ROUNDS == 7
     assert seen == [2, 2] + [6, 6] * 7  # warm-up on both, then one timed pair per round
@@ -552,11 +565,11 @@ class PacedDetector:
     def __init__(self, counts, per_frame_s, clock):
         self.counts, self.per_frame_s, self.clock = list(counts), list(per_frame_s), clock
 
-    def count(self, frames):
+    def detect(self, frames):
         cost = self.per_frame_s.pop(0) if len(self.per_frame_s) > 1 else self.per_frame_s[0]
         counts = self.counts.pop(0) if len(self.counts) > 1 else self.counts[0]
         self.clock.now += cost * len(frames)
-        return counts[: len(frames)]
+        return [boxes_for(n) for n in counts[: len(frames)]]
 
 
 @pytest.mark.parametrize(
@@ -624,7 +637,7 @@ def test_the_median_per_round_ratio_decides(gpu_rounds_s, cpu_rounds_s, expected
             th.SelfTest(20.0, 10.0, 2.0, True),
             "the GPU wasn't at least 10% faster than the CPU (median 20.0 vs 10.0 ms per frame; GPU/CPU 2.0 per round)",
         ),
-        (th.SelfTest(1.0, 10.0, 0.1, False), "the GPU was counting different boxes than the CPU"),
+        (th.SelfTest(1.0, 10.0, 0.1, False), "the GPU was finding different boxes than the CPU"),
     ],
     ids=["faster-but-not-enough", "slower", "different-boxes"],
 )
@@ -647,16 +660,16 @@ def test_boxes_that_differ_in_any_round_fail_the_self_test():
 class StubDetector:
     """A stand-in :class:`textdet.TextDetector` that costs a fixed time per frame on a fake clock."""
 
-    def __init__(self, counts, ms_per_frame, clock, *, backend, fail_after=None):
+    def __init__(self, counts, ms_per_frame, clock, *, backend, fail_after=None, shift=0):
         self.counts, self.ms_per_frame, self.clock = counts, ms_per_frame, clock
-        self.backend, self._fail_after, self._calls = backend, fail_after, 0
+        self.backend, self._fail_after, self._calls, self.shift = backend, fail_after, 0, shift
 
-    def count(self, frames):
+    def detect(self, frames):
         self._calls += 1
         if self._fail_after is not None and self._calls > self._fail_after:
             raise RuntimeError("the device was lost")
         self.clock.now += self.ms_per_frame * len(frames) / 1000.0
-        return self.counts[: len(frames)]
+        return [boxes_for(n, self.shift) for n in self.counts[: len(frames)]]
 
 
 class StubTextDet:
@@ -679,6 +692,7 @@ class StubTextDet:
         gpu_ms=1.0,
         cpu_ms=10.0,
         gpu_counts=None,
+        gpu_shift=0,
         webgpu_error=None,
         cpu_error=None,
         gpu_fail_after=None,
@@ -687,6 +701,7 @@ class StubTextDet:
         self.devices = [SimpleNamespace(device=SimpleNamespace(metadata={"pci_bus_id": pci})) for pci in addresses]
         self.gpu_ms, self.cpu_ms = gpu_ms, cpu_ms
         self.gpu_counts = gpu_counts if gpu_counts is not None else list(range(th.SELFTEST_FRAMES))
+        self.gpu_shift = gpu_shift
         self.cpu_counts = list(range(th.SELFTEST_FRAMES))
         self.webgpu_error, self.cpu_error, self.gpu_fail_after = webgpu_error, cpu_error, gpu_fail_after
         self.cpu_sessions: list[tuple] = []
@@ -712,7 +727,8 @@ class StubTextDet:
     def TextDetector(self, session, *, backend):  # noqa: N802 - the name textdet exports
         if backend == "cpu":
             return StubDetector(self.cpu_counts, self.cpu_ms, self.clock, backend="cpu")
-        return StubDetector(self.gpu_counts, self.gpu_ms, self.clock, backend="webgpu", fail_after=self.gpu_fail_after)
+        return StubDetector(self.gpu_counts, self.gpu_ms, self.clock, backend="webgpu",
+                            fail_after=self.gpu_fail_after, shift=self.gpu_shift)  # fmt: skip
 
     def synthetic_frames(self, count=20):
         return np.zeros((count, 180, 320), np.uint8)
@@ -764,11 +780,21 @@ class TestHelperProcessBackendChoice:
             "the GPU wasn't at least 10% faster than the CPU (median 10.0 vs 10.0 ms per frame; GPU/CPU 1.0 per round)"
         )
 
-    def test_a_gpu_that_counts_different_boxes_serves_from_the_cpu(self, clock):
+    def test_a_gpu_that_finds_different_boxes_serves_from_the_cpu(self, clock):
         stub = StubTextDet(clock, gpu_ms=1.0, cpu_ms=10.0, gpu_counts=[99] * th.SELFTEST_FRAMES)
         detector, ready = self._start(stub)
         assert detector.backend == "cpu"
-        assert ready["reason"] == "the GPU was counting different boxes than the CPU"
+        assert ready["reason"] == "the GPU was finding different boxes than the CPU"
+        assert ready["selftest"]["same_boxes"] is False
+
+    def test_a_gpu_that_finds_the_same_boxes_elsewhere_serves_from_the_cpu(self, clock):
+        # Same count, other places. Rule J version 3 reads where a frame's text is, so this backend would
+        # answer differently from the CPU path on every file with an overlay or a band step -- and the
+        # self-test is the only runtime check there is.
+        stub = StubTextDet(clock, gpu_ms=1.0, cpu_ms=10.0, gpu_shift=40)
+        detector, ready = self._start(stub)
+        assert detector.backend == "cpu"
+        assert ready["reason"] == "the GPU was finding different boxes than the CPU"
         assert ready["selftest"]["same_boxes"] is False
 
     def test_a_self_test_that_fails_part_way_through_serves_from_the_cpu(self, clock):

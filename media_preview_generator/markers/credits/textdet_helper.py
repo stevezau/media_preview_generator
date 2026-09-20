@@ -178,7 +178,7 @@ class SelfTest:
         gpu_ms: The GPU's median milliseconds per frame.
         cpu_ms: The CPU's median milliseconds per frame.
         ratio: The median of each round's own GPU/CPU time ratio: what decides.
-        same_boxes: Every count matched in every round.
+        same_boxes: Every frame's boxes matched, corner for corner, in every round.
     """
 
     gpu_ms: float
@@ -188,13 +188,14 @@ class SelfTest:
 
     @property
     def use_gpu(self) -> bool:
-        """The GPU is used only when it counts exactly the CPU's boxes, at least ``GPU_SPEEDUP_MARGIN`` faster."""
+        """The GPU is used only when it finds exactly the CPU's boxes, in the same places, at least
+        ``GPU_SPEEDUP_MARGIN`` faster."""
         return self.same_boxes and self.ratio <= 1.0 - GPU_SPEEDUP_MARGIN
 
     def cpu_reason(self) -> str:
         """Why this result keeps the CPU (for the helper's ready line and the log)."""
         if not self.same_boxes:
-            return "the GPU was counting different boxes than the CPU"
+            return "the GPU was finding different boxes than the CPU"
         return (
             f"the GPU wasn't at least {GPU_SPEEDUP_MARGIN:.0%} faster than the CPU "
             f"(median {self.gpu_ms} vs {self.cpu_ms} ms per frame; GPU/CPU {self.ratio} per round)"
@@ -210,7 +211,12 @@ def self_test(
     warmup: int = 3,
     rounds: int = SELFTEST_ROUNDS,
 ) -> SelfTest:
-    """Time both detectors on the same frames after a warm-up and compare their box counts.
+    """Time both detectors on the same frames after a warm-up and compare the boxes they find.
+
+    **The boxes, not their count.** ``count`` is ``len(detect(...))``, so comparing counts costs the same and says
+    less: a backend that finds the same *number* of boxes in different *places* passes a count test and then answers
+    differently from the CPU everywhere rule J reads a position (``rule_j.overlay_boxes``, ``rule_j.same_roll``,
+    ``rule_j.reach_back``). This self-test is the only runtime check there is.
 
     The pair is run ``rounds`` times, the GPU and then the CPU back to back, and the verdict is the median of the rounds'
     own GPU/CPU ratios. Load that lasts across a round (another job's decode, a transcode) slows both halves alike and
@@ -219,7 +225,7 @@ def self_test(
     the process.
 
     Args:
-        gpu: A detector with ``count(frames) -> list[int]`` on the GPU.
+        gpu: A detector with ``detect(frames) -> list[tuple[Box, ...]]`` on the GPU.
         cpu: The same on the CPU.
         frames: (n, H, W) uint8 luma.
         clock: Seconds (tests pass a fake); ``time.perf_counter`` by default.
@@ -228,27 +234,27 @@ def self_test(
         rounds: How many GPU/CPU pairs to time.
 
     Returns:
-        Each side's median milliseconds per frame, the median per-round ratio, and whether every count matched in every
-        round.
+        Each side's median milliseconds per frame, the median per-round ratio, and whether every frame's
+        boxes matched, corner for corner, in every round.
     """
     now = clock or _perf_counter
     for detector in (gpu, cpu):
-        detector.count(frames[:warmup])
+        detector.detect(frames[:warmup])
 
-    def timed(detector: Any) -> tuple[list[int], float]:
+    def timed(detector: Any) -> tuple[list[tuple], float]:
         started = now()
-        counts = detector.count(frames)
-        return counts, (now() - started) * 1000.0 / len(frames)
+        boxes = detector.detect(frames)
+        return boxes, (now() - started) * 1000.0 / len(frames)
 
     gpu_times: list[float] = []
     cpu_times: list[float] = []
     same_boxes = True
     for _ in range(rounds):
-        gpu_counts, gpu_ms = timed(gpu)
-        cpu_counts, cpu_ms = timed(cpu)
+        gpu_boxes, gpu_ms = timed(gpu)
+        cpu_boxes, cpu_ms = timed(cpu)
         gpu_times.append(gpu_ms)
         cpu_times.append(cpu_ms)
-        same_boxes = same_boxes and list(gpu_counts) == list(cpu_counts)
+        same_boxes = same_boxes and list(gpu_boxes) == list(cpu_boxes)
     ratios = [g / c if c > 0 else math.inf for g, c in zip(gpu_times, cpu_times, strict=True)]
     return SelfTest(round(median(gpu_times), 2), round(median(cpu_times), 2), round(median(ratios), 4), same_boxes)
 
@@ -510,8 +516,8 @@ def _vulkan_env_overrides() -> dict[str, str]:
 
 
 class TextDetectorPool:
-    """Box counts for luma planes on a worker's device: its GPU helper when that is proven faster, else the CPU
-    helper."""
+    """Text boxes for luma planes on a worker's device: its GPU helper when that is proven faster and finds the same
+    boxes, else the CPU helper."""
 
     def __init__(
         self,
