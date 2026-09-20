@@ -48,7 +48,16 @@ def publisher_for(
         settings = load_server(config.markers, config.type.value)
     if config.type is ServerType.PLEX:
         from .plex_db import PlexMarkerPublisher
+        from .plex_remote import plex_database
 
+        # Where the database work runs: in this process, or on the Plex marker agent beside a Plex on another
+        # machine. Read from the settings this publisher is built with, so the Edit tab's "check it as if it were
+        # on" sees the agent too.
+        database = plex_database(
+            settings,
+            path_provider=lambda: PlexMarkerPublisher.db_path_for(config),
+            label=config.name or "",
+        )
         return PlexMarkerPublisher(
             server,
             config,
@@ -57,6 +66,7 @@ def publisher_for(
             settings_provider=settings_provider,
             ui_details=ui_details,
             db_timeout_s=db_timeout_s,
+            db=database,
         )
     if config.type is ServerType.JELLYFIN:
         from .jellyfin import JellyfinMarkerPublisher

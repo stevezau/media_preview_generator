@@ -12,6 +12,7 @@ from tests.markers.conftest import api_headers as _api_headers
 PLEX_TOKEN = "plex-token-SECRET-1234"
 JF_KEY = "jf-api-key-SECRET-5678"
 TIDB_KEY = "tidb-key-SECRET-9012"
+AGENT_KEY = "agent-key-SECRET-3456"
 
 
 @pytest.fixture
@@ -40,6 +41,15 @@ def servers(app, media, tmp_path):
             "libraries": [{"id": "1", "name": "TV Shows", "remote_paths": ["/data/tv"]}],
             "path_mappings": [{"remote_prefix": "/data/tv", "local_prefix": str(media / "tv")}],
             "output": {"plex_config_folder": str(tmp_path / "plexcfg")},
+            "markers": {
+                "enabled": False,
+                "library_ids": None,
+                "plex": {
+                    "db_write_confirmed_at": None,
+                    "on_plex_redetect": "restore",
+                    "agent": {"enabled": True, "url": "http://plex-host.lan:9494", "token": AGENT_KEY},
+                },
+            },
         },
         {
             "id": "jf-1",
@@ -75,7 +85,7 @@ def servers(app, media, tmp_path):
 
 def _secret_free(resp):
     text = resp.get_data(as_text=True)
-    for secret in (PLEX_TOKEN, JF_KEY, TIDB_KEY):
+    for secret in (PLEX_TOKEN, JF_KEY, TIDB_KEY, AGENT_KEY):
         assert secret not in text
     return resp
 
@@ -898,3 +908,33 @@ def test_plugin_install_is_refused_for_plex(client, servers, monkeypatch):
     resp = client.post("/api/servers/plex-1/install-plugin", headers=_api_headers())
     assert resp.status_code == 400
     assert resp.get_json() == {"ok": False, "error": "plugin install is for Jellyfin and Emby servers"}
+
+
+# --------------------------------------------------------------------------- the Plex marker agent
+
+
+def test_the_status_payload_names_the_agent_but_never_its_key(client, servers, monkeypatch):
+    from media_preview_generator.markers import inspect
+
+    # Only the settings half is under test here; the capability check itself needs a live Plex.
+    monkeypatch.setattr(inspect, "_preview_capability", lambda server, config, settings: {"state": "ready"})
+    resp = _secret_free(client.get("/api/markers/servers/plex-1/status", headers=_api_headers()))
+    agent = resp.get_json()["settings"]["plex"]["agent"]
+    assert agent == {"enabled": True, "url": "http://plex-host.lan:9494", "has_token": True}
+
+
+@pytest.mark.parametrize(
+    ("query", "forgets"),
+    [("", False), ("?refresh=1", True), ("?refresh=0", False), ("?refresh=true", True)],
+    ids=["no-param", "refresh-1", "refresh-0", "refresh-true"],
+)
+def test_check_again_drops_the_cached_answer_first(client, servers, monkeypatch, query, forgets):
+    # The Edit tab's "Check again" button exists to ask the agent again, not to re-read a few-seconds-old answer.
+    from media_preview_generator.markers import inspect
+
+    forgotten = []
+    monkeypatch.setattr(inspect, "forget_capability", lambda server_id: forgotten.append(server_id))
+    monkeypatch.setattr(inspect, "server_status_payload", lambda server, config: {"server_id": config.id})
+    resp = client.get(f"/api/markers/servers/plex-1/status{query}", headers=_api_headers())
+    assert resp.status_code == 200
+    assert forgotten == (["plex-1"] if forgets else [])

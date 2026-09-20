@@ -20,6 +20,7 @@ from flask import jsonify, request
 from loguru import logger
 
 from ...config import resolve_frame_interval
+from ...markers.settings import mask_server
 from ...servers import (
     ServerRegistry,
     ServerType,
@@ -328,6 +329,10 @@ def _merge_markers_update(base_markers: object, posted: object) -> object:
     # silently discarding it and keeping the stored value.
     if isinstance(base.get("plex"), dict) and isinstance(posted.get("plex"), dict):
         merged["plex"] = {**base["plex"], **posted["plex"]}
+        # The Plex marker agent block is the same story one level down: a client that sends only
+        # ``plex.on_plex_redetect`` must not switch the agent off by omission.
+        if isinstance(base["plex"].get("agent"), dict) and isinstance(posted["plex"].get("agent"), dict):
+            merged["plex"]["agent"] = {**base["plex"]["agent"], **posted["plex"]["agent"]}
     return merged
 
 
@@ -423,7 +428,11 @@ def _validate_server_payload(
 
     stored_markers = base.get("markers")
     if "markers" in data:
-        markers_block, err = _validate_markers(_merge_markers_update(stored_markers, data.get("markers")), type_value)
+        # stored_markers is passed on as well: it holds the Plex marker agent's key, which a posted ``****`` means
+        # "keep" (markers.settings), exactly like TheIntroDB's.
+        markers_block, err = _validate_markers(
+            _merge_markers_update(stored_markers, data.get("markers")), type_value, stored_markers
+        )
         if err:
             return None, err
     elif isinstance(stored_markers, dict):
@@ -525,6 +534,7 @@ def list_servers():
             {
                 **server_config_to_dict(cfg),
                 "auth": _redact_auth(entry),
+                "markers": mask_server(entry.get("markers"), cfg.type.value),
             }
         )
 
@@ -553,6 +563,7 @@ def get_server(server_id: str):
             {
                 **server_config_to_dict(cfg),
                 "auth": _redact_auth(entry),
+                "markers": mask_server(entry.get("markers"), cfg.type.value),
             }
         )
 
@@ -775,7 +786,13 @@ def create_server():
     logger.info("Added media server {!r} (id={})", entry["name"], entry["id"])
 
     return (
-        jsonify({**server_config_to_dict(server_config_from_dict(entry)), "auth": _redact_auth(entry)}),
+        jsonify(
+            {
+                **server_config_to_dict(server_config_from_dict(entry)),
+                "auth": _redact_auth(entry),
+                "markers": mask_server(entry.get("markers"), str(entry.get("type") or "")),
+            }
+        ),
         201,
     )
 
@@ -816,6 +833,7 @@ def update_server(server_id: str):
                 {
                     **server_config_to_dict(server_config_from_dict(updated)),
                     "auth": _redact_auth(updated),
+                    "markers": mask_server(updated.get("markers"), str(updated.get("type") or "")),
                 }
             )
 

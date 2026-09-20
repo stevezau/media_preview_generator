@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import re
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,6 +32,7 @@ ON_PLEX_REDETECT_VALUES: tuple[str, ...] = ("restore", "keep_plex")
 ON_EMBY_REDETECT_VALUES: tuple[str, ...] = ("restore", "keep_emby")
 SECRET_MASK = "****"
 _API_KEY_MAX_LEN = 200
+_AGENT_URL_MAX_LEN = 500
 # Sports libraries are excluded by default: no source covers them (spec §4). Name-based because no vendor
 # exposes a "sports" library kind; an explicit library_ids choice always wins.
 _SPORTS_NAME_RE = re.compile(r"\bsports?\b", re.IGNORECASE)
@@ -51,6 +53,11 @@ DEFAULT_GLOBAL_MARKERS: dict[str, Any] = {
 }
 
 
+def default_plex_agent() -> dict[str, Any]:
+    """The default Plex marker agent block: none set up, so the database is written in this process."""
+    return {"enabled": False, "url": "", "token": ""}
+
+
 def default_server_markers(server_type: str) -> dict[str, Any]:
     """Return the default per-server ``markers`` block for a server type.
 
@@ -62,7 +69,11 @@ def default_server_markers(server_type: str) -> dict[str, Any]:
     """
     block: dict[str, Any] = {"enabled": False, "library_ids": None}
     if server_type == "plex":
-        block["plex"] = {"db_write_confirmed_at": None, "on_plex_redetect": "restore"}
+        block["plex"] = {
+            "db_write_confirmed_at": None,
+            "on_plex_redetect": "restore",
+            "agent": default_plex_agent(),
+        }
     if server_type == "emby":
         block["emby"] = {"on_emby_redetect": "restore"}
     return block
@@ -140,6 +151,11 @@ class ServerMarkersSettings:
     db_write_confirmed_at: str | None
     on_plex_redetect: str
     on_emby_redetect: str = "restore"
+    # The Plex marker agent beside a Plex on another machine (``publishers.plex_remote``).
+    agent_enabled: bool = False
+    agent_url: str = ""
+    # repr=False: this dataclass's default repr reaches log lines and test-failure output, like TheIntroDB's key.
+    agent_token: str = field(default="", repr=False)
 
     @property
     def keeps_server_markers(self) -> bool:
@@ -252,12 +268,64 @@ def validate_global(raw: object, existing: object) -> tuple[dict | None, str]:
     }, ""
 
 
-def validate_server(raw: object, server_type: str) -> tuple[dict | None, str]:
+def _stored_agent_token(existing: object) -> str:
+    """The Plex marker agent key already on record for this server ("" when there is none)."""
+    if not isinstance(existing, dict):
+        return ""
+    plex = existing.get("plex")
+    agent = plex.get("agent") if isinstance(plex, dict) else None
+    return str(agent.get("token") or "") if isinstance(agent, dict) else ""
+
+
+def _normalise_agent(raw: object, existing_token: str) -> tuple[dict | None, str]:
+    """Validate a posted Plex marker agent block.
+
+    The address is checked here rather than at connect time so a typo is refused while the user is looking at the
+    field. The key is the same shape of secret as TheIntroDB's: ``****`` means "keep the stored one", and a block
+    that leaves it out keeps it too, so a save that doesn't touch the field can never drop it.
+
+    Args:
+        raw: The posted ``markers.plex.agent`` value (None → the stored key with the agent off).
+        existing_token: The key currently on record.
+
+    Returns:
+        ``(block, "")`` on success, ``(None, message)`` on error.
+    """
+    if raw is None:
+        return {**default_plex_agent(), "token": existing_token}, ""
+    if not isinstance(raw, dict):
+        return None, "markers.plex.agent must be an object"
+    url = str(raw.get("url") or "").strip().rstrip("/")
+    if url:
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.query or parsed.fragment:
+            return None, "markers.plex.agent.url must be an http(s) address, e.g. http://plex-host.lan:9494"
+        if "@" in parsed.netloc or len(url) > _AGENT_URL_MAX_LEN:
+            return None, "markers.plex.agent.url must be a plain address with no username, password or query"
+    token = raw.get("token", existing_token)
+    token = existing_token if token == SECRET_MASK else str(token or "").strip()
+    # The key goes in an Authorization header: a pasted curly quote or zero-width space would make the request fail
+    # with the key in the traceback, and the agent's constant-time compare raises on non-ASCII. Refused here instead.
+    if token and token != existing_token and not (len(token) <= _API_KEY_MAX_LEN and sendable_api_key(token)):
+        return (
+            None,
+            f"markers.plex.agent.token must be up to {_API_KEY_MAX_LEN} printable ASCII characters with no spaces",
+        )
+    if len(token) > _API_KEY_MAX_LEN:
+        return None, f"markers.plex.agent.token must be at most {_API_KEY_MAX_LEN} characters"
+    enabled = bool(raw.get("enabled"))
+    if enabled and not (url and token):
+        return None, "Set the Plex marker agent's address and shared key before turning it on"
+    return {"enabled": enabled, "url": url, "token": token}, ""
+
+
+def validate_server(raw: object, server_type: str, existing: object = None) -> tuple[dict | None, str]:
     """Validate and normalise a per-server ``markers`` block.
 
     Args:
         raw: The posted block (None → defaults).
         server_type: ``plex``, ``emby`` or ``jellyfin``.
+        existing: The stored block, used only to keep the Plex marker agent's key when ``****`` is posted back.
 
     Returns:
         ``(block, "")`` on success, ``(None, message)`` on error.
@@ -284,7 +352,10 @@ def validate_server(raw: object, server_type: str) -> tuple[dict | None, str]:
         confirmed = str(confirmed) if confirmed else None
         if block["enabled"] and not confirmed:
             return None, "Confirm the Plex database write before turning on Intro & Credits for this Plex server"
-        block["plex"] = {"db_write_confirmed_at": confirmed, "on_plex_redetect": redetect}
+        agent, err = _normalise_agent(plex_raw.get("agent"), _stored_agent_token(existing))
+        if err:
+            return None, err
+        block["plex"] = {"db_write_confirmed_at": confirmed, "on_plex_redetect": redetect, "agent": agent}
     if server_type == "emby":
         emby_raw = raw.get("emby") or {}
         if not isinstance(emby_raw, dict):
@@ -311,6 +382,25 @@ def mask_global(block: object) -> dict:
     for s in out.get("sources") or []:
         if isinstance(s, dict) and s.get("id") == "theintrodb":
             s["api_key"] = SECRET_MASK if s.get("api_key") else ""
+    return out
+
+
+def mask_server(block: object, server_type: str) -> dict:
+    """Return a copy of a per-server block with the Plex marker agent's key replaced by ``****`` when set.
+
+    Args:
+        block: The stored (unmasked) ``media_servers[].markers`` block.
+        server_type: ``plex``, ``emby`` or ``jellyfin``.
+
+    Returns:
+        A deep copy safe to send to the client — the input is never mutated. A block that isn't a dict comes back as
+        this server type's defaults (whose key is empty).
+    """
+    out = copy.deepcopy(block) if isinstance(block, dict) else default_server_markers(server_type)
+    plex = out.get("plex")
+    agent = plex.get("agent") if isinstance(plex, dict) else None
+    if isinstance(agent, dict):
+        agent["token"] = SECRET_MASK if agent.get("token") else ""
     return out
 
 
@@ -353,7 +443,7 @@ def load_server(raw: object, server_type: str) -> ServerMarkersSettings:
         disabled — (logged as a warning when ``raw`` was a dict that failed validation, e.g. a
         Plex block with ``enabled: true`` but no confirmation) when invalid.
     """
-    block, err = validate_server(raw, server_type)
+    block, err = validate_server(raw, server_type, raw)
     if err or block is None:
         if err:
             logger.warning(
@@ -364,6 +454,7 @@ def load_server(raw: object, server_type: str) -> ServerMarkersSettings:
         block = default_server_markers(server_type)
     plex = block.get("plex") or {}
     emby = block.get("emby") or {}
+    agent = plex.get("agent") or {}
     ids = block["library_ids"]
     return ServerMarkersSettings(
         enabled=block["enabled"],
@@ -371,6 +462,9 @@ def load_server(raw: object, server_type: str) -> ServerMarkersSettings:
         db_write_confirmed_at=plex.get("db_write_confirmed_at"),
         on_plex_redetect=plex.get("on_plex_redetect", "restore"),
         on_emby_redetect=emby.get("on_emby_redetect", "restore"),
+        agent_enabled=bool(agent.get("enabled")),
+        agent_url=str(agent.get("url") or ""),
+        agent_token=str(agent.get("token") or ""),
     )
 
 

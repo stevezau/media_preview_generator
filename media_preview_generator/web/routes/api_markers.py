@@ -227,6 +227,9 @@ def _server_off_response(cfg: Any) -> tuple[Any, int]:
 def marker_server_status(server_id: str):
     """Intro & Credits status for a server's Edit dialog.
 
+    Query: ``refresh=1`` drops this server's cached answer first — the Plex marker agent's "Check again" button,
+    where the point is to ask the agent again rather than read a few-seconds-old answer.
+
     Returns:
         200 with ``markers.inspect.server_status_payload`` (capability checked as if Intro & Credits were on, state
         ``unknown`` when the check failed; a server turned off on the Servers page isn't contacted), 404 for an unknown
@@ -238,6 +241,8 @@ def marker_server_status(server_id: str):
     cfg = registry.get_config(server_id)
     if cfg is None:
         return jsonify({"error": "server not found"}), 404
+    if _param_to_bool(request.args.get("refresh"), False):
+        inspect.forget_capability(server_id)
     try:
         payload = inspect.server_status_payload(registry.get(server_id), cfg)
     except Exception as exc:

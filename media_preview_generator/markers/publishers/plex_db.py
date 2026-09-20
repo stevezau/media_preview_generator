@@ -21,12 +21,12 @@ import struct
 import threading
 import time
 import urllib.parse
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, NamedTuple
 
 from loguru import logger
 
-from ...servers.ownership import apply_path_mappings
 from ..fs import filesystem_type, is_local_filesystem, is_network_filesystem
 from ..models import Marker, MarkerType
 from .base import (
@@ -616,65 +616,146 @@ def _kept_types(
     return frozenset(kept)
 
 
-class PlexMarkerPublisher(MarkerPublisher):
-    """Writes markers into one Plex server's database."""
+class ItemRead(NamedTuple):
+    """One item as Plex's database has it right now."""
 
-    supported_types = frozenset({MarkerType.INTRO, MarkerType.CREDITS})
-    name = "plex_db"
-    atomic_writes = True  # one SQLite transaction per write
+    exists: bool  # the database knows this rating key at all
+    parts: list[_Part]  # its live files (deleted parts and items in Plex's trash left out)
+
+
+class WriteRequest(NamedTuple):
+    """One item's write: everything the decision half worked out, and the parts it worked it out for."""
+
+    rating_key: int
+    parts: list[_Part]  # the item's parts when ``wanted`` was decided; a different set now stops the write
+    wanted: list[Marker]  # the markers the item should show, this server's types only
+    prior: list[Marker]  # what this app last left on the item
+    duration_ms: int | None
+    own_prior: list[Marker]  # what the calling file left on the item it belonged to before a merge or split
+    calling_part_ids: tuple[int, ...]  # the parts that are the calling file
+    kept_types: frozenset[MarkerType]  # types the last write kept as Plex's own
+    keep_plex: bool  # "Keep Plex's" is on for this server
+
+
+class WriteResult(NamedTuple):
+    """What one write did (see ``MarkerPublisher.write`` for the fields' meaning)."""
+
+    changed: bool
+    ours: list[Marker]
+    kept_types: frozenset[MarkerType]
+    replaced_own: frozenset[MarkerType]
+
+
+class ShownAsk(NamedTuple):
+    """One item of a read-back: ``ours`` is already projected to the types this publisher writes."""
+
+    rating_key: int
+    ours: list[Marker]
+    kept_types: frozenset[MarkerType]
+    item_files: tuple[str, ...] | None
+
+
+class ShownAnswer(NamedTuple):
+    """What one item shows, and its version files as Plex stores them (optimized copies left out)."""
+
+    shown: Shown | None
+    version_files: tuple[str, ...]
+
+
+class ShownBatch(NamedTuple):
+    """A read-back's answers in the order they were asked.
+
+    Fewer answers than items and ``unreadable`` means the database itself stopped being readable and every item left
+    is unread; fewer without it means the call was cancelled.
+    """
+
+    answers: list[ShownAnswer]
+    unreadable: bool
+
+
+class PlexDatabase(ABC):
+    """Everything one Plex server's library database is asked for, wherever that file actually is.
+
+    Two implementations: :class:`LocalPlexDb` opens the file this process can see, and
+    ``plex_remote.RemotePlexDb`` asks the Plex marker agent to run :class:`LocalPlexDb` on Plex's own machine. The
+    rules live in this module and run in one place either way — the schema guards, the marker tag row, the
+    ``taggings`` + ``media_parts.extra_data`` pair, the ±2 s serving shifts, kept and locked types. A transport moves
+    arguments and answers; it never decides anything, and it never takes a database path from its caller.
+    """
+
+    # True when a failed write is known to have changed nothing (one SQLite transaction, in this process). Over a
+    # network an answer can be lost after the transaction committed, so the remote transport says False and the
+    # publisher's record of what is ours is treated as unknown after a failure (``MarkerPublisher.atomic_writes``).
+    atomic_writes: bool = True
+
+    @abstractmethod
+    def file_checks(self, *, deadline: float) -> CapabilityReport:
+        """Check the database file itself: found, on a local disk, writable, and open in Plex's process."""
+
+    @abstractmethod
+    def db_checks(self, *, deadline: float) -> CapabilityReport:
+        """Check what is inside it: the tested schema, marker data this app knows, and Plex's one marker tag row."""
+
+    @abstractmethod
+    def read_item(self, rating_key: int, *, deadline: float) -> ItemRead:
+        """Read one item's live parts (schema and tag row checked first).
+
+        Raises:
+            PublishError: The database couldn't be read, or isn't the tested schema.
+        """
+
+    @abstractmethod
+    def write_item(self, request: WriteRequest, *, deadline: float) -> WriteResult:
+        """Make one item show ``request.wanted``, in one transaction.
+
+        Raises:
+            PublishError: Nothing was written.
+        """
+
+    @abstractmethod
+    def shown_many(
+        self, items: list[ShownAsk], *, timeout_s: float, cancel_check: Callable[[], bool] | None = None
+    ) -> ShownBatch:
+        """Read what items show of what this app left on them."""
+
+    @abstractmethod
+    def item_exists(self, rating_key: int, *, deadline: float) -> bool:
+        """Whether the database has an item with this rating key.
+
+        Raises:
+            PublishError: The database couldn't be read.
+        """
+
+
+class LocalPlexDb(PlexDatabase):
+    """Plex's database as a file this process can open — the only implementation that touches SQLite.
+
+    The Plex marker agent runs this class on Plex's machine, so a remote write is the same code as a local one.
+    """
 
     def __init__(
         self,
-        server: PlexServer,
-        config: ServerConfig,
-        settings: ServerMarkersSettings,
+        path_provider: Callable[[], str | None],
         *,
-        sibling_markers: Callable[[str], dict[MarkerType, Marker] | None] | None = None,
-        settings_provider: Callable[[], ServerMarkersSettings] | None = None,
+        label: str = "",
         mountinfo_path: str = "/proc/self/mountinfo",
-        ui_details: bool = True,
-        db_timeout_s: float | None = None,
     ) -> None:
-        """Create the publisher.
+        """Create the local database.
 
         Args:
-            server: Live ``PlexServer`` client.
-            config: That server's ``ServerConfig``.
-            settings: That server's ``ServerMarkersSettings``.
-            sibling_markers: Looks up decided markers for another local file (multi-version items).
-            settings_provider: Returns the saved settings right now; when given, every check (and so every write)
-                reads the switch and the database-write confirmation from it instead of ``settings``.
+            path_provider: Returns the database file's path right now, or None when the Plex config folder isn't set.
+            label: The server's name, for log lines.
             mountinfo_path: For tests.
-            ui_details: Ask Plex for its own detection settings in ``capability()`` (the Edit dialog shows them); a job
-                doesn't need them.
-            db_timeout_s: The longest a single check or write waits for the database locks; None uses
-                ``BUSY_TIMEOUT_S``. The Inspector's publish-now path shortens it, since a 30 s wait alone outlasts the
-                deadline a web request may take (ruling P-R1).
         """
-        self._server = server
-        self._config = config
-        self._settings = settings
-        self._settings_provider = settings_provider
-        self._sibling_markers = sibling_markers or (lambda _path: None)
+        self._path = path_provider
+        self._label = label
         self._mountinfo_path = mountinfo_path
-        self._ui_details = ui_details
-        self._db_timeout_s = db_timeout_s
-        self._live_files: dict[str, tuple[str, ...]] = {}
-
-    def _db_deadline(self) -> float:
-        """When one check or write stops waiting for the database locks (``time.monotonic()``)."""
-        return time.monotonic() + (BUSY_TIMEOUT_S if self._db_timeout_s is None else self._db_timeout_s)
-
-    def db_path(self) -> str | None:
-        """DB path, or None when the Plex config folder isn't set."""
-        folder = str((self._config.output or {}).get("plex_config_folder") or "").strip()
-        return plex_db_path(folder) if folder else None
 
     def _connect(self, *, read_only: bool, timeout: float) -> sqlite3.Connection:
         mode = "ro" if read_only else "rw"
         # Quoted: SQLite reads "?", "#" and "%" in a file: URI as query, fragment and escapes, which would open a
         # different path for folders named like "Plex #2". mode=rw never creates a missing file.
-        uri = f"file:{urllib.parse.quote(os.path.abspath(self.db_path() or ''))}?mode={mode}"
+        uri = f"file:{urllib.parse.quote(os.path.abspath(self._path() or ''))}?mode={mode}"
         return sqlite3.connect(uri, uri=True, timeout=timeout, isolation_level=None)
 
     @contextlib.contextmanager
@@ -684,7 +765,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         Raises:
             PublishError: UNREACHABLE when the lock isn't free before ``deadline``; MISCONFIGURED without a folder.
         """
-        db = self.db_path()
+        db = self._path()
         if not db:
             raise PublishError("The Plex config folder isn't set", state=Capability.MISCONFIGURED)
         key = _lock_key(db)
@@ -786,12 +867,8 @@ class PlexMarkerPublisher(MarkerPublisher):
             paths.append(folder)
         return paths
 
-    def _live_settings(self) -> ServerMarkersSettings:
-        return self._settings_provider() if self._settings_provider is not None else self._settings
-
-    def _local_checks(self, *, deadline: float) -> CapabilityReport:
-        """Settings (read live when a ``settings_provider`` was given), database files and the shared lock: everything
-        that needs no Plex connection.
+    def file_checks(self, *, deadline: float) -> CapabilityReport:
+        """The database file: found, on a local disk, writable, and held open by another process (Plex).
 
         Args:
             deadline: When to stop waiting for this process's lock on the database.
@@ -800,12 +877,7 @@ class PlexMarkerPublisher(MarkerPublisher):
             READY when all pass. A missing lock holder is reported as UNREACHABLE with ``details["lock_holder"]``
             False, so ``capability()`` can tell "Plex stopped" from "different file".
         """
-        settings = self._live_settings()
-        if not settings.enabled:
-            return CapabilityReport(Capability.DISABLED, "Intro & Credits is off for this server")
-        if not settings.db_write_confirmed_at:
-            return CapabilityReport(Capability.NEEDS_CONFIRMATION, "Confirm the Plex database write to turn this on")
-        db = self.db_path()
+        db = self._path()
         if not db or not os.path.isfile(db):
             return CapabilityReport(
                 Capability.MISCONFIGURED, f"Plex database not found at {db or '(Plex config folder not set)'}"
@@ -852,100 +924,164 @@ class PlexMarkerPublisher(MarkerPublisher):
             )
         return CapabilityReport(Capability.READY, "", details)
 
-    def capability(self) -> CapabilityReport:
-        """Check settings, DB location and lock sharing, Plex Pass, schema and the marker tag row."""
-        local = self._local_checks(deadline=self._db_deadline())
-        if local.details.get("lock_holder") is False:
-            status = self._server.get_server_status()
-            if status is None:
-                return local
-            return CapabilityReport(
-                Capability.NEEDS_LOCAL_DB,
-                f"Plex is running, but not with the database file this app sees at {local.details['db_path']}. "
-                f"{SAME_HOST_PATH_ADVICE}",
-                {**local.details, "plex_pass": status.get("plex_pass"), "plex_version": status.get("version")},
-            )
-        if not local.ready:
-            return local
-        details = dict(local.details)
-        status = self._server.get_server_status()
-        plex_pass = None if status is None else status.get("plex_pass")
-        details["plex_pass"] = plex_pass
-        details["plex_version"] = None if status is None else status.get("version")
-        if plex_pass is False:
-            return CapabilityReport(
-                Capability.NEEDS_PASS, "This Plex server has no Plex Pass, so Plex won't show any markers.", details
-            )
-        details["detection"] = {"intro": None, "credits": None}
-        if plex_pass is not None and self._ui_details:  # unreachable: don't wait on a second connection for UI details
-            try:
-                details["detection"] = self._server.get_marker_detection_prefs()
-            except Exception as exc:
-                logger.debug("Plex {}: detection prefs unavailable: {}", self._config.name, exc)
+    def db_checks(self, *, deadline: float) -> CapabilityReport:
+        """The schema, the marker data this app knows how to read, and Plex's single marker tag row.
+
+        Args:
+            deadline: When to stop waiting for the database locks.
+
+        Returns:
+            READY, or the problem's own capability state and message (never raises).
+        """
         try:
-            # A fresh deadline: the Plex calls above don't eat into the time allowed for the database lock.
-            with self._database(read_only=True, deadline=self._db_deadline()) as conn:
+            with self._database(read_only=True, deadline=deadline) as conn:
                 self._check_schema(conn)
                 self._check_library_marker_versions(conn)
                 self._marker_tag_id(conn)
         except PublishError as exc:
-            return CapabilityReport(exc.state or Capability.MISCONFIGURED, str(exc), details)
+            return CapabilityReport(exc.state or Capability.MISCONFIGURED, str(exc))
         except sqlite3.Error as exc:
             error = publish_error_from_sqlite(exc)
-            return CapabilityReport(error.state or Capability.MISCONFIGURED, str(error), details)
-        return CapabilityReport(Capability.READY, "Written into this Plex server's database", details)
+            return CapabilityReport(error.state or Capability.MISCONFIGURED, str(error))
+        return CapabilityReport(Capability.READY, "")
 
-    def _local_candidates(self, plex_path: str) -> list[str]:
-        return apply_path_mappings(plex_path, list(self._config.path_mappings or [])) or [plex_path]
+    def read_item(self, rating_key: int, *, deadline: float) -> ItemRead:
+        """One item's live parts, with the schema and the marker tag row checked on the same connection.
 
-    def _local_version_files(self, parts: list[_Part]) -> tuple[str, ...]:
-        return tuple(
-            sorted({local for p in parts if not _is_optimized_copy(p) for local in self._local_candidates(p.file)})
-        )
+        Args:
+            rating_key: Plex's metadata item id.
+            deadline: When to stop waiting for the database locks.
 
-    def _sibling_decision(self, plex_file: str) -> dict[MarkerType, Marker] | None:
-        # A multi-disk mapping yields several local candidates; only the one that exists has a decision.
-        for local in self._local_candidates(plex_file):
-            try:
-                decided = self._sibling_markers(local)
-            except Exception as exc:
-                # markers.db's errors are ours, not Plex's: no capability state, so Plex's status isn't touched.
-                raise PublishError(
-                    f"Couldn't look up the markers decided for another version of this item: {exc}"
-                ) from exc
-            if decided is not None:
-                return decided
-        return None
-
-    def _desired(
-        self, parts: list[_Part], markers: list[Marker], canonical_path: str, prior: list[Marker]
-    ) -> list[Marker]:
-        """The item's marker set: the markers of every type all versions decided alike.
-
-        Plex serves one marker set per item, across all its versions. A type is desired only when every version is
-        decided, has that type and agrees within ``VERSION_AGREEMENT_MS`` (spec §6.3). The times written are the
-        calling file's, unless what this app already left on the item (``prior``) agrees with every version too:
-        then that stays, so versions whose times differ slightly don't rewrite each other's markers on every run.
+        Returns:
+            Whether the database knows the item, and its live parts.
 
         Raises:
-            PublishError: Stacked multi-part files.
-            ItemNotFoundError: None of the item's versions is our file.
+            PublishError: The database couldn't be read, or isn't the tested schema.
         """
-        media_items = [p.media_item_id for p in parts]
-        if len(set(media_items)) != len(media_items):
-            raise PublishError("Plex item uses stacked multi-part files; markers for those are not supported")
-        # Plex's optimized copies are transcodes we never decide: they share the item's markers but take no part in
-        # the agreement.
-        versions = [p for p in parts if not _is_optimized_copy(p)]
-        others = [p for p in versions if canonical_path not in self._local_candidates(p.file)]
-        if len(others) == len(versions):
-            # The markers were decided for a file this item doesn't hold: never write them onto another file.
-            raise ItemNotFoundError(
-                "This Plex item has no file matching this path (yet); check the server's path mappings"
-            )
-        # None = never decided, so no type is desired yet. {} = decided with no markers.
-        decisions = [self._sibling_decision(p.file) for p in others]
-        return self.project(agreed_across_versions(markers, decisions, prior, (MarkerType.INTRO, MarkerType.CREDITS)))
+        try:
+            with self._database(read_only=True, deadline=deadline) as conn:
+                self._check_schema(conn)
+                self._marker_tag_id(conn)
+                parts = self._item_parts(conn, rating_key)
+                return ItemRead(bool(parts) or self._item_exists(conn, rating_key), parts)
+        except sqlite3.Error as exc:
+            raise publish_error_from_sqlite(exc) from exc
+
+    def write_item(self, request: WriteRequest, *, deadline: float) -> WriteResult:
+        """Plan the item on a read-only snapshot first, and take Plex's write lock only for a real change.
+
+        Args:
+            request: The item, the parts its markers were decided for, and those markers.
+            deadline: When to stop waiting for the database locks.
+
+        Returns:
+            Whether the database changed, and what the item shows as ours.
+
+        Raises:
+            PublishError: Nothing was written (one transaction).
+        """
+        calling = set(request.calling_part_ids)
+        try:
+            with self._database(read_only=True, deadline=deadline) as conn:
+                snapshot = self._item_parts(conn, request.rating_key)
+                same_files = _same_files(snapshot, request.parts)
+                if same_files:
+                    tag_id = self._marker_tag_id(conn)
+                    plan = self._plan(
+                        conn,
+                        request.rating_key,
+                        tag_id,
+                        snapshot,
+                        request.wanted,
+                        request.prior,
+                        request.duration_ms,
+                        request.own_prior,
+                        calling,
+                        request.kept_types,
+                        request.keep_plex,
+                    )
+            if same_files and _nothing_to_write(plan):
+                changed = False
+            else:
+                with self._database(read_only=False, deadline=deadline) as conn:
+                    changed, plan = self._write_item(
+                        conn,
+                        request.rating_key,
+                        request.parts,
+                        request.wanted,
+                        request.prior,
+                        request.duration_ms,
+                        request.own_prior,
+                        calling,
+                        request.kept_types,
+                        request.keep_plex,
+                    )
+        except sqlite3.Error as exc:
+            raise publish_error_from_sqlite(exc) from exc
+        return WriteResult(changed, plan.ours, plan.kept_types, plan.replaced_own)
+
+    def shown_many(
+        self, items: list[ShownAsk], *, timeout_s: float, cancel_check: Callable[[], bool] | None = None
+    ) -> ShownBatch:
+        """Read items back one read-only connection each (the schema checked on the first), the lock free for a
+        moment between them, so a write from another job waiting for it gets it.
+
+        Args:
+            items: What to ask about each item.
+            timeout_s: The longest one item's read waits for the database locks.
+            cancel_check: True once the job is cancelled; checked before each item.
+
+        Returns:
+            One answer per item read, in order (``shown`` None for an item whose own read failed), and whether the
+            database stopped being readable at all.
+        """
+        answers: list[ShownAnswer] = []
+        tag_id: int | None = None
+        opened = False
+        for position, ask in enumerate(items):
+            if cancel_check and cancel_check():
+                break
+            if opened:
+                time.sleep(READ_BACK_PAUSE_S)  # the lock was just released: a waiting write takes it now
+            opened = True
+            try:
+                with self._database(read_only=True, deadline=time.monotonic() + timeout_s) as conn:
+                    if tag_id is None:
+                        self._check_schema(conn)
+                        tag_id = self._marker_tag_id(conn)
+                    shown, parts = self._shown_in(
+                        conn, tag_id, ask.rating_key, ask.ours, ask.kept_types, ask.item_files
+                    )
+                answers.append(ShownAnswer(shown, _version_files(parts)))
+            except PublishError as exc:
+                logger.debug("Plex {}: couldn't read {} item(s) back: {}", self._label, len(items) - position,
+                             type(exc).__name__)  # fmt: skip
+                return ShownBatch(answers, True)
+            except Exception as exc:
+                # One unreadable item (SQLite busy, a row with a NULL offset) mustn't stop the others.
+                logger.debug("Plex {}: couldn't read item {} back: {}", self._label, ask.rating_key,
+                             type(exc).__name__)  # fmt: skip
+                answers.append(ShownAnswer(None, ()))
+        return ShownBatch(answers, False)
+
+    def item_exists(self, rating_key: int, *, deadline: float) -> bool:
+        """Whether the database has this rating key, read like a read-back (lock proof, read-only).
+
+        Args:
+            rating_key: Plex's metadata item id.
+            deadline: When to stop waiting for the database locks.
+
+        Returns:
+            True when the item is there.
+
+        Raises:
+            PublishError: The database couldn't be read.
+        """
+        try:
+            with self._database(read_only=True, deadline=deadline) as conn:
+                return self._item_exists(conn, rating_key)
+        except sqlite3.Error as exc:
+            raise publish_error_from_sqlite(exc) from exc
 
     def _plan(
         self,
@@ -1100,6 +1236,269 @@ class PlexMarkerPublisher(MarkerPublisher):
                 conn.execute("ROLLBACK")
             raise
 
+    def _shown_in(
+        self,
+        conn: sqlite3.Connection,
+        tag_id: int,
+        rating_key: int,
+        ours: list[Marker],
+        kept_types: frozenset[MarkerType],
+        item_files: tuple[str, ...] | None,
+    ) -> tuple[Shown, list[_Part]]:
+        """One item's rows compared with ``ours`` on an open connection, and the item's live parts.
+
+        ``ours`` is already projected to the types this publisher writes (``ShownAsk``).
+        """
+        if not self._item_exists(conn, rating_key):
+            return Shown.GONE, []
+        rows = conn.execute(
+            "SELECT text, time_offset, end_time_offset, extra_data FROM taggings WHERE metadata_item_id=? AND tag_id=?",
+            (rating_key, tag_id),
+        ).fetchall()
+        parts = self._item_parts(conn, rating_key)
+        if item_files is not None and _version_files(parts) != tuple(item_files):
+            return Shown.VERSIONS_CHANGED, parts
+        served = {
+            mtype: [
+                _served_times(mtype, start, end, _row_is_final(extra))
+                for text, start, end, extra in rows
+                if text == name
+            ]
+            for mtype, name in _TYPE_TEXT.items()
+        }
+        if any(not served.get(mtype) for mtype in kept_types):
+            return Shown.MISSING, parts
+        return compare_shown(ours, served, others_alongside=False), parts
+
+
+class PlexMarkerPublisher(MarkerPublisher):
+    """Writes markers into one Plex server's database."""
+
+    supported_types = frozenset({MarkerType.INTRO, MarkerType.CREDITS})
+    name = "plex_db"
+    # One SQLite transaction per write — but __init__ takes this from the database half: a write through the
+    # Plex marker agent can lose its answer after that transaction committed.
+    atomic_writes = True
+
+    def __init__(
+        self,
+        server: PlexServer,
+        config: ServerConfig,
+        settings: ServerMarkersSettings,
+        *,
+        sibling_markers: Callable[[str], dict[MarkerType, Marker] | None] | None = None,
+        settings_provider: Callable[[], ServerMarkersSettings] | None = None,
+        mountinfo_path: str = "/proc/self/mountinfo",
+        ui_details: bool = True,
+        db_timeout_s: float | None = None,
+        db: PlexDatabase | None = None,
+    ) -> None:
+        """Create the publisher.
+
+        Args:
+            server: Live ``PlexServer`` client.
+            config: That server's ``ServerConfig``.
+            settings: That server's ``ServerMarkersSettings``.
+            sibling_markers: Looks up decided markers for another local file (multi-version items).
+            settings_provider: Returns the saved settings right now; when given, every check (and so every write)
+                reads the switch and the database-write confirmation from it instead of ``settings``.
+            mountinfo_path: For tests.
+            ui_details: Ask Plex for its own detection settings in ``capability()`` (the Edit dialog shows them); a job
+                doesn't need them.
+            db_timeout_s: The longest a single check or write waits for the database locks; None uses
+                ``BUSY_TIMEOUT_S``. The Inspector's publish-now path shortens it, since a 30 s wait alone outlasts the
+                deadline a web request may take (ruling P-R1).
+            db: Where the database work runs. The default opens the file this process can see; a server with a Plex
+                marker agent gets ``plex_remote.RemotePlexDb`` instead (``publishers.factory``).
+        """
+        self._server = server
+        self._config = config
+        self._settings = settings
+        self._settings_provider = settings_provider
+        self._sibling_markers = sibling_markers or (lambda _path: None)
+        self._ui_details = ui_details
+        self._db_timeout_s = db_timeout_s
+        self._db = db or LocalPlexDb(self.db_path, label=config.name, mountinfo_path=mountinfo_path)
+        # A write through the Plex marker agent can fail with its answer lost after the transaction committed, so
+        # that publisher is not atomic and its record of what is ours is unknown after a failure.
+        self.atomic_writes = self._db.atomic_writes
+        self._live_files: dict[str, tuple[str, ...]] = {}
+
+    def _db_timeout(self) -> float:
+        """The longest one check or write waits for the database locks."""
+        return BUSY_TIMEOUT_S if self._db_timeout_s is None else self._db_timeout_s
+
+    def _db_deadline(self) -> float:
+        """When one check or write stops waiting for the database locks (``time.monotonic()``)."""
+        return time.monotonic() + self._db_timeout()
+
+    @staticmethod
+    def db_path_for(config: ServerConfig) -> str | None:
+        """DB path from a server's config, or None when its Plex config folder isn't set.
+
+        Args:
+            config: The server's ``ServerConfig``.
+
+        Returns:
+            The library database's path as this app sees it.
+        """
+        folder = str((config.output or {}).get("plex_config_folder") or "").strip()
+        return plex_db_path(folder) if folder else None
+
+    def db_path(self) -> str | None:
+        """DB path as this app sees it, or None when the Plex config folder isn't set.
+
+        With a Plex marker agent the file is on Plex's machine and this path is not opened: the agent reports its own
+        (``capability().details["db_path"]``).
+        """
+        return self.db_path_for(self._config)
+
+    def _live_settings(self) -> ServerMarkersSettings:
+        return self._settings_provider() if self._settings_provider is not None else self._settings
+
+    def _local_checks(self, *, deadline: float) -> CapabilityReport:
+        """Settings (read live when a ``settings_provider`` was given), then the database's own file checks.
+
+        The file checks run where the database is: in this process, or on the Plex marker agent (``PlexDatabase``).
+        Neither needs a Plex connection.
+
+        Args:
+            deadline: When to stop waiting for the lock on the database.
+
+        Returns:
+            READY when all pass. A missing lock holder is reported as UNREACHABLE with ``details["lock_holder"]``
+            False, so ``capability()`` can tell "Plex stopped" from "different file".
+        """
+        settings = self._live_settings()
+        if not settings.enabled:
+            return CapabilityReport(Capability.DISABLED, "Intro & Credits is off for this server")
+        if not settings.db_write_confirmed_at:
+            return CapabilityReport(Capability.NEEDS_CONFIRMATION, "Confirm the Plex database write to turn this on")
+        report = self._db.file_checks(deadline=deadline)
+        return self._another_plexs_agent(report) or report
+
+    def _another_plexs_agent(self, report: CapabilityReport) -> CapabilityReport | None:
+        """Refuse an agent that is next to a different Plex than this server (a mistyped address).
+
+        Both sides name Plex's own machine identifier — this app from the server it is connected to, the agent from
+        the Preferences.xml beside the database it would write. Anything else would write one Plex's markers into
+        another Plex's database. Silence isn't proof: when either side doesn't say, the write goes ahead.
+
+        Args:
+            report: What the database half answered.
+
+        Returns:
+            The refusal, or None when the two identifiers match or one of them is unknown.
+        """
+        agent = report.details.get("agent") or {}
+        theirs, ours = str(agent.get("machine_identifier") or ""), str(self._config.server_identity or "")
+        if not theirs or not ours or theirs == ours:
+            return None
+        return CapabilityReport(
+            Capability.AGENT_UNAVAILABLE,
+            f"The Plex marker agent at {agent.get('url') or 'this address'} is next to a different Plex server than "
+            f"{self._config.name or 'this one'}. Check the address: markers would have gone into the wrong database.",
+            report.details,
+        )
+
+    def capability(self) -> CapabilityReport:
+        """Check settings, DB location and lock sharing, Plex Pass, schema and the marker tag row."""
+        local = self._local_checks(deadline=self._db_deadline())
+        # The agent's own problems (unreachable, wrong key, wrong version, the wrong Plex) are about the agent, not
+        # about where a database file sits, so they are never reworded as the same-host advice below.
+        if local.state is Capability.AGENT_UNAVAILABLE:
+            return local
+        if local.details.get("lock_holder") is False:
+            status = self._server.get_server_status()
+            if status is None:
+                return local
+            # With an agent the path is the one IT sees; this app sees no database at all.
+            whose = "the agent sees" if local.details.get("agent") else "this app sees"
+            return CapabilityReport(
+                Capability.NEEDS_LOCAL_DB,
+                f"Plex is running, but not with the database file {whose} at {local.details['db_path']}. "
+                f"{SAME_HOST_PATH_ADVICE}",
+                {**local.details, "plex_pass": status.get("plex_pass"), "plex_version": status.get("version")},
+            )
+        if not local.ready:
+            return local
+        details = dict(local.details)
+        status = self._server.get_server_status()
+        plex_pass = None if status is None else status.get("plex_pass")
+        details["plex_pass"] = plex_pass
+        details["plex_version"] = None if status is None else status.get("version")
+        if plex_pass is False:
+            return CapabilityReport(
+                Capability.NEEDS_PASS, "This Plex server has no Plex Pass, so Plex won't show any markers.", details
+            )
+        details["detection"] = {"intro": None, "credits": None}
+        if plex_pass is not None and self._ui_details:  # unreachable: don't wait on a second connection for UI details
+            try:
+                details["detection"] = self._server.get_marker_detection_prefs()
+            except Exception as exc:
+                logger.debug("Plex {}: detection prefs unavailable: {}", self._config.name, exc)
+        # A fresh deadline: the Plex calls above don't eat into the time allowed for the database lock.
+        inside = self._db.db_checks(deadline=self._db_deadline())
+        details.update(inside.details)
+        if not inside.ready:
+            return CapabilityReport(inside.state, inside.message, details)
+        return CapabilityReport(Capability.READY, "Written into this Plex server's database", details)
+
+    def _local_candidates(self, plex_path: str) -> list[str]:
+        # Imported here, not at module level: the server layer pulls in the whole app, and the database half of
+        # this module (``LocalPlexDb``) runs in the Plex marker agent's small image, which has none of it.
+        from ...servers.ownership import apply_path_mappings
+
+        return apply_path_mappings(plex_path, list(self._config.path_mappings or [])) or [plex_path]
+
+    def _sibling_decision(self, plex_file: str) -> dict[MarkerType, Marker] | None:
+        # A multi-disk mapping yields several local candidates; only the one that exists has a decision.
+        for local in self._local_candidates(plex_file):
+            try:
+                decided = self._sibling_markers(local)
+            except Exception as exc:
+                # markers.db's errors are ours, not Plex's: no capability state, so Plex's status isn't touched.
+                raise PublishError(
+                    f"Couldn't look up the markers decided for another version of this item: {exc}"
+                ) from exc
+            if decided is not None:
+                return decided
+        return None
+
+    def _desired(
+        self, parts: list[_Part], markers: list[Marker], canonical_path: str, prior: list[Marker]
+    ) -> list[Marker]:
+        """The item's marker set: the markers of every type all versions decided alike.
+
+        Plex serves one marker set per item, across all its versions. A type is desired only when every version is
+        decided, has that type and agrees within ``VERSION_AGREEMENT_MS`` (spec §6.3). The times written are the
+        calling file's, unless what this app already left on the item (``prior``) agrees with every version too:
+        then that stays, so versions whose times differ slightly don't rewrite each other's markers on every run.
+
+        Raises:
+            PublishError: Stacked multi-part files.
+            ItemNotFoundError: None of the item's versions is our file.
+        """
+        media_items = [p.media_item_id for p in parts]
+        if len(set(media_items)) != len(media_items):
+            raise PublishError("Plex item uses stacked multi-part files; markers for those are not supported")
+        # Plex's optimized copies are transcodes we never decide: they share the item's markers but take no part in
+        # the agreement.
+        versions = [p for p in parts if not _is_optimized_copy(p)]
+        others = [p for p in versions if canonical_path not in self._local_candidates(p.file)]
+        if len(others) == len(versions):
+            # The markers were decided for a file this item doesn't hold: never write them onto another file.
+            raise ItemNotFoundError(
+                "This Plex item has no file matching this path (yet); check the server's path mappings"
+            )
+        # None = never decided, so no type is desired yet. {} = decided with no markers.
+        decisions = [self._sibling_decision(p.file) for p in others]
+        return self.project(agreed_across_versions(markers, decisions, prior, (MarkerType.INTRO, MarkerType.CREDITS)))
+
+    def _local_files(self, version_files: tuple[str, ...]) -> tuple[str, ...]:
+        """Every local candidate of every version file, sorted (see ``live_files``)."""
+        return tuple(sorted({local for remote in version_files for local in self._local_candidates(remote)}))
+
     def write(
         self,
         item_id: str,
@@ -1112,6 +1511,8 @@ class PlexMarkerPublisher(MarkerPublisher):
         kept_types: frozenset[MarkerType] = frozenset(),
     ) -> list[Marker]:
         """Make this item show its desired marker set (see ``_desired``) in ``taggings`` and every part's ``extra_data``.
+
+        What to write is decided here; the database work runs where the file is (``PlexDatabase``).
 
         Types of ours that are no longer desired are removed only where they still serve exactly ``previous``; Plex's
         own rows of those types stay. A desired type replaces whatever rows the item has of that type, except a type
@@ -1145,55 +1546,35 @@ class PlexMarkerPublisher(MarkerPublisher):
         local = self._local_checks(deadline=deadline)
         if not local.ready:
             raise PublishError(local.message, state=local.state)
-        try:
-            with self._database(read_only=True, deadline=deadline) as conn:
-                self._check_schema(conn)
-                self._marker_tag_id(conn)
-                parts = self._item_parts(conn, rating_key)
-                known = bool(parts) or self._item_exists(conn, rating_key)
-            if not known:
-                raise ItemNotFoundError(f"Plex item {rating_key} not found in the database")
-            if not parts:
-                # Every version is deleted or in Plex's trash: nothing to show markers on until Plex finds a file again.
-                raise ItemNotFoundError(
-                    f"Plex has no live files for this item ({rating_key}): they're deleted or in Plex's trash"
-                )
-            self.last_item_files = _version_files(parts)
-            # With no Plex connection or lock held: the sibling lookups take markers.db's lock.
-            desired = self._desired(parts, wanted, canonical_path, prior)
-            if not desired and not prior and not own_prior and not self.last_kept_types:
-                return []
-            calling = {p.id for p in parts if canonical_path in self._local_candidates(p.file)}
-            # Plan on a read-only snapshot first: a write that changes nothing never takes Plex's write lock. A real
-            # change re-reads and re-plans under that lock in _write_item.
-            with self._database(read_only=True, deadline=deadline) as conn:
-                snapshot = self._item_parts(conn, rating_key)
-                same_files = _same_files(snapshot, parts)
-                if same_files:
-                    tag_id = self._marker_tag_id(conn)
-                    plan = self._plan(
-                        conn,
-                        rating_key,
-                        tag_id,
-                        snapshot,
-                        desired,
-                        prior,
-                        duration_ms,
-                        own_prior,
-                        calling,
-                        kept_before,
-                        keep_plex,
-                    )
-            if same_files and _nothing_to_write(plan):
-                changed = False
-            else:
-                with self._database(read_only=False, deadline=deadline) as conn:
-                    changed, plan = self._write_item(
-                        conn, rating_key, parts, desired, prior, duration_ms, own_prior, calling, kept_before, keep_plex
-                    )
-        except sqlite3.Error as exc:
-            raise publish_error_from_sqlite(exc) from exc
-        newly_kept = plan.kept_types - kept_before
+        item = self._db.read_item(rating_key, deadline=deadline)
+        if not item.exists:
+            raise ItemNotFoundError(f"Plex item {rating_key} not found in the database")
+        if not item.parts:
+            # Every version is deleted or in Plex's trash: nothing to show markers on until Plex finds a file again.
+            raise ItemNotFoundError(
+                f"Plex has no live files for this item ({rating_key}): they're deleted or in Plex's trash"
+            )
+        self.last_item_files = _version_files(item.parts)
+        # With no Plex connection or lock held: the sibling lookups take markers.db's lock.
+        desired = self._desired(item.parts, wanted, canonical_path, prior)
+        if not desired and not prior and not own_prior and not self.last_kept_types:
+            return []
+        calling = tuple(sorted(p.id for p in item.parts if canonical_path in self._local_candidates(p.file)))
+        result = self._db.write_item(
+            WriteRequest(
+                rating_key=rating_key,
+                parts=item.parts,
+                wanted=desired,
+                prior=prior,
+                duration_ms=duration_ms,
+                own_prior=own_prior,
+                calling_part_ids=calling,
+                kept_types=kept_before,
+                keep_plex=keep_plex,
+            ),
+            deadline=deadline,
+        )
+        newly_kept = result.kept_types - kept_before
         if newly_kept:
             logger.info(
                 "Plex {}: item {} shows Plex's own {} instead of ours; keeping them (Keep Plex's)",
@@ -1201,22 +1582,22 @@ class PlexMarkerPublisher(MarkerPublisher):
                 rating_key,
                 " and ".join(t.value for t in MarkerType if t in newly_kept),
             )
-        if plan.replaced_own:
+        if result.replaced_own:
             logger.info(
                 "Plex {}: item {} showed Plex's own {}; this server keeps Plex's, but the user locked them, so "
                 "they were replaced",
                 self._config.name,
                 rating_key,
-                " and ".join(t.value for t in MarkerType if t in plan.replaced_own),
+                " and ".join(t.value for t in MarkerType if t in result.replaced_own),
             )
-        if changed:
+        if result.changed:
             logger.info(
-                "Plex {}: item {} now shows {} marker(s) of ours", self._config.name, rating_key, len(plan.ours)
+                "Plex {}: item {} now shows {} marker(s) of ours", self._config.name, rating_key, len(result.ours)
             )
-        self.last_write_changed = changed
-        self.last_kept_types = plan.kept_types
-        self.last_replaced_own_types = plan.replaced_own
-        return plan.ours
+        self.last_write_changed = result.changed
+        self.last_kept_types = result.kept_types
+        self.last_replaced_own_types = result.replaced_own
+        return result.ours
 
     def shows(
         self,
@@ -1258,8 +1639,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         if not self._local_checks(deadline=self._db_deadline()).ready:
             return None
         try:
-            with self._database(read_only=True, deadline=self._db_deadline()) as conn:
-                return not self._item_exists(conn, rating_key)
+            return not self._db.item_exists(rating_key, deadline=self._db_deadline())
         except Exception as exc:
             logger.debug("Plex {}: couldn't look item {} up: {}", self._config.name, item_id, type(exc).__name__)
             return None
@@ -1289,7 +1669,8 @@ class PlexMarkerPublisher(MarkerPublisher):
         Returns:
             Per item id read: how its rows compare. None for an id that isn't a Plex rating key and for an item whose
             read failed (a row this code can't read, SQLite busy); every item left is None once the database can't be
-            shared or read at all (not local, Plex stopped, schema changed, the lock busy past its deadline).
+            shared or read at all (not local, Plex stopped, schema changed, the lock busy past its deadline). An id
+            that isn't a rating key is answered before the read starts, so a cancelled call still reports it.
         """
         out: dict[str, Shown | None] = {}
         self._live_files = {}
@@ -1299,65 +1680,23 @@ class PlexMarkerPublisher(MarkerPublisher):
         if not local.ready:
             logger.debug("Plex {}: couldn't read {} item(s) back: {}", self._config.name, len(items), local.state.value)
             return {item_id: None for item_id, *_ in items}
-        tag_id: int | None = None
-        opened = False
-        for position, (item_id, ours, kept_types, item_files) in enumerate(items):
-            if cancel_check and cancel_check():
-                break
+        asked: list[str] = []
+        asks: list[ShownAsk] = []
+        for item_id, ours, kept_types, item_files in items:
             try:
                 rating_key = _rating_key(item_id)
             except ItemNotFoundError:
                 out[item_id] = None
                 continue
-            if opened:
-                time.sleep(READ_BACK_PAUSE_S)  # the lock was just released: a waiting write takes it now
-            opened = True
-            try:
-                with self._database(read_only=True, deadline=self._db_deadline()) as conn:
-                    if tag_id is None:
-                        self._check_schema(conn)
-                        tag_id = self._marker_tag_id(conn)
-                    shown, parts = self._shown_in(conn, tag_id, rating_key, ours, kept_types, item_files)
-                out[item_id] = shown
-                self._live_files[item_id] = self._local_version_files(parts)
-            except PublishError as exc:
-                logger.debug("Plex {}: couldn't read {} item(s) back: {}", self._config.name, len(items) - position,
-                             type(exc).__name__)  # fmt: skip
-                out.update({rest_id: None for rest_id, *_ in items[position:]})
-                break
-            except Exception as exc:
-                # One unreadable item (SQLite busy, a row with a NULL offset) mustn't stop the others.
-                logger.debug("Plex {}: couldn't read item {} back: {}", self._config.name, item_id, type(exc).__name__)
-                out[item_id] = None
+            asked.append(item_id)
+            asks.append(ShownAsk(rating_key, self.project(ours), frozenset(kept_types), item_files))
+        batch = self._db.shown_many(asks, timeout_s=self._db_timeout(), cancel_check=cancel_check)
+        for item_id, answer in zip(asked, batch.answers, strict=False):
+            out[item_id] = answer.shown
+            if answer.shown is not None:
+                # Only a read that happened records the item's files: an id asked twice, whose second read failed,
+                # keeps what the first one found (``live_files``).
+                self._live_files[item_id] = self._local_files(answer.version_files)
+        if batch.unreadable:
+            out.update({item_id: None for item_id in asked[len(batch.answers) :]})
         return out
-
-    def _shown_in(
-        self,
-        conn: sqlite3.Connection,
-        tag_id: int,
-        rating_key: int,
-        ours: list[Marker],
-        kept_types: frozenset[MarkerType],
-        item_files: tuple[str, ...] | None,
-    ) -> tuple[Shown, list[_Part]]:
-        """One item's rows compared with ``ours`` (see ``shows``) on an open connection, and the item's live parts."""
-        if not self._item_exists(conn, rating_key):
-            return Shown.GONE, []
-        rows = conn.execute(
-            "SELECT text, time_offset, end_time_offset, extra_data FROM taggings WHERE metadata_item_id=? AND tag_id=?",
-            (rating_key, tag_id),
-        ).fetchall()
-        parts = self._item_parts(conn, rating_key)
-        if item_files is not None and _version_files(parts) != tuple(item_files):
-            return Shown.VERSIONS_CHANGED, parts
-        served = {
-            mtype: [
-                _served_times(mtype, start, end, _row_is_final(extra))
-                for text, start, end, extra in rows
-                if text == name
-            ]
-            for mtype, name in _TYPE_TEXT.items()
-        }
-        if any(not served.get(mtype) for mtype in kept_types):
-            return Shown.MISSING, parts
-        return compare_shown(self.project(ours), served, others_alongside=False), parts

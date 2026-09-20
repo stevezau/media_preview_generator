@@ -1,0 +1,42 @@
+# The Plex marker agent, beside Plex. Run this on the machine Plex runs on — that is the whole point of it.
+#
+#   printf 'AGENT_TOKEN=%s\n' "$(openssl rand -hex 24)" > .env && chmod 600 .env
+#   docker compose up -d
+#
+# Then paste the same key, and this machine's address (http://<this-host>:9494), into the app:
+# Servers → your Plex → Edit → Intro & Credits → Plex marker agent.
+services:
+  plex-marker-agent:
+    image: ghcr.io/stevezau/plex-marker-agent:1.0.0
+    container_name: plex-marker-agent
+    restart: unless-stopped
+    # The user that owns Plex's database. Plex's own container runs as this user (PLEX_UID/PLEX_GID); the agent
+    # can't write the database as anyone else, and refuses to try.
+    user: "1000:1000"
+    environment:
+      # The shared key. Keep it in .env (never in this file, never in the image).
+      AGENT_TOKEN: ${AGENT_TOKEN:?set AGENT_TOKEN in .env}
+      # Plex's config folder as THIS container sees it. The agent derives the database path from it and never takes
+      # a path from the app.
+      PLEX_CONFIG_DIR: /plex/Library/Application Support/Plex Media Server
+      AGENT_PORT: 9494
+      TZ: ${TZ:-UTC}
+    volumes:
+      # Plex's config volume. Read-write: writing markers is the job. Nothing else on the host is mounted.
+      - /path/to/plex/config:/plex
+    ports:
+      # Bind to the interface the app reaches this host on. The key is the only thing between a caller and Plex's
+      # database, so don't publish this to the internet.
+      - "9494:9494"
+    networks:
+      - plex
+    deploy:
+      resources:
+        limits:
+          # It waits on SQLite locks and serialises small JSON; it needs neither CPU nor memory to speak of.
+          cpus: "1.0"
+          memory: 256M
+
+networks:
+  plex:
+    driver: bridge

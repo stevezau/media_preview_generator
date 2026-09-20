@@ -188,6 +188,12 @@ def _settings_block(config: ServerConfig, settings: ServerMarkersSettings) -> di
         block["plex"] = {
             "db_write_confirmed_at": settings.db_write_confirmed_at,
             "on_plex_redetect": settings.on_plex_redetect,
+            # The agent's key is never in a response: only whether one is stored (``has_token``).
+            "agent": {
+                "enabled": settings.agent_enabled,
+                "url": settings.agent_url,
+                "has_token": bool(settings.agent_token),
+            },
         }
     if config.type is ServerType.EMBY:
         block["emby"] = {"on_emby_redetect": settings.on_emby_redetect}

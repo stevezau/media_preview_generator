@@ -27,6 +27,7 @@ from media_preview_generator.markers.publishers.base import (
     Shown,
 )
 from media_preview_generator.markers.publishers.plex_db import (
+    LocalPlexDb,
     PlexMarkerPublisher,
     encode_extra_data,
     merge_part_extra_data,
@@ -92,14 +93,14 @@ def plex_holds_the_database(monkeypatch):
 def sql_log(monkeypatch):
     """Every statement the publisher runs, with bound values expanded."""
     log: list[str] = []
-    original = PlexMarkerPublisher._connect
+    original = LocalPlexDb._connect
 
     def connect(self, *, read_only, **kwargs):
         conn = original(self, read_only=read_only, **kwargs)
         conn.set_trace_callback(log.append)
         return conn
 
-    monkeypatch.setattr(PlexMarkerPublisher, "_connect", connect)
+    monkeypatch.setattr(LocalPlexDb, "_connect", connect)
     return log
 
 
@@ -543,7 +544,7 @@ class TestWrite:
         conn.commit()
         conn.close()
         executed = []
-        original = PlexMarkerPublisher._connect
+        original = LocalPlexDb._connect
 
         def connect(self, *, read_only, **kwargs):
             # Refuse the media_parts UPDATE, which runs after the DELETE and INSERT: both must be rolled back.
@@ -558,7 +559,7 @@ class TestWrite:
             )
             return c
 
-        monkeypatch.setattr(PlexMarkerPublisher, "_connect", connect)
+        monkeypatch.setattr(LocalPlexDb, "_connect", connect)
         with pytest.raises(PublishError):
             _publisher(tmp_path, folder).write(
                 "7", [INTRO], previous=[], duration_ms=DUR, canonical_path="/data/tv/S01E01.mkv"
@@ -2103,9 +2104,7 @@ class TestLockTimeouts:
     def test_database_vanishing_before_the_ownership_message_is_still_a_report(self, tmp_path, monkeypatch):
         folder = tmp_path / "Plex Media Server"
         _make_db(folder)
-        monkeypatch.setattr(
-            PlexMarkerPublisher, "_unwritable_paths", staticmethod(lambda path: (os.remove(path), [path])[1])
-        )
+        monkeypatch.setattr(LocalPlexDb, "_unwritable_paths", staticmethod(lambda path: (os.remove(path), [path])[1]))
         report = _publisher(tmp_path, folder).capability()
         assert report.state is Capability.MISCONFIGURED and "can't write" in report.message
 
@@ -2128,7 +2127,7 @@ class TestLockSerialisation:
         pub = _publisher(tmp_path, folder)
         inside, release, probed = threading.Event(), threading.Event(), threading.Event()
         pause_in = {"capability": "_check_library_marker_versions", "write": "_plan"}[holder]
-        real_pause, real_probe = getattr(PlexMarkerPublisher, pause_in), plex_db._shm_dms_locked_elsewhere
+        real_pause, real_probe = getattr(LocalPlexDb, pause_in), plex_db._shm_dms_locked_elsewhere
         paused = []
 
         def pausing(*args, **kwargs):
@@ -2138,7 +2137,7 @@ class TestLockSerialisation:
                 release.wait(10)
             return real_pause(*args, **kwargs)
 
-        monkeypatch.setattr(PlexMarkerPublisher, pause_in, staticmethod(pausing) if pause_in != "_plan" else pausing)
+        monkeypatch.setattr(LocalPlexDb, pause_in, staticmethod(pausing) if pause_in != "_plan" else pausing)
         monkeypatch.setattr(plex_db, "_shm_dms_locked_elsewhere", lambda path: (probed.set(), real_probe(path))[1])
         operation = {
             "capability": pub.capability,
@@ -2219,8 +2218,8 @@ class TestLockSerialisation:
         # Otherwise every later probe on this thread would refuse to run ("inside an open connection").
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder, journal_mode="wal")
-        pub = _publisher(tmp_path, folder)
-        original, calls = PlexMarkerPublisher._connect, []
+        database = LocalPlexDb(lambda: str(db))
+        original, calls = LocalPlexDb._connect, []
 
         def failing_once(self, **kwargs):
             calls.append(1)
@@ -2228,16 +2227,15 @@ class TestLockSerialisation:
                 raise sqlite3.OperationalError("unable to open database file")
             return original(self, **kwargs)
 
-        monkeypatch.setattr(PlexMarkerPublisher, "_connect", failing_once)
-        with pytest.raises(sqlite3.OperationalError), pub._database(read_only=True, deadline=time.monotonic() + 5):
+        monkeypatch.setattr(LocalPlexDb, "_connect", failing_once)
+        with pytest.raises(sqlite3.OperationalError), database._database(read_only=True, deadline=time.monotonic() + 5):
             pass
         assert plex_db.shm_lock_held_elsewhere(str(db)) is False  # runs; no holder in this test
 
     def test_probe_inside_our_own_open_connection_is_refused(self, tmp_path):
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder, journal_mode="wal")
-        pub = _publisher(tmp_path, folder)
-        with pub._database(read_only=True, deadline=time.monotonic() + 5):
+        with LocalPlexDb(lambda: str(db))._database(read_only=True, deadline=time.monotonic() + 5):
             with pytest.raises(RuntimeError, match="open connection"):
                 plex_db.shm_lock_held_elsewhere(str(db))
 
@@ -2784,21 +2782,21 @@ class TestReadBackMany:
         pub = _publisher(tmp_path, folder)
         opened, local_checks, schema_checks = [], [], []
         real_database, real_local, real_schema = (
-            PlexMarkerPublisher._database,
+            LocalPlexDb._database,
             PlexMarkerPublisher._local_checks,
-            (PlexMarkerPublisher._check_schema),
+            (LocalPlexDb._check_schema),
         )
 
         def counting_database(self, **kwargs):
             opened.append(kwargs["read_only"])
             return real_database(self, **kwargs)
 
-        monkeypatch.setattr(PlexMarkerPublisher, "_database", counting_database)
+        monkeypatch.setattr(LocalPlexDb, "_database", counting_database)
         monkeypatch.setattr(
             PlexMarkerPublisher, "_local_checks", lambda self, **kw: local_checks.append(1) or real_local(self, **kw)
         )
         monkeypatch.setattr(
-            PlexMarkerPublisher,
+            LocalPlexDb,
             "_check_schema",
             staticmethod(lambda conn: schema_checks.append(1) or real_schema(conn)),
         )
@@ -2826,7 +2824,7 @@ class TestReadBackMany:
         _make_db(folder)
         pub = _publisher(tmp_path, folder)
         _write_one(pub, [INTRO])
-        real_shown = PlexMarkerPublisher._shown_in
+        real_shown = LocalPlexDb._shown_in
         calls = []
 
         def failing_second(self, *args):
@@ -2835,7 +2833,7 @@ class TestReadBackMany:
                 raise sqlite3.OperationalError("disk I/O error")
             return real_shown(self, *args)
 
-        monkeypatch.setattr(PlexMarkerPublisher, "_shown_in", failing_second)
+        monkeypatch.setattr(LocalPlexDb, "_shown_in", failing_second)
         assert pub.shows_many(self._items(["7", "8", "7"])) == {"7": Shown.OURS, "8": None}
         assert calls == [7, 8, 7]
 
@@ -2844,7 +2842,7 @@ class TestReadBackMany:
         _make_db(folder)
         pub = _publisher(tmp_path, folder)
         _write_one(pub, [INTRO])
-        real_database = PlexMarkerPublisher._database
+        real_database = LocalPlexDb._database
         opened = []
 
         def busy_after_the_first(self, **kwargs):
@@ -2854,7 +2852,7 @@ class TestReadBackMany:
                                    state=Capability.UNREACHABLE)  # fmt: skip
             return real_database(self, **kwargs)
 
-        monkeypatch.setattr(PlexMarkerPublisher, "_database", busy_after_the_first)
+        monkeypatch.setattr(LocalPlexDb, "_database", busy_after_the_first)
         assert pub.shows_many(self._items(["7", "8", "9"])) == {"7": Shown.OURS, "8": None, "9": None}
         assert len(opened) == 2
 
@@ -2870,9 +2868,7 @@ class TestReadBackMany:
         elif problem == "schema":
             _exec(db, "CREATE TRIGGER t AFTER INSERT ON taggings BEGIN SELECT 1; END")
         connected = []
-        monkeypatch.setattr(
-            PlexMarkerPublisher, "_connect", lambda self, **kw: connected.append(kw) or sqlite3.connect(db)
-        )
+        monkeypatch.setattr(LocalPlexDb, "_connect", lambda self, **kw: connected.append(kw) or sqlite3.connect(db))
         assert pub.shows_many(self._items(["7", "8"])) == {"7": None, "8": None}
         assert len(connected) == (1 if problem == "schema" else 0)  # a changed schema stops the call after one look
 
@@ -2894,14 +2890,14 @@ class TestReadBackMany:
                 raise PublishError("Another Intro & Credits task is still using this Plex database",
                                    state=Capability.UNREACHABLE)  # fmt: skip
 
-            monkeypatch.setattr(PlexMarkerPublisher, "_database", busy)
+            monkeypatch.setattr(LocalPlexDb, "_database", busy)
         assert pub.item_missing(item_id) is missing
 
     def test_a_write_waiting_for_the_database_gets_it_between_items(self, tmp_path, monkeypatch):
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder)
         reader, writer = _publisher(tmp_path, folder), _publisher(tmp_path, folder)
-        real_shown = PlexMarkerPublisher._shown_in
+        real_shown = LocalPlexDb._shown_in
         reading = threading.Event()
 
         def slow(self, *args):
@@ -2909,7 +2905,7 @@ class TestReadBackMany:
             time.sleep(0.01)
             return real_shown(self, *args)
 
-        monkeypatch.setattr(PlexMarkerPublisher, "_shown_in", slow)
+        monkeypatch.setattr(LocalPlexDb, "_shown_in", slow)
         monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 0.5)  # the write gives up if it never gets the lock
         finished = {}
 

@@ -26,6 +26,10 @@ class Capability(str, Enum):
     PLUGIN_OUTDATED = "plugin_outdated"
     NEEDS_PASS = "needs_pass"
     NEEDS_LOCAL_DB = "needs_local_db"
+    # A Plex server whose database is on another machine and whose Plex marker agent can't be used right now: it
+    # doesn't answer, it refuses this app's key, or it speaks another version of the protocol. The database itself
+    # is fine — ``details["agent"]`` says which of the three it is (``plex_remote``).
+    AGENT_UNAVAILABLE = "agent_unavailable"
     NEEDS_PLEX_DETECTION_ONCE = "needs_plex_detection_once"
     UNSUPPORTED_SCHEMA = "unsupported_schema"
     UNREACHABLE = "unreachable"

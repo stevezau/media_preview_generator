@@ -727,6 +727,39 @@
                             </div>
                         </div>
 
+                        <!-- Plex only: the marker agent beside a Plex on another machine. Its address and shared
+                             key are stored in markers.plex.agent; the key comes back masked and is posted back
+                             masked unless the user types a new one. -->
+                        <div class="markers-opt d-none border-top pt-3 mt-3" id="markersPlexAgentGroup">
+                            <div>
+                                <label class="fw-semibold" for="markersAgentEnabled">Plex marker agent</label>
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                        title="A small container you run next to Plex. It is the only supported way to write markers to a Plex on another machine."><i class="bi bi-info-circle"></i></button>
+                                <div class="small text-muted">Only needed when this app and Plex are on different machines</div>
+                            </div>
+                            <div class="form-check form-switch markers-switch">
+                                <input class="form-check-input" type="checkbox" role="switch" id="markersAgentEnabled">
+                            </div>
+                        </div>
+                        <div class="d-none mb-3" id="markersPlexAgentFields">
+                            <div class="row g-2">
+                                <div class="col-md-7">
+                                    <label class="form-label small mb-1" for="markersAgentUrl">Address</label>
+                                    <input type="url" class="form-control form-control-sm" id="markersAgentUrl"
+                                           placeholder="http://plex-host.lan:9494" autocomplete="off">
+                                </div>
+                                <div class="col-md-5">
+                                    <label class="form-label small mb-1" for="markersAgentToken">Shared key
+                                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                                title="The same key is set on both sides. It is never written to the logs."><i class="bi bi-info-circle"></i></button>
+                                    </label>
+                                    <input type="password" class="form-control form-control-sm" id="markersAgentToken"
+                                           autocomplete="new-password">
+                                </div>
+                            </div>
+                            <div id="markersAgentState" class="small mt-2"></div>
+                        </div>
+
                         <div class="markers-opt d-none" id="markersEmbyRedetectGroup">
                             <div class="fw-semibold small">When Emby has its own markers
                                 <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"

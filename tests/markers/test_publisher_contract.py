@@ -360,7 +360,7 @@ class PlexItem:
         self.chapters: dict[str, tuple[Chapter, ...]] = {}
         self.durations: dict[str, int] = {}
         self.commits = 0
-        real_write_item = plex_db.PlexMarkerPublisher._write_item
+        real_write_item = plex_db.LocalPlexDb._write_item
         commit_guard = threading.Lock()
 
         def counting_write_item(publisher, *args, **kwargs):
@@ -372,7 +372,7 @@ class PlexItem:
         # Patched once for the whole test: runs on several threads must not patch and unpatch over each other.
         monkeypatch.setattr(plex_db, "shm_lock_held_elsewhere", lambda _db, **_kw: True)
         monkeypatch.setattr(plex_db, "filesystem_type", lambda *_a, **_kw: "ext4")
-        monkeypatch.setattr(plex_db.PlexMarkerPublisher, "_write_item", counting_write_item)
+        monkeypatch.setattr(plex_db.LocalPlexDb, "_write_item", counting_write_item)
         monkeypatch.setattr(
             pipeline,
             "probe_media",
@@ -596,13 +596,13 @@ def test_an_item_recorded_without_its_versions_is_written_once_to_record_them(pl
         item.add_part("2160p")  # never decided
     writes = _spy(monkeypatch, "write")
     write_locks = []
-    real_database = plex_db.PlexMarkerPublisher._database
+    real_database = plex_db.LocalPlexDb._database
 
     def database(publisher, *, read_only, deadline):
         write_locks.append(not read_only)
         return real_database(publisher, read_only=read_only, deadline=deadline)
 
-    monkeypatch.setattr(plex_db.PlexMarkerPublisher, "_database", database)
+    monkeypatch.setattr(plex_db.LocalPlexDb, "_database", database)
     first, second = item.run("1080p"), item.run("1080p")
     if version_added:
         assert _outcomes(first, second) == ["waiting", "waiting"]
@@ -659,14 +659,14 @@ def test_a_transient_failure_keeps_the_item_row_so_the_next_run_removes_the_cred
     item.run("1080p")
     item.chapters[path] = chapters(intro=INTRO_X)
     item.touch("1080p", 3)
-    real_database = plex_db.PlexMarkerPublisher._database
+    real_database = plex_db.LocalPlexDb._database
 
     def busy(publisher, *, read_only, deadline):
         if not read_only:
             raise PublishError("Plex is busy", state=Capability.UNREACHABLE)
         return real_database(publisher, read_only=read_only, deadline=deadline)
 
-    with patch.object(plex_db.PlexMarkerPublisher, "_database", busy):
+    with patch.object(plex_db.LocalPlexDb, "_database", busy):
         assert _outcomes(item.run("1080p")) == ["failed"]
     assert item.store.get_item_publish_state("plex-1", "7").status == "failed"
     assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS]
@@ -1109,14 +1109,14 @@ def _plex_back(item: PlexItem, monkeypatch) -> None:
 def _plex_statements(monkeypatch) -> list[str]:
     """Every statement run on Plex's database from now on."""
     log: list[str] = []
-    original = plex_db.PlexMarkerPublisher._connect
+    original = plex_db.LocalPlexDb._connect
 
     def connect(publisher, *, read_only, **kwargs):
         conn = original(publisher, read_only=read_only, **kwargs)
         conn.set_trace_callback(log.append)
         return conn
 
-    monkeypatch.setattr(plex_db.PlexMarkerPublisher, "_connect", connect)
+    monkeypatch.setattr(plex_db.LocalPlexDb, "_connect", connect)
     return log
 
 
@@ -1161,14 +1161,14 @@ class TestKeepPlexsPerType:
         item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
         item.run("1080p")
         item._sql(("DELETE FROM taggings WHERE metadata_item_id=7",))
-        real_database = plex_db.PlexMarkerPublisher._database
+        real_database = plex_db.LocalPlexDb._database
 
         def busy(publisher, *, read_only, deadline):
             if not read_only:
                 raise PublishError("Plex is busy", state=Capability.UNREACHABLE)
             return real_database(publisher, read_only=read_only, deadline=deadline)
 
-        with patch.object(plex_db.PlexMarkerPublisher, "_database", busy):
+        with patch.object(plex_db.LocalPlexDb, "_database", busy):
             assert _outcomes(item.run("1080p")) == ["failed"]
         _native_intro(item)
         out = item.run("1080p")

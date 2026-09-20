@@ -596,7 +596,7 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
 
 ### 6.3 Publishers
 `MarkerPublisher` (parallel to `OutputAdapter`): `capability() -> Ready | Disabled | NeedsConfirmation |
-NeedsPlugin | PluginOutdated | NeedsPass | NeedsLocalDb | NeedsPlexDetectionOnce | UnsupportedSchema | Unreachable |
+NeedsPlugin | PluginOutdated | NeedsPass | NeedsLocalDb | AgentUnavailable | NeedsPlexDetectionOnce | UnsupportedSchema | Unreachable |
 Misconfigured` (`publishers/base.Capability`), `write(item_id, markers, *, previous, duration_ms, canonical_path,
 own_previous, kept_types) -> list[Marker]` (the markers ours on the item after the call; `last_write_changed` says
 whether that call changed the server, `last_kept_types` which types stay the server's own,
@@ -608,9 +608,25 @@ Replaced | VersionsChanged | Gone | None` (a cheap read-back of what the server 
 at the last write), `atomic_writes`.
 
 **PlexMarkerPublisher** (opt-in per Plex server; Pass servers only)
+- Two halves (`publishers/plex_db.py`): the publisher decides what to write (settings, path mappings, multi-version
+  agreement), and a `PlexDatabase` runs it against the file. `LocalPlexDb` opens the file this process sees;
+  `plex_remote.RemotePlexDb` hands the same arguments to the **Plex marker agent** on Plex's own machine, which runs
+  `LocalPlexDb` there. One implementation of the rules either way.
 - DB path from that server's `output.plex_config_folder` (`Plug-in Support/Databases/com.plexapp.plugins.library.db`).
   Check the directory's filesystem type; network mount (NFS/SMB/CIFS, Docker Desktop shares) → `NeedsLocalDb`, Plex
-  stays read-only with a clear message.
+  stays read-only with a clear message. With an agent the path, the filesystem check and the lock proof are the
+  **agent's**, not this app's.
+- **Plex marker agent** (`plex-marker-agent/`, its own small image; contract and distribution in its README):
+  per-server `markers.plex.agent` = `{enabled, url, token}`, the key masked as `****` everywhere and round-tripping
+  unchanged, `Authorization: Bearer` with `secrets.compare_digest` — the app's own token model. Its database path is
+  its own `PLEX_CONFIG_DIR`, never the app's to choose; it exposes no SQL and nothing but one item's markers. Version
+  skew (an agent that doesn't implement the app's `X-Marker-Agent-Protocol`, or is older than `MIN_AGENT_VERSION`) is
+  refused on the first call, in either direction, naming both versions and which side to update → `AgentUnavailable`,
+  nothing written. The same state covers an unreachable agent, a refused key, and an agent whose Plex isn't this
+  server (both sides name Plex's machine identifier — the agent from `Preferences.xml`, the app from the server it is
+  connected to — and a proven mismatch refuses the write), with `details["agent"].state` telling the Edit tab which.
+  A remote publisher is **not** `atomic_writes`: an answer can be lost after the agent's transaction committed, so
+  after a failed write what is ours on the item is unknown and nothing of ours is removed until it is read back.
 - Resolve `metadata_item_id` + all `media_parts` for the item (existing bundle lookup).
 - One short transaction, `busy_timeout=30000`: delete our types' `taggings` for the item; insert rows on Plex's
   `tag_type=12, tag=''` row; rewrite `pv:intros`/`pv:credits` in every part's `extra_data` (sorted keys, rebuilt
@@ -1510,3 +1526,17 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   adjust always wins.", and the Inspector says it before the save ("This server is set to keep Plex's own markers.
   Your locked marker replaces them anyway."). This closes spec contradiction D1 — §5.5 rule 1 stands and §6.2 step 6's
   exception is gone, so the rule is stated once. An **unlocked** decision still loses to a kept type exactly as before.
+- 2026-09-20 · **Q3 · The Plex marker agent's shape** (plan phase 4 Task 10). A Plex on another machine gets a
+  small container of its own (`plex-marker-agent/`, built from this repo, published beside the app image), run next
+  to Plex with Plex's config folder mounted. It is not the app image in another mode: it carries no ffmpeg, no GPU
+  drivers and none of the media libraries, and it has one job. The app talks to it over HTTP with **one shared key
+  the user pastes into both sides** — `Authorization: Bearer`, `secrets.compare_digest`, the app's own token model,
+  masked as `****` in every response and never logged. It is the **only** supported way to write markers to a Plex on
+  another host, and it never becomes a general remote-control API: the database path is its own `PLEX_CONFIG_DIR`
+  (never the app's to send), it runs no caller-supplied SQL, and its eight endpoints are all about one item's
+  markers. It refuses what the in-process writer refuses — a database that isn't on a local disk **on its side**, a
+  schema it doesn't know, a missing or duplicated marker tag row (it never creates one) — because it runs that same
+  code (`LocalPlexDb`), not a second implementation. A refusal comes back as the very same exception the local path
+  raises, so a failure reads exactly as it does today. Version skew is caught on the first call in either direction
+  (the app sends `X-Marker-Agent-Protocol`, the agent answers its version and the protocols it implements) and
+  refuses with both versions named, writing nothing. Cost if wrong: a rebuild of the container and its docs.

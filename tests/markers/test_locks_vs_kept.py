@@ -22,7 +22,7 @@ from media_preview_generator.markers.models import Candidate, FileIdentity, Mark
 from media_preview_generator.markers.outcomes import REPLACED_OWN, ServerStatus
 from media_preview_generator.markers.publishers import plex_db
 from media_preview_generator.markers.publishers.base import PublishError, Shown
-from media_preview_generator.markers.publishers.plex_db import PlexMarkerPublisher
+from media_preview_generator.markers.publishers.plex_db import LocalPlexDb
 from media_preview_generator.markers.settings import load_global, validate_global
 from media_preview_generator.markers.store import MarkerStore
 from media_preview_generator.servers.base import ServerType
@@ -60,14 +60,14 @@ PLEX_OWN_INTRO_SERVED = (T.INTRO, 990, 29_306)
 def sql_log(monkeypatch):
     """Every statement the Plex publisher runs, so a no-op write can be shown to take no write lock."""
     log: list[str] = []
-    original = PlexMarkerPublisher._connect
+    original = LocalPlexDb._connect
 
     def connect(self, *, read_only, **kwargs):
         conn = original(self, read_only=read_only, **kwargs)
         conn.set_trace_callback(log.append)
         return conn
 
-    monkeypatch.setattr(PlexMarkerPublisher, "_connect", connect)
+    monkeypatch.setattr(LocalPlexDb, "_connect", connect)
     return log
 
 

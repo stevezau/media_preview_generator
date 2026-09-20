@@ -101,7 +101,11 @@ def test_plex_disabled_but_configured_is_checked_as_if_enabled(factory):
         "settings": {
             "enabled": False,
             "library_ids": None,
-            "plex": {"db_write_confirmed_at": None, "on_plex_redetect": "keep_plex"},
+            "plex": {
+                "db_write_confirmed_at": None,
+                "on_plex_redetect": "keep_plex",
+                "agent": {"enabled": False, "url": "", "has_token": False},
+            },
         },
         "capability": {
             "state": "ready",
@@ -133,7 +137,11 @@ def test_plex_enabled_keeps_its_stored_confirmation_and_library_choice(factory):
     assert payload["settings"] == {
         "enabled": True,
         "library_ids": ["1", "2"],
-        "plex": {"db_write_confirmed_at": CONFIRMED, "on_plex_redetect": "restore"},
+        "plex": {
+            "db_write_confirmed_at": CONFIRMED,
+            "on_plex_redetect": "restore",
+            "agent": {"enabled": False, "url": "", "has_token": False},
+        },
     }
 
 
@@ -145,7 +153,11 @@ def test_invalid_stored_block_shows_the_disabled_defaults_the_app_uses(factory):
     assert payload["settings"] == {
         "enabled": False,
         "library_ids": None,
-        "plex": {"db_write_confirmed_at": None, "on_plex_redetect": "restore"},
+        "plex": {
+            "db_write_confirmed_at": None,
+            "on_plex_redetect": "restore",
+            "agent": {"enabled": False, "url": "", "has_token": False},
+        },
     }
     assert factory.calls[0]["settings"].enabled is True
 
@@ -683,7 +695,7 @@ def test_only_the_edit_tab_asks_plex_for_its_own_detection_settings(stage, detec
     def no_database(self, *, read_only, deadline):
         raise PublishError("stop before the schema checks", state=Capability.MISCONFIGURED)
 
-    monkeypatch.setattr(plex_db.PlexMarkerPublisher, "_database", no_database)
+    monkeypatch.setattr(plex_db.LocalPlexDb, "_database", no_database)
     server = MagicMock(name="plex-client")
     server.get_server_status.return_value = {"plex_pass": True, "version": "1.43.0"}
     cfg = server_config("plex", ServerType.PLEX, markers=_plex_markers(enabled=True))

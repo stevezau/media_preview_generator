@@ -58,6 +58,13 @@
         return emby && typeof emby === 'object' ? emby : {};
     }
 
+    // The Plex marker agent as stored: {enabled, url, token}. The key arrives masked ('****') and is posted back
+    // masked unless the user types a new one, so a save can never overwrite it with the mask.
+    function storedAgent(server) {
+        const agent = storedPlex(server).agent;
+        return agent && typeof agent === 'object' ? agent : {};
+    }
+
     // ---------- status block ---------------------------------------------------
 
     function infoIcon(title) {
@@ -123,14 +130,35 @@
         return cut > 0 ? text.slice(0, cut) : text;
     }
 
+    // The agent block of the capability details (url, version, state, which Plex it serves): only there
+    // when an agent is configured, so its presence is what switches this tab's Plex rows to the agent wording.
+    function agentDetails(capability) {
+        const agent = (capability.details || {}).agent;
+        return agent && typeof agent === 'object' ? agent : null;
+    }
+
+    const AGENT_BADGES = {
+        connected: ['ok', '✓ Connected'],
+        unreachable: ['bad', "Can't reach it"],
+        rejected: ['bad', 'Key refused'],
+        incompatible: ['warn', 'Update needed'],
+    };
+
     function renderPlexStatus(status) {
         const capability = status.capability || {};
         const details = capability.details || {};
+        const agent = agentDetails(capability);
         const rows = [
-            kvRow(
-                'How markers get here',
-                `Written into this Plex server's database${infoIcon('Plex has no API or plugins for this. Only on the same machine as Plex.')}`,
-            ),
+            agent
+                ? kvRow(
+                    'How markers get here',
+                    `Written into this Plex server's database, through the agent next to Plex`
+                        + infoIcon('The agent does the database write on the Plex machine. This app never touches the file itself.'),
+                )
+                : kvRow(
+                    'How markers get here',
+                    `Written into this Plex server's database${infoIcon('Plex has no API or plugins for this. Only on the same machine as Plex.')}`,
+                ),
         ];
         if (details.plex_pass === true) rows.push(kvRow('Plex Pass', badge('ok', '✓ Active')));
         if (details.plex_pass === false) rows.push(kvRow('Plex Pass', badge('bad', '✕ Not active')));
@@ -138,10 +166,12 @@
             const disk = plexDbOnNetworkShare(capability)
                 ? badge('bad', `✕ network share${details.fs_type ? ` (${details.fs_type})` : ''}`)
                 : badge('ok', '✓ local disk');
+            const whereTip = agent
+                ? 'The folder of Plex\'s library database, as the agent on the Plex machine sees it. Markers are written straight into this database, so it has to be on a local disk of that machine.'
+                : 'The folder of Plex\'s library database, as this app sees it. Markers are written straight into this database, so it has to be on a local disk of the machine Plex runs on: a database on a network share can\'t be written safely.';
             rows.push(kvRow(
-                'Database location',
-                `<span class="font-monospace text-break me-1">${esc(dirname(details.db_path))}</span>${disk}`
-                    + infoIcon('The folder of Plex\'s library database, as this app sees it. Markers are written straight into this database, so it has to be on a local disk of the machine Plex runs on: a database on a network share can\'t be written safely.'),
+                agent ? 'Database location (on the Plex machine)' : 'Database location',
+                `<span class="font-monospace text-break me-1">${esc(dirname(details.db_path))}</span>${disk}${infoIcon(whereTip)}`,
             ));
         }
         const detectionOn = plexDetectionOn(details.detection);
@@ -222,6 +252,25 @@
         return kvGrid(rows) + (pluginStates.includes(capability.state) ? '' : warningLine(capability));
     }
 
+    // The line under the agent's address: what the last check found, and a way to ask again.
+    function renderAgentState(status) {
+        const line = $('#markersAgentState');
+        if (!line) return;
+        const agent = status ? agentDetails(status.capability || {}) : null;
+        const check = '<button type="button" class="btn btn-sm btn-outline-secondary ms-2 py-0" id="markersAgentCheckBtn">Check again</button>';
+        if (!agent) {
+            line.innerHTML = badge('off', 'Not set up')
+                + ' <span class="text-muted">Save the address and key, then check.</span>' + check;
+            return;
+        }
+        const [tone, text] = AGENT_BADGES[agent.state] || AGENT_BADGES.unreachable;
+        const version = agent.version ? ` <span class="text-muted">version ${esc(agent.version)}</span>` : '';
+        const note = agent.state === 'unreachable'
+            ? '<div class="text-muted mt-1">Markers wait here until the agent answers again. Nothing is lost.</div>'
+            : '';
+        line.innerHTML = `${badge(tone, text)} <span class="font-monospace text-break">${esc(agent.url || '')}</span>${version}${check}${note}`;
+    }
+
     function renderStatus(server, status) {
         const block = $('#markersStatusBlock');
         if (!block) return;
@@ -239,13 +288,15 @@
         block.innerHTML = `<div class="small text-muted"><i class="bi bi-exclamation-circle me-1"></i>Couldn't check this server right now · <a href="#" class="markers-status-retry">Retry</a></div>`;
     }
 
-    async function fetchStatus(server) {
+    // refresh=1 drops the few-seconds-old cached answer first: what "Check again" is for.
+    async function fetchStatus(server, { refresh = false } = {}) {
         const seq = tab.loadSeq;
         const block = $('#markersStatusBlock');
         if (block) block.innerHTML = '<div class="text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Checking…</div>';
         let data = null;
         try {
-            const r = await fetch(`/api/markers/servers/${encodeURIComponent(server.id)}/status`);
+            const query = refresh ? '?refresh=1' : '';
+            const r = await fetch(`/api/markers/servers/${encodeURIComponent(server.id)}/status${query}`);
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
             data = await r.json();
         } catch (_e) {
@@ -256,6 +307,7 @@
         if (seq !== tab.loadSeq) return;
         tab.status = data;
         renderStatus(server, data);
+        if (isPlex(server)) renderAgentState(data);
         if (!tab.librariesTouched && Array.isArray(data.libraries)) renderLibraries(data.libraries, storedMarkers(server));
     }
 
@@ -365,6 +417,19 @@
         if (restoreRadio) restoreRadio.checked = !keepPlex;
         if (keepRadio) keepRadio.checked = keepPlex;
 
+        const agentGroup = $('#markersPlexAgentGroup');
+        if (agentGroup) agentGroup.classList.toggle('d-none', !plex);
+        const agent = plex ? storedAgent(server) : {};
+        const agentToggle = $('#markersAgentEnabled');
+        if (agentToggle) agentToggle.checked = !!agent.enabled;
+        const agentUrl = $('#markersAgentUrl');
+        if (agentUrl) agentUrl.value = agent.url || '';
+        const agentToken = $('#markersAgentToken');
+        // The stored key comes back masked; leaving the mask in the field is what posts it back unchanged.
+        if (agentToken) agentToken.value = agent.token || '';
+        showAgentFields(plex);
+        renderAgentState(null);
+
         const emby = vendorOf(server) === 'emby';
         const embyGroup = $('#markersEmbyRedetectGroup');
         if (embyGroup) embyGroup.classList.toggle('d-none', !emby);
@@ -391,6 +456,17 @@
                 db_write_confirmed_at: storedPlex(server).db_write_confirmed_at || server._markersConfirmedAt || null,
                 on_plex_redetect: picked ? picked.value : (storedPlex(server).on_plex_redetect || 'restore'),
             };
+            const agent = {
+                enabled: !!($('#markersAgentEnabled') || {}).checked,
+                url: (($('#markersAgentUrl') || {}).value || '').trim(),
+                // An untouched field still holds the mask, which the API reads as "keep the stored key".
+                token: (($('#markersAgentToken') || {}).value || '').trim(),
+            };
+            // A server that never had an agent and whose fields are all empty posts no agent block at all, so a
+            // save that only changed something else doesn't write a field the user never filled in.
+            if (Object.keys(storedAgent(server)).length || agent.enabled || agent.url || agent.token) {
+                out.plex.agent = agent;
+            }
         }
         if (vendorOf(server) === 'emby') {
             const picked = document.querySelector('input[name="markersEmbyRedetect"]:checked');
@@ -470,7 +546,28 @@
         return tab.pendingConfirmation;
     }
 
+    // The address and key only matter once the agent is switched on; hidden otherwise, never for Jellyfin or Emby.
+    function showAgentFields(isPlexServer) {
+        const fields = $('#markersPlexAgentFields');
+        if (!fields) return;
+        const on = !!($('#markersAgentEnabled') || {}).checked;
+        fields.classList.toggle('d-none', !(isPlexServer && on));
+    }
+
     function wire() {
+        const agentToggle = $('#markersAgentEnabled');
+        if (agentToggle) {
+            agentToggle.addEventListener('change', () => showAgentFields(isPlex(tab.server)));
+        }
+        const agentState = $('#markersAgentState');
+        if (agentState) {
+            agentState.addEventListener('click', (event) => {
+                if (!event.target.closest('#markersAgentCheckBtn')) return;
+                event.preventDefault();
+                // Saved settings are what the check uses, so an unsaved address says so rather than lying.
+                if (tab.server) fetchStatus(tab.server, { refresh: true });
+            });
+        }
         const toggle = $('#markersEnabled');
         if (toggle) {
             // Ask as soon as the switch is flipped on (Save asks again if that was bypassed).
