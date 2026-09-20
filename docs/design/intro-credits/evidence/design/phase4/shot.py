@@ -29,6 +29,11 @@ SURFACES = {
     "shot-s11b": "11b-health-markers-off",
     "shot-s12": "12-health-jellyfin-emby",
     "shot-s13": "13-plex-helper",
+    "shot-s14": "14-add-nothing-found",
+    "shot-s15": "15-add-just-added",
+    "shot-s16": "16-add-movie",
+    "shot-s17": "17-add-cant-show",
+    "shot-s18": "18-add-season",
 }
 
 

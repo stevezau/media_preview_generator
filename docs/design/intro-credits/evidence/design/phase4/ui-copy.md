@@ -20,7 +20,7 @@ Entry points (Inspector → Intro & Credits, header row, beside the existing `Re
 | Element | String |
 |---|---|
 | Button | `Adjust` (icon `bi-pencil`) |
-| Button ⓘ | `Drag the intro or credits to where they really are, then save. Your times are kept from then on.` |
+| Button ⓘ (**revised** — see §9) | `Drag the intro or credits to where they really are, or add one that wasn't found. Your times are kept from then on.` |
 | Button | `Lock` (icon `bi-lock`) |
 | Button ⓘ | `Keep these times exactly as they are. Later checks won't change them.` |
 | Button (when locked) | `Unlock` (icon `bi-unlock`) |
@@ -146,7 +146,7 @@ If the owner picks option b instead, the badge stays `Keeps Plex's` and the line
 | Element | String |
 |---|---|
 | Row action | `Edit` |
-| Row action ⓘ | `Adjust this episode's intro and credits.` |
+| Row action ⓘ (**revised** — see §9) | `Adjust this episode's intro and credits, or add one that wasn't found.` |
 | Existing row action, unchanged | `Review` |
 | Toast, Edit on a row with no marker to drag (added in Task 6 — the mockup has no surface for it) | `Nothing to adjust on this episode yet — Re-detect checks the file now.` |
 
@@ -226,6 +226,104 @@ Unchanged when there is no helper: `Written into this Plex server's database` an
 
 ---
 
+## 9. Adding a marker by hand (added 2026-09-21 — surfaces 14–18)
+
+Today the editor can only move a marker detection already put on the timeline. When nothing was found for a type
+there is nothing to drag for it, and when nothing was found **at all** `Adjust` is disabled and the Season view's
+`Edit` toasts that there is nothing to adjust. Both of those are whole-file, not per-type.
+These strings cover making one by hand. Everything else about it — save = lock, publish now, §5.5 rule 1, P-R2's two
+bounds, a type no server can show — is the adjusted marker's behaviour unchanged, and needs no new words.
+
+### The way in
+
+| Element | String |
+|---|---|
+| Button (unchanged) | `Adjust` (icon `bi-pencil`) |
+| Button ⓘ **before** | `Drag the intro or credits to where they really are, then save. Your times are kept from then on.` |
+| Button ⓘ **after** | `Drag the intro or credits to where they really are, or add one that wasn't found. Your times are kept from then on.` |
+
+Behaviour, not wording: `Adjust` stops being disabled on a file where nothing was found. It is still disabled on a
+file no job has looked at, and on one whose length isn't known — neither has a timeline to put a marker on.
+
+### The Add affordance, in the empty Decision lane
+
+| Element | String |
+|---|---|
+| Button | `Add intro` / `Add credits` / `Add recap` / `Add preview` (icon `bi-plus-lg`) |
+| Button ⓘ | `Puts a marker on the timeline at a starting time. Drag it to where it really is, then save.` |
+| Action bar's pending list, before anything is added | `Nothing to save yet` |
+| Save button, before anything is added | `Save` (disabled — the shipped "no server" label, reused) |
+
+### The just-added marker
+
+| Element | String |
+|---|---|
+| Strip note, while its times are still the starting ones | `Starting times, not something we found — drag them to where they really are.` |
+| Button | `Remove` |
+| Button ⓘ | `Take this one back out. Nothing has been saved yet.` |
+
+The note goes as soon as an edge moves — it is only true while the times are untouched. `Remove` is offered only for
+a marker added in this edit; a marker that came from detection is dropped with `Unlock` or `Re-detect`, as today.
+Everything else in the strip is the shipped editor's: `Start`, `End`, `{n} seconds long`, the keyboard hint, the
+`Runs to the end of the file` switch, the warnings and the two refusals.
+
+### Starting times
+
+| Type | Start | End | `Runs to the end of the file` |
+|---|---|---|---|
+| Intro | `0:00` | `0:30` | n/a |
+| Recap | `0:00` | `0:30` | n/a |
+| Credits | `max(0, length − 1 minute)` | the end of the file | on |
+| Preview | `max(0, length − 30 seconds)` | the end of the file | on |
+
+Round by design, so they can't be read as an answer: the audio and text detectors practically never produce a whole
+30 seconds from 0:00, or exactly the last minute — every real answer they have written has odd seconds in it. (A
+file whose *chapter* marks happen to be round is the one way the same shape turns up honestly; `sources/chapters.py`
+passes the container's timestamps through as they are.) On a file of ordinary episode or film length these sit
+inside the usual bounds, so the editor opens with no warning already showing. Nothing is taken from the season, the
+neighbouring episodes or the sources.
+
+The `max(0, …)` is load-bearing, not decoration: without it a file shorter than the seed gets a negative start, which
+the editor's own `refusalFor()` does not catch (it checks `start >= duration`, not `start < 0`) and the API then
+refuses with a 400. With the clamp, a short file gets a legal marker and the shipped warning
+`That's earlier than credits usually start. This will still be saved.` — which fires below four minutes for the
+credits seed and below two for the preview seed, and is what the editor shows for any credits or preview starting
+before the last quarter, added or adjusted. Intro and recap need no clamp: `0:00`–`0:30` is legal on any file of at
+least 30 seconds, and a shorter one is refused by the "inside the file" bound like any other marker.
+
+### A type no server with Intro & Credits on can show
+
+The shipped sentence with one word changed, because nothing has been put there to adjust yet:
+
+| Case | String |
+|---|---|
+| Nothing found for it, and no server can show it (the Add button is on screen, disabled) | `Recaps can't be added here: neither Plex nor Emby has a recap marker, and no other server has this file.` |
+| Found, and no server can show it (shipped, unchanged) | `Recaps can't be adjusted here: neither Plex nor Emby has a recap marker, and no other server has this file.` |
+| Added, and some server can show it (shipped, unchanged) | `Only Jellyfin shows recaps. Plex and Emby have no recap marker, so this one won't reach them.` |
+
+The same generated sentence with the same vendor list; only `adjusted` / `added` differs, chosen by whether that type
+has a marker yet. The "no server with Intro & Credits on has this file" variant is unchanged too.
+
+### Season view
+
+| Element | String |
+|---|---|
+| Row action ⓘ **before** | `Adjust this episode's intro and credits.` |
+| Row action ⓘ **after** | `Adjust this episode's intro and credits, or add one that wasn't found.` |
+| Toast, unchanged | `Nothing to adjust on this episode yet — Re-detect checks the file now.` |
+
+The toast stops firing for a row with no marker — that row opens the editor now — and survives for the row it is
+still true of: a file no Intro & Credits job has looked at.
+
+### Unchanged, and deliberately so
+
+`Adjusting this episode. / this movie.`, `Adjusting` in the action bar, `Saving keeps your times — later checks won't
+change them.`, `Save and publish to {n} servers`, every per-server result, and `Saved and locked. Your times stay
+until you unlock them.` An added marker is saved, locked and published exactly like an adjusted one, so it reads
+exactly like one from the moment it is on the timeline.
+
+---
+
 ## Open wording questions for the owner
 
 1. **Q1's sentence** (§4 above) — the recommended wording says a marker you adjust overrides a server's
@@ -240,3 +338,16 @@ Unchanged when there is no helper: `Written into this Plex server's database` an
 5. **The P-R6 "Intro & Credits is off" row is dismissible** (§7) — fine, or should it always show?
 6. **`Save and publish to 3 servers`** — the count includes only servers with Intro & Credits on that can show
    at least one type you changed. Is that the count you'd expect to read there?
+
+### Added 2026-09-21, with §9
+
+7. **One way in, or two** (surface 14) — the Add buttons appear only once `Adjust` has opened the editor, so there is
+   one entry point and one label. Option B also puts `+ Add credits` in the read-only lane, next to
+   `Credits: no markers found`, which opens the editor straight onto that type. More discoverable, one more control.
+   The pack recommends one way in.
+8. **`Add preview` on a movie** (surface 16) — a movie's one window covers credits and preview, so the button is
+   offered there too. Almost no movie has a preview. Leave it, or leave preview out of movies?
+9. **A type whose detection is switched off** — `Add preview` still appears for it, because spec §5.5 rule 1 says a
+   locked user marker wins "even for a type whose detection is off". The chip above still reads
+   `Preview: Detection off` (surfaces 14 and 16 both draw that pair). Right, or should a switched-off type have
+   nothing to add?
