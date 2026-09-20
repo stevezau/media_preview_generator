@@ -4,15 +4,15 @@
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** The leftovers a user has to fix by hand become fixable in the app. The Inspector gains an Adjust / Lock
-editor that saves, locks and publishes to every owning server at once; anime gets its own online source (AniSkip);
-Setup Health says why a server can't take markers before the user finds out from a job; Plex on another machine gets a
+editor that saves, locks and publishes to every owning server at once; anime credits stop being missed because the
+chapter is called "Ending"; Setup Health says why a server can't take markers before the user finds out from a job; Plex on another machine gets a
 helper container that does the database write; the user docs stop saying "comes in a later update"; and the evidence
 folder is trimmed to what a release should carry.
 
 **Architecture:** No new package. The lock data model, the "a lock always wins" rule, the `user` evidence lane and the
 Season view's 🔒 chip already exist (see "What the branch already does"); phase 4 adds the missing write path
 (`POST /api/markers/item/markers` → `MarkerStore.lock_marker` → the existing per-server publish), the editor UI in
-`markers_inspector.js`, one new online source (`markers/sources/aniskip.py`) beside the other three, marker sections in
+`markers_inspector.js`, an anime-scoped chapter-title rule in `markers/sources/chapters.py`, marker sections in
 each vendor's `previews_readiness()` (the Setup Health tab renders them with no JS change), and a small separate
 container that exposes the Plex database write over HTTP so `publishers/plex_db.py` can run it on the Plex host.
 
@@ -20,7 +20,8 @@ container that exposes the Plex database write over HTTP so `publishers/plex_db.
 pytest, Playwright, Docker. The helper container is the same stack (its shape is owner question Q3).
 
 **Spec:** `docs/design/intro-credits/spec.md` (Revision 3) — read §0 first, then §2 goal 3, §3.1 (Plex Pass, tag row,
-DB location, what wipes markers), §4 (the AniSkip row and the online limits), §5.5 rules 1, 2, 7, 8, §6.2 steps 5–8,
+DB location, what wipes markers), §4 (the AniSkip row — answered, see parked items), §5.1 (chapter titles and the
+cold-open rule), §5.5 rules 1, 2, 7, 8, §6.2 steps 5–8,
 §6.3 (`Capability`, the Plex/Emby kept-type rules), §7 items 1, 3, 4, 6, §8, §10.2, §10.3, §11, §12 phase 4, §13 items
 1, 4, 5, 17, 18, §14 (2026-09-13 "helper container on the Plex host later", 2026-09-14 R1/R5, 2026-09-16 Q4's gate
 shape, 2026-09-16 importer groups, 2026-09-19 Plex ownership). Roadmap and its Global Constraints:
@@ -36,7 +37,8 @@ repeated so an implementer who sees only one task has them.
 
 **Carried over (owner rules, spec §0, §1, §5.6 and the roadmap):**
 - **Precision over coverage:** a missing marker is acceptable; a wrong one is not. A new source publishes nothing on
-  its own until it is measured (Task 8's gate). A user's own marker is the one exception — it is the user's call.
+  its own until it is measured against the chapter truth, in the gate style phases 2 and 3 used. A user's own marker
+  is the one exception — it is the user's call.
 - Feature is **off until turned on per server**. Nothing is detected for a file with no enabled owner, and the editor
   publishes only to owners whose switch is on.
 - File identity = canonical path + size + mtime. A change drops evidence and **unlocked** markers; locked markers
@@ -45,10 +47,10 @@ repeated so an implementer who sees only one task has them.
   `mlab-app`), **never the prod Plex on `plex`**. Prod Plex DB: read-only (`sqlite3 "file:<db>?mode=ro"`). **Phase 4
   needs nothing on the `plex` host** — the helper container is proven with two containers on storage (Task 13 row 12).
   If a task ever looks like it needs `plex`, ask the owner and quote this rule in the question.
-- **Never delete or write files under `/data*`** (the owner's library, both hosts). Lab mounts are `:ro`. The AniSkip
-  truth set only `stat`/`ffprobe`-reads real files.
-- **No real library paths, file names or release groups in committed files.** Anime truth sets, per-file JSON and the
-  MAL id survey stay local (git-ignored), as in phases 2 and 3.
+- **Never delete or write files under `/data*`** (the owner's library, both hosts). Lab mounts are `:ro`. The anime chapter
+  measurements only `stat`/`ffprobe`-read real files.
+- **No real library paths, file names or release groups in committed files.** Anime chapter truth sets and per-file
+  JSON stay local (git-ignored), as in phases 2 and 3.
 - **Secrets:** TheIntroDB's key stays masked as `****` and never logged. Whatever credential the helper container
   uses gets the same treatment (masked in every API response, never logged, round-trips unchanged when `****` is
   posted back). Never commit `evidence/lab/env`.
@@ -82,8 +84,9 @@ repeated so an implementer who sees only one task has them.
   unreachable server for 30 s blocks a thread. Per-server deadline, per-server result, no retries inside the request.
 - **No new runtime dependency** unless Task 1 proves the MAL id needs one (owner question Q2b). A new pinned
   dependency needs the owner's OK and an image-size number, as in phase 3.
-- **AniSkip never decides alone** until Task 8's gate says otherwise, and its evidence joins the IntroDB + TheIntroDB
-  independence group until Task 8 measures what it copies (spec §5.5 rule 8, §14 2026-09-16).
+- **AniSkip does not ship** — measured in Task 1 and not taken (parked items; `evidence/eval/aniskip-facts.md`).
+  Spec §5.5 rule 8's interim ruling, which files an AniSkip importer's copies with IntroDB + TheIntroDB, becomes
+  **permanent** on that measurement (Task 11).
 - **The helper container is the only way markers reach a Plex on another host.** Without it, Plex stays read-only with
   the message it has today (`Capability.NEEDS_LOCAL_DB`). The helper never becomes a general remote-control API.
 
@@ -113,46 +116,39 @@ again.
 - **The facts the Setup Health checks need are already computed** for the server Edit tab: `capability()` returns
   `NEEDS_PASS`, `NEEDS_LOCAL_DB`, `NEEDS_PLEX_DETECTION_ONCE`, `NEEDS_PLUGIN`, `PLUGIN_OUTDATED` (spec §6.3), and
   `GET /api/markers/servers/<id>/status` already renders them. Task 9 reuses that, it does not re-probe.
-- **AniSkip is already known as someone else's importer.** `sources/server_markers.py:32–38` matches an AniSkip
-  importer plugin by name and `decide.py:45–49` files its copies in the IntroDB group. There is no AniSkip client,
-  no `Source.ANISKIP`, and no MAL id anywhere (`grep` for `mal_id`/`anidb`/`anilist`/`myanimelist`: zero hits in
-  `media_preview_generator/`).
+- **AniSkip is only ever someone else's importer, and that is now the permanent answer.**
+  `sources/server_markers.py:32–38` matches an AniSkip importer plugin by name and `decide.py:45–49` files its copies
+  in the IntroDB group. There is no AniSkip client and no `Source.ANISKIP` — and none is coming (parked items).
+  Measured: no MAL id exists anywhere in this library (0 of 4,651 anime episodes; every TV part carries a tvdb token
+  and nothing else), and AniSkip matches IntroDB to ≤ 44 ms on 21 % of intros where the two intro databases already
+  counted as one source match on 10 %.
 - **`markers/job_runner.py:60`** already treats `manual`, `inspector` and `inspector_season` as user-picked job
   sources (`_USER_PICKED_SOURCES`, reused at `:71`).
 - **The helper container does not exist** in any form. Two words in the codebase look like it and are not: `sidecar`
   in `processing/multi_server.py` means an Emby BIF file on disk, and `helper` in `markers/credits/` means a text
   detection subprocess. **Pick a distinct name** — this plan uses **Plex marker agent** (`plex-marker-agent/`).
 
-## Facts that need checking against the real service (Task 1 owns all of these)
+## Measured and closed (Task 1, 2026-09-20 — `evidence/eval/aniskip-facts.md`, `c53d8c6`)
 
-The spec describes AniSkip in exactly one line — §4's table: *"Anime only (MAL id + `episodeLength`); phase 4"* — and
-nothing in this repo has ever called it. **Everything below is unknown until Task 1 measures it.** No task may assume a
-shape; a task that needs one of these facts starts after Task 1 records it in `evidence/online/phase4-aniskip.md`.
+All eight facts this plan listed for AniSkip were measured against the live service and the owner's real library, and
+the answer is that **AniSkip does not ship** (parked items). The API itself was never the problem: anonymous, one GET,
+seconds not milliseconds, 404 for no data, and it does check the file's cut — to ±20 s, ranked by votes rather than by
+closeness. What stopped it:
 
-1. Base URL, API version and path shape; whether a key is needed; whether the service is up and answering today.
-2. The exact query parameters. The spec names two (MAL id, `episodeLength`) — check what else is required, whether
-   `episodeLength` must match the file's duration and what happens when it doesn't (this is what makes a source
-   "checks the file's cut itself" under §5.5 rule 6, which decides whether it could ever publish alone at Medium).
-3. The segment types it returns and what each means (opening / ending / recap / mixed variants), and how they map to
-   our `MarkerType` — including whether an "ending" is our credits or our preview.
-4. The response envelope: units (seconds vs ms), whether an end may be absent, and any vote / confidence / episode-
-   length fields worth storing in `meta_json`.
-5. Rate limits **read from response headers** (the app paces from headers, never hard-coded; spec §4) and the 429
-   behaviour.
-6. Terms of use and attribution, compared with the TheIntroDB risk already accepted in spec §13 item 1 — the owner
-   decides again if the terms are similar.
-7. **Where a MAL id comes from at all.** `MediaIds` carries tmdb/imdb/tvdb only (`models.py:90–98`);
-   `external_ids.py` parses only `{tmdb-…}`, `{tvdb-…}`, `{imdb-…}` tokens; `plex.py get_external_ids()` returns
-   those three. Measure, on the owner's anime folders: how many episodes carry a MAL/AniDB/AniList token in the path,
-   how many get one from each server's metadata (Jellyfin/Emby provider ids), and what a mapping would cost.
-8. **Episode numbering.** Anime is routinely numbered absolutely by one database and per-season by another. Measure
-   whether the owner's anime seasons line up with what AniSkip expects; a silent off-by-one season would publish
-   another episode's intro, which is the one failure this feature must never have.
+1. **No MAL id exists anywhere in this library** — 0 of 4,651 anime episodes resolve without a mapping file, and
+   neither candidate map (Anime-Lists/anime-lists, Fribb/anime-lists) carries a LICENSE.
+2. **It fails the owner's own Q4 gate** — 5.1 % of anime intros wrong by more than 15 s against the 2 % Medium cap,
+   and tightening the episode-length band to ≤ 2 s doesn't help (5.2 %).
+3. **It isn't a coverage win** — on 120 resolved anime episodes it is the only source with an answer for 2 intros and
+   0 credits; IntroDB covers anime better.
+4. **It probably isn't independent** — it matches IntroDB to ≤ 44 ms on 21 % of intros, where the two intro databases
+   already counted as one source match on 10 %, and not through chapters.
 
-Until each is recorded with the command that produced it and the date, the plan treats it as unknown. Task 7 does not
-start before Task 1 lands.
+Two findings from the same work **are** worth taking, and became Task 15: the chapter classifier ignores `Ending`,
+which on anime is the credits (238 files), and 581 of 1,080 anime intro chapters are a lone generic `Intro` where
+§5.1's cold-open rule can't fire.
 
-## Open questions for the owner — unanswered as of 2026-09-20
+## Open questions for the owner (Q2 and Q2b answered 2026-09-20; the rest still open)
 
 Each question states what is at stake and the plan's recommended default. **No task that depends on one starts before
 it is answered.**
@@ -181,17 +177,12 @@ it is answered.**
   reversal is a rule change in `publishers/plex_db.py` and `emby.py` plus the matrix rows — cheap while nothing is
   locked in the wild, expensive after a release. **Whatever the answer, it rewrites spec §6.2 step 6 and §5.5 rule 1
   so only one of them survives** (Task 4).
-- **Q2 · AniSkip's gate and its default.** Recommended default: ships **disabled** (`"enabled": false`, like
-  TheIntroDB) until the gate in Task 8 passes on a real anime truth set, and it **never decides alone** at either
-  publish setting until measured. The gate copies the Q4 shape the owner already set for credits text (spec §14
-  2026-09-16): per set, wrong ≤ 2 % of files at Medium and ≤ 1 % at High (rounded up, `wrong_cap()`), **and ≤ Plex's
-  own wrong on the same files**, with Medium useful ≥ Plex's useful. Cost if wrong: an anime library gets less
-  coverage than it could until someone turns the source on.
-- **Q2b · Where the MAL id may come from.** If Task 1 shows path tokens alone cover too little, the options are a
-  server's own provider ids, or a mapping source (an extra network fetch, or a file shipped in the image). A mapping
-  source is a new dependency and a new staleness problem. Recommended default: **path tokens plus whatever the server
-  already reports, nothing new** — if that covers too little, AniSkip stays off and the owner decides whether a
-  mapping is worth it.
+- **Q2 · AniSkip's gate and its default — ANSWERED (2026-09-20): it does not ship.** Task 1's measurements
+  (`evidence/eval/aniskip-facts.md`) fail the gate this question proposed: 5.1 % of anime intros wrong by more than
+  15 s against a 2 % Medium cap, no coverage win, and probably not independent of IntroDB. **Blocks nothing.**
+- **Q2b · Where the MAL id may come from — ANSWERED (2026-09-20) by the same measurement:** nowhere. 0 of 4,651
+  anime episodes resolve from path tokens or from what Plex reports, and both candidate id maps are unlicensed.
+  **Blocks nothing.** What would reopen both: a licensed id map **and** a gate pass (parked items).
 - **Q3 · The Plex marker agent's shape.** Its own tiny image, or the same app image started in an agent mode? How is
   it authenticated (a token the user pastes into both sides)? Is it published to GHCR beside the app image, and under
   what tag? Does it ever do anything but the marker write? Recommended default: **its own small image**, one shared
@@ -240,13 +231,14 @@ it is answered.**
   server's markers over a locked one. Q1 resolves it; Task 4 rewrites whichever loses.
 - **D2 · §6.2 step 8** ("no job — save, lock, publish to every owner immediately") sets no bound on a request that
   writes a database and calls two plugins. P-R1 bounds it; Task 11 writes the bound into §6.2.
-- **D3 · §8's settings block has no AniSkip entry.** Adding `aniskip` to `SOURCE_IDS` and
-  `DEFAULT_GLOBAL_MARKERS["sources"]` needs **no schema bump**: `_normalise_sources()` appends any `SOURCE_IDS` entry
-  a stored `sources` list is missing (`settings.py:145–215`), so `_CURRENT_SCHEMA_VERSION` stays 15. Task 7 states
-  that in §8 and in `docs/reference.md`'s settings table.
-- **D4 · §5.5 rule 8 pre-judges AniSkip.** It files an AniSkip importer's copies with IntroDB + TheIntroDB "until
-  phase 4 measures what they copy". Task 8 measures it; if the answer differs, rule 8 and `decide.py:45–49` change
-  together, with the measurement cited.
+- **D3 · (closed) §8's settings block has no AniSkip entry** — and never gains one: phase 4 adds no source, so
+  `SOURCE_IDS`, `DEFAULT_GLOBAL_MARKERS` and `_CURRENT_SCHEMA_VERSION` (15) are all untouched.
+- **D4 · §5.5 rule 8's interim ruling becomes permanent.** It files an AniSkip importer's copies with IntroDB +
+  TheIntroDB "until phase 4 measures what they copy". Phase 4 measured it: AniSkip matches IntroDB to ≤ 44 ms on
+  21 % of intros, against 10 % between the two intro databases already counted as one source, and not through
+  chapters. Task 11 strikes "until phase 4 measures what they copy" from rule 8 and records the 21 % as the reason,
+  in §5.5 and in a dated §14 line; `decide.py:45–49`'s comment loses its "isn't a source yet" wording and keeps the
+  grouping.
 - **D5 · The user docs promise this phase.** `docs/reference.md:290` ("The Inspector can't adjust or lock markers
   yet"), `docs/guides.md:624`, `:640`, `:681` ("comes in a later update") and `settings.html:518`'s
   `respect_locks` tooltip ("Editing and locking markers in the Inspector comes in a later update") all become false
@@ -281,8 +273,8 @@ The approved design artifact already fixes the entry points (`✎ Adjust`, `🔒
 4. **The Q1 answer in words** — the sentence on the server card when an edit overrides that server's "Keep Plex's" /
    "Keep Emby's".
 5. **Season view:** the per-row Edit affordance beside the existing Review button.
-6. **Settings → Intro & Credits:** the AniSkip source row (label, subtitle, ⓘ with the measured numbers, "anime only"
-   badge, disabled-by-default state) and the corrected `respect_locks` tooltip.
+6. **Settings → Intro & Credits:** the corrected `respect_locks` tooltip. (No new source row — phase 4 adds no
+   source.)
 7. **Setup Health:** the marker rows for Plex (Pass missing, marker tag row absent, database not on this machine,
    Plex's own detection may overwrite) and for Jellyfin/Emby (plugin missing, plugin outdated), each with its
    current → recommended pair and its ⓘ. **No "Manual" chip** — it was deliberately removed
@@ -303,32 +295,32 @@ Wording rules: plain English, present tense, no internal setting names in the fi
   silently skipped once before.
 - **Reviews (speed mode, owner).** One combined review per task (spec compliance + Architecture Review shapes).
   `[high-risk]` tasks get a deep adversarial review (mutants, real data, lab) and a scoped re-review only after a
-  HIGH. **Milestone audit** over the whole phase-4 diff after Tasks 5, 6, 8, 9 and 10 land, before the docs task —
+  HIGH. **Milestone audit** over the whole phase-4 diff after Tasks 5, 6, 9, 10 and 15 land, before the docs task —
   a gate, not a suggestion.
 - **Architecture Review agent** runs on every staged diff before its commit, in parallel with the task review.
-- **Waves.** W0: Task 1 and Task 2 (Task 2 ends at the owner checkpoint). W1: 3 and 9 in parallel, then 4 after 3,
-  then 7 after 4 — **3, 4 and 7 all edit `markers/pipeline.py` and/or `markers/decide.py`, so they are sequential**
-  (see the conflict table); 9 shares nothing with them. W2: 5, 8, 10. W3: 6. Gate: milestone audit. Then 11 (docs),
-  12 (evidence trim), 13 (lab), 14 (close-out) in order.
-- **High-risk tasks:** 3 (writes servers from an HTTP request), 4 (changes what reaches a server), 7 (a new source
-  that can publish wrong times), 10 (writes a Plex database over a network).
+- **Waves.** W0: Task 1 (**done**, 2026-09-20) and Task 2 (Task 2 ends at the owner checkpoint). W1: 3, 9 and 15 in
+  parallel, then 4 after 3 (**3 and 4 both touch `markers/pipeline.py`**; 9 and 15 share nothing with them or with
+  each other). W2: 5 and 10. W3: 6. Gate: milestone audit. Then 11 (docs), 12 (evidence trim), 13 (lab), 14
+  (close-out) in order. **Numbers 7 and 8 are retired** — the AniSkip source and its harness gate were measured and
+  not taken (parked items); the surviving tasks keep the numbers they had.
+- **High-risk tasks:** 3 (writes servers from an HTTP request), 4 (changes what reaches a server), 10 (writes a Plex
+  database over a network). Task 15 changes what chapters mean, so it ships only what its measurement wins.
 
 ## Task order and dependencies
 
 | # | Task | Depends on | Wave · lane | Risk | Visible UI | Files (C = create, M = modify) |
 |---|---|---|---|---|---|---|
-| 1 | AniSkip and anime-id measurements | — | 0 · lane-parallel | | no | C `evidence/online/phase4-aniskip.md`, `evidence/online/phase4/*.py`; M `.gitignore` |
+| 1 | AniSkip and anime-id measurements — **done 2026-09-20** (`c53d8c6`) | — | 0 · lane-parallel | | no | C `evidence/eval/aniskip-facts.md`, `evidence/online/phase4/*.py`; M `.gitignore` |
 | 2 | Mockup pack + UI copy → **owner checkpoint 6** | — | 0 · sequential | | **yes (all of it)** | C `evidence/design/phase4.html`, `.superpowers/sdd/plan-phase4/shots/` |
 | 3 | Marker write API + publish-now path | 2 (copy only), Q4 (P-R1's default applies unless the owner objects) | 1 · lane-parallel | high-risk | no | C `tests/markers/test_api_markers_edit.py`, `tests/markers/test_publish_now.py`; M `web/routes/api_markers.py`, `markers/pipeline.py`, `markers/store.py`, `markers/inspect.py` |
 | 4 | Locked markers vs "Keep Plex's" / "Keep Emby's" (**Q1**) | Q1, 3 | 1 · sequential | high-risk | no | C `tests/markers/test_locks_vs_kept.py`; M `markers/publishers/plex_db.py`, `markers/publishers/emby.py`, `markers/pipeline.py`, `markers/decide.py` (comments), `docs/design/intro-credits/spec.md` (§5.5 rule 1, §6.2 step 6, §14) |
 | 5 | Inspector Adjust / Lock editor | 2 (approved), 3, 4 | 2 · lane-parallel | | **yes** | M `web/static/js/markers_inspector.js`, `web/static/css/pages/markers_inspector.css`, `web/templates/bif_viewer.html`, `web/templates/settings.html` (D5 tooltip), `tests/e2e/test_intro_credits_inspector.py` |
 | 6 | Season view: Edit per row | 5 | 3 · sequential | | **yes** | M `web/static/js/markers_season.js`, `tests/e2e/test_intro_credits_season.py` |
-| 7 | AniSkip source: ids, client, settings, decision group | 1, Q2, Q2b, **3, 4** | 1 · **sequential** (after 4) | high-risk | **yes (settings row)** | C `markers/sources/aniskip.py`, `tests/markers/test_aniskip.py`; M `markers/models.py`, `markers/external_ids.py`, `markers/settings.py`, `markers/pipeline.py`, `markers/decide.py`, `web/templates/settings.html`, `web/static/js/markers_inspector.js`, `web/static/js/markers_season.js`, `tests/markers/test_decide.py`, `tests/markers/test_external_ids.py`, `tests/markers/test_settings.py`, `tests/e2e/test_intro_credits_settings.py` |
-| 8 | AniSkip accuracy + gate in the harness | 7 | 2 · lane-parallel | | no | C `evidence/eval/phase4-harness.md`, `tests/markers_eval/test_aniskip.py`; M `tools/markers_eval/online.py`, `tools/markers_eval/report.py`, `tools/markers_eval/data.py`, `tools/markers_eval/README.md` |
+| 15 | Anime chapter titles: `Ending`, and the lone generic `Intro` | 1 | 1 · lane-parallel | | no | C `tests/markers/test_chapters_anime.py`, `evidence/eval/phase4-chapters.md`; M `markers/sources/chapters.py`, `tests/markers/test_chapters.py`, `tools/markers_eval/` (a before/after chapter run) |
 | 9 | Setup Health: Intro & Credits checks | 2 (approved) | 1 · lane-parallel | | **yes** | C `tests/markers/test_readiness_markers.py`; M `servers/plex.py`, `servers/jellyfin.py`, `servers/emby.py`, `servers/base.py` (docstring), `tests/test_servers_plex.py`, `tests/test_servers_jellyfin.py`, `tests/test_servers_emby.py`, `tests/test_api_servers.py`, `tests/e2e/test_intro_credits_server_tab.py` |
 | 10 | Plex marker agent (helper container) | Q3, 3 | 2 · lane-parallel | high-risk | **yes (Edit tab block)** | C `plex-marker-agent/` (app, Dockerfile, README), `markers/publishers/plex_remote.py`, `tests/markers/test_plex_remote.py`, `tests/test_plex_marker_agent.py`; M `markers/publishers/plex_db.py`, `markers/publishers/base.py`, `markers/settings.py`, `web/templates/servers.html`, `web/static/js/markers_server_tab.js`, `web/routes/api_markers.py` |
-| — | **Milestone audit** (phase-4 diff) | 5, 6, 8, 9, 10 | gate | | | fixes in the owning task's files |
-| 11 | Docs | 3–10, audit | 4 · sequential | | | M `README.md`, `docs/reference.md`, `docs/guides.md`, `docs/guides/previews-readiness.md`, `spec.md`, `plan-roadmap.md`, `evidence/README.md` |
+| — | **Milestone audit** (phase-4 diff) | 5, 6, 9, 10, 15 | gate | | | fixes in the owning task's files |
+| 11 | Docs | 3–6, 9, 10, 15, audit | 4 · sequential | | | M `README.md`, `docs/reference.md`, `docs/guides.md`, `docs/guides/previews-readiness.md`, `spec.md`, `plan-roadmap.md`, `evidence/README.md` |
 | 12 | Evidence trim + a stable home for the lab (**Q5**) | 11, Q5 | 5 · sequential | | | M/delete under `docs/design/intro-credits/evidence/`; C the lab's new home |
 | 13 | Phase-4 lab matrix (+ rows in the phase 1–3 matrices) | 10, 11 | 6 · sequential | high-risk | | C `evidence/lab/phase4_matrix.py`, `evidence/lab/phase4-results.md`; M `evidence/lab/phase1_matrix.py`, `phase2_matrix.py`, `phase3_matrix.py`, `evidence/lab/up.sh`, `evidence/lab/app.sh` |
 | 14 | PR, image, close-out | 13 | 7 · sequential | | | M `spec.md` §0/§12/§14, `plan-roadmap.md`, `evidence/lab/phase4-results.md`, `.superpowers/sdd/plan-phase4/progress.md`; PR body (REST — `gh pr edit` is broken here) |
@@ -341,18 +333,12 @@ All paths under `markers/`, `servers/`, `processing/`, `web/` are inside `media_
 | Tasks | Shared file | Resolution |
 |---|---|---|
 | 3, 4 | `markers/pipeline.py` | 3 adds the publish-now path; 4 changes the kept-type rule inside the publishers. 4 starts after 3 lands (sequential in wave 1). |
-| 3, 7 | `markers/pipeline.py` | 3 adds the publish-now path; 7 adds the AniSkip lookup in source order. **7 starts after 4 lands**, so all three touch the file in sequence. |
-| 4, 7 | `markers/decide.py` | 4 writes the locked-vs-kept comments; 7 adds AniSkip's independence group. Sequential (7 after 4). |
-| 5, 7 | `web/templates/settings.html` | 7 adds the AniSkip source row (wave 1); 5 fixes the `respect_locks` tooltip (wave 2). Sequential, different regions. |
-| 7, 10 | `markers/settings.py` | 7 adds `aniskip` to `SOURCE_IDS` and the defaults (wave 1); 10 adds the per-server agent block (wave 2). Sequential. |
 | 3, 10 | `web/routes/api_markers.py` | 3 adds the write routes; 10 adds the agent status only. 10 starts after 3 lands (wave 2). |
 | 4, 10 | `markers/publishers/plex_db.py` | 4 (wave 1) changes the kept-type write path; 10 (wave 2) moves the write behind a transport. Sequential. |
-| 5, 7 | `web/static/js/markers_inspector.js` | 7 adds one `SOURCES` entry; 5 adds the editor. Different regions, but to keep it simple **7 lands first** (end of wave 1) and 5 rebases. |
-| 7, 9 | none (7: `markers/`, settings UI; 9: `servers/`) | 9 runs in parallel with the whole 3 → 4 → 7 chain. |
 | 5, 6 | `web/static/js/markers_season.js` | Only 6 edits it (5 leaves the Season view alone). |
-| 7, 8 | `tools/markers_eval/` | Only 8 edits the harness; 7 only adds the source it measures. |
+| 15, any | `markers/sources/chapters.py`, `tools/markers_eval/` | No other phase-4 task touches either — 15 is the only chapter-source and harness change, so it runs beside 3 and 9 with no shared file. |
 | 9, 10 | `web/templates/servers.html` | 9 adds nothing to the template (checks render themselves); 10 adds the agent block. No overlap. |
-| 7, 11, 12, 14 | `docs/design/intro-credits/spec.md` | 4 writes §5.5 rule 1 / §6.2 step 6; 7 writes §4's AniSkip row and §8; 11 the rest; 14 §0/§12. Sequential by wave. |
+| 4, 11, 14, 15 | `docs/design/intro-credits/spec.md` | 4 writes §5.5 rule 1 / §6.2 step 6; 15 writes §5.1's chapter-title rule; 11 the rest (including §5.5 rule 8 and §4's AniSkip row); 14 §0/§12. Sequential by wave. |
 | 12, 13 | `evidence/` | 12 trims, 13 adds the lab results. **13 runs after 12** so nothing is written into a folder that is about to move. |
 | any, `.gitignore` | `.gitignore` | Only Task 1 edits it. |
 
@@ -361,12 +347,10 @@ All paths under `markers/`, `servers/`, `processing/`, `web/` are inside `media_
 ```
 media_preview_generator/
   markers/
-    sources/aniskip.py              # T7  AniSkip client (shape from Task 1's measurements)
-    external_ids.py                 # T7  MAL id (path tokens + whatever a server reports)
-    models.py                       # T7  Source.ANISKIP, MediaIds gains the anime id
-    settings.py                     # T7  SOURCE_IDS + defaults;  T10 per-server agent block
-    decide.py                       # T4  comments;  T7 independence group;  T8 rule 8 if measured otherwise
-    pipeline.py                     # T3  publish-now path;  T4 kept types;  T7 the lookup
+    sources/chapters.py             # T15 anime `Ending` = credits, and the lone generic `Intro`
+    settings.py                     # T10 per-server agent block
+    decide.py                       # T4  comments only (rule 8's grouping is unchanged, now permanent)
+    pipeline.py                     # T3  publish-now path;  T4 kept types
     store.py                        # T3  unlock + the lock's own timestamp
     inspect.py                      # T3  the payload the editor needs
     publishers/plex_db.py           # T4  locked vs kept;  T10 the write behind a transport
@@ -374,17 +358,18 @@ media_preview_generator/
     publishers/emby.py              # T4  locked vs kept (ReplaceOwn)
   servers/{plex,jellyfin,emby}.py   # T9  marker sections in previews_readiness()
   web/routes/api_markers.py         # T3  save/lock/unlock + publish;  T10 agent status
-  web/static/js/markers_inspector.js# T5  the editor;  T7 the AniSkip lane
-  web/static/js/markers_season.js   # T6  Edit per row;  T7 the AniSkip chip
+  web/static/js/markers_inspector.js# T5  the editor
+  web/static/js/markers_season.js   # T6  Edit per row
   web/static/js/markers_server_tab.js # T10 the agent block
-  web/templates/settings.html       # T5  respect_locks tooltip;  T7 the AniSkip row
+  web/templates/settings.html       # T5  respect_locks tooltip
   web/templates/servers.html        # T10 the agent block
 plex-marker-agent/                  # T10 the helper container (image, README, contract)
-tools/markers_eval/                 # T8  AniSkip rows + the gate
+tools/markers_eval/                 # T15 the before/after chapter run (no new subcommand unless it needs one)
 docs/design/intro-credits/evidence/
-  online/phase4-aniskip.md          # T1  the measured service facts
+  eval/aniskip-facts.md             # T1  the measured service facts (done, c53d8c6)
+  online/phase4/                    # T1  the scripts behind those numbers
   design/phase4.html                # T2  the mockup pack
-  eval/phase4-harness.md            # T8
+  eval/phase4-chapters.md           # T15 the chapter rule's before/after numbers
   lab/phase4_matrix.py, lab/phase4-results.md   # T13
 ```
 
@@ -403,7 +388,7 @@ under `results/`, tokens scrubbed):
 | 6 | Q1's answer on Emby: locked type × `keep_emby` × Emby's own rows, 4.10 and 4.9 (`ReplaceOwn` per Q1) | Emby 4.10, 4.9 |
 | 7 | Save with one server stopped: saved and locked, that server reported failed in the response, the next Check servers publishes it | JF 10.11 stopped |
 | 8 | The two D8 shapes, told apart: a recap on Emby and on Plex is **refused** in the UI (`can_show`), while an edited credits **end** on Emby is **accepted and published start-only** with "Emby skips to the end of the file" shown — never silently dropped | Emby 4.10, Plex |
-| 9 | AniSkip on an anime season: evidence stored with its meta, pacing read from the real headers, a disabled-source run stores nothing | Plex + JF 10.11 |
+| 9 | Task 15's chapter rule end to end on a real anime episode whose credits chapter is `Ending`: credits decided from chapters and published, and an episode with only a lone generic `Intro` behaves as Task 15 shipped | Plex + JF 10.11 |
 | 10 | Setup Health, Plex: Pass missing, marker tag row absent, database not on this machine, Plex's own detection on | Plex (+ a no-Pass Plex, see below) |
 | 11 | Setup Health, plugins: missing, then an older build installed → outdated, then current → All good | JF 10.11, JF 12.0, Emby 4.10, 4.9 |
 | 12 | The Plex marker agent: the app container **without** the Plex config volume + the agent container **with** it; markers published through it; a wrong token refused; a version mismatch refused; the agent stopped → Plex read-only with a clear message | Plex |
@@ -431,36 +416,40 @@ Rows added to the earlier matrices (the publisher behaviour they extend lives th
 ## Task 1: AniSkip and anime-id measurements
 
 `[lane-parallel]` — spec §4 (the AniSkip row and how the app paces from headers), §5.2, §5.5 rule 8, §13 item 1.
-Blocks Tasks 7 and 8. **No product code in this task.**
+**No product code in this task.**
+
+**DONE 2026-09-20** (`c53d8c6`, branch `aniskip-facts`): `docs/design/intro-credits/evidence/eval/aniskip-facts.md`.
+The ruling it produced — **AniSkip does not ship**, and the two anime chapter findings that became Task 15 — is in
+"Measured and closed" above and in the parked items. The steps below are kept as the record of what was asked.
 
 **Files:**
-- Create: `docs/design/intro-credits/evidence/online/phase4-aniskip.md`,
+- Create: `docs/design/intro-credits/evidence/eval/aniskip-facts.md`,
   `docs/design/intro-credits/evidence/online/phase4/` (scripts; the truth set and per-file JSON stay git-ignored)
 - Modify: `.gitignore` (the phase-4 local folder)
 
 **Steps**
-- [ ] **Step 1: The service.** Call AniSkip for a handful of known anime episodes and record, with the date and the
+- [x] **Step 1: The service.** Call AniSkip for a handful of known anime episodes and record, with the date and the
   exact command: base URL, version, path, required and optional parameters, whether a key is needed, the segment
   types, the response envelope and units, and every rate-limit header it returns. Record the 429 behaviour. Record its
   terms of use and any attribution requirement. **Write down what could not be established**, rather than guessing.
-- [ ] **Step 2: Does it check the file's cut?** Ask with a deliberately wrong `episodeLength` and record what changes.
+- [x] **Step 2: Does it check the file's cut?** Ask with a deliberately wrong `episodeLength` and record what changes.
   This decides whether AniSkip could ever qualify under §5.5 rule 6 (a lone decider at Medium) or never.
-- [ ] **Step 3: Ids.** Count, over the owner's anime folders: episodes with a MAL/AniDB/AniList token in the path;
+- [x] **Step 3: Ids.** Count, over the owner's anime folders: episodes with a MAL/AniDB/AniList token in the path;
   episodes whose Plex, Jellyfin and Emby items report an anime id; and the overlap. Report coverage as a percentage of
   anime episodes, beside the phase-1 coverage table's style.
-- [ ] **Step 4: Numbering.** For the seasons that do resolve, check whether AniSkip's episode numbering matches the
+- [x] **Step 4: Numbering.** For the seasons that do resolve, check whether AniSkip's episode numbering matches the
   file's season/episode. Record every mismatch shape found (absolute vs seasonal, split cours, specials).
-- [ ] **Step 5: Truth set.** Assemble anime episodes with trustworthy truth (studio chapters, or frame-checked) —
+- [x] **Step 5: Truth set.** Assemble anime episodes with trustworthy truth (studio chapters, or frame-checked) —
   aim for the scale of the existing online set (43 cases) or better. List it locally; commit only counts.
-- [ ] **Step 6: Overlap with the sources we have.** For episodes both cover, compare AniSkip's times with
+- [x] **Step 6: Overlap with the sources we have.** For episodes both cover, compare AniSkip's times with
   TheIntroDB / IntroDB / SkipDB the way §5.5 rule 8's ≤ 44 ms check was done. This is the evidence for whether AniSkip
   is an independent source or a copy.
-- [ ] **Step 7: Write it up** in `phase4-aniskip.md`, marking each fact "measured" with its command, or "not
+- [x] **Step 7: Write it up** in `aniskip-facts.md`, marking each fact "measured" with its command, or "not
   established".
 
 **Proves:** the file itself; no tests.
-**Done when:** every one of the eight items under "Facts that need checking" is either measured with its command and
-date, or explicitly recorded as not established, and the owner has the Q2b coverage numbers in front of them.
+**Done when:** every one of the eight facts is either measured with its command and date, or explicitly recorded as
+not established, and the owner has the coverage numbers in front of them. **Met.**
 
 ---
 
@@ -468,7 +457,7 @@ date, or explicitly recorded as not established, and the owner has the Q2b cover
 
 `[sequential]` — spec §0 ("Visible UI changes: show a mockup and get the look + wording confirmed before building"),
 §7 items 1, 3, 4, 6; memory `feedback_checkpoint_ux_before_building`, `feedback_info_icons_everywhere`,
-`feedback_setup_health_ux_pattern`. Blocks Tasks 5, 6, 9, 10 and the settings row in Task 7.
+`feedback_setup_health_ux_pattern`. Blocks Tasks 5, 6, 9 and 10.
 
 **Files:**
 - Create: `docs/design/intro-credits/evidence/design/phase4.html` (the app's own theme, real values, the same style as
@@ -637,81 +626,64 @@ season table without a page reload.
 
 ---
 
-## Task 7: AniSkip source — ids, client, settings, decision group
+## Task 15: Anime chapter titles — `Ending`, and the lone generic `Intro`
 
-`[sequential]` `[high-risk]` **[visible UI — the Settings row, from Task 2's pack]** — spec §4, §5.2, §5.5
-rules 6 and 8, §8; Q2, Q2b; D3, D4. **Does not start before Task 1 lands and Q2/Q2b are answered** — and, because it
-edits `markers/pipeline.py` and `markers/decide.py`, **not before Tasks 3 and 4 have landed** (conflict table).
+`[lane-parallel]` — spec §5.1 (chapter titles, the cold-open rule), §5.5 rules 2 and 3, §10.2; Task 1's measurements
+(`evidence/eval/aniskip-facts.md` §5). Wave 1, beside Tasks 3 and 9: it touches the chapter source and the harness,
+which no other phase-4 task goes near. **Measure first, ship only what wins** — the same discipline rule J got.
 
-**Files:**
-- Create: `media_preview_generator/markers/sources/aniskip.py`, `tests/markers/test_aniskip.py`
-- Modify: `markers/models.py` (`Source.ANISKIP`, the anime id on `MediaIds`), `markers/external_ids.py`,
-  `markers/settings.py` (`SOURCE_IDS`, `DEFAULT_GLOBAL_MARKERS`), `markers/pipeline.py` (the lookup, in source order),
-  `markers/decide.py` (the independence group), `web/templates/settings.html` (the source row),
-  `web/static/js/markers_inspector.js` (`SOURCES`), `web/static/js/markers_season.js` (the chip name),
-  `tests/markers/test_decide.py`, `test_external_ids.py`, `test_settings.py`, `tests/e2e/test_intro_credits_settings.py`
-
-**Steps**
-- [ ] **Step 1: Ids.** Add the anime id to `MediaIds` and parse it exactly where Task 1's measurements say it is
-  available — path tokens and/or a server's reported ids. An id that can't be established means **no lookup**, never a
-  guess. Cover the numbering shapes Task 1 found; a season whose numbering can't be matched is skipped with a reason.
-- [ ] **Step 2: The client**, built to the measured shape: paced from its own response headers through the existing
-  `sources/ratelimit.py` (never a hard-coded rate), 429 backoff, circuit breaker, daily budget reserve, cancel between
-  requests, and the same evidence row shape as the other online sources (rules/parser version included, so a stored
-  answer is re-asked when the parser changes).
-- [ ] **Step 3: Settings.** `aniskip` in `SOURCE_IDS` and in the defaults with the owner's Q2 default. State in the
-  commit message and in §8 that no schema bump is needed (D3), and prove it with a test that loads a stored
-  `settings.json` without the entry.
-- [ ] **Step 4: Decision rules.** AniSkip joins whichever independence group Task 1 Step 6 measured (until Task 8
-  says otherwise, the IntroDB + TheIntroDB group, matching what `decide.py` already does with AniSkip importer
-  copies). It never decides alone unless Q2 says otherwise **and** Task 1 Step 2 proved it checks the file's cut.
-  Cover every cell: AniSkip + each other source, agreeing and disagreeing, and AniSkip beside a server's AniSkip
-  importer copy (they must never count as two).
-- [ ] **Step 5: UI.** The Settings source row from Task 2's pack (anime-only badge, ⓘ with the measured numbers),
-  the Inspector lane, the Season chip.
-- [ ] **Step 6:** Full markers suite + e2e settings, Architecture Review, commit, push.
-
-**Proves:** `tests/markers/test_aniskip.py`, the new cells in `tests/markers/test_decide.py`,
-`tests/e2e/test_intro_credits_settings.py`.
-**Done when:** an anime episode with a resolvable id gets AniSkip evidence with its times and meta, a file without one
-is skipped with a reason, AniSkip and an AniSkip importer's copy never agree with each other, and the source's
-default matches the owner's Q2 answer.
-
----
-
-## Task 8: AniSkip accuracy and gate in the harness
-
-`[lane-parallel]` — spec §10.2, §4's accuracy table, §5.5 rule 8; the Q4 gate shape (§14 2026-09-16); Q2.
+Two findings from Task 1, both on the owner's real library:
+- **`Ending` is the credits on anime, and the classifier ignores it.** `chapters.py:23` deliberately excludes
+  `End`/`Ending` because they are common final-scene names in **movies**. 238 anime files carry one; on the 149 where
+  AniSkip also has an `ed`, its start is within 5 s of that chapter in 127 (85 %), within 1 s in 78, and more than
+  15 s away in 9 — median |delta| 1.0 s. That is up to 238 files of credits coverage the app throws away today.
+- **581 of 1,080 anime intro chapters are a lone generic `Intro`** with no specific opening chapter in the file, so
+  §5.1's cold-open rule can't fire and the app takes the chapter at face value. On anime that chapter is often the
+  cold open, not the theme — so this one may *cost* accuracy rather than gain it. Chapter conventions are uniform
+  within a show, so it is checkable per show (112 shows), not per file.
 
 **Files:**
-- Create: `docs/design/intro-credits/evidence/eval/phase4-harness.md`, `tests/markers_eval/test_aniskip.py`
-- Modify: `tools/markers_eval/online.py` (`run_online` ~171, `online_verdicts` ~113, `judge_online` ~96,
-  `plex_online` ~184), `tools/markers_eval/report.py`, `tools/markers_eval/data.py`,
-  `tools/markers_eval/README.md`
+- Create: `tests/markers/test_chapters_anime.py`,
+  `docs/design/intro-credits/evidence/eval/phase4-chapters.md`
+- Modify: `media_preview_generator/markers/sources/chapters.py`, `tests/markers/test_chapters.py`,
+  `tools/markers_eval/` (whatever the before/after chapter run needs — no new subcommand unless it earns one)
 
 **Steps**
-- [ ] **Step 1:** Load Task 1's anime truth set into the harness the way the 43 online cases are loaded, and add the
-  anime set to the report.
-- [ ] **Step 2:** Rows per source and per publish setting, scored `useful` / `wrong` / `missed` by the existing
-  `score.py` judgements, **beside a Plex baseline column** — exactly as phases 2 and 3 did. The baseline comes from
-  the **stored dump** the harness already defaults to, `evidence/lab/results/scale/prod_plex_markers.json` (with its
-  `prod_plex_parts.json` sibling; `tools/markers_eval/report.py:18`, `plex.py:5–26`), **not** a fresh query on
-  `plex`. An anime file that isn't in that dump is **dropped from the truth set** and the drop is counted in
-  `phase4-harness.md`; re-exporting the dump is a read-only query on the prod Plex DB and needs the owner's OK first
-  — this plan's rule is that **phase 4 needs nothing on the `plex` host**.
-- [ ] **Step 3:** The gate, in the same style as `credits_text.gate_checks()` / `wrong_cap()`: per set, Medium wrong
-  ≤ 2 % of files (rounded up) **and** ≤ Plex's wrong on that set; High wrong ≤ 1 % **and** ≤ Plex's wrong; Medium
-  useful ≥ Plex's useful. Add an "AniSkip alone" row, reported but never a publish path until the owner says so.
-- [ ] **Step 4:** The rows the decision rules rest on: how many decisions AniSkip supplied an edge for, and how many
-  would change if AniSkip were treated as independent of IntroDB + TheIntroDB (the D4 answer).
-- [ ] **Step 5:** A failing gate **stops this task and goes to the owner with the numbers.** Never loosen the gate,
-  never tune around it.
-- [ ] **Step 6:** Write `phase4-harness.md` (counts only, no library paths) and update the README.
+- [ ] **Step 1: Baseline.** Score today's classifier against the existing chapter truth (the harness already scores
+  chapters) on three populations: the anime set, the non-anime TV set and the movie sets. Record useful / wrong /
+  missed per population. Nothing is changed yet.
+- [ ] **Step 2: The `Ending` rule, scoped.** The rule is global today and was written for movies, so an anime-only
+  scope is the premise: decide what "anime" means here from what the code already has (library kind, the season
+  group, a per-show chapter convention — **not** a new metadata source), and say plainly in the write-up which files
+  the scope catches and which it misses.
+- [ ] **Step 3: Measure it.** Re-score all three populations with the rule on. State the gain (anime credits) **and**
+  the cost (any movie or non-anime file whose final scene is now read as credits). A single new wrong answer on
+  movies is worth more than ten anime gains — precision over coverage.
+- [ ] **Step 4: The lone generic `Intro`.** Measure what the app decides for those 581 files today, per show, against
+  the chapter truth. If they are mostly cold opens, the honest change is to **not** decide an intro from a lone
+  generic `Intro` on anime (a coverage loss that removes wrong answers); if they are mostly themes, change nothing.
+  Either way the write-up carries the numbers.
+- [ ] **Step 5: Bump `CHAPTER_RULES_VERSION`** (`chapters.py:21`, currently 1) for whatever ships. Its own comment
+  says it exists for exactly this: a change to the candidates a file's chapters give means already-probed files must
+  be read again. Without the bump the new rule never reaches a file the app has already seen — the chapter-source
+  twin of Task 3's migration trap. A test pins that a stored answer at the old version is re-probed.
+- [ ] **Step 6: Ship only what wins.** Each change survives on its own measurement, or is dropped and recorded as
+  measured-and-not-taken. No tuning to the truth set, no rule that wins on anime by losing on movies.
+- [ ] **Step 7:** Unit cells in `tests/markers/test_chapters_anime.py` for every title shape the rule reads
+  (`Ending`, `End`, `End Credits`, `Ending Song`, the non-anime cases the rule must still refuse) and for the scope
+  boundary; the existing `tests/markers/test_chapters.py` passes unchanged, or every changed row is explained.
+- [ ] **Step 8:** Write `evidence/eval/phase4-chapters.md`: the three populations, before and after, per change, plus
+  what was dropped and why. Counts only, no library paths.
+- [ ] **Step 9:** Spec §5.1 gains the shipped rule and its scope; a dated §14 line records the measurement. Full
+  markers suite, `ruff`, Architecture Review, commit, push.
 
-**Proves:** `tests/markers_eval/test_aniskip.py` (synthetic), and the harness run itself.
-**Done when:** the harness reports AniSkip against the same truth and the same Plex baseline as every other source,
-the gate is coded rather than described, and either it passes on the anime set or the owner has the numbers and has
-ruled.
+**Proves:** `tests/markers/test_chapters_anime.py` and the unchanged `tests/markers/test_chapters.py`, plus the
+harness before/after run in `evidence/eval/phase4-chapters.md` — the numbers are the gate, not the tests.
+**Lab:** phase-4 row 9 (a real anime episode whose credits chapter is `Ending` gets credits published to lab Plex and
+Jellyfin; a lone-generic-`Intro` episode behaves as shipped). A row is warranted because this changes what the app
+publishes from a file it already reads, on a population the lab can mount read-only.
+**Done when:** each of the two findings is either shipped with a measurement that shows it wins on anime and costs
+nothing on movies and non-anime TV, or dropped with the numbers that say so — and spec §5.1 matches the code.
 
 ---
 
@@ -807,7 +779,7 @@ act on; and the local (same-host) path is provably unchanged.
 
 ---
 
-## Milestone audit (gate, after Tasks 5, 6, 8, 9, 10)
+## Milestone audit (gate, after Tasks 5, 6, 9, 10, 15)
 
 Whole phase-4 diff, the eight production bug shapes plus this phase's own risks: an HTTP request that writes servers,
 a rule change that reaches every publisher, a new source that can publish wrong times, a container that writes a
@@ -818,7 +790,7 @@ gate, not a suggestion.
 
 ## Task 11: Docs
 
-`[sequential]` — `.claude/rules/docs.md`; D5, D6, D7.
+`[sequential]` — `.claude/rules/docs.md`; D3, D4, D5, D6, D7.
 
 **Files:** `README.md`, `docs/reference.md`, `docs/guides.md`, `docs/guides/previews-readiness.md`,
 `docs/design/intro-credits/spec.md`, `docs/design/intro-credits/plan-roadmap.md`,
@@ -828,14 +800,17 @@ gate, not a suggestion.
 - [ ] **Step 1:** Delete every "comes in a later update" (`reference.md:290`, `guides.md:624`, `:640`, `:681`) and
   write how adjusting, locking and unlocking actually work, including what happens on a server that keeps its own
   markers (Q1's answer) and on Emby's missing types.
-- [ ] **Step 2:** `reference.md`: the two new endpoints and their responses; `markers.sources` gains `aniskip` (and
-  the note that an existing `settings.json` gets it without a migration); the per-server agent block.
-- [ ] **Step 3:** `guides.md`: an anime section (what AniSkip needs, why it may find nothing), and a "Plex on another
-  machine" section pointing at the agent.
+- [ ] **Step 2:** `reference.md`: the two new endpoints and their responses; the per-server agent block. No source
+  list change — phase 4 adds no source.
+- [ ] **Step 3:** `guides.md`: a "Plex on another machine" section pointing at the agent, and — if Task 15 shipped
+  anything — one line on what the app now reads from an anime `Ending` chapter.
 - [ ] **Step 4:** `guides/previews-readiness.md`: the new marker checks, one entry each, with what to do about them.
-- [ ] **Step 5:** Spec: §4's AniSkip row with the measured numbers, §5.5 rules 6 and 8 if Task 8 changed them, §6.2
-  step 8's bound (D2), §7 items 3, 4 and 6, §8, §9's Setup Health row (D6), §13 item 17's lock note (D7), and a
-  dated §14 line per decision taken in this phase.
+- [ ] **Step 5:** Spec: §4's AniSkip row becomes "measured 2026-09-20, not taken" with a pointer to
+  `evidence/eval/aniskip-facts.md`; **§5.5 rule 8 loses "until phase 4 measures what they copy"** — an AniSkip
+  importer's copies stay in the IntroDB + TheIntroDB group **permanently**, with the 21 % ≤ 44 ms match (against 10 %
+  between the two intro databases) as the recorded evidence (D4); §5.1 keeps whatever Task 15 shipped; §6.2 step 8's
+  bound (D2), §7 items 3, 4 and 6, §9's Setup Health row (D6), §13 item 17's lock note (D7), and a dated §14 line per
+  decision taken in this phase, the AniSkip ruling included.
 - [ ] **Step 6:** Roadmap: tick the phase-4 bullets, record what was done and what was not.
 
 **Proves:** a docs read-through against the built UI; the e2e copy tests that assert shipped strings.
@@ -926,11 +901,13 @@ Continuing the roadmap's list; 1–3 are done, 4 and 5 are still open.
 4. *(open, from phase 2)* Emby catalog forum thread / developer id — plus the first `emby-plugin-v*` release, which
    §13 item 18 wants cut at or after `fb32a88`.
 5. *(open)* Enabling the prod Plex DB write for a real server — only when the owner says so.
-6. **Phase-4 mockup pack** (Task 2) — the editor, Season Edit, Setup Health rows, the AniSkip settings row, the agent
-   block. Blocks Tasks 5, 6, 9, 10.
+6. **Phase-4 mockup pack** (Task 2) — the editor, Season Edit, Setup Health rows, the agent block. Blocks Tasks 5,
+   6, 9 and 10.
 7. **Q1 — a locked marker vs "Keep Plex's" / "Keep Emby's."** Blocks Task 4, and Task 5's copy.
-8. **Q2 — AniSkip's default and its gate.** Blocks Tasks 7 and 8.
-9. **Q2b — where the MAL id may come from**, once Task 1 has the coverage numbers. Blocks Task 7.
+8. **Q2 — AniSkip's default and its gate. ANSWERED 2026-09-20 by Task 1's measurement: it does not ship.** Blocks
+   nothing.
+9. **Q2b — where the MAL id may come from. ANSWERED 2026-09-20: nowhere** (0 of 4,651, both id maps unlicensed).
+   Blocks nothing.
 10. **Q3 — the Plex marker agent's shape, auth and distribution.** Blocks Task 10.
 11. **Q4 — the save-and-publish bound** (only if P-R1's recommendation is wrong).
 12. **Q5 — the evidence trim**: what stays, and where the lab scripts move to. Blocks Task 12.
@@ -938,15 +915,29 @@ Continuing the roadmap's list; 1–3 are done, 4 and 5 are still open.
 
 ## Parked items carried in
 
+- **AniSkip as a source of ours — measured and not taken (Task 1, 2026-09-20,
+  `docs/design/intro-credits/evidence/eval/aniskip-facts.md`, `c53d8c6`).** The API was never the problem (anonymous,
+  one GET, seconds not ms, 404 = no data, and it does check the file's cut to ±20 s). Four measured reasons:
+  1. **No MAL id exists anywhere in this library** — 0 of 4,651 anime episodes resolve without a mapping file, and
+     neither candidate map (Anime-Lists/anime-lists, Fribb/anime-lists) carries a LICENSE.
+  2. **It fails the owner's own Q4 gate** — 5.1 % of anime intros wrong by more than 15 s against the 2 % Medium cap;
+     tightening the episode-length band to ≤ 2 s doesn't help (5.2 %).
+  3. **It isn't a coverage win** — on 120 resolved anime episodes it is the only source with an answer for 2 intros
+     and 0 credits; IntroDB covers anime better.
+  4. **It probably isn't independent** — it matches IntroDB to ≤ 44 ms on 21 % of intros, where the two intro
+     databases already counted as one source match on 10 %, and not through chapters.
+  **What would change the answer: a licensed id map *and* a gate pass** — both, not either. Until then spec §5.5
+  rule 8's grouping of an AniSkip importer's copies with IntroDB + TheIntroDB is permanent (Task 11), and the
+  retired plan numbers 7 (the source) and 8 (its harness gate) are not reused.
 - **Phase-2 plan L100** — `DecisionRow` drops a proposed marker's `decided_by`, "not in phase 2 because only the
   phase-4 editor needs it". Task 3 needs it: the editor shows what a proposal was based on before the user overrides
   it. Landing it there is the cheapest place — **with the `decisions` migration in Task 3 Step 2**, or not at all
   (an added column that skips `_MIGRATIONS` never reaches an existing install).
 - **Phase-2 plan L165 / phase-3 parked item** — anime "Ending" chapters aren't counted as credits, and files with two
-  "End Credits" chapters take the last one (16 "Ending" titles in four anime seasons on the lab scale run). Proposed
-  as a phase-4 chapter-title rules item with its own harness rows. **Not scheduled in this plan** — it is a detection
-  change, not polish, and it needs the same measure-then-gate treatment as any other rule. Raise it with the owner
-  beside Q2, since it lands on the same anime files.
+  "End Credits" chapters take the last one. **Now scheduled: Task 15**, with Task 1's measurement behind it (238
+  files, AniSkip's `ed` within 5 s of the chapter on 85 % of the 149 it could check) and the same measure-then-gate
+  discipline the credit-text rules got. The second half of L165 (two "End Credits" chapters, the rules take the last)
+  stays parked — no measurement asked for it.
 - **`pipeline.py:672`** — "what `respect_locks=False` should change is for the phase 4 editor". Task 3 decides it and
   writes the answer into the tooltip and `docs/reference.md`; `respect_locks` stays outside
   `detection_fingerprint()` (`settings.py:106`), and Task 3 Step 3 writes that reason into the docstring.
