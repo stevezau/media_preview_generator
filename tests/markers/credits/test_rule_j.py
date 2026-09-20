@@ -1294,6 +1294,67 @@ class TestReachBack:
 
     ROLL = [band_row(t, 3, 160, 10.0) for t in range(500, 560, 2)]  # 2 s cadence, so the walk reaches 3 s
 
+    BUG = (8, 8, 40, 20)  # a channel logo, top left: its middle is 24.5, far outside the roll's band
+    CARDS = ((140, 20, 180, 35), (138, 60, 182, 75), (142, 100, 178, 115))  # a roll's cards, middle 160.5
+
+    @classmethod
+    def _cadence_shape(cls) -> tuple[list[rule_j.Row], list[rule_j.Row]]:
+        """A tail whose band is the same read raw and thinned, and whose only difference is the run's cadence.
+
+        The bug has a keyframe of its own every 5 s right across the story, and sits on every other keyframe of the
+        roll. Dropping it leaves the roll's real cards, half as many, so the run's credit frames go from 4 s apart to
+        8 s apart -- and 1.5 x 8 s reaches back over the lit story text in the roll's own band, 10 s apart, where
+        1.5 x 4 s does not.
+        """
+        bug_only = [(t / 2.0, 1, 40.0, (cls.BUG,)) for t in range(0, 1061, 10)]
+        story_text = [(t / 2.0, 1, 40.0, (cls.CARDS[0],)) for t in range(485, 1066, 20)]
+        roll = [
+            (t / 2.0, 4, 10.0, (cls.BUG, *cls.CARDS)) if (t - 1080) % 16 == 0 else (t / 2.0, 1, 10.0, (cls.BUG,))
+            for t in range(1080, 1281, 8)
+        ]
+        rows = sorted([*bug_only, *story_text, *roll], key=lambda row: row[0])
+        return rows, rule_j.without_overlays(rows, rule_j.overlay_boxes(rows))
+
+    def test_the_walk_never_outreaches_the_runs_cadence_as_decoded(self):
+        # The channel the cap closes. The walk has no step limit, so a cadence the thinning grew is a longer walk,
+        # not one longer step: uncapped, this shape answers 242.5 s, 297.5 s before the band steps alone put it.
+        rows, thin = self._cadence_shape()
+        runs = rule_j.credit_runs(rows)
+        raw_bounds = rule_j._credit_bounds(rows, *runs[-1], rule_j.RULE_J)
+        thin_bounds = rule_j._credit_bounds(thin, *runs[-1], rule_j.RULE_J)
+        assert rule_j.band_of(rows, *raw_bounds, rule_j.RULE_J) == 160.5
+        assert rule_j.band_of(thin, *thin_bounds, rule_j.RULE_J) == 160.5
+        assert rule_j._run_spacing(rows, *thin_bounds, rule_j.RULE_J) == 4.0
+        assert rule_j._run_spacing(thin, *thin_bounds, rule_j.RULE_J) == 8.0
+
+        band_steps_alone = rule_j.coarse_start(rows)
+        pair = rule_j.coarse_start(rows, without=thin)
+        assert band_steps_alone is not None and band_steps_alone.pts_s == 540.0
+        assert pair is not None and pair.pts_s == 540.0
+
+        # The same walk from the same start, told nothing about the rows as decoded, crosses 297.5 s of story.
+        anchored = rule_j._anchored(thin, *thin_bounds, rule_j.RULE_J)
+        run = range(runs[-1][0], runs[-1][1] + 1)
+        assert thin[rule_j.reach_back(thin, anchored, *thin_bounds, run=run)][0] == 242.5
+        assert thin[rule_j.reach_back(thin, anchored, *thin_bounds, run=run, raw=rows)][0] == 540.0
+
+    def test_dropping_a_bug_can_put_a_story_keyframe_in_the_band(self):
+        # The cap holds the *step*; it is not a bound on the walk, and there isn't one. `in_band` reads the median
+        # middle of a frame's remaining boxes, so a story keyframe carrying the bug and one box in the roll's band is
+        # out of the band as decoded -- the middle of the two -- and in it once the bug is dropped. The walk then
+        # crosses the whole tail at the roll's own cadence. The story box wanders down the frame, so no group of it
+        # spans enough of the story to be gathered as an overlay itself, while its horizontal middle never moves.
+        story = [(float(t), 2, 40.0, (self.BUG, (140, 20 + t // 4, 180, 35 + t // 4))) for t in range(0, 537, 4)]
+        rows = [*story, *[(float(t), 3, 10.0, self.CARDS) for t in range(540, 641, 4)]]
+        thin = rule_j.without_overlays(rows, rule_j.overlay_boxes(rows))
+        assert rule_j.overlay_boxes(rows) == (self.BUG,)
+        assert rule_j.in_band(rows[10], 160.5) is False and rule_j.in_band(thin[10], 160.5) is True
+
+        band_steps_alone = rule_j.coarse_start(rows)
+        pair = rule_j.coarse_start(rows, without=thin)
+        assert band_steps_alone is not None and band_steps_alone.pts_s == 540.0
+        assert pair is not None and pair.pts_s == 0.0  # the file's first row: the whole tail, not the 24 s join
+
     def test_it_reads_presentation_order_not_ffmpegs(self):
         # Six of the 80 files emit the roll's keyframes in swapped pairs. Read in decode order the walk would compare
         # the wrong pair of times and stop at the first swap; read in presentation order it reaches the whole block.
@@ -1474,7 +1535,7 @@ class TestOverlayBoxes:
         # docs say "reproduces with the band steps stubbed out", so stub them and say it here.
         monkeypatch.setattr(rule_j, "same_roll", lambda rows, runs, params=rule_j.RULE_J: len(runs) - 1)
         monkeypatch.setattr(
-            rule_j, "reach_back", lambda rows, index, first, last, params=rule_j.RULE_J, *, run=None: index
+            rule_j, "reach_back", lambda rows, index, first, last, params=rule_j.RULE_J, *, run=None, raw=None: index
         )
         assert rule_j.credits_start(rows, []) == 480.0
 

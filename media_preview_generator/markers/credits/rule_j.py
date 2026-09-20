@@ -43,13 +43,19 @@ overlays dropped. That second half is what keeps the band from walking a start o
 the channel bug, which is what it does on broadcast recordings when it reads them raw.
 **The overlay step is not monotone in either direction**, on its own and not only in the pair. Inside the chosen run,
 dropping boxes thins the run's credit frames, which grows the spacing the anchor measures, which can stop the anchor
-stepping over a frame the 24 s join glued on -- so a start can land up to that join *earlier* than version 2 put it,
-not only later (:func:`_anchored`; pinned by
-``test_rule_j.TestOverlayBoxes.test_thinning_a_run_can_stop_the_anchor_stepping``, which reproduces with the band
-steps stubbed out). A start it moves later can carry a run past the guard's 30 s floor, so a file version 2 refused
-can gain an answer. No file of the sets, the lab or the 51 broadcast recordings does either, and over all 285 set
-rows on both decode paths no answer of the pair is earlier than the band steps alone put it. That measurement is the
-whole of the evidence: neither direction is bounded by an argument.
+stepping over a frame the 24 s join glued on -- so a start can land *earlier* than version 2 put it, not only later
+(:func:`_anchored`; pinned by ``test_rule_j.TestOverlayBoxes.test_thinning_a_run_can_stop_the_anchor_stepping``,
+which reproduces with the band steps stubbed out). **How much earlier is not bounded by the 24 s join, and is not
+bounded at all.** The join bounds the anchor, which takes at most ``ANCHOR_MAX_STEPS`` steps; :func:`reach_back` has
+no step limit, and both of the things it reads move under the overlay step. Its cadence is capped by the run as
+decoded so that thinning can no longer widen a step (:func:`reach_back`), but which frames it steps onto is
+:func:`in_band` on the thinned boxes, and dropping a corner bug can move a story keyframe's median middle *into* the
+roll's band. A synthetic tail of such frames answers the file's first row, the whole tail earlier than the band
+steps alone (``test_rule_j.TestReachBack.test_dropping_a_bug_can_put_a_story_keyframe_in_the_band``). A start the
+overlay step moves later can carry a run past the guard's 30 s floor, so a file version 2 refused can gain an
+answer; that direction is unbounded too. No file of the sets, the lab or the 51 broadcast recordings does either,
+and over all 285 set rows on both decode paths no answer of the pair is earlier than the band steps alone put it.
+That measurement is the whole of the evidence: neither direction is bounded by an argument.
 ``coarse_end_s`` reads the run's latest credit frame in presentation order for the same reason, so Q3's end means the
 end of the roll rather than whichever of its keyframes ffmpeg emitted last, and ``fade_back`` never steps onto a later
 row. Everywhere else rows stay in ffmpeg's output order, the anchor's distance included: the measured keyframe rows
@@ -244,11 +250,12 @@ def overlay_boxes(rows: Sequence[Row], params: RuleParams = RULE_J) -> tuple[Box
     most of its own tail: no file of the sets, the lab or the 51 broadcast recordings has the shape, and every answer
     the band steps move on them, the pair moves to the same second. The answer is **not** guaranteed to be no
     earlier than version 2's: this step's own non-monotonicity applies here as everywhere -- thinning the chosen run
-    can stop the anchor stepping over a glued-on frame (see the module docstring) -- so this shape too is bounded by
-    the 24 s join and not by version 2. Three ways of reading round it were measured and each cost a measured
-    broadcast answer -- bounding the story by the merged roll, dropping the kept runs' own rows, and reading the
-    share on
-    the rows as decoded (``evidence/eval/phase3-harness.md``, "Tried and not taken (this round)"). Pinned by
+    can stop the anchor stepping over a glued-on frame, and dropping a bug's box can put a story keyframe in the
+    roll's band for a walk that has no step limit (see the module docstring and :func:`reach_back`) -- so this shape
+    too is bounded by neither version 2 nor the 24 s join, but by the tail. Three ways of reading round it were
+    measured and each cost a measured broadcast answer -- bounding the story by the merged roll, dropping the kept
+    runs' own rows, and reading the share on the rows as decoded (``evidence/eval/phase3-harness.md``, "Tried and not
+    taken (this round)"). Pinned by
     ``test_rule_j.TestOverlayBoxes.test_a_split_roll_can_be_gathered_as_its_own_overlay``.
 
     Boxes are gathered by overlap (``OVERLAY_IOU`` against the first box of each group, which is what the group is
@@ -535,7 +542,14 @@ def same_roll(rows: Sequence[Row], runs: Sequence[tuple[int, int]], params: Rule
 
 
 def reach_back(
-    rows: Sequence[Row], index: int, first: int, last: int, params: RuleParams = RULE_J, *, run: range | None = None
+    rows: Sequence[Row],
+    index: int,
+    first: int,
+    last: int,
+    params: RuleParams = RULE_J,
+    *,
+    run: range | None = None,
+    raw: Sequence[Row] | None = None,
 ) -> int:
     """Step the start back over earlier keyframes that are the roll's own (spec §13 item 14).
 
@@ -572,6 +586,25 @@ def reach_back(
     is what cost two right answers on the broadcast recordings when the two halves of version 3 were measured apart
     (``evidence/eval/broadcast-tv.md``).
 
+    **The cadence is capped by the run as it was decoded** (``raw``). Dropping an overlay's boxes takes credit frames
+    out of the run, which *grows* the spacing between the ones that are left, which would grow this limit -- and
+    unlike the anchor, which takes at most ``ANCHOR_MAX_STEPS`` steps, this walk has no step limit, so a wider limit
+    is a longer walk, not one longer step. Measured on a synthetic tail whose band is identical raw and thinned and
+    whose cadence alone moves, an uncapped walk answered 297.5 s before the band steps alone put it
+    (``test_rule_j.TestReachBack.test_the_walk_never_outreaches_the_runs_cadence_as_decoded``). Taking the smaller of
+    the two spacings means the overlay step can never lend the walk a step the run did not have before its boxes were
+    dropped. It costs nothing measured (2026-09-21, ``evidence/eval/phase3-harness.md``).
+
+    **The cap bounds the step; nothing bounds the walk.** The other half of what ``rows`` is reaches the walk through
+    :func:`in_band`, which reads the median middle of a frame's *remaining* boxes: a story keyframe carrying a corner
+    bug and one box in the roll's band reads a middle between the two and is out of the band as decoded, and reads
+    the band box alone once the bug is dropped. The walk then crosses it at the roll's own cadence like any other,
+    however many such frames there are. A synthetic tail of them answers the first row of the file, the whole tail
+    earlier than the band steps alone
+    (``test_rule_j.TestReachBack.test_dropping_a_bug_can_put_a_story_keyframe_in_the_band``). That flip happens on
+    real rows -- 36 keyframes over the 17 of the 51 broadcast recordings that have an overlay -- and no answer of the
+    sets, the lab or the 51 moves because of it. That is measurement, not a guarantee.
+
     Args:
         rows: Keyframe rows of the tail, in decode order, with the overlays' boxes already dropped.
         index: The anchored start to walk back from.
@@ -580,6 +613,9 @@ def reach_back(
         params: Rule thresholds.
         run: The row indices of that run, which the walk steps over rather than onto; None to walk over every earlier
             row.
+        raw: The same rows as they were decoded, indexed alike, which caps the cadence. :func:`coarse_start` always
+            passes them, so the rule never runs uncapped; None is for callers holding the decoded rows already, and
+            leaves the cadence as ``rows`` measures it.
 
     Returns:
         The row the start walks back to, or ``index`` when nothing before it is the roll's.
@@ -587,7 +623,12 @@ def reach_back(
     band = band_of(rows, first, last, params)
     if band is None:
         return index
-    limit = min(params.gap_s, ANCHOR_SPACING_FACTOR * _run_spacing(rows, first, last, params))
+    spacing = _run_spacing(rows, first, last, params)
+    if raw is not None:
+        # ``first`` and ``last`` are credit frames of ``rows``, and dropping boxes only ever takes text away, so they
+        # are credit frames of ``raw`` too: ``_run_spacing`` always has its two frames here.
+        spacing = min(spacing, _run_spacing(raw, first, last, params))
+    limit = min(params.gap_s, ANCHOR_SPACING_FACTOR * spacing)
     inside = frozenset(run or ())
     # Presentation order, not ffmpeg's: the walk asks what comes *before* this frame, and the measured keyframe rows
     # aren't always increasing. Read in decode order a swapped pair puts a later frame before the start, and the walk
@@ -654,8 +695,10 @@ def coarse_start(
             walk_run, walk_from = runs[keep], bounds
             start = _anchored(read, *walk_from, params)
     # The rows the walk may not step *onto* are the whole run it starts from as it was decoded, overlay rows included:
-    # the anchor has already ruled on them, and a row the overlay emptied is no more the walk's to take.
-    start = reach_back(read, start, *walk_from, params, run=range(walk_run[0], walk_run[1] + 1))
+    # the anchor has already ruled on them, and a row the overlay emptied is no more the walk's to take. ``rows``
+    # goes in as well, and only to cap the walk's cadence: without it, thinning the run could lend the walk reach the
+    # run never had (:func:`reach_back`). With no overlay ``read`` is ``rows``, so the cap is a no-op.
+    start = reach_back(read, start, *walk_from, params, run=range(walk_run[0], walk_run[1] + 1), raw=rows)
     return Coarse(
         index=start,
         end_index=chosen[1],
