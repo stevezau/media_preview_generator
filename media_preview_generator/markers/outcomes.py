@@ -123,7 +123,9 @@ def with_sentence(message: str, sentence: str) -> str:
 def replaced_own_note(replaced_types: Iterable[MarkerType], vendor: str) -> str:
     """Row wording for a locked marker that replaced the server's own although the server keeps its own.
 
-    Approved copy, ``evidence/design/phase4/ui-copy.md`` §4 (owner decision, spec §14 2026-09-20).
+    Approved copy, ``evidence/design/phase4/ui-copy.md`` §4 (owner decision, spec §14 2026-09-20). The Inspector's
+    editor writes the same sentence itself (``web/static/js/markers_inspector.js`` ``resultLines``) because the save
+    route hands it the replaced types, not this message — change both together.
 
     Args:
         replaced_types: The types whose own markers the server lost (``MarkerPublisher.last_replaced_own_types``).

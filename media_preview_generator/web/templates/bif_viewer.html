@@ -172,7 +172,11 @@
                     <div id="markersEpisodeView">
                         <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
                             <div class="small text-muted text-break" id="markersInspectorPath"></div>
-                            <button class="btn btn-sm btn-outline-secondary" id="markersRedetectBtn" type="button" disabled title="Look this file up and detect it again, asking every source. Runs as a job on the Dashboard."><i class="bi bi-arrow-repeat me-1"></i>Re-detect</button>
+                            <div class="d-flex gap-2 flex-wrap">
+                                <button class="btn btn-sm btn-outline-secondary" id="markersAdjustBtn" type="button" disabled title="Drag the intro or credits to where they really are, then save. Your times are kept from then on."><i class="bi bi-pencil me-1"></i>Adjust</button>
+                                <button class="btn btn-sm btn-outline-secondary" id="markersLockBtn" type="button" disabled title="Keep these times exactly as they are. Later checks won't change them."><i class="bi bi-lock me-1"></i>Lock</button>
+                                <button class="btn btn-sm btn-outline-secondary" id="markersRedetectBtn" type="button" disabled title="Look this file up and detect it again, asking every source. Runs as a job on the Dashboard."><i class="bi bi-arrow-repeat me-1"></i>Re-detect</button>
+                            </div>
                         </div>
                         <div id="markersInspectorBody"></div>
                     </div>
@@ -191,6 +195,27 @@
     <p class="text-muted small mb-0">
         Or paste a preview file path directly to skip the lookup.
     </p>
+</div>
+
+<!-- Unlock confirmation (Intro & Credits tab). Says what comes back before the user's own times stop winning. -->
+<div class="modal fade" id="markersUnlockModal" tabindex="-1" aria-labelledby="markersUnlockTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="markersUnlockTitle"><i class="bi bi-unlock me-2"></i>Unlock these markers?</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-2">Your times stay on your servers for now:</p>
+                <ul class="mb-3" id="markersUnlockList"></ul>
+                <p class="mb-0">The next time this episode is checked, the sources decide again and may move them. Re-detect does that straight away.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Keep them locked</button>
+                <button type="button" class="btn btn-danger" id="markersUnlockConfirm">Unlock</button>
+            </div>
+        </div>
+    </div>
 </div>
 {% endblock %}
 

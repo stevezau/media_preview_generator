@@ -303,6 +303,11 @@ class _Inspector:
         self.item_requests: list[str] = []
         self.info_requests: list[str] = []
         self.redetect_bodies: list[dict] = []
+        self.save_bodies: list[dict] = []
+        self.unlock_bodies: list[dict] = []
+        # What POST / DELETE /api/markers/item/markers answer. A tuple of (status, body) so a test can make one fail.
+        self.save_answer: tuple[int, dict] = (200, {"markers": {}, "servers": []})
+        self.unlock_answer: tuple[int, dict] = (200, {"unlocked": [], "markers": {}, "decisions": {}})
         self.item_handler = item_handler
         server = {"id": "plex-1", "name": server_type.title(), "type": server_type, "enabled": True, "url": "http://p"}
         mock_servers_list(page, servers=[server])
@@ -316,6 +321,7 @@ class _Inspector:
         page.route("**/api/bif/frame**", lambda r: r.fulfill(status=200, body=b""))
         page.route("**/api/markers/item?**", self._item)
         page.route("**/api/markers/item/redetect", self._redetect)
+        page.route("**/api/markers/item/markers", self._markers)
 
     def _info(self, route: Route) -> None:
         self.info_requests.append(route.request.url)
@@ -342,6 +348,16 @@ class _Inspector:
         self.redetect_bodies.append(route.request.post_data_json or {})
         _fulfill_json(route, {"job_id": "9f8e7d6c-1111-4222-8333-444455556666"}, status=202)
 
+    def _markers(self, route: Route) -> None:
+        body = route.request.post_data_json or {}
+        if route.request.method == "DELETE":
+            self.unlock_bodies.append(body)
+            status, answer = self.unlock_answer
+        else:
+            self.save_bodies.append(body)
+            status, answer = self.save_answer
+        _fulfill_json(route, answer, status=status)
+
     def open_result(self, index: int = 0) -> Page:
         page = self.page
         if not page.url.endswith("/bif-viewer"):
@@ -357,6 +373,8 @@ class _Inspector:
     def open_tab(self) -> Page:
         self.page.locator("#inspectorMarkersTabBtn").click()
         expect(self.page.locator("#inspector-tab-markers")).to_have_class(re.compile(r"\bactive\b"))
+        # An empty body doesn't contain "Loading" either, so wait for it to have rendered something first.
+        expect(self.page.locator("#markersInspectorBody > *")).not_to_have_count(0, timeout=5000)
         expect(self.page.locator("#markersInspectorBody")).not_to_contain_text("Loading", timeout=3000)
         return self.page
 
@@ -930,3 +948,820 @@ class TestResultsWithoutAPreview:
         expect(page.locator("#previewFrame")).to_be_visible()
         assert len(inspector.info_requests) == 1
         assert "index-sd.bif" in inspector.info_requests[0]
+
+
+# ---------------------------------------------------------------------------
+# Adjust / Lock editor (phase 4, Task 5)
+# ---------------------------------------------------------------------------
+
+
+def _saved(mtype: str, start: int, end: int, locked: bool = True) -> dict:
+    return {
+        "type": mtype,
+        "start_ms": start,
+        "end_ms": end,
+        "locked": locked,
+        "locked_at": "2026-09-20T10:00:00+00:00",
+    }
+
+
+def _row(server_id: str, name: str, stype: str, result: str, **extra) -> dict:
+    """One row of POST /api/markers/item/markers (``api_markers._editor_server_row``)."""
+    row = {
+        "server_id": server_id,
+        "server_name": name,
+        "server_type": stype,
+        "result": result,
+        "message": "",
+        "can_show": ["intro", "credits", "recap", "preview"] if stype == "jellyfin" else ["intro", "credits"],
+        "cant_show": [],
+        "notes": [],
+        "replaced_own": [],
+    }
+    row.update(extra)
+    return row
+
+
+def locked_payload() -> dict:
+    """South Park with both decided types locked by the user, as the Inspector reads it after a save."""
+    payload = south_park()
+    for mtype in ("intro", "credits"):
+        decision = payload["decisions"][mtype]
+        decision["reason"] = "locked by user"
+        decision["marker"]["locked"] = True
+        decision["marker"]["locked_at"] = "2026-09-20T10:00:00+00:00"
+        decision["marker"]["decided_by"] = ["user"]
+    return payload
+
+
+def _strip(page: Page, mtype: str):
+    return page.locator(f'.mk-edit-strip[data-edit-type="{mtype}"]')
+
+
+def _field(page: Page, mtype: str, edge: str):
+    return _strip(page, mtype).locator(".mk-time").nth(0 if edge == "start" else 1)
+
+
+def _handle(page: Page, window: str, edge: str):
+    return page.locator(f'.mk-window[data-window="{window}"] .mk-bar-editing .mk-handle-{edge}')
+
+
+def _save_button(page: Page):
+    return page.locator(".mk-edit-actions .mk-edit-save")
+
+
+def _open_editor(inspector: _Inspector) -> Page:
+    inspector.open_result()
+    page = inspector.open_tab()
+    page.locator("#markersAdjustBtn").click()
+    expect(page.locator(".mk-edit-actions")).to_be_visible()
+    return page
+
+
+@pytest.mark.e2e
+class TestAdjustEditor:
+    def test_adjust_opens_the_editor_over_both_windows(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        page = _open_editor(inspector)
+
+        expect(page.locator("#markersInspectorBody")).to_contain_text(
+            "Adjusting this episode. Nothing changes on your servers until you save."
+        )
+        # One strip per adjustable type, in the window that shows it; recap and preview have nothing to drag here.
+        expect(page.locator(".mk-edit-strip")).to_have_count(2)
+        expect(page.locator('.mk-window[data-window="opening"] .mk-edit-strip')).to_have_count(1)
+        expect(page.locator('.mk-window[data-window="ending"] .mk-edit-strip')).to_have_count(1)
+        expect(_strip(page, "intro")).to_contain_text("Intro")
+        expect(_field(page, "intro", "start")).to_have_value("0:11")
+        expect(_field(page, "intro", "end")).to_have_value("0:37")
+        expect(_strip(page, "intro")).to_contain_text("26 seconds long")
+        expect(_strip(page, "intro")).to_contain_text("Arrow keys move it 1 second")
+        expect(_strip(page, "intro")).to_contain_text("hold Shift for 10 seconds")
+
+        # Credits already run to the end of the file, so the switch starts on and the end box is closed.
+        expect(_strip(page, "credits")).to_contain_text("Runs to the end of the file")
+        expect(_strip(page, "credits").locator("input[role='switch']")).to_be_checked()
+        expect(_field(page, "credits", "end")).to_be_disabled()
+
+        expect(page.locator(".mk-edit-pending")).to_have_text("Intro 0:11–0:37 · Credits 21:39 →")
+        expect(page.locator(".mk-edit-actions")).to_contain_text(
+            "Saving keeps your times — later checks won't change them."
+        )
+        expect(_save_button(page)).to_have_text("Save and publish to 3 servers")
+        # Nothing reaches a server until Save is pressed.
+        assert inspector.save_bodies == []
+        # While an edit is open the other two actions are out of reach.
+        expect(page.locator("#markersAdjustBtn")).to_be_disabled()
+        expect(page.locator("#markersLockBtn")).to_be_disabled()
+        expect(page.locator("#markersRedetectBtn")).to_be_disabled()
+
+    def test_the_handles_are_named_for_a_screen_reader_and_follow_the_times(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        page = _open_editor(inspector)
+
+        start = _handle(page, "opening", "start")
+        expect(start).to_have_attribute("aria-label", "Intro start, 0 minutes 11 seconds")
+        expect(_handle(page, "opening", "end")).to_have_attribute("aria-label", "Intro end, 0 minutes 37 seconds")
+        expect(_handle(page, "ending", "start")).to_have_attribute("aria-label", "Credits start, 21 minutes 39 seconds")
+        start.press("ArrowRight")
+        expect(start).to_have_attribute("aria-label", "Intro start, 0 minutes 12 seconds")
+
+    def test_arrow_keys_nudge_a_second_and_shift_ten(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        page = _open_editor(inspector)
+
+        start = _handle(page, "opening", "start")
+        start.press("ArrowRight")
+        expect(_field(page, "intro", "start")).to_have_value("0:12")
+        start.press("Shift+ArrowRight")
+        expect(_field(page, "intro", "start")).to_have_value("0:22")
+        start.press("ArrowLeft")
+        expect(_field(page, "intro", "start")).to_have_value("0:21")
+        expect(_strip(page, "intro")).to_contain_text("16 seconds long")
+        expect(page.locator(".mk-edit-pending")).to_contain_text("Intro 0:21–0:37")
+
+        _handle(page, "opening", "end").press("Shift+ArrowLeft")
+        expect(_field(page, "intro", "end")).to_have_value("0:27")
+        # The page's own arrow keys step the preview frame; a nudge must not also do that.
+        expect(page.locator("#currentFrame")).to_have_text("0")
+
+    def test_the_whole_edit_without_a_mouse(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        inspector.save_answer = (200, {"markers": {"intro": _saved("intro", 20_000, 37_000)}, "servers": []})
+        inspector.open_result()
+        page = inspector.open_tab()
+        # Keyboard only: the button is activated with Enter, the handle nudged, Save pressed with Enter.
+        page.locator("#markersAdjustBtn").press("Enter")
+        expect(page.locator(".mk-edit-actions")).to_be_visible()
+        _handle(page, "opening", "start").press("Shift+ArrowRight")
+        _handle(page, "opening", "start").press("ArrowLeft")
+        expect(_field(page, "intro", "start")).to_have_value("0:20")
+
+        with page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
+        ):
+            _save_button(page).press("Enter")
+
+        assert len(inspector.save_bodies) == 1
+        body = inspector.save_bodies[0]
+        assert body["path"] == _MEDIA_FILE
+        assert body["markers"] == [
+            {"type": "intro", "start_ms": 20_000, "end_ms": 37_000},
+            # Credits run to the end of the file, so no end is sent at all — the API reads null as "to the end".
+            {"type": "credits", "start_ms": 1_299_000, "end_ms": None},
+        ]
+
+    def test_dragging_a_handle_moves_the_marker_and_that_is_what_gets_saved(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        page = _open_editor(inspector)
+
+        handle = _handle(page, "opening", "start")
+        handle.scroll_into_view_if_needed()
+        box = handle.bounding_box()
+        assert box is not None
+        middle = box["y"] + box["height"] / 2
+        page.mouse.move(box["x"] + box["width"] / 2, middle)
+        page.mouse.down()
+        page.mouse.move(box["x"] + box["width"] / 2 + 30, middle, steps=6)
+        page.mouse.up()
+
+        dragged = _field(page, "intro", "start").input_value()
+        assert dragged != "0:11", "the drag moved nothing"
+        expect(page.locator(".mk-edit-pending")).to_contain_text(f"Intro {dragged}–0:37")
+
+        with page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
+        ):
+            _save_button(page).click()
+        minutes, seconds = dragged.split(":")
+        sent = next(m for m in inspector.save_bodies[0]["markers"] if m["type"] == "intro")
+        assert sent["start_ms"] == (int(minutes) * 60 + int(seconds)) * 1000
+        assert 11_000 < sent["start_ms"] < 36_000
+
+    def test_typed_times_are_read_and_the_two_refusals_hold_save_back(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        page = _open_editor(inspector)
+
+        _field(page, "intro", "start").fill("1:05")
+        expect(page.locator(".mk-edit-pending")).to_contain_text("Intro 1:05–0:37")
+        expect(_strip(page, "intro")).to_contain_text("The end has to come after the start.")
+        expect(_field(page, "intro", "start")).to_have_class(re.compile(r"\bis-invalid\b"))
+        expect(_save_button(page)).to_be_disabled()
+
+        _field(page, "intro", "start").fill("0:05")
+        expect(_save_button(page)).to_be_enabled()
+        _field(page, "intro", "end").fill("25:00")
+        expect(_strip(page, "intro")).to_contain_text("That's past the end of the file (22:02).")
+        expect(_field(page, "intro", "end")).to_have_class(re.compile(r"\bis-invalid\b"))
+        expect(_save_button(page)).to_be_disabled()
+        assert inspector.save_bodies == []
+
+    def test_an_unusual_marker_warns_and_still_saves(self, authed_page: Page, app_url: str) -> None:
+        # P-R2: every bound but "inside the file" and "ends after it starts" is advice, not a refusal.
+        inspector = _Inspector(authed_page, app_url, south_park())
+        page = _open_editor(inspector)
+
+        _field(page, "intro", "end").fill("0:13")
+        expect(_strip(page, "intro")).to_contain_text("That's shorter than most intros. This will still be saved.")
+        expect(_save_button(page)).to_be_enabled()
+        # The end moves out first: a start past the end would be a refusal, and a refusal hides the advice.
+        _field(page, "intro", "end").fill("21:00")
+        expect(_strip(page, "intro")).to_contain_text("That's longer than most intros. This will still be saved.")
+        _field(page, "intro", "start").fill("15:00")
+        expect(_strip(page, "intro")).to_contain_text(
+            "That's later in the file than intros usually are. This will still be saved."
+        )
+        expect(_save_button(page)).to_be_enabled()
+
+        # Credits that stop before the file does: the switch goes off and the warning appears, save still allowed.
+        _strip(page, "credits").locator("input[role='switch']").uncheck()
+        expect(_field(page, "credits", "end")).to_be_enabled()
+        _field(page, "credits", "end").fill("21:50")
+        expect(_strip(page, "credits")).to_contain_text(
+            "Credits usually run to the end of the file. This will still be saved."
+        )
+        _field(page, "credits", "start").fill("5:00")
+        expect(_strip(page, "credits")).to_contain_text(
+            "That's earlier than credits usually start. This will still be saved."
+        )
+
+        with page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
+        ):
+            _save_button(page).click()
+        assert inspector.save_bodies[0]["markers"] == [
+            {"type": "intro", "start_ms": 900_000, "end_ms": 1_260_000},
+            {"type": "credits", "start_ms": 300_000, "end_ms": 1_310_000},
+        ]
+
+    def test_cancel_puts_the_tab_back_and_sends_nothing(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        page = _open_editor(inspector)
+        _handle(page, "opening", "start").press("Shift+ArrowRight")
+        expect(_field(page, "intro", "start")).to_have_value("0:21")
+
+        page.locator(".mk-edit-cancel").click()
+
+        expect(page.locator(".mk-edit-actions")).to_have_count(0)
+        expect(page.locator(".mk-edit-strip")).to_have_count(0)
+        expect(page.locator("#markersInspectorBody")).not_to_contain_text("Adjusting this episode")
+        expect(_lane(page, "opening", "Decision")).to_contain_text("Intro 0:11–0:37")
+        expect(page.locator("#markersAdjustBtn")).to_be_enabled()
+        expect(page.locator("#markersRedetectBtn")).to_be_enabled()
+        assert inspector.save_bodies == []
+
+    def test_a_movie_adjusts_only_its_ending(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, movie())
+        page = _open_editor(inspector)
+        expect(page.locator("#markersInspectorBody")).to_contain_text("Adjusting this movie.")
+        expect(page.locator(".mk-edit-strip")).to_have_count(1)
+        expect(_field(page, "credits", "start")).to_have_value("1:55:00")
+        expect(_save_button(page)).to_have_text("Save and publish to 1 server")
+
+    def test_a_file_nothing_was_decided_for_cant_be_adjusted(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, not_checked())
+        inspector.open_result()
+        page = inspector.open_tab()
+        expect(page.locator("#markersAdjustBtn")).to_be_disabled()
+        expect(page.locator("#markersLockBtn")).to_be_disabled()
+        expect(page.locator("#markersRedetectBtn")).to_be_enabled()
+
+    def test_a_save_that_fails_keeps_the_edit_on_screen(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        inspector.save_answer = (409, {"error": "This file changed on disk since it was analysed; re-detect it first."})
+        page = _open_editor(inspector)
+        _handle(page, "opening", "start").press("ArrowRight")
+
+        _save_button(page).click()
+
+        expect(page.locator("#toastNotification")).to_contain_text("changed on disk", timeout=5000)
+        expect(page.locator(".mk-edit-actions")).to_be_visible()
+        expect(_field(page, "intro", "start")).to_have_value("0:12")
+        expect(_save_button(page)).to_be_enabled()
+        expect(page.locator(".mk-saved")).to_have_count(0)
+
+
+@pytest.mark.e2e
+class TestTypesAServerCantShow:
+    """Owner ruling: a type one enabled server shows stays editable; only "nobody shows it" refuses the edit."""
+
+    @staticmethod
+    def _with_recap(server_types: list[str]) -> dict:
+        payload = south_park()
+        payload["decisions"]["recap"] = _decision("decided", ("recap", 0, 40_000))
+        payload["servers"] = [
+            _server(f"s-{i}", stype.title(), stype, "will_add", []) for i, stype in enumerate(server_types)
+        ]
+        return payload
+
+    def test_a_recap_a_jellyfin_can_show_is_editable_and_names_who_misses_out(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        inspector = _Inspector(authed_page, app_url, self._with_recap(["plex", "emby", "jellyfin"]))
+        page = _open_editor(inspector)
+
+        expect(_field(page, "recap", "start")).to_be_enabled()
+        expect(_strip(page, "recap")).to_contain_text(
+            "Only Jellyfin shows recaps. Plex and Emby have no recap marker, so this one won't reach them."
+        )
+        expect(page.locator(".mk-edit-pending")).to_contain_text("Recap 0:00–0:40")
+        expect(_save_button(page)).to_be_enabled()
+
+    def test_a_recap_no_server_can_show_is_refused_without_refusing_the_rest(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        inspector = _Inspector(authed_page, app_url, self._with_recap(["plex", "emby"]))
+        page = _open_editor(inspector)
+
+        expect(_field(page, "recap", "start")).to_be_disabled()
+        expect(_field(page, "recap", "end")).to_be_disabled()
+        expect(_strip(page, "recap")).to_contain_text(
+            "Recaps can't be adjusted here: neither Plex nor Emby has a recap marker, "
+            "and no other server has this file."
+        )
+        # The intro and credits on the same screen are still perfectly editable, and the recap is left out.
+        expect(_field(page, "intro", "start")).to_be_enabled()
+        expect(page.locator(".mk-edit-pending")).not_to_contain_text("Recap")
+        expect(_save_button(page)).to_have_text("Save and publish to 2 servers")
+
+        with page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
+        ):
+            _save_button(page).click()
+        assert [m["type"] for m in inspector.save_bodies[0]["markers"]] == ["intro", "credits"]
+
+    def test_no_server_has_intro_and_credits_on_so_nothing_can_be_saved(self, authed_page: Page, app_url: str) -> None:
+        payload = south_park()
+        for server in payload["servers"]:
+            server["markers_enabled"] = False
+        inspector = _Inspector(authed_page, app_url, payload)
+        page = _open_editor(inspector)
+
+        expect(_strip(page, "intro")).to_contain_text(
+            "Intros can't be adjusted here: no server with Intro & Credits on has this file."
+        )
+        expect(_field(page, "intro", "start")).to_be_disabled()
+        expect(_save_button(page)).to_have_text("Save")
+        expect(_save_button(page)).to_be_disabled()
+        expect(page.locator(".mk-edit-pending")).to_have_text("")
+
+
+def every_result() -> dict:
+    """An intro-and-credits file with one server per result the save can answer with."""
+    payload = south_park()
+    payload["decisions"]["credits"] = _decision("decided", ("credits", 1_250_000, 1_280_000))
+    payload["servers"] = [
+        _server("plex-main", "Plex · Main", "plex", "will_replace", [], version_count=2),
+        _server("emby-lab", "Emby · Lab", "emby", "will_add", []),
+        _server("jf-lab", "Jellyfin · Lab", "jellyfin", "will_add", []),
+        _server("plex-parents", "Plex · Parents", "plex", "not_enabled", [], markers_enabled=False),
+        _server("jf-wait", "Jellyfin · Attic", "jellyfin", "waiting", []),
+        _server("jf-same", "Jellyfin · Shed", "jellyfin", "up_to_date", []),
+        _server("jf-review", "Jellyfin · Loft", "jellyfin", "will_add", []),
+    ]
+    return payload
+
+
+def every_result_answer() -> dict:
+    """The save's answer. Each row is the API's own words for that server (``_editor_server_row``)."""
+    return {
+        "canonical_path": _MEDIA_FILE,
+        "duration_ms": _DURATION,
+        "markers": {
+            "intro": _saved("intro", 11_000, 37_000),
+            "credits": _saved("credits", 1_250_000, 1_280_000),
+        },
+        "servers": [
+            _row("plex-main", "Plex · Main", "plex", "written", replaced_own=["intro"], message="2 marker(s)."),
+            _row(
+                "emby-lab",
+                "Emby · Lab",
+                "emby",
+                "written",
+                notes=[{"type": "credits", "field": "end", "note": "Emby skips to the end of the file"}],
+            ),
+            _row("jf-lab", "Jellyfin · Lab", "jellyfin", "failed", message="HTTP 500 from the plugin"),
+            _row("plex-parents", "Plex · Parents", "plex", "not_enabled", message="Intro & Credits is off"),
+            _row("jf-wait", "Jellyfin · Attic", "jellyfin", "waiting", message="Not in this server's library yet"),
+            _row("jf-same", "Jellyfin · Shed", "jellyfin", "unchanged"),
+            _row("jf-review", "Jellyfin · Loft", "jellyfin", "needs_review", message="Sources disagree on credits"),
+        ],
+    }
+
+
+def _with_types(types: list[str]) -> dict:
+    """South Park plus the extra types, with a Jellyfin on hand so they are all adjustable."""
+    payload = south_park()
+    payload["decisions"]["credits"] = _decision("decided", ("credits", 1_250_000, 1_280_000))
+    if "recap" in types:
+        payload["decisions"]["recap"] = _decision("decided", ("recap", 0, 40_000))
+    if "preview" in types:
+        payload["decisions"]["preview"] = _decision("decided", ("preview", 1_300_000, _DURATION))
+    payload["servers"] = [
+        _server("jf-lab", "Jellyfin · Lab", "jellyfin", "will_add", []),
+        _server("emby-den", "Emby · Den", "emby", "will_add", []),
+        _server("plex-den", "Plex · Den", "plex", "nothing_to_publish", []),
+    ]
+    return payload
+
+
+@pytest.mark.e2e
+class TestSaveAndItsResults:
+    def test_saving_shows_every_server_result_and_the_locked_state(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, every_result())
+        inspector.save_answer = (200, every_result_answer())
+        page = _open_editor(inspector)
+
+        with page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
+        ):
+            _save_button(page).click()
+
+        expect(page.locator(".mk-saved")).to_contain_text("Saved and locked. Your times stay until you unlock them.")
+        # The editor closes on a save: nothing is left to drag or cancel.
+        expect(page.locator(".mk-edit-actions")).to_have_count(0)
+        expect(page.locator(".mk-edit-strip")).to_have_count(0)
+
+        expected = {
+            "plex-main": (
+                "Updated",
+                [
+                    "Intro 0:11–0:37 · Credits 20:50–21:20",
+                    "Replaced Plex's own marker. This server is set to keep Plex's, "
+                    "but a marker you adjust always wins.",
+                    "All versions of this item share one set of markers",
+                ],
+            ),
+            "emby-lab": (
+                "Updated",
+                [
+                    "Intro 0:11–0:37 · Credits 20:50",
+                    "Your credits end wasn't sent. Emby skips to the end of the file, "
+                    "past any scene after the credits.",
+                ],
+            ),
+            "jf-lab": (
+                "Couldn't reach it",
+                ["Your times are saved. This server gets them at the next Check servers run."],
+            ),
+            "plex-parents": ("Intro & Credits off", ["Turn on Intro & Credits for this server to send markers here."]),
+            "jf-wait": ("Waiting", ["Not in this server's library yet"]),
+            "jf-same": ("Up to date", ["Intro 0:11–0:37 · Credits 20:50–21:20"]),
+            "jf-review": ("Needs review", ["Sources disagree on credits"]),
+        }
+        for server_id, (badge, lines) in expected.items():
+            card = _server_card(page, server_id)
+            expect(card.locator(".mk-plan")).to_have_text(badge)
+            for line in lines:
+                expect(card).to_contain_text(line)
+        # The publisher's own row message is job wording; the card shows the editor's words, not "2 marker(s).".
+        expect(_server_card(page, "plex-main")).not_to_contain_text("marker(s)")
+        # Only Emby's credits end goes missing; nobody else says so.
+        expect(_server_card(page, "jf-same")).not_to_contain_text("credits end wasn't sent")
+        # A server that took everything says nothing about types it couldn't show.
+        expect(_server_card(page, "jf-same")).not_to_contain_text("has no")
+
+        # The tab now reads as locked, and the header offers Unlock instead of Lock.
+        expect(page.locator(".mk-chips")).to_contain_text("Locked by you")
+        expect(page.locator("#markersLockBtn")).to_have_text("Unlock")
+        expect(page.locator(".mk-lane-decision .mk-lock")).to_have_count(2)
+
+    def test_a_server_that_took_some_types_says_which_one_it_couldnt(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, _with_types(["recap"]))
+        inspector.save_answer = (
+            200,
+            {
+                "markers": {
+                    "intro": _saved("intro", 11_000, 37_000),
+                    "recap": _saved("recap", 0, 40_000),
+                    "credits": _saved("credits", 1_250_000, 1_280_000),
+                },
+                "servers": [
+                    _row("jf-lab", "Jellyfin · Lab", "jellyfin", "written"),
+                    _row("emby-den", "Emby · Den", "emby", "written", cant_show=["recap"]),
+                    _row("plex-den", "Plex · Den", "plex", "written", cant_show=["recap"]),
+                ],
+            },
+        )
+        page = _open_editor(inspector)
+        with page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
+        ):
+            _save_button(page).click()
+
+        emby = _server_card(page, "emby-den")
+        expect(emby.locator(".mk-plan")).to_have_text("Recap not sent")
+        expect(emby).to_contain_text("Emby has no recap marker. Its intro and credits were updated.")
+        expect(emby).to_contain_text("Intro 0:11–0:37 · Credits 20:50–21:20")
+        expect(_server_card(page, "jf-lab").locator(".mk-plan")).to_have_text("Updated")
+        expect(_server_card(page, "jf-lab")).to_contain_text("Recap 0:00–0:40")
+
+    def test_a_server_that_took_nothing_at_all_says_so(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, _with_types(["recap", "preview"]))
+        inspector.save_answer = (
+            200,
+            {
+                "markers": {
+                    "intro": _saved("intro", 11_000, 37_000),
+                    "recap": _saved("recap", 0, 40_000),
+                    "credits": _saved("credits", 1_250_000, 1_280_000),
+                    "preview": _saved("preview", 1_300_000, _DURATION),
+                },
+                "servers": [
+                    _row("jf-lab", "Jellyfin · Lab", "jellyfin", "written"),
+                    _row("emby-den", "Emby · Den", "emby", "written", cant_show=["recap", "preview"]),
+                    _row("plex-den", "Plex · Den", "plex", "nothing_to_publish", cant_show=["recap", "preview"]),
+                ],
+            },
+        )
+        page = _open_editor(inspector)
+        with page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
+        ):
+            _save_button(page).click()
+
+        plex = _server_card(page, "plex-den")
+        expect(plex.locator(".mk-plan")).to_have_text("Nothing sent")
+        expect(plex).to_contain_text("Plex has no recap or preview marker, and nothing else changed.")
+        emby = _server_card(page, "emby-den")
+        expect(emby.locator(".mk-plan")).to_have_text("Recap or preview not sent")
+        expect(emby).to_contain_text("Emby has no recap or preview marker. Its intro and credits were updated.")
+
+    def test_the_cards_say_sending_while_the_save_is_in_flight(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        held: list[Route] = []
+        authed_page.route("**/api/markers/item/markers", lambda route: held.append(route))
+        page = _open_editor(inspector)
+
+        _save_button(page).click()
+
+        expect(page.locator(".mk-edit-actions")).to_contain_text("Your times are saved. Sending them to your servers…")
+        expect(_save_button(page)).to_contain_text("Saving…")
+        expect(_save_button(page)).to_be_disabled()
+        for server_id in ("plex-1", "jf-1", "emby-1"):
+            expect(_server_card(page, server_id).locator(".mk-plan")).to_contain_text("Sending…")
+        # The times can't be moved while they are on their way.
+        expect(_field(page, "intro", "start")).to_be_disabled()
+        expect(_handle(page, "opening", "start")).to_be_disabled()
+
+        held[0].fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"markers": {"intro": _saved("intro", 11_000, 37_000)}, "servers": []}),
+        )
+        expect(page.locator(".mk-saved")).to_be_visible(timeout=5000)
+
+
+@pytest.mark.e2e
+class TestLockAndUnlock:
+    def test_lock_sends_the_decided_times_unchanged(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        inspector.save_answer = (
+            200,
+            {
+                "markers": {
+                    "intro": _saved("intro", 11_000, 37_000),
+                    "credits": _saved("credits", 1_299_000, _DURATION),
+                },
+                "servers": [_row("plex-1", "Plex", "plex", "unchanged")],
+            },
+        )
+        inspector.open_result()
+        page = inspector.open_tab()
+        expect(page.locator("#markersLockBtn")).to_have_text("Lock")
+
+        with page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
+        ):
+            page.locator("#markersLockBtn").click()
+
+        assert inspector.save_bodies == [
+            {
+                "path": _MEDIA_FILE,
+                "markers": [
+                    {"type": "intro", "start_ms": 11_000, "end_ms": 37_000},
+                    {"type": "credits", "start_ms": 1_299_000, "end_ms": None},
+                ],
+            }
+        ]
+        expect(page.locator("#toastNotification")).to_contain_text(
+            "Locked — these times stay until you unlock them.", timeout=5000
+        )
+        expect(page.locator(".mk-chips")).to_contain_text("Locked by you")
+        expect(page.locator("#markersLockBtn")).to_have_text("Unlock")
+
+    def test_lock_leaves_out_a_type_no_server_can_show(self, authed_page: Page, app_url: str) -> None:
+        # The API refuses the whole save over one unshowable type, so Lock has to filter the same way Adjust does:
+        # a recap is decided whatever vendors the user runs, and neither Plex nor Emby has a recap marker.
+        payload = south_park()
+        payload["decisions"]["recap"] = _decision("decided", ("recap", 0, 40_000))
+        payload["servers"] = [
+            _server("plex-1", "Plex", "plex", "will_add", []),
+            _server("emby-1", "Emby", "emby", "will_add", []),
+        ]
+        inspector = _Inspector(authed_page, app_url, payload)
+        inspector.save_answer = (200, {"markers": {}, "servers": []})
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        with page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
+        ):
+            page.locator("#markersLockBtn").click()
+
+        assert [m["type"] for m in inspector.save_bodies[0]["markers"]] == ["intro", "credits"]
+
+    def test_lock_is_out_of_reach_when_no_server_could_take_the_markers(self, authed_page: Page, app_url: str) -> None:
+        payload = south_park()
+        for server in payload["servers"]:
+            server["markers_enabled"] = False
+        inspector = _Inspector(authed_page, app_url, payload)
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        expect(page.locator("#markersLockBtn")).to_be_disabled()
+        assert inspector.save_bodies == []
+
+    def test_adjust_waits_while_a_lock_is_in_flight(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        held: list[Route] = []
+        authed_page.route("**/api/markers/item/markers", lambda route: held.append(route))
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        page.locator("#markersLockBtn").click()
+
+        # The lock publishes to every server; starting an edit meanwhile would be thrown away by the answer.
+        expect(page.locator("#markersAdjustBtn")).to_be_disabled()
+        expect(page.locator("#markersLockBtn")).to_be_disabled()
+        expect(page.locator("#markersRedetectBtn")).to_be_disabled()
+
+        held[0].fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"markers": {"intro": _saved("intro", 11_000, 37_000)}, "servers": []}),
+        )
+        expect(page.locator("#markersAdjustBtn")).to_be_enabled(timeout=5000)
+        expect(page.locator("#markersLockBtn")).to_have_text("Unlock")
+
+    def test_a_lock_answering_after_the_file_changed_applies_nothing_and_frees_the_buttons(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        other = "/data/tv/South Park (1997)/Season 01/South Park S01E04.mkv"
+        second = copy.deepcopy(south_park())
+        second["canonical_path"] = other
+        second["servers"] = [_server("plex-e04", "Plex E04", "plex", "up_to_date", [])]
+        held: list[Route] = []
+        inspector = _Inspector(
+            authed_page,
+            app_url,
+            south_park(),
+            results=[_result(), _result(item_id="9999", media_file=other, title="South Park S01E04")],
+        )
+        authed_page.route("**/api/markers/item/markers", lambda route: held.append(route))
+        inspector.open_result(0)
+        page = inspector.open_tab()
+        page.locator("#markersLockBtn").click()
+        expect(page.locator("#markersAdjustBtn")).to_be_disabled()
+
+        # The user moves to another episode before the lock answers.
+        inspector.payload = second
+        inspector.open_result(1)
+        expect(_server_card(page, "plex-e04")).to_be_visible(timeout=5000)
+
+        held[0].fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"markers": {"intro": _saved("intro", 11_000, 37_000)}, "servers": []}),
+        )
+
+        # The other episode's answer neither locks this one nor leaves its buttons stuck.
+        expect(page.locator("#markersAdjustBtn")).to_be_enabled(timeout=5000)
+        expect(page.locator("#markersInspectorPath")).to_have_text(other)
+        expect(page.locator(".mk-chips")).not_to_contain_text("Locked by you")
+        expect(page.locator(".mk-saved")).to_have_count(0)
+
+    def test_a_locked_file_opens_with_the_chip_the_lane_lock_and_unlock(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, locked_payload())
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        expect(page.locator(".mk-chips")).to_contain_text("Locked by you")
+        expect(page.locator('.mk-window[data-window="opening"] .mk-lane-decision .mk-lock')).to_have_count(1)
+        expect(page.locator("#markersLockBtn")).to_have_text("Unlock")
+        expect(page.locator("#markersAdjustBtn")).to_be_enabled()
+
+    def test_unlock_says_what_comes_back_before_it_drops_the_lock(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, locked_payload())
+        inspector.unlock_answer = (200, {"unlocked": ["intro", "credits"], "markers": {}, "decisions": {}})
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        page.locator("#markersLockBtn").click()
+
+        modal = page.locator("#markersUnlockModal")
+        expect(modal).to_be_visible()
+        expect(modal).to_contain_text("Unlock these markers?")
+        expect(modal).to_contain_text("Your times stay on your servers for now:")
+        expect(modal.locator("#markersUnlockList li")).to_have_text(["Intro 0:11–0:37", "Credits 21:39 →"])
+        expect(modal).to_contain_text(
+            "The next time this episode is checked, the sources decide again and may move them."
+        )
+        expect(modal).to_contain_text("Keep them locked")
+
+        # The next read of the file has nothing locked any more.
+        inspector.payload = south_park()
+        with page.expect_response(
+            lambda r: r.request.method == "DELETE" and r.url.endswith("/api/markers/item/markers"), timeout=5000
+        ):
+            page.locator("#markersUnlockConfirm").click()
+
+        assert inspector.unlock_bodies == [{"path": _MEDIA_FILE, "types": ["intro", "credits"]}]
+        expect(page.locator("#toastNotification")).to_contain_text(
+            "Unlocked — the next check decides these times again.", timeout=5000
+        )
+        expect(page.locator(".mk-chips")).not_to_contain_text("Locked by you")
+        expect(page.locator("#markersLockBtn")).to_have_text("Lock")
+
+    def test_an_unlock_that_fails_keeps_the_lock_and_the_dialog(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, locked_payload())
+        inspector.unlock_answer = (409, {"error": "This file hasn't been analysed yet. Run Re-detect first."})
+        inspector.open_result()
+        page = inspector.open_tab()
+        page.locator("#markersLockBtn").click()
+        modal = page.locator("#markersUnlockModal")
+        expect(modal).to_be_visible()
+
+        with page.expect_response(
+            lambda r: r.request.method == "DELETE" and r.url.endswith("/api/markers/item/markers"), timeout=5000
+        ):
+            page.locator("#markersUnlockConfirm").click()
+
+        expect(page.locator("#toastNotification")).to_contain_text("hasn't been analysed yet", timeout=5000)
+        expect(modal).to_be_visible()
+        expect(page.locator(".mk-chips")).to_contain_text("Locked by you")
+        expect(page.locator("#markersLockBtn")).to_have_text("Unlock")
+        # The confirm button comes back, so the user can try again without reopening anything.
+        expect(page.locator("#markersUnlockConfirm")).to_be_enabled()
+        with page.expect_response(
+            lambda r: r.request.method == "DELETE" and r.url.endswith("/api/markers/item/markers"), timeout=5000
+        ):
+            page.locator("#markersUnlockConfirm").click()
+        assert len(inspector.unlock_bodies) == 2
+
+    def test_keeping_them_locked_changes_nothing(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, locked_payload())
+        inspector.open_result()
+        page = inspector.open_tab()
+        page.locator("#markersLockBtn").click()
+        modal = page.locator("#markersUnlockModal")
+        expect(modal).to_be_visible()
+
+        modal.locator("button", has_text="Keep them locked").click()
+
+        expect(modal).to_be_hidden()
+        assert inspector.unlock_bodies == []
+        expect(page.locator(".mk-chips")).to_contain_text("Locked by you")
+
+
+@pytest.mark.e2e
+class TestEditorTimeHelpers:
+    """The editor's pure time helpers, pinned in the browser — the project has no JS test runner."""
+
+    @pytest.mark.parametrize(
+        ("text", "ms"),
+        [
+            ("0:14", 14_000),
+            ("40:55", 2_455_000),
+            ("1:55:12", 6_912_000),
+            ("90", 90_000),
+            ("", None),
+            ("0:75", None),
+            ("abc", None),
+            ("1:2:3:4", None),
+        ],
+    )
+    def test_parse_clock_reads_a_time_or_refuses_it(self, authed_page: Page, app_url: str, text: str, ms) -> None:
+        authed_page.goto(f"{app_url}/bif-viewer")
+        authed_page.wait_for_load_state("domcontentloaded")
+        assert authed_page.evaluate("t => window.markersEditor.parseClock(t)", text) == ms
+
+    def test_length_and_spoken_time(self, authed_page: Page, app_url: str) -> None:
+        authed_page.goto(f"{app_url}/bif-viewer")
+        authed_page.wait_for_load_state("domcontentloaded")
+        lengths = authed_page.evaluate(
+            "() => [1000, 27000, 119000, 120000, 126000].map((ms) => window.markersEditor.lengthText(ms))"
+        )
+        assert lengths == [
+            "1 second long",
+            "27 seconds long",
+            "119 seconds long",
+            "2 minutes long",
+            "2 minutes 6 seconds long",
+        ]
+        spoken = authed_page.evaluate("() => [14000, 6912000, 61000].map((ms) => window.markersEditor.spokenTime(ms))")
+        assert spoken == ["0 minutes 14 seconds", "1 hour 55 minutes 12 seconds", "1 minute 1 second"]

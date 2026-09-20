@@ -1,12 +1,19 @@
 // =========================================================================
-// Preview Inspector → Intro & Credits tab (read-only + Re-detect).
+// Preview Inspector → Intro & Credits tab (read-only, Re-detect, and the Adjust / Lock editor).
 //
 // Renders GET /api/markers/item (markers.inspect.item_payload): what was decided for the file, the evidence behind
 // it, and what each server shows now and what the next publish changes there. Loaded lazily when the tab is shown
 // and cached per file. Every piece of text goes through textContent.
 //
+// Adjust opens the editor over the same two zoom windows: the Decision bar grows a drag handle at each edge, each
+// edited type gets a strip with typed times, and one action bar saves the lot through POST /api/markers/item/markers
+// (save = lock = publish to every owner, plan ruling P-R3) and shows what each server did. Unlock is
+// DELETE /api/markers/item/markers behind a confirmation. Copy is lifted verbatim from the owner-approved pack,
+// docs/design/intro-credits/evidence/design/phase4/ui-copy.md.
+//
 // Exposes window.loadMarkersInspector({server_id, item_id, media_file, type}); a null item (a pasted preview path)
-// shows how to get a file instead. Depends on app.js globals: apiPost, showToast, getCsrfToken, _initBootstrapTooltips.
+// shows how to get a file instead. Depends on app.js globals: apiPost, showToast, getCsrfToken,
+// _initBootstrapTooltips, _disposeBootstrapTooltips, and on window.bootstrap (Modal for Unlock, Tooltip for Lock).
 // Forwards every item and the resolved canonical path to window.markersSeason (markers_season.js), which owns the
 // "This episode" / "Whole season" toggle.
 // =========================================================================
@@ -50,11 +57,50 @@
         nothing_to_publish: ['Nothing to send yet', 'text-bg-secondary'],
     };
     const VENDOR_TILES = { plex: 'P', jellyfin: 'J', emby: 'E' };
+    const VENDOR_NAMES = { plex: 'Plex', jellyfin: 'Jellyfin', emby: 'Emby' };
     const CANT_READ = 'Couldn\'t read what the server shows';
+
+    // --- editor constants -------------------------------------------------
+    // Only these two types can be told to run to the end of the file; an intro or recap that does is a mis-detection.
+    const TO_END_TYPES = ['credits', 'preview'];
+    const NUDGE_MS = 1000;
+    const NUDGE_SHIFT_MS = 10000;
+    // A drag can't push an edge past the other one; a typed time can, and then the editor refuses to save.
+    const MIN_LENGTH_MS = 1000;
+    // The bounds markers.decide applies to a *source*. A user's own marker keeps only "inside the file" and "ends
+    // after it starts" (plan ruling P-R2), so these only ever produce a warning here.
+    const USUAL_MIN_INTRO_MS = 3000;
+    const USUAL_MAX_INTRO_MS = 300000;
+    const USUAL_START_PERCENT = 35; // intro/recap start within the first 35% of the file
+    const USUAL_END_PERCENT = 75; // credits/preview start in the last 25%
+    const TYPE_WORDS = { intro: 'intro', credits: 'credits', recap: 'recap', preview: 'preview' };
+    const TYPE_PLURALS = { intro: 'intros', credits: 'credits', recap: 'recaps', preview: 'previews' };
+    // What POST /api/markers/item/markers calls each per-server outcome (api_markers._EDITOR_RESULTS).
+    const RESULTS = {
+        written: ['Updated', 'text-bg-success'],
+        unchanged: ['Up to date', 'text-bg-success'],
+        waiting: ['Waiting', 'text-bg-info'],
+        failed: ['Couldn\'t reach it', 'text-bg-danger'],
+        not_enabled: ['Intro & Credits off', 'text-bg-secondary'],
+        nothing_to_publish: ['Nothing sent', 'text-bg-secondary'],
+        needs_review: ['Needs review', 'text-bg-warning'],
+    };
+    const RESULT_LINES = {
+        failed: ['Your times are saved. This server gets them at the next Check servers run.', 'text-danger-emphasis'],
+        not_enabled: ['Turn on Intro & Credits for this server to send markers here.', 'text-muted'],
+    };
+    const LOCK_TIP = 'Keep these times exactly as they are. Later checks won\'t change them.';
+    const UNLOCK_TIP = 'Let later checks set these times again.';
 
     const cache = new Map();
     let requestSeq = 0;
     let shown = null; // {key, item, payload}
+    // The open edit: {types, model: {type: {start, end, toEnd, editable, badStart, badEnd}}, saving, ui, actions}.
+    let editing = null;
+    // The answer to the last save: {servers, markers, sent}. Cleared whenever another file or a fresh payload loads.
+    let results = null;
+    // A Lock is in flight: it publishes to every server, so the header's other actions wait for its answer.
+    let busy = false;
 
     const $ = function (id) { return document.getElementById(id); };
 
@@ -214,10 +260,19 @@
         const duration = payload.duration_ms;
         const l = lane('Decision', 'mk-lane-decision');
         const notes = [];
+        if (!editing && win.types.some(function (type) { return isLocked(payload, type); })) {
+            const lock = el('i', 'bi bi-lock-fill mk-lock');
+            lock.setAttribute('data-bs-toggle', 'tooltip');
+            lock.setAttribute('data-bs-placement', 'top');
+            lock.title = 'You set these times. Later checks won\'t change them.';
+            l.label.appendChild(lock);
+        }
         win.types.forEach(function (type) {
             const d = (payload.decisions || {})[type] || {};
             const typeLabel = TYPE_LABELS[type];
-            if (d.status === 'decided' && d.marker) {
+            if (editing && editing.model[type]) {
+                l.track.appendChild(editBar(type, win, payload));
+            } else if (d.status === 'decided' && d.marker) {
                 const node = bar(d.marker, win, duration, 'mk-bar-result', `${typeLabel} ${laneRange(d.marker, duration)}`);
                 if (node) l.track.appendChild(node);
             } else if (d.status === 'needs_review' && d.proposed) {
@@ -255,6 +310,11 @@
             axis.appendChild(tick);
         }
         zoom.append(axis, decisionLane(win, payload));
+        if (editing) {
+            win.types.forEach(function (type) {
+                if (editing.model[type]) zoom.appendChild(editStrip(type, payload));
+            });
+        }
 
         const evidence = (payload.evidence || []).filter(function (r) { return r.source !== 'server_markers'; });
         const known = SOURCES.map(function (s) { return s[0]; });
@@ -315,6 +375,13 @@
                     `${label}: ${notForMovies ? 'not used for movies' : 'Detection off'}`));
             }
         });
+        // The same chip the Season view shows for a locked row (markers_season.js), so the two read alike.
+        if (TYPES.some(function (type) { return isLocked(payload, type); })) {
+            const chip = el('span', 'badge mk-chip mk-chip-locked');
+            chip.appendChild(el('i', 'bi bi-lock-fill me-1'));
+            chip.appendChild(el('span', '', 'Locked by you'));
+            chips.appendChild(chip);
+        }
         return chips;
     }
 
@@ -379,9 +446,32 @@
             const top = el('div', 'd-flex align-items-center gap-2 flex-wrap');
             top.appendChild(el('span', 'mk-tile mk-tile-' + stype, VENDOR_TILES[stype] || '?'));
             top.appendChild(el('strong', 'text-break', server.server_name || stype || 'Server'));
+            box.appendChild(top);
+            const row = resultFor(server.server_id);
+            if (row) {
+                const badge = resultBadge(row);
+                const chip = el('span', 'badge mk-plan ' + badge[1], badge[0]);
+                // The publisher's own words stay reachable without putting job wording on the card.
+                if (row.message) chip.title = row.message;
+                top.appendChild(chip);
+                resultLines(row, payload).forEach(function (line) {
+                    box.appendChild(el('div', 'small mk-line ' + line[1], line[0]));
+                });
+                grid.appendChild(box);
+                return;
+            }
+            if (editing && editing.saving && willReceive(server)) {
+                const chip = el('span', 'badge mk-plan text-bg-secondary');
+                chip.appendChild(sendingSpinner());
+                chip.appendChild(el('span', '', 'Sending…'));
+                top.appendChild(chip);
+                const listed = pendingFor(server, payload);
+                if (listed) box.appendChild(el('div', 'small text-muted mk-line', listed));
+                grid.appendChild(box);
+                return;
+            }
             const plan = PLANS[server.plan] || [server.plan || 'Unknown', 'text-bg-secondary'];
             top.appendChild(el('span', 'badge mk-plan ' + plan[1], plan[0]));
-            box.appendChild(top);
             serverLines(server, payload).forEach(function (line) {
                 box.appendChild(el('div', 'small text-muted mk-line', line));
             });
@@ -393,28 +483,832 @@
             grid.appendChild(box);
         });
         bodyEl.appendChild(grid);
+        if (results) {
+            const done = el('div', 'alert alert-success py-2 small mt-3 mb-0 d-flex align-items-center gap-2 mk-saved');
+            done.appendChild(el('i', 'bi bi-lock-fill'));
+            done.appendChild(el('div', '', 'Saved and locked. Your times stay until you unlock them.'));
+            bodyEl.appendChild(done);
+        }
         card.append(header, bodyEl);
         return card;
     }
 
-    // Labels wider than their bar sit beside it in the page's text colour, so they stay readable on the track.
-    function placeBarLabels(root) {
-        root.querySelectorAll('.mk-bar').forEach(function (node) {
-            const text = node.querySelector('.mk-bar-text');
-            // clientWidth includes the bar's 5px side padding; the text doesn't get that room.
-            if (!text || text.scrollWidth <= node.clientWidth - 10) return;
-            const track = node.parentElement;
-            const roomRight = track.clientWidth - (node.offsetLeft + node.offsetWidth);
-            node.classList.add(roomRight >= text.scrollWidth + 6 || roomRight >= node.offsetLeft ? 'mk-bar-out-right' : 'mk-bar-out-left');
+    // =====================================================================
+    // Adjust / Lock editor
+    // =====================================================================
+
+    function plural(count, word) {
+        return count === 1 ? `1 ${word}` : `${count} ${word}s`;
+    }
+
+    // "0:14", "40:55" and "1:55:12" all read as a time; "90" is 90 seconds. Anything else is not a time at all.
+    function parseClock(text) {
+        const match = /^(\d{1,3})(?::(\d{1,2}))?(?::(\d{1,2}))?$/.exec(String(text === undefined || text === null ? '' : text).trim());
+        if (!match) return null;
+        const parts = [match[1], match[2], match[3]].filter(function (p) { return p !== undefined; }).map(Number);
+        if (parts.slice(1).some(function (n) { return n > 59; })) return null;
+        return parts.reduce(function (total, n) { return total * 60 + n; }, 0) * 1000;
+    }
+
+    // A time a screen reader can read out: "0 minutes 14 seconds", "1 hour 55 minutes 12 seconds".
+    function spokenTime(ms) {
+        const total = Math.max(0, Math.round(ms / 1000));
+        const hours = Math.floor(total / 3600);
+        const words = hours ? [plural(hours, 'hour')] : [];
+        words.push(plural(Math.floor((total % 3600) / 60), 'minute'), plural(total % 60, 'second'));
+        return words.join(' ');
+    }
+
+    function lengthText(ms) {
+        const total = Math.max(0, Math.round(ms / 1000));
+        if (total < 120) return `${plural(total, 'second')} long`;
+        const seconds = total % 60;
+        const minutes = plural(Math.floor(total / 60), 'minute');
+        return seconds ? `${minutes} ${plural(seconds, 'second')} long` : `${minutes} long`;
+    }
+
+    function joinWith(names, word) {
+        if (names.length < 2) return names[0] || '';
+        return `${names.slice(0, -1).join(', ')} ${word} ${names[names.length - 1]}`;
+    }
+
+    function capitalise(text) {
+        return text ? text[0].toUpperCase() + text.slice(1) : text;
+    }
+
+    function isLocked(payload, type) {
+        const d = (payload.decisions || {})[type];
+        return !!(d && d.marker && d.marker.locked);
+    }
+
+    function lockedTypes(payload) {
+        return TYPES.filter(function (type) { return isLocked(payload, type); });
+    }
+
+    function enabledOwners(payload) {
+        return (payload.servers || []).filter(function (s) { return s.markers_enabled; });
+    }
+
+    // Which brands with Intro & Credits on can show this type, and which can't. Brands, not server names: the
+    // approved copy names Plex, Emby and Jellyfin, and two Plex servers say nothing more than one.
+    function vendorsFor(payload, type) {
+        const shown = [];
+        const missing = [];
+        enabledOwners(payload).forEach(function (server) {
+            const vendor = VENDOR_NAMES[String(server.server_type || '').toLowerCase()] || server.server_type;
+            const bucket = (server.can_show || []).indexOf(type) !== -1 ? shown : missing;
+            if (shown.indexOf(vendor) === -1 && missing.indexOf(vendor) === -1) bucket.push(vendor);
         });
+        return { shown: shown, missing: missing };
+    }
+
+    // The times the editor starts from: what was decided, or the proposal a "needs review" type is waiting on.
+    function decisionSeed(payload, type) {
+        const d = (payload.decisions || {})[type] || {};
+        if (d.status === 'decided' && d.marker) {
+            return { start: d.marker.start_ms, end: segmentEnd(d.marker, payload.duration_ms) };
+        }
+        if (d.proposed) return { start: d.proposed.start_ms, end: segmentEnd(d.proposed, payload.duration_ms) };
+        return null;
+    }
+
+    // A type is adjustable when one of the two zoom windows shows it and something put a bar there to drag.
+    function editableTypes(payload) {
+        const out = [];
+        windowsFor(payload).forEach(function (win) {
+            win.types.forEach(function (type) {
+                if (decisionSeed(payload, type)) out.push(type);
+            });
+        });
+        return out;
+    }
+
+    function resolved(type) {
+        const model = editing.model[type];
+        const duration = shown.payload.duration_ms;
+        return { type: type, start_ms: model.start, end_ms: model.toEnd ? duration : model.end };
+    }
+
+    // The types a save sends. A type no server with Intro & Credits on can show is left out (and its strip says so).
+    function sentTypes() {
+        return editing.types.filter(function (type) { return editing.model[type].editable; });
+    }
+
+    // Spec §5.5 rule 2's two bounds a user's own marker keeps (P-R2). Everything else only warns.
+    function refusalFor(type, payload) {
+        const model = editing.model[type];
+        const duration = payload.duration_ms;
+        const end = model.toEnd ? duration : model.end;
+        if (model.start >= duration || end > duration) return `That's past the end of the file (${clock(duration)}).`;
+        if (end <= model.start) return 'The end has to come after the start.';
+        return '';
+    }
+
+    function warningsFor(type, payload) {
+        const model = editing.model[type];
+        const duration = payload.duration_ms;
+        const end = model.toEnd ? duration : model.end;
+        const out = [];
+        const atStart = START_SEGMENTS.indexOf(type) !== -1;
+        if (type === 'intro' && end - model.start < USUAL_MIN_INTRO_MS) {
+            out.push('That\'s shorter than most intros. This will still be saved.');
+        }
+        if (type === 'intro' && end - model.start > USUAL_MAX_INTRO_MS) {
+            out.push('That\'s longer than most intros. This will still be saved.');
+        }
+        // Cross-multiplied like markers.decide, so the exact boundary can't land on the wrong side of a float.
+        if (atStart && model.start * 100 > USUAL_START_PERCENT * duration) {
+            out.push('That\'s later in the file than intros usually are. This will still be saved.');
+        }
+        if (!atStart && model.start * 100 < USUAL_END_PERCENT * duration) {
+            out.push('That\'s earlier than credits usually start. This will still be saved.');
+        }
+        if (type === 'credits' && end < duration - END_OF_FILE_MS) {
+            out.push('Credits usually run to the end of the file. This will still be saved.');
+        }
+        return out;
+    }
+
+    // The per-type note when some (or no) server with Intro & Credits on can show this type. Owner ruling: a type
+    // one server can show stays editable and the note names who misses out; only "nobody can show it" refuses.
+    function reachNote(type, payload) {
+        const vendors = vendorsFor(payload, type);
+        const word = TYPE_WORDS[type];
+        if (!vendors.shown.length) {
+            const missing = vendors.missing;
+            const plurals = capitalise(TYPE_PLURALS[type]);
+            // Nothing to name: no server with Intro & Credits on has this file at all, so the save would be refused
+            // whatever the times were (the API answers 409 for it).
+            if (!missing.length) return `${plurals} can't be adjusted here: no server with Intro & Credits on has this file.`;
+            let who = `${missing[0]} has no ${word} marker`;
+            if (missing.length === 2) who = `neither ${missing[0]} nor ${missing[1]} has a ${word} marker`;
+            else if (missing.length > 2) who = `none of ${joinWith(missing, 'and')} has a ${word} marker`;
+            return `${plurals} can't be adjusted here: ${who}, and no other server has this file.`;
+        }
+        if (!vendors.missing.length) return '';
+        const shows = vendors.shown.length === 1 ? 'shows' : 'show';
+        return `Only ${joinWith(vendors.shown, 'and')} ${shows} ${TYPE_PLURALS[type]}. `
+            + `${joinWith(vendors.missing, 'and')} ${vendors.missing.length === 1 ? 'has' : 'have'} no ${TYPE_WORDS[type]} marker, `
+            + 'so this one won\'t reach them.';
+    }
+
+    function editBanner(payload) {
+        const box = el('div', 'alert alert-warning py-2 small d-flex align-items-center gap-2 mb-3 mk-edit-banner');
+        box.appendChild(el('i', 'bi bi-pencil'));
+        const what = payload.is_movie ? 'movie' : 'episode';
+        box.appendChild(el('div', '', `Adjusting this ${what}. Nothing changes on your servers until you save.`));
+        return box;
+    }
+
+    // The decision bar while it is being edited: the same amber bar, with a grab handle at each edge.
+    function editBar(type, win, payload) {
+        const node = el('span', 'mk-bar mk-bar-result mk-bar-editing');
+        const text = el('span', 'mk-bar-text');
+        const start = handle(type, 'start', win, payload);
+        const end = handle(type, 'end', win, payload);
+        node.append(start, text, end);
+        editing.ui[type] = Object.assign(editing.ui[type] || {}, {
+            win: win, bar: node, text: text, startHandle: start, endHandle: end,
+        });
+        return node;
+    }
+
+    function handle(type, edge, win, payload) {
+        const node = el('button', 'mk-handle mk-handle-' + edge);
+        node.type = 'button';
+        node.disabled = !editing.model[type].editable || editing.saving;
+        node.addEventListener('keydown', function (event) { onHandleKey(event, type, edge, payload); });
+        node.addEventListener('pointerdown', function (event) { onHandleGrab(event, node, type, edge, win, payload); });
+        return node;
+    }
+
+    function onHandleKey(event, type, edge, payload) {
+        // Guarded here rather than in edgeMs, so every path that reads the model from a listener checks the same way.
+        if (!editing || !editing.model[type] || !shown || !shown.payload) return;
+        const step = event.shiftKey ? NUDGE_SHIFT_MS : NUDGE_MS;
+        let delta = 0;
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') delta = -step;
+        else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') delta = step;
+        if (!delta) return;
+        event.preventDefault();
+        // The page's own arrow-key handler steps the preview frame; it must not also fire for a marker nudge.
+        event.stopPropagation();
+        moveEdge(type, edge, edgeMs(type, edge) + delta, payload);
+    }
+
+    function onHandleGrab(event, node, type, edge, win, payload) {
+        if (editing.model[type].editable === false || editing.saving) return;
+        const track = node.closest('.mk-track');
+        if (!track) return;
+        event.preventDefault();
+        node.focus();
+        node.setPointerCapture(event.pointerId);
+        const move = function (ev) {
+            const rect = track.getBoundingClientRect();
+            if (!rect.width) return;
+            const fraction = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
+            moveEdge(type, edge, win.start + fraction * (win.end - win.start), payload);
+        };
+        const stop = function () {
+            node.removeEventListener('pointermove', move);
+            node.removeEventListener('pointerup', stop);
+            node.removeEventListener('pointercancel', stop);
+        };
+        node.addEventListener('pointermove', move);
+        node.addEventListener('pointerup', stop);
+        node.addEventListener('pointercancel', stop);
+    }
+
+    function edgeMs(type, edge) {
+        const model = editing.model[type];
+        return edge === 'start' ? model.start : (model.toEnd ? shown.payload.duration_ms : model.end);
+    }
+
+    // A drag or a nudge stays inside the file and can't cross the other edge; a typed time may, and is refused.
+    function moveEdge(type, edge, ms, payload) {
+        if (!editing || !editing.model[type] || !shown || !shown.payload) return;
+        const model = editing.model[type];
+        const duration = payload.duration_ms;
+        const snapped = Math.round(ms / 1000) * 1000;
+        if (edge === 'start') {
+            const ceiling = (model.toEnd ? duration : model.end) - MIN_LENGTH_MS;
+            model.start = Math.min(Math.max(0, snapped), Math.max(0, ceiling));
+            model.badStart = false;
+        } else {
+            model.end = Math.min(Math.max(model.start + MIN_LENGTH_MS, snapped), duration);
+            // Dragging the end onto the end of the file is the same statement the switch makes, so they agree.
+            model.toEnd = TO_END_TYPES.indexOf(type) !== -1 && model.end >= duration - END_OF_FILE_MS;
+            model.badEnd = false;
+        }
+        refreshType(type);
+        refreshActions(payload);
+    }
+
+    function timeField(type, edge, payload) {
+        const label = el('label', 'd-flex align-items-center gap-1 small text-muted mb-0', edge === 'start' ? 'Start' : 'End');
+        const input = el('input', 'mk-time');
+        input.type = 'text';
+        input.inputMode = 'numeric';
+        input.autocomplete = 'off';
+        input.setAttribute('aria-label', `${TYPE_LABELS[type]} ${edge}`);
+        input.addEventListener('input', function () { onFieldInput(type, edge, input, payload); });
+        input.addEventListener('blur', function () { refreshType(type); refreshActions(payload); });
+        label.appendChild(input);
+        editing.ui[type] = editing.ui[type] || {};
+        editing.ui[type][edge + 'Input'] = input;
+        return label;
+    }
+
+    function onFieldInput(type, edge, input, payload) {
+        const model = editing.model[type];
+        const ms = parseClock(input.value);
+        if (ms === null) {
+            // Not a time at all: the model keeps its last good value, the field goes red and Save waits.
+            if (edge === 'start') model.badStart = true; else model.badEnd = true;
+        } else if (edge === 'start') {
+            model.badStart = false;
+            model.start = ms;
+        } else {
+            model.badEnd = false;
+            model.toEnd = false;
+            model.end = ms;
+        }
+        refreshType(type);
+        refreshActions(payload);
+    }
+
+    function toEndSwitch(type, payload) {
+        const wrap = el('div', 'form-check form-switch mb-0 d-flex align-items-center gap-2');
+        const input = el('input', 'form-check-input mt-0');
+        input.type = 'checkbox';
+        input.setAttribute('role', 'switch');
+        input.id = 'mkRunsToEnd-' + type;
+        input.addEventListener('change', function () {
+            const model = editing.model[type];
+            model.toEnd = input.checked;
+            model.badEnd = false;
+            if (!model.toEnd) model.end = Math.min(payload.duration_ms, Math.max(model.start + MIN_LENGTH_MS, model.end));
+            refreshType(type);
+            refreshActions(payload);
+        });
+        const label = el('label', 'form-check-label small text-muted', 'Runs to the end of the file');
+        label.setAttribute('for', input.id);
+        wrap.append(input, label);
+        editing.ui[type] = Object.assign(editing.ui[type] || {}, { toEndInput: input });
+        return wrap;
+    }
+
+    function keyboardHint() {
+        const hint = el('span', 'mk-edit-hint');
+        const wide = el('span', 'mk-edit-hint-wide');
+        wide.append('Arrow keys move it 1 second · hold ', el('kbd', '', 'Shift'), ' for 10 seconds');
+        const narrow = el('span', 'mk-edit-hint-narrow');
+        narrow.append('Arrow keys 1 second · ', el('kbd', '', 'Shift'), ' 10 seconds');
+        hint.append(wide, narrow);
+        return hint;
+    }
+
+    function editStrip(type, payload) {
+        const strip = el('div', 'mk-edit-strip');
+        strip.dataset.editType = type;
+        strip.appendChild(el('span', 'mk-edit-type', TYPE_LABELS[type]));
+        strip.appendChild(timeField(type, 'start', payload));
+        strip.appendChild(timeField(type, 'end', payload));
+        const length = el('span', 'small text-muted mk-edit-length');
+        // The times are announced as text, not only as a position on the track.
+        length.setAttribute('role', 'status');
+        strip.appendChild(length);
+        if (TO_END_TYPES.indexOf(type) !== -1) {
+            strip.appendChild(toEndSwitch(type, payload));
+            strip.appendChild(infoIcon('Turn this off when something plays after the credits — a last scene, or a preview of the next episode.'));
+        }
+        strip.appendChild(keyboardHint());
+        strip.appendChild(infoIcon('Tab to a handle, then use the arrow keys. You can also type a time straight into the boxes.'));
+        const messages = el('div', 'mk-edit-messages');
+        strip.appendChild(messages);
+        editing.ui[type] = Object.assign(editing.ui[type] || {}, { length: length, messages: messages });
+        return strip;
+    }
+
+    function message(icon, className, text) {
+        const line = el('div', 'mk-edit-warn ' + className);
+        line.appendChild(el('i', 'bi ' + icon + ' me-1'));
+        line.appendChild(el('span', '', text));
+        return line;
+    }
+
+    // Everything one type's strip and bar show, recomputed from the model. Called on every nudge, drag and keystroke,
+    // so it never rebuilds a node: a rebuild would drop the focus the keyboard edit lives on.
+    function refreshType(type) {
+        if (!editing || !editing.model[type] || !shown || !shown.payload) return;
+        const payload = shown.payload;
+        const duration = payload.duration_ms;
+        const model = editing.model[type];
+        const ui = editing.ui[type] || {};
+        const seg = resolved(type);
+        const end = seg.end_ms;
+        const frozen = !model.editable || editing.saving;
+        const refusal = model.editable ? refusalFor(type, payload) : '';
+        // The offending box is the one that holds an impossible time: the start when it is at or past the end (of the
+        // marker or of the file), the end when it reaches past the file.
+        const badStart = !!model.badStart || model.start >= duration || (!!refusal && end <= model.start);
+        const badEnd = !!model.badEnd || end > duration;
+        // A box being typed into is never rewritten: "0" on the way to "0:14" is a valid time, and normalising it
+        // mid-word would move the caret out from under the next keystroke. Its blur tidies it up instead.
+        if (ui.startInput) {
+            if (document.activeElement !== ui.startInput) ui.startInput.value = clock(model.start);
+            ui.startInput.disabled = frozen;
+            ui.startInput.classList.toggle('is-invalid', badStart);
+        }
+        if (ui.endInput) {
+            if (document.activeElement !== ui.endInput) ui.endInput.value = clock(end);
+            ui.endInput.disabled = frozen || model.toEnd;
+            ui.endInput.classList.toggle('is-invalid', badEnd);
+        }
+        if (ui.toEndInput) {
+            ui.toEndInput.checked = model.toEnd;
+            ui.toEndInput.disabled = frozen;
+        }
+        if (ui.length) ui.length.textContent = lengthText(Math.max(0, end - model.start));
+        if (ui.bar) {
+            const win = ui.win;
+            const span = win.end - win.start;
+            const left = Math.min(Math.max(model.start, win.start), win.end);
+            const right = Math.min(Math.max(end, left), win.end);
+            ui.bar.style.left = ((left - win.start) / span * 100).toFixed(3) + '%';
+            ui.bar.style.width = ((right - left) / span * 100).toFixed(3) + '%';
+            const label = `${TYPE_LABELS[type]} ${laneRange(seg, duration)}`;
+            ui.text.textContent = label;
+            ui.bar.title = label;
+            ui.startHandle.setAttribute('aria-label', `${TYPE_LABELS[type]} start, ${spokenTime(model.start)}`);
+            ui.endHandle.setAttribute('aria-label', `${TYPE_LABELS[type]} end, ${spokenTime(end)}`);
+            ui.startHandle.disabled = frozen;
+            ui.endHandle.disabled = frozen;
+            placeBarLabel(ui.bar);
+        }
+        if (ui.messages) {
+            const lines = [];
+            const note = reachNote(type, payload);
+            if (!model.editable) {
+                lines.push(message('bi-slash-circle', 'text-danger-emphasis', note));
+            } else {
+                if (note) lines.push(message('bi-info-circle', 'text-muted', note));
+                if (refusal) lines.push(message('bi-x-circle', 'text-danger-emphasis', refusal));
+                else warningsFor(type, payload).forEach(function (text) {
+                    lines.push(message('bi-exclamation-triangle', 'text-warning-emphasis', text));
+                });
+            }
+            ui.messages.replaceChildren.apply(ui.messages, lines);
+        }
+    }
+
+    function pendingText(payload) {
+        return sentTypes().map(function (type) {
+            return `${TYPE_LABELS[type]} ${laneRange(resolved(type), payload.duration_ms)}`;
+        }).join(' · ');
+    }
+
+    // The pack's rule for the count: servers with Intro & Credits on that can show at least one type being saved.
+    function publishCount(payload) {
+        const types = sentTypes();
+        return enabledOwners(payload).filter(function (server) {
+            return (server.can_show || []).some(function (type) { return types.indexOf(type) !== -1; });
+        }).length;
+    }
+
+    function willReceive(server) {
+        const types = sentTypes();
+        return !!server.markers_enabled && (server.can_show || []).some(function (type) { return types.indexOf(type) !== -1; });
+    }
+
+    function saveLabel(payload) {
+        const count = publishCount(payload);
+        return count ? `Save and publish to ${count} server${count === 1 ? '' : 's'}` : 'Save';
+    }
+
+    function sendingSpinner() {
+        const spinner = el('span', 'spinner-border spinner-border-sm me-1');
+        spinner.style.width = '.7rem';
+        spinner.style.height = '.7rem';
+        spinner.setAttribute('aria-hidden', 'true');
+        return spinner;
+    }
+
+    function pendingFor(server, payload) {
+        const canShow = server.can_show || [];
+        return sentTypes().filter(function (type) { return canShow.indexOf(type) !== -1; })
+            .map(function (type) { return `${TYPE_LABELS[type]} ${cardRange(resolved(type), payload.duration_ms)}`; })
+            .join(' · ');
+    }
+
+    function editActions(payload) {
+        const bar = el('div', 'mk-edit-actions');
+        if (editing.saving) {
+            bar.appendChild(el('span', 'small text-muted', 'Your times are saved. Sending them to your servers…'));
+            bar.appendChild(el('span', 'flex-grow-1'));
+            const saving = el('button', 'btn btn-sm btn-primary mk-edit-save');
+            saving.type = 'button';
+            saving.disabled = true;
+            saving.appendChild(sendingSpinner());
+            saving.appendChild(el('span', '', 'Saving…'));
+            bar.appendChild(saving);
+            editing.actions = {};
+            return bar;
+        }
+        bar.appendChild(el('span', 'small text-muted', 'Adjusting'));
+        const pending = el('span', 'mk-edit-pending');
+        bar.appendChild(pending);
+        bar.appendChild(el('span', 'flex-grow-1'));
+        bar.appendChild(el('span', 'small text-muted', 'Saving keeps your times — later checks won\'t change them.'));
+        const cancel = el('button', 'btn btn-sm btn-outline-secondary mk-edit-cancel', 'Cancel');
+        cancel.type = 'button';
+        cancel.addEventListener('click', cancelEdit);
+        const save = el('button', 'btn btn-sm btn-primary mk-edit-save');
+        save.type = 'button';
+        save.addEventListener('click', function () { saveEdit(sentTypes()); });
+        bar.append(cancel, save);
+        editing.actions = { pending: pending, save: save };
+        return bar;
+    }
+
+    function refreshActions(payload) {
+        if (!editing || !shown || !shown.payload) return;
+        const actions = editing.actions || {};
+        if (!actions.save) return;
+        const blocked = sentTypes().some(function (type) {
+            const model = editing.model[type];
+            return model.badStart || model.badEnd || !!refusalFor(type, payload);
+        });
+        actions.pending.textContent = pendingText(payload);
+        actions.save.textContent = saveLabel(payload);
+        actions.save.disabled = blocked || !sentTypes().length;
+    }
+
+    function syncHeaderButtons(payload, item) {
+        const path = payload.canonical_path || item.media_file || '';
+        const redetect = $('markersRedetectBtn');
+        const adjust = $('markersAdjustBtn');
+        const lock = $('markersLockBtn');
+        const working = !!editing || busy;
+        if (redetect) redetect.disabled = !path || working;
+        if (!adjust || !lock) return;
+        adjust.disabled = working || !payload.known || !payload.duration_ms || !editableTypes(payload).length;
+        const locked = lockedTypes(payload);
+        lock.disabled = working || (!locked.length && !lockableTypes(payload).length);
+        setLockButton(lock, locked.length > 0);
+    }
+
+    function setLockButton(button, locked) {
+        button.replaceChildren(el('i', 'bi ' + (locked ? 'bi-unlock' : 'bi-lock') + ' me-1'), document.createTextNode(locked ? 'Unlock' : 'Lock'));
+        button.dataset.mode = locked ? 'unlock' : 'lock';
+        retitle(button, locked ? UNLOCK_TIP : LOCK_TIP);
+    }
+
+    // The button's own words change with its job, so its tooltip is rebuilt rather than left saying the old thing.
+    function retitle(button, text) {
+        button.title = text;
+        const bs = window.bootstrap;
+        if (!bs || !bs.Tooltip) return;
+        const tip = bs.Tooltip.getInstance(button);
+        if (tip) tip.dispose();
+        if (button.getAttribute('data-bs-toggle') === 'tooltip') new bs.Tooltip(button);
+    }
+
+    function startEditing() {
+        const payload = shown && shown.payload;
+        if (!payload || !payload.duration_ms || editing) return;
+        const types = editableTypes(payload);
+        if (!types.length) return;
+        const model = {};
+        types.forEach(function (type) {
+            const seed = decisionSeed(payload, type);
+            model[type] = {
+                start: seed.start,
+                end: seed.end,
+                toEnd: TO_END_TYPES.indexOf(type) !== -1 && seed.end >= payload.duration_ms - END_OF_FILE_MS,
+                // Owner ruling: only a type no enabled server can show at all is refused.
+                editable: vendorsFor(payload, type).shown.length > 0,
+                badStart: false,
+                badEnd: false,
+            };
+        });
+        editing = { types: types, model: model, saving: false, ui: {}, actions: null };
+        results = null;
+        render(payload, shown.item);
+        // Focus follows the button that was pressed into the editor, so a keyboard user is already on a handle.
+        const first = $('markersInspectorBody').querySelector('.mk-handle:not([disabled])');
+        if (first) first.focus({ preventScroll: true });
+    }
+
+    function cancelEdit() {
+        if (!editing || editing.saving) return;
+        editing = null;
+        render(shown.payload, shown.item);
+    }
+
+    // null end_ms is how the API reads "runs to the end of the file" — the same thing the switch says.
+    function markersBody(types, model) {
+        return types.map(function (type) {
+            return { type: type, start_ms: model[type].start, end_ms: model[type].toEnd ? null : model[type].end };
+        });
+    }
+
+    async function saveEdit(types) {
+        if (!editing || editing.saving || !types.length) return;
+        const payload = shown.payload;
+        const path = payload.canonical_path || shown.item.media_file;
+        const body = markersBody(types, editing.model);
+        const started = { key: shown.key, seq: requestSeq };
+        editing.saving = true;
+        render(payload, shown.item);
+        try {
+            applySaved(await apiPost('/api/markers/item/markers', { path: path, markers: body }), types, started);
+        } catch (error) {
+            showToast('Intro & Credits', `Couldn't save: ${error.message}`, 'danger');
+            if (!editing || !shown || shown.key !== started.key) return;
+            editing.saving = false;
+            render(shown.payload, shown.item);
+        }
+    }
+
+    // The save answers with the stored markers and one row per server, not a whole item payload: fold what it says
+    // into the payload on screen and drop the cache, so the next visit re-reads the file from the API.
+    // ``started`` is where the request set off; an answer for a file the Inspector has since left is dropped.
+    // Returns whether it was applied, so a caller doesn't announce a save the user can no longer see.
+    function applySaved(answer, types, started) {
+        if (!shown || !shown.payload || shown.key !== started.key || started.seq !== requestSeq) return false;
+        const payload = shown.payload;
+        const saved = answer.markers || {};
+        // Every stored marker comes back, not only the ones just sent, so a type the user didn't touch keeps the
+        // decision it already had and only its stored times are refreshed.
+        Object.keys(saved).forEach(function (type) {
+            const decisions = payload.decisions || (payload.decisions = {});
+            const d = decisions[type] || (decisions[type] = {});
+            const locked = !!saved[type].locked;
+            const before = d.marker || {};
+            d.status = 'decided';
+            if (locked) {
+                d.reason = 'locked by user';
+                d.proposed = null;
+            }
+            d.marker = {
+                type: type,
+                start_ms: saved[type].start_ms,
+                end_ms: saved[type].end_ms,
+                decided_by: locked ? ['user'] : (before.decided_by || []),
+                locked: locked,
+                locked_at: saved[type].locked_at || null,
+            };
+        });
+        results = { servers: answer.servers || [], markers: saved, sent: types.slice() };
+        editing = null;
+        cache.delete(shown.key);
+        render(payload, shown.item);
+        return true;
+    }
+
+    function resultFor(serverId) {
+        if (!results) return null;
+        return results.servers.find(function (row) { return row.server_id === serverId; }) || null;
+    }
+
+    function typeWords(types) {
+        return types.map(function (type) { return TYPE_WORDS[type] || type; });
+    }
+
+    function resultBadge(row) {
+        const cant = row.cant_show || [];
+        if (cant.length && row.result === 'written') {
+            return [`${capitalise(joinWith(typeWords(cant), 'or'))} not sent`, 'text-bg-secondary'];
+        }
+        return RESULTS[row.result] || [row.result || 'Unknown', 'text-bg-secondary'];
+    }
+
+    // What a server took. Emby's credits are published start-only when they end before the file does, and its row
+    // says so in `notes`, so the line shows the start alone rather than an end Emby never got.
+    function listedForResult(row, payload) {
+        const canShow = row.can_show || [];
+        const startOnly = (row.notes || []).some(function (n) { return n.type === 'credits' && n.field === 'end'; });
+        return results.sent.filter(function (type) { return canShow.indexOf(type) !== -1; })
+            .map(function (type) {
+                const marker = results.markers[type];
+                if (!marker) return '';
+                if (type === 'credits' && startOnly) return `${TYPE_LABELS[type]} ${clock(marker.start_ms)}`;
+                return `${TYPE_LABELS[type]} ${cardRange(marker, payload.duration_ms)}`;
+            })
+            .filter(Boolean).join(' · ');
+    }
+
+    function resultLines(row, payload) {
+        const lines = [];
+        const cant = row.cant_show || [];
+        const vendor = VENDOR_NAMES[String(row.server_type || '').toLowerCase()] || row.server_type;
+        if (row.result === 'written' || row.result === 'unchanged') {
+            const listed = listedForResult(row, payload);
+            if (listed) lines.push([listed, 'text-muted']);
+        }
+        if (RESULT_LINES[row.result]) {
+            lines.push(RESULT_LINES[row.result]);
+        } else if (row.result === 'written' && cant.length) {
+            const sent = results.sent.filter(function (type) { return cant.indexOf(type) === -1; });
+            const were = sent.length === 1 ? 'was' : 'were';
+            lines.push([`${vendor} has no ${joinWith(typeWords(cant), 'or')} marker. `
+                + `Its ${joinWith(typeWords(sent), 'and')} ${were} updated.`, 'text-muted']);
+        } else if (row.result === 'nothing_to_publish' && cant.length) {
+            lines.push([`${vendor} has no ${joinWith(typeWords(cant), 'or')} marker, and nothing else changed.`, 'text-muted']);
+        } else if (row.message && row.result !== 'written' && row.result !== 'unchanged') {
+            // A written row's message is the job's own wording ("2 marker(s)"); the times above say it better, and
+            // the badge still carries the publisher's words for anyone who wants them.
+            lines.push([row.message, 'text-muted']);
+        }
+        (row.notes || []).forEach(function (note) {
+            if (note.type !== 'credits' || note.field !== 'end' || !note.note) return;
+            // The phrase itself stays the publisher's (markers.publishers.emby.CREDITS_BEFORE_END_NOTE); only the
+            // sentence around it is the editor's, so the two can't drift into saying different things.
+            lines.push([`Your credits end wasn't sent. ${note.note}, past any scene after the credits.`, 'text-warning-emphasis']);
+        });
+        if ((row.replaced_own || []).length) {
+            // The same sentence markers.outcomes.replaced_own_note writes for a job row; the editor row carries only
+            // the types, so the words live here too — change both together.
+            lines.push([`Replaced ${vendor}'s own marker. This server is set to keep ${vendor}'s, `
+                + 'but a marker you adjust always wins.', 'text-muted']);
+        }
+        const server = (payload.servers || []).find(function (s) { return s.server_id === row.server_id; });
+        if (server && String(row.server_type).toLowerCase() === 'plex' && server.version_count > 1) {
+            lines.push(['All versions of this item share one set of markers', 'text-muted']);
+        }
+        return lines;
+    }
+
+    // What Lock can actually send. A type no server with Intro & Credits on can show is left out for the same reason
+    // the editor leaves it out: the API refuses the whole request over one unshowable type
+    // (``api_markers._unshowable_type``), and a recap is decided whatever vendors the user happens to run.
+    function lockableTypes(payload) {
+        return TYPES.filter(function (type) {
+            return decidedMarker(payload, type) && vendorsFor(payload, type).shown.length > 0;
+        });
+    }
+
+    // Lock alone changes no time: the decided times go through the same save (so the same lock, and the same publish
+    // to every owner) exactly as they are — plan ruling P-R3.
+    async function lockNow() {
+        const payload = shown && shown.payload;
+        if (!payload || !payload.duration_ms || editing || busy) return;
+        const types = lockableTypes(payload);
+        if (!types.length) return;
+        const model = {};
+        types.forEach(function (type) {
+            const marker = decidedMarker(payload, type);
+            const end = segmentEnd(marker, payload.duration_ms);
+            model[type] = {
+                start: marker.start_ms,
+                end: end,
+                toEnd: TO_END_TYPES.indexOf(type) !== -1 && end >= payload.duration_ms - END_OF_FILE_MS,
+            };
+        });
+        const path = payload.canonical_path || shown.item.media_file;
+        const started = { key: shown.key, seq: requestSeq };
+        // The publish runs against every server: Adjust and Re-detect stay out of reach until it answers, so an edit
+        // can't be started and then thrown away by the answer.
+        busy = true;
+        syncHeaderButtons(payload, shown.item);
+        let answer = null;
+        let failure = '';
+        try {
+            answer = await apiPost('/api/markers/item/markers', { path: path, markers: markersBody(types, model) });
+        } catch (error) {
+            failure = error.message;
+        }
+        busy = false;
+        // An answer for a file the Inspector has since left applies nothing, but the buttons still have to come back.
+        if (!answer || !applySaved(answer, types, started)) {
+            if (shown && shown.payload) syncHeaderButtons(shown.payload, shown.item);
+            if (failure) showToast('Intro & Credits', `Couldn't lock these markers: ${failure}`, 'danger');
+            return;
+        }
+        showToast('Intro & Credits', 'Locked — these times stay until you unlock them.', 'success');
+    }
+
+    async function apiSend(url, method, data) {
+        const response = await fetch(url, {
+            method: method,
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCsrfToken() },
+            body: JSON.stringify(data),
+        });
+        if (response.status === 401) {
+            window.location.href = '/login';
+            throw new Error('Authentication required');
+        }
+        const body = await response.json().catch(function () { return {}; });
+        if (!response.ok) throw new Error((body && body.error) || `HTTP ${response.status}`);
+        return body;
+    }
+
+    function askToUnlock() {
+        const payload = shown && shown.payload;
+        const modalEl = $('markersUnlockModal');
+        const list = $('markersUnlockList');
+        if (!payload || !modalEl || !list || !window.bootstrap) return;
+        const types = lockedTypes(payload);
+        if (!types.length) return;
+        list.replaceChildren.apply(list, types.map(function (type) {
+            const marker = decidedMarker(payload, type);
+            return el('li', 'font-monospace small', `${TYPE_LABELS[type]} ${laneRange(marker, payload.duration_ms)}`);
+        }));
+        modalEl.dataset.types = types.join(',');
+        window.bootstrap.Modal.getOrCreateInstance(modalEl).show();
+    }
+
+    async function unlock() {
+        const payload = shown && shown.payload;
+        const modalEl = $('markersUnlockModal');
+        if (!payload || !modalEl) return;
+        const types = String(modalEl.dataset.types || '').split(',').filter(Boolean);
+        const path = payload.canonical_path || shown.item.media_file;
+        const button = $('markersUnlockConfirm');
+        if (button) button.disabled = true;
+        try {
+            await apiSend('/api/markers/item/markers', 'DELETE', { path: path, types: types });
+            if (window.bootstrap) window.bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+            showToast('Intro & Credits', 'Unlocked — the next check decides these times again.', 'success');
+            // What the sources make of these types now is the API's answer, not something this page can work out.
+            results = null;
+            cache.delete(shown.key);
+            await loadMarkersInspector(shown.item);
+        } catch (error) {
+            showToast('Intro & Credits', `Couldn't unlock: ${error.message}`, 'danger');
+        } finally {
+            if (button) button.disabled = false;
+        }
+    }
+
+    // Labels wider than their bar sit beside it in the page's text colour, so they stay readable on the track.
+    function placeBarLabel(node) {
+        const text = node.querySelector('.mk-bar-text');
+        // The bar being dragged is measured again on every move, so a label that fitted a moment ago is put back.
+        node.classList.remove('mk-bar-out-right', 'mk-bar-out-left');
+        // clientWidth includes the bar's 5px side padding; the text doesn't get that room.
+        if (!text || text.scrollWidth <= node.clientWidth - 10) return;
+        const track = node.parentElement;
+        const roomRight = track.clientWidth - (node.offsetLeft + node.offsetWidth);
+        node.classList.add(roomRight >= text.scrollWidth + 6 || roomRight >= node.offsetLeft ? 'mk-bar-out-right' : 'mk-bar-out-left');
+    }
+
+    function placeBarLabels(root) {
+        root.querySelectorAll('.mk-bar').forEach(placeBarLabel);
     }
 
     function render(payload, item) {
         const body = $('markersInspectorBody');
         $('markersInspectorPath').textContent = payload.canonical_path || item.media_file || '';
         if (window.markersSeason) window.markersSeason.setPath(payload.canonical_path || item.media_file || '');
-        $('markersRedetectBtn').disabled = !(payload.canonical_path || item.media_file);
+        syncHeaderButtons(payload, item);
         const parts = [];
+        if (editing) {
+            // Every node the live edit updates is built below; nothing may be left pointing at the last render's DOM.
+            editing.ui = {};
+            parts.push(editBanner(payload));
+        }
         if (!payload.known) {
             const box = el('div', 'alert alert-secondary py-2 mk-not-checked');
             box.appendChild(el('strong', '', 'Not checked yet'));
@@ -427,8 +1321,15 @@
             }
             windowsFor(payload).forEach(function (win) { parts.push(renderWindow(win, payload)); });
         }
+        // One action bar for the whole edit, under both zoom windows (the approved pack, surfaces 2 and 3).
+        if (editing) parts.push(editActions(payload));
         parts.push(renderServers(payload));
+        if (typeof window._disposeBootstrapTooltips === 'function') window._disposeBootstrapTooltips(body);
         body.replaceChildren.apply(body, parts);
+        if (editing) {
+            editing.types.forEach(function (type) { refreshType(type); });
+            refreshActions(payload);
+        }
         placeBarLabels(body);
         // On a narrow screen the ending window scrolls; start it at the end of the file, where its markers are.
         body.querySelectorAll('.mk-window[data-window="ending"] .mk-scroll').forEach(function (scroll) {
@@ -474,9 +1375,13 @@
         if (!body || !button) return;
         const key = keyFor(item);
         const seq = ++requestSeq;
+        // A different file (or a fresh read of this one) is not the file the open edit or the last save was about.
+        editing = null;
+        results = null;
         if (!item || !(item.media_file || (item.server_id && item.item_id))) {
             shown = null;
             $('markersInspectorPath').textContent = '';
+            editorButtonsOff();
             button.disabled = true;
             body.replaceChildren(el('div', 'alert alert-secondary py-2', 'Search for the title above to see its Intro & Credits. A pasted preview path doesn\'t say which video file it belongs to.'));
             return;
@@ -488,6 +1393,7 @@
         }
         shown = { key: key, item: item, payload: null };
         $('markersInspectorPath').textContent = item.media_file || '';
+        editorButtonsOff();
         button.disabled = true;
         body.replaceChildren(el('div', 'text-muted small py-3', 'Loading Intro & Credits…'));
         try {
@@ -511,7 +1417,18 @@
         }
     }
 
-    async function redetect() {
+    // Nothing is loaded (or it failed): there is nothing to adjust or lock, whatever the buttons said a moment ago.
+    function editorButtonsOff() {
+        const adjust = $('markersAdjustBtn');
+        const lock = $('markersLockBtn');
+        if (adjust) adjust.disabled = true;
+        if (lock) {
+            lock.disabled = true;
+            setLockButton(lock, false);
+        }
+    }
+
+    async function redetectItem() {
         if (!shown) return;
         const path = (shown.payload && shown.payload.canonical_path) || shown.item.media_file;
         if (!path) return;
@@ -536,12 +1453,29 @@
         }
     }
 
-    function wireRedetect() {
-        const button = $('markersRedetectBtn');
-        if (button) button.addEventListener('click', redetect);
+    function wireButtons() {
+        const redetect = $('markersRedetectBtn');
+        if (redetect) redetect.addEventListener('click', redetectItem);
+        const adjust = $('markersAdjustBtn');
+        if (adjust) adjust.addEventListener('click', startEditing);
+        const lock = $('markersLockBtn');
+        if (lock) lock.addEventListener('click', function () {
+            if (lock.dataset.mode === 'unlock') askToUnlock();
+            else lockNow();
+        });
+        const confirm = $('markersUnlockConfirm');
+        if (confirm) confirm.addEventListener('click', unlock);
     }
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wireRedetect);
-    else wireRedetect();
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wireButtons);
+    else wireButtons();
 
     window.loadMarkersInspector = loadMarkersInspector;
+    // The Season view's Edit action (phase 4, Task 6) opens the same editor; the pure time helpers are exported
+    // beside it so they can be pinned without a JS test runner.
+    window.markersEditor = {
+        open: startEditing,
+        parseClock: parseClock,
+        spokenTime: spokenTime,
+        lengthText: lengthText,
+    };
 })();

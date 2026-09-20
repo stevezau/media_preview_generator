@@ -290,3 +290,165 @@ html[data-bs-theme="light"] .mk-lane-decision .mk-lane-label {
     background: var(--bs-danger);
     border-color: var(--bs-danger);
 }
+
+/* Inspector → Adjust / Lock editor (evidence/design/phase4/index.html surfaces 2–5). */
+
+/* The bar being edited keeps the decision's amber; the outline separates it from the handles' own borders. */
+.mk-bar-editing {
+    outline: 2px solid var(--bs-body-bg);
+}
+
+.mk-handle {
+    position: absolute;
+    top: -5px;
+    bottom: -5px;
+    width: 11px;
+    padding: 0;
+    border: 2px solid var(--bs-body-bg);
+    border-radius: 4px;
+    background: #e5a00d;
+    cursor: col-resize;
+    /* Above the bar's own text, so a label spilling out of a short bar can't swallow the grab area. */
+    z-index: 3;
+    /* Without this the browser pans the scrolling timeline instead of dragging the handle. */
+    touch-action: none;
+}
+
+.mk-handle-start {
+    left: -6px;
+}
+
+.mk-handle-end {
+    right: -6px;
+}
+
+.mk-handle:focus-visible {
+    outline: 2px solid #fff;
+    outline-offset: 1px;
+}
+
+html[data-bs-theme="light"] .mk-handle:focus-visible {
+    outline-color: #1b1407;
+}
+
+.mk-handle::after {
+    content: "";
+    position: absolute;
+    left: 4px;
+    top: 5px;
+    bottom: 5px;
+    width: 1px;
+    background: rgba(0, 0, 0, 0.45);
+}
+
+.mk-handle[disabled] {
+    cursor: default;
+    opacity: 0.6;
+}
+
+/* One strip per type being edited, directly under the Decision lane of the window that shows it. */
+.mk-edit-strip {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+    margin-top: 0.5rem;
+    margin-left: calc(132px + 1rem);
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--bs-border-color);
+    border-radius: 8px;
+    background: var(--bs-tertiary-bg);
+}
+
+.mk-edit-type {
+    font-weight: 600;
+    color: #e5a00d;
+}
+
+html[data-bs-theme="light"] .mk-edit-type {
+    color: #a86f00;
+}
+
+.mk-time {
+    width: 5.5rem;
+    padding: 0.1rem 0.35rem;
+    text-align: center;
+    font-family: var(--bs-font-monospace);
+    font-size: 0.85rem;
+    color: var(--bs-body-color);
+    background: var(--bs-body-bg);
+    border: 1px solid var(--bs-border-color);
+    border-radius: 5px;
+}
+
+.mk-time.is-invalid {
+    border-color: var(--bs-danger);
+    box-shadow: 0 0 0 0.15rem rgba(var(--bs-danger-rgb), 0.25);
+}
+
+.mk-edit-hint {
+    font-size: 0.75rem;
+    color: var(--bs-secondary-color);
+}
+
+/* Both hints are always in the DOM; width decides which one is readable, so no resize handler is needed. */
+.mk-edit-hint-narrow {
+    display: none;
+}
+
+.mk-edit-messages {
+    flex-basis: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    font-size: 0.78rem;
+}
+
+.mk-edit-messages:empty {
+    display: none;
+}
+
+/* One action bar for the whole edit, under both zoom windows. */
+.mk-edit-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+    margin-bottom: 1rem;
+    padding: 0.65rem 0.8rem;
+    border: 1px solid #8a6310;
+    border-radius: 10px;
+    background: var(--bs-tertiary-bg);
+}
+
+.mk-edit-pending {
+    font-family: var(--bs-font-monospace);
+    font-size: 0.82rem;
+}
+
+.mk-lock {
+    font-size: 0.8rem;
+}
+
+@media (max-width: 575.98px) {
+    /* The strip lives inside the timeline so it sits under the bar it edits. On a phone the timeline scrolls
+     * sideways, so the strip sticks to the left edge instead of sliding out of view with it. */
+    .mk-edit-strip {
+        position: sticky;
+        left: 0;
+        margin-left: 0;
+        max-width: calc(100vw - 3rem);
+    }
+
+    .mk-edit-hint-wide {
+        display: none;
+    }
+
+    .mk-edit-hint-narrow {
+        display: inline;
+    }
+
+    .mk-edit-actions .mk-edit-save {
+        flex-grow: 1;
+    }
+}
