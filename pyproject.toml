@@ -86,9 +86,10 @@ test = [
     # Chromium, fresh memory budget, so no cross-test state
     # accumulation can trigger the known Playwright-on-small-CI
     # Chromium crash pattern (playwright#34075). 4-shard split
-    # gives 30-42 tests/shard (151 ÷ 4); the largest shards sit
-    # just above the empirical ~30-test threshold, so the
-    # ``--reruns 1`` safety net in ci.yml covers residual risk.
+    # gives ~100-107 tests/shard (411 ÷ 4, measured 103/107/100/101);
+    # the suite has outgrown the empirical ~30-test threshold the
+    # split was sized for, so the fresh runner per shard — not the
+    # shard size — is what bounds memory accumulation now.
     "pytest-shard>=0.1.2",
     "playwright>=1.40.0",
     "flask-cors>=6.0.0,<7",

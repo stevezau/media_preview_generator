@@ -230,12 +230,15 @@ jobs:
         # memory budget, so cross-test accumulation can't pile up
         # the way it did in the previous single-job design.
         #
-        # 4 shards × ~30-42 tests/shard sits at or under the empirical
-        # ~30-test Chromium crash threshold from prior runs. Two real
-        # bugs were fixed before reaching for sharding (webhook race
-        # in c8ac9d4, APScheduler thread drain in 20c42cf) — sharding
-        # mitigates only the residual environmental flakes, not real
-        # regressions.
+        # The suite has grown: `pytest -m e2e --collect-only` gives 411
+        # tests, so 4 shards is ~100-107 each (measured 103/107/100/101 —
+        # pytest-shard balances it fine). That is well past the empirical
+        # ~30-test Chromium crash threshold the split was originally sized
+        # for, so a shard is no longer "under" it; a fresh runner per shard
+        # is still what keeps memory accumulation bounded. Two real bugs
+        # were fixed before reaching for sharding (webhook race in c8ac9d4,
+        # APScheduler thread drain in 20c42cf) — sharding mitigates only
+        # the residual environmental flakes, not real regressions.
         #
         # --shard-id is 0-indexed; matrix index is 1-indexed for the
         # GH status check display ("e2e (shard 3/4)"). Shell arithmetic
@@ -252,7 +255,14 @@ jobs:
         run: >-
           pytest -m e2e -n 0 --no-cov --tb=short --timeout=120
           --shard-id=$((${{ matrix.shard }} - 1)) --num-shards=4
-        timeout-minutes: 10
+        # 10 minutes was sized for a ~38-test shard. The largest shard is now
+        # 107 tests and takes 110s serially on a fast 32-core box; a GH runner
+        # is several times slower than that, which left almost no headroom
+        # before a slow run started failing as a timeout rather than a test.
+        # 25 minutes is ~13x the measured local wall time — still short enough
+        # to catch a genuine hang, since the real backstop for one stuck test
+        # is --timeout=120 above.
+        timeout-minutes: 25
 
       - name: Upload Playwright traces on failure
         if: failure()

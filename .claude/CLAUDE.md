@@ -30,8 +30,10 @@ xdist failures. Verified via journalctl kernel logs during diagnostic runs
 in commit f856944 follow-up.
 
 The CI ships a different pattern: pytest-shard splits the e2e suite across
-4 GitHub Actions runners, each running `-n 0` (serial) on its own ~30-test
-slice. Locally, `-n 8` is empirically stable (verified 33/33 pass).
+4 GitHub Actions runners, each running `-n 0` (serial) on its own slice —
+411 e2e tests today, so ~100-107 per shard (measured 103/107/100/101; the
+largest takes 110s serially on this box). Locally, `-n 8` is empirically
+stable (verified 33/33 pass).
 
 ```bash
 
