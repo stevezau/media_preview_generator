@@ -73,7 +73,10 @@ def agent_too_old(version: str) -> bool:
 
     Returns:
         True only when both versions parse as dotted numbers and the agent's is lower. A version this app can't read
-        is left to the protocol check, which is the real contract.
+        (including the ``""`` of an answer with no ``agent`` block at all) is not "too old": neither this check nor
+        the protocol one -- which passes an empty ``protocols`` list (``_read``) -- refuses such an answer on its own.
+        Something that isn't our agent is turned away by the ``result`` it doesn't send, as "answered N instead of a
+        result".
     """
     theirs, mine = _version_tuple(version), _version_tuple(MIN_AGENT_VERSION)
     return bool(theirs and mine and theirs < mine)

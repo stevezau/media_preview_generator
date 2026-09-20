@@ -119,6 +119,32 @@ class TestTheGuards:
         assert response.status_code == 401
         assert response.get_json()["error"] == {"kind": "auth"}
 
+    @pytest.mark.parametrize(
+        "offered",
+        ["kéy", "ÿ" * 8, "key—dash", "\U0001f511"],
+        ids=["latin-1-letter", "high-latin-1-bytes", "em-dash", "astral"],
+    )
+    def test_a_non_ascii_key_is_refused_rather_than_crashing(self, agent, offered):
+        """werkzeug decodes headers latin-1 and ``compare_digest`` raises TypeError on a str above U+007F.
+
+        Our own key is ASCII-validated before it is stored (``markers/settings.py``), so only a third party
+        sends one of these -- and a 500 on an auth path tells that third party the endpoint exists.
+        """
+        response = agent.post(
+            "/v1/checks/file",
+            json={},
+            headers={"Authorization": f"Bearer {offered}", plex_remote.PROTOCOL_HEADER: "1"},
+        )
+        assert response.status_code == 401
+        assert response.get_json()["error"] == {"kind": "auth"}
+
+    @pytest.mark.parametrize("token", ["kéy", "—", "k\U0001f511"], ids=["accent", "em-dash", "astral"])
+    def test_an_agent_whose_own_key_is_non_ascii_refuses_to_start(self, tmp_path, token):
+        """The other half of the pair. The app stores printable ASCII only (``markers/settings.py``), so such a
+        key could never match one it sends: every request would 401 and look like a typo on the app's side."""
+        with pytest.raises(SystemExit, match="ASCII"):
+            plex_marker_agent.create_app(config_dir=str(tmp_path), token=token)
+
     def test_a_wrong_key_says_nothing_about_this_plex(self, agent):
         body = agent.post("/v1/checks/file", json={}, headers={"Authorization": "Bearer nope"}).get_data(as_text=True)
         assert "Plex Media Server" not in body and "db_path" not in body

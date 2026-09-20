@@ -6,6 +6,7 @@ outlives the request; an unreachable server can't multiply into one wait per ser
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import threading
 from unittest.mock import patch
@@ -307,9 +308,18 @@ class TestTheBound:
         rows = _publish(monkeypatch, store, media, reg, pubs)
         assert threading.active_count() == before
         assert all(r["status"] != "" for r in rows)
-        # Every publisher was called on this thread, not handed to anything.
-        for pub in pubs.values():
+        # Every publisher was called on this thread, not handed to anything -- and with this file's own arguments,
+        # so a fan-out that reached the right number of servers with the wrong item or path still fails here.
+        saved = dataclasses.replace(INTRO, locked=True)  # every marker the editor saved is a lock
+        for sid, pub in pubs.items():
             pub.write.assert_called_once()
+            call = pub.write.call_args
+            assert call.args == (f"item-{sid}", [saved])
+            assert call.kwargs["canonical_path"] == media
+            assert call.kwargs["duration_ms"] == DUR
+            assert call.kwargs["previous"] == []
+            assert call.kwargs["own_previous"] is None
+            assert call.kwargs["kept_types"] == frozenset()
 
     def test_a_server_the_deadline_caught_is_reported_and_left_for_the_next_run(self, store, media, monkeypatch):
         rec = _known(store, media, [INTRO])

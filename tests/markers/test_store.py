@@ -1,6 +1,8 @@
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
@@ -829,6 +831,77 @@ def test_a_schema_1_database_gains_the_lock_and_proposal_columns_and_keeps_its_r
         assert s.get_decisions(1)[T.PREVIEW].decided_by == ("skipdb",)
     finally:
         s.close()
+
+
+def _losing_the_open_race(path, winner):
+    """Patch ``_tx`` so ``winner()`` runs once in the window between reading the version and BEGIN IMMEDIATE."""
+    entered: list[str] = []
+    real_tx = MarkerStore._tx
+
+    @contextmanager
+    def other_opens_it_first(self):
+        if not entered:
+            entered.append("opened")
+            winner()
+        with real_tx(self) as conn:
+            yield conn
+
+    return patch.object(MarkerStore, "_tx", other_opens_it_first), entered
+
+
+def test_a_second_process_opening_the_same_schema_1_store_migrates_nothing(tmp_path):
+    """Two app processes on one CONFIG_DIR: the loser of the race must not re-run `_MIGRATIONS[1]`.
+
+    Its bare `ALTER TABLE markers ADD COLUMN locked_at` would raise "duplicate column name" out of
+    `__init__`, so which migrations to run is decided inside the transaction, not before it.
+    """
+    path = str(tmp_path / "markers.db")
+    _schema_1_database(path)
+    patched, entered = _losing_the_open_race(path, lambda: MarkerStore(path).close())
+
+    with patched:
+        loser = MarkerStore(path)
+    try:
+        assert entered == ["opened"], "the race window was never entered"
+        assert loser._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()["value"] == str(
+            store_mod.SCHEMA_VERSION
+        )
+        columns = {r[1] for r in loser._conn.execute("PRAGMA table_info(markers)").fetchall()}
+        assert "locked_at" in columns  # the winner's migration stands; the loser neither repeated nor undid it
+    finally:
+        loser.close()
+
+
+def test_losing_the_race_to_a_newer_build_is_still_refused(tmp_path):
+    """The other cell of the same race: the winner was a NEWER build, not this one.
+
+    The outer read saw a version this build supports, so only the read inside the transaction can catch
+    it — without that second refusal this build would go on to operate a schema it doesn't know.
+    """
+    path = str(tmp_path / "markers.db")
+    _schema_1_database(path)
+    newer = str(store_mod.SCHEMA_VERSION + 1)
+
+    def a_newer_build_wins():
+        raw = sqlite3.connect(path)
+        raw.execute("UPDATE meta SET value=? WHERE key='schema_version'", (newer,))
+        raw.commit()
+        raw.close()
+
+    patched, entered = _losing_the_open_race(path, a_newer_build_wins)
+
+    with patched, pytest.raises(RuntimeError, match=f"schema {newer}"):
+        MarkerStore(path)
+
+    assert entered == ["opened"], "the race window was never entered"
+    raw = sqlite3.connect(path)
+    try:
+        # Refused, so nothing of this build's schema was written over the newer one.
+        assert raw.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == newer
+        columns = {r[1] for r in raw.execute("PRAGMA table_info(markers)").fetchall()}
+        assert "locked_at" not in columns
+    finally:
+        raw.close()
 
 
 def test_a_failed_migration_leaves_the_schema_version_where_it_was(tmp_path, monkeypatch):

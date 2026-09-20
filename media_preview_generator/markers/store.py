@@ -397,21 +397,23 @@ class MarkerStore:
         migration statement that fails leaves both the schema and the recorded version exactly where
         they were.
 
+        The version is read a *second* time as the first statement inside that transaction, and both
+        the refusal and the migrations are decided from that read. Two processes opening the same store
+        at once would otherwise both see the old version outside it: two of this build would both run
+        ``_MIGRATIONS``' bare ``ALTER TABLE`` and the second would die with "duplicate column name",
+        and a build older than the one that won the race would open a schema it doesn't support.
+        ``BEGIN IMMEDIATE`` serialises them, so the one that waited sees the version the other just
+        wrote. Only the *first* refusal leaves the file untouched -- by the second, WAL has already
+        rewritten it -- but a refused open closes the connection either way and writes nothing.
+
         Raises:
             RuntimeError: The database's ``schema_version`` is newer than this build supports.
         """
-        meta_exists = self._conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
-        if meta_exists:
-            row = self._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-            current = int(row["value"]) if row else SCHEMA_VERSION
-        else:
-            current = SCHEMA_VERSION  # nothing written yet -- no version to refuse or migrate from
-        if current > SCHEMA_VERSION:
-            raise RuntimeError(
-                f"markers.db was created by a newer version (schema {current}, this build supports {SCHEMA_VERSION})"
-            )
+        self._refuse_newer(self._schema_version(self._conn))
         self._conn.execute("PRAGMA journal_mode=WAL")
         with self._tx() as conn:
+            current = self._schema_version(conn)
+            self._refuse_newer(current)
             while current < SCHEMA_VERSION:
                 for stmt in _MIGRATIONS.get(current, ()):
                     conn.execute(stmt)
@@ -422,6 +424,38 @@ class MarkerStore:
                 "INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(current),),
             )
+
+    @staticmethod
+    def _refuse_newer(current: int) -> None:
+        """Stop opening a database written by a build that knows more than this one.
+
+        Args:
+            current: The version just read.
+
+        Raises:
+            RuntimeError: ``current`` is newer than this build supports.
+        """
+        if current > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"markers.db was created by a newer version (schema {current}, this build supports {SCHEMA_VERSION})"
+            )
+
+    @staticmethod
+    def _schema_version(conn: sqlite3.Connection) -> int:
+        """The recorded ``schema_version``, or this build's when the database has nothing to migrate from.
+
+        Args:
+            conn: The connection to read on.
+
+        Returns:
+            The version. A database with no ``meta`` table (or no row in it) is brand new, so there is no
+            version to refuse or migrate from and this build's own is the answer.
+        """
+        meta_exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone()
+        if not meta_exists:
+            return SCHEMA_VERSION
+        row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        return int(row["value"]) if row else SCHEMA_VERSION
 
     def _now(self) -> str:
         return self._clock().isoformat()

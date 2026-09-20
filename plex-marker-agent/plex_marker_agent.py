@@ -120,18 +120,26 @@ def create_app(
         raise SystemExit(
             "Set AGENT_TOKEN to the same shared key you paste into the app; the agent won't start without one."
         )
+    # The app refuses to store a key that isn't printable ASCII (``markers/settings.py``), so a key with anything
+    # else in it could never match one the app sends: every request would be refused with a 401 that looks like a
+    # typo on the app's side. Said here once, at start, instead.
+    if not shared_key.isascii():
+        raise SystemExit("AGENT_TOKEN must be plain ASCII: the app can't send a key with any other character in it.")
     if not folder:
         raise SystemExit("Set PLEX_CONFIG_DIR to Plex's config folder as this container sees it.")
 
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = MAX_BODY_BYTES
     database = LocalPlexDb(lambda: plex_db_path(folder), label="agent", mountinfo_path=mountinfo_path)
+    shared_key_bytes = shared_key.encode("utf-8", "surrogateescape")
 
     def authorised() -> bool:
         header = request.headers.get("Authorization", "")
         offered = header[7:].strip() if header.startswith("Bearer ") else ""
-        # compare_digest: the same constant-time check the app's own API does for its token (web/auth.py).
-        return bool(offered) and secrets.compare_digest(offered, shared_key)
+        # compare_digest: the same constant-time check the app's own API does for its token (web/auth.py). The
+        # BYTES, not the str: werkzeug decodes headers as latin-1, and compare_digest raises TypeError on a str
+        # holding anything above U+007F -- a key with one non-ASCII byte would 500 on the auth path, not 401.
+        return bool(offered) and secrets.compare_digest(offered.encode("utf-8", "surrogateescape"), shared_key_bytes)
 
     def speaks_our_protocol() -> bool:
         asked = request.headers.get(plex_remote.PROTOCOL_HEADER, "").strip()
