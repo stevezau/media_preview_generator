@@ -88,6 +88,8 @@ docs/design/intro-credits/evidence/credits/bench/
 # Truth sets / results list real library file paths (public repo): local only
 docs/design/intro-credits/evidence/**/*.json
 docs/design/intro-credits/evidence/**/*.jsonl
+# Phase-4 anime id maps: third-party data, multi-MB, and neither upstream repo carries a licence
+docs/design/intro-credits/evidence/online/phase4/animelists.xml
 docs/design/intro-credits/evidence/lab/*_truth.txt
 docs/design/intro-credits/evidence/lab/prod_plex_baseline.txt
 docs/design/intro-credits/evidence/credits/spot.txt
