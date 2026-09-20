@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,8 @@ from tools.markers_eval import decode_cache
 from tools.markers_eval.decode_cache import DecodeCache
 
 DUR = 6_000_000
+# Two credit cards, one over the other: what a dark row of the roll holds.
+CARDS = ((40, 24, 128, 44), (41, 55, 130, 75))
 
 
 class _Decoder:
@@ -37,17 +40,17 @@ class _Decoder:
         if self.gpu_fails and kwargs["gpu"] is not None:
             raise frames.GpuDecodeError("ffmpeg exited 69 on the GPU")
         if kwargs["keyframes_only"]:  # the tail: story, then a dark roll from 5700 s
-            return [(float(t), 0, 120.0) for t in range(5100, 5700, 4)] + [
-                (float(t), 2, 10.0) for t in range(5700, 5990, 2)
+            return [(float(t), 0, 120.0, ()) for t in range(5100, 5700, 4)] + [
+                (float(t), 2, 10.0, CARDS) for t in range(5700, 5990, 2)
             ]
         start = kwargs["start_s"]
         window = range(int(start), int(start + (kwargs["length_s"] or 21)))
-        return [(float(t), 2, 10.0) if t >= 5700 else (float(t), 0, 120.0) for t in window]
+        return [(float(t), 2, 10.0, CARDS) if t >= 5700 else (float(t), 0, 120.0, ()) for t in window]
 
 
 def _kwargs(**overrides):
     kwargs = {"ffmpeg": "/ff", "start_s": 5100.0, "length_s": None, "keyframes_only": True, "fps": None, "gpu": "NVIDIA",
-              "gpu_device_path": "cuda:0", "count_boxes": lambda p: [0] * len(p), "start_time_s": 0.0}  # fmt: skip
+              "gpu_device_path": "cuda:0", "detect_boxes": lambda p: [()] * len(p), "start_time_s": 0.0}  # fmt: skip
     return {**kwargs, **overrides}
 
 
@@ -116,6 +119,45 @@ def test_a_decode_runs_once_per_file_command_and_decode_code(tmp_path, monkeypat
     cache.decode_rows(str(media), **_kwargs())
     assert len(decoder.decodes) == 11
     assert (cache.decoded, cache.reused) == (10, 1)
+
+
+def test_a_reused_decode_gives_back_the_boxes_it_stored(tmp_path, monkeypatch, media):
+    # The positions the next rules read (spec §13 items 14 and 15) survive the cache: a rule change re-runs against
+    # stored rows, so rows read from disk have to be the rows the decode returned, boxes included.
+    decoder = _Decoder(monkeypatch)
+    cache = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu")
+    decoded = cache.decode_rows(str(media), **_kwargs())
+    reused = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu").decode_rows(str(media), **_kwargs())
+    assert len(decoder.decodes) == 1
+    assert reused == decoded
+    roll = [row for row in reused if row[1]]
+    assert roll and all(row[3] == CARDS for row in roll)
+    assert all(isinstance(box, tuple) for row in reused for box in row[3])
+
+
+@pytest.mark.parametrize(
+    ("break_it", "why"),
+    [
+        (lambda rows: [row[:3] for row in rows], "rows from before positions"),
+        (lambda rows: [[*row[:3], [[1, 2, 3]]] for row in rows], "a box that isn't four numbers"),
+    ],
+)
+def test_a_stored_decode_that_cannot_be_read_is_decoded_again_not_served(tmp_path, monkeypatch, media, break_it, why):
+    # An entry an older harness wrote holds (pts, count, luma) only. Served as rows it would hand rule J's successors
+    # frames with no boxes at all, silently; raising instead would end an hour-long run at whatever file it reached.
+    # It counts as a miss, and the decode overwrites it. (The decode digest keeps such entries out of the key in the
+    # first place; this is the backstop, and the one thing between a row-shape change made only in rule_j.py --
+    # which RULE_FILES leaves out of that digest -- and stale rows.)
+    decoder = _Decoder(monkeypatch)
+    cache = DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "cpu")
+    fresh = cache.decode_rows(str(media), **_kwargs())
+    [entry] = (tmp_path / "cache" / "credits_decodes").glob("*.json")
+    entry.write_text(json.dumps({"rows": break_it(json.loads(entry.read_text())["rows"])}))
+    assert cache.decode_rows(str(media), **_kwargs()) == fresh
+    assert len(decoder.decodes) == 2
+    assert (cache.decoded, cache.reused) == (2, 0)
+    assert cache.decode_rows(str(media), **_kwargs()) == fresh  # the entry it wrote reads back
+    assert (cache.decoded, cache.reused) == (2, 1)
 
 
 def test_the_backend_that_counted_the_boxes_is_in_the_key(tmp_path, monkeypatch, media):
@@ -225,7 +267,7 @@ def test_a_write_cut_short_leaves_no_entry_behind(tmp_path, monkeypatch, media):
 
 def test_the_real_decode_gets_every_argument_it_was_asked_for(tmp_path, monkeypatch, media):
     decoder = _Decoder(monkeypatch)
-    count_boxes = object()
+    detect_boxes = object()
     DecodeCache(tmp_path / "cache", digest="d", backend=lambda: "gpu cuda:0").decode_rows(
         str(media),
         **_kwargs(
@@ -233,7 +275,7 @@ def test_the_real_decode_gets_every_argument_it_was_asked_for(tmp_path, monkeypa
             length_s=21.0,
             keyframes_only=False,
             fps=1,
-            count_boxes=count_boxes,
+            detect_boxes=detect_boxes,
             start_time_s=12.5,
             timeout_s=90.0,
             keep_every=48,
@@ -242,7 +284,7 @@ def test_the_real_decode_gets_every_argument_it_was_asked_for(tmp_path, monkeypa
     )
     (kwargs,) = decoder.decodes
     assert kwargs == {"ffmpeg": "/ff", "start_s": 5680.0, "length_s": 21.0, "keyframes_only": False, "fps": 1,
-                      "gpu": "NVIDIA", "gpu_device_path": "cuda:0", "count_boxes": count_boxes, "cancel_check": None,
+                      "gpu": "NVIDIA", "gpu_device_path": "cuda:0", "detect_boxes": detect_boxes, "cancel_check": None,
                       "timeout_s": 90.0, "start_time_s": 12.5, "keep_every": 48, "drop_non_key": True}  # fmt: skip
 
 
@@ -315,7 +357,7 @@ def test_a_rule_change_reruns_the_apps_detector_on_stored_decodes(tmp_path, monk
 
     def cache():
         return ct.CreditsTextCache(tmp_path / "cache", ffmpeg="/ff", decode="gpu", gpu_device="cuda:0",
-                                   count_boxes=lambda p: [0] * len(p), backend=lambda: "gpu cuda:0",
+                                   detect_boxes=lambda p: [()] * len(p), backend=lambda: "gpu cuda:0",
                                    probe=lambda p: MediaProbe(DUR, ()), decodes=decodes)  # fmt: skip
 
     monkeypatch.setattr(ct, "detector_digest", lambda: "rule-1")

@@ -2,7 +2,8 @@
 just before the coarse answer. Decoded with the worker's GPU through the same hwaccel arguments as previews.
 
 Only 320×180 NV12 leaves ffmpeg and only the Y plane is kept; each chunk of frames goes to text detection as it
-arrives, so memory stays bounded whatever the file's keyframe spacing.
+arrives, so memory stays bounded whatever the file's keyframe spacing. A row keeps the boxes that chunk found, not
+only how many (``rule_j.Row``); they come from the same detection call, so they cost no extra decoding or detection.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ from ..probe import (
     probe_media,
     video_packets,
 )
-from .rule_j import Row
+from .rule_j import Box, Row
 
 FRAME_W = 320
 FRAME_H = 180
@@ -360,19 +361,19 @@ def run_decode(
     command: list[str],
     *,
     hw_active: bool,
-    count_boxes: Callable[[np.ndarray], list[int]],
+    detect_boxes: Callable[[np.ndarray], list[tuple[Box, ...]]],
     pts_offset_s: float,
     cancel_check: Callable[[], bool] | None = None,
     timeout_s: float = DECODE_TIMEOUT_S,
     chunk_frames: int = CHUNK_FRAMES,
     name: str = "",
 ) -> list[Row]:
-    """Run one decode and count text boxes chunk by chunk.
+    """Run one decode and read its text boxes chunk by chunk.
 
     Args:
         command: From :func:`decode_command`.
         hw_active: Decode runs on the GPU (a failure is then a :class:`GpuDecodeError`).
-        count_boxes: Box counts for (n, 180, 320) uint8 luma planes.
+        detect_boxes: Text boxes for (n, 180, 320) uint8 luma planes, one ``(left, top, right, bottom)`` tuple per box.
         pts_offset_s: The container's own first timestamp, subtracted from every row so they are seconds from the start
             of the file (see :func:`container_start_s`). Required, and 0.0 only for a container that starts at 0: a
             default would quietly hand back a recording's raw timestamps, tens of thousands of seconds out.
@@ -384,17 +385,18 @@ def run_decode(
         name: The file's name for messages.
 
     Returns:
-        ``(pts, boxes, luma)`` per frame, in decode order. A frame ffmpeg gave no timestamp for is left out; the frames
-        around it keep their own.
+        ``(pts, box count, luma, boxes)`` per frame, in decode order. A frame ffmpeg gave no timestamp for is left out;
+        the frames around it keep their own.
 
     Raises:
         DecodeCancelledError: Cancelled (ffmpeg is killed).
         GpuDecodeError: The GPU decode exited non-zero or gave no frames.
         DecodeTimeoutError: The decode (on the GPU or the CPU) ran past ``timeout_s``; ffmpeg is killed.
-        FrameDecodeError: ffmpeg couldn't be started, a CPU decode exited non-zero, text detection answered a count per
-            frame it wasn't asked, or a clean exit wrote a number of timestamps that doesn't match the frames.
+        FrameDecodeError: ffmpeg couldn't be started, a CPU decode exited non-zero, text detection answered boxes for a
+            number of frames it wasn't asked or boxes that aren't four numbers each, or a clean exit wrote a number of
+            timestamps that doesn't match the frames.
     """
-    boxes: list[int] = []
+    boxes: list[tuple[Box, ...]] = []
     luma: list[float] = []
     pending: list[bytes] = []
     stop = threading.Event()
@@ -405,10 +407,15 @@ def run_decode(
 
     def flush() -> None:
         planes = np.frombuffer(b"".join(pending), dtype=np.uint8).reshape(len(pending), FRAME_H, FRAME_W)
-        counts = count_boxes(planes)
-        if len(counts) != len(pending):
-            raise FrameDecodeError(f"text detection answered {len(counts)} counts for {len(pending)} frames")
-        boxes.extend(int(c) for c in counts)
+        found = detect_boxes(planes)
+        if len(found) != len(pending):
+            raise FrameDecodeError(f"text detection answered {len(found)} frames' boxes for {len(pending)} frames")
+        try:
+            boxes.extend(tuple((int(a), int(b), int(c), int(d)) for a, b, c, d in frame) for frame in found)
+        except (TypeError, ValueError) as exc:
+            # The helper's own answer is checked before it gets here; this is any other text detector's, and the
+            # caller only handles the decode errors this module names.
+            raise FrameDecodeError(f"text detection answered boxes that aren't four numbers each: {exc}") from exc
         luma.extend(round(float(plane.mean()), 1) for plane in planes)
         pending.clear()
 
@@ -468,7 +475,7 @@ def run_decode(
         # ffmpeg exited cleanly, so a showinfo line per frame is the contract. Pairing anyway would put a frame's boxes
         # on another frame's timestamp and store a credits start at the wrong second; the file is skipped instead.
         raise FrameDecodeError(f"ffmpeg wrote {len(pts)} timestamps for {len(boxes)} frames of {name}")
-    rows = [(pts[i], boxes[i], luma[i]) for i in range(len(boxes)) if pts[i] is not None]
+    rows = [(pts[i], len(boxes[i]), luma[i], boxes[i]) for i in range(len(boxes)) if pts[i] is not None]
     if len(rows) != len(boxes):
         logger.warning("{} frames of {} have no timestamp and are dropped", len(boxes) - len(rows), name)
     return rows
@@ -484,7 +491,7 @@ def decode_rows(
     fps: int | None,
     gpu: str | None,
     gpu_device_path: str | None,
-    count_boxes: Callable[[np.ndarray], list[int]],
+    detect_boxes: Callable[[np.ndarray], list[tuple[Box, ...]]],
     cancel_check: Callable[[], bool] | None = None,
     timeout_s: float = DECODE_TIMEOUT_S,
     start_time_s: float | None = None,
@@ -523,5 +530,5 @@ def decode_rows(
         if start_time_s is None
         else start_time_s
     )
-    return run_decode(command, hw_active=hw_active, count_boxes=count_boxes, cancel_check=cancel_check,
+    return run_decode(command, hw_active=hw_active, detect_boxes=detect_boxes, cancel_check=cancel_check,
                       timeout_s=timeout_s, pts_offset_s=offset_s, name=name)  # fmt: skip

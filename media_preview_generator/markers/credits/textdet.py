@@ -23,6 +23,8 @@ import numpy as np
 import onnxruntime as ort
 import pyclipper
 
+from .rule_j import Box
+
 MODEL_FILE = "ch_PP-OCRv4_det_infer.onnx"
 MODEL_SHA256 = "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9"
 MODEL_SIZE = 4_745_517
@@ -271,8 +273,23 @@ def webgpu_session(model_path: str, device, intra_op_threads: int = INTRA_OP_THR
     return session
 
 
+def bounds(quads: np.ndarray) -> tuple[Box, ...]:
+    """Each quadrilateral's axis-aligned bounds as whole pixels.
+
+    Args:
+        quads: Boxes as (n, 4, 2) corners, from :meth:`TextDetector.boxes`.
+
+    Returns:
+        ``(left, top, right, bottom)`` per box, in the frame's own pixels. :func:`postprocess` has already rounded and
+        clipped every corner to a whole pixel inside the frame, so nothing is lost here.
+    """
+    return tuple(
+        (int(quad[:, 0].min()), int(quad[:, 1].min()), int(quad[:, 0].max()), int(quad[:, 1].max())) for quad in quads
+    )
+
+
 class TextDetector:
-    """Box counts per frame from one ONNX Runtime session."""
+    """Text boxes per frame from one ONNX Runtime session."""
 
     def __init__(self, session: ort.InferenceSession, *, backend: str) -> None:
         """Wrap a session.
@@ -292,9 +309,14 @@ class TextDetector:
             return np.zeros((0, 4, 2), dtype=np.float32)
         return postprocess(self._session.run(None, {self._input: tensor})[0], image.shape[:2])
 
+    def detect(self, planes: np.ndarray) -> list[tuple[Box, ...]]:
+        """Each frame's text boxes for (n, H, W) uint8 luma planes, fed as three equal channels (as rule J was
+        measured). The same model run as :meth:`count`, keeping where the boxes are as well as how many."""
+        return [bounds(self.boxes(np.stack([plane] * 3, axis=-1))) for plane in planes]
+
     def count(self, planes: np.ndarray) -> list[int]:
-        """Box counts for (n, H, W) uint8 luma planes, each fed as three equal channels (as rule J was measured)."""
-        return [len(self.boxes(np.stack([plane] * 3, axis=-1))) for plane in planes]
+        """How many text boxes each of (n, H, W) uint8 luma planes holds (the GPU self-test compares counts)."""
+        return [len(found) for found in self.detect(planes)]
 
 
 def synthetic_frames(count: int = 20) -> np.ndarray:

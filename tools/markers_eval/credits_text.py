@@ -37,7 +37,7 @@ from .cache import ProbeCache
 from .credits import _name, _truth, judge_credits
 from .data import evidence_dir
 from .decisions import ORDER
-from .decode_cache import DecodeCache, ffmpeg_build
+from .decode_cache import DecodeCache, ffmpeg_build, rows_from_json, rows_to_json
 from .online import SETTINGS, case_file, case_key, load_online, online_verdicts, tally
 from .plex import PlexMarker, first_marker, load_baseline, server_candidates
 
@@ -462,7 +462,7 @@ class CreditsTextCache:
         ffmpeg: str,
         decode: str,
         gpu_device: str | None,
-        count_boxes: Callable[[np.ndarray], list[int]],
+        detect_boxes: Callable[[np.ndarray], list[tuple[rule_j.Box, ...]]],
         backend: Callable[[], str | None],
         probe: Callable[[str], MediaProbe],
         decodes: DecodeCache | None = None,
@@ -474,9 +474,9 @@ class CreditsTextCache:
             ffmpeg: ffmpeg binary.
             decode: ``gpu`` or ``cpu``.
             gpu_device: The GPU worker's device (ignored on the CPU path).
-            count_boxes: Text boxes per chunk of luma planes.
-            backend: The text detection backend ``count_boxes`` counts on (:attr:`TextDetection.backend`): answers
-                counted on another backend, or decoded on another GPU, are other answers.
+            detect_boxes: Text boxes per chunk of luma planes.
+            backend: The text detection backend ``detect_boxes`` reads on (:attr:`TextDetection.backend`): answers
+                read on another backend, or decoded on another GPU, are other answers.
             probe: A file's duration.
             decodes: Where the detector's decodes are kept across detector changes, or None to decode every time an
                 answer isn't cached.
@@ -489,7 +489,7 @@ class CreditsTextCache:
         self._root = root / "credits_text"
         self._root.mkdir(parents=True, exist_ok=True)
         self._ffmpeg, self._decode, self._gpu_device = ffmpeg, decode, gpu_device
-        self._count_boxes, self._backend, self._probe, self._decodes = count_boxes, backend, probe, decodes
+        self._detect_boxes, self._backend, self._probe, self._decodes = detect_boxes, backend, probe, decodes
         self._build: str | None = None
         self.detector_digest = detector_digest()
         self.gpu_fallbacks: set[str] = set()
@@ -499,7 +499,7 @@ class CreditsTextCache:
         with serving:
             return find_credits(
                 path, duration_ms=self._probe(path).duration_ms, is_episode=is_episode, ffmpeg=self._ffmpeg,
-                count_boxes=self._count_boxes, gpu=gpu, gpu_device_path=self._gpu_device if gpu else None,
+                detect_boxes=self._detect_boxes, gpu=gpu, gpu_device_path=self._gpu_device if gpu else None,
             )  # fmt: skip
 
     def result(self, path: str, *, is_episode: bool) -> dict:
@@ -539,8 +539,8 @@ class CreditsTextCache:
             found = self._find(path, is_episode=is_episode, gpu=None)
             fell_back.write_text("")
             self.gpu_fallbacks.add(_name(path))
-        data = {"start_s": found.start_s, "end_s": found.end_s, "key": [list(r) for r in found.key_rows],
-                "fine": [list(r) for r in found.fine_rows], "end": [list(r) for r in found.end_rows]}  # fmt: skip
+        data = {"start_s": found.start_s, "end_s": found.end_s, "key": rows_to_json(found.key_rows),
+                "fine": rows_to_json(found.fine_rows), "end": rows_to_json(found.end_rows)}  # fmt: skip
         if self._backend() == backend:
             cached.write_text(json.dumps(data))
         return data
@@ -548,22 +548,22 @@ class CreditsTextCache:
 
 @dataclass(frozen=True)
 class TextDetection:
-    """The app's own box counter for one decode path.
+    """The app's own text box detector for one decode path.
 
     Attributes:
-        count_boxes: Text boxes per chunk of luma planes.
-        backend: What counts them right now: ``cpu``, or the GPU backend and its helper's device (``webgpu cuda:0``);
+        detect_boxes: Text boxes per chunk of luma planes.
+        backend: What reads them right now: ``cpu``, or the GPU backend and its helper's device (``webgpu cuda:0``);
             None before the first request, when the helper's self-test hasn't chosen yet.
         close: Stops every helper, once, at the end of the whole run.
     """
 
-    count_boxes: Callable[[np.ndarray], list[int]]
+    detect_boxes: Callable[[np.ndarray], list[tuple[rule_j.Box, ...]]]
     backend: Callable[[], str | None]
     close: Callable[[], None]
 
 
-def _counter(decode: str, gpu_device: str) -> TextDetection:
-    """The app's own box counter for this decode path.
+def _detection_on(decode: str, gpu_device: str) -> TextDetection:
+    """The app's own text box detector for this decode path.
 
     The pool is the process's own (``get_textdet_pool``), exactly as a worker gets it, and ``close_all`` is called once
     at the end of the whole run: it stops every helper permanently (controller note N3).
@@ -579,7 +579,7 @@ def _counter(decode: str, gpu_device: str) -> TextDetection:
         return used if used in (None, "cpu") else f"{used} {textdet_helper.device_key(gpu, device)}"
 
     return TextDetection(
-        lambda planes: pool.count_boxes(planes, gpu=gpu, gpu_device_path=device), backend, pool.close_all
+        lambda planes: pool.detect_boxes(planes, gpu=gpu, gpu_device_path=device), backend, pool.close_all
     )
 
 
@@ -722,15 +722,15 @@ def run_credits_text(
     rule = RuleTally()
     kinds: dict[str, RuleTally] = {}
     passed = True
-    detection = _counter(decode, gpu_device)
-    count_boxes = detection.count_boxes
+    detection = _detection_on(decode, gpu_device)
+    detect_boxes = detection.detect_boxes
     try:
         # One blank frame starts the helper and its self-test, so the decode cache knows from the first file on which
-        # backend counts the boxes (a GPU's self-test can pick the CPU).
-        count_boxes(np.zeros((1, FRAME_H, FRAME_W), dtype=np.uint8))
+        # backend reads the boxes (a GPU's self-test can pick the CPU).
+        detect_boxes(np.zeros((1, FRAME_H, FRAME_W), dtype=np.uint8))
         decodes = DecodeCache(cache_root, digest=decode_digest(), backend=detection.backend)
         cache = CreditsTextCache(
-            cache_root, ffmpeg=ffmpeg, decode=decode, gpu_device=gpu_device, count_boxes=count_boxes,
+            cache_root, ffmpeg=ffmpeg, decode=decode, gpu_device=gpu_device, detect_boxes=detect_boxes,
             backend=detection.backend, probe=probes.probe, decodes=decodes,
         )  # fmt: skip
         summary: dict = {"decode": decode, "detector_version": CREDITS_TEXT_VERSION,
@@ -758,7 +758,9 @@ def run_credits_text(
                 details[name] = rows.files
                 parts.append(rows)
                 for f in rows.files:
-                    reasons = sheet_reasons(f, [tuple(r) for r in results[f["file"]]["key"]])
+                    # Read without a guard on purpose: the answer cache's key carries detector_digest, which hashes
+                    # every credits module, so an entry from before rows held positions can never be served here.
+                    reasons = sheet_reasons(f, rows_from_json(results[f["file"]]["key"]))
                     if not reasons:
                         continue
                     summary["sheets"].append(_sheet_entry(name, f, reasons))

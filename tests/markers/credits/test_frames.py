@@ -254,12 +254,16 @@ def _fake_ffmpeg(
     return [sys.executable, "-c", script]
 
 
-def _counter(calls: list[np.ndarray]):
-    def count(planes: np.ndarray) -> list[int]:
-        calls.append(planes.copy())
-        return [int(p[0, 0] > 200) * 3 for p in planes]
+# What _detector answers for a bright frame: three boxes, each at its own place in the 320x180 frame.
+BRIGHT_BOXES = ((40, 24, 128, 44), (41, 55, 130, 75), (44, 85, 133, 105))
 
-    return count
+
+def _detector(calls: list[np.ndarray]):
+    def detect(planes: np.ndarray) -> list[tuple[tuple[int, int, int, int], ...]]:
+        calls.append(planes.copy())
+        return [BRIGHT_BOXES if p[0, 0] > 200 else () for p in planes]
+
+    return detect
 
 
 def _gone(pid: int) -> bool:
@@ -324,18 +328,45 @@ class TestRunDecode:
         pts = ["5100.1234", "5102.5", "5101.9", "5104", "5106.0005"]
         before = _reapers()
         rows = frames.run_decode(
-            _fake_ffmpeg(values, pts), hw_active=False, pts_offset_s=0.0, count_boxes=_counter(calls), chunk_frames=2
+            _fake_ffmpeg(values, pts), hw_active=False, pts_offset_s=0.0, detect_boxes=_detector(calls), chunk_frames=2
         )
         assert rows == [
-            (5100.123, 0, 10.0),
-            (5102.5, 3, 250.0),
-            (5101.9, 3, 250.0),
-            (5104.0, 0, 120.0),
-            (5106.001, 0, 5.0),
+            (5100.123, 0, 10.0, ()),
+            (5102.5, 3, 250.0, BRIGHT_BOXES),
+            (5101.9, 3, 250.0, BRIGHT_BOXES),
+            (5104.0, 0, 120.0, ()),
+            (5106.001, 0, 5.0, ()),
         ]
         assert [c.shape for c in calls] == [(2, 180, 320), (2, 180, 320), (1, 180, 320)]
         assert calls[0].dtype == np.uint8 and int(calls[0][1, 5, 5]) == 250  # the Y plane, not the chroma
         assert _reapers() == before  # a decode that ended cleanly closes its own pipe, no reaper
+
+    def test_a_frame_with_no_one_or_several_boxes_keeps_its_own_boxes_and_their_count(self):
+        # The count rule J reads and the positions the next rules read come from one detection call and must agree,
+        # frame by frame: a row's second field is the length of its fourth.
+        per_frame = [(), (BRIGHT_BOXES[0],), BRIGHT_BOXES]
+
+        rows = frames.run_decode(
+            _fake_ffmpeg([10, 20, 30], ["1", "2", "3"]),
+            hw_active=False,
+            pts_offset_s=0.0,
+            detect_boxes=lambda planes: per_frame[: len(planes)],
+            chunk_frames=3,
+        )
+        assert [(row[1], row[3]) for row in rows] == [(0, ()), (1, (BRIGHT_BOXES[0],)), (3, BRIGHT_BOXES)]
+        assert all(row[1] == len(row[3]) for row in rows)
+
+    def test_a_detector_that_answers_lists_gives_rows_of_tuples(self):
+        # The helper's JSON answers arrive as lists; rows must hold tuples, so a row can be a dict key, compared and
+        # stored without a copy of its own.
+        rows = frames.run_decode(
+            _fake_ffmpeg([10], ["1"]),
+            hw_active=False,
+            pts_offset_s=0.0,
+            detect_boxes=lambda planes: [[[10, 20, 30, 40]]] * len(planes),
+        )
+        assert rows == [(1.0, 1, 10.0, ((10, 20, 30, 40),))]
+        assert isinstance(rows[0][3], tuple) and isinstance(rows[0][3][0], tuple)
 
     def test_luma_is_the_mean_rounded_to_a_tenth(self):
         # 36 % of the pixels at 34 and the rest at 33 average 33.36: only rounding to a tenth gives 33.4 (a uniform
@@ -346,9 +377,9 @@ class TestRunDecode:
             sys.stdout.buffer.write(bytes([34]) * 20736 + bytes([33]) * (57600 - 20736) + bytes([128]) * 28800)
         """)
         rows = frames.run_decode(
-            [sys.executable, "-c", script], hw_active=False, pts_offset_s=0.0, count_boxes=lambda p: [0]
+            [sys.executable, "-c", script], hw_active=False, pts_offset_s=0.0, detect_boxes=lambda p: [()]
         )
-        assert rows == [(1.0, 0, 33.4)]
+        assert rows == [(1.0, 0, 33.4, ())]
 
     def test_a_frame_without_a_timestamp_drops_its_own_row_only(self):
         # A NOPTS line in the middle: the frames after it must keep their own timestamps. Shifting them would move a
@@ -358,29 +389,29 @@ class TestRunDecode:
             _fake_ffmpeg([10, 250, 250], ["100", "NOPTS", "106"]),
             hw_active=False,
             pts_offset_s=0.0,
-            count_boxes=_counter(calls),
+            detect_boxes=_detector(calls),
             chunk_frames=1,
         )
-        assert rows == [(100.0, 0, 10.0), (106.0, 3, 250.0)]
+        assert rows == [(100.0, 0, 10.0, ()), (106.0, 3, 250.0, BRIGHT_BOXES)]
 
     def test_several_frames_without_timestamps_drop_only_their_own_rows(self):
         rows = frames.run_decode(
             _fake_ffmpeg([10, 250, 250, 250, 5], ["100", "NOPTS", "104", "NOPTS", "108"]),
             hw_active=False,
             pts_offset_s=0.0,
-            count_boxes=_counter([]),
+            detect_boxes=_detector([]),
             chunk_frames=2,
         )
-        assert rows == [(100.0, 0, 10.0), (104.0, 3, 250.0), (108.0, 0, 5.0)]
+        assert rows == [(100.0, 0, 10.0, ()), (104.0, 3, 250.0, BRIGHT_BOXES), (108.0, 0, 5.0, ())]
 
     def test_a_partial_trailing_frame_is_ignored(self):
         rows = frames.run_decode(
             _fake_ffmpeg([10], ["1"], extra_bytes=1000),
             hw_active=False,
             pts_offset_s=0.0,
-            count_boxes=lambda p: [0] * len(p),
+            detect_boxes=lambda p: [()] * len(p),
         )
-        assert rows == [(1.0, 0, 10.0)]
+        assert rows == [(1.0, 0, 10.0, ())]
 
     @pytest.mark.parametrize(
         ("values", "pts", "extra", "message"),
@@ -396,7 +427,7 @@ class TestRunDecode:
                 _fake_ffmpeg(values, pts, extra_bytes=extra),
                 hw_active=False,
                 pts_offset_s=0.0,
-                count_boxes=lambda p: [0] * len(p),
+                detect_boxes=lambda p: [()] * len(p),
             )
         assert type(excinfo.value) is FrameDecodeError
 
@@ -408,7 +439,7 @@ class TestRunDecode:
                 _fake_ffmpeg([10], ["1"], exit_code=3),
                 hw_active=hw,
                 pts_offset_s=0.0,
-                count_boxes=lambda p: [0] * len(p),
+                detect_boxes=lambda p: [()] * len(p),
                 name="Movie.mkv",
             )
         assert type(excinfo.value) is error
@@ -416,14 +447,14 @@ class TestRunDecode:
     def test_no_frames_on_the_gpu_is_a_gpu_failure(self):
         with pytest.raises(GpuDecodeError, match="no frames") as excinfo:
             frames.run_decode(
-                _fake_ffmpeg([], []), hw_active=True, pts_offset_s=0.0, count_boxes=lambda p: [0] * len(p)
+                _fake_ffmpeg([], []), hw_active=True, pts_offset_s=0.0, detect_boxes=lambda p: [()] * len(p)
             )
         assert type(excinfo.value) is GpuDecodeError
 
     def test_no_frames_on_the_cpu_is_an_empty_answer(self):
         assert (
             frames.run_decode(
-                _fake_ffmpeg([], []), hw_active=False, pts_offset_s=0.0, count_boxes=lambda p: [0] * len(p)
+                _fake_ffmpeg([], []), hw_active=False, pts_offset_s=0.0, detect_boxes=lambda p: [()] * len(p)
             )
             == []
         )
@@ -439,7 +470,7 @@ class TestRunDecode:
         def count(planes):
             calls.append(planes)
             cancelled.set()
-            return [0] * len(planes)
+            return [()] * len(planes)
 
         started = time.monotonic()
         try:
@@ -454,7 +485,7 @@ class TestRunDecode:
                     ),
                     hw_active=False,
                     pts_offset_s=0.0,
-                    count_boxes=count,
+                    detect_boxes=count,
                     cancel_check=cancelled.is_set,
                     chunk_frames=2,
                 )
@@ -479,7 +510,7 @@ class TestRunDecode:
                     _fake_ffmpeg([10], ["1"], pid_file=str(pid_file), close_stdout=True, linger_s=30),
                     hw_active=False,
                     pts_offset_s=0.0,
-                    count_boxes=lambda p: [0] * len(p),
+                    detect_boxes=lambda p: [()] * len(p),
                     cancel_check=cancelled.is_set,
                     timeout_s=30.0,
                 )
@@ -498,7 +529,7 @@ class TestRunDecode:
                 _fake_ffmpeg([10] * 50, ["1"] * 50, sleep_s=1.0, pid_file=str(pid_file)),
                 hw_active=hw,
                 pts_offset_s=0.0,
-                count_boxes=lambda p: [0] * len(p),
+                detect_boxes=lambda p: [()] * len(p),
                 timeout_s=1.0,
             )
         assert type(excinfo.value) is DecodeTimeoutError
@@ -513,7 +544,7 @@ class TestRunDecode:
                 [sys.executable, "-c", script],
                 hw_active=False,
                 pts_offset_s=0.0,
-                count_boxes=lambda p: [0] * len(p),
+                detect_boxes=lambda p: [()] * len(p),
                 timeout_s=2.0,
             )
         assert time.monotonic() - started < 9
@@ -538,7 +569,7 @@ class TestRunDecode:
                     [sys.executable, "-c", script],
                     hw_active=False,
                     pts_offset_s=0.0,
-                    count_boxes=lambda p: [0] * len(p),
+                    detect_boxes=lambda p: [()] * len(p),
                     timeout_s=2.0,
                 )
             assert time.monotonic() - started < 2.0 + 6
@@ -570,7 +601,7 @@ class TestRunDecode:
                     ),
                     hw_active=False,
                     pts_offset_s=0.0,
-                    count_boxes=lambda p: [0] * len(p),
+                    detect_boxes=lambda p: [()] * len(p),
                     timeout_s=1.0,
                 )
             _assert_gone(pid_file, within_s=5)
@@ -587,14 +618,14 @@ class TestRunDecode:
         def count(planes):
             time.sleep(0.5)  # long enough for the reader to fill the queue and block
             cancelled.set()
-            return [0] * len(planes)
+            return [()] * len(planes)
 
         with pytest.raises(DecodeCancelledError):
             frames.run_decode(
                 _fake_ffmpeg([10] * 50, ["1"] * 50),
                 hw_active=False,
                 pts_offset_s=0.0,
-                count_boxes=count,
+                detect_boxes=count,
                 cancel_check=cancelled.is_set,
                 chunk_frames=1,
             )
@@ -610,13 +641,13 @@ class TestRunDecode:
             if not ahead:
                 time.sleep(1.5)
                 ahead.append(int(progress.read_text()))
-            return [0] * len(planes)
+            return [()] * len(planes)
 
         rows = frames.run_decode(
             _fake_ffmpeg([10] * 100, [str(i) for i in range(100)], progress_file=str(progress)),
             hw_active=False,
             pts_offset_s=0.0,
-            count_boxes=count,
+            detect_boxes=count,
             chunk_frames=1,
             timeout_s=30,
         )
@@ -633,7 +664,7 @@ class TestRunDecode:
                 [missing, "-i", "x"],
                 hw_active=hw,
                 pts_offset_s=0.0,
-                count_boxes=lambda p: [0] * len(p),
+                detect_boxes=lambda p: [()] * len(p),
                 name="Movie.mkv",
             )
         assert type(excinfo.value) is FrameDecodeError
@@ -644,7 +675,7 @@ class TestRunDecode:
         rows = frames.run_decode(
             _fake_ffmpeg([10, 250], ["30020.5", "30021.5"]),
             hw_active=False,
-            count_boxes=lambda p: [0] * len(p),
+            detect_boxes=lambda p: [()] * len(p),
             pts_offset_s=30000.0,
         )
         assert [r[0] for r in rows] == [20.5, 21.5]
@@ -652,19 +683,19 @@ class TestRunDecode:
     def test_the_timestamp_offset_has_to_be_given(self):
         # No default: a caller that forgets it would silently publish a recording's raw container timestamps.
         with pytest.raises(TypeError, match="pts_offset_s"):
-            frames.run_decode(_fake_ffmpeg([10], ["1"]), hw_active=False, count_boxes=lambda p: [0] * len(p))
+            frames.run_decode(_fake_ffmpeg([10], ["1"]), hw_active=False, detect_boxes=lambda p: [()] * len(p))
 
     def test_slow_text_detection_never_loses_the_end_of_the_stream(self):
         def slow(planes):
             time.sleep(1.5)
-            return [0] * len(planes)
+            return [()] * len(planes)
 
         started = time.monotonic()
         rows = frames.run_decode(
             _fake_ffmpeg([10, 10, 10], ["1", "2", "3"]),
             hw_active=False,
             pts_offset_s=0.0,
-            count_boxes=slow,
+            detect_boxes=slow,
             chunk_frames=1,
             timeout_s=12,
         )
@@ -677,20 +708,20 @@ class TestRunDecode:
         # counted, dropped the end marker and was reported as a timeout.
         def slow(planes):
             time.sleep(1.2)
-            return [0] * len(planes)
+            return [()] * len(planes)
 
         started = time.monotonic()
         rows = frames.run_decode(
             _fake_ffmpeg([10] * count, [str(i) for i in range(count)]),
             hw_active=True,
             pts_offset_s=0.0,
-            count_boxes=slow,
+            detect_boxes=slow,
             timeout_s=20,
         )
         assert len(rows) == count
         assert time.monotonic() - started < 1.2 * count / 64 + 6
 
-    def test_a_failing_box_count_kills_ffmpeg_and_propagates(self, tmp_path):
+    def test_a_failing_text_detection_kills_ffmpeg_and_propagates(self, tmp_path):
         pid_file = tmp_path / "ffmpeg.pid"
 
         def count(planes):
@@ -702,21 +733,45 @@ class TestRunDecode:
                 _fake_ffmpeg([10] * 50, ["1"] * 50, sleep_s=0.2, pid_file=str(pid_file)),
                 hw_active=False,
                 pts_offset_s=0.0,
-                count_boxes=count,
+                detect_boxes=count,
                 chunk_frames=1,
             )
         assert time.monotonic() - started < 5
         _assert_gone(pid_file)
 
-    def test_a_box_count_per_frame_is_required(self, tmp_path):
-        # A helper answering the wrong number of counts would shift every later row's boxes onto another frame's pts.
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            [3],  # a count, as text detection answered before positions
+            [[[10, 20, 30]]],  # three numbers in a box
+            [[[10, 20, 30, "x"]]],  # a corner that isn't a number
+        ],
+    )
+    def test_boxes_that_are_not_four_numbers_each_are_a_decode_error(self, answer, tmp_path):
+        # detect_credits_text only handles this module's own errors, so a detector answering something else has to
+        # come back as one of them rather than a bare TypeError nothing catches.
         pid_file = tmp_path / "ffmpeg.pid"
-        with pytest.raises(FrameDecodeError, match="answered 1 counts for 2 frames") as excinfo:
+        with pytest.raises(FrameDecodeError, match="aren't four numbers each") as excinfo:
             frames.run_decode(
                 _fake_ffmpeg([10] * 50, ["1"] * 50, sleep_s=0.2, pid_file=str(pid_file)),
                 hw_active=True,
                 pts_offset_s=0.0,
-                count_boxes=lambda p: [0],
+                detect_boxes=lambda p: answer * len(p),
+                chunk_frames=1,
+            )
+        assert type(excinfo.value) is FrameDecodeError
+        _assert_gone(pid_file)
+
+    def test_a_frames_boxes_per_frame_are_required(self, tmp_path):
+        # A helper answering for the wrong number of frames would shift every later row's boxes onto another frame's
+        # pts.
+        pid_file = tmp_path / "ffmpeg.pid"
+        with pytest.raises(FrameDecodeError, match="answered 1 frames' boxes for 2 frames") as excinfo:
+            frames.run_decode(
+                _fake_ffmpeg([10] * 50, ["1"] * 50, sleep_s=0.2, pid_file=str(pid_file)),
+                hw_active=True,
+                pts_offset_s=0.0,
+                detect_boxes=lambda p: [()],
                 chunk_frames=2,
             )
         assert type(excinfo.value) is FrameDecodeError
@@ -734,12 +789,12 @@ class TestDecodeRows:
         def fake_run(command, **kwargs):
             seen["command"] = command
             seen.update(kwargs)
-            return [(1.0, 0, 10.0)]
+            return [(1.0, 0, 10.0, ())]
 
         monkeypatch.setattr(frames, "run_decode", fake_run)
 
         def count(planes):
-            return [0] * len(planes)
+            return [()] * len(planes)
 
         def cancel():
             return False
@@ -753,7 +808,7 @@ class TestDecodeRows:
             fps=1,
             gpu=gpu,
             gpu_device_path=device,
-            count_boxes=count,
+            detect_boxes=count,
             cancel_check=cancel,
             timeout_s=42.0,
             start_time_s=0.0,
@@ -761,11 +816,11 @@ class TestDecodeRows:
         expected_command, _ = frames.decode_command(
             FF, MOVIE, start_s=5680.5, length_s=21.0, keyframes_only=False, fps=1, gpu=gpu, gpu_device_path=device
         )
-        assert rows == [(1.0, 0, 10.0)]
+        assert rows == [(1.0, 0, 10.0, ())]
         assert seen == {
             "command": expected_command,
             "hw_active": hw,
-            "count_boxes": count,
+            "detect_boxes": count,
             "cancel_check": cancel,
             "timeout_s": 42.0,
             "pts_offset_s": 0.0,
@@ -796,7 +851,7 @@ class TestDecodeRows:
             fps=None,
             gpu=None,
             gpu_device_path=None,
-            count_boxes=lambda p: [0] * len(p),
+            detect_boxes=lambda p: [()] * len(p),
             timeout_s=600.0,
         )
         assert seen["pts_offset_s"] == expected
@@ -817,7 +872,7 @@ class TestDecodeRows:
             fps=None,
             gpu=None,
             gpu_device_path=None,
-            count_boxes=lambda p: [0] * len(p),
+            detect_boxes=lambda p: [()] * len(p),
             timeout_s=5.0,
         )
         assert probed["timeout_s"] == 5.0
@@ -837,7 +892,7 @@ class TestDecodeRows:
                 fps=None,
                 gpu=None,
                 gpu_device_path=None,
-                count_boxes=lambda p: [0] * len(p),
+                detect_boxes=lambda p: [()] * len(p),
                 cancel_check=lambda: True,
             )
 
@@ -855,7 +910,7 @@ class TestDecodeRows:
             fps=None,
             gpu=None,
             gpu_device_path=None,
-            count_boxes=lambda p: [0] * len(p),
+            detect_boxes=lambda p: [()] * len(p),
             start_time_s=30000.0,
         )
         assert seen["pts_offset_s"] == 30000.0 and probes == []
@@ -877,7 +932,7 @@ class TestDecodeRows:
                 fps=None,
                 gpu=None,
                 gpu_device_path=None,
-                count_boxes=lambda p: [0] * len(p),
+                detect_boxes=lambda p: [()] * len(p),
             )
         assert type(excinfo.value) is FrameDecodeError
 
@@ -910,7 +965,7 @@ class TestDecodeRows:
         seen: dict = {}
         monkeypatch.setattr(frames, "run_decode", lambda command, **kwargs: seen.update(command=command) or [])
         frames.decode_rows(MOVIE, ffmpeg=FF, start_s=5100.0, length_s=None, keyframes_only=True, fps=None, gpu=None,
-                           gpu_device_path=None, count_boxes=lambda p: [0] * len(p), start_time_s=0.0,
+                           gpu_device_path=None, detect_boxes=lambda p: [()] * len(p), start_time_s=0.0,
                            keep_every=keep_every, drop_non_key=drop_non_key)  # fmt: skip
         expected, _ = frames.decode_command(FF, MOVIE, start_s=5100.0, length_s=None, keyframes_only=True, fps=None,
                                             gpu=None, gpu_device_path=None, keep_every=keep_every,

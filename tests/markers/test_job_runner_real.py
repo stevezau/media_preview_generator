@@ -526,18 +526,18 @@ class TestCreditTextOnTheWorkers:
         decodes: list[tuple] = []
         effects: dict = {}
 
-        def decode_rows(path, *, gpu, gpu_device_path, count_boxes, cancel_check, **kwargs):
+        def decode_rows(path, *, gpu, gpu_device_path, detect_boxes, cancel_check, **kwargs):
             decodes.append((gpu, gpu_device_path))
             effect = effects.get("gpu" if gpu else "cpu")
             if callable(effect):
                 effect()
             elif isinstance(effect, BaseException):
                 raise effect
-            count_boxes(np.zeros((1, frames.FRAME_H, frames.FRAME_W), np.uint8))
+            detect_boxes(np.zeros((1, frames.FRAME_H, frames.FRAME_W), np.uint8))
             return []  # no credit roll in the tail: "nothing found"
 
         pool = MagicMock()
-        pool.count_boxes.return_value = [0]
+        pool.detect_boxes.return_value = [()]
         monkeypatch.setattr(frames, "decode_rows", decode_rows)
         # The detector reads the container's start time and which packets its keyframe pass drops once per file before
         # its decodes: part of the faked decode.
@@ -572,7 +572,7 @@ class TestCreditTextOnTheWorkers:
     def test_the_worker_reads_the_text_on_its_gpu(self, engine, setup):
         job = self._run(engine, setup)
         assert setup.decodes == [("NVIDIA", "cuda:0")]
-        assert setup.pool.count_boxes.call_args.kwargs == {"gpu": "NVIDIA", "gpu_device_path": "cuda:0"}
+        assert setup.pool.detect_boxes.call_args.kwargs == {"gpu": "NVIDIA", "gpu_device_path": "cuda:0"}
         assert job.status is JobStatus.COMPLETED and _outcome(engine.jm, job.id) == {"markers_none": 1}
         assert self._worker().fallback_active is False
         assert self._released(engine)
@@ -584,7 +584,7 @@ class TestCreditTextOnTheWorkers:
         setup.effects["gpu"] = frames.GpuDecodeError("the GPU decoded no frames from S01E01.mkv")
         job = self._run(engine, setup)
         assert setup.decodes == [("NVIDIA", "cuda:0"), (None, None)]
-        assert setup.pool.count_boxes.call_args.kwargs == {"gpu": None, "gpu_device_path": None}
+        assert setup.pool.detect_boxes.call_args.kwargs == {"gpu": None, "gpu_device_path": None}
         worker = self._worker()
         assert worker.fallback_active is True and "GPU decoded no frames" in worker.fallback_reason
         rec = setup.store.get_file(setup.path)
@@ -617,8 +617,8 @@ class TestCreditTextOnTheWorkers:
         from media_preview_generator.markers.models import Source
 
         # The pool itself moves a crashed GPU helper's device to the CPU; what reaches the detector is the CPU helper
-        # failing too (``TextDetectorPool.count_boxes``).
-        setup.pool.count_boxes.side_effect = TextDetUnavailableError("Text detection failed: the helper exited (-9)")
+        # failing too (``TextDetectorPool.detect_boxes``).
+        setup.pool.detect_boxes.side_effect = TextDetUnavailableError("Text detection failed: the helper exited (-9)")
         if where != "gpu-helper":
             setup.effects["gpu"] = frames.GpuDecodeError("ffmpeg exited 1 decoding S01E01.mkv on the GPU")
         job = self._run(engine, setup)

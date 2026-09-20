@@ -131,9 +131,9 @@ def counts_row(vendor: str) -> dict:
     frames = synthetic_frames(20)
     try:
         started = time.monotonic()
-        gpu_counts = pool.count_boxes(frames, gpu=vendor, gpu_device_path=DEVICES[vendor])
+        gpu_counts = [len(found) for found in pool.detect_boxes(frames, gpu=vendor, gpu_device_path=DEVICES[vendor])]
         backend = pool.backend_of(vendor, DEVICES[vendor])
-        cpu_counts = pool.count_boxes(frames, gpu=None, gpu_device_path=None)
+        cpu_counts = [len(found) for found in pool.detect_boxes(frames, gpu=None, gpu_device_path=None)]
         return {"vendor": vendor, "backend": backend, "same_counts": gpu_counts == cpu_counts,
                 "seconds": round(time.monotonic() - started, 1),
                 "log": [line for line in LOG if "Credit text detection on" in line]}  # fmt: skip
@@ -169,11 +169,11 @@ def vaapi_row() -> dict:
     pool = TextDetectorPool()
     try:
         common = {"duration_ms": movie_duration_ms(), "is_episode": False, "ffmpeg": "ffmpeg"}
-        cpu = find_credits(MOVIE, count_boxes=lambda p: pool.count_boxes(p, gpu=None, gpu_device_path=None),
+        cpu = find_credits(MOVIE, detect_boxes=lambda p: pool.detect_boxes(p, gpu=None, gpu_device_path=None),
                            gpu=None, gpu_device_path=None, **common)  # fmt: skip
         intel = find_credits(
             MOVIE,
-            count_boxes=lambda p: pool.count_boxes(p, gpu="INTEL", gpu_device_path=DEVICES["INTEL"]),
+            detect_boxes=lambda p: pool.detect_boxes(p, gpu="INTEL", gpu_device_path=DEVICES["INTEL"]),
             gpu="INTEL",
             gpu_device_path=DEVICES["INTEL"],
             **common,

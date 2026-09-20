@@ -4,7 +4,13 @@
 
 Anonymised: files become ``movie-01…``/``tv-01…`` in the evidence order, every time is shifted by a whole number of
 seconds so the item's tail window starts at 1000 s, rows keep only ``[pts, boxes, luma]``, and the frame-check truth
-(``credits/adjudicated.json``) replaces the chapter truth. Before writing, every item is checked against the prototype
+(``credits/adjudicated.json``) replaces the chapter truth.
+
+The rows carry no box positions, unlike the app's own rows (``rule_j.Row``): the prototype that measured them recorded
+how many boxes a frame held and never where they were, and re-measuring these files would replace the very rows the
+port is pinned against. Rule J reads no positions, so this fixture still pins every one of its answers; a rule that
+reads them is measured on the harness's decode cache, or on ``credits_synth_lab.json.gz``
+(``tools/markers_eval/credits_synth_fixture.py``). Before writing, every item is checked against the prototype
 (``credits/eval_rules3.py`` ``detect``, refine span 20 s): the port on the shifted rows must give the prototype's
 error within 1.5 ms, or the script stops (an unshifted item would keep real timings; none needed it while planning).
 
@@ -38,6 +44,12 @@ TAIL_ORIGIN_S = 1000
 # over a gap the 24 s join can't bridge. Keep this list in step
 # with ``PORT_DIVERGENCES`` in ``tests/markers/credits/test_rule_j.py``, which pins both sides of each.
 PORT_DIVERGENCES = {"movie-03", "movie-12", "movie-25", "movie-29", "movie-38", "tv-07", "tv-09", "tv-22", "tv-31"}
+ABOUT = (
+    "Rule J regression rows for the 80 credits files of spec §5.4, anonymised by tools.markers_eval.credits_fixture. "
+    "Each row is [pts, box count, luma]: the prototype these were measured with recorded how many text boxes a frame "
+    "held, never where they were, and re-measuring the files would replace the rows the port is pinned against. Rule "
+    "J reads no positions; rows that carry them are in the harness's decode cache and in credits_synth_lab.json.gz."
+)
 
 
 def _prototype(evidence: Path) -> dict:
@@ -92,11 +104,7 @@ def build(evidence: Path) -> dict:
                 "expected_error_s": expected,
             }
         )
-    return {
-        "about": "Rule J regression rows for the 80 credits files of spec §5.4, anonymised by tools.markers_eval.credits_fixture",
-        "refine_before_s": REFINE_SPAN_S,
-        "items": items,
-    }
+    return {"about": ABOUT, "refine_before_s": REFINE_SPAN_S, "items": items}
 
 
 def main() -> int:

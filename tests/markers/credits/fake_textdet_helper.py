@@ -1,4 +1,5 @@
-"""Stand-in for the text detection helper process: the same protocol, boxes = bright pixels // 100 (at most 9).
+"""Stand-in for the text detection helper process: the same protocol, one box per 100 bright pixels (at most 9),
+the nth box at ``[n, 2n, n + 10, 2n + 12]`` so a test can tell the positions apart.
 
     python fake_textdet_helper.py --backend cpu|webgpu --mode MODE [--idle-exit-s S] [--no-selftest]
 
@@ -19,6 +20,10 @@ import sys
 import time
 
 import numpy as np
+
+
+def boxes_for(plane):
+    return [[n, 2 * n, n + 10, 2 * n + 12] for n in range(min(9, int((plane > 200).sum()) // 100))]
 
 
 def send(out, message):
@@ -104,7 +109,7 @@ def main() -> int:
         if args.mode == "error-reply":
             send(out, {"id": request["id"], "error": "boom"})
             continue
-        send(out, {"id": request["id"], "boxes": [min(9, int((p > 200).sum()) // 100) for p in planes]})
+        send(out, {"id": request["id"], "boxes": [boxes_for(p) for p in planes]})
         if args.mode == "crash-after-reply":
             os._exit(9)
 

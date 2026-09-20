@@ -26,15 +26,19 @@ MOVIE = FileRecord(7, "/media/movies/Movie (2020)/Movie (2020).mkv", 100, 1, 6_0
 EPISODE = FileRecord(
     8, "/media/tv/Show/Season 01/Show - S01E01.mkv", 100, 1, 1_320_000, "/media/tv/Show/Season 01", False
 )
-STORY = [(5100.0 + 2 * i, 0, 120.0) for i in range(300)]  # 5100–5698 s, bright, no text
-ROLL = [(5700.0 + 2 * i, 2, 12.0) for i in range(100)]  # 5700–5898 s, dark cards
-FINE = [(float(t), 0, 120.0) for t in range(5680, 5690)] + [(float(t), 2, 12.0) for t in range(5690, 5702)]
-SCENE = [(5900.0 + 2 * i, 0, 120.0) for i in range(50)]  # 5900–5998 s: a scene after the roll
-END = [(5897.0, 2, 12.0), (5898.0, 2, 12.0), (5899.0, 1, 12.0)] + [(float(t), 0, 120.0) for t in range(5900, 5918)]
+STORY = [(5100.0 + 2 * i, 0, 120.0, ()) for i in range(300)]  # 5100–5698 s, bright, no text
+# Two cards, one over the other, as a dark credit frame reads them; a lit frame reads none.
+CARDS = ((40, 24, 128, 44), (41, 55, 130, 75))
+ROLL = [(5700.0 + 2 * i, 2, 12.0, CARDS) for i in range(100)]  # 5700–5898 s, dark cards
+FINE = [(float(t), 0, 120.0, ()) for t in range(5680, 5690)] + [(float(t), 2, 12.0, CARDS) for t in range(5690, 5702)]
+SCENE = [(5900.0 + 2 * i, 0, 120.0, ()) for i in range(50)]  # 5900–5998 s: a scene after the roll
+END = [(5897.0, 2, 12.0, CARDS), (5898.0, 2, 12.0, CARDS), (5899.0, 1, 12.0, CARDS[:1])] + [
+    (float(t), 0, 120.0, ()) for t in range(5900, 5918)
+]
 
 
 def count(planes):
-    return [0] * len(planes)
+    return [()] * len(planes)
 
 
 class Decodes:
@@ -84,12 +88,12 @@ class TestFindCredits:
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
         phases: list[str] = []
         result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
-                                       count_boxes=count, gpu="NVIDIA", gpu_device_path="cuda:0", phase=phases.append)  # fmt: skip
+                                       detect_boxes=count, gpu="NVIDIA", gpu_device_path="cuda:0", phase=phases.append)  # fmt: skip
         assert (result.start_s, result.end_s, result.fine_rows, result.end_rows) == (None, None, (), ())
         (call,) = decodes.calls
         assert call == {"path": MOVIE.canonical_path, "ffmpeg": "/ff", "start_s": 5100.0, "length_s": None,
                         "keyframes_only": True, "fps": None, "gpu": "NVIDIA", "gpu_device_path": "cuda:0",
-                        "count_boxes": count, "cancel_check": None, "start_time_s": START_TIME_S,
+                        "detect_boxes": count, "cancel_check": None, "start_time_s": START_TIME_S,
                         "keep_every": None, "drop_non_key": False}  # fmt: skip
         assert phases == ["Reading the credits…"]
         assert probes == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": None}]
@@ -102,7 +106,7 @@ class TestFindCredits:
         phases: list[str] = []
         # The roll's last keyframe is at 5898 s and the file ends at 5910 s: no scene follows, no end decode (Q3).
         result = detector.find_credits(MOVIE.canonical_path, duration_ms=5_910_000, is_episode=False, ffmpeg="/ff",
-                                       count_boxes=count, gpu=None, gpu_device_path=None, cancel_check=cancel,
+                                       detect_boxes=count, gpu=None, gpu_device_path=None, cancel_check=cancel,
                                        phase=phases.append)  # fmt: skip
         assert (result.start_s, result.end_s) == (rule_j.credits_start(STORY + ROLL, FINE), None) == (5690.0, None)
         assert len(decodes.calls) == 2
@@ -111,7 +115,7 @@ class TestFindCredits:
         # recording's refine rows tens of thousands of seconds out and silently drop the refinement (Task 6).
         assert decodes.calls[1] == {"path": MOVIE.canonical_path, "ffmpeg": "/ff", "start_s": 5680.0,
                                     "length_s": 21.0, "keyframes_only": False, "fps": 1, "gpu": None,
-                                    "gpu_device_path": None, "count_boxes": count, "cancel_check": cancel,
+                                    "gpu_device_path": None, "detect_boxes": count, "cancel_check": cancel,
                                     "start_time_s": START_TIME_S}  # fmt: skip
         tail = decodes.calls[0]
         assert (tail["start_time_s"], tail["keep_every"], tail["drop_non_key"]) == (START_TIME_S, None, False)
@@ -124,13 +128,13 @@ class TestFindCredits:
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
         phases: list[str] = []
         result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
-                                       count_boxes=count, gpu="NVIDIA", gpu_device_path="cuda:0", phase=phases.append)  # fmt: skip
+                                       detect_boxes=count, gpu="NVIDIA", gpu_device_path="cuda:0", phase=phases.append)  # fmt: skip
         assert (result.start_s, result.end_s, result.end_rows) == (5690.0, 5899.0, tuple(END))
         # Both refine decodes by whole-dict equality: they stay on the worker's GPU (a refine decode quietly dropped to
         # the CPU would raise FrameDecodeError instead of the GpuDecodeError the worker's CPU rerun needs), and all three
         # decodes read the one start time this run probed.
         gpu_kwargs = {"path": MOVIE.canonical_path, "ffmpeg": "/ff", "keyframes_only": False, "fps": 1,
-                      "gpu": "NVIDIA", "gpu_device_path": "cuda:0", "count_boxes": count, "cancel_check": None,
+                      "gpu": "NVIDIA", "gpu_device_path": "cuda:0", "detect_boxes": count, "cancel_check": None,
                       "start_time_s": START_TIME_S}  # fmt: skip
         assert decodes.calls[1] == {**gpu_kwargs, "start_s": 5680.0, "length_s": 21.0}
         assert decodes.calls[2] == {**gpu_kwargs, "start_s": 5897.0, "length_s": 21.0}
@@ -145,7 +149,7 @@ class TestFindCredits:
         decodes = Decodes(timecode)
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
         result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
-                                       count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
         assert rule_j.coarse_start(timecode).pts_s == 5200.0
         assert (result.start_s, result.end_s, result.fine_rows, result.end_rows) == (None, None, (), ())
         assert len(decodes.calls) == 1
@@ -165,7 +169,7 @@ class TestFindCredits:
         decodes = Decodes(STORY + ROLL + glued, FINE, END)
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
         result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
-                                       count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
         coarse = rule_j.coarse_start(STORY + ROLL + glued)
         assert rule_j.coarse_end_s(STORY + ROLL + glued, coarse) == 5910.0
         assert (decodes.calls[2]["start_s"], decodes.calls[2]["length_s"]) == (5897.0, 5910.0 + 20.0 - 5897.0)
@@ -182,7 +186,7 @@ class TestFindCredits:
 
         monkeypatch.setattr(detector.frames, "decode_rows", decode)
         result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
-                                       count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
         coarse = rule_j.coarse_start(STORY + ROLL + SCENE)
         assert result.start_s == coarse.pts_s - rule_j.REFINE_BEFORE_S
         assert result.end_s == rule_j.coarse_end_s(STORY + ROLL + SCENE, coarse) + rule_j.REFINE_END_AFTER_S
@@ -200,14 +204,14 @@ class TestFindCredits:
         decodes = Decodes(STORY + ROLL + SCENE, FINE, END)
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
         result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
-                                       count_boxes=count, gpu=gpu, gpu_device_path=device)  # fmt: skip
+                                       detect_boxes=count, gpu=gpu, gpu_device_path=device)  # fmt: skip
         assert (result.start_s, result.end_s) == (5690.0, 5899.0)
         assert decodes.calls[0] == {"path": MOVIE.canonical_path, "ffmpeg": "/ff", "start_s": 5100.0, "length_s": None,
                                     "keyframes_only": True, "fps": None, "gpu": gpu, "gpu_device_path": device,
-                                    "count_boxes": count, "cancel_check": None, "start_time_s": START_TIME_S,
+                                    "detect_boxes": count, "cancel_check": None, "start_time_s": START_TIME_S,
                                     "keep_every": keep_every, "drop_non_key": drop_non_key}  # fmt: skip
         refine = {"path": MOVIE.canonical_path, "ffmpeg": "/ff", "keyframes_only": False, "fps": 1, "gpu": gpu,
-                  "gpu_device_path": device, "count_boxes": count, "cancel_check": None, "start_time_s": START_TIME_S}  # fmt: skip
+                  "gpu_device_path": device, "detect_boxes": count, "cancel_check": None, "start_time_s": START_TIME_S}  # fmt: skip
         assert decodes.calls[1:] == [{**refine, "start_s": 5680.0, "length_s": 21.0},
                                      {**refine, "start_s": 5897.0, "length_s": 21.0}]  # fmt: skip
         assert probes.thinning_calls == [{"path": MOVIE.canonical_path, "ffmpeg": "/ff", "cancel_check": None}]
@@ -221,7 +225,7 @@ class TestFindCredits:
         decodes = Decodes([])
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
         result = detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
-                                       count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
         assert result == detector.CreditsTextResult(None, None, (), (), ())
         assert len(decodes.calls) == 1 and decodes.calls[0]["drop_non_key"] is True
 
@@ -230,13 +234,13 @@ class TestFindCredits:
         monkeypatch.setattr(detector.frames, "decode_rows", lambda path, **kwargs: pytest.fail("decoded anyway"))
         with pytest.raises(frames.DecodeCancelledError, match="cancelled before decoding"):
             detector.find_credits(MOVIE.canonical_path, duration_ms=6_000_000, is_episode=False, ffmpeg="/ff",
-                                  count_boxes=count, gpu=None, gpu_device_path=None, cancel_check=lambda: True)  # fmt: skip
+                                  detect_boxes=count, gpu=None, gpu_device_path=None, cancel_check=lambda: True)  # fmt: skip
 
     def test_an_episode_reads_the_last_450_s(self, monkeypatch, probes):
         decodes = Decodes([])
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
         detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
-                              count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+                              detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
         assert decodes.calls[0]["start_s"] == 870.0
 
     @pytest.mark.parametrize(
@@ -254,9 +258,9 @@ class TestFindCredits:
         decodes = Decodes(tail, before, fine)
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
         result = detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
-                                       count_boxes=count, gpu="NVIDIA", gpu_device_path="cuda:0")  # fmt: skip
+                                       detect_boxes=count, gpu="NVIDIA", gpu_device_path="cuda:0")  # fmt: skip
         keyframe_pass = {"path": EPISODE.canonical_path, "ffmpeg": "/ff", "keyframes_only": True, "fps": None,
-                         "gpu": "NVIDIA", "gpu_device_path": "cuda:0", "count_boxes": count, "cancel_check": None,
+                         "gpu": "NVIDIA", "gpu_device_path": "cuda:0", "detect_boxes": count, "cancel_check": None,
                          "start_time_s": START_TIME_S, "keep_every": thinning.keep_every,
                          "drop_non_key": thinning.drop_non_key}  # fmt: skip
         assert decodes.calls[0] == {**keyframe_pass, "start_s": 870.0, "length_s": None}
@@ -273,7 +277,7 @@ class TestFindCredits:
         decodes = Decodes(tail)
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
         result = detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
-                                       count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
         assert rule_j.coarse_start(tail).pts_s == 898.0
         assert (result.start_s, result.end_s) == (None, None)
         assert len(decodes.calls) == 1
@@ -287,7 +291,7 @@ class TestFindCredits:
         decodes = Decodes(tail, before)
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
         result = detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
-                                       count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
         assert (decodes.calls[1]["start_s"], decodes.calls[1]["length_s"]) == (750.0, 120.0)
         assert (result.start_s, result.end_s, result.key_rows) == (None, None, tuple(tail))
         assert len(decodes.calls) == 2
@@ -298,7 +302,7 @@ class TestFindCredits:
         decodes = Decodes(tail, [])
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
         result = detector.find_credits(EPISODE.canonical_path, duration_ms=500_000, is_episode=True, ffmpeg="/ff",
-                                       count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
         assert (decodes.calls[1]["start_s"], decodes.calls[1]["length_s"]) == (0.0, 50.0)
         assert (result.start_s, len(decodes.calls)) == (None, 2)
 
@@ -309,7 +313,7 @@ class TestFindCredits:
         decodes = Decodes(tail, before)
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
         result = detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
-                                       count_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+                                       detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
         assert (result.start_s, result.end_s, result.fine_rows) == (None, None, ())
         assert len(decodes.calls) == 2
 
@@ -326,7 +330,7 @@ class TestFindCredits:
             duration_ms=50_000,
             is_episode=False,
             ffmpeg="/ff",
-            count_boxes=count,
+            detect_boxes=count,
             gpu=None,
             gpu_device_path=None,
         )
@@ -339,9 +343,9 @@ class FakePool:
     def __init__(self):
         self.calls = []
 
-    def count_boxes(self, planes, *, gpu, gpu_device_path):
+    def detect_boxes(self, planes, *, gpu, gpu_device_path):
         self.calls.append((gpu, gpu_device_path))
-        return [0] * len(planes)
+        return [()] * len(planes)
 
 
 @pytest.fixture
@@ -394,7 +398,7 @@ class TestDetect:
         # bound method on every access.
         call["phase"](detector.READING_PHASE)
         assert phase == [detector.READING_PHASE]
-        call["count_boxes"](frames.np.zeros((2, 180, 320), frames.np.uint8))
+        call["detect_boxes"](frames.np.zeros((2, 180, 320), frames.np.uint8))
         assert pool.calls == [("NVIDIA", "cuda:0")]
 
     def test_a_scene_after_the_roll_gives_the_candidate_its_end(self, monkeypatch, pool, ctx):
@@ -668,14 +672,14 @@ def _find_credits_on_the_cpu(clip: str, ffmpeg: str, *, duration_s: int, frames_
     # since ``close_all`` ends a pool permanently.
     pool = textdet_helper.TextDetectorPool()
 
-    def count_boxes(planes):
+    def detect_boxes(planes):
         if frames_read is not None:
             frames_read.append(len(planes))
-        return pool.count_boxes(planes, gpu=None, gpu_device_path=None)
+        return pool.detect_boxes(planes, gpu=None, gpu_device_path=None)
 
     try:
         return detector.find_credits(clip, duration_ms=duration_s * 1000, is_episode=False, ffmpeg=ffmpeg,
-                                     count_boxes=count_boxes, gpu=None, gpu_device_path=None)  # fmt: skip
+                                     detect_boxes=detect_boxes, gpu=None, gpu_device_path=None)  # fmt: skip
     finally:
         pool.close_all()
 

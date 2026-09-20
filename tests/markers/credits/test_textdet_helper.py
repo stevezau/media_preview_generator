@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import json
 import os
 import signal
 import subprocess
@@ -22,7 +24,8 @@ HARDWARE = SimpleNamespace(device="Quadro P5000 (NVIDIA)", is_software=False)
 SOFTWARE = SimpleNamespace(device="llvmpipe (LLVM 19.1.1, 256 bits)", is_software=True)
 NO_VULKAN = SimpleNamespace(device=None, is_software=False)
 PLANES = np.stack([np.zeros((180, 320), np.uint8), np.full((180, 320), 255, np.uint8)])
-ANSWER = [0, 9]
+# What the fake helper answers for PLANES: no box on the dark plane, its nine on the bright one, positions included.
+ANSWER = [(), tuple((n, 2 * n, n + 10, 2 * n + 12) for n in range(9))]
 NVIDIA_ICD = "/etc/vulkan/icd.d/nvidia_icd.json"
 # One address per worker device, so a test can tell two helpers' GPU pins apart.
 WORKER_PCI = {"cuda:0": "0000:02:00.0", "cuda:1": "0000:65:00.0", "/dev/dri/renderD128": "0000:00:02.0"}
@@ -89,7 +92,7 @@ def envs(monkeypatch):
 class TestRouting:
     def test_a_cpu_worker_uses_the_cpu_helper(self, envs):
         env = envs()
-        assert env.pool.count_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
         assert env.backends() == [("cpu", "cpu", False)]
         assert env.specs[0].pci_bus_id is None
         assert "VK_DRIVER_FILES" not in env.started[0]["env"]
@@ -98,7 +101,7 @@ class TestRouting:
     def test_an_nvidia_worker_starts_one_webgpu_helper_with_the_vulkan_env_and_keeps_it(self, envs, loguru_caplog):
         env = envs()
         for _ in range(3):
-            assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+            assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         assert env.backends() == [("cuda:0", "webgpu", True)]
         assert env.specs[0].pci_bus_id == "0000:02:00.0"
         started = env.started[0]["env"]
@@ -114,7 +117,7 @@ class TestRouting:
     @pytest.mark.parametrize("gpu", ["INTEL", "AMD"])
     def test_a_vaapi_worker_gets_no_nvidia_overrides(self, envs, gpu):
         env = envs()
-        assert env.pool.count_boxes(PLANES, gpu=gpu, gpu_device_path="/dev/dri/renderD128") == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu=gpu, gpu_device_path="/dev/dri/renderD128") == ANSWER
         assert env.backends() == [("/dev/dri/renderD128", "webgpu", True)]
         started = env.started[0]["env"]
         assert "VK_DRIVER_FILES" not in started
@@ -126,21 +129,21 @@ class TestRouting:
     )
     def test_gpus_without_a_webgpu_path_use_the_cpu(self, envs, gpu, path):
         env = envs()
-        assert env.pool.count_boxes(PLANES, gpu=gpu, gpu_device_path=path) == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu=gpu, gpu_device_path=path) == ANSWER
         assert env.backends() == [("cpu", "cpu", False)]
         assert env.pool.backend_of(gpu, path) == "cpu"
 
     @pytest.mark.parametrize(("vulkan", "why"), [(SOFTWARE, "software"), (NO_VULKAN, "no device at all")])
     def test_software_vulkan_never_starts_a_gpu_helper(self, envs, loguru_caplog, vulkan, why):
         env = envs(vulkan=vulkan)
-        assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         assert env.backends() == [("cpu", "cpu", False)], why
         assert "Credit text detection on cuda:0: CPU (Vulkan reports no hardware GPU)" in loguru_caplog.text
 
     def test_the_verdict_line_names_the_pin_even_when_there_is_no_address(self, envs, monkeypatch, loguru_caplog):
         env = envs()
         monkeypatch.setattr(th, "worker_pci_bus_id", lambda gpu, path: None)
-        assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         assert "pinned to no address (unpinned)" in loguru_caplog.text
 
     def test_backend_of_answers_before_any_request(self, envs):
@@ -150,8 +153,8 @@ class TestRouting:
 
     def test_two_gpu_workers_get_a_helper_each(self, envs):
         env = envs()
-        assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
-        assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:1") == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:1") == ANSWER
         assert env.backends() == [("cuda:0", "webgpu", True), ("cuda:1", "webgpu", True)]
         assert env.pool.backend_of("NVIDIA", "cuda:1") == "webgpu"
         # Controller note N1: only the environment puts a helper on its own card, so the two must differ.
@@ -162,7 +165,7 @@ class TestFallback:
     def test_a_self_test_that_picks_the_cpu_moves_the_device_to_the_cpu_helper(self, envs, loguru_caplog):
         env = envs(modes={"webgpu": "selftest-cpu"})
         for _ in range(2):
-            assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+            assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         assert env.backends() == [("cuda:0", "webgpu", True), ("cpu", "cpu", False)]
         assert env.procs[0].wait(timeout=10) is not None  # the GPU helper was closed
         assert (
@@ -183,8 +186,8 @@ class TestFallback:
     )
     def test_a_failing_gpu_helper_hands_the_same_frames_to_the_cpu_for_good(self, envs, loguru_caplog, mode, timeouts):
         env = envs(modes={"webgpu": mode}, **timeouts)
-        assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
-        assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         assert env.backends() == [("cuda:0", "webgpu", True), ("cpu", "cpu", False)]
         assert env.procs[0].poll() is not None  # killed, not left running
         warnings = [r.getMessage() for r in loguru_caplog.records if r.levelname == "WARNING"]
@@ -193,17 +196,17 @@ class TestFallback:
     def test_a_failing_cpu_helper_is_unavailable_and_the_next_call_starts_a_new_one(self, envs):
         env = envs(modes={"cpu": "crash-on-request"})
         with pytest.raises(th.TextDetUnavailableError, match="Text detection failed"):
-            env.pool.count_boxes(PLANES, gpu=None, gpu_device_path=None)
+            env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None)
         env.modes["cpu"] = "ok"
-        assert env.pool.count_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
         assert env.backends() == [("cpu", "cpu", False), ("cpu", "cpu", False)]
 
     def test_a_gpu_helper_that_exits_between_requests_moves_the_device_to_the_cpu_for_good(self, envs, loguru_caplog):
         env = envs(modes={"webgpu": "crash-after-reply"})
-        assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         assert env.procs[0].wait(timeout=10) == 9
         for _ in range(2):
-            assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+            assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         assert env.backends() == [("cuda:0", "webgpu", True), ("cpu", "cpu", False)]
         assert env.pool.backend_of("NVIDIA", "cuda:0") == "cpu"
         warnings = [r.getMessage() for r in loguru_caplog.records if r.levelname == "WARNING"]
@@ -211,29 +214,29 @@ class TestFallback:
 
     def test_a_cpu_helper_that_went_idle_is_started_again(self, envs, loguru_caplog):
         env = envs(idle_exit_s=0.3)
-        assert env.pool.count_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
         assert env.procs[0].wait(timeout=10) == th.IDLE_EXIT_CODE
-        assert env.pool.count_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
         assert env.backends() == [("cpu", "cpu", False), ("cpu", "cpu", False)]
         assert not [r for r in loguru_caplog.records if r.levelname == "WARNING"]
 
     def test_a_cpu_helper_that_exits_between_requests_is_started_again(self, envs):
         env = envs(modes={"cpu": "crash-after-reply"})
         for _ in range(2):
-            assert env.pool.count_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
+            assert env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
             env.procs[-1].wait(timeout=10)
         assert env.backends() == [("cpu", "cpu", False), ("cpu", "cpu", False)]
 
     def test_an_idle_exit_as_a_request_arrives_starts_the_helper_again_on_the_gpu(self, envs, loguru_caplog):
         env = envs(modes={"webgpu": ["idle-exit-on-request", "ok"]})
-        assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         assert env.procs[0].wait(timeout=10) == th.IDLE_EXIT_CODE
         assert env.backends() == [("cuda:0", "webgpu", True), ("cuda:0", "webgpu", False)]
         assert not [r for r in loguru_caplog.records if r.levelname == "WARNING"]
 
     def test_a_helper_still_leaving_on_its_idle_timer_is_not_taken_for_a_crash(self, envs, loguru_caplog):
         env = envs(modes={"webgpu": ["idle-exit-slow-shutdown", "ok"]})
-        assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         assert env.procs[0].wait(timeout=10) == th.IDLE_EXIT_CODE
         assert env.backends() == [("cuda:0", "webgpu", True), ("cuda:0", "webgpu", False)]
         assert env.pool.backend_of("NVIDIA", "cuda:0") == "webgpu"
@@ -241,10 +244,10 @@ class TestFallback:
 
     def test_a_helper_close_to_its_idle_exit_is_replaced_before_a_request(self, envs):
         env = envs()
-        assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         helper = env.pool._helpers["cuda:0"]
         helper.last_used -= th.IDLE_EXIT_S
-        assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         assert env.backends() == [("cuda:0", "webgpu", True), ("cuda:0", "webgpu", False)]
         assert env.procs[0].wait(timeout=10) is not None
 
@@ -256,7 +259,7 @@ class TestFallback:
         started = time.monotonic()
         try:
             with pytest.raises(th.TextDetUnavailableError, match="didn't read a request"):
-                env.pool.count_boxes(big, gpu=None, gpu_device_path=None)
+                env.pool.detect_boxes(big, gpu=None, gpu_device_path=None)
             assert time.monotonic() - started < 1.0 + th.KILL_WAIT_S + th.EXIT_CODE_WAIT_S + 3
             assert env.procs[0].poll() is not None
         finally:
@@ -271,7 +274,7 @@ class TestFallback:
         env = envs(modes={"cpu": "hang-with-child"}, request_timeout_s=1.0)
         try:
             with pytest.raises(th.TextDetUnavailableError, match="no answer within"):
-                env.pool.count_boxes(PLANES, gpu=None, gpu_device_path=None)
+                env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None)
             child = int(pid_file.read_text())
             deadline = time.monotonic() + 10
             while _alive(child) and time.monotonic() < deadline:
@@ -284,9 +287,9 @@ class TestFallback:
 
     def test_an_idle_exit_starts_the_helper_again_without_a_new_self_test(self, envs, loguru_caplog):
         env = envs(idle_exit_s=0.3)
-        assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         assert env.procs[0].wait(timeout=10) == th.IDLE_EXIT_CODE
-        assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         assert env.backends() == [("cuda:0", "webgpu", True), ("cuda:0", "webgpu", False)]
         assert not [r for r in loguru_caplog.records if r.levelname == "WARNING"]
 
@@ -308,7 +311,7 @@ def test_requests_for_one_device_never_overlap(envs):
     def work():
         try:
             for _ in range(15):
-                results.append(env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0"))
+                results.append(env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0"))
         except BaseException as exc:  # noqa: BLE001 - collected for the assertion
             errors.append(exc)
 
@@ -324,7 +327,7 @@ def test_requests_for_one_device_never_overlap(envs):
 def test_close_all_kills_a_helper_that_hangs_at_exit(envs, monkeypatch):
     monkeypatch.setattr(th, "CLOSE_GRACE_S", 0.5)
     env = envs(modes={"cpu": "hang-on-exit"})
-    env.pool.count_boxes(PLANES, gpu=None, gpu_device_path=None)
+    env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None)
     started = time.monotonic()
     env.pool.close_all()
     assert env.procs[0].poll() is not None and time.monotonic() - started < 10
@@ -336,7 +339,7 @@ class TestGpuPinning:
     def test_an_nvidia_worker_without_a_known_address_is_not_pinned(self, envs, monkeypatch):
         env = envs()
         monkeypatch.setattr(th, "worker_pci_bus_id", lambda gpu, path: None)
-        assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
         started = env.started[0]["env"]
         assert started["VK_DRIVER_FILES"] == NVIDIA_ICD
         assert "DRI_PRIME" not in started
@@ -349,7 +352,7 @@ class TestGpuPinning:
         monkeypatch.setenv("NODEVICE_SELECT", "1")  # would turn the selection layer off entirely
         monkeypatch.setenv("DRI_PRIME", "pci-0000_99_00_0")  # another GPU's tag
         path = "cuda:0" if gpu == "NVIDIA" else "/dev/dri/renderD128"
-        assert env.pool.count_boxes(PLANES, gpu=gpu, gpu_device_path=path) == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu=gpu, gpu_device_path=path) == ANSWER
         started = env.started[0]["env"]
         assert "MESA_VK_DEVICE_SELECT" not in started
         assert "NODEVICE_SELECT" not in started
@@ -359,7 +362,7 @@ class TestGpuPinning:
         env = envs()
         monkeypatch.setenv("DRI_PRIME", "pci-0000_99_00_0")
         monkeypatch.setenv("MESA_VK_DEVICE_SELECT", "10005:0")
-        assert env.pool.count_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
         assert not [name for name in PIN_ENV if name in env.started[0]["env"]]
 
 
@@ -825,7 +828,7 @@ class TestShutdown:
 
         def work():
             try:
-                env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0")
+                env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0")
             except BaseException as exc:  # noqa: BLE001 - collected for the assertion
                 failed.append(exc)
 
@@ -850,7 +853,7 @@ class TestShutdown:
 
         def work():
             try:
-                env.pool.count_boxes(PLANES, gpu=None, gpu_device_path=None)
+                env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None)
             except BaseException as exc:  # noqa: BLE001 - collected for the assertion
                 failed.append(exc)
 
@@ -880,18 +883,18 @@ class TestShutdown:
 
         monkeypatch.setattr(th, "_start", start_then_close)
         with pytest.raises(th.TextDetUnavailableError, match="shutting down"):
-            env.pool.count_boxes(PLANES, gpu=gpu, gpu_device_path=device)
+            env.pool.detect_boxes(PLANES, gpu=gpu, gpu_device_path=device)
         assert env.pool._helpers == {}
         assert env.procs[0].wait(timeout=10) is not None
 
     def test_a_request_after_close_all_starts_no_new_helper(self, envs):
         env = envs()
-        assert env.pool.count_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
+        assert env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None) == ANSWER
         env.pool.close_all()
         with pytest.raises(th.TextDetUnavailableError, match="shutting down"):
-            env.pool.count_boxes(PLANES, gpu=None, gpu_device_path=None)
+            env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None)
         with pytest.raises(th.TextDetUnavailableError, match="shutting down"):
-            env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0")
+            env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0")
         assert len(env.specs) == 1
 
 
@@ -915,7 +918,7 @@ def test_a_second_worker_on_one_device_never_acts_on_a_stale_gpu_verdict(envs, m
 
     def work():
         try:
-            results.append(env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0"))
+            results.append(env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0"))
         except BaseException as exc:  # noqa: BLE001 - collected for the assertion
             errors.append(exc)
 
@@ -936,9 +939,9 @@ def test_a_second_worker_on_one_device_never_acts_on_a_stale_gpu_verdict(envs, m
 
 def test_a_helper_that_restarts_on_the_cpu_says_so(envs, loguru_caplog):
     env = envs(modes={"webgpu": ["ok", "selftest-cpu"]}, idle_exit_s=0.3)
-    assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+    assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
     assert env.procs[0].wait(timeout=10) == th.IDLE_EXIT_CODE
-    assert env.pool.count_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
+    assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
     assert env.backends() == [("cuda:0", "webgpu", True), ("cuda:0", "webgpu", False), ("cpu", "cpu", False)]
     assert env.pool.backend_of("NVIDIA", "cuda:0") == "cpu"
     warnings = [r.getMessage() for r in loguru_caplog.records if r.levelname == "WARNING"]
@@ -948,7 +951,7 @@ def test_a_helper_that_restarts_on_the_cpu_says_so(envs, loguru_caplog):
 def test_a_helper_that_goes_idle_on_every_request_is_not_restarted_forever(envs):
     env = envs(modes={"cpu": "idle-exit-on-request"})
     with pytest.raises(th.TextDetUnavailableError, match="went idle twice in a row"):
-        env.pool.count_boxes(PLANES, gpu=None, gpu_device_path=None)
+        env.pool.detect_boxes(PLANES, gpu=None, gpu_device_path=None)
     assert env.backends() == [("cpu", "cpu", False), ("cpu", "cpu", False)]
 
 
@@ -959,3 +962,55 @@ def test_get_textdet_pool_is_one_pool_for_the_process_closed_at_exit(monkeypatch
     pool = th.get_textdet_pool()
     assert th.get_textdet_pool() is pool
     assert registered == [pool.close_all]
+
+
+class TestProtocol:
+    """The wire between helper and parent carries each frame's own boxes (spec §5.4 rows), not just how many."""
+
+    PLANES = np.stack([np.zeros((2, 3), np.uint8), np.full((2, 3), 9, np.uint8)])
+    BOXES = [((1, 2, 3, 4), (5, 6, 7, 8)), ()]
+
+    def _helper(self, reply: bytes) -> th._Helper:
+        proc = SimpleNamespace(stdout=io.BytesIO(reply), stdin=io.BytesIO(), poll=lambda: None)
+        return th._Helper(proc, io.BytesIO(), 5.0)
+
+    def test_the_helper_writes_each_frames_boxes_and_the_parent_reads_them_back(self, monkeypatch):
+        request = json.dumps({"id": 1, "frames": 2, "height": 2, "width": 3}).encode()
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, request + b"\n" + self.PLANES.tobytes())
+        os.close(write_fd)
+        stdin = os.fdopen(read_fd, "rb", buffering=0)
+        monkeypatch.setattr(th, "sys", SimpleNamespace(stdin=SimpleNamespace(buffer=stdin)))
+        answered: list[np.ndarray] = []
+        detector = SimpleNamespace(detect=lambda planes: answered.append(planes) or self.BOXES)
+        written = io.BytesIO()
+
+        assert th._serve(detector, written, idle_exit_s=5.0) == 0
+        assert np.array_equal(answered[0], self.PLANES)
+        assert json.loads(written.getvalue()) == {"id": 1, "boxes": [[[1, 2, 3, 4], [5, 6, 7, 8]], []]}
+
+        helper = self._helper(written.getvalue())
+        assert helper.request(self.PLANES) == self.BOXES
+        sent = helper.proc.stdin.getvalue()
+        assert json.loads(sent.split(b"\n", 1)[0]) == {"id": 1, "frames": 2, "height": 2, "width": 3}
+
+    @pytest.mark.parametrize(
+        ("boxes", "why"),
+        [
+            ([2, 0], "counts, as helpers before positions answered"),
+            ([[[1, 2, 3]], []], "three numbers in a box"),
+            ([[["left", 2, 3, 4]], []], "a corner that isn't a number"),
+            ([[1, 2, 3, 4], []], "one frame's boxes flattened into the frame's own list"),
+        ],
+    )
+    def test_an_answer_that_is_not_four_numbers_per_box_is_refused(self, boxes, why):
+        # Taken as rows, any of these would reach rule J as a frame whose boxes it can't read; the request fails
+        # instead, which moves the device to the CPU helper (a GPU) or fails the run (the CPU helper).
+        helper = self._helper(json.dumps({"id": 1, "boxes": boxes}).encode() + b"\n")
+        with pytest.raises(th.HelperError, match="bad answer"):
+            helper.request(self.PLANES)
+
+    def test_an_answer_for_the_wrong_number_of_frames_is_refused(self):
+        helper = self._helper(json.dumps({"id": 1, "boxes": [[]]}).encode() + b"\n")
+        with pytest.raises(th.HelperError, match="bad answer"):
+            helper.request(self.PLANES)

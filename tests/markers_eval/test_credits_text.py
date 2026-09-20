@@ -19,6 +19,8 @@ from tools.markers_eval.decode_cache import DecodeCache
 from tools.markers_eval.plex import PlexMarker
 
 DUR = 6_000_000
+# Two credit cards, one over the other: the boxes a dark row of a roll holds.
+CARDS = ((40, 24, 128, 44), (41, 55, 130, 75))
 FILES = [
     {"file": "/m/A (2001)/A.mkv", "credits_start": 5700.0},   # text right, Plex 40 s early: they disagree
     {"file": "/m/B (2002)/B.mkv", "credits_start": 5500.0},   # text 20 s early, Plex 15 s early: they agree
@@ -126,11 +128,16 @@ def test_merge_rows_adds_the_80s_two_halves():
     assert len(merged.files) == 5
 
 
+# One card per box, stacked down the frame: a row's boxes, which epilogue_like and rule J's coordinates ignore.
+def _cards(boxes):
+    return tuple((40, 24 + 30 * n, 128, 44 + 30 * n) for n in range(boxes))
+
+
 def _dark(t, boxes=0):
-    return (float(t), boxes, 10.0)
+    return (float(t), boxes, 10.0, _cards(boxes))
 
 
-STORY = [(float(t), 0, 120.0) for t in range(0, 90, 2)]
+STORY = [(float(t), 0, 120.0, ()) for t in range(0, 90, 2)]
 
 
 @pytest.mark.parametrize(
@@ -140,7 +147,7 @@ STORY = [(float(t), 0, 120.0) for t in range(0, 90, 2)]
         ([*STORY, *[_dark(t, 1) for t in range(88, 100, 2)], *[_dark(t, 3) for t in range(100, 160, 2)]], 88.0, True),  # 12 s of cards
         ([*STORY, *[_dark(t, 1) for t in range(90, 100, 2)], *[_dark(t, 3) for t in range(100, 160, 2)]], 90.0, False),  # 10 s: not more
         ([*STORY, *[_dark(t, 2) for t in range(90, 100, 2)], *[_dark(t) for t in range(100, 130, 2)], *[_dark(t, 2) for t in range(130, 190, 2)]], 90.0, True),  # black gap
-        ([*STORY, *[(float(t), 0, 120.0) for t in range(90, 100, 2)]], None, False),              # no answer
+        ([*STORY, *[(float(t), 0, 120.0, ()) for t in range(90, 100, 2)]], None, False),          # no answer
     ],
 )  # fmt: skip
 def test_epilogue_like(rows, start, expected):
@@ -297,16 +304,20 @@ def test_cache_runs_the_app_once_per_identity_and_version(tmp_path, monkeypatch)
 
     def find(path, **kwargs):
         calls.append(kwargs)
-        return CreditsTextResult(5702.0, 5890.0, ((5700.0, 2, 12.0),), ((5701.0, 2, 12.0),), ((5890.0, 2, 12.0),))
+        return CreditsTextResult(
+            5702.0, 5890.0, ((5700.0, 2, 12.0, CARDS),), ((5701.0, 2, 12.0, CARDS),), ((5890.0, 2, 12.0, CARDS),)
+        )
 
     monkeypatch.setattr(ct, "find_credits", find)
     cache = ct.CreditsTextCache(tmp_path / "cache", ffmpeg="/ff", decode="gpu", gpu_device="cuda:0",
-                                count_boxes=lambda p: [0] * len(p), backend=lambda: "webgpu cuda:0",
+                                detect_boxes=lambda p: [()] * len(p), backend=lambda: "webgpu cuda:0",
                                 probe=lambda p: MediaProbe(DUR, ()))  # fmt: skip
     first = cache.result(str(media), is_episode=False)
     second = cache.result(str(media), is_episode=False)
-    assert first == second == {"start_s": 5702.0, "end_s": 5890.0, "key": [[5700.0, 2, 12.0]], "fine": [[5701.0, 2, 12.0]],
-                               "end": [[5890.0, 2, 12.0]]}  # fmt: skip
+    stored_cards = [list(box) for box in CARDS]
+    assert first == second == {"start_s": 5702.0, "end_s": 5890.0, "key": [[5700.0, 2, 12.0, stored_cards]],
+                               "fine": [[5701.0, 2, 12.0, stored_cards]],
+                               "end": [[5890.0, 2, 12.0, stored_cards]]}  # fmt: skip
     assert len(calls) == 1
     assert (calls[0]["duration_ms"], calls[0]["gpu"], calls[0]["gpu_device_path"], calls[0]["is_episode"]) == (DUR, "NVIDIA", "cuda:0", False)  # fmt: skip
     monkeypatch.setattr(ct, "CREDITS_TEXT_VERSION", CREDITS_TEXT_VERSION + 1)
@@ -426,7 +437,7 @@ def test_every_package_module_the_detector_imports_is_hashed_or_changes_no_answe
 
 def _cache_for(tmp_path, find, decode="gpu", gpu_device="cuda:0", backend="webgpu cuda:0"):
     return ct.CreditsTextCache(tmp_path / "cache", ffmpeg="/ff", decode=decode, gpu_device=gpu_device,
-                               count_boxes=lambda p: [0] * len(p), backend=lambda: backend,
+                               detect_boxes=lambda p: [()] * len(p), backend=lambda: backend,
                                probe=lambda p: MediaProbe(DUR, ()))  # fmt: skip
 
 
@@ -490,7 +501,7 @@ def test_an_answer_whose_backend_changed_while_it_was_read_is_not_kept(tmp_path,
 
     monkeypatch.setattr(ct, "find_credits", find)
     cache = ct.CreditsTextCache(tmp_path / "cache", ffmpeg="/ff", decode="gpu", gpu_device="cuda:0",
-                                count_boxes=lambda p: [0] * len(p), backend=lambda: next(backends),
+                                detect_boxes=lambda p: [()] * len(p), backend=lambda: next(backends),
                                 probe=lambda p: MediaProbe(DUR, ()))  # fmt: skip
     assert cache.result(str(media), is_episode=False)["start_s"] == 5702.0
     _cache_for(tmp_path, find).result(str(media), is_episode=False)
@@ -506,7 +517,7 @@ def test_a_file_the_gpu_cannot_decode_is_read_on_the_cpu_as_the_worker_does(tmp_
         calls.append(kwargs)
         if kwargs["gpu"] is not None:
             raise GpuDecodeError("ffmpeg exited 69 on the GPU")
-        return CreditsTextResult(5702.0, None, ((5700.0, 2, 12.0),), (), ())
+        return CreditsTextResult(5702.0, None, ((5700.0, 2, 12.0, CARDS),), (), ())
 
     monkeypatch.setattr(ct, "find_credits", find)
     cache = _cache_for(tmp_path, find)
@@ -543,7 +554,7 @@ def test_an_unknown_set_stops_the_run_instead_of_reporting_a_clean_gate(sets, tm
     def never(*args, **kwargs):
         raise AssertionError("the run must not start before the sets are checked")
 
-    monkeypatch.setattr(ct, "_counter", never)
+    monkeypatch.setattr(ct, "_detection_on", never)
     monkeypatch.setattr(ct, "evidence_dir", never)
     with pytest.raises(ValueError, match="unknown set"):
         ct.run_credits_text(decode="cpu", gpu_device="cuda:0", sets=sets, online=False, cache_root=tmp_path,
@@ -563,7 +574,7 @@ def test_the_command_exits_non_zero_on_an_unknown_set(monkeypatch):
 def test_the_cache_refuses_data_folders():
     with pytest.raises(ValueError, match="/data"):
         ct.CreditsTextCache(__import__("pathlib").Path("/data/cache"), ffmpeg="/ff", decode="cpu", gpu_device=None,
-                            count_boxes=lambda p: [], backend=lambda: "cpu", probe=lambda p: MediaProbe(DUR, ()))  # fmt: skip
+                            detect_boxes=lambda p: [], backend=lambda: "cpu", probe=lambda p: MediaProbe(DUR, ()))  # fmt: skip
 
 
 GATE_FILES = {
@@ -594,9 +605,9 @@ class _GateRun:
         run = self
         self.counted = []
 
-        def count_boxes(planes):
+        def detect_boxes(planes):
             run.counted.append(planes.shape)
-            return [0] * len(planes)
+            return [()] * len(planes)
 
         def backend():
             return "webgpu cuda:0" if run.counted else None
@@ -625,9 +636,9 @@ class _GateRun:
         def close():
             run.closed += 1
 
-        def counter(decode, gpu_device):
-            run.seen["counter"] = (decode, gpu_device)
-            return ct.TextDetection(count_boxes, backend, close)
+        def detection(decode, gpu_device):
+            run.seen["detection"] = (decode, gpu_device)
+            return ct.TextDetection(detect_boxes, backend, close)
 
         def hdr_kind(path, *, ffprobe):
             run.seen.setdefault("hdr_ffprobe", set()).add(ffprobe)
@@ -636,11 +647,11 @@ class _GateRun:
         monkeypatch.setattr(ct, "evidence_dir", lambda: evidence)
         monkeypatch.setattr(ct, "ProbeCache", FakeProbes)
         monkeypatch.setattr(ct, "CreditsTextCache", FakeCache)
-        monkeypatch.setattr(ct, "_counter", counter)
+        monkeypatch.setattr(ct, "_detection_on", detection)
         monkeypatch.setattr(ct, "load_baseline", lambda path: run.seen.update(baseline=path) or {p: [PlexMarker("credits", int(s * 1000), DUR, True)] for p, s in GATE_PLEX.items()})  # fmt: skip
         monkeypatch.setattr(ct, "hdr_kind", hdr_kind)
         monkeypatch.setattr(ct, "SPEC_WITHIN_10S", spec_within_10s)
-        self.tmp_path, self.count_boxes = tmp_path, count_boxes
+        self.tmp_path, self.detect_boxes = tmp_path, detect_boxes
 
     def __call__(self, sets=("80", "205"), decode="gpu", gpu_device="cuda:0"):
         return ct.run_credits_text(decode=decode, gpu_device=gpu_device, sets=sets, online=False,
@@ -657,7 +668,7 @@ class _GateRun:
         ("cpu", "cpu", "cpu"),                    # a CPU run
     ],
 )  # fmt: skip
-def test_the_counter_reports_the_backend_the_pool_actually_used(monkeypatch, decode, verdict, backend):
+def test_the_detection_reports_the_backend_the_pool_actually_used(monkeypatch, decode, verdict, backend):
     # This string is the decode cache's key: a GPU run whose self-test chose the CPU must share a CPU run's rows.
     from media_preview_generator.markers.credits import textdet_helper
 
@@ -668,20 +679,20 @@ def test_the_counter_reports_the_backend_the_pool_actually_used(monkeypatch, dec
             asked.append((gpu, gpu_device_path))
             return verdict
 
-        def count_boxes(self, planes, *, gpu, gpu_device_path):
-            asked.append(("count", gpu, gpu_device_path))
-            return [0] * len(planes)
+        def detect_boxes(self, planes, *, gpu, gpu_device_path):
+            asked.append(("detect", gpu, gpu_device_path))
+            return [()] * len(planes)
 
         def close_all(self):
             asked.append("closed")
 
     monkeypatch.setattr(textdet_helper, "get_textdet_pool", Pool)
-    detection = ct._counter(decode, "cuda:1")
+    detection = ct._detection_on(decode, "cuda:1")
     assert detection.backend() == backend
     gpu, device = ("NVIDIA", "cuda:1") if decode == "gpu" else (None, None)
-    detection.count_boxes([object()])
+    detection.detect_boxes([object()])
     detection.close()
-    assert asked == [(gpu, device), ("count", gpu, device), "closed"]
+    assert asked == [(gpu, device), ("detect", gpu, device), "closed"]
 
 
 @pytest.mark.parametrize(("decode", "gpu_device"), [("gpu", "cuda:1"), ("cpu", "cuda:0")])
@@ -689,7 +700,7 @@ def test_the_run_hands_its_decode_path_and_tools_to_every_part(tmp_path, monkeyp
     # A --decode cpu run that measured the GPU path (or the wrong card) would still report "decode": "cpu".
     run = _GateRun(tmp_path, monkeypatch)
     summary, _, _ = run(decode=decode, gpu_device=gpu_device)
-    assert run.seen["counter"] == (decode, gpu_device)
+    assert run.seen["detection"] == (decode, gpu_device)
     root, kwargs = run.seen["cache"]
     assert root == tmp_path / "cache"
     assert kwargs.pop("probe").__self__.__class__.__name__ == "FakeProbes"
@@ -699,7 +710,7 @@ def test_the_run_hands_its_decode_path_and_tools_to_every_part(tmp_path, monkeyp
     assert run.counted[0] == (1, 180, 320) and decodes._backend() == "webgpu cuda:0"
     assert summary["text_detection"] == "webgpu cuda:0"
     assert kwargs.pop("backend")() == "webgpu cuda:0"
-    assert kwargs == {"ffmpeg": "/ff", "decode": decode, "gpu_device": gpu_device, "count_boxes": run.count_boxes}
+    assert kwargs == {"ffmpeg": "/ff", "decode": decode, "gpu_device": gpu_device, "detect_boxes": run.detect_boxes}
     assert run.seen["probes"] == (tmp_path / "cache", "/ffp")
     assert run.seen["hdr_ffprobe"] == {"/ffp"}
     assert run.seen["baseline"] == tmp_path / "b.json"

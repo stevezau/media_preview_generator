@@ -27,7 +27,15 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-Row = tuple[float, int, float]
+# One text box's place in its frame: left, top, right, bottom as **inclusive** pixel indices of the frame's own
+# 320x180 -- 0 to 319 across and 0 to 179 down, so a box across the whole frame reads 0..319 and is 320 wide
+# (``right - left + 1``). ``textdet.postprocess`` has already rounded every corner and clipped it to those ranges, so
+# the bounds are exact.
+Box = tuple[int, int, int, int]
+# A frame: its time in seconds from the start of the file, how many text boxes it holds, its mean luma, and where those
+# boxes are. Rule J reads the first three only -- the boxes ride along for the rules that need positions (spec §13
+# items 14 and 15), and appending them leaves every comparison, sort and index here reading what it read before.
+Row = tuple[float, int, float, tuple[Box, ...]]
 
 FADE_LUMA = 12.0
 FADE_STEP_S = 4.0

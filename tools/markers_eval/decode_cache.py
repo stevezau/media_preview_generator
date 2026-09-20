@@ -3,7 +3,7 @@
 Rule J is pure (rows in, answer out); the hour a ``credits-text`` run takes on storage is the decoding and text
 detection behind the rows. :class:`DecodeCache` keeps each decode's rows keyed on the file's identity, the ffmpeg build
 and the exact command the app builds for it (window, keyframes or 1 fps, hwaccel arguments, scaler and keyframe
-thinning all included), the text detection backend that counted the boxes, and a digest of the code that turns a
+thinning all included), the text detection backend that read the boxes, and a digest of the code that turns a
 command into rows (``credits_text.decode_digest``). The app's own ``find_credits`` then runs unchanged against it: a
 rule change re-reads stored rows and decodes only the windows it hasn't read before, while a change to the decode code,
 the ffmpeg build, the text detection or the model's pin reads everything again.
@@ -17,12 +17,45 @@ import json
 import os
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
 
 import numpy as np
+from loguru import logger
 
 from media_preview_generator.markers.credits import frames
+
+
+def rows_to_json(rows: Sequence[frames.Row]) -> list[list]:
+    """Rows as JSON: ``[pts, box count, luma, [[left, top, right, bottom], ...]]`` per frame.
+
+    Args:
+        rows: From ``frames.decode_rows``.
+
+    Returns:
+        The same rows, JSON types only.
+    """
+    return [[pts, count, luma, [list(box) for box in boxes]] for pts, count, luma, boxes in rows]
+
+
+def rows_from_json(stored: Iterable) -> list[frames.Row]:
+    """Rows back from :func:`rows_to_json`, box positions included.
+
+    Args:
+        stored: What :func:`rows_to_json` wrote.
+
+    Returns:
+        The rows, as ``frames.decode_rows`` returned them.
+
+    Raises:
+        TypeError, ValueError: A row isn't ``[pts, count, luma, boxes]`` with four numbers per box (an entry written
+            before rows carried positions). :meth:`DecodeCache.decode_rows` decodes the window again instead of
+            serving it; a caller reading an entry itself has to decide what to do.
+    """
+    return [
+        (float(pts), int(count), float(luma), tuple((int(a), int(b), int(c), int(d)) for a, b, c, d in boxes))
+        for pts, count, luma, boxes in stored
+    ]
 
 
 def ffmpeg_build(ffmpeg: str) -> str:
@@ -58,7 +91,7 @@ class DecodeCache:
         Args:
             root: Cache folder; must not be under /data*.
             digest: The digest of the code that turns a command into rows (``credits_text.decode_digest``).
-            backend: The text detection backend counting the boxes right now (``webgpu cuda:0``, ``cpu``), None
+            backend: The text detection backend reading the boxes right now (``webgpu cuda:0``, ``cpu``), None
                 before its first request. It isn't in the command: a GPU run's CPU rerun of a file the card can't
                 decode builds the CPU run's command but counts on the GPU helper, and the helper's own self-test can
                 put a GPU worker's counting on the CPU.
@@ -137,7 +170,7 @@ class DecodeCache:
         fps: int | None,
         gpu: str | None,
         gpu_device_path: str | None,
-        count_boxes: Callable[[np.ndarray], list[int]],
+        detect_boxes: Callable[[np.ndarray], list[tuple[frames.Box, ...]]],
         cancel_check: Callable[[], bool] | None = None,
         timeout_s: float = frames.DECODE_TIMEOUT_S,
         start_time_s: float | None = None,
@@ -167,21 +200,29 @@ class DecodeCache:
             entry = self._entry(path, ffmpeg, f"rows|{before}|{what}")
             if entry.exists():
                 stored = json.loads(entry.read_text())
-                self.reused += 1
                 if "gpu_error" in stored:
+                    self.reused += 1
                     raise frames.GpuDecodeError(stored["gpu_error"])
-                return [(float(pts), int(boxes), float(luma)) for pts, boxes, luma in stored["rows"]]
+                try:
+                    rows = rows_from_json(stored["rows"])
+                except (TypeError, ValueError) as exc:
+                    # An entry from before rows carried positions, or any other shape this code can't read: a cache
+                    # miss, not the end of an hour-long run. The decode below overwrites it.
+                    logger.warning("Decoding {} again: its stored rows can't be read ({})", os.path.basename(path), exc)
+                else:
+                    self.reused += 1
+                    return rows
         self.decoded += 1
         try:
             rows = self._decode_rows(
                 path, ffmpeg=ffmpeg, start_s=start_s, length_s=length_s, keyframes_only=keyframes_only, fps=fps,
-                gpu=gpu, gpu_device_path=gpu_device_path, count_boxes=count_boxes, cancel_check=cancel_check,
+                gpu=gpu, gpu_device_path=gpu_device_path, detect_boxes=detect_boxes, cancel_check=cancel_check,
                 timeout_s=timeout_s, start_time_s=start_time_s, keep_every=keep_every, drop_non_key=drop_non_key,
             )  # fmt: skip
         except frames.GpuDecodeError as exc:
             self._keep(path, ffmpeg, what, before, {"gpu_error": str(exc)})
             raise
-        self._keep(path, ffmpeg, what, before, {"rows": [list(row) for row in rows]})
+        self._keep(path, ffmpeg, what, before, {"rows": rows_to_json(rows)})
         return rows
 
     def _keep(self, path: str, ffmpeg: str, what: str, before: str | None, data: dict) -> None:

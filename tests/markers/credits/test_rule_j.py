@@ -19,12 +19,18 @@ FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "markers" / "credit
 SYNTH_FIXTURE = FIXTURE.with_name("credits_synth_lab.json.gz")
 
 
-def dark(t: float, boxes: int = 0, luma: float = 10.0) -> tuple[float, int, float]:
-    return (t, boxes, luma)
+def cards(boxes: int) -> tuple[rule_j.Box, ...]:
+    """Text boxes stacked down the frame, one per box: where a row with this many boxes might hold them. Rule J never
+    reads them (:class:`TestRuleJReadsPtsCountAndLuma`); rows carry them for the rules that will."""
+    return tuple((40, 20 + 30 * n, 280, 44 + 30 * n) for n in range(boxes))
 
 
-def bright(t: float, boxes: int = 0, luma: float = 120.0) -> tuple[float, int, float]:
-    return (t, boxes, luma)
+def dark(t: float, boxes: int = 0, luma: float = 10.0) -> rule_j.Row:
+    return (t, boxes, luma, cards(boxes))
+
+
+def bright(t: float, boxes: int = 0, luma: float = 120.0) -> rule_j.Row:
+    return (t, boxes, luma, cards(boxes))
 
 
 class _UnreadRows:
@@ -592,6 +598,11 @@ def _synth() -> dict:
     return {item["name"]: item for item in json.loads(gzip.decompress(SYNTH_FIXTURE.read_bytes()))["items"]}
 
 
+def _synth_rows(raw: list) -> list[rule_j.Row]:
+    """The lab fixture's rows whole: the app's own decode, box positions included."""
+    return [(float(r[0]), int(r[1]), float(r[2]), tuple(tuple(int(v) for v in box) for box in r[3])) for r in raw]
+
+
 class TestTextAllThrough:
     """Text on screen all through the tail is not a roll (the lab's Synth Audio episodes, final review): no answer
     unless at least 30 s of the tail precede the run and fewer than 80 % of those keyframes carry any text."""
@@ -830,6 +841,13 @@ def _fixture() -> dict:
 
 
 def _rows(raw: list) -> list[tuple[float, int, float]]:
+    """A fixture's rows as rule J reads them: time, box count, luma.
+
+    The 80-file fixture holds nothing else. It was built from the prototype's own measurements
+    (``tools/markers_eval/credits_fixture.py``), which recorded how many boxes each frame had and never where they
+    were, and re-measuring these files would replace the very rows the port is pinned against. Position work reads
+    the harness's decode cache, whose rows carry the boxes, or the lab fixture below.
+    """
     return [(float(r[0]), int(r[1]), float(r[2])) for r in raw]
 
 
@@ -999,3 +1017,51 @@ class TestEightyFiles:
             assert re.fullmatch(r"(movie|tv)-\d\d", item["id"])
             assert item["kind"] in {"movie", "tv"}
             assert set(item) == {"id", "kind", "duration_s", "truth_s", "key", "fine", "expected_error_s"}
+
+
+class TestRuleJReadsPtsCountAndLuma:
+    """A row carries its text boxes' positions for the rules that need them (spec §13 items 14 and 15). Rule J reads
+    the first three fields only, so no answer of its own can move when the boxes arrive beside them."""
+
+    @staticmethod
+    def _with_positions(rows: list, spread: int = 0) -> list[rule_j.Row]:
+        """The same rows, each with boxes somewhere in the frame -- a different place per row, so a rule that read
+        them would answer differently."""
+        return [
+            (pts, count, luma, tuple((n + spread, i % 150, n + 40 + spread, i % 150 + 20) for n in range(count)))
+            for i, (pts, count, luma) in enumerate(rows)
+        ]
+
+    @pytest.mark.parametrize("spread", [0, 37])
+    def test_every_one_of_the_80_files_answers_the_same_with_positions_on_its_rows(self, spread):
+        for item in _fixture()["items"]:
+            key, fine = _rows(item["key"]), _rows(item["fine"])
+            with_boxes_key = self._with_positions(key, spread)
+            with_boxes_fine = self._with_positions(fine, spread)
+            assert rule_j.credits_start(with_boxes_key, with_boxes_fine) == rule_j.credits_start(key, fine), item["id"]
+            coarse, plain_coarse = rule_j.coarse_start(with_boxes_key), rule_j.coarse_start(key)
+            assert coarse == plain_coarse, item["id"]
+            if coarse is None:
+                continue
+            assert rule_j.coarse_end_s(with_boxes_key, coarse) == rule_j.coarse_end_s(key, plain_coarse), item["id"]
+            assert rule_j.end_keyframe_s(with_boxes_key, coarse) == rule_j.end_keyframe_s(key, plain_coarse), item["id"]
+            assert rule_j.text_all_through(with_boxes_key, coarse) == rule_j.text_all_through(key, plain_coarse)
+            assert rule_j.credits_end(
+                with_boxes_key, coarse, with_boxes_fine, item["duration_s"]
+            ) == rule_j.credits_end(key, plain_coarse, fine, item["duration_s"]), item["id"]
+
+    def test_the_lab_files_answer_the_same_with_their_own_positions(self):
+        # The lab fixture's rows are the app's own, so these are the real boxes, not made-up ones.
+        for item in _synth().values():
+            key, fine = _synth_rows(item["key"]), _synth_rows(item["fine"])
+            bare = [row[:3] for row in key]
+            assert rule_j.coarse_start(key) == rule_j.coarse_start(bare), item["name"]
+            assert rule_j.credits_start(key, fine) == rule_j.credits_start(bare, [row[:3] for row in fine])
+
+    @pytest.mark.parametrize("boxes", [0, 1, 3])
+    def test_a_frame_is_a_credit_frame_on_its_count_wherever_its_boxes_are(self, boxes):
+        corner = ((0, 0, 8, 6),) * boxes  # a channel logo's place
+        middle = ((120, 80, 200, 100),) * boxes  # a credit card's place
+        for luma in (10.0, 120.0):
+            assert rule_j.is_credit((1.0, boxes, luma, corner)) is rule_j.is_credit((1.0, boxes, luma, middle))
+            assert rule_j.is_credit((1.0, boxes, luma, corner)) is rule_j.is_credit((1.0, boxes, luma))

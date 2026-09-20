@@ -119,12 +119,12 @@ def _pixels(planes):
 
 def _intra_rows(ffmpeg, path, **kwargs):
     return frames.decode_rows(path, ffmpeg=ffmpeg, start_s=3.0, length_s=None, keyframes_only=True, fps=None,
-                              count_boxes=_pixels, **kwargs)  # fmt: skip
+                              detect_boxes=_pixels, **kwargs)  # fmt: skip
 
 
 def _rows(clip, **kwargs):
     ffmpeg, path = clip
-    return frames.decode_rows(path, ffmpeg=ffmpeg, count_boxes=lambda planes: [0] * len(planes), **kwargs)
+    return frames.decode_rows(path, ffmpeg=ffmpeg, detect_boxes=lambda planes: [()] * len(planes), **kwargs)
 
 
 def test_cpu_keyframes_of_the_tail(clip):

@@ -753,3 +753,63 @@ epilogue cards.
   lab's chapter truth).
 - The 205's gate still fails its usefulness floor (96 < 124) and both wrong caps (17 > 5, 15 > 3); the adjudication of
   its version 1 wrong answers above is unchanged, as no wrong answer moved.
+
+## Rows carry their boxes' positions (2026-09-20)
+
+Two rules the owner has asked for need to know *where* a frame's text is, not only how much of it there is: names over
+bright footage at the start of a roll (§13 item 14) and a channel logo plus a lower-third on a story frame (§13 item
+15, `broadcast-tv.md`). This change carries the positions through and moves no answer.
+
+**The row.** `(pts, box count, luma_mean, boxes)` — `rule_j.Row`, with `rule_j.Box` a `(left, top, right, bottom)`
+tuple of whole pixels in the frame's own 320×180 (`textdet.bounds`, the bounds of the detector's own quadrilateral;
+`postprocess` has already rounded and clipped every corner, so nothing is lost). A tuple appended to the row, rather
+than a new type, is what keeps rule J reading exactly what it read before: every comparison, sort and index in
+`rule_j.py` is on fields 0–2 and is untouched. The helper protocol answers
+`{"id": n, "boxes": [[[left, top, right, bottom], …], …]}`, one list per frame (`textdet_helper`), and a reply that
+isn't four numbers per box — the old counts included — is refused rather than read as a row.
+
+**Cost.** Nothing more is decoded or detected: the positions come out of the same
+`TextDetector.detect` call the count comes from (`count` is now `len` of it). Measured over the 910 decodes
+these runs wrote — the sets, the online cases and the 51 broadcast files, both decode paths:
+
+| | median | p90 | max |
+|---|---|---|---|
+| Rows kept in memory per decode, with positions | 17.4 KB | 95.7 KB | 453.3 KB |
+| The same rows, counts only | 3.9 KB | 56.6 KB | 118.2 KB |
+| Stored per decode, with positions | 2.3 KB | 14.3 KB | 70.8 KB |
+| Stored per decode, counts only | 0.5 KB | 7.5 KB | 15.5 KB |
+
+A worker holds one file's rows at a time, so the added memory is 8.0 KB per decode at the median and 373.3 KB at the
+heaviest decode of the lot (the longest keyframe pass ran to 940 rows, the busiest to 3,669 boxes). The added time is
+`bounds()` at 15 µs per 3-box frame against 11–17 ms of text detection for that frame, plus 0.14 ms per 64-frame chunk
+on the helper's pipe (0.01 ms as counts). Whole runs, `nice -n 19`, one job at a time, every window decoded again:
+36 min and 32 min, against the 71 and 34 minutes above for round 3's runs of the same sets — wall clock on a machine
+that wasn't idle either time, so what the positions cost is the 15 µs a frame, not this.
+
+**Nothing moved.** Every decode's key changed (the decode digest covers `frames.py` and the text detection), so both
+runs decoded every window again from the media — 0 rows were reused from an earlier run — and were compared against
+the round-3 final runs (`r3_commit_*.json`, the same code as `fb32a88` bar a docstring; `r3_final_*.json` and
+`r2_final_*.json` give the same verdict):
+
+| Run | Decodes | Compared | Result |
+|---|---|---|---|
+| GPU, the 80 + the 205 + the 43 online cases | 568 | 543 per-file rows | identical |
+| CPU, the 80 | 154 | 80 per-file rows | identical |
+
+"Identical" is every per-file `text` start, `text_end`, `high`, `medium` and `plex` answer, every set row, every gate
+check, `rule_j_80` and `rule_j_80_by_kind`, every online decision at all three settings, and the frame-check sheet
+list. Also re-run, on decodes that no longer existed in the cache:
+
+- **The 51 broadcast files** (`broadcast-tv.md`), both decode paths, with the guard on and off: every answer, every
+  guard number and every one of the 11,521 keyframe rows identical on each path, with 9,757 boxes (GPU) and 8,012
+  (CPU) now riding on them.
+- **The lab's 8 synthetic files**, GPU: every keyframe and refine row matches the stored fixture row for row on time,
+  box count and luma, so `credits_synth_lab.json.gz` could be rebuilt with the positions beside them
+  (`tools/markers_eval/credits_synth_fixture.py`).
+
+**Reading positions from the harness.** A stored decode is
+`[pts, box count, luma, [[left, top, right, bottom], …]]`; `decode_cache.rows_from_json` turns it back into the tuple
+`frames.decode_rows` returns, and `DecodeCache(...).serving()` puts the whole cache behind the app's own
+`find_credits`, so a rule that reads positions can be measured over the sets without decoding anything. The 80-file
+rule J fixture has no positions and says so in its own `about`: it was built from the prototype's measurements, which
+never recorded them. The lab fixture has them.

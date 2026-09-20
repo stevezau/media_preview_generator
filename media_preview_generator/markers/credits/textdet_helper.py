@@ -7,7 +7,8 @@ at shutdown (ORT PR #29591).
 Protocol, one request at a time per helper:
 - helper → parent, once: ``{"ready": true, "backend": "webgpu"|"cpu", "selftest": {...}|null, "reason": str}``
 - parent → helper: ``{"id": n, "frames": N, "height": H, "width": W}`` and a newline, then N×H×W bytes of luma
-- helper → parent: ``{"id": n, "boxes": [N ints]}`` or ``{"id": n, "error": str}``
+- helper → parent: ``{"id": n, "boxes": [N lists of [left, top, right, bottom]]}`` (one list per frame, in frame
+  order) or ``{"id": n, "error": str}``
 - stdin closed → the helper exits 0; no request for ``--idle-exit-s`` → it exits 75.
 
 The web app imports this module; it loads no ONNX Runtime or OpenCV (only :func:`main`, in the helper, imports
@@ -42,6 +43,7 @@ from loguru import logger
 
 from ..locks import KeyedLocks
 from .devices import choose_ep_device, pin_env_to_gpu, worker_pci_bus_id
+from .rule_j import Box
 
 MODULE = "media_preview_generator.markers.credits.textdet_helper"
 MODEL_ENV = "MEDIA_PREVIEW_TEXTDET_MODEL"
@@ -349,8 +351,8 @@ class _Helper:
             raise HelperError(f"unreadable answer {line[:80]!r}")
         return message
 
-    def request(self, planes: np.ndarray) -> list[int]:
-        """Box counts for (n, H, W) uint8 luma planes.
+    def request(self, planes: np.ndarray) -> list[tuple[Box, ...]]:
+        """Each plane's text boxes for (n, H, W) uint8 luma planes.
 
         Raises:
             HelperError: The helper didn't read the frames, didn't answer, or answered something else.
@@ -367,7 +369,11 @@ class _Helper:
         boxes = reply.get("boxes")
         if reply.get("id") != self._next_id or "error" in reply or not isinstance(boxes, list) or len(boxes) != count:
             raise HelperError(f"bad answer: {str(reply.get('error') or reply)[:200]}")
-        return [int(b) for b in boxes]
+        try:
+            return [tuple((int(a), int(b), int(c), int(d)) for a, b, c, d in frame) for frame in boxes]
+        except (TypeError, ValueError) as exc:
+            # A frame's entry that isn't four numbers per box would otherwise reach rule J as a row it can't read.
+            raise HelperError(f"bad answer: boxes aren't four numbers each ({exc})") from exc
 
     def _write(self, data: bytes, deadline: float) -> None:
         failed: list[BaseException] = []
@@ -537,7 +543,9 @@ class TextDetectorPool:
         self._guard = threading.Lock()
         self._closed = False
 
-    def count_boxes(self, planes: np.ndarray, *, gpu: str | None, gpu_device_path: str | None) -> list[int]:
+    def detect_boxes(
+        self, planes: np.ndarray, *, gpu: str | None, gpu_device_path: str | None
+    ) -> list[tuple[Box, ...]]:
         """Text boxes per luma plane on the worker's device.
 
         Args:
@@ -546,7 +554,7 @@ class TextDetectorPool:
             gpu_device_path: The worker's device.
 
         Returns:
-            One count per plane.
+            One plane's boxes per plane, each ``(left, top, right, bottom)`` in the plane's own pixels.
 
         Raises:
             TextDetUnavailableError: The CPU helper failed (the next call starts a new one), or the pool is closed.
@@ -559,23 +567,23 @@ class TextDetectorPool:
             with self._locks.hold(key):
                 if self._gpu_allowed(key, gpu):
                     try:
-                        counts = self._on_helper(key, planes, lambda: self._gpu_spec(key, gpu, gpu_device_path))
+                        boxes = self._on_helper(key, planes, lambda: self._gpu_spec(key, gpu, gpu_device_path))
                     except HelperError as exc:
                         self._raise_if_closed()
                         self._use_cpu(key, f"its GPU helper failed: {exc}", warning=True)
                     else:
-                        if counts is not None:
-                            return counts
+                        if boxes is not None:
+                            return boxes
         with self._locks.hold(CPU_KEY):
             self._raise_if_closed()
             try:
-                counts = self._on_helper(CPU_KEY, planes, self._cpu_spec)
+                boxes = self._on_helper(CPU_KEY, planes, self._cpu_spec)
             except HelperError as exc:
                 self._raise_if_closed()  # close_all killed it: the pool ending, not text detection failing
                 raise TextDetUnavailableError(f"Text detection failed: {exc}") from exc
-        if counts is None:  # pragma: no cover - the CPU helper either serves or raises
+        if boxes is None:  # pragma: no cover - the CPU helper either serves or raises
             raise TextDetUnavailableError("Text detection failed: the CPU helper didn't answer")
-        return counts
+        return boxes
 
     def backend_of(self, gpu: str | None, gpu_device_path: str | None) -> str | None:
         """What a worker's text detection runs on: ``webgpu``, ``cpu``, or None before its first request.
@@ -621,7 +629,9 @@ class TextDetectorPool:
             return False
         return True
 
-    def _on_helper(self, key: str, planes: np.ndarray, spec_for: Callable[[], HelperSpec]) -> list[int] | None:
+    def _on_helper(
+        self, key: str, planes: np.ndarray, spec_for: Callable[[], HelperSpec]
+    ) -> list[tuple[Box, ...]] | None:
         for attempt in (1, 2):
             helper = self._helper(key, spec_for)
             if helper is None:
@@ -849,14 +859,15 @@ def _serve(detector: Any, protocol: BinaryIO, idle_exit_s: float) -> int:
             return 0
         try:
             _send(
-                protocol, {"id": request["id"], "boxes": detector.count(np.frombuffer(data, np.uint8).reshape(shape))}
+                protocol,
+                {"id": request["id"], "boxes": detector.detect(np.frombuffer(data, np.uint8).reshape(shape))},
             )
         except Exception as exc:  # noqa: BLE001 - the parent decides what a failed request means
             _send(protocol, {"id": request["id"], "error": f"{type(exc).__name__}: {exc}"})
 
 
 def main(argv: list[str] | None = None) -> int:
-    """The helper process: ``--check`` once, or serve box counts until stdin closes or it has been idle.
+    """The helper process: ``--check`` once, or serve each frame's text boxes until stdin closes or it has been idle.
 
     Args:
         argv: Command-line arguments (``sys.argv[1:]`` when None).

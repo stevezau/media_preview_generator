@@ -205,6 +205,53 @@ class TestTextDetector:
         detector = textdet.TextDetector(FakeSession(np.zeros((1, 1, 192, 320), np.float32)), backend="webgpu")
         assert detector.backend == "webgpu"
         assert detector.count(np.zeros((3, 180, 320), np.uint8)) == [0, 0, 0]
+        assert detector.detect(np.zeros((3, 180, 320), np.uint8)) == [(), (), ()]
+
+    @pytest.mark.parametrize(
+        ("bands", "expected"),
+        [
+            ([], ()),
+            ([(40, 60)], ((16, 24, 214, 69),)),
+            # In contour order, which is the model's, not top to bottom: the rows keep whatever order the detector
+            # gives, as they keep ffmpeg's own row order.
+            ([(40, 60), (90, 110), (140, 160)], ((16, 118, 214, 163), (16, 71, 214, 116), (16, 24, 214, 69))),
+        ],
+    )
+    def test_a_frame_with_no_one_or_several_boxes_gives_each_box_its_place(self, bands, expected):
+        # Rule J's own view (how many) and the positions the next rules read come from one model run: the count is
+        # the length of the boxes, and each box is its quadrilateral's bounds in the frame's own 320x180 pixels.
+        pred = np.zeros((1, 1, 192, 320), np.float32)
+        for top, bottom in bands:
+            pred[0, 0, top:bottom, 30:200] = 0.9
+        detector = textdet.TextDetector(FakeSession(pred), backend="cpu")
+        planes = np.zeros((1, 180, 320), np.uint8)
+        assert detector.detect(planes) == [expected]
+        assert detector.count(planes) == [len(expected)]
+        # Python ints, not numpy's: the helper answers these over a JSON pipe, where a numpy int is an error the
+        # parent reads as a failed request (and == wouldn't tell the two apart).
+        assert json.dumps(detector.detect(planes)[0])
+        assert all(type(value) is int for box in detector.detect(planes)[0] for value in box)
+
+    def test_bounds_are_the_corners_own_whole_pixels(self):
+        # postprocess has already rounded and clipped every corner, so the bounds lose nothing.
+        quads = np.array([[[10.0, 20.0], [60.0, 20.0], [60.0, 41.0], [10.0, 41.0]]], np.float32)
+        assert textdet.bounds(quads) == ((10, 20, 60, 41),)
+        assert textdet.bounds(np.zeros((0, 4, 2), np.float32)) == ()
+
+    def test_a_box_across_the_whole_frame_ends_at_the_last_pixel(self):
+        # rule_j.Box is inclusive corner indices: postprocess clips to width - 1 and height - 1, so a band across the
+        # frame reads 319 and 179, never 320 or 180. A rule reading these gets its width as right - left + 1.
+        pred = np.zeros((1, 1, 192, 320), np.float32)
+        pred[0, 0, 40:60, :] = 0.9
+        detector = textdet.TextDetector(FakeSession(pred), backend="cpu")
+        [(left, top, right, bottom)] = detector.detect(np.zeros((1, 180, 320), np.uint8))[0]
+        assert (left, right) == (0, 319) and right - left + 1 == 320
+        assert 0 <= top <= bottom <= 179
+
+    def test_bounds_hold_a_rotated_box_whole(self):
+        # A tilted caption's corners aren't axis-aligned; its bounds are the smallest box that holds all four.
+        quads = np.array([[[10.0, 25.0], [60.0, 20.0], [62.0, 40.0], [12.0, 45.0]]], np.float32)
+        assert textdet.bounds(quads) == ((10, 20, 62, 45),)
 
 
 class FakeOptions:

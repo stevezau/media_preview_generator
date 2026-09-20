@@ -43,7 +43,7 @@ class CreditsTextResult:
         start_s: The credits start, or None when the tail holds no credit run or its text is on screen all through the
             tail (``rule_j.text_all_through``).
         end_s: Where the skip ends (Q3), or None: it runs to the end of the file.
-        key_rows: The tail's keyframe rows (the harness keeps them).
+        key_rows: The tail's keyframe rows, each ``(pts, box count, luma, boxes)`` (the harness keeps them).
         fine_rows: The 1 fps rows before the coarse start (empty without an answer).
         end_rows: The 1 fps rows from 1 s before ``rule_j.end_keyframe_s`` to 20 s past the run's latest credit keyframe
             (empty unless more than 30 s follows that keyframe).
@@ -62,7 +62,7 @@ def find_credits(
     duration_ms: int,
     is_episode: bool,
     ffmpeg: str,
-    count_boxes: Callable[[np.ndarray], list[int]],
+    detect_boxes: Callable[[np.ndarray], list[tuple[rule_j.Box, ...]]],
     gpu: str | None,
     gpu_device_path: str | None,
     cancel_check: Callable[[], bool] | None = None,
@@ -92,7 +92,7 @@ def find_credits(
         duration_ms: Its duration.
         is_episode: Read the last 450 s instead of 900 s (T-R4).
         ffmpeg: ffmpeg binary.
-        count_boxes: Text boxes per chunk of luma planes.
+        detect_boxes: Text boxes per chunk of luma planes.
         gpu: The worker's GPU type, None on a CPU worker.
         gpu_device_path: The worker's device.
         cancel_check: True once the job is cancelled.
@@ -114,7 +114,7 @@ def find_credits(
     show(READING_PHASE)
     start_time_s = frames.container_start_s(path, ffmpeg, cancel_check=cancel_check)
     thinning = frames.keyframe_thinning(path, ffmpeg, cancel_check=cancel_check)
-    decode = {"ffmpeg": ffmpeg, "gpu": gpu, "gpu_device_path": gpu_device_path, "count_boxes": count_boxes,
+    decode = {"ffmpeg": ffmpeg, "gpu": gpu, "gpu_device_path": gpu_device_path, "detect_boxes": detect_boxes,
               "cancel_check": cancel_check, "start_time_s": start_time_s}  # fmt: skip
 
     def keyframes(start_s: float, length_s: float | None) -> list[rule_j.Row]:
@@ -245,7 +245,7 @@ def detect_credits_text(
             duration_ms=rec.duration_ms,
             is_episode=rec.season_key is not None,
             ffmpeg=getattr(ctx.config, "ffmpeg_path", None) or "ffmpeg",
-            count_boxes=lambda planes: pool.count_boxes(planes, gpu=gpu, gpu_device_path=gpu_device_path),
+            detect_boxes=lambda planes: pool.detect_boxes(planes, gpu=gpu, gpu_device_path=gpu_device_path),
             gpu=gpu,
             gpu_device_path=gpu_device_path,
             cancel_check=cancel_check,

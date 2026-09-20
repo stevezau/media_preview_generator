@@ -48,7 +48,7 @@ def detect(path: str, pool: TextDetectorPool, gpu: str | None, device: str | Non
             duration_ms=probe.duration_ms,
             is_episode=True,
             ffmpeg="ffmpeg",
-            count_boxes=lambda planes: pool.count_boxes(planes, gpu=gpu, gpu_device_path=device),
+            detect_boxes=lambda planes: pool.detect_boxes(planes, gpu=gpu, gpu_device_path=device),
             gpu=gpu,
             gpu_device_path=device,
         )

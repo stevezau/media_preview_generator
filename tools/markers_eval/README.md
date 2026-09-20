@@ -188,6 +188,13 @@ detector's source (`credits_text.DETECTOR_SOURCES`: `markers/credits/*.py`, the 
 reported as `detector_digest`). A re-run of unchanged code is free; any change to that code runs the app's detector
 on every file again, even when `CREDITS_TEXT_VERSION` stays the same.
 
+Each stored row is `[pts, box count, luma, [[left, top, right, bottom], ...]]`: the frame's time in seconds from the
+start of the file, how many text boxes it holds, its mean luma, and where those boxes are in the frame's own 320×180
+pixels (spec §5.4 "What a row holds"). `decode_cache.rows_from_json` reads a stored row back into the tuple
+`frames.decode_rows` returns, so a rule can be measured on the boxes without decoding anything:
+`DecodeCache(...).serving()` puts the cache behind the app's own `find_credits`, and a row's fourth field is the
+positions. Rule J reads the first three fields only.
+
 That re-run doesn't decode again unless it has to. Every decode the detector asks for (the tail's keyframes, each
 1 fps window) is kept under `$MARKERS_EVAL_CACHE/credits_decodes` (`decode_cache.DecodeCache`) keyed on the file's
 identity, the ffmpeg build (the first line of `ffmpeg -version`), the exact ffmpeg command the app builds (window,
@@ -251,3 +258,20 @@ time is shifted by a whole number of seconds so the item's tail window starts at
 `[pts, boxes, luma]`, and the frame-check truth (`credits/adjudicated.json`) replaces the chapter truth. Each item is
 checked against the prototype (`credits/eval_rules3.py`) before it is written; the nine items in
 `PORT_DIVERGENCES`, where the port deliberately differs, are reported instead of stopping the build.
+
+These rows carry **no box positions**: the prototype that measured them recorded how many boxes a frame held and never
+where they were, and re-measuring the files would replace the rows the port is pinned against. Rule J reads no
+positions, so the fixture still pins every one of its answers. A rule that reads positions is measured on the decode
+cache above, or on the lab fixture below.
+
+## Lab fixture (with box positions)
+
+```bash
+MEDIA_PREVIEW_TEXTDET_MODEL=... python -m tools.markers_eval.credits_synth_fixture [--decode gpu|cpu]
+```
+
+Rebuilds `tests/fixtures/markers/credits_synth_lab.json.gz` from the lab's synthetic files
+(`evidence/lab/synth`, git-ignored) through the app's own `find_credits`, with `rule_j.text_all_through` patched off —
+the view rule J version 1 had when the fixture's `version_1_start_s` was measured. Every file is decoded again and
+checked against the fixture it replaces: each row's time, box count and mean luma must match row for row, or the build
+stops. Only the positions are new, and they come from the same text detection call the counts came from.

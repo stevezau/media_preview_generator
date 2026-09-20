@@ -355,7 +355,19 @@ taken from the rapidocr_onnxruntime 1.4.4 wheel), pinned at `/app/models/ch_PP-O
   "gradually no longer maintained" and caps Python < 3.13, which is why its det pre/post-processing is vendored
   (above) rather than depended on at build time.
 
-**Rule "J"** per frame `[pts, boxes, luma_mean]`:
+**What a row holds** (2026-09-20). Every decoded frame gives one row, `[pts, boxes, luma_mean, positions]`: its time
+in seconds from the start of the file, how many text boxes the detector found, its mean luma, and where each of those
+boxes is — `(left, top, right, bottom)` as inclusive pixel indices of the frame's own 320×180 (0–319 across, 0–179
+down, so a box is `right − left + 1` wide), the bounds of the detector's own quadrilateral
+(`markers/credits/rule_j.Box`). The positions come out of the same detection call as the count, so no
+frame is decoded or read twice for them: measured over 910 decodes (the sets, the online cases and the 51 broadcast
+files on both decode paths), they add a median 8.0 KB and at most 373.3 KB of rows per decode, and 15 µs per frame of
+text detection against its 11–17 ms. The helper protocol carries
+them (`{"id": n, "boxes": [[[left, top, right, bottom], …], …]}`, one list per frame) and the harness stores them with
+every cached decode. **Rule J reads the first three fields and nothing else**, so no answer of its own moves; the
+positions are there for the rules that need them (§13 items 14 and 15).
+
+**Rule "J"** per frame `[pts, boxes, luma_mean]` (the first three fields above):
 1. Credit frame = (`luma < 30` and `boxes ≥ 1`) or (`luma ≥ 30` and `boxes ≥ 3`). Bright frames need more text:
    signage in a lit scene gave 3+ boxes for minutes (Checkin' It Twice, −864 s under a looser rule).
 2. Join credit frames into runs across gaps ≤ 24 s; dark empty frames never break a run (Summit of the Gods: 24 s of
@@ -1442,3 +1454,16 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   and the published `pr-241` image (`sha256:813f67cb…`) passed its own checks (detector exit 0, model sha256 = the
   pin, ffmpeg 8.1.2) and re-ran lab rows 1, 2, 3, 16 and phase 2's row 24, with credit text giving no answer on the
   lab's burnt-in-timecode episodes. Still the owner's to do: the Emby catalog submission (roadmap checkpoint 4).
+- 2026-09-20 · Credit-text rows carry their text boxes' **positions** (§5.4 "What a row holds"): `(left, top, right,
+  bottom)` in the frame's own 320×180 pixels, appended to the row, so rule J reads exactly the three fields it read
+  before and no answer of its own can move. The helper protocol answers a frame's boxes instead of a count (a reply
+  that isn't four numbers per box is refused), the harness's decode cache and answer cache store them, and
+  `tools/markers_eval/credits_synth_fixture.py` rebuilds the lab fixture with them; the 80-file rule J fixture keeps
+  the prototype's measured rows and carries none, which its own `about` says. Nothing is decoded or detected twice for
+  them: a file's rows weigh 8.0 KB more at the median (373.3 KB at the heaviest decode measured) and the bounds cost
+  15 µs a frame against 11–17 ms of text detection. Proven by re-decoding everything, since the decode key changed:
+  the GPU run over the 80, the 205 and the 43 online cases (568 windows decoded, 543 rows compared) and the CPU run
+  over the 80 (154, 80) are identical to the round-3 final runs file by
+  file, gate check by gate check, online decision by online decision; the 51 broadcast files on both paths and the
+  lab's synthetic files answer the same too (`evidence/eval/phase3-harness.md` "Rows carry their boxes' positions").
+  Wanted by §13 items 14 and 15, which are built on top of it.
