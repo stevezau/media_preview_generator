@@ -904,6 +904,9 @@ class LocalPlexDb(PlexDatabase):
             owner = "unknown"
             with contextlib.suppress(OSError):
                 owner = str(os.stat(db).st_uid)
+            # The facts as well as the sentence: with an agent this ran on Plex's machine, and ``capability()``
+            # rebuilds the sentence around the agent rather than around this app (spec §6.3).
+            details.update({"unwritable": list(unwritable), "writer_uid": str(os.geteuid()), "db_owner_uid": owner})
             return CapabilityReport(
                 Capability.MISCONFIGURED,
                 f"This app (user {os.geteuid()}) can't write {', '.join(unwritable)}. Run it with the user that owns "
@@ -1388,7 +1391,10 @@ class PlexMarkerPublisher(MarkerPublisher):
             report: What the database half answered.
 
         Returns:
-            The refusal, or None when the two identifiers match or one of them is unknown.
+            The refusal, with ``details["agent"]["wrong_plex"]`` set, or None when the two identifiers match or one
+            of them is unknown. The flag is what the Setup Health row reads: an agent that answered and was refused
+            anyway is otherwise indistinguishable from one whose answer simply couldn't be decoded, and telling the
+            user to check a correct address would send them after the wrong thing.
         """
         agent = report.details.get("agent") or {}
         theirs, ours = str(agent.get("machine_identifier") or ""), str(self._config.server_identity or "")
@@ -1398,8 +1404,52 @@ class PlexMarkerPublisher(MarkerPublisher):
             Capability.AGENT_UNAVAILABLE,
             f"The Plex marker agent at {agent.get('url') or 'this address'} is next to a different Plex server than "
             f"{self._config.name or 'this one'}. Check the address: markers would have gone into the wrong database.",
-            report.details,
+            {**report.details, "agent": {**agent, "wrong_plex": True}},
         )
+
+    def _through_the_agent(self, local: CapabilityReport) -> CapabilityReport | None:
+        """The database half's refusal, said about the agent's container instead of about this app.
+
+        ``LocalPlexDb.file_checks`` runs wherever the database is, but its wording is written from this app's
+        side ("The app must run on the same machine as Plex", "This app (user N) can't write ..."). Through an
+        agent that side is the agent's container, so the untouched wording tells the user to move the app —
+        the one thing the agent exists to avoid. Spec §6.3: with an agent the path, the filesystem check and
+        the lock proof are the agent's.
+
+        Args:
+            local: What the database half answered.
+
+        Returns:
+            The same state and details with the agent's wording, or None when no agent ran the check (or its
+            answer says nothing about where the app runs).
+        """
+        if not local.details.get("agent"):
+            return None
+        details = local.details
+        if local.state is Capability.NEEDS_LOCAL_DB:
+            fs_type = str(details.get("fs_type") or "")
+            where = (
+                f"Plex's database is on a network share ({fs_type}) where the Plex marker agent runs."
+                if is_network_filesystem(fs_type)
+                else "Plex's database is on a filesystem the Plex marker agent doesn't recognise as a local disk "
+                f"({fs_type or 'unknown'})."
+            )
+            return CapabilityReport(
+                local.state,
+                f"{where} Mount Plex's config folder into the agent's container from a local disk of the Plex "
+                "machine; Plex stays read-only.",
+                details,
+            )
+        if local.state is Capability.MISCONFIGURED and details.get("unwritable"):
+            paths = ", ".join(str(p) for p in details["unwritable"])
+            return CapabilityReport(
+                local.state,
+                f"The Plex marker agent (user {details.get('writer_uid') or 'unknown'}) can't write {paths}. Run the "
+                f"agent's container with the user that owns Plex's database "
+                f"(user {details.get('db_owner_uid') or 'unknown'}).",
+                details,
+            )
+        return None
 
     def capability(self) -> CapabilityReport:
         """Check settings, DB location and lock sharing, Plex Pass, schema and the marker tag row."""
@@ -1408,6 +1458,9 @@ class PlexMarkerPublisher(MarkerPublisher):
         # about where a database file sits, so they are never reworded as the same-host advice below.
         if local.state is Capability.AGENT_UNAVAILABLE:
             return local
+        through_agent = self._through_the_agent(local)
+        if through_agent is not None:
+            return through_agent
         if local.details.get("lock_holder") is False:
             status = self._server.get_server_status()
             if status is None:

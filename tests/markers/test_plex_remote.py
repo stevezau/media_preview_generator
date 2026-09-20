@@ -608,6 +608,16 @@ class TestTheAgentMustBeNextToThisPlex:
             assert report.state is Capability.AGENT_UNAVAILABLE
             assert "different Plex server" in report.message
 
+    def test_the_refusal_flags_the_agent_block_so_the_health_card_can_tell_it_apart(self):
+        """The Setup Health row can't infer this from "connected yet refused": an agent whose answer simply
+        couldn't be decoded is also connected-and-refused, and would get told to change a correct address."""
+        publisher, _ = self._publisher_seeing(agent_identity="plex-bbb", server_identity="plex-aaa")
+        assert publisher.capability().details["agent"]["wrong_plex"] is True
+
+    def test_an_agent_next_to_the_right_plex_is_never_flagged(self):
+        publisher, _ = self._publisher_seeing(agent_identity="plex-aaa", server_identity="plex-aaa")
+        assert "wrong_plex" not in publisher.capability().details["agent"]
+
     def test_the_wrong_plex_is_said_so_even_when_that_plex_is_stopped(self):
         # Otherwise the "same host path" advice below it would tell the user to fix paths, not the address.
         database = FakeDatabase()
@@ -626,6 +636,128 @@ class TestTheAgentMustBeNextToThisPlex:
             publisher.write("7", [INTRO], previous=[], duration_ms=1, canonical_path="/data/tv/S01E01.mkv")
         assert ei.value.state is Capability.AGENT_UNAVAILABLE
         assert database.writes == []
+
+
+class TestARefusalNamesTheContainerItIsAbout:
+    """Spec §6.3: with an agent the path, the filesystem check and the lock proof are the AGENT's.
+
+    ``LocalPlexDb.file_checks`` runs on whichever side holds the database but words its refusals from this app's
+    side, so through an agent they told the user to move the app — the one thing the agent exists to avoid.
+    """
+
+    @staticmethod
+    def _publisher_told(report: CapabilityReport) -> PlexMarkerPublisher:
+        database = FakeDatabase()
+        database.file_report = report
+        return _publisher(database)
+
+    @staticmethod
+    def _with_agent(details: dict) -> dict:
+        return {**details, "agent": {"url": URL, "state": "connected", "machine_identifier": ""}}
+
+    NETWORK = {"db_path": "/agent/db", "fs_type": "nfs4"}
+    UNKNOWN_FS = {"db_path": "/agent/db", "fs_type": "fuse.weird"}
+    UNWRITABLE = {
+        "db_path": "/agent/db",
+        "fs_type": "ext4",
+        "unwritable": ["/agent/db", "/agent/db-wal"],
+        "writer_uid": "1000",
+        "db_owner_uid": "998",
+    }
+
+    @pytest.mark.parametrize(
+        ("state", "details", "app_wording"),
+        [
+            (Capability.NEEDS_LOCAL_DB, NETWORK, "The app must run on the same machine as Plex"),
+            (Capability.NEEDS_LOCAL_DB, UNKNOWN_FS, "this app doesn't recognise"),
+            (Capability.MISCONFIGURED, UNWRITABLE, "This app (user 1000) can't write"),
+        ],
+        ids=["network-share", "unrecognised-filesystem", "unwritable-paths"],
+    )
+    def test_without_an_agent_the_wording_is_still_about_this_app(self, state, details, app_wording):
+        report = self._publisher_told(
+            CapabilityReport(state, f"Plex's database … {app_wording} …", details)
+        ).capability()
+        assert report.state is state
+        assert app_wording in report.message
+        assert "agent" not in report.message
+
+    def test_a_network_share_on_the_agents_side_says_to_mount_it_there(self):
+        report = self._publisher_told(
+            CapabilityReport(
+                Capability.NEEDS_LOCAL_DB,
+                "Plex's database is on a network share (nfs4). The app must run on the same machine as Plex to "
+                "write markers; Plex stays read-only.",
+                self._with_agent(self.NETWORK),
+            )
+        ).capability()
+        assert report.state is Capability.NEEDS_LOCAL_DB
+        assert report.message == (
+            "Plex's database is on a network share (nfs4) where the Plex marker agent runs. Mount Plex's config "
+            "folder into the agent's container from a local disk of the Plex machine; Plex stays read-only."
+        )
+        # The refusal the agent exists to make unnecessary must not be the advice it gives.
+        assert "The app must run on the same machine as Plex" not in report.message
+
+    def test_a_filesystem_the_agent_cant_place_names_the_agent_too(self):
+        report = self._publisher_told(
+            CapabilityReport(
+                Capability.NEEDS_LOCAL_DB,
+                "Plex's database is on a filesystem this app doesn't recognise as a local disk (fuse.weird); "
+                "Plex stays read-only.",
+                self._with_agent(self.UNKNOWN_FS),
+            )
+        ).capability()
+        assert report.message == (
+            "Plex's database is on a filesystem the Plex marker agent doesn't recognise as a local disk "
+            "(fuse.weird). Mount Plex's config folder into the agent's container from a local disk of the Plex "
+            "machine; Plex stays read-only."
+        )
+        assert "this app doesn't recognise" not in report.message
+
+    def test_paths_the_agent_cant_write_send_the_user_to_the_agents_container(self):
+        report = self._publisher_told(
+            CapabilityReport(
+                Capability.MISCONFIGURED,
+                "This app (user 1000) can't write /agent/db, /agent/db-wal. Run it with the user that owns Plex's "
+                "database (user 998).",
+                self._with_agent(self.UNWRITABLE),
+            )
+        ).capability()
+        assert report.state is Capability.MISCONFIGURED
+        assert report.message == (
+            "The Plex marker agent (user 1000) can't write /agent/db, /agent/db-wal. Run the agent's container "
+            "with the user that owns Plex's database (user 998)."
+        )
+        assert "This app (user" not in report.message
+
+    def test_the_facts_the_wording_is_rebuilt_from_survive_the_rewrite(self):
+        """The Edit tab reads ``details``, so a reworded refusal must keep every fact the original carried."""
+        details = self._with_agent(self.UNWRITABLE)
+        report = self._publisher_told(CapabilityReport(Capability.MISCONFIGURED, "old", details)).capability()
+        assert report.details["unwritable"] == ["/agent/db", "/agent/db-wal"]
+        assert report.details["db_path"] == "/agent/db"
+        assert report.details["agent"]["url"] == URL
+
+    def test_a_misconfigured_answer_that_is_not_about_writing_is_left_alone(self):
+        """Only the two refusals that name a container are reworded; a missing database file already reads right."""
+        message = "Plex database not found at /agent/db"
+        report = self._publisher_told(
+            CapabilityReport(Capability.MISCONFIGURED, message, self._with_agent({"db_path": "/agent/db"}))
+        ).capability()
+        assert report.message == message
+
+    def test_the_lock_holder_branch_still_says_the_agent_sees(self):
+        """The one branch that was already agent-aware must keep its wording (and not be reworded twice)."""
+        report = self._publisher_told(
+            CapabilityReport(
+                Capability.UNREACHABLE,
+                "Plex doesn't have its database open through this folder right now",
+                self._with_agent({"db_path": "/agent/db", "lock_holder": False, "fs_type": "ext4"}),
+            )
+        ).capability()
+        assert report.state is Capability.NEEDS_LOCAL_DB
+        assert "the database file the agent sees at /agent/db" in report.message
 
 
 class TestWhatAFailedWriteLeavesBehind:
