@@ -103,6 +103,21 @@ def versions_agree(mine: list[Marker], theirs: list[Marker]) -> bool:
     )
 
 
+def same_times(mine: list[Marker], theirs: list[Marker]) -> bool:
+    """Whether two marker lists of one type hold exactly the same times (in start order).
+
+    :func:`versions_agree` asks whether two versions mean the same answer; this asks whether a list *is* another
+    list. It is what decides whether what the item already shows belongs to a version the user locked.
+    """
+    if len(mine) != len(theirs):
+        return False
+    key = lambda m: (m.start_ms, m.end_ms)  # noqa: E731 -- a two-line sort key, not worth a def
+    return all(
+        a.start_ms == b.start_ms and a.end_ms == b.end_ms
+        for a, b in zip(sorted(mine, key=key), sorted(theirs, key=key), strict=True)
+    )
+
+
 def agreed_across_versions(
     markers: Iterable[Marker],
     others: Iterable[Mapping[MarkerType, Marker] | None],
@@ -114,8 +129,13 @@ def agreed_across_versions(
     A type is kept only when the calling file has it and every other version is decided, has that type and agrees
     within ``VERSION_AGREEMENT_MS``. The times are the calling file's, unless what this app already left on the item
     (``prior``) agrees with every version too: then that stays, so versions whose times differ slightly don't rewrite
-    each other's markers on every run. Whichever times win, each returned marker carries the calling file's ``locked``
-    flag for its type — only that file's, never a sibling version's: a lock belongs to the file the user edited, and a
+    each other's markers on every run. **A locked type is the exception** -- the user's own times win however close
+    they are to what the item shows, because the whole difference an editor nudge makes is smaller than
+    ``VERSION_AGREEMENT_MS``, so keeping ``prior`` would silently discard the edit. That exception stops once
+    ``prior`` *is* a locked version's own times: the item can then show only one of two deliberate user choices that
+    agree inside the window this app calls one answer, so the first to land stays and the versions settle rather than
+    rewriting each other on every run forever. Whichever times win, each returned marker carries the calling file's
+    ``locked`` flag for its type — only that file's, never a sibling version's: a lock belongs to the file the user edited, and a
     run of an unlocked version that lets the server keep its own markers again is undone by the locked version's next
     write (that write bumps the item's version, so the unlocked one's publish basis no longer matches either).
 
@@ -136,13 +156,45 @@ def agreed_across_versions(
         if not mine or any(t is None or not versions_agree(mine, t) for t in theirs):
             continue
         kept = [m for m in prior if m.type is mtype]
-        if kept and versions_agree(kept, mine) and all(versions_agree(kept, t) for t in theirs):
+        locked = any(m.locked for m in mine)
+        # Every entry of ``theirs`` is a decided version that agrees with ``mine``; the guard above skipped this type
+        # otherwise.
+        locked_versions = [mine] + [t for t in theirs if any(m.locked for m in t)]
+        # Not ``versions_agree``: the question is whether the item is already showing times a user locked, not
+        # whether it is showing something close enough. Within the tolerance but belonging to nobody -- the detector's
+        # times from before the locks, or an edit a later one superseded -- is exactly where a lock has to win.
+        kept_is_a_locked_versions = any(same_times(kept, v) for v in locked_versions)
+        agrees = kept and versions_agree(kept, mine) and all(versions_agree(kept, t) for t in theirs)
+        if agrees and (not locked or kept_is_a_locked_versions):
             # The times stay what the item already shows, but the calling file's lock rides along: whether the type is
             # the user's own decides whether the server may keep its own markers of it (spec §5.5 rule 1), and what the
             # item record happens to carry from an earlier run must not answer that.
-            locked = any(m.locked for m in mine)
             agreed.extend(replace(m, locked=locked) for m in kept)
         else:
+            # A locked type takes the shortcut above only when the item is already showing a locked version's own
+            # times. The shortcut exists so two versions of one item don't rewrite each other every run over a
+            # difference inside ``VERSION_AGREEMENT_MS``, and a nudge of the editor's arrow keys is smaller than
+            # that: against times nobody locked, keeping ``prior`` would hand the user back what they just changed,
+            # report the row ``unchanged``, and never reach ``set_publish_basis`` -- the same silent no-op on every
+            # later run, which is the bug this branch was split for.
+            #
+            # Where the item *is* showing a locked version's times, keeping them is right even against another
+            # locked version: both are the user's own deliberate choices, the item can show only one of them, and
+            # they are inside the window this app already calls one answer. Letting each version write its own
+            # instead makes the runs alternate forever, every one of them a real Plex write that bumps the item
+            # version and so invalidates the other version's publish basis.
+            #
+            # The residual, stated at its real size: which locked version wins is whichever landed first, so any
+            # other locked version's edit within ``VERSION_AGREEMENT_MS`` of it -- a first lock as much as a
+            # re-edit -- is dropped. It is dropped *quietly*: the publisher returns ``prior`` unchanged, the pipeline
+            # advances the publish basis and reports the row up to date, and nothing retries. A deterministic
+            # winner over the locked set (lowest start, ties by path) would converge the same way and remove the
+            # dependence on run order; deferred, see the phase-4 progress log.
+            #
+            # Also not fixed here: the guard above compares ``mine`` with each sibling but never sibling with
+            # sibling, so versions that agree only through a middle one (0, 2500, 1200 ms) still make each run
+            # remove or rewrite the type. That predates locks; the claim that versions "settle" holds for versions
+            # that agree pairwise.
             agreed.extend(mine)
     return agreed
 

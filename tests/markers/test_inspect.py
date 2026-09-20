@@ -1085,6 +1085,27 @@ def test_plex_will_replace_when_plex_shows_its_own_intro(store, factory):
     assert row["published"] == [] and row["publish_status"] is None
 
 
+def test_plex_a_locked_nudge_inside_the_version_tolerance_reads_as_will_replace(store, factory):
+    # The Plex publisher keeps what the item already shows when it agrees within VERSION_AGREEMENT_MS -- except for a
+    # locked type, whose own times are written however close they are. Without the same exception here the Inspector
+    # reports "Up to date" for the very edit the editor exists to deliver: the user nudges a marker 1.5 s, saves, and
+    # the row says nothing needs doing. 1-2 s is the band where this shows; under 1 s _SAME_TOLERANCE_MS hides it.
+    nudged = Marker(T.CREDITS, 1_291_500, DURATION, ("user",), locked=True)
+    rec = _known_file(store, {T.INTRO: _none(T.INTRO), T.CREDITS: _decided(CREDITS)})
+    _published(store, rec, "plex", "rk-1", [CREDITS], basis_for=[CREDITS])
+    store.save_user_markers(rec.id, [nudged], settings_fingerprint="fp")
+    registry = _registry(server_config("plex", ServerType.PLEX))
+    registry.get("plex").get_markers.return_value = _plex_rows(CREDITS)
+
+    payload = inspect.item_payload(PATH, registry=registry, store=store)
+    row = _row(payload, "plex")
+
+    assert row["plan"] == "will_replace"
+    # ... and the times it will replace with are the user's, not the ones the item already shows.
+    assert payload["decisions"]["credits"]["marker"]["start_ms"] == 1_291_500
+    assert row["current"] == [{"type": "credits", "start_ms": 1_290_000, "end_ms": None}]
+
+
 def test_plex_own_marker_of_a_type_we_did_not_decide_is_left_out_of_the_comparison(store, factory):
     rec = _known_file(
         store,

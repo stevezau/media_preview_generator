@@ -520,14 +520,22 @@ def _expected(
 ) -> list[dict]:
     """What the server should show once published, per type.
 
-    The Plex publisher keeps (and writes back) what is already ours on the item when it agrees with the decision
-    within its version tolerance, so that is what the server should show, whatever it shows now.
+    Mirrors :func:`~.publishers.base.agreed_across_versions`, which is the rule that decides it: the Plex publisher
+    keeps (and writes back) what is already ours on the item when it agrees with the decision within its version
+    tolerance, **except for a locked type**, whose own times are written however close they are.
+
+    This never reads sibling versions, so every part of the publisher's rule that depends on them can differ. The
+    locked exception ending when the item shows a locked version's exact times reads as "will replace" where the
+    publisher keeps what the item shows: the safe way round. Two parts err the other way, for unlocked types: the
+    publisher also requires ``prior`` to agree with every sibling and drops the type when a sibling disagrees, and
+    this reads "up to date" for both.
     """
     expected = []
     for mtype in dict.fromkeys(m.type for m in wanted):
         want = [m for m in wanted if m.type is mtype]
         kept = [m for m in ours if m.type is mtype]
-        if server_type is ServerType.PLEX and kept and versions_agree(kept, want):
+        locked = any(m.locked for m in want)
+        if server_type is ServerType.PLEX and not locked and kept and versions_agree(kept, want):
             expected.extend(_marker_dict(m) for m in kept)
         else:
             expected.extend(_marker_dict(m) for m in want)

@@ -2424,6 +2424,131 @@ class TestAgreeingVersionsDoNotPingPong:
             ("intro", 11_000, 37_000),
         ]
 
+    def test_two_locked_versions_settle_on_one_answer_instead_of_alternating(self, tmp_path, sql_log):
+        # A locked type skips the "keep what the item shows" shortcut, so the user's own times always reach the
+        # server -- except when every other version is locked too. Both times are then the user's own deliberate
+        # choices, the item can show only one, and they are inside the window this app already calls one answer, so
+        # the first one to land stays. Letting each version write its own makes the runs alternate forever, and each
+        # rewrite bumps the item version, which invalidates the other version's publish basis: the loop never
+        # converges. Measured before the sibling test existed: 6 COMMITs over these 6 runs.
+        locked_a = Marker(T.CREDITS, 1_299_000, DUR, ("user",), locked=True)
+        locked_b = Marker(T.CREDITS, 1_300_500, DUR + 800, ("user",), locked=True)  # 1.5 s later, also the user's
+        decided = {self.A: {T.CREDITS: locked_a}, self.B: {T.CREDITS: locked_b}}
+        db, pub = self._item(tmp_path, decided)
+        item_row: list[Marker] = []
+        for run in range(6):
+            path, credits, duration = (self.A, locked_a, DUR) if run % 2 == 0 else (self.B, locked_b, DUR + 800)
+            item_row = _write_one(pub, [credits], previous=item_row, duration_ms=duration, path=path)
+            assert [(m.start_ms, m.end_ms, m.locked) for m in item_row] == [(1_299_000, DUR, True)]
+        assert sql_log.count("COMMIT") == 1
+        assert _rows(db, "SELECT time_offset, end_time_offset FROM taggings") == [(1_297_000, DUR)]
+
+    def test_locking_both_versions_over_the_detectors_times_still_reaches_plex(self, tmp_path):
+        # The item is showing what the *detector* decided, and the user then locks both versions within 2 s of it.
+        # Keeping ``prior`` because "the versions agree" would keep the detector's times forever and no edit would
+        # ever land -- the original bug, narrowed. ``prior`` has to *be* a locked version's own times, not merely
+        # agree with them. (The Whole-season "Edit every row" flow is how both versions get locked in one sitting.)
+        detector = Marker(T.CREDITS, 1_299_000, DUR, ("chapters",))
+        locked_a = Marker(T.CREDITS, 1_299_800, DUR, ("user",), locked=True)
+        locked_b = Marker(T.CREDITS, 1_300_000, DUR, ("user",), locked=True)
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=((self.A, None), (self.B, None)))
+        decided = {self.A: {T.CREDITS: detector}, self.B: {T.CREDITS: detector}}
+        pub = _publisher(tmp_path, folder, sibling_markers=decided.get)
+        item_row = _write_one(pub, [detector], path=self.A)
+        assert _rows(db, "SELECT time_offset FROM taggings") == [(1_297_000,)]
+
+        decided.update({self.A: {T.CREDITS: locked_a}, self.B: {T.CREDITS: locked_b}})
+        item_row = _write_one(pub, [locked_a], previous=item_row, path=self.A)
+
+        assert [(m.start_ms, m.end_ms, m.locked) for m in item_row] == [(1_299_800, DUR, True)]
+        assert _rows(db, "SELECT time_offset FROM taggings") == [(1_297_800,)]
+        # ... and the other locked version then keeps them rather than starting an alternation.
+        assert _write_one(pub, [locked_b], previous=item_row, path=self.B) == item_row
+        assert pub.last_write_changed is False
+
+    def test_re_editing_the_version_the_item_shows_lands_although_both_are_locked(self, tmp_path):
+        # Two locked versions have settled on A's times. The user opens A again and nudges it 900 ms. "First to land
+        # stays" must not swallow that: nothing new landed, and it is the user's own most recent edit to the very
+        # version they opened. ``prior`` is A's old times, which stop being any locked version's once A moves.
+        locked_a = Marker(T.CREDITS, 1_299_800, DUR, ("user",), locked=True)
+        locked_b = Marker(T.CREDITS, 1_300_000, DUR, ("user",), locked=True)
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=((self.A, None), (self.B, None)))
+        decided = {self.A: {T.CREDITS: locked_a}, self.B: {T.CREDITS: locked_b}}
+        pub = _publisher(tmp_path, folder, sibling_markers=decided.get)
+        item_row = _write_one(pub, [locked_a], path=self.A)
+        item_row = _write_one(pub, [locked_b], previous=item_row, path=self.B)
+        assert [(m.start_ms, m.end_ms) for m in item_row] == [(1_299_800, DUR)]
+
+        re_nudged = Marker(T.CREDITS, 1_300_700, DUR, ("user",), locked=True)
+        decided[self.A] = {T.CREDITS: re_nudged}
+        item_row = _write_one(pub, [re_nudged], previous=item_row, path=self.A)
+
+        assert [(m.start_ms, m.end_ms, m.locked) for m in item_row] == [(1_300_700, DUR, True)]
+        assert pub.last_write_changed is True
+        assert _rows(db, "SELECT time_offset FROM taggings") == [(1_298_700,)]
+        # ... and it settles again on the new times.
+        assert _write_one(pub, [locked_b], previous=item_row, path=self.B) == item_row
+        assert pub.last_write_changed is False
+
+    def test_three_versions_with_two_locked_settle_too(self, tmp_path, sql_log):
+        # ``any``, not ``all``: with a third, unlocked version in the item, "every other version is locked" is false
+        # for both locked ones, so both would take the exempt branch and alternate forever. Measured with ``all``:
+        # 4 COMMITs over these 6 runs.
+        C = "/data/tv/E - 720p.mkv"
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=((self.A, None), (self.B, None), (C, None)))
+        locked_a = Marker(T.CREDITS, 1_299_000, DUR, ("user",), locked=True)
+        locked_b = Marker(T.CREDITS, 1_300_500, DUR, ("user",), locked=True)
+        unlocked_c = Marker(T.CREDITS, 1_299_500, DUR, ("chapters",))
+        decided = {self.A: {T.CREDITS: locked_a}, self.B: {T.CREDITS: locked_b}, C: {T.CREDITS: unlocked_c}}
+        pub = _publisher(tmp_path, folder, sibling_markers=decided.get)
+        item_row: list[Marker] = []
+
+        for run in range(6):
+            path, credits = [(self.A, locked_a), (self.B, locked_b), (C, unlocked_c)][run % 3]
+            item_row = _write_one(pub, [credits], previous=item_row, path=path)
+            assert [(m.start_ms, m.end_ms) for m in item_row] == [(1_299_000, DUR)]  # the first writer's times stay
+
+        assert sql_log.count("COMMIT") == 1
+        assert _rows(db, "SELECT time_offset FROM taggings") == [(1_297_000,)]
+
+    def test_a_locked_version_beside_an_unlocked_one_writes_the_users_times(self, tmp_path):
+        # The other half of the sibling test: one version locked, the other not. Only the locked version's times are
+        # the user's, so they win -- and the unlocked version's own run then keeps them, so this converges too.
+        locked_a = Marker(T.CREDITS, 1_300_500, DUR, ("user",), locked=True)
+        decided = {self.A: {T.CREDITS: locked_a}, self.B: {T.CREDITS: self.CREDITS_B}}
+        db, pub = self._item(tmp_path, decided)
+
+        item_row = _write_one(pub, [locked_a], previous=[self.CREDITS_A], path=self.A)
+        assert [(m.start_ms, m.end_ms, m.locked) for m in item_row] == [(1_300_500, DUR, True)]
+
+        # The unlocked version's own run keeps those times, and carries *its* lock flag, not the sibling's: a lock
+        # belongs to the file the user edited. Its next write lets Plex keep its own markers of the type again, and
+        # the locked version's next write undoes that -- documented in ``agreed_across_versions``.
+        unlocked_run = _write_one(pub, [self.CREDITS_B], previous=item_row, duration_ms=DUR + 800, path=self.B)
+        assert [(m.start_ms, m.end_ms, m.locked) for m in unlocked_run] == [(1_300_500, DUR, False)]
+        assert _rows(db, "SELECT time_offset FROM taggings") == [(1_298_500,)]
+
+    def test_an_unlocked_single_version_item_still_keeps_what_it_shows(self, tmp_path, sql_log):
+        # The shortcut's own cell, pinned because the locked fix sits right beside it: with no sibling version
+        # ``all([])`` is True, so a single-version item takes it. A detector that wobbles by under 2 s between runs
+        # must not rewrite Plex every time -- that churn is the whole reason the shortcut exists. Only a *locked*
+        # type is exempt, because there the moved times are the user's own and discarding them is silent data loss.
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=((self.A, None),))
+        pub = _publisher(tmp_path, folder)
+        item_row = _write_one(pub, [self.CREDITS_A], path=self.A)
+        wobbled = Marker(T.CREDITS, 1_300_500, DUR, ("chapters",))
+
+        again = _write_one(pub, [wobbled], previous=item_row, path=self.A)
+
+        assert again == [self.CREDITS_A]
+        assert pub.last_write_changed is False
+        assert sql_log.count("COMMIT") == 1
+        assert _rows(db, "SELECT time_offset FROM taggings") == [(1_297_000,)]
+
     @pytest.mark.parametrize(
         ("mine", "sibling"),
         [

@@ -1471,9 +1471,10 @@ class PlexMarkerPublisher(MarkerPublisher):
         """The item's marker set: the markers of every type all versions decided alike.
 
         Plex serves one marker set per item, across all its versions. A type is desired only when every version is
-        decided, has that type and agrees within ``VERSION_AGREEMENT_MS`` (spec §6.3). The times written are the
-        calling file's, unless what this app already left on the item (``prior``) agrees with every version too:
-        then that stays, so versions whose times differ slightly don't rewrite each other's markers on every run.
+        decided, has that type and agrees within ``VERSION_AGREEMENT_MS`` (spec §6.3). Which version's times are
+        written -- the calling file's, or what this app already left on the item -- is
+        :func:`~.base.agreed_across_versions`'s rule, including the exception a locked type makes; it isn't restated
+        here.
 
         Raises:
             PublishError: Stacked multi-part files.

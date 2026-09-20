@@ -61,7 +61,11 @@ a version added after publish, an undecided sibling). The fix is to track and co
 ## Follow-ups from the combined review (2026-09-14)
 - A per-(server, item) process lock covers item-row read → write → item-row/basis update, so two versions can't race.
 - When versions agree within 2 s, the Plex publisher keeps what is already on the item (no rewrite ping-pong); item rows
-  compare by (type, start, end).
+  compare by (type, start, end). **A locked type is the exception**: the user's own times are written even when they
+  are within 2 s of what the item shows, because the whole difference an editor nudge makes is smaller than that.
+  Unless the item is already showing a locked version's own times — then both are the user's, the item can show only
+  one, and the first to land stays, so locked versions settle instead of alternating forever. "Agrees within 2 s" is
+  not enough for that: times nobody locked (the detector's, from before the locks) must always give way.
 - The up-to-date skip is bypassed on a forced re-detect and while the file is waiting.
 - `write(..., own_previous=)` carries the file's last published set when its Plex item id changed (merge/split), so the
   moved part's old `pv:` keys are removed when they serve exactly that.

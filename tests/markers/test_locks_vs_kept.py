@@ -187,7 +187,10 @@ class TestPlexPublisher:
         assert unlocked.last_write_changed is False
 
         locked = _plex_publisher(tmp_path, folder, redetect="keep_plex")
-        # The item keeps the times it already shows (they agree); ``decided_by`` is the record's, the lock the user's.
+        # The user's times here are byte-for-byte the ones the item already shows, so they *are* a locked version's
+        # own times and the record stays as it is -- ``decided_by`` the record's, the lock the calling file's. Only
+        # the stale ``final`` flag is put right. A locked type that actually moves is
+        # ``TestAgreeingVersionsDoNotPingPong`` in test_plex_db_publisher.py.
         assert _write_one(locked, [LOCKED_CREDITS], previous=[CREDITS_FINAL], path=PLEX_PATH) == [
             replace(CREDITS_FINAL, locked=True)
         ]
@@ -198,9 +201,11 @@ class TestPlexPublisher:
             {"startTimeOffset": 1_297_000, "endTimeOffset": DUR, "final": True}
         ]
 
-    def test_a_lock_survives_the_item_keeping_another_versions_agreeing_times(self, tmp_path):
-        # A multi-version item keeps the times it already shows when every version agrees with them. The times are the
-        # item's, the lock is the calling file's -- and it decides whether Plex may keep its own rows of the type.
+    def test_a_lock_outranks_the_item_keeping_another_versions_agreeing_times(self, tmp_path):
+        # locked type (unless the item already shows a locked version's exact times; this sibling is unlocked). That shortcut stops two versions rewriting each other over a sub-``VERSION_AGREEMENT_MS``
+        # locked type. That shortcut stops two versions rewriting each other over a sub-``VERSION_AGREEMENT_MS``
+        # difference, and an editor nudge is smaller than that, so it would silently hand the user back the times
+        # they just changed. The user's own times win, and the lock decides whether Plex may keep its own rows.
         other = "/data/tv/S01E01 - 2160p.mkv"
         folder = tmp_path / "Plex Media Server"
         db = _make_db(folder, parts=((PLEX_PATH, None), (other, None)), journal_mode="delete")
@@ -215,10 +220,28 @@ class TestPlexPublisher:
 
         ours = _write_one(pub, [locked_a_little_later], previous=item_row, path=PLEX_PATH)
 
-        # The item's own times win (every version agrees with them), and the calling file's lock rides along.
-        assert [(m.start_ms, m.end_ms, m.locked) for m in ours] == [(11_000, 37_000, True)]
+        # The user's own times win although the item's agree with them, and Plex's redetected rows are replaced.
+        assert [(m.start_ms, m.end_ms, m.locked) for m in ours] == [(11_500, 37_500, True)]
         assert (pub.last_kept_types, pub.last_replaced_own_types) == (frozenset(), {T.INTRO})
-        assert _served(db) == [(T.INTRO, 11_000, 37_000)]
+        assert _served(db) == [(T.INTRO, 11_500, 37_500)]
+        assert pub.last_write_changed is True
+
+    def test_a_half_second_edit_of_a_single_version_item_reaches_plex(self, tmp_path):
+        # The shortcut needs no sibling version to fire: ``all([])`` is True, so a single-version item took it too,
+        # and an arrow-key nudge -- the editor's headline interaction -- is always inside ``VERSION_AGREEMENT_MS``.
+        # Discarding it reported the row ``unchanged`` and never set a new publish basis, so every later run repeated
+        # the same silent no-op.
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=((PLEX_PATH, None),), journal_mode="delete")
+        pub = _plex_publisher(tmp_path, folder, redetect="keep_plex")
+        item_row = _write_one(pub, [INTRO], path=PLEX_PATH)
+        nudged = replace(INTRO, end_ms=37_500, decided_by=(Source.USER.value,), locked=True)
+
+        ours = _write_one(pub, [nudged], previous=item_row, path=PLEX_PATH)
+
+        assert [(m.start_ms, m.end_ms, m.locked) for m in ours] == [(11_000, 37_500, True)]
+        assert _served(db) == [(T.INTRO, 11_000, 37_500)]
+        assert pub.last_write_changed is True
 
 
 def _set_intro_key(db):
