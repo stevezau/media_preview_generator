@@ -255,7 +255,9 @@ class TestStartJobModalIntroCredits:
         page.locator('.job-library-checkbox[data-server-id="plex-1"][value="1"]').check()
         page.locator('.job-library-checkbox[data-server-id="plex-1"][value="2"]').check()
 
-        with page.expect_request("**/api/markers/jobs"):
+        with page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/jobs"), timeout=5000
+        ):
             _start_button(page).click()
 
         expect(page.locator("#newJobModal")).to_be_hidden(timeout=3000)
@@ -279,7 +281,9 @@ class TestStartJobModalIntroCredits:
         page.locator('.job-library-checkbox[data-server-id="plex-1"][value="1"]').check()
         page.locator('.job-library-checkbox[data-server-id="jf-1"][value="1"]').check()
 
-        with page.expect_request("**/api/markers/jobs"):
+        with page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/jobs"), timeout=5000
+        ):
             _start_button(page).click()
 
         assert posts[0]["libraries"] == [
@@ -296,7 +300,9 @@ class TestStartJobModalIntroCredits:
         page.locator("#jobMarkersForce").check()
         page.locator("#jobPriority").select_option("1")
 
-        with page.expect_request("**/api/markers/jobs"):
+        with page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/jobs"), timeout=5000
+        ):
             _start_button(page).click()
 
         assert posts[0]["libraries"] == []
@@ -313,7 +319,7 @@ class TestStartJobModalIntroCredits:
         page.locator('.job-library-checkbox[data-server-id="plex-1"][value="2"]').check()
         page.locator("#jobRegenerateAll").check()
 
-        with page.expect_request("**/api/jobs"):
+        with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith("/api/jobs"), timeout=5000):
             _start_button(page).click()
 
         assert markers_posts == []

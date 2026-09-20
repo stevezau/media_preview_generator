@@ -685,10 +685,12 @@ class TestIntroCreditsTab:
         button = page.locator("#markersRedetectBtn")
         expect(button).to_be_enabled()
 
-        with page.expect_request("**/api/markers/item/redetect") as req:
+        with page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/redetect"), timeout=5000
+        ) as req:
             button.click()
 
-        assert req.value.method == "POST"
+        assert req.value.request.method == "POST"
         assert inspector.redetect_bodies == [{"path": _MEDIA_FILE}]
         toast = page.locator("#toastNotification")
         expect(toast).to_contain_text("Queued — see the Dashboard", timeout=3000)

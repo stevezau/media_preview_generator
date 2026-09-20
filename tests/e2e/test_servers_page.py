@@ -294,9 +294,12 @@ class TestServersAddFlows:
         servers_page.locator("#step-connect-test").click()
         expect(servers_page.locator("#connectResult")).to_contain_text("Test Plex", timeout=3000)
         # Wait for POST so the assertions don't race the request.
-        with servers_page.expect_request("**/api/servers") as req_info:
+        with servers_page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/servers"),
+            timeout=5000,
+        ) as req_info:
             servers_page.locator("#step-result-save").click()
-        req_info.value  # noqa: B018
+        req_info.value  # noqa: B018 — the response landed, so the mock recorded the body
         assert captured, "POST /api/servers never fired"
         assert captured[0]["type"] == "plex"
         assert captured[0]["url"] == "http://plex.local:32400"
@@ -316,9 +319,12 @@ class TestServersAddFlows:
         servers_page.locator("#authPassword").fill("hunter2")
         servers_page.locator("#step-connect-test").click()
         expect(servers_page.locator("#connectResult")).to_contain_text("Connected")
-        with servers_page.expect_request("**/api/servers") as req_info:
+        with servers_page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/servers"),
+            timeout=5000,
+        ) as req_info:
             servers_page.locator("#step-result-save").click()
-        req_info.value  # noqa: B018
+        req_info.value  # noqa: B018 — the response landed, so the mock recorded the body
         assert captured
         assert captured[0]["type"] == "emby"
         # Tighten: pin the URL the user typed, not just the vendor.
@@ -343,7 +349,10 @@ class TestServersAddFlows:
         authed_page.goto(f"{app_url}/servers")
         authed_page.wait_for_load_state("domcontentloaded")
         expect(authed_page.locator("#serverList")).to_contain_text("Home", timeout=3000)
-        with authed_page.expect_request("**/api/servers/*/refresh-libraries") as req_info:
+        with authed_page.expect_response(
+            lambda r: r.request.method == "POST" and "/api/servers/" in r.url and r.url.endswith("/refresh-libraries"),
+            timeout=5000,
+        ) as req_info:
             authed_page.locator(".refresh-libraries-btn").first.click()
-        req_info.value  # noqa: B018
-        assert called, "POST /api/servers/<id>/refresh-libraries never fired"
+        req_info.value  # noqa: B018 — the response landed, so the mock recorded the call
+        assert called and called[0].endswith("/api/servers/p1/refresh-libraries"), called

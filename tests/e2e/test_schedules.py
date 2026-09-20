@@ -126,9 +126,11 @@ class TestScheduleNonPlex:
             "#newScheduleModal button.btn-primary, #newScheduleModal button:has-text('Save')"
         ).last
         # Wait for POST to fire so the assertion below isn't racing it.
-        with authed_page.expect_request("**/api/schedules") as req_info:
+        with authed_page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/schedules"), timeout=5000
+        ) as req_info:
             save_btn.click()
-        req_info.value  # noqa: B018 — ensures the request landed
+        req_info.value  # noqa: B018 — the response landed, so the mock recorded the body
 
         assert captured, "POST /api/schedules never fired"
         body = captured[0]
@@ -176,9 +178,11 @@ class TestScheduleNonPlex:
         save_btn = authed_page.locator(
             "#newScheduleModal button.btn-primary, #newScheduleModal button:has-text('Save')"
         ).last
-        with authed_page.expect_request("**/api/schedules") as req_info:
+        with authed_page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/schedules"), timeout=5000
+        ) as req_info:
             save_btn.click()
-        req_info.value  # noqa: B018 — ensures the request landed
+        req_info.value  # noqa: B018 — the response landed, so the mock recorded the body
 
         assert captured, "POST /api/schedules never fired"
         body = captured[0]
@@ -244,8 +248,10 @@ def _capture_schedule_writes(page: Page, schedules: list[dict]) -> list[tuple[st
     return captured
 
 
-def _save_schedule(page: Page, url_glob: str) -> None:
-    with page.expect_request(url_glob):
+def _save_schedule(page: Page, path: str, method: str = "POST") -> None:
+    """Click Save and wait for the write's RESPONSE: waiting for the request would let a caller's assertion run
+    before ``_capture_schedule_writes`` recorded the body (it flakes under ``-n 8``)."""
+    with page.expect_response(lambda r: r.request.method == method and r.url.endswith(path), timeout=5000):
         page.locator("#scheduleSubmitBtn").click()
 
 
@@ -274,7 +280,7 @@ class TestScheduleIntroCredits:
             "Checks the chosen libraries for intro and credits markers. Files already done are skipped. "
             "Low priority unless you pick otherwise."
         )
-        _save_schedule(authed_page, "**/api/schedules")
+        _save_schedule(authed_page, "/api/schedules")
 
         assert [method for method, _ in captured] == ["POST"]
         body = captured[0][1]
@@ -296,7 +302,7 @@ class TestScheduleIntroCredits:
         expect(authed_page.locator("#scanModeMarkers")).to_be_checked()
         expect(authed_page.locator("#scheduleLookbackGroup")).to_be_hidden()
         expect(authed_page.locator("#scheduleSortByGroup")).to_be_hidden()
-        _save_schedule(authed_page, "**/api/schedules/sch-ic")
+        _save_schedule(authed_page, "/api/schedules/sch-ic", method="PUT")
 
         assert [method for method, _ in captured] == ["PUT"]
         assert captured[0][1]["config"] == {"job_type": "intro_credits"}
@@ -330,7 +336,7 @@ class TestScheduleIntroCredits:
         )
         # A library pick left from before doesn't block the save: Check servers has no libraries.
         authed_page.evaluate("document.getElementById('scheduleLibraryAll').checked = false")
-        _save_schedule(authed_page, "**/api/schedules")
+        _save_schedule(authed_page, "/api/schedules")
 
         assert [method for method, _ in captured] == ["POST"]
         body = captured[0][1]
@@ -377,7 +383,7 @@ class TestScheduleIntroCredits:
         expect(authed_page.locator("#scheduleMarkersCheckServers")).to_be_checked()
         expect(authed_page.locator("#scheduleServerGroup")).to_be_hidden()
         expect(authed_page.locator("#scheduleLibrariesGroup")).to_be_hidden()
-        _save_schedule(authed_page, "**/api/schedules/sch-ic")
+        _save_schedule(authed_page, "/api/schedules/sch-ic", method="PUT")
 
         assert [method for method, _ in captured] == ["PUT"]
         assert captured[0][1]["config"] == {"job_type": "intro_credits", "reconcile": True}
@@ -420,6 +426,6 @@ class TestScheduleIntroCredits:
         expect(authed_page.locator("#scheduleSortByGroup")).to_be_visible()
         authed_page.locator("#scheduleSortBy").select_option("random")
 
-        _save_schedule(authed_page, "**/api/schedules")
+        _save_schedule(authed_page, "/api/schedules")
 
         assert captured[0][1]["config"] == {"job_type": "full_library", "sort_by": "random"}

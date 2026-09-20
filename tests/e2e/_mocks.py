@@ -12,6 +12,10 @@ Two flavours of helper:
 * ``capture_*`` — register the route AND return a list that captures
   the JSON bodies sent to it. Tests can assert against the captured
   payload to verify the wizard/page sent the right shape.
+
+Every handler that captures MUST append before it calls ``_fulfill_json``: tests wait for the *response* to know the
+body was recorded (waiting for the request doesn't, the browser sends that before this handler runs), so fulfilling
+first silently reintroduces a capture race that only shows under ``-n 8``.
 """
 
 from __future__ import annotations
@@ -391,12 +395,13 @@ def mock_server_health_check_apply(page: Page, ok: bool = True) -> list[bool]:
     return called
 
 
-def mock_servers_refresh_libraries(page: Page, count: int = 2) -> list[bool]:
-    """POST /api/servers/<id>/refresh-libraries. Returns a list capturing each call."""
-    called: list[bool] = []
+def mock_servers_refresh_libraries(page: Page, count: int = 2) -> list[str]:
+    """POST /api/servers/<id>/refresh-libraries. Returns a list capturing each call's url, so a test can pin
+    which server was refreshed (the glob matches any id)."""
+    called: list[str] = []
 
     def handler(route: Route) -> None:
-        called.append(True)
+        called.append(route.request.url)
         _fulfill_json(route, {"ok": True, "count": count, "libraries": []})
 
     page.route("**/api/servers/*/refresh-libraries", handler)
