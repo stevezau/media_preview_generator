@@ -19,7 +19,7 @@ published to every server that has the file. Feature name in the UI: **"Intro & 
    https://claude.ai/code/artifact/65394c1a-e878-4fc2-985b-63bc4c307c5d (source: `evidence/design/index.html`).
 5. Memory notes: `intro-credits-markers-design`, `lab-servers-on-storage`, `design-doc-survives-clear`.
 
-**Status (2026-09-19).** Phase 1 (§12: store, chapters/online detection, Intro & Credits job type, Plex + Jellyfin
+**Status (2026-09-20).** Phase 1 (§12: store, chapters/online detection, Intro & Credits job type, Plex + Jellyfin
 publishers, per-server Edit tab, Settings section, Inspector tab, config migration, docs) is built, audited and
 lab-proven: lab matrix 18/19 (row 11 unit-tested), `pr-241` image checked on the lab, and a scale run on 715 real files
 with 0 failures (`evidence/lab/phase1-results.md`). Its findings are fixed in §5.5 rules 6–7 and a warning when an
@@ -42,16 +42,25 @@ self-test, the Settings row, the Inspector "Credit text" lane, and the accuracy 
 tooltip; §14 2026-09-18). The harness gate passes 5 of 5 on the 80 hand-checked files (movies40 + tv40) on both
 decode paths and fails 3 of 5 on the harder 205-movie set — a disclosed detector-gap limitation, not fixed here
 (§5.4, §13 item 14; owner, 2026-09-18): ships at "Medium" now, "High" needs a second source until that gap closes.
-Rule J version 2 (final review, §14 2026-09-19) narrowed that gap (205 Medium useful 90 → 96, no early answer added),
-fixed §13 item 13 and stopped text that never leaves the screen reading as a roll; the 205 still fails 3 of 5.
-Rulings T-R1–T-R9 and contradictions C1–C7 resolved while planning phase 3 are in §14. Lab matrix
-(`evidence/lab/phase3-results.md`): 15 of 16 rows pass on storage and on the `plex` host's real NVIDIA and Intel GPUs;
-row 14 is partial (no NVIDIA-side contamination during the Intel self-test, but `intel_gpu_top` never showed Intel
-render work; §13 item 12). The `pr-241` image (`sha256:f96684678a6fb40a2dfbb3000ea32e958410dcfcc61cec5224cf84fc57f223a8`,
-from `a3c6c32`) re-ran rows 1, 2, 3 and 16 on the lab, and ran the detector on one real season on `plex` beside
-production (§14, 2026-09-19): 10 of 11 starts within 10 s (E04 no answer), every answered episode's after-credits
-scene kept. Next: owner review, then
-phase 4. Build runs on PR #241, branch
+Rule J version 2 (final review, §14 2026-09-19/20) narrowed that gap (205 Medium useful 90 → 96, no early answer
+added), fixed §13 item 13, stopped text that never leaves the screen reading as a roll, and reads before the tail for
+a roll the tail cuts into; rule J alone now meets §5.4 on **both** decode paths (GPU 64 within 10 s, CPU 59, 1 early
+each). The 205 still fails 3 of 5. Rulings T-R1–T-R9 and contradictions C1–C7 resolved while planning phase 3 are in
+§14. **The whole PR was then reviewed in eight lanes** (security and web, jobs and workers, servers and publishers,
+detection, harness, CI/Docker/docs, UI, cleanup); it also fixed the VP9 keyframe
+pass (§5.4 Frames), the two bugs the final scale run exposed (§14 2026-09-19: Plex's own migration leaving parts the
+publisher refused, fixed; and this app's earlier markers counting as a server's second opinion, fixed for Emby
+through the Bridge store and still open for Plex, §13 item 17) and added the broadcast-TV limit (§13 item 15). Lab
+matrix (`evidence/lab/phase3-results.md`): **16 of 16** rows pass on `final-2` (`bd9e561`) — row 14 now outright,
+from the Intel GPU's own per-process render counters (NVIDIA publishes none; `nvidia-smi pmon` shows the absence) —
+with phase 2 24 of 24 and phase 1's 16 re-run rows 16 of 16 on the same image, beside a final-2 scale run of 711 real
+files (`evidence/lab/phase1-results.md` "Final (final-2, bd9e561)"; the 715-file run above is 2026-09-14's, and
+final-2's 24 Failed Plex rows are finding 1, fixed and re-proven). The published `pr-241` image
+(`sha256:813f67cb5550d1ce0abd564c95b88b42379dbdb02ae48fbc4e589f5c677a9042`, from `003a8d1`) re-ran rows 1, 2, 3, 16
+and phase 2's row 24 on the lab, and an earlier build ran the detector on one real season on `plex` beside production
+(§14, 2026-09-19): 10 of 11 starts within 10 s (E04 no answer), every answered episode's after-credits scene kept.
+Tests: 11,429 unit/integration (88.84 %), 363 e2e, the CI integration selection; CI green on `003a8d1` including the
+new arm64 image check. Next: owner review, then phase 4. Build runs on PR #241, branch
 `feat/markers-detection`; spec, slimmed evidence and plans live in `docs/design/intro-credits/`. Local-only, gitignored
 files stay beside them: `evidence/lab/env` (tokens), `evidence/lab/synth/` (webm), `evidence/lab/scale_mounts.sh` and
 `evidence/lab/results/` (real library paths), `evidence/online/skipdb-dump.json`,
@@ -878,10 +887,12 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
    **Done (2026-09-19), then final-reviewed across the whole PR (2026-09-20):** rule J version 2 meets §5.4 on both
    decode paths (GPU 64 within 10 s, CPU 59, 1 early each); the lab matrix is **16 of 16** on `final-2` (`bd9e561`,
    `evidence/lab/phase3-results.md`), with phase 2 24 of 24 and phase 1 16 of 16 on the same image, a scale run over
-   711 real files, and the `pr-241` image's own re-run of rows 1, 2, 3 and 16 plus one real season on `plex`. The
-   review also closed two bugs the scale run exposed (Plex's own migration leaving parts the publisher refused; the
-   app's earlier markers read back as a server's second opinion) and one accuracy risk it found on broadcast TV
-   (§13 item 15). Tests: 11,429 unit/integration (88.86 %), 363 e2e, the CI integration selection, all green.
+   711 real files, and the published `pr-241` image's re-run of rows 1, 2, 3, 16 and phase 2's row 24 (an earlier
+   `pr-241` build ran one real season on `plex`). The
+   review also closed one of the two bugs the scale run exposed (Plex's own migration leaving parts the publisher
+   refused) and narrowed the other (the app's earlier markers read back as a server's second opinion: fixed for Emby,
+   still open for Plex, §13 item 17), and recorded one accuracy risk on broadcast TV (§13 item 15). Tests: 11,429
+   unit/integration (88.84 %), 363 e2e, the CI integration selection, all green.
    Waiting on owner review.
 4. **Polish.** Adjust/Lock editor, AniSkip, Setup Health checks, helper container for Plex on another machine, docs.
 
@@ -904,12 +915,14 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
 11. **Dolby Vision profile 5 credits text is unmeasured** — 0 of the 80 hand-checked files and 0 of the 205-movie
     set are profile 5 (`evidence/credits/phase3-measurements.md` M5); the detector reads the base layer's luma like
     any file, but this hasn't been checked against a real profile-5 credit roll.
-12. **Dawn's device choice on a two-GPU host is half proven.** The WebGPU EP's own device selection doesn't choose
-    the physical adapter Dawn runs on (T-R3). Task 13 rows 12–14 on `plex` (TITAN RTX + Intel UHD 770): each helper
-    gets its own device's PCI address, and the Intel self-test never put a process on the NVIDIA card. But
-    `intel_gpu_top` read 0 % on every engine while the Intel helper ran, so the Intel side's own render work is
-    inferred from the helper's arguments, not seen on the hardware (row 14 partial). Either way the Intel self-test
-    chose the CPU on that iGPU, so nothing beyond the self-test's own frames ran on it.
+12. ~~**Dawn's device choice on a two-GPU host is half proven.**~~ — **closed on the final image** (`final-2`,
+    `bd9e561`; `evidence/lab/phase3-results.md` "Final (final-2, bd9e561) — plex rows"). The WebGPU EP's own device
+    selection doesn't choose the physical adapter Dawn runs on (T-R3), so row 14 now checks the hardware itself: all
+    8 WebGPU helpers carried `--pci-bus-id 0000:00:02.0` and 2.08–2.81 s of `drm-engine-render` time in their own
+    Intel DRM fdinfo, and none had a DRM file open on another device. The NVIDIA driver publishes no DRM fdinfo
+    counters, so its half stays an absence check: `nvidia-smi pmon` listed no text detection helper on the TITAN in
+    36 samples. Either way the Intel self-test chose the CPU on that iGPU, so nothing beyond the self-test's own
+    frames ran on it.
 13. ~~A lone credit-text keyframe inside a scene, within 24 s of the roll, joins rule J's run and extends it over
     that scene~~ — **fixed in rule J version 2** (§5.4): the end steps back over a lit credit keyframe glued on after
     a scene frame, and the 1 fps walk stops where the scene starts. Whether there is an end is still decided from the
@@ -1424,3 +1437,8 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   Plex library sample gives each `extra_data` form its own 50 newest rows, since the credits `final` migration rewrites
   parts where they are and a URL-encoded part keeps its old id. The Emby plugin answers `Replacing*Ticks` (needs a
   plugin build; §13 item 18).
+- 2026-09-20 · Final review closed: the branch is pushed to `003a8d1`, where CI is green including the new arm64
+  image job (the lab-evidence commits after it are docs only),
+  and the published `pr-241` image (`sha256:813f67cb…`) passed its own checks (detector exit 0, model sha256 = the
+  pin, ffmpeg 8.1.2) and re-ran lab rows 1, 2, 3, 16 and phase 2's row 24, with credit text giving no answer on the
+  lab's burnt-in-timecode episodes. Still the owner's to do: the Emby catalog submission (roadmap checkpoint 4).
