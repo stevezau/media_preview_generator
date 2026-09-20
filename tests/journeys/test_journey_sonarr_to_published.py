@@ -77,7 +77,6 @@ def _reset_singletons(tmp_path):
 def app(tmp_path, monkeypatch):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
-    monkeypatch.setenv("CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("WEB_AUTH_TOKEN", "test-token-12345678")
     # Pre-seed settings: setup complete, webhooks enabled, debounce 0s so
     # the timer fires immediately when start() is called.
@@ -104,6 +103,11 @@ def app(tmp_path, monkeypatch):
     )
     auth_path = config_dir / "auth.json"
     auth_path.write_text(json.dumps({"token": "test-token-12345678"}))
+    # CONFIG_DIR is pointed at this folder only once its settings.json exists: a thread still finishing the
+    # previous test can create the settings singleton at any moment, and one created for an empty folder
+    # would be kept by create_app (same config dir) with none of these settings.
+    monkeypatch.setenv("CONFIG_DIR", str(config_dir))
+    reset_settings_manager()
     app = create_app(config_dir=str(config_dir))
     return app
 

@@ -29,7 +29,7 @@ from unittest.mock import patch
 import pytest
 
 from media_preview_generator.web.app import create_app
-from media_preview_generator.web.settings_manager import reset_settings_manager
+from media_preview_generator.web.settings_manager import get_settings_manager, reset_settings_manager
 
 pytestmark = pytest.mark.journey
 
@@ -72,6 +72,9 @@ def _reset_singletons():
         except Exception:
             pass
     wh_mod._pending_timers.clear()
+    # Belt and braces: the next test's autouse setup resets this too, and its fixture writes settings.json before
+    # pointing CONFIG_DIR at it.
+    reset_settings_manager()
 
 
 def _settings_with_debounce(config_dir, debounce_seconds: int, plex_cfg_path: str) -> None:
@@ -119,23 +122,41 @@ def _make_plex_cfg(tmp_path) -> str:
 @pytest.fixture()
 def app_immediate(tmp_path, monkeypatch):
     """App with debounce = 0s — Timer fires immediately."""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    monkeypatch.setenv("CONFIG_DIR", str(config_dir))
-    monkeypatch.setenv("WEB_AUTH_TOKEN", "test-token-12345678")
-    _settings_with_debounce(config_dir, 0, _make_plex_cfg(tmp_path))
-    return create_app(config_dir=str(config_dir))
+    return _app_with_debounce(tmp_path, monkeypatch, 0)
 
 
 @pytest.fixture()
 def app_debounced(tmp_path, monkeypatch):
     """App with debounce = 60s — used to verify fire-now actually skips the wait."""
+    return _app_with_debounce(tmp_path, monkeypatch, 60)
+
+
+def _app_with_debounce(tmp_path, monkeypatch, debounce_seconds: int):
+    """An app on its own config dir, written BEFORE ``CONFIG_DIR`` points at it.
+
+    A thread still finishing the previous test can call ``get_settings_manager()`` at any moment. If it does so while
+    ``CONFIG_DIR`` already names this test's folder but its settings.json isn't written yet, the singleton it creates
+    holds no settings, and ``create_app`` keeps it (same config dir), so the webhook reads the 60 s default instead of
+    this test's delay and the job fires long after the test has given up. Writing the file first makes any such
+    manager load the right values.
+    """
     config_dir = tmp_path / "config"
     config_dir.mkdir()
+    _settings_with_debounce(config_dir, debounce_seconds, _make_plex_cfg(tmp_path))
     monkeypatch.setenv("CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("WEB_AUTH_TOKEN", "test-token-12345678")
-    _settings_with_debounce(config_dir, 60, _make_plex_cfg(tmp_path))
-    return create_app(config_dir=str(config_dir))
+    reset_settings_manager()
+    app = create_app(config_dir=str(config_dir))
+    assert get_settings_manager().get("webhook_delay") == debounce_seconds, (
+        "the app is holding a settings manager built before this fixture wrote settings.json"
+    )
+    return app
+
+
+# A webhook's job runs on a Timer thread one second after the POST (webhooks.py clamps the delay to at least 1 s), so
+# every wait here is for that timer plus an inline run_job. The budget is liveness slack only: a passing run returns as
+# soon as the event is set. It is not what makes this file stable under -n 4 — the fixture below is.
+_RUN_WAIT_S = 10.0
 
 
 def _auth_headers():
@@ -183,7 +204,7 @@ class TestSingleWebhookProducesOneJob:
                 headers=_auth_headers(),
             )
             assert response.status_code == 202
-            assert run_event.wait(timeout=3.0), "run_processing was never invoked end-to-end"
+            assert run_event.wait(timeout=_RUN_WAIT_S), "run_processing was never invoked end-to-end"
 
         # Exactly one Job — the debounce → batch → create_job chain ran
         # exactly once. A regression that double-fires (e.g. two Timers
@@ -250,7 +271,7 @@ class TestDuplicateWebhooksDedupToOneJob:
             r1 = client.post("/api/webhooks/sonarr", json=payload, headers=_auth_headers())
             r2 = client.post("/api/webhooks/sonarr", json=payload, headers=_auth_headers())
             r3 = client.post("/api/webhooks/sonarr", json=payload, headers=_auth_headers())
-            assert run_event.wait(timeout=3.0), "First webhook never produced a Job"
+            assert run_event.wait(timeout=_RUN_WAIT_S), "First webhook never produced a Job"
             # Brief settle so any second/third (incorrectly scheduled) timer would also fire.
             time.sleep(0.2)
 
@@ -334,9 +355,9 @@ class TestFireNowSkipsDebounce:
                 f"fire-now should return 202 when the batch was found; got {fire_response.status_code}"
             )
 
-            # Job must materialise way under 60 s (we wait at most 3 s).
-            assert run_event.wait(timeout=3.0), (
-                "fire-now did not result in run_processing being invoked within 3s. "
+            # Job must materialise way under 60 s (we wait at most _RUN_WAIT_S).
+            assert run_event.wait(timeout=_RUN_WAIT_S), (
+                f"fire-now did not result in run_processing being invoked within {_RUN_WAIT_S}s. "
                 "Either the timer wasn't cancelled and the synchronous dispatch path is broken, "
                 "OR the fire-now endpoint failed silently."
             )
@@ -561,8 +582,8 @@ class TestFireWebhookNowByJobId:
                 f"Body: {fire_response.get_data(as_text=True)!r}"
             )
 
-            assert run_event.wait(timeout=3.0), (
-                "Per-job fire-webhook-now did not dispatch the batch within 3s — "
+            assert run_event.wait(timeout=_RUN_WAIT_S), (
+                f"Per-job fire-webhook-now did not dispatch the batch within {_RUN_WAIT_S}s — "
                 "the shared helper or the job→key lookup is broken."
             )
 
