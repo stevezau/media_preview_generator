@@ -49,8 +49,10 @@ PORT_DIVERGENCES = {"movie-03", "movie-12", "movie-25", "movie-29", "movie-38", 
 ABOUT = (
     "Rule J regression rows for the 80 credits files of spec §5.4, anonymised by tools.markers_eval.credits_fixture. "
     "Each row is [pts, box count, luma]: the prototype these were measured with recorded how many text boxes a frame "
-    "held, never where they were, and re-measuring the files would replace the rows the port is pinned against. Rule "
-    "J reads no positions; rows that carry them are in the harness's decode cache and in credits_synth_lab.json.gz."
+    "held, never where they were, and re-measuring the files would replace the rows the port is pinned against. "
+    "These rows carry no positions, so rule J's three position steps find nothing to read here and every answer "
+    "below is version 2's. The rule itself does read positions, on rows that carry them: the harness's decode cache "
+    "and credits_synth_lab.json.gz."
 )
 
 

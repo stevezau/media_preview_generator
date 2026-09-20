@@ -79,13 +79,33 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_credits_text(args: argparse.Namespace) -> int:
-    from .credits_text import UnknownSetError, run_credits_text
+    from .credits_text import SweepError, UnknownSetError, run_credits_text, sweep_credits_text
 
     ffmpeg = args.ffmpeg or shutil.which("ffmpeg")
     if ffmpeg is None:
         sys.exit("No ffmpeg found (pass --ffmpeg)")
     root = Path(args.cache or os.environ.get("MARKERS_EVAL_CACHE") or Path.home() / ".cache/markers_eval")
     baseline = Path(args.plex_baseline) if args.plex_baseline else evidence_dir() / DEFAULT_BASELINE
+    if args.sweep:
+        # A sweep reports its cells, not one run: it has no single answer set to diff, no online cases and no sheets,
+        # so these would be accepted and then quietly dropped.
+        ignored = [name for name in ("changed_since", "online", "sheets") if getattr(args, name)]
+        if ignored:
+            sys.exit("--sweep cannot be combined with " + ", ".join(f"--{name.replace('_', '-')}" for name in ignored))
+        try:
+            summary, _cells = sweep_credits_text(
+                decode=args.decode, gpu_device=args.gpu_device, sets=tuple(args.sets.split(",")), specs=args.sweep,
+                cache_root=root, ffmpeg=ffmpeg, ffprobe=ffprobe_path_for(ffmpeg), baseline_path=baseline,
+            )  # fmt: skip
+        except (SweepError, UnknownSetError) as exc:
+            # A sweep that measured nothing must never print a table: both of these mean no cell was run as asked.
+            sys.exit(str(exc))
+        table = summary.pop("table")
+        print(table)
+        print(json.dumps(summary, indent=2))
+        if args.json:
+            Path(args.json).write_text(json.dumps({**summary, "table": table}, indent=1, default=str))
+        return 0
     before = json.loads(Path(args.changed_since).read_text())["details"] if args.changed_since else None
     try:
         summary, details, passed = run_credits_text(
@@ -140,6 +160,14 @@ def main(argv: list[str] | None = None) -> int:
         "--changed-since",
         help="an earlier run's --json file: list every answer that moved more than 10 s against it (and give each "
         "sheets with --sheets)",
+    )
+    text.add_argument(
+        "--sweep",
+        action="append",
+        metavar="rule_j.NAME=v1,v2,...",
+        help="sweep one of rule J's constants over these values instead of reporting a run (repeat for a cross "
+        "product); prints a markdown table carrying the columns evidence/eval/phase3-harness.md's sweep "
+        "tables carry, plus what each cell decoded",
     )
     text.add_argument("--ffmpeg")
     text.add_argument("--cache")

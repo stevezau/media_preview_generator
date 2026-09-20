@@ -3,8 +3,11 @@
     MEDIA_PREVIEW_TEXTDET_MODEL=... python -m tools.markers_eval.credits_synth_fixture [--decode gpu|cpu]
 
 The rows are the app's own decode of ``evidence/lab/synth`` (git-ignored; set ``MARKERS_EVAL_EVIDENCE`` from a
-worktree), read through ``detector.find_credits`` with ``rule_j.text_all_through`` and ``rule_j.overlay_boxes`` patched
-off, which is the view rule J version 1 had when the fixture's ``version_1_start_s`` was measured.
+worktree), read through ``detector.find_credits`` with every step rule J version 1 didn't have patched off --
+``rule_j.text_all_through``, ``rule_j.overlay_boxes``, ``rule_j.same_roll`` and ``rule_j.reach_back`` -- which is the
+view rule J version 1 had when the fixture's ``version_1_start_s`` was measured. All four, not only the first two:
+the refine window is decoded from the coarse start, so any step that moves that start replaces the fine rows the
+build checks itself against (:func:`rows_of`).
 
 Every file is decoded again and checked against the fixture it replaces: each row's time, box count and mean luma must
 match row for row, or the build stops. The pinned answers were measured on exactly these rows; only the boxes'
@@ -79,11 +82,21 @@ def rows_of(item: dict, path: Path, *, decode: str, detect_boxes, probe) -> tupl
     Returns:
         The keyframe rows and the 1 fps refine rows.
     """
-    guard, overlays = rule_j.text_all_through, rule_j.overlay_boxes
-    # Version 1 had neither step, so neither may run here: the timecode episodes' pinned answers and their 1 fps rows
-    # are what the rule answered before either of them existed.
-    rule_j.text_all_through = lambda rows, coarse: False
-    rule_j.overlay_boxes = lambda rows, params=rule_j.RULE_J: ()
+    # Version 1 had none of the four steps below, so none of them may run here: the timecode episodes' pinned answers
+    # and their 1 fps rows are what the rule answered before any of them existed, and the refine window `find_credits`
+    # decodes is measured from the coarse start, so a step that moves that start replaces the fine rows this build
+    # checks itself against. The two band steps do move it -- on three of the six Synth Audio episodes, by 104-215 s
+    # -- which stopped the rebuild with "the fine rows are no longer the fixture's" while only the guard and the
+    # overlay step were patched off.
+    version_1 = {
+        "text_all_through": lambda rows, coarse: False,
+        "overlay_boxes": lambda rows, params=rule_j.RULE_J: (),
+        "same_roll": lambda rows, runs, params=rule_j.RULE_J: len(runs) - 1,
+        "reach_back": lambda rows, index, *args, **kwargs: index,
+    }
+    saved = {name: getattr(rule_j, name) for name in version_1}
+    for name, step in version_1.items():
+        setattr(rule_j, name, step)
     try:
         gpu = "NVIDIA" if decode == "gpu" else None
         found = find_credits(
@@ -96,7 +109,8 @@ def rows_of(item: dict, path: Path, *, decode: str, detect_boxes, probe) -> tupl
             gpu_device_path="cuda:0" if gpu else None,
         )
     finally:
-        rule_j.text_all_through, rule_j.overlay_boxes = guard, overlays
+        for name, step in saved.items():
+            setattr(rule_j, name, step)
     return list(found.key_rows), list(found.fine_rows)
 
 

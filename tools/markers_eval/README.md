@@ -237,6 +237,31 @@ a one-off failure stays until its entry is deleted. Entries are written whole or
   folder local, never under `/data*`. A sheet is named by the file and the second it tiles around
   (`<set>-<hash>-<s>.jpg`, `<set>-<hash>-end-<s>.jpg`), and one that exists isn't written again, so a re-run into
   the same folder adds only sheets for answers that moved.
+- `--sweep rule_j.NAME=v1,v2,...` (repeatable): measure one of rule J's own constants at each of those values over
+  the chosen sets instead of reporting a run, and print a markdown table carrying the columns
+  `phase3-harness.md`'s sweep tables carry — the 80's rule J / Medium useful / wrong and the 205's Medium and
+  alone rows — plus what each cell decoded. The published tables are written from it by hand: they name the
+  constant in prose and drop the decode count. Several
+  `--sweep` arguments are a cross product, which is how the band's two numbers were tabled. Each cell runs the
+  **whole rule** through `DecodeCache(...).serving()`, so both halves of version 3 are live in every cell, and the
+  answer cache is deliberately bypassed: its key is the detector's *source* digest, which a swept attribute doesn't
+  move, so every cell would otherwise be served the shipped cell's answers. A constant a `setattr` wouldn't reach is
+  refused before anything is measured (`unreachable_by_patch`): anything that takes a copy of it while a module of
+  ours is imported — a default argument, a decorator's argument, or an assignment in any block that runs at import
+  (module scope, a class body, an `if`, a `try` body or its handlers, a `with`, a `for`, a `match` case) — in
+  `rule_j.py` itself or in another module of ours, whether that module did `from .rule_j import <NAME>` or read it
+  as `rule_j.<NAME>`. What it cannot see is a module of ours that nothing has imported yet when the sweep starts.
+  That is not hypothetical: a published band sweep
+  reached `same_roll` and nothing else, because `in_band` bound `BAND_TOLERANCE_PX` as a default argument and so
+  read the shipped value there (`phase3-harness.md`, "What the architecture review changed"). `--online`, `--sheets`
+  and `--changed-since` are refused with it rather than ignored: a sweep has many answer sets, not the one these
+  three read.
+
+  ```bash
+  nice -n 19 /home/data/.venv/bin/python -m tools.markers_eval credits-text --decode gpu --sets 80,205 \
+    --sweep rule_j.BAND_TOLERANCE_PX=16,24,32,40,48
+  ```
+
 - `--decode`, `--gpu-device`, `--sets`, `--ffmpeg`, `--cache`, `--plex-baseline`, `--json` work as in `report`.
 
 ## Text detection bench

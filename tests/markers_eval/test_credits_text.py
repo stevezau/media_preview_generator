@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
+import sys
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -918,3 +920,319 @@ def test_a_failed_sheet_is_logged_and_the_run_goes_on(tmp_path, loguru_caplog):
         ct._write_sheet("/ff", "/m/A (2001)/A.mkv", 5702.0, out)
     assert "TimeoutExpired" in loguru_caplog.text and "ffmpeg exited 1" in loguru_caplog.text
     assert "/m/" not in loguru_caplog.text
+
+
+@pytest.mark.parametrize(
+    ("spec", "constant", "values"),
+    [
+        ("rule_j.BAND_TOLERANCE_PX=16,24,32,40", "BAND_TOLERANCE_PX", (16.0, 24.0, 32.0, 40.0)),
+        ("rule_j.OVERLAY_LEAST=3,4,5", "OVERLAY_LEAST", (3, 4, 5)),
+        (" rule_j.ROLL_TEXT_SHARE =0.4,0.5", "ROLL_TEXT_SHARE", (0.4, 0.5)),
+    ],
+)
+def test_a_sweep_spec_is_read_with_the_constants_own_type(spec, constant, values):
+    # An int constant read as a float would make `OVERLAY_LEAST` 4.0 and compare differently to `len(story)`.
+    assert ct.parse_sweep(spec) == (constant, values)
+    assert all(type(v) is type(getattr(rule_j, constant)) for v in values)
+
+
+@pytest.mark.parametrize(
+    ("spec", "message"),
+    [
+        ("rule_j.NO_SUCH_THING=1", "no constant named NO_SUCH_THING"),
+        ("detector.BAND_TOLERANCE_PX=16", "wants rule_j."),
+        ("rule_j.BAND_TOLERANCE_PX", "wants rule_j."),
+        ("rule_j.BAND_TOLERANCE_PX=", "wants rule_j."),
+        ("rule_j.RULE_J=1", "only numbers can be swept"),
+        ("rule_j.OVERLAY_LEAST=4.5", "takes int values"),
+        ("rule_j.band_of=1", "no constant named band_of"),
+    ],
+)
+def test_a_sweep_spec_that_names_nothing_sweepable_is_refused(spec, message):
+    with pytest.raises(ct.SweepError, match=re.escape(message)):
+        ct.parse_sweep(spec)
+
+
+@pytest.mark.parametrize(
+    ("body", "escapes"),
+    [
+        # The shape that was actually published: `in_band` bound the tolerance as a default, so the monkeypatch
+        # reached `same_roll` and nothing else and `in_band` read the shipped band in every cell.
+        (
+            "def in_band(row, band, tol=X):\n    return tol\n",
+            ["rule_j.in_band() binds it as a default argument, read once at import"],
+        ),
+        ("def f(*, tol=X):\n    return tol\n", ["rule_j.f() binds it as a default argument, read once at import"]),
+        (
+            "f = lambda tol=X: tol\n",
+            ["rule_j.<lambda>() binds it as a default argument, read once at import",
+             "rule_j.f is built from it at import"],
+        ),  # fmt: skip
+        ("import functools\n@functools.lru_cache(maxsize=X)\ndef f():\n    return 1\n",
+         ["rule_j.f's decorator is given it at import"]),  # fmt: skip
+        ("def deco(n):\n    return lambda c: c\n@deco(X)\nclass P:\n    pass\n",
+         ["rule_j.P's decorator is given it at import"]),  # fmt: skip
+        ("HALF = X / 2\n", ["rule_j.HALF is built from it at import"]),
+        ("HALF: float = X / 2\n", ["rule_j.HALF is built from it at import"]),
+        ("HALF = 1.0\nHALF += X\n", ["rule_j.HALF is built from it at import"]),
+        ("if (HALF := X / 2):\n    pass\n", ["rule_j.HALF is built from it at import"]),
+        # A dataclass field default -- what `RuleParams.gap_s` would be if it were written from a constant.
+        ("class Params:\n    tol: float = X\n", ["rule_j.tol is built from it at import"]),
+        # Every block that runs at import, not only the three an earlier version of the walk descended into.
+        ("if True:\n    HALF = X\n", ["rule_j.HALF is built from it at import"]),
+        ("try:\n    HALF = X\nexcept Exception:\n    HALF = 0.0\n", ["rule_j.HALF is built from it at import"]),
+        ("try:\n    import os\nexcept ImportError:\n    HALF = X\n", ["rule_j.HALF is built from it at import"]),
+        ("V = 1\nmatch V:\n    case 1:\n        HALF = X\n", ["rule_j.HALF is built from it at import"]),
+        ("import contextlib\nwith contextlib.suppress(Exception):\n    HALF = X\n",
+         ["rule_j.HALF is built from it at import"]),  # fmt: skip
+        ("for _ in range(1):\n    HALF = X\n", ["rule_j.HALF is built from it at import"]),
+        # Read in a function body: a fresh lookup every call, which a patch does reach.
+        ("def same_roll(rows):\n    return X\n", []),
+        ("def reach_back(p):\n    limit = min(p, 1.5 * X)\n    return limit\n", []),
+    ],
+    ids=["default-arg", "kwonly-default", "lambda-default", "decorator-arg", "class-decorator", "module-assign",
+         "module-annassign", "module-augassign", "module-walrus", "class-field", "nested-if", "try-body",
+         "except-handler", "match-case", "with-body", "for-body", "read-in-a-body", "local-built-in-a-body"],
+)  # fmt: skip
+def test_every_way_a_constant_escapes_a_patch_is_reported(body, escapes):
+    assert ct.unreachable_by_patch("X", "X = 32.0\n" + body) == escapes
+
+
+def test_every_swept_constant_is_reachable_in_the_tree_as_it_stands():
+    # The nine the docs' sweeps cover: if one of them ever grows an import-time copy, the sweep must refuse rather
+    # than publish a table of the shipped value.
+    swept = ("BAND_TOLERANCE_PX", "ROLL_TEXT_SHARE", "OVERLAY_IOU", "OVERLAY_SPAN_SHARE", "OVERLAY_KEYFRAME_SHARE",
+             "OVERLAY_LEAST", "OVERLAY_CONTAINMENT", "ANCHOR_SPACING_FACTOR", "TEXT_ALL_THROUGH_SHARE")  # fmt: skip
+    assert {name: ct.unreachable_by_patch(name) for name in swept} == dict.fromkeys(swept, [])
+
+
+def test_another_module_reading_it_off_rule_j_at_import_is_reported(tmp_path, monkeypatch):
+    # `def f(tol=rule_j.BAND_TOLERANCE_PX)` elsewhere binds the value at import and leaves no attribute of that name
+    # behind, so the `from ... import` check alone doesn't see it.
+    module = tmp_path / "pretend.py"
+    module.write_text("from media_preview_generator.markers.credits import rule_j\n\n\n"
+                      "def widen(px, tol=rule_j.BAND_TOLERANCE_PX):\n    return px + tol\n")  # fmt: skip
+    theirs = SimpleNamespace(rule_j=ct.rule_j, __file__=str(module))
+    monkeypatch.setitem(sys.modules, "media_preview_generator.markers.pretend", theirs)
+    assert ct.unreachable_by_patch("BAND_TOLERANCE_PX") == [
+        "media_preview_generator.markers.pretend.widen() binds it as a default argument, read once at import"
+    ]
+
+
+def test_a_constant_another_module_imported_by_value_is_reported(monkeypatch):
+    # `from .rule_j import BAND_TOLERANCE_PX` keeps a copy the sweep's setattr never touches.
+    copy = SimpleNamespace(BAND_TOLERANCE_PX=32.0)
+    monkeypatch.setitem(sys.modules, "media_preview_generator.markers.pretend", copy)
+    assert ct.unreachable_by_patch("BAND_TOLERANCE_PX") == [
+        "media_preview_generator.markers.pretend has its own BAND_TOLERANCE_PX: it imported the value, not the module"
+    ]
+
+
+@pytest.mark.parametrize(
+    "constant",
+    ["BAND_TOLERANCE_PX", "ROLL_TEXT_SHARE", "OVERLAY_IOU", "OVERLAY_SPAN_SHARE", "OVERLAY_KEYFRAME_SHARE",
+     "OVERLAY_LEAST", "OVERLAY_CONTAINMENT", "ANCHOR_SPACING_FACTOR", "TEXT_ALL_THROUGH_SHARE"],
+)  # fmt: skip
+def test_every_constant_the_docs_sweep_is_reachable_by_a_patch_today(constant):
+    assert ct.unreachable_by_patch(constant) == []
+
+
+def test_a_sweep_refuses_before_it_measures_anything(tmp_path, monkeypatch):
+    def never(*args, **kwargs):
+        raise AssertionError("the sweep must not start before its specs are checked")
+
+    monkeypatch.setattr(ct, "_detection_on", never)
+    monkeypatch.setattr(ct, "evidence_dir", never)
+    for specs, message in ((["rule_j.NOPE=1"], "no constant named NOPE"), ([], "needs at least one")):
+        with pytest.raises(ct.SweepError, match=message):
+            ct.sweep_credits_text(decode="cpu", gpu_device="cuda:0", sets=("80",), specs=specs,
+                                  cache_root=tmp_path, ffmpeg="/ff", ffprobe="/ffp", baseline_path=tmp_path / "b")  # fmt: skip
+    with pytest.raises(ValueError, match="unknown set"):
+        ct.sweep_credits_text(decode="cpu", gpu_device="cuda:0", sets=("90",),
+                              specs=["rule_j.BAND_TOLERANCE_PX=16"], cache_root=tmp_path, ffmpeg="/ff",
+                              ffprobe="/ffp", baseline_path=tmp_path / "b")  # fmt: skip
+
+
+def test_a_sweep_of_a_constant_a_patch_would_not_reach_is_refused(tmp_path, monkeypatch):
+    def never(*args, **kwargs):
+        raise AssertionError("the sweep must not start when a cell would measure the shipped value")
+
+    monkeypatch.setattr(ct, "_detection_on", never)
+    monkeypatch.setattr(ct, "unreachable_by_patch", lambda constant, source=None: [f"{constant} is bound at import"])
+    with pytest.raises(ct.SweepError, match="BAND_TOLERANCE_PX is bound at import"):
+        ct.sweep_credits_text(decode="cpu", gpu_device="cuda:0", sets=("80",),
+                              specs=["rule_j.BAND_TOLERANCE_PX=16,32"], cache_root=tmp_path, ffmpeg="/ff",
+                              ffprobe="/ffp", baseline_path=tmp_path / "b")  # fmt: skip
+
+
+class _SweepRun:
+    """``sweep_credits_text`` end to end with the app's own ``find_credits`` replaced by one that reads whichever
+    constants rule J is set to right now, so a cell that never reached the rule shows up as an unmoved answer."""
+
+    def __init__(self, tmp_path, monkeypatch, *, shared_file=False):
+        self.asked, self.closed = [], 0
+        evidence = tmp_path / "evidence"
+        (evidence / "credits").mkdir(parents=True)
+        sets = {name: list(rows) for name, rows in GATE_FILES.items()}
+        if shared_file:
+            # The 40 movies of the 80 are all in the 205: one file, two sets, one answer per cell.
+            sets["movie_credit_truth"].append(sets["movies40"][0])
+        for name, rows in {**sets, "adjudicated": {}}.items():
+            (evidence / f"credits/{name}.json").write_text(json.dumps(rows))
+        run = self
+
+        class FakeProbes:
+            def __init__(self, root, *, ffprobe):
+                pass
+
+            def probe(self, path):
+                return MediaProbe(DUR, ())
+
+        def find_credits(path, **kwargs):
+            # The answer moves with the constant, so a cell served from a cache or run before the patch is visible.
+            run.asked.append((path, rule_j.BAND_TOLERANCE_PX, rule_j.ROLL_TEXT_SHARE))
+            return CreditsTextResult(GATE_ANSWERS[path] - rule_j.BAND_TOLERANCE_PX, None, (), (), ())
+
+        monkeypatch.setattr(ct, "evidence_dir", lambda: evidence)
+        monkeypatch.setattr(ct, "ProbeCache", FakeProbes)
+        monkeypatch.setattr(ct, "find_credits", find_credits)
+        monkeypatch.setattr(ct, "_detection_on", lambda decode, device: ct.TextDetection(
+            lambda planes: [()] * len(planes), lambda: "cpu", lambda: setattr(run, "closed", run.closed + 1)
+        ))  # fmt: skip
+        monkeypatch.setattr(ct, "load_baseline", lambda path: {p: [PlexMarker("credits", int(s * 1000), DUR, True)]
+                                                               for p, s in GATE_PLEX.items()})  # fmt: skip
+        self.tmp_path = tmp_path
+
+    def __call__(self, specs, sets=("80", "205")):
+        return ct.sweep_credits_text(decode="cpu", gpu_device="cuda:0", sets=sets, specs=specs,
+                                     cache_root=self.tmp_path / "cache", ffmpeg="/ff", ffprobe="/ffp",
+                                     baseline_path=self.tmp_path / "b.json")  # fmt: skip
+
+
+def test_every_cell_is_measured_with_its_own_value(tmp_path, monkeypatch):
+    run = _SweepRun(tmp_path, monkeypatch)
+    summary, cells = run(["rule_j.BAND_TOLERANCE_PX=16,32"])
+    assert [cell.values for cell in cells] == [(("BAND_TOLERANCE_PX", 16.0),), (("BAND_TOLERANCE_PX", 32.0),)]
+    assert [cell.shipped for cell in cells] == [False, True]
+    # Five files per cell, each asked while the rule held that cell's value -- never the shipped one by default.
+    assert {band for _path, band, _share in run.asked[:5]} == {16.0}
+    assert {band for _path, band, _share in run.asked[5:]} == {32.0}
+    assert summary["cells"] == 2 and summary["sets"] == ["205", "80"]
+
+
+def test_a_cross_product_sweeps_every_pair(tmp_path, monkeypatch):
+    run = _SweepRun(tmp_path, monkeypatch)
+    _summary, cells = run(["rule_j.BAND_TOLERANCE_PX=16,32", "rule_j.ROLL_TEXT_SHARE=0.4,0.5"], sets=("80",))
+    assert [cell.values for cell in cells] == [
+        (("BAND_TOLERANCE_PX", 16.0), ("ROLL_TEXT_SHARE", 0.4)),
+        (("BAND_TOLERANCE_PX", 16.0), ("ROLL_TEXT_SHARE", 0.5)),
+        (("BAND_TOLERANCE_PX", 32.0), ("ROLL_TEXT_SHARE", 0.4)),
+        (("BAND_TOLERANCE_PX", 32.0), ("ROLL_TEXT_SHARE", 0.5)),
+    ]
+    assert [cell.shipped for cell in cells] == [False, False, False, True]
+    assert sorted({pair[1:] for pair in run.asked}) == [(16.0, 0.4), (16.0, 0.5), (32.0, 0.4), (32.0, 0.5)]
+
+
+def test_the_constants_are_put_back_even_when_a_cell_raises(tmp_path, monkeypatch):
+    run = _SweepRun(tmp_path, monkeypatch)
+    before = (rule_j.BAND_TOLERANCE_PX, rule_j.ROLL_TEXT_SHARE)
+    run(["rule_j.BAND_TOLERANCE_PX=16,32", "rule_j.ROLL_TEXT_SHARE=0.4"], sets=("80",))
+    assert (rule_j.BAND_TOLERANCE_PX, rule_j.ROLL_TEXT_SHARE) == before
+    assert run.closed == 1
+
+    def blow_up(*args, **kwargs):
+        raise RuntimeError("the card went away")
+
+    monkeypatch.setattr(ct, "find_credits", blow_up)
+    with pytest.raises(RuntimeError, match="the card went away"):
+        run(["rule_j.BAND_TOLERANCE_PX=16"], sets=("80",))
+    assert (rule_j.BAND_TOLERANCE_PX, rule_j.ROLL_TEXT_SHARE) == before
+
+
+def test_the_sweep_table_carries_the_columns_the_docs_sweep_tables_do(tmp_path, monkeypatch):
+    run = _SweepRun(tmp_path, monkeypatch)
+    summary, cells = run(["rule_j.BAND_TOLERANCE_PX=16,32"])
+    assert summary["table"].splitlines()[0] == (
+        "| BAND_TOLERANCE_PX | 80: rule J / Medium useful / wrong | 205: Medium useful / wrong "
+        "| 205: alone useful / wrong | decoded / reused |"
+    )
+    shipped = cells[1]
+    assert summary["table"].splitlines()[3] == (
+        f"| **32.0** | {shipped.rule.within_10s} / {shipped.rows['80'].medium['useful']} / "
+        f"{shipped.rows['80'].medium['wrong']} | {shipped.rows['205'].medium['useful']} / "
+        f"{shipped.rows['205'].medium['wrong']} | {shipped.rows['205'].text['useful']} / "
+        f"{shipped.rows['205'].text['wrong']} | 0 / 0 |"
+    )
+
+
+def test_the_command_prints_the_table_and_exits_zero(tmp_path, monkeypatch, capsys):
+    from tools.markers_eval import __main__ as cli
+
+    seen = {}
+
+    def sweep(**kwargs):
+        seen.update(kwargs)
+        return {"table": "| a |\n|---|\n| 1 |", "cells": 1}, []
+
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/ff")
+    monkeypatch.setattr("tools.markers_eval.credits_text.sweep_credits_text", sweep)
+    out = tmp_path / "sweep.json"
+    assert cli.main(["credits-text", "--decode", "cpu", "--sets", "80",
+                     "--sweep", "rule_j.BAND_TOLERANCE_PX=16,32", "--cache", str(tmp_path),
+                     "--json", str(out)]) == 0  # fmt: skip
+    # Every argument the command is responsible for building, not just the ones it copies: a wrong baseline or a
+    # wrong ffprobe is exactly what would corrupt a published sweep table's useful / wrong columns.
+    assert seen == {
+        "decode": "cpu",
+        "gpu_device": "cuda:0",
+        "sets": ("80",),
+        "specs": ["rule_j.BAND_TOLERANCE_PX=16,32"],
+        "cache_root": tmp_path,
+        "ffmpeg": "/ff",
+        "ffprobe": cli.ffprobe_path_for("/ff"),
+        "baseline_path": cli.evidence_dir() / cli.DEFAULT_BASELINE,
+    }
+    assert "| a |" in capsys.readouterr().out
+    assert json.loads(out.read_text()) == {"cells": 1, "table": "| a |\n|---|\n| 1 |"}
+
+
+@pytest.mark.parametrize(
+    ("flags", "message"),
+    [
+        (["--online"], "--sweep cannot be combined with --online"),
+        (["--sheets", "SHEETS"], "--sweep cannot be combined with --sheets"),
+        (["--changed-since", "BEFORE"], "--sweep cannot be combined with --changed-since"),
+        (
+            ["--online", "--sheets", "SHEETS", "--changed-since", "BEFORE"],
+            "--sweep cannot be combined with --changed-since, --online, --sheets",
+        ),
+    ],
+    ids=["online", "sheets", "changed-since", "all-three"],
+)
+def test_a_sweep_refuses_the_flags_it_would_have_dropped(tmp_path, monkeypatch, flags, message):
+    # A sweep reports cells, not one run: taking these and ignoring them would look like a diff that found nothing.
+    from tools.markers_eval import __main__ as cli
+
+    ran = []
+    monkeypatch.setattr(cli.shutil, "which", lambda name: "/ff")
+    monkeypatch.setattr("tools.markers_eval.credits_text.sweep_credits_text", lambda **kwargs: ran.append(kwargs))
+    (tmp_path / "before.json").write_text(json.dumps({"details": []}))
+    filled = [str(tmp_path / "sheets") if f == "SHEETS" else str(tmp_path / "before.json") if f == "BEFORE" else f
+              for f in flags]  # fmt: skip
+    with pytest.raises(SystemExit) as exit_:
+        cli.main(["credits-text", "--decode", "cpu", "--sets", "80", "--cache", str(tmp_path),
+                  "--sweep", "rule_j.BAND_TOLERANCE_PX=16,32", *filled])  # fmt: skip
+    assert str(exit_.value) == message
+    assert ran == []
+
+
+def test_a_file_in_both_sets_is_read_once_per_cell(tmp_path, monkeypatch):
+    # Both sets must see the same answer for a shared file, and a cell must not pay for it twice.
+    run = _SweepRun(tmp_path, monkeypatch, shared_file=True)
+    _summary, cells = run(["rule_j.BAND_TOLERANCE_PX=16,32"])
+    shared = GATE_FILES["movies40"][0]["file"]
+    per_cell = [pair[0] for pair in run.asked].count(shared) / len(cells)
+    assert per_cell == 1
+    for cell in cells:
+        rows = {row["file"]: row["text"] for row in cell.rows["80"].files}
+        assert rows[shared] == {row["file"]: row["text"] for row in cell.rows["205"].files}[shared]

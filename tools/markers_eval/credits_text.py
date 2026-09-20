@@ -10,15 +10,18 @@ Summaries hold counts and folder names only; details (``--json``) hold paths and
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import dataclasses
 import hashlib
+import itertools
 import json
 import math
 import os
 import subprocess
+import sys
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -66,6 +69,10 @@ HDR_PROBE_TIMEOUT_S = 60
 
 class UnknownSetError(ValueError):
     """``--sets`` names a set this harness doesn't have."""
+
+
+class SweepError(ValueError):
+    """``--sweep`` names a constant this harness can't sweep, or one a patch wouldn't reach."""
 
 
 def detector_files(root: Path = PACKAGE_ROOT, patterns: Sequence[str] = DETECTOR_SOURCES) -> list[Path]:
@@ -190,10 +197,11 @@ def epilogue_like(
     the roll over a gap or black).
 
     The run and its frames are read the way rule J read them (``rule_j.overlay_boxes``), so the shape judged here is
-    the shape the answer came from -- a channel bug's boxes are not what makes a frame look dense. It is bounded by
-    ``run_index``, not by ``index``: version 3 can reach a start back before the run, and slicing from there in decode
-    order covers rows that aren't the run's -- and gives nothing at all when the row the walk reached was emitted
-    after it.
+    the shape the answer came from -- a channel bug's boxes are not what makes a frame look dense. The run is
+    ``rule_j._run_rows``, the rule's own slice, so it stays the run whatever the band steps do: bounded by
+    ``run_index``, not by ``index``, because version 3 can reach a start back before the run, and slicing from there
+    in decode order covers rows that aren't the run's -- and gives nothing at all when the row the walk reached was
+    emitted after it.
 
     Args:
         key_rows: The tail's keyframe rows, in decode order.
@@ -211,8 +219,7 @@ def epilogue_like(
     coarse = rule_j.coarse_start(key_rows, without=rows)
     if coarse is None or start_s is None:
         return False
-    first = coarse.index if coarse.run_index is None else coarse.run_index
-    run = list(rows[first : coarse.end_index + 1])
+    run = list(rule_j._run_rows(rows, coarse))
     dense = next((row[0] for row in run if row[1] >= 3), None)
     if dense is not None and dense - start_s > 10:
         return True
@@ -837,3 +844,349 @@ def _online(evidence: Path, baseline: Mapping[str, list[PlexMarker]], cache: Cre
         summary[label]["credits_text_asked"] = len(asked & texts.keys())
         details[label] = verdicts
     return summary, details
+
+
+# ---------------------------------------------------------------------------- sweeping rule J's own constants
+
+
+def parse_sweep(spec: str) -> tuple[str, tuple[float, ...]]:
+    """One ``--sweep`` argument: ``rule_j.BAND_TOLERANCE_PX=16,24,32,40``.
+
+    Args:
+        spec: The argument.
+
+    Returns:
+        The constant's name in :mod:`rule_j` and the values to try, each read as the constant's own type.
+
+    Raises:
+        SweepError: Not ``rule_j.<NAME>=<value>[,<value>...]``, a constant rule J hasn't got, or a value of the
+            wrong type.
+    """
+    name, _, values = spec.partition("=")
+    module, _, constant = name.strip().partition(".")
+    if module != "rule_j" or not constant or not values.strip():
+        raise SweepError(f"--sweep wants rule_j.<NAME>=<value>[,<value>...], not {spec!r}")
+    if constant != constant.upper() or not hasattr(rule_j, constant):
+        raise SweepError(f"rule J has no constant named {constant}")
+    kind = type(getattr(rule_j, constant))
+    if kind not in (int, float):
+        raise SweepError(f"rule_j.{constant} is a {kind.__name__}; only numbers can be swept")
+    try:
+        return constant, tuple(kind(value) for value in values.split(","))
+    except ValueError as exc:
+        raise SweepError(f"rule_j.{constant} takes {kind.__name__} values: {exc}") from None
+
+
+def _bound_at_import(tree: ast.Module, reads: Callable[[ast.AST | None], bool], label: str) -> list[str]:
+    """Every place in one parsed module that keeps a copy of what ``reads`` matches, taken while the module is imported.
+
+    A patch reaches a name looked up inside a function body, because that lookup happens on every call. It does not
+    reach a value read once while the module was being imported, wherever the reading sits, so those are what this
+    finds: default arguments, decorator arguments, and assignments (plain, annotated, augmented or walrus) in any
+    block that runs at import -- module scope, a class body, an ``if``, a ``try`` body *or its handlers*, a ``with``,
+    a ``for``, a ``match`` case. Function bodies are skipped, which is the whole point; a nested function's defaults
+    are reported anyway, which refuses a sweep that would in fact have worked rather than measuring a wrong one.
+
+    Args:
+        tree: The parsed module.
+        reads: True for an expression that reads the constant.
+        label: How the module is named in the lines returned.
+
+    Returns:
+        One line per place, without repeats.
+    """
+    found: list[str] = []
+
+    def at_import(body: Sequence[ast.stmt]) -> Iterator[ast.stmt]:
+        for stmt in body:
+            if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            yield stmt
+            for child in ast.iter_child_nodes(stmt):
+                if isinstance(child, ast.stmt):
+                    yield from at_import([child])
+                elif isinstance(child, ast.ExceptHandler | ast.match_case):
+                    yield from at_import(child.body)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) and any(
+            reads(default) for default in (*node.args.defaults, *node.args.kw_defaults)
+        ):
+            found.append(f"{label}.{getattr(node, 'name', '<lambda>')}() binds it as a default argument, "
+                         "read once at import")  # fmt: skip
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) and any(
+            reads(decorator) for decorator in node.decorator_list
+        ):
+            found.append(f"{label}.{node.name}'s decorator is given it at import")
+
+    for stmt in at_import(tree.body):
+        target = None
+        if isinstance(stmt, ast.Assign) and reads(stmt.value):
+            target = stmt.targets[0]
+        elif isinstance(stmt, ast.AnnAssign | ast.AugAssign) and reads(stmt.value):
+            target = stmt.target
+        if target is not None:
+            found.append(f"{label}.{ast.unparse(target)} is built from it at import")
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.NamedExpr) and reads(node.value):
+                found.append(f"{label}.{ast.unparse(node.target)} is built from it at import")
+    return list(dict.fromkeys(found))
+
+
+def unreachable_by_patch(constant: str, source: str | None = None) -> list[str]:
+    """Where setting ``rule_j.<constant>`` would **not** reach, so a sweep of it would measure the shipped value.
+
+    A sweep sets the module attribute, and rule J reads its constants in function bodies -- a fresh lookup on every
+    call, which a patch reaches. Two things break that, and a published band sweep was silently wrong for the first
+    of them (``evidence/eval/phase3-harness.md``, "What the architecture review changed": ``in_band``'s tolerance was
+    bound at import, so sweeping ``BAND_TOLERANCE_PX`` reached only ``same_roll``):
+
+    * :mod:`rule_j` itself taking a copy while it is imported -- a default argument, a decorator's argument, or an
+      assignment in any block that runs at import (:func:`_bound_at_import` lists them);
+    * another module of ours keeping its own copy: ``from .rule_j import <NAME>``, which gives it a module attribute
+      of that name, or the same import-time shapes reading it as ``rule_j.<NAME>``.
+
+    What it cannot see is a module of ours that has not been imported yet when the sweep starts, and anything outside
+    ``media_preview_generator`` and ``tools.markers_eval``.
+
+    Args:
+        constant: The constant's name in :mod:`rule_j`.
+        source: Python source to read as :mod:`rule_j`'s instead of its own (the tests' shapes).
+
+    Returns:
+        One line per place a patch wouldn't reach; empty when setting the attribute is the whole story.
+    """
+
+    def reads_here(node: ast.AST | None) -> bool:
+        return node is not None and any(isinstance(n, ast.Name) and n.id == constant for n in ast.walk(node))
+
+    tree = ast.parse(Path(rule_j.__file__).read_text() if source is None else source)
+    escapes = _bound_at_import(tree, reads_here, "rule_j")
+    ours = ("media_preview_generator", "tools.markers_eval")
+    for name, module in sorted(sys.modules.items()):
+        if module is None or module is rule_j or not name.startswith(ours):
+            continue
+        held = vars(module) if hasattr(module, "__dict__") else {}
+        if constant in held:
+            escapes.append(f"{name} has its own {constant}: it imported the value, not the module")
+            continue
+        aliases = {alias for alias, value in held.items() if value is rule_j}
+        path = getattr(module, "__file__", None)
+        if not aliases or not isinstance(path, str) or not Path(path).is_file():
+            continue
+
+        def reads_there(node: ast.AST | None, aliases: set[str] = aliases) -> bool:
+            return node is not None and any(
+                isinstance(n, ast.Attribute) and n.attr == constant and isinstance(n.value, ast.Name)
+                and n.value.id in aliases
+                for n in ast.walk(node)
+            )  # fmt: skip
+
+        escapes.extend(_bound_at_import(ast.parse(Path(path).read_text()), reads_there, name))
+    return escapes
+
+
+@dataclass(frozen=True)
+class SweepCell:
+    """One combination of swept values and what the sets say about it.
+
+    Attributes:
+        values: The value each swept constant was set to for this cell.
+        shipped: Every constant is at the value the tree ships.
+        rule: Spec §5.4's metric for rule J alone on the 80 (all zero when the 80 weren't run).
+        rows: Each group's rows (``80``, ``205``).
+        decoded: Windows this cell had to decode for real, having not been read before.
+        reused: Windows served from the decode cache.
+    """
+
+    values: tuple[tuple[str, float], ...]
+    shipped: bool
+    rule: RuleTally
+    rows: dict[str, TextRows]
+    decoded: int
+    reused: int
+
+
+def sweep_table(cells: Sequence[SweepCell]) -> str:
+    """The cells as a markdown table, carrying the columns ``phase3-harness.md``'s sweep tables carry.
+
+    The published tables are written from this one by hand: their constant column is prose rather than the
+    attribute's name, and they leave out the decode count, which says how much of a cell was measured rather
+    than what it answered.
+
+    Args:
+        cells: The cells, in the order they were run; at least one.
+
+    Returns:
+        The table, one row per cell, with the shipped cell's values in bold.
+    """
+    names = [name for name, _ in cells[0].values]
+    header = [*names, "80: rule J / Medium useful / wrong", "205: Medium useful / wrong",
+              "205: alone useful / wrong", "decoded / reused"]  # fmt: skip
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join(["---"] * len(header)) + "|"]
+    for cell in cells:
+        eighty, two_oh_five = cell.rows.get("80"), cell.rows.get("205")
+        row = [f"**{value}**" if cell.shipped else f"{value}" for _, value in cell.values]
+        row.append(
+            "-" if eighty is None else f"{cell.rule.within_10s} / {eighty.medium['useful']} / {eighty.medium['wrong']}"
+        )
+        row.append("-" if two_oh_five is None else f"{two_oh_five.medium['useful']} / {two_oh_five.medium['wrong']}")
+        row.append("-" if two_oh_five is None else f"{two_oh_five.text['useful']} / {two_oh_five.text['wrong']}")
+        row.append(f"{cell.decoded} / {cell.reused}")
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines)
+
+
+def _sweep_answer(
+    path: str,
+    *,
+    is_episode: bool,
+    decode: str,
+    gpu_device: str,
+    ffmpeg: str,
+    detect_boxes: Callable[[np.ndarray], list[tuple[rule_j.Box, ...]]],
+    probe: Callable[[str], MediaProbe],
+    decodes: DecodeCache,
+) -> tuple[float | None, float | None]:
+    """One file's ``(start, end)`` for the constants rule J is set to right now, from the decode cache.
+
+    A GPU decode the card can't do is read again on the CPU, exactly as :meth:`CreditsTextCache.result` does it, so a
+    swept cell's population is the reported run's population.
+    """
+    gpu = "NVIDIA" if decode == "gpu" else None
+    duration_ms = probe(path).duration_ms
+    with decodes.serving():
+        try:
+            found = find_credits(path, duration_ms=duration_ms, is_episode=is_episode, ffmpeg=ffmpeg,
+                                 detect_boxes=detect_boxes, gpu=gpu, gpu_device_path=gpu_device if gpu else None)  # fmt: skip
+        except GpuDecodeError:
+            found = find_credits(path, duration_ms=duration_ms, is_episode=is_episode, ffmpeg=ffmpeg,
+                                 detect_boxes=detect_boxes, gpu=None, gpu_device_path=None)  # fmt: skip
+    return found.start_s, found.end_s
+
+
+def sweep_credits_text(
+    *,
+    decode: str,
+    gpu_device: str,
+    sets: tuple[str, ...],
+    specs: Sequence[str],
+    cache_root: Path,
+    ffmpeg: str,
+    ffprobe: str,
+    baseline_path: Path,
+) -> tuple[dict, list[SweepCell]]:
+    """Rule J's own constants, swept over the gate's sets with the **whole rule** live on every cell.
+
+    Each cell sets the constants on :mod:`rule_j` and runs the app's own ``find_credits`` over every file of the
+    chosen sets through the decode cache, so a cell costs rule J's own microseconds per file plus a stored-rows read.
+    The answer cache is deliberately not used: its key carries the detector's *source* digest, which a swept
+    attribute doesn't move, so it would serve the shipped cell's answers to every cell.
+
+    Several ``--sweep`` arguments are a cross product, which is the shape the band's two numbers were tabled in.
+
+    Args:
+        decode: ``gpu`` or ``cpu``.
+        gpu_device: The GPU worker's device (``cuda:0``).
+        sets: Which of ``80`` and ``205`` to run.
+        specs: ``--sweep`` arguments (:func:`parse_sweep`).
+        cache_root: Where probes and decodes are cached (never under /data*).
+        ffmpeg: ffmpeg binary.
+        ffprobe: ffprobe binary.
+        baseline_path: Plex's markers.
+
+    Returns:
+        A summary (the table and the run's own facts) and the cells.
+
+    Raises:
+        UnknownSetError: ``sets`` names a set this harness doesn't have.
+        SweepError: A spec is malformed, or names a constant a patch wouldn't reach. Both are checked before
+            anything is measured: a sweep that silently measures the shipped value in every cell is worse than no
+            sweep, and one has already been published (``phase3-harness.md``).
+    """
+    unknown = sorted(set(sets) - set(GATE_SETS))
+    if unknown:
+        raise UnknownSetError(f"unknown set(s): {unknown}; choose from {sorted(GATE_SETS)}")
+    if not specs:
+        # One cell with nothing set is a table of the shipped run wearing a sweep's clothes.
+        raise SweepError("a sweep needs at least one rule_j.<NAME>=<value>[,<value>...]")
+    swept = [parse_sweep(spec) for spec in specs]
+    escapes = [line for constant, _ in swept for line in unreachable_by_patch(constant)]
+    if escapes:
+        raise SweepError("setting the attribute wouldn't reach every read: " + "; ".join(escapes))
+    evidence = evidence_dir()
+    adjudicated = json.loads((evidence / "credits/adjudicated.json").read_text())
+    probes = ProbeCache(cache_root, ffprobe=ffprobe)
+    baseline = load_baseline(baseline_path)
+    kinds_of = {"movies40": True, "tv40": False, "movie_credit_truth": True}
+    files_of = {
+        name: json.loads((evidence / f"credits/{name}.json").read_text()) for group in sets for name in GATE_SETS[group]
+    }
+    original = {constant: getattr(rule_j, constant) for constant, _ in swept}
+    detection = _detection_on(decode, gpu_device)
+    cells: list[SweepCell] = []
+    try:
+        # One blank frame starts the helper and its self-test, so the decode cache knows which backend read the boxes.
+        detection.detect_boxes(np.zeros((1, FRAME_H, FRAME_W), dtype=np.uint8))
+        decodes = DecodeCache(cache_root, digest=decode_digest(), backend=detection.backend)
+        for combination in itertools.product(*(values for _, values in swept)):
+            values = tuple(zip((constant for constant, _ in swept), combination, strict=True))
+            for constant, value in values:
+                setattr(rule_j, constant, value)
+            counted = (decodes.decoded, decodes.reused)
+            rule, rows = RuleTally(), {}
+            # The 40 movies of the 80 are all in the 205, so a cell reads them once and both sets see that answer.
+            cell_answers: dict[tuple[str, bool], tuple[float | None, float | None]] = {}
+            for group in (g for g in ("80", "205") if g in sets):
+                parts = []
+                for name in GATE_SETS[group]:
+                    is_movie = kinds_of[name]
+                    answers = {}
+                    for entry in files_of[name]:
+                        key = (entry["file"], not is_movie)
+                        if key not in cell_answers:
+                            cell_answers[key] = _sweep_answer(
+                                entry["file"], is_episode=not is_movie, decode=decode, gpu_device=gpu_device,
+                                ffmpeg=ffmpeg, detect_boxes=detection.detect_boxes, probe=probes.probe,
+                                decodes=decodes,
+                            )  # fmt: skip
+                        answers[entry["file"]] = cell_answers[key]
+                        if group == "80":
+                            rule.add(answers[entry["file"]][0], _truth(entry, adjudicated))
+                    parts.append(
+                        compare_text(
+                            files_of[name],
+                            adjudicated,
+                            answers=answers,
+                            probe=probes.probe,
+                            baseline=baseline,
+                            is_movie=is_movie,
+                        )  # fmt: skip
+                    )
+                rows[group] = merge_rows(parts)
+            cells.append(
+                SweepCell(
+                    values=values,
+                    shipped=all(value == original[constant] for constant, value in values),
+                    rule=rule,
+                    rows=rows,
+                    decoded=decodes.decoded - counted[0],
+                    reused=decodes.reused - counted[1],
+                )
+            )
+            logger.info("swept {}: {}", dict(values), sweep_table(cells[-1:]).splitlines()[-1])
+    finally:
+        for constant, value in original.items():
+            setattr(rule_j, constant, value)
+        backend = detection.backend()
+        detection.close()
+    return {
+        "decode": decode,
+        "decode_digest": decode_digest(),
+        "detector_digest": detector_digest(),
+        "text_detection": backend,
+        "sets": sorted(sets),
+        "swept": list(specs),
+        "cells": len(cells),
+        "table": sweep_table(cells),
+    }, cells
