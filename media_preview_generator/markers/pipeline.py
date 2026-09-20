@@ -51,13 +51,16 @@ from .outcomes import (
     OUTCOME_KEYS,
     PLEX_PASS_UNKNOWN,
     READ_BACK_FAILED,
+    REPLACED_OWN,
     STATE_BY_STATUS,
     VERIFY_LATER,
     FileOutcome,
     ServerStatus,
     file_outcome,
     kept_note,
+    replaced_own_note,
     with_kept_note,
+    with_sentence,
 )
 from .ownership import marker_matches, owning_servers
 from .probe import ProbeError, ffprobe_path_for, probe_media
@@ -115,10 +118,12 @@ _SETTINGS_ANSWERS = frozenset({Capability.DISABLED, Capability.NEEDS_CONFIRMATIO
 
 # The Inspector editor's publish (``publish_now``) runs inside a web request on one of eight gunicorn threads, so it is
 # bounded (ruling P-R1). Each server's own HTTP calls are capped by ``ServerConfig.timeout``, which the route shortens
-# to this. Plex's database lock is NOT covered: ``publishers/plex_db.BUSY_TIMEOUT_S`` is its own 30 s wait and has no
-# caller-side knob, so a Plex leg can still run well past the gate below. Shortening it needs a deadline threaded
-# through that publisher (its `_database`/`_local_checks` already take one).
+# to this.
 PUBLISH_NOW_SERVER_TIMEOUT_S = 8
+# Plex waits on locks, not on HTTP, so its own bound is separate: ``publishers/plex_db.BUSY_TIMEOUT_S`` is a job's
+# 30 s wait, which alone outlasts the gate below. The publish-now path gives the database locks the same bound the
+# servers' HTTP calls get, so one busy Plex can't hold a web thread for half a minute.
+PUBLISH_NOW_DB_WAIT_S = float(PUBLISH_NOW_SERVER_TIMEOUT_S)
 # A START GATE, not a cancellation: a server the fan-out hasn't STARTED by then isn't started at all. It stops one
 # unreachable server from multiplying into one wait per server; it cannot cut a server's call short once it began.
 PUBLISH_NOW_DEADLINE_S = 25.0
@@ -241,6 +246,9 @@ class PipelineContext:
             detector, but stored answers count as if it were there.
         decided_by: Files per marker type and source group this job decided; a file counts once its run reaches
             publishing and doesn't fail (the job summary's "Decided by" counts).
+        db_timeout_s: The longest Plex's publisher waits for the database locks in one check or write; None leaves it
+            at ``plex_db.BUSY_TIMEOUT_S``. ``publish_now`` shortens it, since that wait alone outlasts the deadline a
+            web request may take (ruling P-R1).
     """
 
     registry: Any
@@ -258,6 +266,7 @@ class PipelineContext:
     recheck_empty_server_markers: bool = False
     chromaprint: ChromaprintState = ChromaprintState.AVAILABLE
     credits_text: TextDetState = TextDetState.AVAILABLE
+    db_timeout_s: float | None = None
     decided_by: DecidedByTally = field(default_factory=DecidedByTally, repr=False)
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
@@ -1310,6 +1319,7 @@ def _publish_to(
         sibling_markers=lambda p: markers_for_path(store, p),
         settings_provider=lambda: _live_markers_settings(ctx, cfg),
         ui_details=False,  # Plex's own detection settings are for the Edit dialog: one more Plex request per check
+        db_timeout_s=ctx.db_timeout_s,
     )
     if publisher is None:
         return _not_written(ServerStatus.SKIPPED, "Not supported for this server type yet", name="")
@@ -1402,7 +1412,14 @@ def _publish_to(
                 )
                 if shown is None:
                     return {**_up_to_date(item_row.kept_types), READ_BACK_FAILED: True}
-                released = bool(item_row.kept_types) and not _live_markers_settings(ctx, cfg).keeps_server_markers
+                # A kept type goes back to ours once the server is set to use ours — and once the user locks it, since
+                # a marker the user adjusted or locked wins over "Keep Plex's" / "Keep Emby's" (spec §5.5 rule 1).
+                # A lock alone doesn't change the decided times, so without this the unchanged test above would leave
+                # the server showing its own markers for a type the user just took over.
+                released = bool(item_row.kept_types) and (
+                    not _live_markers_settings(ctx, cfg).keeps_server_markers
+                    or bool(item_row.kept_types & {m.type for m in wanted if m.locked})
+                )
                 if shown is Shown.OURS and not released:
                     return _up_to_date(item_row.kept_types)
                 reason = {
@@ -1460,6 +1477,7 @@ def _publish_to(
 
         changed = publisher.last_write_changed
         kept = publisher.last_kept_types
+        replaced_own = publisher.last_replaced_own_types
         version = store.set_item_publish_state(
             cfg.id, item_id, ours, "written", kept_types=kept, item_files=publisher.last_item_files
         )
@@ -1467,6 +1485,15 @@ def _publish_to(
             return _up_to_date(kept)  # a forced run whose write changed nothing
         store.set_publish_basis(rec.id, cfg.id, decided_hash=decided_hash, item_version=version)
         note = with_kept_note(kept_note(kept, wanted, vendor), _shown_differently(ours))
+        override = replaced_own_note(replaced_own, vendor)
+
+        def _says_override(row: dict) -> dict:
+            # The user's lock took the server's own markers off it although the server keeps its own: the row names
+            # the types so the Inspector and the editor can say which servers that happened on (spec §5.5 rule 1).
+            if not replaced_own:
+                return row
+            return {**row, REPLACED_OWN: [t.value for t in MarkerType if t in replaced_own]}
+
         shown_types = {m.type for m in ours} | kept
         waiting_for = [m.type.value for m in wanted if m.type not in shown_types]
         if waiting_for:
@@ -1474,15 +1501,18 @@ def _publish_to(
             message = with_kept_note(
                 f"Waiting for this item's other versions to agree on: {', '.join(waiting_for)}", note
             )
-            return _finish(ServerStatus.WAITING, message, name=publisher.name, item_id=item_id, published=ours)
+            message = with_sentence(message, override)
+            return _says_override(
+                _finish(ServerStatus.WAITING, message, name=publisher.name, item_id=item_id, published=ours)
+            )
         if ours:
             message = f"{len(ours)} marker(s)"
         else:
             message = "Cleared our markers from this server" if changed or not note else ""
-        message = with_kept_note(message, note)
+        message = with_sentence(with_kept_note(message, note), override)
         written = _finish(ServerStatus.WRITTEN, message, name=publisher.name, item_id=item_id, published=ours)
         # Recorded either way, but only a write that changed the server says so: it already showed this.
-        return written if changed else _up_to_date(kept)
+        return _says_override(written) if changed else _up_to_date(kept)
 
 
 class FileNotAnalysedError(Exception):
@@ -1509,11 +1539,12 @@ def publish_now(
     ``duration_ms``, ``canonical_path``, ``own_previous`` and ``kept_types`` arguments, the same ``publish_state`` rows
     and the same messages, so Check servers can't tell the two apart.
 
-    The bound has two halves. Each server's own HTTP calls are capped by its ``ServerConfig.timeout``, which the caller
-    shortens for this path; on top of that, ``deadline_s`` is a start gate — a server the fan-out hasn't started by
-    then isn't started at all, its row says so and its publish basis is cleared, so the next run publishes it. So N
-    slow servers can't multiply, but one server already under way still runs to its own limit: a Plex database write
-    waits up to ``publishers.plex_db.BUSY_TIMEOUT_S`` on top of the gate.
+    The bound has two halves. Each of a server's own calls is capped by its ``ServerConfig.timeout`` (HTTP), which the
+    caller shortens for this path, or by ``PUBLISH_NOW_DB_WAIT_S`` (Plex's database locks) — **per call**, so a Plex
+    leg that checks the server and then writes can spend that wait several times over. On top of that, ``deadline_s``
+    is a start gate: a server the fan-out hasn't started by then isn't started at all, its row says so and its publish
+    basis is cleared, so the next run publishes it. So N slow servers can't multiply, and one server already under way
+    runs to a small multiple of the shortened wait instead of a small multiple of ``plex_db.BUSY_TIMEOUT_S``.
 
     Args:
         canonical_path: Local path of the file (already validated by the caller).
@@ -1549,6 +1580,7 @@ def publish_now(
         chromaprint=ChromaprintState.ABSENT,
         credits_text=TextDetState.ABSENT,
         live_config=live_config,
+        db_timeout_s=PUBLISH_NOW_DB_WAIT_S,
     )
     item = ProcessableItem(canonical_path=canonical_path, server_id="", item_id_by_server={})
     owning = _owning_servers(item, ctx)

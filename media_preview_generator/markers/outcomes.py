@@ -113,6 +113,54 @@ def with_kept_note(message: str, note: str) -> str:
     return f"{message}; {note}" if message else note[0].upper() + note[1:]
 
 
+def with_sentence(message: str, sentence: str) -> str:
+    """``message. sentence`` — a whole sentence after a row message — or either one alone."""
+    if not sentence:
+        return message
+    return f"{message}. {sentence}" if message else sentence
+
+
+def replaced_own_note(replaced_types: Iterable[MarkerType], vendor: str) -> str:
+    """Row wording for a locked marker that replaced the server's own although the server keeps its own.
+
+    Approved copy, ``evidence/design/phase4/ui-copy.md`` §4 (owner decision, spec §14 2026-09-20).
+
+    Args:
+        replaced_types: The types whose own markers the server lost (``MarkerPublisher.last_replaced_own_types``).
+        vendor: The server's brand as users know it (``Plex``, ``Emby``).
+
+    Returns:
+        The sentence; "" when the server's own markers were left alone.
+    """
+    if not frozenset(replaced_types):
+        return ""
+    return (
+        f"Replaced {vendor}'s own marker. This server is set to keep {vendor}'s, but a marker you adjust always wins."
+    )
+
+
+def lock_overrides_note(replaced_types: Iterable[MarkerType], vendor: str) -> str:
+    """Inspector wording **before** a save, for a locked type this server would otherwise keep its own markers of.
+
+    Approved copy, ``evidence/design/phase4/ui-copy.md`` §4 (owner decision, spec §14 2026-09-20).
+
+    Args:
+        replaced_types: The types whose own markers the server is about to lose.
+        vendor: The server's brand as users know it (``Plex``, ``Emby``).
+
+    Returns:
+        The sentence; "" when nothing of the server's own is in the way.
+    """
+    if not frozenset(replaced_types):
+        return ""
+    return f"This server is set to keep {vendor}'s own markers. Your locked marker replaces them anyway."
+
+
+# Row key listing the types whose server's own markers a locked marker replaced although the server keeps its own
+# (spec §5.5 rule 1); absent when nothing of the server's own was taken off it.
+REPLACED_OWN = "replaced_own"
+
+
 # Row key on a written or up-to-date row of a replaced file: servers often rescan a replaced file after the job, so
 # the job checks it again later (``job_runner._queue_verify``).
 VERIFY_LATER = "verify_later"

@@ -21,7 +21,7 @@ from .audio.season import folder_videos, season_group, season_size
 from .decide import DecisionStatus, shortened_by
 from .external_ids import ids_from_path, is_season_folder
 from .models import SERVER_SOURCES, Marker, MarkerType, Source
-from .outcomes import kept_note, with_kept_note
+from .outcomes import kept_note, lock_overrides_note, with_kept_note, with_sentence
 from .ownership import allowed_matches, owning_servers
 from .publishers.base import Capability, versions_agree
 from .publishers.emby import CREDENTIALS_REJECTED, credits_note
@@ -64,7 +64,10 @@ class CapabilityCache:
     """Capability answers per server: ready ones reused for ``ttl_s``, any other state (or a ready one with a warning)
     for ``not_ready_ttl_s``.
 
-    The Edit tab and the Inspector ask on every load, and one Plex check can wait 30 s on a busy database. An entry
+    The Edit tab and the Inspector ask on every load, and one Plex check can wait ``plex_db.BUSY_TIMEOUT_S`` on a busy
+    database: this read lane deliberately keeps the job-length wait (a shortened one would report a busy Plex as
+    unreachable on a page load, which is worse than a slow page), and this cache is what keeps it to once a minute.
+    Only the Inspector's *publish* path shortens it, through ``publisher_for(db_timeout_s=…)``. An entry
     only counts while the server's config is unchanged, so a saved server (switch, libraries, database folder, URL,
     credentials) is checked again at once; there is no settings-saved hook to clear it. A plugin install or uninstall
     isn't a config change, so those routes call ``forget``.
@@ -484,6 +487,9 @@ def _kept_on_server(
     write nor what we left there, while the server still shows markers of the type (``plex_db._kept_types``; Emby's
     plugin leaves such a type alone). A recorded type no longer decided whose markers aren't ours is left alone by the
     job, so it is left out here too.
+
+    Locks are not read here, as in ``plex_db._kept_types``: this answers only what the **setting** would keep, and
+    ``_plan`` takes the locked types back out (spec §5.5 rule 1) and says so instead.
     """
     kept = set()
     for mtype in MarkerType:
@@ -538,19 +544,24 @@ def _plan(
         return "not_enabled", off_reason
     if not wanted:
         return ("will_remove", "") if ours else ("nothing_to_publish", "")
-    kept = (
+    would_keep = (
         _kept_on_server(current, wanted, ours, recorded_kept, duration_ms, server_type)
         if keep_own and current is not None
         else frozenset()
     )
+    # A marker the user adjusted or locked wins over "Keep Plex's" / "Keep Emby's" (spec §5.5 rule 1, §14 2026-09-20),
+    # so the next publish replaces this server's own markers of a locked type instead of leaving them.
+    locked = {m.type for m in wanted if m.locked}
+    kept = would_keep - locked
     vendor = server_type.value.capitalize()
     note = kept_note(kept, wanted, vendor)
+    override = lock_overrides_note(would_keep & locked, vendor)
     # Emby's credits skip runs to the end of the file, past a scene after credits that end earlier.
     shown_note = (
         credits_note([m for m in wanted if m.type not in kept], duration_ms) if server_type is ServerType.EMBY else ""
     )
     if waiting_on_versions:
-        return "waiting", with_kept_note(VERSIONS_DISAGREE_REASON, note)
+        return "waiting", with_sentence(with_kept_note(VERSIONS_DISAGREE_REASON, note), override)
     if current is None:
         return "unknown", shown_note
     # Plex's own markers of a kept type stay whatever this file decided: compare only the other types.
@@ -568,7 +579,7 @@ def _plan(
             shown = matched
     # Compared within _SAME_TOLERANCE_MS where a job compares Plex's rows exactly: a Plex marker within a second of
     # ours reads "Up to date" here while the job counts it as Plex's. Plex's own detection doesn't land that close.
-    reason = with_kept_note(with_kept_note("", note), shown_note)
+    reason = with_sentence(with_kept_note(with_kept_note("", note), shown_note), override)
     if _same(shown, expected, duration_ms, server_type):
         return (f"keeps_{server_type.value}" if note else "up_to_date"), reason
     return ("will_replace" if shown else "will_add"), reason

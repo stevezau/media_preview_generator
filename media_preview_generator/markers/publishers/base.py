@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from loguru import logger
@@ -110,7 +110,10 @@ def agreed_across_versions(
     A type is kept only when the calling file has it and every other version is decided, has that type and agrees
     within ``VERSION_AGREEMENT_MS``. The times are the calling file's, unless what this app already left on the item
     (``prior``) agrees with every version too: then that stays, so versions whose times differ slightly don't rewrite
-    each other's markers on every run.
+    each other's markers on every run. Whichever times win, each returned marker carries the calling file's ``locked``
+    flag for its type — only that file's, never a sibling version's: a lock belongs to the file the user edited, and a
+    run of an unlocked version that lets the server keep its own markers again is undone by the locked version's next
+    write (that write bumps the item's version, so the unlocked one's publish basis no longer matches either).
 
     Args:
         markers: The calling file's decided markers.
@@ -130,7 +133,11 @@ def agreed_across_versions(
             continue
         kept = [m for m in prior if m.type is mtype]
         if kept and versions_agree(kept, mine) and all(versions_agree(kept, t) for t in theirs):
-            agreed.extend(kept)
+            # The times stay what the item already shows, but the calling file's lock rides along: whether the type is
+            # the user's own decides whether the server may keep its own markers of it (spec §5.5 rule 1), and what the
+            # item record happens to carry from an earlier run must not answer that.
+            locked = any(m.locked for m in mine)
+            agreed.extend(replace(m, locked=locked) for m in kept)
         else:
             agreed.extend(mine)
     return agreed
@@ -191,6 +198,10 @@ class MarkerPublisher(ABC):
     # untouched ("Keep Plex's", "Keep Emby's"); the caller records them and passes them back as ``kept_types``. Empty
     # elsewhere.
     last_kept_types: frozenset[MarkerType] = frozenset()
+    # Set by every successful ``write``: the types whose markers on the item were the server's own and were replaced
+    # anyway because the user locked them, although the server is set to keep its own (spec §5.5 rule 1). The caller
+    # says so in the server's row; empty whenever nothing of the server's own was taken off it.
+    last_replaced_own_types: frozenset[MarkerType] = frozenset()
     # Set by every ``write`` that read the item: the item's version files that write computed the marker set for. The
     # caller records them and passes them back to ``shows``. None where items have no shared versions (Jellyfin, Emby).
     last_item_files: tuple[str, ...] | None = None

@@ -653,7 +653,9 @@ def decide(
         locked: User-locked markers by type. A lock always wins, including over a disabled type, and
             is returned with `locked=True` so the cross-type overlap checks never demote it, whatever
             the passed value's own flag says. A value that isn't a :class:`Marker`, or whose type
-            doesn't match its key, is ignored.
+            doesn't match its key, is ignored. The flag carries on to the publishers, which read it to
+            override "Keep Plex's" / "Keep Emby's" for that type (spec §5.5 rule 1, §14 2026-09-20) —
+            so nothing here may drop it from a decided marker.
 
     Returns:
         A decision for every :class:`MarkerType`.

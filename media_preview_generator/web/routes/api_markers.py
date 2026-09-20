@@ -501,6 +501,7 @@ def _editor_server_row(row: dict, *, saved: list[Any], duration_ms: int) -> dict
     """One publish row in the editor's words, with what this server can't show and its per-field notes."""
     from ...markers.inspect import CAN_SHOW
     from ...markers.models import MarkerType
+    from ...markers.outcomes import REPLACED_OWN
     from ...markers.publishers.emby import credits_note
     from ...servers.base import ServerType
 
@@ -524,6 +525,9 @@ def _editor_server_row(row: dict, *, saved: list[Any], duration_ms: int) -> dict
         "can_show": list(can_show),
         "cant_show": [m.type.value for m in saved if m.type.value not in can_show],
         "notes": notes,
+        # The types whose own markers this server lost to the user's lock although it is set to keep its own
+        # (spec §5.5 rule 1); empty on every other server.
+        "replaced_own": list(row.get(REPLACED_OWN, ())),
     }
 
 
@@ -541,10 +545,11 @@ def marker_item_save():
         200 with ``markers`` (every stored marker for the file, the saved ones locked) and ``servers``: one row per
         owning server with ``result`` (``written``, ``unchanged``, ``waiting``, ``failed``, ``not_enabled``,
         ``nothing_to_publish`` or ``needs_review``), its ``message``, what it ``can_show``, the saved types it
-        ``cant_show``, and per-field ``notes`` (Emby's credits end). 400 for a body this can't be saved from, a path
-        outside every server library, or a type no enabled owner can show; 404 for an unknown server or item; 409 when
-        the server is off, no enabled owner has the file, or the file was never analysed or has changed since; 503
-        when the config directory isn't writable.
+        ``cant_show``, per-field ``notes`` (Emby's credits end), and the types whose own markers the lock
+        ``replaced_own`` on a server set to keep its own (spec §5.5 rule 1). 400 for a body this can't be saved
+        from, a path outside every server library, or a type no enabled owner can show; 404 for an unknown server
+        or item; 409 when the server is off, no enabled owner has the file, or the file was never analysed or has
+        changed since; 503 when the config directory isn't writable.
     """
     from ...markers.pipeline import (
         PUBLISH_NOW_SERVER_TIMEOUT_S,

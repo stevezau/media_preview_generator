@@ -465,7 +465,10 @@ frame-checks every answer shaped like that.
 
 ### 5.5 Combining evidence
 Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
-1. A **locked** user marker wins, always (even for a type whose detection is off); it is never demoted by rules 9–10.
+1. A **locked** user marker wins, always (even for a type whose detection is off); it is never demoted by rules 9–10,
+   and it is published over a server's own markers even where that server is set to keep them (`keep_plex`,
+   `keep_emby`). This is the only rule for a lock against a kept type; the publishers report the types whose own
+   markers they replaced and the UI says so (§6.3, §14 2026-09-20).
 2. Sanity checks apply to every candidate, chapters included: inside the file (end ≤ duration + 2 s, clamped to the
    duration; unknown duration fails; a segment can't end before it starts); length ≥ 3 s for every type and ≤ 300 s for
    intros and recaps; intro/recap starts in the first 35% and must not run to the end of the file (end missing or
@@ -585,8 +588,7 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    change, an item the server replaced; a drifted Plex item's current version files too), plus files with decided
    credits or preview whose server's stored answer is empty or unusable, on a 1/2/4/8/16-day backoff (at most 5
    re-reads, failed ones included), and the files of items whose last publish failed, on the same backoff (at most 5
-   retries per failure). Locked markers re-assert, except that `keep_plex` / `keep_emby` keep the server's own markers
-   over them until the phase-4 lock editor settles how the two meet (nothing locks a marker before phase 4). Plex
+   retries per failure). Locked markers re-assert (§5.5 rule 1). Plex
    `on_plex_redetect` = `restore` (default) or `keep_plex`; Emby `on_emby_redetect` = `restore` or `keep_emby`.
    `keep_plex` keeps Plex's markers (§14 2026-09-14), not stored as evidence.
 7. **Outcomes** per server: markers written / reused / needs review / skipped + reason.
@@ -597,8 +599,9 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
 NeedsPlugin | PluginOutdated | NeedsPass | NeedsLocalDb | NeedsPlexDetectionOnce | UnsupportedSchema | Unreachable |
 Misconfigured` (`publishers/base.Capability`), `write(item_id, markers, *, previous, duration_ms, canonical_path,
 own_previous, kept_types) -> list[Marker]` (the markers ours on the item after the call; `last_write_changed` says
-whether that call changed the server, `last_kept_types` which types stay the server's own, `last_item_files` which
-version files the set was computed for), `shows(item_id, ours, *, kept_types, item_files) -> Ours | Missing |
+whether that call changed the server, `last_kept_types` which types stay the server's own,
+`last_replaced_own_types` which types a lock took off the server although it keeps its own (§5.5 rule 1),
+`last_item_files` which version files the set was computed for), `shows(item_id, ours, *, kept_types, item_files) -> Ours | Missing |
 Replaced | VersionsChanged | Gone | None` (a cheap read-back of what the server shows of what we last left there: Plex's
 `taggings` rows and the item's live version files under the same lock proof, Jellyfin's core `/MediaSegments`;
 `Shown.VERSIONS_CHANGED` when the item's versions, optimized copies left out, differ from the `item_files` recorded
@@ -625,9 +628,13 @@ at the last write), `atomic_writes`.
 - Warn when Plex's own detection is on (it can force-overwrite). Before a file is reported up to date, the job reads
   the item's rows back: gone → written again; replaced by Plex's own → written again (`on_plex_redetect=restore`) or
   kept per type (`keep_plex`): the publisher leaves that type's rows and `pv:` key alone on every write path until
-  the setting is `restore` or Plex has no rows of the type (`item_publish_state` kept types). Under `keep_plex` a
+  the setting is `restore`, Plex has no rows of the type, or the user locked the type (`item_publish_state` kept
+  types). Under `keep_plex` a
   decided type's rows become kept when they are neither what the write would show nor what the item record (or the
   moved file's own record) says is ours, so rows on an item with no record of the type are kept rather than replaced.
+  A **locked** type is never kept (§5.5 rule 1): its rows and `pv:` key are rewritten — the stale credits `final` flag
+  refresh `keep_plex` otherwise turns off included — and the types whose own rows it replaced are reported in
+  `last_replaced_own_types`.
 
 **JellyfinMarkerPublisher**
 - Extend **Media Preview Bridge** (`jellyfin-plugin/`, route prefix `MediaPreviewBridge`, today `Ping`,
@@ -660,7 +667,10 @@ at the last write), `atomic_writes`.
   none this file → waiting, not in library). POST carries this file's size; every POST is confirmed by reading the
   chapters back (not shown → DELETE, failed). An unchanged set whose stored state matches (same ticks and size, not
   stale) sends nothing. `shows()` reads the chapter rows (credits compared by start). `keep_emby` posts without
-  `ReplaceOwn` and records the types Emby shows its own rows of as kept; the plugin still stores ours for them.
+  `ReplaceOwn` and records the types Emby shows its own rows of as kept; the plugin still stores ours for them. A
+  **locked** type is never kept (§5.5 rule 1): since `ReplaceOwn` is per POST and not per type, a locked type Emby
+  still shows its own rows of is re-posted alone with `ReplaceOwn`, then the whole set is posted again without it, and
+  that type is reported in `last_replaced_own_types`.
 - **Credits (R1):** Emby always gets the decided credits start, even when the credits end before the file does
   (end < duration − 2 s); its Skip Credits button then skips to the end of the file, including any scene after the
   credits. The row and the Inspector note say "Emby skips to the end of the file".
@@ -1489,3 +1499,14 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   taken in the same run: `End` as credits (0 anime files use it; 9 non-anime files do) and not deciding an intro from a lone
   generic `Intro` (would lose 569 anime + 857 TV intros to remove 7 wrong ones — the chapter is the theme song in 85%
   of the files Plex can judge, not the cold open). `evidence/eval/phase4-chapters.md`.
+- 2026-09-20 · **Q1 · A marker the user adjusted or locked beats a server's "keep its own" setting** (option a). A
+  locked type is published to every owning server even where `on_plex_redetect` is `keep_plex` or `on_emby_redetect`
+  is `keep_emby`: Plex's own rows and `pv:` key of that type are rewritten, and Emby gets that type re-posted with
+  `ReplaceOwn` (which is per POST, so a locked type goes on its own and the whole set follows without it). The reason:
+  the setting answers "who wins when the *server* detects something of its own", and the user isn't the server — a
+  lock is the one answer nobody else can produce, and a setting that silently swallowed it would leave the Inspector
+  showing times no player ever plays. The override is never silent: the publishers report the types whose own markers
+  they replaced, the server row says "Replaced Plex's own marker. This server is set to keep Plex's, but a marker you
+  adjust always wins.", and the Inspector says it before the save ("This server is set to keep Plex's own markers.
+  Your locked marker replaces them anyway."). This closes spec contradiction D1 — §5.5 rule 1 stands and §6.2 step 6's
+  exception is gone, so the rule is stated once. An **unlocked** decision still loses to a kept type exactly as before.

@@ -23,6 +23,7 @@ def publisher_for(
     settings: ServerMarkersSettings | None = None,
     settings_provider: Callable[[], ServerMarkersSettings] | None = None,
     ui_details: bool = True,
+    db_timeout_s: float | None = None,
 ) -> MarkerPublisher | None:
     """Build the publisher for ``config.type`` with that server's markers settings.
 
@@ -37,6 +38,8 @@ def publisher_for(
             own API and the pipeline checks the saved settings first.
         ui_details: Include details only the Edit dialog shows in ``capability()`` (Plex's own detection settings, one
             more Plex request).
+        db_timeout_s: The longest Plex's publisher waits for the database locks in one check or write; None leaves it
+            at ``plex_db.BUSY_TIMEOUT_S``. Other server types don't take a database lock and ignore it.
 
     Returns:
         The publisher, or None for a server type without one.
@@ -53,6 +56,7 @@ def publisher_for(
             sibling_markers=sibling_markers,
             settings_provider=settings_provider,
             ui_details=ui_details,
+            db_timeout_s=db_timeout_s,
         )
     if config.type is ServerType.JELLYFIN:
         from .jellyfin import JellyfinMarkerPublisher

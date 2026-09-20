@@ -56,9 +56,9 @@ SAME_HOST_PATH_ADVICE = (
     "Mount the exact folder Plex uses, on the same machine "
     "(on unRAID, the same /mnt/cache or /mnt/user path Plex uses)."
 )
-# The longest one write() waits for locks in total (this process's lock on the database, then Plex's write
-# lock) before giving up until the next run. capability() allows this twice: once for the lock probe, once for its
-# read-only checks after the Plex calls.
+# The default for how long one write() waits for locks in total (this process's lock on the database, then Plex's
+# write lock) before giving up until the next run. capability() allows this twice: once for the lock probe, once for
+# its read-only checks after the Plex calls. A caller that must answer sooner passes its own ``db_timeout_s``.
 BUSY_TIMEOUT_S = 30.0
 # Check servers reads Plex items back one read-only connection each, like a single file's read-back, and leaves this
 # process's lock on the database free this long between them, so a write from another job waiting for it gets it.
@@ -547,6 +547,7 @@ class _Plan(NamedTuple):
     part_updates: list[tuple[str, int]]  # (extra_data, media_parts id)
     ours: list[Marker]  # the desired markers the item shows as ours after the write (kept types left out)
     kept_types: frozenset[MarkerType]  # types whose rows are Plex's own and stay untouched
+    replaced_own: frozenset[MarkerType]  # locked types whose Plex rows this write replaces under "Keep Plex's"
 
     @property
     def is_noop(self) -> bool:
@@ -566,13 +567,14 @@ def _refresh_final_types(
     The flag says whether credits run to the end of the file, and Plex's docs say some apps open their post-play screen
     at the final credits, so a flag left from a version since deleted is put right. Only on an item with one version:
     with several, each version's runtime can give another flag for the same times, and rewriting would flip it back
-    on the other version's next run. Only with the file's duration known. Never under "Keep Plex's": rows serving the
-    wanted times can be Plex's own even when our record lists those times (a write that changed nothing still records
-    them), and those rows are never touched. Under "Use ours", Plex's rows with identical times get our flag.
+    on the other version's next run. Only with the file's duration known. Under "Keep Plex's" only for a type the user
+    locked: rows serving the wanted times can be Plex's own even when our record lists those times (a write that
+    changed nothing still records them), and those rows are never touched — but a locked type's rows are ours whatever
+    the setting says (spec §5.5 rule 1). Under "Use ours", Plex's rows with identical times get our flag.
     """
-    if keep_plex or not duration_ms or duration_ms <= 0 or len(_version_files(parts)) != 1:
+    if not duration_ms or duration_ms <= 0 or len(_version_files(parts)) != 1:
         return frozenset()
-    return frozenset(m.type for m in wanted)
+    return frozenset(m.type for m in wanted if m.locked or not keep_plex)
 
 
 def _kept_types(
@@ -591,6 +593,10 @@ def _kept_types(
     no record of (a first publish, a reset markers.db, a re-added server): those can't be told from Plex's. Rows that
     already show what we'd write are treated as ours. A kept type stays kept, whatever gets written for the item,
     until Plex has no rows of it left or the server is set to restore ours.
+
+    Locks are not read here: this answers only what the **setting** would keep. ``_plan`` takes the types the user
+    locked back out of the answer, since a locked marker wins over "Keep Plex's" (spec §5.5 rule 1), and reports them
+    as replaced instead.
     """
     if not keep_plex:
         return frozenset()
@@ -627,6 +633,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         settings_provider: Callable[[], ServerMarkersSettings] | None = None,
         mountinfo_path: str = "/proc/self/mountinfo",
         ui_details: bool = True,
+        db_timeout_s: float | None = None,
     ) -> None:
         """Create the publisher.
 
@@ -640,6 +647,9 @@ class PlexMarkerPublisher(MarkerPublisher):
             mountinfo_path: For tests.
             ui_details: Ask Plex for its own detection settings in ``capability()`` (the Edit dialog shows them); a job
                 doesn't need them.
+            db_timeout_s: The longest a single check or write waits for the database locks; None uses
+                ``BUSY_TIMEOUT_S``. The Inspector's publish-now path shortens it, since a 30 s wait alone outlasts the
+                deadline a web request may take (ruling P-R1).
         """
         self._server = server
         self._config = config
@@ -648,7 +658,12 @@ class PlexMarkerPublisher(MarkerPublisher):
         self._sibling_markers = sibling_markers or (lambda _path: None)
         self._mountinfo_path = mountinfo_path
         self._ui_details = ui_details
+        self._db_timeout_s = db_timeout_s
         self._live_files: dict[str, tuple[str, ...]] = {}
+
+    def _db_deadline(self) -> float:
+        """When one check or write stops waiting for the database locks (``time.monotonic()``)."""
+        return time.monotonic() + (BUSY_TIMEOUT_S if self._db_timeout_s is None else self._db_timeout_s)
 
     def db_path(self) -> str | None:
         """DB path, or None when the Plex config folder isn't set."""
@@ -839,7 +854,7 @@ class PlexMarkerPublisher(MarkerPublisher):
 
     def capability(self) -> CapabilityReport:
         """Check settings, DB location and lock sharing, Plex Pass, schema and the marker tag row."""
-        local = self._local_checks(deadline=time.monotonic() + BUSY_TIMEOUT_S)
+        local = self._local_checks(deadline=self._db_deadline())
         if local.details.get("lock_holder") is False:
             status = self._server.get_server_status()
             if status is None:
@@ -869,7 +884,7 @@ class PlexMarkerPublisher(MarkerPublisher):
                 logger.debug("Plex {}: detection prefs unavailable: {}", self._config.name, exc)
         try:
             # A fresh deadline: the Plex calls above don't eat into the time allowed for the database lock.
-            with self._database(read_only=True, deadline=time.monotonic() + BUSY_TIMEOUT_S) as conn:
+            with self._database(read_only=True, deadline=self._db_deadline()) as conn:
                 self._check_schema(conn)
                 self._check_library_marker_versions(conn)
                 self._marker_tag_id(conn)
@@ -954,7 +969,11 @@ class PlexMarkerPublisher(MarkerPublisher):
                 (rating_key, tag_id),
             )
         ]
-        kept_types = _kept_types(rows, wanted, prior, own_prior, kept_before, keep_plex)
+        # A marker the user adjusted or locked wins over "Keep Plex's" (spec §5.5 rule 1, §14 2026-09-20), so a locked
+        # type is written even where the setting would have left Plex's own rows in place.
+        locked = frozenset(m.type for m in wanted if m.locked)
+        would_keep = _kept_types(rows, wanted, prior, own_prior, kept_before, keep_plex)
+        kept_types = would_keep - locked
         # Plex's rows of a kept type, and the pv: key it rebuilds them from, are left exactly as they are.
         wanted = [m for m in wanted if m.type not in kept_types]
         prior = [m for m in prior if m.type not in kept_types]
@@ -1011,6 +1030,9 @@ class PlexMarkerPublisher(MarkerPublisher):
             part_updates=part_updates,
             ours=wanted,
             kept_types=kept_types,
+            # Only the types whose rows this write really rewrites: a locked type the setting would have kept whose
+            # rows already serve the wanted times takes nothing off Plex, so the row mustn't say it did.
+            replaced_own=frozenset(t for t in would_keep & locked if _TYPE_TEXT[t] in replaced),
         )
 
     def _write_item(
@@ -1093,7 +1115,8 @@ class PlexMarkerPublisher(MarkerPublisher):
 
         Types of ours that are no longer desired are removed only where they still serve exactly ``previous``; Plex's
         own rows of those types stay. A desired type replaces whatever rows the item has of that type, except a type
-        kept as Plex's own while the server is set to "Keep Plex's" (see ``_kept_types``). Rows and keys that already
+        kept as Plex's own while the server is set to "Keep Plex's" (see ``_kept_types``) — a type the user locked is
+        written even then, and reported in ``last_replaced_own_types`` (spec §5.5 rule 1). Rows and keys that already
         serve the desired times stay, unless only their credits ``final`` flag is stale (see ``_refresh_final_types``).
 
         Returns:
@@ -1103,6 +1126,7 @@ class PlexMarkerPublisher(MarkerPublisher):
             PublishError: Nothing was written (one transaction; see ``MarkerPublisher.write``).
         """
         self.last_write_changed = False
+        self.last_replaced_own_types = frozenset()
         self.last_item_files = None
         keep_plex = self._live_settings().on_plex_redetect == "keep_plex"
         kept_before = frozenset(kept_types)
@@ -1116,7 +1140,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         if not wanted and not prior and not own_prior and not self.last_kept_types:
             return []
         rating_key = _rating_key(item_id)
-        deadline = time.monotonic() + BUSY_TIMEOUT_S
+        deadline = self._db_deadline()
         # capability() is cached per job; these checks (lock probe included) guard every write on their own.
         local = self._local_checks(deadline=deadline)
         if not local.ready:
@@ -1177,12 +1201,21 @@ class PlexMarkerPublisher(MarkerPublisher):
                 rating_key,
                 " and ".join(t.value for t in MarkerType if t in newly_kept),
             )
+        if plan.replaced_own:
+            logger.info(
+                "Plex {}: item {} showed Plex's own {}; this server keeps Plex's, but the user locked them, so "
+                "they were replaced",
+                self._config.name,
+                rating_key,
+                " and ".join(t.value for t in MarkerType if t in plan.replaced_own),
+            )
         if changed:
             logger.info(
                 "Plex {}: item {} now shows {} marker(s) of ours", self._config.name, rating_key, len(plan.ours)
             )
         self.last_write_changed = changed
         self.last_kept_types = plan.kept_types
+        self.last_replaced_own_types = plan.replaced_own
         return plan.ours
 
     def shows(
@@ -1222,10 +1255,10 @@ class PlexMarkerPublisher(MarkerPublisher):
             rating_key = _rating_key(item_id)
         except ItemNotFoundError:
             return None
-        if not self._local_checks(deadline=time.monotonic() + BUSY_TIMEOUT_S).ready:
+        if not self._local_checks(deadline=self._db_deadline()).ready:
             return None
         try:
-            with self._database(read_only=True, deadline=time.monotonic() + BUSY_TIMEOUT_S) as conn:
+            with self._database(read_only=True, deadline=self._db_deadline()) as conn:
                 return not self._item_exists(conn, rating_key)
         except Exception as exc:
             logger.debug("Plex {}: couldn't look item {} up: {}", self._config.name, item_id, type(exc).__name__)
@@ -1262,7 +1295,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         self._live_files = {}
         if not items:
             return out
-        local = self._local_checks(deadline=time.monotonic() + BUSY_TIMEOUT_S)
+        local = self._local_checks(deadline=self._db_deadline())
         if not local.ready:
             logger.debug("Plex {}: couldn't read {} item(s) back: {}", self._config.name, len(items), local.state.value)
             return {item_id: None for item_id, *_ in items}
@@ -1280,7 +1313,7 @@ class PlexMarkerPublisher(MarkerPublisher):
                 time.sleep(READ_BACK_PAUSE_S)  # the lock was just released: a waiting write takes it now
             opened = True
             try:
-                with self._database(read_only=True, deadline=time.monotonic() + BUSY_TIMEOUT_S) as conn:
+                with self._database(read_only=True, deadline=self._db_deadline()) as conn:
                     if tag_id is None:
                         self._check_schema(conn)
                         tag_id = self._marker_tag_id(conn)

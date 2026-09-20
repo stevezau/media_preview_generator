@@ -116,20 +116,37 @@ def _kept_types(
 ) -> frozenset[MarkerType] | None:
     """The wanted types Emby shows its own rows of instead of ours, as the plugin leaves them without ``ReplaceOwn``.
 
-    Rows that are what this app left before (``prior``) are ours, never Emby's.
+    Rows that are what this app left before (``prior``) are ours, never Emby's. A type the user locked is never kept:
+    a marker the user adjusted or locked wins over "Keep Emby's" (spec §5.5 rule 1), so a locked type that still shows
+    neither ours nor what we left is a write that didn't land.
 
     Returns:
         Those types (empty when every type shows ours); None when a type shows neither ours nor, under "Keep Emby's",
         rows of Emby's own.
     """
+    locked = {m.type for m in wanted if m.locked}
     kept = set()
     for mtype in dict.fromkeys(m.type for m in wanted):
         if _shows(rows, wanted, mtype):
             continue
-        if not keep or not _has_rows(rows, mtype) or _shows(rows, list(prior), mtype):
+        if not keep or mtype in locked or not _has_rows(rows, mtype) or _shows(rows, list(prior), mtype):
             return None
         kept.add(mtype)
     return frozenset(kept)
+
+
+def _embys_own_types(rows: list[dict[str, Any]], wanted: list[Marker], prior: list[Marker]) -> frozenset[MarkerType]:
+    """The wanted types whose rows on the item are Emby's own, which "Keep Emby's" would leave there.
+
+    Rows that are what a write would show, or what this app left before (``prior``), are ours and take nothing off
+    Emby. Intersected with the locked types this is what a lock overrides (spec §5.5 rule 1); the rest is what stays
+    Emby's, and a ``ReplaceOwn`` POST must leave exactly those out.
+    """
+    return frozenset(
+        m.type
+        for m in wanted
+        if _has_rows(rows, m.type) and not _shows(rows, wanted, m.type) and not _shows(rows, list(prior), m.type)
+    )
 
 
 def _stored_markers(state: dict[str, Any]) -> list[Marker]:
@@ -330,7 +347,9 @@ class EmbyMarkerPublisher(MarkerPublisher):
         The POST carries this file's size, which the plugin compares with the item's file. "Use ours" sends
         ``ReplaceOwn``, so ours replace Emby's own rows of a type. "Keep Emby's" doesn't: the plugin leaves a type that
         has Emby's rows alone (it still stores ours and shows them once Emby's rows are gone), and that type is reported
-        in ``last_kept_types``. An empty set deletes the plugin's markers when something of ours may be there
+        in ``last_kept_types``. A type the user **locked** is sent with ``ReplaceOwn`` even under "Keep Emby's" (spec
+        §5.5 rule 1) and reported in ``last_replaced_own_types``. An empty set deletes the plugin's markers when
+        something of ours may be there
         (``previous`` None or not empty, or a kept type). Nothing is sent when ``previous`` already is this set, the
         plugin holds exactly it for this very file, and Emby's chapters already show what a POST would leave there.
 
@@ -346,10 +365,14 @@ class EmbyMarkerPublisher(MarkerPublisher):
                 removed again, best effort).
         """
         self.last_write_changed = False
+        self.last_replaced_own_types = frozenset()
         keep = self._keeps_emby()
-        kept_before = frozenset(kept_types) if keep else frozenset()
-        self.last_kept_types = kept_before
         wanted = self.project(markers)
+        # A marker the user adjusted or locked wins over "Keep Emby's" (spec §5.5 rule 1, §14 2026-09-20), so a locked
+        # type is never kept — not even one kept by an earlier run.
+        locked = frozenset(m.type for m in wanted if m.locked)
+        kept_before = (frozenset(kept_types) - locked) if keep else frozenset()
+        self.last_kept_types = kept_before
         prior = self.project(previous) if previous is not None else []
         try:
             if not wanted:
@@ -363,6 +386,7 @@ class EmbyMarkerPublisher(MarkerPublisher):
                 raise PublishError("Couldn't read this Emby item; markers not written")
             rows, versions = item
             self._confirm_version(item_id, versions, canonical_path)
+            replaced_own = (_embys_own_types(rows, wanted, prior) & locked) if keep else frozenset()
             body = _post_body(wanted, _file_size(canonical_path))
             ours_before = [m for m in wanted if m.type not in kept_before]
             if previous is not None and _times(prior) == _times(ours_before):
@@ -374,20 +398,44 @@ class EmbyMarkerPublisher(MarkerPublisher):
             raise PublishError(
                 f"Can't reach Emby ({type(exc).__name__}); markers not written", state=Capability.UNREACHABLE
             ) from exc
-        answer = self._post(item_id, body, replace_own=not keep)
+        # ReplaceOwn is per POST, not per type, so the whole set carries it only when every type in it is the user's
+        # own; otherwise the locked types are replaced by the second POST below and the kept ones stay Emby's.
+        replace_all = not keep or locked == {m.type for m in wanted}
+        answer = self._post(item_id, body, replace_own=replace_all)
         # Only a POST that put rows of ours on the item, or took earlier ones off, changed what Emby shows.
         self.last_write_changed = (answer.get("Stored") or 0) > 0 or bool(previous)
         rows = self._chapters_after_post(item_id)
         stale = _stale_ours(rows, wanted, prior) if keep else frozenset()
         if stale:
             # The plugin no longer knows those rows are ours (its store was lost), so without ReplaceOwn it kept them as
-            # Emby's. ReplaceOwn is per POST: replace just those types, then store the whole set again.
+            # Emby's.
             logger.info("Emby {}: item {} still shows markers this app wrote earlier; replacing them",
                         self._config.name, item_id)  # fmt: skip
-            self._post(item_id, _post_body([m for m in wanted if m.type in stale], body["file_size"]), replace_own=True)
+        force = stale | (frozenset() if replace_all else replaced_own)
+        if force:
+            # ReplaceOwn is per POST, so this one carries every wanted type EXCEPT the ones that stay Emby's own. A
+            # POST carrying only ``force`` would take our other types' rows off the item (the plugin removes the rows
+            # of the set it stored) until the POST after it put them back — and a failure in between would leave the
+            # item short a marker it already showed. This way the item is complete after it, and the POST below only
+            # puts the whole set back in the plugin's store.
+            stays_embys = _embys_own_types(rows, wanted, prior) - locked
+            self._post(
+                item_id,
+                _post_body([m for m in wanted if m.type not in stays_embys], body["file_size"]),
+                replace_own=True,
+            )
             self._post(item_id, body, replace_own=False)
             self.last_write_changed = True
             rows = self._chapters_after_post(item_id)
+        if replaced_own:
+            logger.info(
+                "Emby {}: item {} showed Emby's own {}; this server keeps Emby's, but the user locked them, so they "
+                "were replaced",
+                self._config.name,
+                item_id,
+                " and ".join(t.value for t in MarkerType if t in replaced_own),
+            )
+        self.last_replaced_own_types = replaced_own
         kept = _kept_types(rows, wanted, keep, prior)
         if kept is None:
             self._remove_unconfirmed(item_id)

@@ -503,8 +503,10 @@ class TestKeepEmbys:
         ours = _write(emby, [INTRO, CREDITS_TO_END], previous=[OLD_INTRO, CREDITS_TO_END], publisher=publisher)
         assert ours == [INTRO, CREDITS_TO_END] and publisher.last_kept_types == frozenset()
         assert emby.replace_own == [False, False, True, False]
+        # The ReplaceOwn POST carries the whole set, not just the stale intro: Emby keeps none of these types, and a
+        # POST carrying only the intro would take our credits row off the item until the POST after it put it back.
         replaced = emby.server.put_emby_markers.call_args_list[2].kwargs
-        assert (replaced["intro_start_ticks"], replaced["credits_start_ticks"]) == (1_267_710_000, None)
+        assert (replaced["intro_start_ticks"], replaced["credits_start_ticks"]) == (1_267_710_000, 12_953_240_000)
         assert emby.markers_shown() == [("IntroStart", 126_771), ("IntroEnd", 157_068), ("CreditsStart", 1_295_324)]
         assert emby.stored == (1_267_710_000, 1_570_680_000, 12_953_240_000)
 

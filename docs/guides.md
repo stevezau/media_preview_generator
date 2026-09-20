@@ -709,6 +709,10 @@ first time you turn it on for a Plex server:
   not a run after a failed or skipped attempt, not another version of the item — until you switch the server to
   **Use ours** (the next job writes ours) or Plex no longer has markers of that type (then ours are written
   again). Markers that are simply gone are written again either way.
+- **A marker you adjust or lock in the Inspector is the exception**: it is written over Plex's own markers of that
+  type even on a server set to **Keep Plex's**, and the server's row says so — *"Replaced Plex's own marker. This
+  server is set to keep Plex's, but a marker you adjust always wins."* The Inspector says it before you save, too.
+  Emby works the same way with **Keep Emby's**. Unlock the marker and that type goes back to the setting.
 - With **"Keep Plex's"**, markers Plex already shows of a type this app has no record of writing on that item are
   kept too, unless they already match ours: Plex's own markers from before Intro & Credits was turned on, markers
   Plex filled in after this app removed its own (for example while an item's versions disagreed), and markers on an
@@ -944,6 +948,7 @@ A file's row for one server (the job's Files panel, the Inspector) can also say:
 | **Skipped**: "This library isn't selected for Intro & Credits on this server" | The library was unticked, or removed from the server, while the job ran | Tick it again in Edit → Intro & Credits |
 | **Skipped**: "This file is excluded on this server" | The file matches one of that server's exclude paths | Remove the exclusion if it's wrong |
 | **Up to date**: "Keeping Emby's intro" (or credits; also added to other rows, e.g. "1 marker(s); keeping Emby's intro") | This Emby server is set to **Keep Emby's**, and Emby shows its own markers of that type | Switch it to **Use ours** if you want ours |
+| **Written**: "… Replaced Plex's own marker. This server is set to keep Plex's, but a marker you adjust always wins." (Emby says the same about Emby's) | You adjusted or locked that marker in the Inspector, so it was written over the server's own although the server is set to keep its own | Nothing; unlock the marker if you want the server's own back |
 | Any row ending "…; Emby skips to the end of the file" | The credits end before the file does (a scene follows them), but Emby's Skip Credits always skips to the end of the file | Nothing; Emby has no credits end |
 | **Waiting**: "Emby doesn't show which of this item's versions is this file yet; if the file is already in Emby's library, check this server's path mappings" | Emby groups several versions in this item, and none of them maps to this file with its own item id | Nothing while Emby is still scanning; otherwise fix the server's path mappings |
 | **Failed**: "This file is Emby item 55, another version of item 53; markers not written" | The job found another version's item for this file | Check how Emby grouped this item's versions |

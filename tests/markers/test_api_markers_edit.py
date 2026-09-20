@@ -348,8 +348,22 @@ class TestSaveStoresAndPublishes:
             "can_show": ["intro", "credits"],
             "cant_show": [],
             "notes": [],
+            "replaced_own": [],
         }
         assert not _EDITOR_RESULTS[status.value].startswith("markers_")
+
+    def test_the_types_a_lock_took_off_a_server_reach_the_editor_by_name(
+        self, client, servers, known, episode, published
+    ):
+        """The sentence in ``message`` is the same for one type or two, so only this list tells the editor which
+        types the lock overrode on a server set to keep its own (spec §5.5 rule 1)."""
+        row = _row("plex-1", "plex", "markers_written", "1 marker(s). Replaced Plex's own marker.")
+        row["replaced_own"] = ["intro"]
+        published.rows = [row]
+
+        resp = _save(client, episode, [{"type": "intro", "start_ms": 5_000, "end_ms": 35_000}])
+
+        assert resp.get_json()["servers"][0]["replaced_own"] == ["intro"]
 
     @pytest.mark.parametrize("mtype", ["recap", "preview"])
     @pytest.mark.parametrize(
