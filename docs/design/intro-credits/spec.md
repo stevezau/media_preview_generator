@@ -875,10 +875,14 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
    (owner's Q4) passes 5 of 5 on the 80 (movies40 + tv40) on both decode paths and fails 3 of 5 on the 205-movie set
    — a disclosed detector-gap limitation, not tuned around (§5.4, §13). Ships at "Medium"; at "High" it needs a
    second source until that gap closes. *Done when* (Task 14): lab-proven, with the shipped image's digest recorded.
-   **Done (2026-09-19):** lab matrix 15 of 16 pass plus row 14 partial (`evidence/lab/phase3-results.md`), the
-   `pr-241` image `sha256:f96684678a6fb40a2dfbb3000ea32e958410dcfcc61cec5224cf84fc57f223a8` (from `a3c6c32`) re-ran
-   rows 1, 2, 3 and 16 and one real season on `plex`; 8702 unit/integration tests (88.51 %), 328 e2e (one xdist flake, passed alone), 92 eval, 9
-   real-model integration tests pass. Waiting on owner review.
+   **Done (2026-09-19), then final-reviewed across the whole PR (2026-09-20):** rule J version 2 meets §5.4 on both
+   decode paths (GPU 64 within 10 s, CPU 59, 1 early each); the lab matrix is **16 of 16** on `final-2` (`bd9e561`,
+   `evidence/lab/phase3-results.md`), with phase 2 24 of 24 and phase 1 16 of 16 on the same image, a scale run over
+   711 real files, and the `pr-241` image's own re-run of rows 1, 2, 3 and 16 plus one real season on `plex`. The
+   review also closed two bugs the scale run exposed (Plex's own migration leaving parts the publisher refused; the
+   app's earlier markers read back as a server's second opinion) and one accuracy risk it found on broadcast TV
+   (§13 item 15). Tests: 11,429 unit/integration (88.86 %), 363 e2e, the CI integration selection, all green.
+   Waiting on owner review.
 4. **Polish.** Adjust/Lock editor, AniSkip, Setup Health checks, helper container for Plex on another machine, docs.
 
 ## 13. Risks and open items

@@ -188,8 +188,10 @@ medium fixed; lab matrix 23/23; `pr-241` image `sha256:3afed8e7…` from `8a8b92
   self-test counts exactly the CPU's boxes, faster; else CPU. Crash/hang → CPU for the process lifetime; cancel
   between chunks.
 - [x] `credits/rule_j.py`: rule J exactly as spec §5.4 (luma < 30 & boxes ≥ 1, or boxes ≥ 3; runs over gaps ≤ 24 s with
-  dark bridging; runs ≥ 15 s; last run; anchor; refine). Regression test reproduces 63/80 within 10 s, 1 early,
-  from an anonymised copy of `evidence/credits/f3.jsonl` committed as a test fixture.
+  dark bridging; runs ≥ 15 s; last run; anchor; refine), version 2 after the final review (the anchor's 24 s limit,
+  the end's step back over scene text, no answer when text is on screen all through the tail, and reading before the
+  tail for a roll it cuts into). Regression test reproduces 64/80 within 10 s, 1 early, from an anonymised copy of
+  `evidence/credits/f3.jsonl` committed as a test fixture.
 - [x] Docker: numpy, onnxruntime, onnxruntime-ep-webgpu, opencv-python-headless, **and pyclipper** (T-R2); model
   downloaded at build with sha256.
 
@@ -200,16 +202,24 @@ Intel (self-test picks CPU on the iGPU), and combined credits decisions beat Ple
 same files. Owner's Q5 answer: rule J ships as measured (no tuning attempted); a later tuning pass is a follow-up
 that must beat rule J on both the 80-file and 205-movie sets with no more early answers.
 
-**Status 2026-09-19: built, audited and lab-proven; owner review of PR #241 next.** Rule J alone on the 80: 63 within
-10 s and 1 early on the GPU decode (meets §5.4); 58 on the CPU decode (one short, a scaler difference between the two
-paths). Against Plex's own credits markers: the 80 pass all five gate checks on both decode paths; the 205-movie set
-passes both "never looser than Plex" checks and fails the usefulness floor and the two wrong caps (credit text answers
-late on split rolls, spec §13 item 14). Owner, 2026-09-18: ships at Medium now, the late-answer gap is a follow-up.
-GPU path proven on storage NVIDIA (rows 3–5, 9) and on `plex`: NVIDIA picks the GPU, Intel's self-test picks the CPU
-on the iGPU (rows 12–13); row 14 is partial (Intel render work not seen by `intel_gpu_top`). Lab matrix 15 of 16 plus
-row 14 partial; `pr-241` image `sha256:f9668467…` from `a3c6c32` re-ran rows 1, 2, 3 and 16, and one real season on
-`plex` (10 of 11 starts within 10 s, E04 no answer; every answered episode's after-credits scene kept). Evidence: `evidence/lab/phase3-results.md`,
-`evidence/eval/phase3-harness.md`.
+**Status 2026-09-20: built, audited, final-reviewed and lab-proven on the final image; owner review of PR #241 next.**
+Rule J version 2 alone on the 80: 64 within 10 s and 1 early on the GPU decode, 59 and 1 on the CPU — it now meets
+§5.4 on **both** paths. Version 2 also refuses a tail with text on screen all through it (a burnt-in timecode, a
+station logo) and reads 120 s before the tail for a roll the tail cuts into. Against Plex's own credits markers: the
+80 pass all five gate checks on both decode paths; the 205-movie set passes both "never looser than Plex" checks and
+fails the usefulness floor and the two wrong caps (credit text answers late on split rolls, spec §13 item 14). Owner,
+2026-09-18: ships at Medium now, the late-answer gap is a follow-up. A new broadcast-TV set (51 frame-checked
+recordings) shows credit text about as accurate as Plex's own detection there, not better — a known limit (§13 item
+15, `evidence/eval/broadcast-tv.md`). GPU path proven on storage NVIDIA (rows 3–5, 9) and on `plex`: NVIDIA picks the
+GPU, Intel's self-test picks the CPU on the iGPU (rows 12–13), and row 14 now passes outright, with the Intel GPU's
+own per-process counters showing the helpers' render work and none on any other GPU. Lab matrix **16 of 16** on
+`final-2` (`bd9e561`), phase 2 24 of 24 and phase 1 16 of 16 on the same image, plus a scale run over 711 real files
+(credits 468 useful / 6 wrong; intros 246 / 7, the regressions from the lab's own TheIntroDB budget running out) and
+one real season on `plex` (10 of 11 starts within 10 s; every answered episode's after-credits scene kept). The final
+review also fixed two bugs the scale run exposed: Plex parts rewritten by Plex's own database migration could never
+be updated again, and the app counted its own earlier markers as a server's second opinion. Evidence:
+`evidence/lab/phase1-results.md`, `evidence/lab/phase2-results.md`, `evidence/lab/phase3-results.md`,
+`evidence/eval/phase3-harness.md`, `evidence/eval/broadcast-tv.md`.
 
 ### Phase 4 — Polish (plan: `plan-phase4.md`)
 Adjust/Lock editor in the Inspector (drag handles, keyboard nudge, lock, publish to every owner immediately),
