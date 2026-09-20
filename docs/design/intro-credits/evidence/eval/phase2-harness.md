@@ -263,5 +263,7 @@ files) do:
 - **"Ending" titles not counted as credits:** 16 of them ("Ending", or "ENDING" in one show), in Chainsaw Man S01,
   Food Wars! S01, JUJUTSU KAISEN S02 and SPY x FAMILY S01. "ED" is counted as credits: SPY x FAMILY S01, Re:ZERO S02,
   Mushoku Tensei S01 and Chainsaw Man S01.
+  **Superseded 2026-09-20** (phase 4, Task 15): a bare "Ending" is credits on a TV episode, so those 16 now count and
+  this row reports only what is still uncounted. `phase4-chapters.md` has the measurement.
 - **Files with two credits chapters:** Mr. Robot S04 (1 file) and Tom Clancy's Without Remorse (the rules pick the
   last one).

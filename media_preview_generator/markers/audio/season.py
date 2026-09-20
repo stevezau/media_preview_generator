@@ -453,7 +453,9 @@ def _member_record(ctx: PipelineContext, path: str) -> FileRecord | None:
         probed_as,
         duration_ms=probe.duration_ms,
         season_key=os.path.dirname(path),
-        chapters=chapter_candidates(probe),
+        # Each member's own path decides the episode-only chapter names, exactly as its own run would:
+        # a season group can hold a file whose name carries no SxxEyy, and it must not be read as one.
+        chapters=chapter_candidates(probe, is_episode=ids_from_path(path).is_episode),
         chapter_version=CHAPTER_RULES_VERSION,
     )
 

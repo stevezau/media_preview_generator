@@ -208,6 +208,18 @@ Parse container chapters. Name → type by case-insensitive regex (`OP`/`ED` onl
 chapter runs to the next chapter start (its own end is clamped to the first later chapter start). A generic "Intro" /
 "Introduction" chapter is ignored when the same file has a specific opening chapter ("OP", "Opening", "Title Sequence",
 "Theme Song"…): anime files put the cold open in "Intro" (Mushoku Tensei S01E06: Intro 0–275 s, OP 275–364 s).
+A **lone** generic "Intro" still decides: measured 2026-09-20 on 581 anime files, it is the theme song in 233 of the
+274 Plex's own intro marker can judge and the cold open in 7, so dropping it would cost 569 anime intros to remove 7
+wrong ones (`evidence/eval/phase4-chapters.md`).
+**"Ending" is credits on a TV episode only** — on anime it names the ED (282 files), in a film it names the last
+scene. Measured 2026-09-20: it gains 280 anime credits and changes nothing on 11,919 non-anime TV episodes or 9,904
+movies; the one movie with an "Ending" chapter was frame-checked and taking it would skip the last 161 s of the film.
+The kind is read from the file's **own path** (`ids_from_path`: a season and episode in the name), never from a kind a
+server resolved — the path is part of the file's identity, so chapter evidence cached under `CHAPTER_RULES_VERSION`
+can never disagree with the input that derived it. All 282 of those anime files name a season and episode, so the
+stricter input costs nothing measured; a file whose path doesn't keeps the movie answer even when a server calls it an
+episode. **"End" alone is still nothing anywhere**: no anime file uses it, four movies and five non-anime TV episodes
+do.
 Matroska `ChapterSkipType` is deferred: ffprobe 8 can't read it. Must include names the published plugins miss: **"Title Sequence"**,
 "Opening Credits", "Intro", "Recap", "Previously", "End Credits", "Credits", "Outro", "Preview". 165 of 1,500 sampled
 seasons (11%) carry them. Exact when present. Chapter truth can still be off vs the rule in §5.4 (3 of 40 movies had
@@ -1467,3 +1479,13 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   file, gate check by gate check, online decision by online decision; the 51 broadcast files on both paths and the
   lab's synthetic files answer the same too (`evidence/eval/phase3-harness.md` "Rows carry their boxes' positions").
   Wanted by §13 items 14 and 15, which are built on top of it.
+- 2026-09-20 · §5.1 "Ending" is credits on a **TV episode** only (`CHAPTER_RULES_VERSION` 1 → 2), measured on the
+  owner's whole library before and after — 4,346 anime episodes, 11,919 non-anime TV episodes (a seeded sample of
+  110,211) and 9,904 movies: +280 anime credits, no change on the other two. The scope is library kind because no
+  in-file scope separates an anime `Opening`/`Ending` pair from the one movie that has the same pair, and that movie's
+  "Ending" is its last scene (frame-checked: taking it skips 161 s of the film). The kind is the file's own path
+  (`ids_from_path`), not a resolved kind, so cached chapter evidence can never disagree with what derived it; all 282
+  anime files with that chapter name a season and episode, so the stricter input costs nothing. Measured and **not**
+  taken in the same run: `End` as credits (0 anime files use it; 9 non-anime files do) and not deciding an intro from a lone
+  generic `Intro` (would lose 569 anime + 857 TV intros to remove 7 wrong ones — the chapter is the theme song in 85%
+  of the files Plex can judge, not the cold open). `evidence/eval/phase4-chapters.md`.

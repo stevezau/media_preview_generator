@@ -1712,7 +1712,8 @@ def _attempt(
 
     servers = _ItemServers(item, owning)
     known_kind = ctx.store.get_server_kind(existing.id) if unchanged else None
-    ids, lookups_allowed, confirmed_kind = _resolve_kind(ids_from_path(path), servers, known_kind)
+    path_ids = ids_from_path(path)
+    ids, lookups_allowed, confirmed_kind = _resolve_kind(path_ids, servers, known_kind)
     rec = ctx.store.upsert_file(
         FileIdentity(path, st.st_size, st.st_mtime_ns),
         duration_ms=probe.duration_ms if probe else None,
@@ -1722,7 +1723,16 @@ def _attempt(
     if confirmed_kind is not None:
         ctx.store.set_server_kind(rec.id, confirmed_kind)
     if probe is not None:
-        ctx.store.replace_evidence(rec.id, Source.CHAPTERS, chapter_candidates(probe), version=CHAPTER_RULES_VERSION)
+        # The episode-only chapter names read the kind from the PATH, not the resolved kind: the path is
+        # part of the file's identity, so stored candidates can never disagree with it, while a resolved
+        # kind can change under a cache that only re-reads on CHAPTER_RULES_VERSION. Measured cost of the
+        # stricter input: none (evidence/eval/phase4-chapters.md).
+        ctx.store.replace_evidence(
+            rec.id,
+            Source.CHAPTERS,
+            chapter_candidates(probe, is_episode=path_ids.is_episode),
+            version=CHAPTER_RULES_VERSION,
+        )
     _mark_refreshed(ctx, path, Source.CHAPTERS)
     if not rec.duration_ms:
         return ItemOutcome(FileOutcome.FAILED.value, "Couldn't read the file's duration")

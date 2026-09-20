@@ -7,8 +7,10 @@ import os
 from collections import Counter
 from pathlib import Path
 
+from media_preview_generator.markers.external_ids import ids_from_path
+
 from .cache import FingerprintCache, ProbeCache
-from .credits import CreditsRows, chapter_rules, compare_credits_with_plex, title_coverage
+from .credits import CreditsReport, CreditsRows, chapter_rules, compare_credits_with_plex, title_coverage
 from .data import EvalEpisode, evidence_dir, load_v3_results
 from .decisions import audio_candidate, compare_with_plex, g3_differences, season_segments
 from .intros import SPEC_V3
@@ -77,16 +79,25 @@ def _credits_rows(rows: CreditsRows) -> dict:
 
 
 def _scale_run_titles(evidence: Path) -> dict | None:
-    """Ledger L165 on the lab scale run's chapters (the only stored set with anime): "Ending" titles, two credits."""
+    """Ledger L165 on the lab scale run's chapters (the only stored set with anime): "Ending" titles, two credits.
+
+    The set holds movies as well as episodes, and "Ending" is credits on an episode only (spec §5.1), so
+    each row is scored with its own kind -- scoring the whole set as episodes would hide exactly the
+    movie-side regression this ledger exists to surface.
+    """
     path = evidence / SCALE_TRUTH
     if not path.exists():
         return None
     entries = [{"file": v["host"], "chapters": [c[0] for c in v.get("chapters") or []]}
                for v in json.loads(path.read_text()).values()]  # fmt: skip
-    report = title_coverage(entries)
-    return {"files": len(entries), "with_credits_title": report.tally["found"],
-            "ending_titles": sorted(set(report.ending_titles)),
-            "several_credits_chapters": sorted(set(report.several_credits))}  # fmt: skip
+    by_kind = {True: [], False: []}
+    for entry in entries:
+        by_kind[ids_from_path(entry["file"]).is_episode].append(entry)
+    reports = {kind: title_coverage(rows, is_episode=kind) for kind, rows in by_kind.items()}
+    return {"files": len(entries), "episodes": len(by_kind[True]), "movies": len(by_kind[False]),
+            "with_credits_title": sum(r.tally["found"] for r in reports.values()),
+            "ending_titles": sorted({n for r in reports.values() for n in r.ending_titles}),
+            "several_credits_chapters": sorted({n for r in reports.values() for n in r.several_credits})}  # fmt: skip
 
 
 def _credits(evidence: Path, baseline: dict[str, list[PlexMarker]], probes: ProbeCache) -> tuple[dict, dict]:
@@ -95,7 +106,15 @@ def _credits(evidence: Path, baseline: dict[str, list[PlexMarker]], probes: Prob
 
     movies40, tv40, set205 = load("movies40"), load("tv40"), load("movie_credit_truth")
     adjudicated = load("adjudicated")
-    rules = chapter_rules(movies40 + tv40, adjudicated, probe=probes.probe)
+    # Movies and episodes are scored separately because "Ending" only counts as credits on an episode.
+    movie_rules = chapter_rules(movies40, adjudicated, probe=probes.probe, is_episode=False)
+    tv_rules = chapter_rules(tv40, adjudicated, probe=probes.probe, is_episode=True)
+    rules = CreditsReport(
+        tally=movie_rules.tally + tv_rules.tally,
+        titles_missed=movie_rules.titles_missed + tv_rules.titles_missed,
+        several_credits=movie_rules.several_credits + tv_rules.several_credits,
+        ending_titles=movie_rules.ending_titles + tv_rules.ending_titles,
+    )
     coverage = title_coverage(set205)
     sets = {
         "movies40": compare_credits_with_plex(

@@ -106,7 +106,13 @@ decided start.
 - The 205-movie set: `compare_credits_with_plex` and `title_coverage`.
 - Ledger L165: files whose "Ending" chapter titles aren't counted as credits, and files with two credits chapters. This
   also covers the lab scale run's chapters (`lab/results/scale/truth.json`, when present), the only stored set with
-  anime.
+  anime. Since phase 4 Task 15 a bare "Ending" **is** credits on a TV episode (spec §5.1), so every row is scored with
+  a kind. The three hand-checked sets pass one kind per set, because `is_movie` is also their decision context (a
+  movie's credits must start within 900 s of the end): the 40 movies and the 205 movies as movies, the 40 TV files as
+  episodes. That is safe only while each set is uniform, and it was checked — `ids_from_path` reads 40 of 40 tv40 rows
+  as episodes and 0 of 40 + 0 of 205 movie rows as episodes. The scale run's set holds both, so it is split row by row
+  by `ids_from_path` instead. What the ledger still lists is what the rule does not take: "Ending" on a movie, and
+  titles like "Ending Theme".
 
 Chapters come from ffprobe, cached as JSON next to the fingerprints (`ProbeCache`).
 

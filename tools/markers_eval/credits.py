@@ -65,9 +65,16 @@ def _name(path: str) -> str:
     return without_ids(parent)
 
 
-def _uncounted_ending(title: str) -> bool:
-    """An "Ending" title the classifier doesn't take for credits (ledger L165: anime name their credits "Ending")."""
-    return bool(_ENDING_RE.search(title)) and classify_chapter_title(title) is not MarkerType.CREDITS
+def _uncounted_ending(title: str, *, is_episode: bool) -> bool:
+    """An "Ending" title the classifier still doesn't take for credits (ledger L165).
+
+    Since phase 4 Task 15 a bare "Ending" is credits on an episode, so the kind has to be passed in or
+    the ledger would keep listing titles the app now reads.
+    """
+    return (
+        bool(_ENDING_RE.search(title))
+        and classify_chapter_title(title, is_episode=is_episode) is not MarkerType.CREDITS
+    )
 
 
 def judge_credits(start_s: float | None, truth_s: float) -> str:
@@ -79,11 +86,12 @@ def judge_credits(start_s: float | None, truth_s: float) -> str:
     return "late" if start_s > truth_s + LATE_S else "useful"
 
 
-def title_coverage(movies: list[dict]) -> CreditsReport:
+def title_coverage(movies: list[dict], *, is_episode: bool = False) -> CreditsReport:
     """Chapter titles only: does the title classifier see a credits chapter in each file's titles?
 
     Args:
         movies: Rows with ``file`` and ``chapters`` (titles; ``credits/movie_credit_truth.json`` holds the last six).
+        is_episode: The rows are TV episodes, so the episode-only titles ("Ending") count as credits.
 
     Returns:
         found / not_found, the last title of each file without one, the files with several credits titles, and the
@@ -92,13 +100,13 @@ def title_coverage(movies: list[dict]) -> CreditsReport:
     report = CreditsReport()
     for movie in movies:
         titles = list(movie.get("chapters") or [])
-        credits = sum(classify_chapter_title(t) is MarkerType.CREDITS for t in titles)
+        credits = sum(classify_chapter_title(t, is_episode=is_episode) is MarkerType.CREDITS for t in titles)
         report.tally["found" if credits else "not_found"] += 1
         if not credits and titles:
             report.titles_missed.append(titles[-1])
         if credits > 1:
             report.several_credits.append(_name(movie["file"]))
-        if any(_uncounted_ending(t) for t in titles):
+        if any(_uncounted_ending(t, is_episode=is_episode) for t in titles):
             report.ending_titles.append(_name(movie["file"]))
     return report
 
@@ -108,14 +116,16 @@ def _truth(entry: dict, adjudicated: dict[str, dict]) -> float:
 
 
 def chapter_rules(
-    files: list[dict], adjudicated: dict[str, dict], *, probe: Callable[[str], MediaProbe]
+    files: list[dict], adjudicated: dict[str, dict], *, probe: Callable[[str], MediaProbe], is_episode: bool
 ) -> CreditsReport:
-    """The 80 hand-checked files: the chapter source's credits start against the truth (adjudicated wins).
+    """Hand-checked files: the chapter source's credits start against the truth (adjudicated wins).
 
     Args:
-        files: ``credits/movies40.json`` and ``tv40.json`` rows.
+        files: ``credits/movies40.json`` or ``tv40.json`` rows -- one kind per call, because the
+            episode-only titles ("Ending") depend on it.
         adjudicated: Truth fixed by frame checks, by file name.
         probe: A file's duration and chapters.
+        is_episode: The rows are TV episodes.
 
     Returns:
         The tally of the last credits chapter's start, files with several credits chapters and "Ending" titles.
@@ -125,13 +135,14 @@ def chapter_rules(
         path = entry["file"]
         media = probe(path)
         credits = sorted(
-            (c for c in chapter_candidates(media) if c.type is MarkerType.CREDITS), key=lambda c: c.start_ms
+            (c for c in chapter_candidates(media, is_episode=is_episode) if c.type is MarkerType.CREDITS),
+            key=lambda c: c.start_ms,
         )
         if len(credits) > 1:
             report.several_credits.append(_name(path))
         start = credits[-1].start_ms / 1000 if credits else None
         report.tally[judge_credits(start, _truth(entry, adjudicated))] += 1
-        if any(_uncounted_ending(c.title) for c in media.chapters):
+        if any(_uncounted_ending(c.title, is_episode=is_episode) for c in media.chapters):
             report.ending_titles.append(_name(path))
     return report
 
@@ -162,11 +173,12 @@ def compare_credits_with_plex(
         media = probe(path)
         markers = baseline.get(path, [])
         plex = first_marker(markers, MarkerType.CREDITS)
-        chapters = chapter_candidates(media)
+        chapters = chapter_candidates(media, is_episode=not is_movie)
         detail = {"file": path, "name": _name(path), "truth": truth, "plex": plex.start_ms / 1000 if plex else None,
                   "plex_markers": sum(m.type == "credits" for m in markers),
                   "credits_chapters": sum(c.type is MarkerType.CREDITS for c in chapters),
-                  "ending_titles": [c.title for c in media.chapters if _uncounted_ending(c.title)]}  # fmt: skip
+                  "ending_titles": [c.title for c in media.chapters
+                                    if _uncounted_ending(c.title, is_episode=not is_movie)]}  # fmt: skip
         rows.plex[judge_credits(detail["plex"], truth)] += 1
         with_plex = chapters + server_candidates(markers, MarkerType.CREDITS)
         for row, candidates, level in (("chapters", chapters, "high"), ("high", with_plex, "high"),

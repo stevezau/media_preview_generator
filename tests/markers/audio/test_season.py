@@ -2015,6 +2015,55 @@ class TestServerKindOfSiblings:
             assert job(["104"]) == []
 
 
+class TestMemberEpisodeOnlyChapterNames:
+    """The season step stores each member's chapter evidence, so it decides the episode-only chapter names
+    (spec §5.1's "Ending") for files no run of their own has reached yet -- and it reads each member's own
+    path for that, never the asking episode's kind."""
+
+    ENDING = MediaProbe(
+        DUR,
+        (
+            Chapter(0, 30_000, "Chapter 1"),
+            Chapter(30_000, 120_000, "Intro"),
+            Chapter(120_000, 1_200_000, "Part B"),
+            Chapter(1_200_000, None, "Ending"),
+        ),
+    )
+
+    def _limits(self, store, tmp_path, folder_name, names):
+        folder = tmp_path / "media" / "tv" / folder_name / "Season 01"
+        folder.mkdir(parents=True)
+        paths = [str(folder / name) for name in names]
+        for i, path in enumerate(paths):
+            _write(path, 100 + i)
+        ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=HIGH)
+        with patch.object(season, "probe_media", side_effect=lambda path, **kw: self.ENDING):
+            season.season_intro_chapter_limits(ctx, paths[0])
+        return paths
+
+    @staticmethod
+    def _chapter_rows(store, path):
+        rec = store.get_file(path)
+        return [(r.type, r.label) for r in store.evidence_rows(rec.id) if r.source is Source.CHAPTERS]
+
+    def test_a_member_named_like_an_episode_gets_the_ending_credits_candidate(self, store, tmp_path):
+        paths = self._limits(
+            store, tmp_path, "Show (2020) {tvdb-1}", ["Show - S01E01.mkv", "Show - S01E02.mkv", "Show - S01E03.mkv"]
+        )
+        # The sibling the season step probed on E01's behalf, before any run of its own.
+        assert self._chapter_rows(store, paths[1]) == [(MarkerType.INTRO, "Intro"), (MarkerType.CREDITS, "Ending")]
+        assert store.evidence_version(store.get_file(paths[1]).id, Source.CHAPTERS) == CHAPTER_RULES_VERSION
+
+    def test_a_member_whose_name_has_no_sxxeyy_does_not(self, store, tmp_path):
+        # A flat/absolute-numbered folder: season_group takes every file whose parsed season is None, so a
+        # member can be a file its own run would not read as an episode. Handing the asking episode's kind
+        # down would give such a member the episode-only reading of "Ending" -- the last-scene mistake the
+        # scope exists to prevent.
+        paths = self._limits(store, tmp_path, "Show {tvdb-1}", ["Show - 101.mkv", "Show - 102.mkv"])
+        assert not any(ids_from_path(p).is_episode for p in paths)
+        assert self._chapter_rows(store, paths[1]) == [(MarkerType.INTRO, "Intro")]
+
+
 class TestUnreadableMembers:
     """A member ffprobe can't read isn't probed again on every sibling's checking thread (up to 60 s each)."""
 

@@ -2702,6 +2702,56 @@ class TestRulesVersions:
         _, probe_mock = _run(_ctx(store, reg, settings_raw=raw), media, {"jellyfin-1": jf}, probe=probe)
         assert probe_mock.call_count == 0
 
+    # Goblin Slayer S02E01: the ED chapter is named "Ending", which the rules read as credits from
+    # CHAPTER_RULES_VERSION 2 (phase 4 Task 15).
+    ENDING_S02E01 = (
+        Chapter(0, 187_000, "Opening"),
+        Chapter(187_000, 1_323_000, "Part B"),
+        Chapter(1_323_000, 1_413_000, "Ending"),
+        Chapter(1_413_000, 1_422_000, "Preview"),
+    )
+
+    @pytest.mark.parametrize("stored_version", [None, pipeline.CHAPTER_RULES_VERSION - 1], ids=["unversioned", "older"])
+    def test_an_ending_chapter_stored_by_older_rules_is_read_again(self, store, media, stored_version):
+        # The bump is what carries the "Ending" rule to a file the app has already probed: with the old
+        # version stored there is no credits marker, and the re-read is the only thing that creates one.
+        reg = _registry(media, ServerType.JELLYFIN)
+        jf = ready_publisher("jellyfin_bridge")
+        raw = {"sources": [{"id": "chapters", "enabled": True}], "detect": {"intro": False, "credits": True}}
+        probe = _probe(self.ENDING_S02E01, duration=1_422_000)
+        _run(_ctx(store, reg, settings_raw=raw), media, {"jellyfin-1": jf}, probe=probe)
+        rec = store.get_file(media)
+        store.replace_evidence(rec.id, Source.CHAPTERS, [], version=stored_version)
+        _, probe_mock = _run(_ctx(store, reg, settings_raw=raw), media, {"jellyfin-1": jf}, probe=probe)
+        assert probe_mock.call_count == 1
+        assert store.evidence_version(rec.id, Source.CHAPTERS) == pipeline.CHAPTER_RULES_VERSION
+        assert store.get_markers(rec.id)[T.CREDITS] == Marker(T.CREDITS, 1_323_000, 1_413_000, ("chapters",))
+        # And the other half of why the bump is needed: at the current version the file is never read
+        # again, so a rule change that forgot to bump would never reach a file the app had seen.
+        store.replace_evidence(rec.id, Source.CHAPTERS, [], version=pipeline.CHAPTER_RULES_VERSION)
+        _, probe_mock = _run(_ctx(store, reg, settings_raw=raw), media, {"jellyfin-1": jf}, probe=probe)
+        assert probe_mock.call_count == 0
+
+    @pytest.mark.parametrize("server_ids", [None, EPISODE_IDS], ids=["server says nothing", "server says episode"])
+    def test_an_ending_chapter_is_not_credits_for_a_file_whose_path_has_no_sxxeyy(self, store, ambiguous, server_ids):
+        # The rule reads the kind from the PATH, not the resolved kind, so the stored candidates can never
+        # disagree with the input that derived them (the evidence cache only re-reads on the rules version).
+        # "Server says episode" is therefore a deliberate miss, and it is the cell that tells the two inputs
+        # apart: measured cost on the owner's library is zero, because all 282 anime files with an "Ending"
+        # chapter name a season and episode in the path (evidence/eval/phase4-chapters.md).
+        reg = _registry(ambiguous, ServerType.JELLYFIN)
+        reg.get("jellyfin-1").get_external_ids.return_value = server_ids
+        jf = ready_publisher("jellyfin_bridge")
+        raw = {"sources": [{"id": "chapters", "enabled": True}], "detect": {"intro": False, "credits": True}}
+        probe = _probe(self.ENDING_S02E01, duration=1_422_000)
+        _run(_ctx(store, reg, settings_raw=raw), ambiguous, {"jellyfin-1": jf}, probe=probe)
+        rec = store.get_file(ambiguous)
+        assert [(r.type, r.label) for r in store.evidence_rows(rec.id) if r.source is Source.CHAPTERS] == [
+            (T.INTRO, "Opening"),
+            (T.PREVIEW, "Preview"),
+        ]
+        assert store.get_markers(rec.id).get(T.CREDITS) is None
+
     @pytest.mark.parametrize("source", [Source.THEINTRODB, Source.INTRODB, Source.SKIPDB], ids=lambda s: s.value)
     def test_online_answers_from_an_older_parser_are_asked_again(self, store, media, source):
         reg = _registry(media, ServerType.PLEX)

@@ -9,6 +9,17 @@ genre abbreviations that collide with real words in any other case (a character 
 they match only written exactly uppercase; every other name matches case-insensitively. A leading
 U+FEFF byte-order mark (seen in some muxers' embedded titles) is stripped before matching or use as
 `origin`.
+
+"Ending" is credits on an **episode** only. On anime it names the ED; in a film it names the last
+scene. Measured on the owner's library (`evidence/eval/phase4-chapters.md`): 282 of 4,346 anime
+episodes carry a bare "Ending" chapter, and so does 1 of 9,904 movies -- a documentary whose "Ending"
+is its closing scene, where taking it would skip the film's last 161 s. No chapter shape tells the two
+apart, so the kind does. Callers pass the kind the file's **path** gives (`ids_from_path`), never a
+kind a server resolved: the path is part of the file's identity, so chapter evidence cached under
+`CHAPTER_RULES_VERSION` can never disagree with the input that derived it. All 282 of those anime files
+name a season and episode in the path, so the stricter input costs nothing measured.
+"End" alone stays a scene name everywhere: no anime file used it, four movies and five non-anime TV
+episodes did.
 """
 
 from __future__ import annotations
@@ -18,10 +29,13 @@ import re
 from ..models import Candidate, MarkerType, Source
 from ..probe import Chapter, MediaProbe
 
-# Bump whenever a change here changes the candidates a file's chapters give, so files probed before are read again.
-CHAPTER_RULES_VERSION = 1
+# Bump whenever a change here -- or to `external_ids.ids_from_path`'s episode rule, which callers pass as
+# `is_episode` -- changes the candidates a file's chapters give, so files probed before are read again.
+# 2: "Ending" reads as credits on an episode (phase 4, Task 15).
+CHAPTER_RULES_VERSION = 2
 
-# "End"/"Ending" alone are common final-scene names in movies, so they are deliberately not credits.
+# "End" alone is a common final-scene name, so it is deliberately not credits anywhere; "Ending" is
+# credits on an episode only (`_EPISODE_PATTERNS`).
 # "OP"/"ED" are handled separately, case-sensitively -- see module docstring.
 _PATTERNS: tuple[tuple[MarkerType, re.Pattern[str]], ...] = (
     (
@@ -36,6 +50,10 @@ _EXACT_CASE_PATTERNS: tuple[tuple[MarkerType, re.Pattern[str]], ...] = (
     (MarkerType.INTRO, re.compile(r"^OP$")),
     (MarkerType.CREDITS, re.compile(r"^ED$")),
 )
+# Names that only mean a marker on a TV episode -- see the module docstring for why "Ending" is one.
+_EPISODE_PATTERNS: tuple[tuple[MarkerType, re.Pattern[str]], ...] = (
+    (MarkerType.CREDITS, re.compile(r"^ending$", re.I)),
+)
 _GENERIC_INTRO = re.compile(r"^(intro|introduction)$", re.I)
 
 
@@ -44,13 +62,24 @@ def _normalize(title: str) -> str:
     return " ".join((title or "").lstrip("\ufeff").split())
 
 
-def classify_chapter_title(title: str) -> MarkerType | None:
-    """Map a chapter title to a marker type, or None for ordinary chapters."""
+def classify_chapter_title(title: str, *, is_episode: bool = False) -> MarkerType | None:
+    """Map a chapter title to a marker type, or None for ordinary chapters.
+
+    Args:
+        title: The chapter's embedded title.
+        is_episode: The file's own path names a season and episode. A path that doesn't counts as not
+            an episode, so the extra names stay off -- see the module docstring for why the path, and
+            not a kind a server resolved, is the input.
+
+    Returns:
+        The marker type the name means, or None.
+    """
     text = _normalize(title)
     for mtype, pattern in _EXACT_CASE_PATTERNS:
         if pattern.match(text):
             return mtype
-    for mtype, pattern in _PATTERNS:
+    patterns = (_PATTERNS + _EPISODE_PATTERNS) if is_episode else _PATTERNS
+    for mtype, pattern in patterns:
         if pattern.match(text):
             return mtype
     return None
@@ -80,16 +109,24 @@ def _clamped_ends(chapters: tuple[Chapter, ...]) -> list[int | None]:
     return ends
 
 
-def chapter_candidates(probe: MediaProbe) -> list[Candidate]:
+def chapter_candidates(probe: MediaProbe, *, is_episode: bool = False) -> list[Candidate]:
     """Candidates for every named intro/credits/recap/preview chapter.
 
     Ends are clamped to the next chapter's start (spec §5.1). A generic "Intro"/"Introduction"
     chapter is dropped when the file also has a specific opening chapter (the cold open) -- see
     module docstring.
+
+    Args:
+        probe: The file's duration and chapters.
+        is_episode: The file's own path names a season and episode, which lets the episode-only names
+            ("Ending") match.
+
+    Returns:
+        One candidate per named chapter, in the file's chapter order.
     """
     chapters = probe.chapters
     ends = _clamped_ends(chapters)
-    types = [classify_chapter_title(c.title) for c in chapters]
+    types = [classify_chapter_title(c.title, is_episode=is_episode) for c in chapters]
     has_specific_opening = any(
         t is MarkerType.INTRO and not _is_generic_intro(c.title) for c, t in zip(chapters, types, strict=True)
     )
