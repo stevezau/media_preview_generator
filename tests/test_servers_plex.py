@@ -1935,13 +1935,8 @@ class TestPlexMarkerHelpers:
         assert plex_server_under_test.get_marker_detection_prefs() == {"intro": None, "credits": None}
 
 
-class TestPlexMarkersReadiness:
-    """The Intro & Credits rows Plex's Setup Health card emits (plan phase 4 Task 9; spec §7 item 6).
-
-    Every row is read from the capability report the Intro & Credits tab already asks for, so these tests
-    drive ``markers.inspect.server_status_payload`` — the one source of truth — and assert the rows it
-    produces, not a second probe.
-    """
+class _MarkerReadinessHarness:
+    """Drives ``previews_readiness`` with every non-marker probe stubbed out, for the classes below."""
 
     CONFIRMED = {"db_write_confirmed_at": "2026-01-01T00:00:00Z", "on_plex_redetect": "restore"}
 
@@ -2015,6 +2010,23 @@ class TestPlexMarkersReadiness:
             if section["id"] == "markers"
             for check in section["checks"]
         }
+
+    def _server_on(self, config_folder: str = "/plex"):
+        """A Plex with Intro & Credits switched on and the database write confirmed.
+
+        Pass ``str(tmp_path)`` whenever the test reads ``overall_ok`` or ``_failing_critical``: an unwritable
+        config folder fails its own critical row and would stand in for the one under test.
+        """
+        return self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED}, config_folder)
+
+
+class TestPlexMarkersReadiness(_MarkerReadinessHarness):
+    """The Intro & Credits rows Plex's Setup Health card emits (plan phase 4 Task 9; spec §7 item 6).
+
+    Every row is read from the capability report the Intro & Credits tab already asks for, so these tests
+    drive ``markers.inspect.server_status_payload`` — the one source of truth — and assert the rows it
+    produces, not a second probe.
+    """
 
     def test_feature_off_emits_only_the_one_row_and_probes_nothing(self):
         """P-R6: a server that isn't sent markers gets one row, in All good, and no capability probe.
@@ -2283,3 +2295,199 @@ class TestPlexMarkersReadiness:
         ids = [s["id"] for s in self._readiness(server, capability)["sections"]]
 
         assert ids.index("markers") < ids.index("library_settings")
+
+
+class TestPlexMarkerAgentReadiness(_MarkerReadinessHarness):
+    """The row for the Plex marker helper — the whole write path for a Plex on another machine.
+
+    ``AGENT_UNAVAILABLE`` returns from ``capability()`` before Plex Pass, the marker list, the database and
+    detection are read, so without this row a Plex writing no markers at all showed either no Intro & Credits
+    section (Plex unreachable too) or, when Plex still answered over HTTP, a lone green "Plex Pass is active".
+    """
+
+    @staticmethod
+    def _agent(state: str = "connected", url: str = "http://plex-host.lan:9494", **extra) -> dict:
+        return {"url": url, "version": "1.0.0", "state": state, "machine_identifier": "", **extra}
+
+    def _agent_row(self, capability: dict) -> dict:
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED})
+        return self._marker_checks(self._readiness(server, capability))["markers_plex_agent"]
+
+    @pytest.mark.parametrize(
+        ("agent", "label", "current", "reason"),
+        [
+            (
+                {"state": "unreachable"},
+                "The Plex marker helper isn't answering",
+                "can't be reached",
+                "Markers wait here until it answers again. Nothing is lost.",
+            ),
+            (
+                {"state": "rejected"},
+                "The Plex marker helper refused this app's key",
+                "key refused",
+                "Set the same shared key on the helper and in the Intro & Credits tab.",
+            ),
+            (
+                {"state": "incompatible"},
+                "The Plex marker helper and this app are different versions",
+                "version mismatch",
+                "The Intro & Credits tab says which of the two to update.",
+            ),
+            (
+                {"state": "connected", "wrong_plex": True},
+                "The Plex marker helper is beside a different Plex",
+                "wrong Plex server",
+                "Check its address in the Intro & Credits tab: markers would have gone into the wrong database.",
+            ),
+            # Connected and refused anyway, but NOT the wrong Plex: the agent answered something this app can't
+            # decode. Inferring "wrong Plex" from connected-yet-refused would send the user to change a correct
+            # address, so this cell has to read as "not answering" instead.
+            (
+                {"state": "connected"},
+                "The Plex marker helper isn't answering",
+                "can't be reached",
+                "Markers wait here until it answers again. Nothing is lost.",
+            ),
+        ],
+        ids=[
+            "unreachable",
+            "rejected",
+            "incompatible",
+            "connected-to-the-wrong-plex",
+            "connected-but-the-answer-was-unreadable",
+        ],
+    )
+    def test_every_refused_agent_state_is_its_own_must_fix_row(self, agent, label, current, reason):
+        row = self._agent_row(self._capability("agent_unavailable", agent=self._agent(**agent), plex_pass=True))
+
+        assert row["label"] == label
+        assert row["severity"] == "critical"
+        assert row["ok"] is False
+        assert (row["current"], row["recommended"]) == (current, "connected")
+        assert row["reason"] == reason
+        # Nothing this app can toggle for the user → the card shows the read-only badge, not a fix button.
+        assert row["actions"] == {}
+
+    def test_a_working_agent_is_a_passing_row(self):
+        capability = self._capability("ready", agent=self._agent(), plex_pass=True, lock_holder=True, fs_type="ext4")
+
+        row = self._agent_row(capability)
+
+        assert row["label"] == "The Plex marker helper is connected"
+        assert row["ok"] is True
+        assert (row["current"], row["recommended"]) == ("connected", "connected")
+        assert row["reason"] is None
+
+    @pytest.mark.parametrize(
+        "agent",
+        [{"url": "http://a:9494"}, {"url": "http://a:9494", "state": ""}, {"state": "something-new"}],
+        ids=["no-state-key", "empty-state", "unknown-state"],
+    )
+    def test_a_state_this_build_doesnt_know_reads_as_cant_be_reached(self, agent):
+        """The same fallback the Edit tab's badge uses (``markers_server_tab.js AGENT_BADGES``)."""
+        row = self._agent_row(self._capability("agent_unavailable", agent=agent))
+
+        assert row["current"] == "can't be reached"
+        assert row["ok"] is False
+
+    def test_a_refusal_with_no_agent_block_still_emits_the_row(self):
+        """Defensive: the row exists so this state is never silent, whatever the details carry."""
+        row = self._agent_row(self._capability("agent_unavailable"))
+
+        assert row["current"] == "can't be reached"
+        assert row["severity"] == "critical"
+
+    def test_a_plex_with_no_agent_gets_no_agent_row(self):
+        capability = self._capability("ready", plex_pass=True, lock_holder=True, fs_type="ext4")
+        assert "markers_plex_agent" not in self._marker_checks(self._readiness(self._server_on(), capability))
+
+    def test_an_unavailable_agent_fails_the_card_instead_of_looking_healthy(self, tmp_path):
+        """The regression: Plex still answers over HTTP, so ``plex_pass`` is known and used to be the only row —
+        a green "Plex Pass is active" on a server no marker can reach."""
+        capability = self._capability("agent_unavailable", agent=self._agent("unreachable"), plex_pass=True)
+
+        payload = self._readiness(self._server_on(str(tmp_path)), capability)
+
+        checks = self._marker_checks(payload)
+        assert list(checks) == ["markers_plex_agent", "markers_plex_pass"]
+        assert self._failing_critical(payload) == ["markers_plex_agent"]
+        section = next(s for s in payload["sections"] if s["id"] == "markers")
+        assert (section["ok"], section["severity"]) == (False, "critical")
+        assert payload["overall_ok"] is False
+
+    def test_an_unavailable_agent_on_an_unreachable_plex_still_emits_the_row(self, tmp_path):
+        """The cell the other test's ``plex_pass`` hides: with no fact at all the section used to be None."""
+        payload = self._readiness(
+            self._server_on(str(tmp_path)), self._capability("agent_unavailable", agent=self._agent("unreachable"))
+        )
+
+        assert list(self._marker_checks(payload)) == ["markers_plex_agent"]
+        assert self._failing_critical(payload) == ["markers_plex_agent"]
+        assert payload["overall_ok"] is False
+
+    @pytest.mark.parametrize("state", ["unreachable", "rejected", "incompatible", "connected"])
+    def test_no_agent_row_is_ever_severity_info(self, state):
+        """``servers.js _partitionChecks`` drops every ``info`` row, so one here would never render."""
+        row = self._agent_row(self._capability("agent_unavailable", agent=self._agent(state)))
+        assert row["severity"] in ("critical", "recommended")
+
+    def test_the_agent_row_reads_first(self):
+        """It is the gate: when it fails nothing past it was even checked."""
+        capability = self._capability("ready", agent=self._agent(), plex_pass=True, lock_holder=True, fs_type="ext4")
+        assert list(self._marker_checks(self._readiness(self._server_on(), capability)))[0] == "markers_plex_agent"
+
+    def test_the_states_are_the_ones_the_transport_sets(self):
+        """`readiness` keeps its own copy of the state names; a rename in the transport must not drift past it."""
+        from media_preview_generator.markers import readiness
+        from media_preview_generator.markers.publishers import plex_remote
+
+        assert set(readiness.AGENT_STATES) == {
+            plex_remote.AGENT_UNREACHABLE,
+            plex_remote.AGENT_REJECTED,
+            plex_remote.AGENT_INCOMPATIBLE,
+        }
+        assert readiness.AGENT_RECOMMENDED == plex_remote.AGENT_CONNECTED
+        assert readiness.AGENT_FALLBACK_STATE == plex_remote.AGENT_UNREACHABLE
+
+    def test_the_database_row_names_the_helpers_machine_when_a_helper_did_the_check(self):
+        """The check ran on the helper's machine, so "this machine" would be about the wrong container —
+        and the fix would tell the user to move the app the helper exists to leave where it is."""
+        capability = self._capability("needs_local_db", agent=self._agent(), fs_type="nfs4", db_path="/agent/db")
+
+        row = self._marker_checks(self._readiness(self._server_on(), capability))["markers_plex_db_local"]
+
+        assert row["label"] == "The helper isn't on the machine with Plex's database"
+        assert (row["current"], row["recommended"]) == ("another machine", "the helper's machine")
+        assert row["reason"] == (
+            "Run the helper on the Plex machine, with Plex's config folder mounted from a local disk."
+        )
+        assert "run this app on the same machine as Plex" not in row["reason"]
+        assert "the helper already does this write for you" in row["explanation"]
+        # Every piece of the row's copy switches together — a tooltip still saying "this app must run on the
+        # Plex machine" would contradict the label right next to it.
+        assert row["tooltip"] == (
+            "Markers go straight into Plex's database, so the helper must run on the Plex machine with that "
+            "machine's own copy of Plex's config folder."
+        )
+
+    def test_the_database_row_keeps_this_machine_without_a_helper(self):
+        capability = self._capability("needs_local_db", fs_type="nfs4", db_path="/plex/db")
+
+        row = self._marker_checks(self._readiness(self._server_on(), capability))["markers_plex_db_local"]
+
+        assert row["label"] == "Plex's library database isn't on this machine"
+        assert (row["current"], row["recommended"]) == ("another machine", "this machine")
+        assert row["tooltip"] == (
+            "Markers go straight into Plex's database, so this app must run on the Plex machine, or reach it "
+            "through the helper."
+        )
+
+    def test_a_helper_that_can_write_says_so_without_claiming_this_machine(self):
+        capability = self._capability("ready", agent=self._agent(), plex_pass=True, lock_holder=True, fs_type="ext4")
+
+        row = self._marker_checks(self._readiness(self._server_on(), capability))["markers_plex_db_local"]
+
+        assert row["label"] == "The helper is on the machine with Plex's database"
+        assert row["ok"] is True
+        assert (row["current"], row["recommended"]) == ("the helper's machine", "the helper's machine")

@@ -56,6 +56,67 @@ LOCAL_DB_TOOLTIP = (
     "Markers go straight into Plex's database, so this app must run on the Plex machine, or reach it through "
     "the helper."
 )
+# With a helper the check ran on ITS machine, so the row can't say "this machine" — the app is already where it
+# belongs, and the advice above would tell the user to move the one thing the helper exists to avoid moving.
+LOCAL_DB_LABEL_AGENT = "The helper isn't on the machine with Plex's database"
+LOCAL_DB_LABEL_AGENT_OK = "The helper is on the machine with Plex's database"
+LOCAL_DB_REASON_AGENT = "Run the helper on the Plex machine, with Plex's config folder mounted from a local disk."
+LOCAL_DB_CURRENT_AGENT = "the helper's machine"
+LOCAL_DB_TOOLTIP_AGENT = (
+    "Markers go straight into Plex's database, so the helper must run on the Plex machine with that machine's "
+    "own copy of Plex's config folder."
+)
+LOCAL_DB_TODO = (
+    "<p><strong>What to do:</strong> run this app on the Plex machine, or run the Plex marker helper next to "
+    "Plex. Everything else about this server keeps working either way.</p>"
+)
+LOCAL_DB_TODO_AGENT = (
+    "<p><strong>What to do:</strong> the helper already does this write for you, so this app can stay where it "
+    "is. Run the helper's container on the Plex machine and mount Plex's config folder into it from one of that "
+    "machine's own disks. Everything else about this server keeps working either way.</p>"
+)
+
+AGENT_LABEL_OK = "The Plex marker helper is connected"
+AGENT_RECOMMENDED = "connected"
+AGENT_TOOLTIP = (
+    "A Plex on another machine is written by the helper container running beside it. Without the helper "
+    "answering, no intro or credits marker reaches this server."
+)
+# Connection state (``publishers.plex_remote.AGENT_*``) → this row's label, ``current`` and reason. An unknown state
+# reads as "can't be reached", the same fallback the Edit tab's badge uses (``markers_server_tab.js AGENT_BADGES``).
+AGENT_STATES: dict[str, tuple[str, str, str]] = {
+    "unreachable": (
+        "The Plex marker helper isn't answering",
+        "can't be reached",
+        "Markers wait here until it answers again. Nothing is lost.",
+    ),
+    "rejected": (
+        "The Plex marker helper refused this app's key",
+        "key refused",
+        "Set the same shared key on the helper and in the Intro & Credits tab.",
+    ),
+    "incompatible": (
+        "The Plex marker helper and this app are different versions",
+        "version mismatch",
+        "The Intro & Credits tab says which of the two to update.",
+    ),
+}
+AGENT_FALLBACK_STATE = "unreachable"
+# Connected, and refused anyway: the helper is beside a different Plex than this server (a mistyped address).
+AGENT_WRONG_PLEX = (
+    "The Plex marker helper is beside a different Plex",
+    "wrong Plex server",
+    "Check its address in the Intro & Credits tab: markers would have gone into the wrong database.",
+)
+AGENT_EXPLANATION = (
+    "<p><strong>What it checks:</strong> whether the Plex marker helper running beside Plex answers this app.</p>"
+    "<p><strong>Why it matters:</strong> Plex has no API for intro and credits markers, so they are written "
+    "into its database — which only works from the machine that database is on. When Plex is on another "
+    "machine, the helper is the only way in, and while it isn't answering no marker reaches this server at "
+    "all.</p>"
+    "<p><strong>Nothing is lost:</strong> markers stay in this app. The next Intro &amp; Credits run sends "
+    "them as soon as the helper answers again.</p>"
+)
 
 DETECTION_LABEL = "Plex's own detection can replace your markers"
 DETECTION_LABEL_OK = "Plex's own detection is off"
@@ -115,6 +176,30 @@ class MarkerFacts:
         """Whether this Plex server has Plex Pass; None when it couldn't be read."""
         value = self.details.get("plex_pass")
         return value if isinstance(value, bool) else None
+
+    @property
+    def agent(self) -> dict[str, Any] | None:
+        """The Plex marker agent's block from the capability details; None when no agent did the check.
+
+        Its presence is what switches this server's Plex rows to the agent's wording, exactly as it does on the
+        Edit tab (``markers_server_tab.js agentDetails``).
+        """
+        value = self.details.get("agent")
+        return value if isinstance(value, dict) else None
+
+    @property
+    def agent_state(self) -> str | None:
+        """The agent's connection state, or None when no agent did the check.
+
+        ``""`` for an agent block that doesn't say — read as :data:`AGENT_FALLBACK_STATE` where it is used.
+        """
+        agent = self.agent
+        return None if agent is None else str(agent.get("state") or "")
+
+    @property
+    def agent_refused(self) -> bool:
+        """Whether the capability check stopped at the agent, so nothing past it was read at all."""
+        return self.state == Capability.AGENT_UNAVAILABLE.value
 
     @property
     def db_on_this_machine(self) -> bool | None:
@@ -307,6 +392,49 @@ def off_section() -> dict[str, Any]:
     }
 
 
+def agent_check(facts: MarkerFacts) -> dict[str, Any] | None:
+    """The Plex marker helper's row, or None when no helper is configured for this server.
+
+    The helper is the whole write path for a Plex on another machine, and a refusal by it (``AGENT_UNAVAILABLE``)
+    stops the capability check before Plex Pass, the marker list and the database are read. Without this row those
+    unknown facts emit nothing, so a Plex writing no markers at all would show either no Intro & Credits section
+    or — when Plex itself still answers over HTTP — a lone green "Plex Pass is active".
+
+    Args:
+        facts: This server's facts, from :func:`marker_facts`.
+
+    Returns:
+        The row, or None when no helper answered this check — this server has none, or the check stopped before
+        it (Intro & Credits off, or the database write not confirmed yet).
+    """
+    if facts.agent is None and not facts.agent_refused:
+        return None
+    agent = facts.agent or {}
+    state = facts.agent_state or AGENT_FALLBACK_STATE
+    # Connected AND not refused: a helper that answered is still refused when it turns out to be beside a
+    # different Plex than this server, and that must not read as a passing row.
+    ok = state == AGENT_RECOMMENDED and not facts.agent_refused
+    if ok:
+        label, current, reason = AGENT_LABEL_OK, AGENT_RECOMMENDED, None
+    elif agent.get("wrong_plex"):
+        # Only ``_another_plexs_agent`` sets this. Inferring it from "connected yet refused" would also catch a
+        # helper whose answer simply couldn't be decoded, and send the user to change a correct address.
+        label, current, reason = AGENT_WRONG_PLEX
+    else:
+        label, current, reason = AGENT_STATES.get(state, AGENT_STATES[AGENT_FALLBACK_STATE])
+    return _row(
+        "markers_plex_agent",
+        label,
+        severity=CRITICAL,
+        ok=ok,
+        tooltip=AGENT_TOOLTIP,
+        explanation=AGENT_EXPLANATION,
+        current=current,
+        recommended=AGENT_RECOMMENDED,
+        reason=reason,
+    )
+
+
 def plex_section(facts: MarkerFacts) -> dict[str, Any] | None:
     """The Intro & Credits rows for a Plex server, or None when nothing about markers is known.
 
@@ -320,6 +448,10 @@ def plex_section(facts: MarkerFacts) -> dict[str, Any] | None:
     if not facts.on:
         return None
     checks: list[dict[str, Any]] = []
+
+    agent_row = agent_check(facts)
+    if agent_row is not None:
+        checks.append(agent_row)
 
     has_pass = facts.plex_pass
     if has_pass is not None:
@@ -372,26 +504,33 @@ def plex_section(facts: MarkerFacts) -> dict[str, Any] | None:
 
     local_db = facts.db_on_this_machine
     if local_db is not None:
+        if facts.agent is not None:
+            label = LOCAL_DB_LABEL_AGENT_OK if local_db else LOCAL_DB_LABEL_AGENT
+            here, reason, what_to_do = LOCAL_DB_CURRENT_AGENT, LOCAL_DB_REASON_AGENT, LOCAL_DB_TODO_AGENT
+            tooltip = LOCAL_DB_TOOLTIP_AGENT
+        else:
+            label = LOCAL_DB_LABEL_OK if local_db else LOCAL_DB_LABEL
+            here, reason, what_to_do = "this machine", LOCAL_DB_REASON, LOCAL_DB_TODO
+            tooltip = LOCAL_DB_TOOLTIP
         checks.append(
             _row(
                 "markers_plex_db_local",
-                LOCAL_DB_LABEL_OK if local_db else LOCAL_DB_LABEL,
+                label,
                 severity=CRITICAL,
                 ok=local_db,
-                tooltip=LOCAL_DB_TOOLTIP,
+                tooltip=tooltip,
                 explanation=(
-                    "<p><strong>What it checks:</strong> that the Plex library database this app can see is the "
+                    "<p><strong>What it checks:</strong> that the Plex library database being written is the "
                     "same file the running Plex has open.</p>"
                     "<p><strong>Why it matters:</strong> Plex has no API for writing intro and credits markers, "
-                    "so this app writes them into the database itself. SQLite only allows that from the machine "
-                    "the file is on — over a network share the write would corrupt it, so this app refuses and "
-                    "leaves Plex read-only.</p>"
-                    "<p><strong>What to do:</strong> run this app on the Plex machine, or run the Plex marker "
-                    "helper next to Plex. Everything else about this server keeps working either way.</p>"
+                    "so they go into the database itself. SQLite only allows that from the machine the file is "
+                    "on — over a network share the write would corrupt it, so it is refused and Plex is left "
+                    "read-only.</p>"
+                    f"{what_to_do}"
                 ),
-                current="this machine" if local_db else "another machine",
-                recommended="this machine",
-                reason=None if local_db else LOCAL_DB_REASON,
+                current=here if local_db else "another machine",
+                recommended=here,
+                reason=None if local_db else reason,
             )
         )
 
