@@ -8,14 +8,19 @@
 // Adjust opens the editor over the same two zoom windows: the Decision bar grows a drag handle at each edge, each
 // edited type gets a strip with typed times, and a type nothing was found for carries an Add button where its bar
 // would be, which seeds a deliberately round starting time (addSeed) you then drag. One action bar saves the lot
-// through POST /api/markers/item/markers
-// (save = lock = publish to every owner, plan ruling P-R3) and shows what each server did. Unlock is
-// DELETE /api/markers/item/markers behind a confirmation. Copy is lifted verbatim from the owner-approved pack,
+// through POST /api/markers/item/markers (save = lock = publish to every owner, plan ruling P-R3) and shows what
+// each server did. Lock sends the decided times through that same endpoint and Unlock is
+// DELETE /api/markers/item/markers; both say what they will do and ask first. Copy is lifted verbatim from the
+// owner-approved pack,
 // docs/design/intro-credits/evidence/design/phase4/ui-copy.md.
+//
+// A job publishes markers behind the tab's back, so the file on screen is read again whenever an Intro & Credits job
+// finishes on the /jobs socket, and Re-detect drops what it holds straight away.
 //
 // Exposes window.loadMarkersInspector({server_id, item_id, media_file, type}); a null item (a pasted preview path)
 // shows how to get a file instead. Depends on app.js globals: apiPost, showToast, getCsrfToken,
-// _initBootstrapTooltips, _disposeBootstrapTooltips, and on window.bootstrap (Modal for Unlock, Tooltip for Lock).
+// _initBootstrapTooltips, _disposeBootstrapTooltips, on window.bootstrap (Modal for the Lock and Unlock
+// confirmations, Tooltip for the header buttons) and on window.io (the /jobs socket).
 // Forwards every item and the resolved canonical path to window.markersSeason (markers_season.js), which owns the
 // "This episode" / "Whole season" toggle, and tells it to forget a file whose markers a save, lock or unlock has
 // just changed. window.markersEditor.openFile is that view's Edit: load a file's tab and open the editor on it.
@@ -109,16 +114,33 @@
     // no timeline to put a marker on. That is a file no job has looked at, or one a job looked at but couldn't read
     // a duration for. A file merely missing an intro or credits opens on its Add buttons.
     const NOTHING_TO_ADJUST = 'Nothing to adjust on this episode yet — Re-detect checks the file now.';
+    const NOTHING_TO_LOCK = 'Nothing to lock on this episode yet — Re-detect checks the file now.';
+    const NO_FILE_YET = 'No file is open in this tab yet.';
+    const STILL_LOADING = 'This file is still loading.';
+    const COULDNT_READ = 'This file\'s Intro & Credits couldn\'t be read.';
+    const REDETECT_QUEUEING = 'This file is on its way to the queue.';
+    const NO_OWNER_TO_LOCK = 'No server with Intro & Credits on has this file, so there is nothing to lock.';
+    const EDIT_IN_HAND = 'Save or cancel the times you are adjusting first.';
+    const LOCK_IN_FLIGHT = 'Your last change is still on its way to your servers.';
+    const NOT_A_TIME = 'That isn\'t a time. Try 1:23 or 0:14.';
+    // Only an Intro & Credits job changes what this tab shows (media_preview_generator/job_kinds.py).
+    const JOB_KIND_MARKERS = 'intro_credits';
 
     const cache = new Map();
+    // The /jobs socket, opened the first time a file is shown in the tab: a page that never opens it never connects.
+    let jobsSocket = null;
     let requestSeq = 0;
     let shown = null; // {key, item, payload}
     // The open edit: {types, model: {type: {start, end, toEnd, editable, badStart, badEnd}}, saving, ui, actions}.
     let editing = null;
+    // What the open Lock dialog listed: {key, path, types, model}. Confirm sends this, not whatever has arrived since.
+    let pendingLock = null;
     // The answer to the last save: {servers, markers, sent}. Cleared whenever another file or a fresh payload loads.
     let results = null;
     // A Lock is in flight: it publishes to every server, so the header's other actions wait for its answer.
     let busy = false;
+    // A Re-detect is on its way to the queue. Held here rather than on the button, which every render rewrites.
+    let queueing = false;
 
     const $ = function (id) { return document.getElementById(id); };
 
@@ -544,6 +566,9 @@
         bodyEl.appendChild(grid);
         if (results) {
             const done = el('div', 'alert alert-success py-2 small mt-3 mb-0 d-flex align-items-center gap-2 mk-saved');
+            // Announced when it appears, and reachable: the save replaced the editor the focus was in.
+            done.setAttribute('role', 'status');
+            done.tabIndex = -1;
             done.appendChild(el('i', 'bi bi-lock-fill'));
             done.appendChild(el('div', '', 'Saved and locked. Your times stay until you unlock them.'));
             bodyEl.appendChild(done);
@@ -681,6 +706,9 @@
     // Spec §5.5 rule 2's two bounds a user's own marker keeps (P-R2). Everything else only warns.
     function refusalFor(type, payload) {
         const model = editing.model[type];
+        // A box holding something that isn't a time at all: the model still carries the last time that *was* one, so
+        // the bounds below would check a time the user can no longer see, and the red box would say nothing.
+        if (model.badStart || model.badEnd) return NOT_A_TIME;
         const duration = payload.duration_ms;
         const end = model.toEnd ? duration : model.end;
         if (model.start >= duration || end > duration) return `That's past the end of the file (${clock(duration)}).`;
@@ -702,10 +730,10 @@
         }
         // Cross-multiplied like markers.decide, so the exact boundary can't land on the wrong side of a float.
         if (atStart && model.start * 100 > USUAL_START_PERCENT * duration) {
-            out.push('That\'s later in the file than intros usually are. This will still be saved.');
+            out.push(`That's later in the file than ${TYPE_PLURALS[type]} usually are. This will still be saved.`);
         }
         if (!atStart && model.start * 100 < USUAL_END_PERCENT * duration) {
-            out.push('That\'s earlier than credits usually start. This will still be saved.');
+            out.push(`That's earlier than ${TYPE_PLURALS[type]} usually start. This will still be saved.`);
         }
         if (type === 'credits' && end < duration - END_OF_FILE_MS) {
             out.push('Credits usually run to the end of the file. This will still be saved.');
@@ -762,6 +790,12 @@
     function handle(type, edge, win, payload) {
         const node = el('button', 'mk-handle mk-handle-' + edge);
         node.type = 'button';
+        // A slider, not a button whose name keeps changing: a screen reader announces a moved value on its own, while
+        // a renamed button is only read out again the next time it is focused.
+        node.setAttribute('role', 'slider');
+        node.setAttribute('aria-label', `${TYPE_LABELS[type]} ${edge}`);
+        node.setAttribute('aria-valuemin', '0');
+        node.setAttribute('aria-valuemax', String(Math.round((payload.duration_ms || 0) / 1000)));
         node.disabled = !editing.model[type].editable || editing.saving;
         node.addEventListener('keydown', function (event) { onHandleKey(event, type, edge, payload); });
         node.addEventListener('pointerdown', function (event) { onHandleGrab(event, node, type, edge, win, payload); });
@@ -837,9 +871,12 @@
         const label = el('label', 'd-flex align-items-center gap-1 small text-muted mb-0', edge === 'start' ? 'Start' : 'End');
         const input = el('input', 'mk-time');
         input.type = 'text';
-        input.inputMode = 'numeric';
+        // Not "numeric": iOS shows a digits-only pad, and every time here has a colon in it.
+        input.inputMode = 'text';
         input.autocomplete = 'off';
         input.setAttribute('aria-label', `${TYPE_LABELS[type]} ${edge}`);
+        input.setAttribute('aria-describedby', messagesId(type));
+        input.setAttribute('aria-invalid', 'false');
         input.addEventListener('input', function () { onFieldInput(type, edge, input, payload); });
         input.addEventListener('blur', function () { refreshType(type); refreshActions(payload); });
         label.appendChild(input);
@@ -903,6 +940,10 @@
         return hint;
     }
 
+    function messagesId(type) {
+        return 'mk-edit-messages-' + type;
+    }
+
     function editStrip(type, payload) {
         const strip = el('div', 'mk-edit-strip');
         strip.dataset.editType = type;
@@ -921,6 +962,9 @@
         strip.appendChild(infoIcon('Tab to a handle, then use the arrow keys. You can also type a time straight into the boxes.'));
         if (editing.model[type].added) strip.appendChild(removeButton(type));
         const messages = el('div', 'mk-edit-messages');
+        messages.id = messagesId(type);
+        // What the boxes point at with aria-describedby, and a live region so a refusal is read out as it appears.
+        messages.setAttribute('role', 'status');
         strip.appendChild(messages);
         editing.ui[type] = Object.assign(editing.ui[type] || {}, { length: length, messages: messages });
         return strip;
@@ -945,6 +989,11 @@
         return line;
     }
 
+    function setSliderValue(node, ms) {
+        node.setAttribute('aria-valuenow', String(Math.round(ms / 1000)));
+        node.setAttribute('aria-valuetext', spokenTime(ms));
+    }
+
     // Everything one type's strip and bar show, recomputed from the model. Called on every nudge, drag and keystroke,
     // so it never rebuilds a node: a rebuild would drop the focus the keyboard edit lives on.
     function refreshType(type) {
@@ -967,11 +1016,13 @@
             if (document.activeElement !== ui.startInput) ui.startInput.value = clock(model.start);
             ui.startInput.disabled = frozen;
             ui.startInput.classList.toggle('is-invalid', badStart);
+            ui.startInput.setAttribute('aria-invalid', badStart ? 'true' : 'false');
         }
         if (ui.endInput) {
             if (document.activeElement !== ui.endInput) ui.endInput.value = clock(end);
             ui.endInput.disabled = frozen || model.toEnd;
             ui.endInput.classList.toggle('is-invalid', badEnd);
+            ui.endInput.setAttribute('aria-invalid', badEnd ? 'true' : 'false');
         }
         if (ui.toEndInput) {
             ui.toEndInput.checked = model.toEnd;
@@ -988,8 +1039,8 @@
             const label = `${TYPE_LABELS[type]} ${laneRange(seg, duration)}`;
             ui.text.textContent = label;
             ui.bar.title = label;
-            ui.startHandle.setAttribute('aria-label', `${TYPE_LABELS[type]} start, ${spokenTime(model.start)}`);
-            ui.endHandle.setAttribute('aria-label', `${TYPE_LABELS[type]} end, ${spokenTime(end)}`);
+            setSliderValue(ui.startHandle, model.start);
+            setSliderValue(ui.endHandle, end);
             ui.startHandle.disabled = frozen;
             ui.endHandle.disabled = frozen;
             placeBarLabel(ui.bar);
@@ -1008,7 +1059,13 @@
                     lines.push(message('bi-exclamation-triangle', 'text-warning-emphasis', text));
                 });
             }
-            ui.messages.replaceChildren.apply(ui.messages, lines);
+            // A live region announces a mutation, not a change, and this runs on every keystroke and every frame
+            // of a drag: putting the same standing warning back would read it out again each time.
+            const spoken = lines.map(function (line) { return line.textContent; }).join('\n');
+            if (spoken !== ui.messagesText) {
+                ui.messagesText = spoken;
+                ui.messages.replaceChildren.apply(ui.messages, lines);
+            }
         }
     }
 
@@ -1019,8 +1076,7 @@
     }
 
     // The pack's rule for the count: servers with Intro & Credits on that can show at least one type being saved.
-    function publishCount(payload) {
-        const types = sentTypes();
+    function publishCount(payload, types) {
         return enabledOwners(payload).filter(function (server) {
             return (server.can_show || []).some(function (type) { return types.indexOf(type) !== -1; });
         }).length;
@@ -1032,7 +1088,7 @@
     }
 
     function saveLabel(payload) {
-        const count = publishCount(payload);
+        const count = publishCount(payload, sentTypes());
         return count ? `Save and publish to ${count} server${count === 1 ? '' : 's'}` : 'Save';
     }
 
@@ -1098,27 +1154,71 @@
         actions.save.disabled = blocked || !sentTypes().length;
     }
 
+    function workingReason() {
+        if (editing) return EDIT_IN_HAND;
+        if (busy) return LOCK_IN_FLIGHT;
+        return queueing ? REDETECT_QUEUEING : '';
+    }
+
+    function adjustReason(payload) {
+        // A file where nothing was found still has somewhere to go: the editor opens on its Add buttons. What it
+        // still needs is a length -- without one there is no timeline to put a marker on.
+        const nothing = !payload.known || !payload.duration_ms
+            || !(editableTypes(payload).length || addableTypes(payload).length);
+        return nothing ? NOTHING_TO_ADJUST : '';
+    }
+
+    // A decided type no enabled server can show is no more lockable than it is adjustable (the API refuses the whole
+    // request over one), so a file with times but nowhere to send them says that rather than "nothing to lock".
+    function lockReason(payload) {
+        if (!payload.duration_ms) return NOTHING_TO_LOCK;
+        if (lockedTypes(payload).length || lockableTypes(payload).length) return '';
+        const decided = TYPES.some(function (type) { return decidedMarker(payload, type); });
+        return decided ? NO_OWNER_TO_LOCK : NOTHING_TO_LOCK;
+    }
+
+    // Bootstrap 5.3 gives .btn:disabled pointer-events: none, so a disabled button's tooltip never fires and the
+    // user is left with a grey button and no reason at all. These two stay clickable and say why instead — the same
+    // sentence the Season view's Edit gives — while aria-disabled tells assistive tech they do nothing.
+    function setBlocked(button, reason) {
+        // The button's own words when it works, captured before the first refusal overwrites the title.
+        if (button.dataset.tip === undefined) button.dataset.tip = button.title;
+        button.dataset.blocked = reason || '';
+        // The markup ships both buttons disabled for the moment before anything is loaded. From here on the state is
+        // aria-disabled, which keeps the pointer events the tooltip and the "why not" need.
+        button.disabled = false;
+        button.classList.toggle('mk-blocked', !!reason);
+        if (reason) button.setAttribute('aria-disabled', 'true');
+        else button.removeAttribute('aria-disabled');
+        retitle(button, reason || button.dataset.tip);
+    }
+
+    // Returns whether the press was refused, so the caller does nothing else with it.
+    function sayWhyBlocked(button) {
+        const reason = button.dataset.blocked || '';
+        if (reason) showToast('Intro & Credits', reason, 'info');
+        return !!reason;
+    }
+
     function syncHeaderButtons(payload, item) {
         const path = payload.canonical_path || item.media_file || '';
         const redetect = $('markersRedetectBtn');
         const adjust = $('markersAdjustBtn');
         const lock = $('markersLockBtn');
-        const working = !!editing || busy;
-        if (redetect) redetect.disabled = !path || working;
+        const working = workingReason();
+        if (redetect) setBlocked(redetect, working || (path ? '' : NO_FILE_YET));
         if (!adjust || !lock) return;
-        // A file where nothing was found still has somewhere to go: the editor opens on its Add buttons. What it
-        // still needs is a length — without one there is no timeline to put a marker on.
-        adjust.disabled = working || !payload.known || !payload.duration_ms
-            || !(editableTypes(payload).length || addableTypes(payload).length);
+        setBlocked(adjust, working || adjustReason(payload));
         const locked = lockedTypes(payload);
-        lock.disabled = working || (!locked.length && !lockableTypes(payload).length);
         setLockButton(lock, locked.length > 0);
+        setBlocked(lock, working || lockReason(payload));
     }
 
+    // Every caller follows this with setBlocked, which is what puts the new words on the tooltip.
     function setLockButton(button, locked) {
         button.replaceChildren(el('i', 'bi ' + (locked ? 'bi-unlock' : 'bi-lock') + ' me-1'), document.createTextNode(locked ? 'Unlock' : 'Lock'));
         button.dataset.mode = locked ? 'unlock' : 'lock';
-        retitle(button, locked ? UNLOCK_TIP : LOCK_TIP);
+        button.dataset.tip = locked ? UNLOCK_TIP : LOCK_TIP;
     }
 
     // The button's own words change with its job, so its tooltip is rebuilt rather than left saying the old thing.
@@ -1210,6 +1310,9 @@
         if (!editing || editing.saving) return;
         editing = null;
         render(shown.payload, shown.item);
+        // The re-render threw away the node the focus was on; it goes back to the button the edit started from.
+        const adjust = $('markersAdjustBtn');
+        if (adjust) adjust.focus();
     }
 
     // null end_ms is how the API reads "runs to the end of the file" — the same thing the switch says.
@@ -1230,7 +1333,17 @@
         try {
             applySaved(await apiPost('/api/markers/item/markers', { path: path, markers: body }), types, started);
         } catch (error) {
-            showToast('Intro & Credits', `Couldn't save: ${error.message}`, 'danger');
+            // api_markers.marker_item_save stores and locks the times *before* it publishes, so a 500, a dropped
+            // connection and the post-save FileChangedError all report a failure over a save that landed. Both
+            // caches would go on serving the pre-save, unlocked times, so they go whatever the error was.
+            cache.delete(started.key);
+            if (window.markersSeason) window.markersSeason.forgetFile(started.path);
+            showToast(
+                'Intro & Credits',
+                `Couldn't finish saving: ${error.message} Your times may already be saved — reload this file to see`
+                + ' where they stand.',
+                'danger',
+            );
             if (!editing || !shown || shown.key !== started.key) return;
             editing.saving = false;
             render(shown.payload, shown.item);
@@ -1270,10 +1383,42 @@
                 locked_at: saved[type].locked_at || null,
             };
         });
+        applyToServers(payload, answer, types);
         results = { servers: answer.servers || [], markers: saved, sent: types.slice() };
         editing = null;
         render(payload, shown.item);
+        // The re-render threw away the editor the focus was in: it goes to what the save has just said.
+        const done = $('markersInspectorBody').querySelector('.mk-saved');
+        if (done) done.focus();
         return true;
+    }
+
+    // A server that took the save shows the saved times from this moment on. Without this its "now" lane would keep
+    // drawing the marker it had before, and the Decision lane would mark that server as disagreeing with the very
+    // times it just took (§5.5: 5 s apart for intro/recap, 10 s for credits/preview).
+    function applyToServers(payload, answer, types) {
+        const saved = answer.markers || {};
+        (answer.servers || []).forEach(function (row) {
+            if (row.result !== 'written' && row.result !== 'unchanged') return;
+            const server = (payload.servers || []).find(function (s) { return s.server_id === row.server_id; });
+            // A server whose markers couldn't be read stays unread: this answer says what it took, not what it has.
+            if (!server || !Array.isArray(server.current)) return;
+            const canShow = row.can_show || [];
+            const took = types.filter(function (type) { return canShow.indexOf(type) !== -1 && saved[type]; });
+            if (!took.length) return;
+            // Emby's credits are published start-only when they end before the file does, and run to the end there.
+            const startOnly = (row.notes || []).some(function (n) { return n.type === 'credits' && n.field === 'end'; });
+            const rest = server.current.filter(function (c) { return took.indexOf(c.type) === -1; });
+            took.forEach(function (type) {
+                const marker = saved[type];
+                rest.push({
+                    type: type,
+                    start_ms: marker.start_ms,
+                    end_ms: type === 'credits' && startOnly ? null : marker.end_ms,
+                });
+            });
+            server.current = rest.sort(function (a, b) { return a.start_ms - b.start_ms; });
+        });
     }
 
     function resultFor(serverId) {
@@ -1358,11 +1503,13 @@
         });
     }
 
-    // Lock alone changes no time: the decided times go through the same save (so the same lock, and the same publish
-    // to every owner) exactly as they are — plan ruling P-R3.
-    async function lockNow() {
+    // Lock publishes to every owning server, exactly as Save does, so it says so first — Save's own words, with the
+    // times it is about to keep. What it lists is held until Confirm, so what gets published is what was read.
+    function askToLock() {
         const payload = shown && shown.payload;
-        if (!payload || !payload.duration_ms || editing || busy) return;
+        const modalEl = $('markersLockModal');
+        const list = $('markersLockList');
+        if (!payload || !payload.duration_ms || !modalEl || !list || !window.bootstrap) return;
         const types = lockableTypes(payload);
         if (!types.length) return;
         const model = {};
@@ -1375,22 +1522,78 @@
                 toEnd: TO_END_TYPES.indexOf(type) !== -1 && end >= payload.duration_ms - END_OF_FILE_MS,
             };
         });
-        const path = payload.canonical_path || shown.item.media_file;
-        const started = { key: shown.key, seq: requestSeq, path: path };
+        pendingLock = {
+            key: shown.key,
+            path: payload.canonical_path || shown.item.media_file,
+            types: types,
+            model: model,
+        };
+        list.replaceChildren.apply(list, types.map(function (type) {
+            const marker = decidedMarker(payload, type);
+            return el('li', 'font-monospace small', `${TYPE_LABELS[type]} ${laneRange(marker, payload.duration_ms)}`);
+        }));
+        const count = publishCount(payload, types);
+        const confirm = $('markersLockConfirm');
+        if (confirm) confirm.textContent = `Lock and publish to ${count} server${count === 1 ? '' : 's'}`;
+        showModal(modalEl);
+    }
+
+    function forgetPendingLock() {
+        pendingLock = null;
+    }
+
+    // Which of this tab's dialogs are open or on their way up. Bootstrap's own `modal-open` sits on the body and
+    // would answer for the other one, and a dialog's `show` class isn't set yet while its backdrop fades in.
+    const openDialogs = new Set();
+
+    function showModal(modalEl) {
+        openDialogs.add(modalEl);
+        modalEl.addEventListener('hidden.bs.modal', function () { openDialogs.delete(modalEl); }, { once: true });
+        window.bootstrap.Modal.getOrCreateInstance(modalEl).show();
+    }
+
+    // Bootstrap ignores hide() while a dialog is still opening — its backdrop fades first, so that window is real —
+    // and the dialog would then sit on screen over the work the button just started, its backdrop swallowing every
+    // click on the page beneath. So the hide is chased until it takes: once the dialog is up if that one was
+    // ignored, and dropped again the moment a hide completes. A dialog the user has already closed has nothing to
+    // chase — arming then would slam it shut the next time it opened.
+    function hideModal(modalEl) {
+        if (!modalEl || !window.bootstrap) return;
+        const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
+        modal.hide();
+        if (!openDialogs.has(modalEl)) return;
+        const again = function () { modal.hide(); };
+        modalEl.addEventListener('shown.bs.modal', again, { once: true });
+        modalEl.addEventListener('hidden.bs.modal', function () {
+            modalEl.removeEventListener('shown.bs.modal', again);
+        }, { once: true });
+    }
+
+    // Lock alone changes no time: the times the dialog listed go through the same save (so the same lock, and the
+    // same publish to every owner) exactly as they are — plan ruling P-R3.
+    async function lockNow() {
+        const pending = pendingLock;
+        pendingLock = null;
+        hideModal($('markersLockModal'));
+        if (!pending || editing || busy) return;
+        const started = { key: pending.key, seq: requestSeq, path: pending.path };
         // The publish runs against every server: Adjust and Re-detect stay out of reach until it answers, so an edit
         // can't be started and then thrown away by the answer.
         busy = true;
-        syncHeaderButtons(payload, shown.item);
+        if (shown && shown.payload) syncHeaderButtons(shown.payload, shown.item);
         let answer = null;
         let failure = '';
         try {
-            answer = await apiPost('/api/markers/item/markers', { path: path, markers: markersBody(types, model) });
+            answer = await apiPost(
+                '/api/markers/item/markers',
+                { path: pending.path, markers: markersBody(pending.types, pending.model) },
+            );
         } catch (error) {
             failure = error.message;
         }
         busy = false;
         // An answer for a file the Inspector has since left applies nothing, but the buttons still have to come back.
-        if (!answer || !applySaved(answer, types, started)) {
+        if (!answer || !applySaved(answer, pending.types, started)) {
             if (shown && shown.payload) syncHeaderButtons(shown.payload, shown.item);
             if (failure) showToast('Intro & Credits', `Couldn't lock these markers: ${failure}`, 'danger');
             return;
@@ -1425,7 +1628,7 @@
             return el('li', 'font-monospace small', `${TYPE_LABELS[type]} ${laneRange(marker, payload.duration_ms)}`);
         }));
         modalEl.dataset.types = types.join(',');
-        window.bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        showModal(modalEl);
     }
 
     async function unlock() {
@@ -1441,7 +1644,7 @@
         if (button) button.disabled = true;
         try {
             await apiSend('/api/markers/item/markers', 'DELETE', { path: path, types: types });
-            if (window.bootstrap) window.bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+            hideModal(modalEl);
             showToast('Intro & Credits', 'Unlocked — the next check decides these times again.', 'success');
             // What the sources make of these types now is the API's answer, not something this page can work out.
             results = null;
@@ -1554,11 +1757,11 @@
         if (!item || !(item.media_file || (item.server_id && item.item_id))) {
             shown = null;
             $('markersInspectorPath').textContent = '';
-            editorButtonsOff();
-            button.disabled = true;
+            headerForNoPayload();
             body.replaceChildren(el('div', 'alert alert-secondary py-2', 'Search for the title above to see its Intro & Credits. A pasted preview path doesn\'t say which video file it belongs to.'));
             return;
         }
+        watchJobs();
         if (cache.has(key)) {
             shown = { key: key, item: item, payload: cache.get(key) };
             render(shown.payload, item);
@@ -1566,8 +1769,7 @@
         }
         shown = { key: key, item: item, payload: null };
         $('markersInspectorPath').textContent = item.media_file || '';
-        editorButtonsOff();
-        button.disabled = true;
+        headerForNoPayload();
         body.replaceChildren(el('div', 'text-muted small py-3', 'Loading Intro & Credits…'));
         try {
             const payload = await fetchItem(item);
@@ -1577,6 +1779,8 @@
             render(payload, item);
         } catch (error) {
             if (seq !== requestSeq) return;
+            shown.failed = error.reason === 'version_not_here' ? 'version' : 'read';
+            headerForNoPayload();
             if (error.reason === 'version_not_here') {
                 // Nothing to re-detect: the job would find no file either.
                 const box = el('div', 'alert alert-secondary py-2 mk-version-not-here');
@@ -1586,7 +1790,6 @@
                 return;
             }
             body.replaceChildren(el('div', 'alert alert-warning py-2', `Couldn't load Intro & Credits for this file: ${error.message}`));
-            button.disabled = !item.media_file;
         }
     }
 
@@ -1602,54 +1805,143 @@
         if (shown.payload && !startEditing()) showToast('Intro & Credits', NOTHING_TO_ADJUST, 'info');
     }
 
-    // Nothing is loaded (or it failed): there is nothing to adjust or lock, whatever the buttons said a moment ago.
-    function editorButtonsOff() {
+    // All three header buttons refused for one reason, whatever they said a moment ago. Callers that want one of
+    // them back say so afterwards.
+    function headerButtonsBlocked(reason) {
+        const redetect = $('markersRedetectBtn');
         const adjust = $('markersAdjustBtn');
         const lock = $('markersLockBtn');
-        if (adjust) adjust.disabled = true;
+        if (redetect) setBlocked(redetect, reason);
+        if (adjust) setBlocked(adjust, reason);
         if (lock) {
-            lock.disabled = true;
             setLockButton(lock, false);
+            setBlocked(lock, reason);
         }
+    }
+
+    // Both caches forget one file: whatever is about to change it, what they hold describes the file before that
+    // happened. Takes the file rather than reading it off ``shown``, so a request that answers after the user has
+    // moved on still drops the file it was about.
+    function forget(key, path) {
+        cache.delete(key);
+        if (path && window.markersSeason) window.markersSeason.forgetFile(path);
+    }
+
+    function forgetShown() {
+        if (!shown) return;
+        forget(shown.key, (shown.payload && shown.payload.canonical_path) || shown.item.media_file);
+    }
+
+    // A job publishing markers changes what every server shows, and a Re-detect changes the decisions themselves.
+    function jobFinished(job) {
+        // A previews job leaves every marker exactly where it was; a job with no kind at all is read as one that may
+        // have moved them.
+        if (job && job.kind && job.kind !== JOB_KIND_MARKERS) return;
+        forgetShown();
+        if (shown) readAgain(shown.item);
+    }
+
+    // Read one file's tab again. An open edit, a lock in flight or the open Lock dialog owns the screen: dropping
+    // what the caches hold is enough then, and neither the times the user is typing nor the ones the dialog is
+    // showing change underneath them.
+    function readAgain(item) {
+        if (editing || busy || pendingLock) return undefined;
+        if (!shown || shown.item !== item) return undefined;
+        // A read that failed leaves no payload, and it is exactly the state a job can put right: Re-detect is
+        // offered there, so the file it re-reads has to reach the screen when that job lands.
+        if (!shown.payload && shown.failed !== 'read') return undefined;
+        return loadMarkersInspector(item);
+    }
+
+    function watchJobs() {
+        if (jobsSocket || typeof window.io !== 'function') return;
+        // Polling only, as app.js connects: a websocket pins a gunicorn thread for every open tab.
+        jobsSocket = window.io('/jobs', { transports: ['polling'], reconnection: true });
+        jobsSocket.on('job_completed', jobFinished);
+        jobsSocket.on('job_failed', jobFinished);
+    }
+
+    // The header row as the state it is in now describes it, wherever that state changed.
+    function refreshHeader() {
+        if (shown && shown.payload) syncHeaderButtons(shown.payload, shown.item);
+        else headerForNoPayload();
+    }
+
+    // The header row while nothing is on screen to act on: no file at all, one still being read, or one whose read
+    // failed. ``shown.failed`` says which failure, because only one of them leaves anything worth pressing.
+    function headerForNoPayload() {
+        const working = workingReason();
+        if (!shown) {
+            headerButtonsBlocked(working || NO_FILE_YET);
+            return;
+        }
+        headerButtonsBlocked(working || (shown.failed ? COULDNT_READ : STILL_LOADING));
+        // A read that failed can be tried again as a job: it opens the file itself. A version that isn't on this
+        // disk can't — the job would find no file either.
+        const redetect = $('markersRedetectBtn');
+        if (redetect && !working && shown.failed === 'read' && shown.item.media_file) setBlocked(redetect, '');
     }
 
     async function redetectItem() {
         if (!shown) return;
+        const started = { key: shown.key, item: shown.item };
         const path = (shown.payload && shown.payload.canonical_path) || shown.item.media_file;
         if (!path) return;
-        const button = $('markersRedetectBtn');
-        button.disabled = true;
+        queueing = true;
+        refreshHeader();
+        let result = null;
+        let failure = '';
+        // Only the request is guarded: everything below describes a job that is already queued, and a throw there
+        // would otherwise be reported as a job that never was.
         try {
-            const result = await apiPost('/api/markers/item/redetect', { path: path });
-            // The job changes what this file shows once it runs: load it fresh next time.
-            cache.delete(shown.key);
-            showToast('Re-detect', 'Queued — see the Dashboard', 'success');
-            const jobId = result && result.job_id;
-            const toastBody = $('toastBody');
-            if (jobId && toastBody) {
-                const link = el('a', 'ms-1', String(jobId).substring(0, 8));
-                link.href = '/?job=' + encodeURIComponent(jobId);
-                toastBody.append(' ', link);
-            }
+            result = await apiPost('/api/markers/item/redetect', { path: path });
         } catch (error) {
-            showToast('Re-detect', `Couldn't queue it: ${error.message}`, 'danger');
-        } finally {
-            button.disabled = false;
+            failure = error.message;
         }
+        queueing = false;
+        refreshHeader();
+        if (failure) {
+            showToast('Re-detect', `Couldn't queue it: ${failure}`, 'danger');
+            return;
+        }
+        forget(started.key, path);
+        showToast('Re-detect', 'Queued — see the Dashboard', 'success');
+        const jobId = result && result.job_id;
+        const toastBody = $('toastBody');
+        if (jobId && toastBody) {
+            const link = el('a', 'ms-1', String(jobId).substring(0, 8));
+            link.href = '/?job=' + encodeURIComponent(jobId);
+            toastBody.append(' ', link);
+        }
+        // The queued job hasn't run yet, so this brings back what any *other* job has changed since the tab last read
+        // the file; jobFinished reads it again when this one lands, and the confirmation above doesn't wait on it.
+        await readAgain(started.item);
     }
 
     function wireButtons() {
         const redetect = $('markersRedetectBtn');
-        if (redetect) redetect.addEventListener('click', redetectItem);
+        if (redetect) redetect.addEventListener('click', function () {
+            if (sayWhyBlocked(redetect)) return;
+            redetectItem();
+        });
         const adjust = $('markersAdjustBtn');
-        if (adjust) adjust.addEventListener('click', startEditing);
+        if (adjust) adjust.addEventListener('click', function () {
+            if (sayWhyBlocked(adjust)) return;
+            startEditing();
+        });
         const lock = $('markersLockBtn');
         if (lock) lock.addEventListener('click', function () {
+            if (sayWhyBlocked(lock)) return;
             if (lock.dataset.mode === 'unlock') askToUnlock();
-            else lockNow();
+            else askToLock();
         });
-        const confirm = $('markersUnlockConfirm');
-        if (confirm) confirm.addEventListener('click', unlock);
+        const confirmUnlock = $('markersUnlockConfirm');
+        if (confirmUnlock) confirmUnlock.addEventListener('click', unlock);
+        const confirmLock = $('markersLockConfirm');
+        if (confirmLock) confirmLock.addEventListener('click', lockNow);
+        const lockModal = $('markersLockModal');
+        // Dismissed with the ✕, the backdrop or Escape as well as the button: nothing is held on to either way.
+        if (lockModal) lockModal.addEventListener('hidden.bs.modal', forgetPendingLock);
     }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wireButtons);
     else wireButtons();
@@ -1659,6 +1951,8 @@
     // beside it so they can be pinned without a JS test runner.
     window.markersEditor = {
         openFile: editFile,
+        // The open /jobs socket, so a test can call the handlers this file registered on it without a real job.
+        jobsSocket: function () { return jobsSocket; },
         parseClock: parseClock,
         spokenTime: spokenTime,
         lengthText: lengthText,

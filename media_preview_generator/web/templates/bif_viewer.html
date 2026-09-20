@@ -197,6 +197,28 @@
     </p>
 </div>
 
+<!-- Lock confirmation (Intro & Credits tab). Lock publishes to every owning server exactly as Save does, so it
+     says which times it keeps and where they go before it sends anything. -->
+<div class="modal fade" id="markersLockModal" tabindex="-1" aria-labelledby="markersLockTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="markersLockTitle"><i class="bi bi-lock me-2"></i>Lock these markers?</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-2">These times are kept exactly as they are, and later checks won't change them:</p>
+                <ul class="mb-3" id="markersLockList"></ul>
+                <p class="mb-0">They go to your servers now, the same way Save sends them.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Leave them as they are</button>
+                <button type="button" class="btn btn-primary" id="markersLockConfirm">Lock and publish</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Unlock confirmation (Intro & Credits tab). Says what comes back before the user's own times stop winning. -->
 <div class="modal fade" id="markersUnlockModal" tabindex="-1" aria-labelledby="markersUnlockTitle" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">

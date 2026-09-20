@@ -13,7 +13,7 @@
 // arrives — setPath corrects a season already fetched under the item's media_file (used as a placeholder path
 // until the canonical one is known) if the two differ, and remembers the canonical path for that media_file so the
 // item shown again (the tab re-shown) asks for it straight away. Text goes through textContent. Depends on app.js
-// globals: apiPost, showToast, _initBootstrapTooltips.
+// globals: apiPost, showToast, _initBootstrapTooltips, _disposeBootstrapTooltips.
 // =========================================================================
 (function () {
     'use strict';
@@ -66,6 +66,13 @@
         if (className) node.className = className;
         if (text !== undefined && text !== null) node.textContent = text;
         return node;
+    }
+
+    // Bootstrap holds its own reference to every tooltip it makes: one left behind on a row this replaces stays on
+    // screen with nothing under it, and its instance is never collected.
+    function setBody(body, nodes) {
+        if (typeof window._disposeBootstrapTooltips === 'function') window._disposeBootstrapTooltips(body);
+        body.replaceChildren.apply(body, nodes);
     }
 
     function clock(ms) {
@@ -211,7 +218,7 @@
         table.append(thead, tbody);
         scroll.appendChild(table);
         card.appendChild(scroll);
-        body.replaceChildren(head, card, el('div', 'mk-season-legend text-muted small mt-1', LEGEND));
+        setBody(body, [head, card, el('div', 'mk-season-legend text-muted small mt-1', LEGEND)]);
         if (typeof window._initBootstrapTooltips === 'function') window._initBootstrapTooltips(body);
     }
 
@@ -224,7 +231,7 @@
             render(cache.get(asked));
             return;
         }
-        body.replaceChildren(el('div', 'text-muted small py-3', 'Loading the season…'));
+        setBody(body, [el('div', 'text-muted small py-3', 'Loading the season…')]);
         try {
             const resp = await fetch('/api/markers/season?path=' + encodeURIComponent(asked));
             if (resp.status === 401) {
@@ -236,7 +243,7 @@
             cache.set(asked, data);
             if (mine === seq) render(data);
         } catch (error) {
-            if (mine === seq) body.replaceChildren(el('div', 'alert alert-warning py-2', `Couldn't load this season: ${error.message}`));
+            if (mine === seq) setBody(body, [el('div', 'alert alert-warning py-2', `Couldn't load this season: ${error.message}`)]);
         }
     }
 

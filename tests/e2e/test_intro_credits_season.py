@@ -22,6 +22,8 @@ from .test_intro_credits_inspector import (
     _field,
     _handle,
     _Inspector,
+    _is_item,
+    _is_save,
     _result,
     _save_button,
     _saved,
@@ -129,16 +131,8 @@ def _action(page: Page, episode: str, name: str):
     return _row(page, episode).locator(".mk-season-action").get_by_role("button", name=name, exact=True)
 
 
-def _is_item(response) -> bool:
-    return response.request.method == "GET" and "/api/markers/item?" in response.url
-
-
 def _is_season(response) -> bool:
     return response.request.method == "GET" and "/api/markers/season?" in response.url
-
-
-def _is_save(response) -> bool:
-    return response.request.method == "POST" and response.url.endswith("/api/markers/item/markers")
 
 
 @pytest.mark.e2e
@@ -770,3 +764,32 @@ class TestSeasonRowEdit:
         expect(page.locator("#markersSeasonBody .mk-season-title")).to_be_visible()
         paths = [parse_qs(urlparse(u).query)["path"][0] for u in view.season_requests]
         assert paths == [_MEDIA_FILE, f"{_FOLDER}/South Park S01E01.mkv", _MEDIA_FILE]
+
+
+@pytest.mark.e2e
+class TestSeasonTooltips:
+    def test_a_tooltip_doesnt_outlive_the_row_it_was_on(self, authed_page: Page, app_url: str) -> None:
+        # Bootstrap keys its tooltips by element and appends each one to <body>: a row replaced under an open
+        # tooltip leaves it on screen with nothing beneath it, and its instance is never collected.
+        view = _Season(authed_page, app_url, season())
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+
+        find_edit = (
+            "() => { window.__edit = document.querySelector("
+            "'#markersSeasonBody tr[data-episode=\"E01\"] .mk-season-action button');"
+            " return !!bootstrap.Tooltip.getInstance(window.__edit); }"
+        )
+        assert page.evaluate(find_edit) is True
+
+        # Clicked through the DOM so the pointer never moves: a real click elsewhere would hide the tooltip by
+        # itself and prove nothing about what the re-render left behind.
+        page.evaluate(
+            "() => { document.getElementById('markersViewEpisode').click();"
+            " document.getElementById('markersViewSeason').click(); }"
+        )
+
+        expect(page.locator("#markersSeasonBody .mk-season-title")).to_be_visible()
+        assert page.evaluate("() => document.contains(window.__edit)") is False
+        assert page.evaluate("() => !!bootstrap.Tooltip.getInstance(window.__edit)") is False

@@ -387,6 +387,18 @@ def _server_card(page: Page, server_id: str):
     return page.locator(f'.mk-server[data-server-id="{server_id}"]')
 
 
+def _is_item(response) -> bool:
+    return response.request.method == "GET" and "/api/markers/item?" in response.url
+
+
+def _is_save(response) -> bool:
+    return response.request.method == "POST" and response.url.endswith("/api/markers/item/markers")
+
+
+def _is_unlock(response) -> bool:
+    return response.request.method == "DELETE" and response.url.endswith("/api/markers/item/markers")
+
+
 @pytest.mark.e2e
 class TestIntroCreditsTab:
     def test_south_park_decision_evidence_and_servers(self, authed_page: Page, app_url: str) -> None:
@@ -768,6 +780,23 @@ class TestIntroCreditsTabLoading:
         inspector.open_tab()
         assert len(inspector.item_requests) == 1
 
+    def test_the_buttons_say_the_file_is_loading_while_it_loads(self, authed_page: Page, app_url: str) -> None:
+        # The path is already on screen above them, so "No file is open in this tab yet" would read as a lie.
+        held: list[Route] = []
+        inspector = _Inspector(authed_page, app_url, south_park(), item_handler=held.append)
+        inspector.open_result()
+        inspector.page.locator("#inspectorMarkersTabBtn").click()
+        page = inspector.page
+
+        expect(page.locator("#markersInspectorBody")).to_contain_text("Loading Intro & Credits…")
+        for name in ("#markersRedetectBtn", "#markersAdjustBtn", "#markersLockBtn"):
+            expect(page.locator(name)).to_have_attribute("title", "This file is still loading.")
+        page.locator("#markersAdjustBtn").click(force=True)
+        expect(page.locator("#toastNotification")).to_contain_text("This file is still loading.", timeout=5000)
+
+        _fulfill_json(held[0], south_park())
+        expect(page.locator("#markersAdjustBtn")).to_be_enabled(timeout=5000)
+
     def test_a_second_item_with_the_tab_open_loads_its_own_markers(self, authed_page: Page, app_url: str) -> None:
         other = "/data/tv/South Park (1997)/Season 01/South Park S01E04.mkv"
         inspector = _Inspector(
@@ -803,6 +832,11 @@ class TestIntroCreditsTabLoading:
         expect(page.locator("#markersInspectorBody")).to_contain_text("Search for the title")
         expect(page.locator("#markersRedetectBtn")).to_be_disabled()
         assert inspector.item_requests == []
+        # All three say the same thing rather than sitting there grey and silent.
+        for button in ("#markersRedetectBtn", "#markersAdjustBtn", "#markersLockBtn"):
+            expect(page.locator(button)).to_have_attribute("title", "No file is open in this tab yet.")
+        page.locator("#markersAdjustBtn").click(force=True)
+        expect(page.locator("#toastNotification")).to_contain_text("No file is open in this tab yet.", timeout=5000)
 
     def test_a_path_the_app_cant_place_is_retried_by_server_and_item_id(self, authed_page: Page, app_url: str) -> None:
         payload = south_park()
@@ -915,6 +949,52 @@ class TestVersionNotOnThisDisk:
         by_id = inspector.item_requests[1]
         assert f"item_id={second_id}" in by_id
         assert "version_file=" + _quote(_V2160) in by_id
+        # Nothing was read, and nothing is still being read: the buttons say that, not "still loading".
+        for button in ("#markersRedetectBtn", "#markersAdjustBtn", "#markersLockBtn"):
+            expect(page.locator(button)).to_have_attribute("title", "This file's Intro & Credits couldn't be read.")
+
+    def test_a_read_that_failed_with_no_path_offers_nothing(self, authed_page: Page, app_url: str) -> None:
+        # Reached by server and item id alone: Re-detect has no path to send, so it stays refused with the others.
+        inspector = _Inspector(
+            authed_page,
+            app_url,
+            south_park(),
+            results=[_result(media_file="")],
+            item_handler=lambda route: _fulfill_json(route, {"error": "Plex timed out"}, status=502),
+        )
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        expect(page.locator("#markersInspectorBody")).to_contain_text("Couldn't load Intro & Credits for this file")
+        for button in ("#markersRedetectBtn", "#markersAdjustBtn", "#markersLockBtn"):
+            expect(page.locator(button)).to_have_attribute("title", "This file's Intro & Credits couldn't be read.")
+
+    def test_a_read_that_failed_says_so_and_still_offers_re_detect(self, authed_page: Page, app_url: str) -> None:
+        # The job opens the file itself, so a failed read is exactly the case Re-detect is for.
+        inspector = _Inspector(
+            authed_page,
+            app_url,
+            south_park(),
+            item_handler=lambda route: _fulfill_json(route, {"error": "Plex timed out"}, status=502),
+        )
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        expect(page.locator("#markersInspectorBody")).to_contain_text("Couldn't load Intro & Credits for this file")
+        for button in ("#markersAdjustBtn", "#markersLockBtn"):
+            expect(page.locator(button)).to_have_attribute("title", "This file's Intro & Credits couldn't be read.")
+        page.locator("#markersAdjustBtn").click(force=True)
+        expect(page.locator("#toastNotification")).to_contain_text(
+            "This file's Intro & Credits couldn't be read.", timeout=5000
+        )
+        # Re-detect is the way out of this one, so it stays pressable.
+        expect(page.locator("#markersRedetectBtn")).to_be_enabled()
+        with page.expect_response(
+            lambda response: response.request.method == "POST" and response.url.endswith("/api/markers/item/redetect"),
+            timeout=5000,
+        ):
+            page.locator("#markersRedetectBtn").click()
+        assert inspector.redetect_bodies == [{"path": _MEDIA_FILE}]
 
 
 @pytest.mark.e2e
@@ -1055,18 +1135,80 @@ class TestAdjustEditor:
         expect(page.locator("#markersLockBtn")).to_be_disabled()
         expect(page.locator("#markersRedetectBtn")).to_be_disabled()
 
-    def test_the_handles_are_named_for_a_screen_reader_and_follow_the_times(
-        self, authed_page: Page, app_url: str
-    ) -> None:
+    def test_the_handles_are_sliders_whose_value_follows_the_times(self, authed_page: Page, app_url: str) -> None:
+        # A slider's value is announced as it moves; a button renamed under the focus is only read out again the
+        # next time it is focused.
         inspector = _Inspector(authed_page, app_url, south_park())
         page = _open_editor(inspector)
 
         start = _handle(page, "opening", "start")
-        expect(start).to_have_attribute("aria-label", "Intro start, 0 minutes 11 seconds")
-        expect(_handle(page, "opening", "end")).to_have_attribute("aria-label", "Intro end, 0 minutes 37 seconds")
-        expect(_handle(page, "ending", "start")).to_have_attribute("aria-label", "Credits start, 21 minutes 39 seconds")
+        expect(start).to_have_attribute("role", "slider")
+        expect(start).to_have_attribute("aria-label", "Intro start")
+        expect(start).to_have_attribute("aria-valuemin", "0")
+        expect(start).to_have_attribute("aria-valuemax", "1322")
+        expect(start).to_have_attribute("aria-valuenow", "11")
+        expect(start).to_have_attribute("aria-valuetext", "0 minutes 11 seconds")
+        expect(_handle(page, "opening", "end")).to_have_attribute("aria-valuetext", "0 minutes 37 seconds")
+        expect(_handle(page, "ending", "start")).to_have_attribute("aria-valuetext", "21 minutes 39 seconds")
         start.press("ArrowRight")
-        expect(start).to_have_attribute("aria-label", "Intro start, 0 minutes 12 seconds")
+        expect(start).to_have_attribute("aria-valuenow", "12")
+        expect(start).to_have_attribute("aria-valuetext", "0 minutes 12 seconds")
+        # The name stays put, so the value is what changes under the focus.
+        expect(start).to_have_attribute("aria-label", "Intro start")
+
+    def test_the_boxes_say_they_are_wrong_and_point_at_the_messages(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        page = _open_editor(inspector)
+
+        field = _field(page, "intro", "start")
+        expect(field).to_have_attribute("aria-describedby", "mk-edit-messages-intro")
+        expect(field).to_have_attribute("aria-invalid", "false")
+        # "numeric" is a digits-only pad on iOS, and every time here has a colon in it.
+        expect(field).to_have_attribute("inputmode", "text")
+        messages = _strip(page, "intro").locator(".mk-edit-messages")
+        expect(messages).to_have_attribute("id", "mk-edit-messages-intro")
+        expect(messages).to_have_attribute("role", "status")
+
+        field.fill("25:00")
+        expect(field).to_have_attribute("aria-invalid", "true")
+        expect(messages).to_contain_text("That's past the end of the file (22:02).")
+        field.fill("0:11")
+        expect(field).to_have_attribute("aria-invalid", "false")
+
+    def test_the_handles_are_wide_enough_to_grab(self, authed_page: Page, app_url: str) -> None:
+        # WCAG 2.5.8: the handle is drawn 11 px wide, so its target is widened to the 24 px minimum.
+        inspector = _Inspector(authed_page, app_url, south_park())
+        page = _open_editor(inspector)
+        target = page.evaluate(
+            "() => { const h = document.querySelector('.mk-handle');"
+            " const before = getComputedStyle(h, '::before');"
+            " return [parseFloat(before.width), h.getBoundingClientRect().height]; }"
+        )
+        assert target[0] >= 24
+        assert target[1] >= 24
+
+    def test_typing_something_that_isnt_a_time_says_so(self, authed_page: Page, app_url: str) -> None:
+        # The model keeps the last time that parsed, so without this the box goes red over a time that is fine.
+        inspector = _Inspector(authed_page, app_url, south_park())
+        page = _open_editor(inspector)
+
+        _field(page, "intro", "start").fill("abc")
+
+        expect(_strip(page, "intro")).to_contain_text("That isn't a time. Try 1:23 or 0:14.")
+        expect(_field(page, "intro", "start")).to_have_class(re.compile(r"\bis-invalid\b"))
+        expect(_field(page, "intro", "start")).to_have_attribute("aria-invalid", "true")
+        expect(_save_button(page)).to_be_disabled()
+
+        _field(page, "intro", "start").fill("0:15")
+        expect(_strip(page, "intro")).not_to_contain_text("That isn't a time")
+        expect(_save_button(page)).to_be_enabled()
+
+        # The end box is read the same way.
+        _field(page, "intro", "end").fill("half past")
+        expect(_strip(page, "intro")).to_contain_text("That isn't a time. Try 1:23 or 0:14.")
+        expect(_field(page, "intro", "end")).to_have_attribute("aria-invalid", "true")
+        expect(_save_button(page)).to_be_disabled()
+        assert inspector.save_bodies == []
 
     def test_arrow_keys_nudge_a_second_and_shift_ten(self, authed_page: Page, app_url: str) -> None:
         inspector = _Inspector(authed_page, app_url, south_park())
@@ -1099,9 +1241,7 @@ class TestAdjustEditor:
         _handle(page, "opening", "start").press("ArrowLeft")
         expect(_field(page, "intro", "start")).to_have_value("0:20")
 
-        with page.expect_response(
-            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
-        ):
+        with page.expect_response(_is_save, timeout=5000):
             _save_button(page).press("Enter")
 
         assert len(inspector.save_bodies) == 1
@@ -1133,9 +1273,7 @@ class TestAdjustEditor:
         assert dragged != "0:11", "the drag moved nothing"
         expect(page.locator(".mk-edit-pending")).to_contain_text(f"Intro {dragged}–0:37")
 
-        with page.expect_response(
-            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
-        ):
+        with page.expect_response(_is_save, timeout=5000):
             _save_button(page).click()
         minutes, seconds = dragged.split(":")
         sent = next(m for m in inspector.save_bodies[0]["markers"] if m["type"] == "intro")
@@ -1189,14 +1327,54 @@ class TestAdjustEditor:
             "That's earlier than credits usually start. This will still be saved."
         )
 
-        with page.expect_response(
-            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
-        ):
+        with page.expect_response(_is_save, timeout=5000):
             _save_button(page).click()
         assert inspector.save_bodies[0]["markers"] == [
             {"type": "intro", "start_ms": 900_000, "end_ms": 1_260_000},
             {"type": "credits", "start_ms": 300_000, "end_ms": 1_310_000},
         ]
+
+    def test_a_standing_warning_isnt_read_out_again_on_every_keystroke(self, authed_page: Page, app_url: str) -> None:
+        # .mk-edit-messages is a live region, and refreshType runs on every keystroke and every frame of a drag:
+        # putting the same warning back announces it again each time.
+        inspector = _Inspector(authed_page, app_url, south_park())
+        page = _open_editor(inspector)
+        _field(page, "intro", "end").fill("21:00")
+        _field(page, "intro", "start").fill("15:00")
+        expect(_strip(page, "intro")).to_contain_text("That's later in the file than intros usually are.")
+        page.evaluate(
+            "() => { window.__said = 0;"
+            " new MutationObserver(() => { window.__said += 1; })"
+            ".observe(document.getElementById('mk-edit-messages-intro'), {childList: true}); }"
+        )
+
+        _handle(page, "opening", "start").press("ArrowRight")
+        expect(_field(page, "intro", "start")).to_have_value("15:01")
+        _handle(page, "opening", "start").press("ArrowRight")
+        expect(_field(page, "intro", "start")).to_have_value("15:02")
+
+        assert page.evaluate("() => window.__said") == 0
+        # Words that really did change are still put on screen.
+        _field(page, "intro", "start").fill("0:05")
+        expect(_strip(page, "intro")).not_to_contain_text("That's later in the file")
+        assert page.evaluate("() => window.__said") > 0
+
+    def test_each_type_is_warned_about_in_its_own_words(self, authed_page: Page, app_url: str) -> None:
+        # A late recap was warned about as an intro, and an early preview as credits.
+        inspector = _Inspector(authed_page, app_url, _with_types(["recap", "preview"]))
+        page = _open_editor(inspector)
+
+        _field(page, "recap", "end").fill("16:00")
+        _field(page, "recap", "start").fill("15:00")
+        expect(_strip(page, "recap")).to_contain_text(
+            "That's later in the file than recaps usually are. This will still be saved."
+        )
+
+        _field(page, "preview", "start").fill("5:00")
+        expect(_strip(page, "preview")).to_contain_text(
+            "That's earlier than previews usually start. This will still be saved."
+        )
+        expect(_save_button(page)).to_be_enabled()
 
     def test_cancel_puts_the_tab_back_and_sends_nothing(self, authed_page: Page, app_url: str) -> None:
         inspector = _Inspector(authed_page, app_url, south_park())
@@ -1206,6 +1384,8 @@ class TestAdjustEditor:
 
         page.locator(".mk-edit-cancel").click()
 
+        # Cancel threw away the node the focus was on: it goes back to the button the edit started from.
+        expect(page.locator("#markersAdjustBtn")).to_be_focused()
         expect(page.locator(".mk-edit-actions")).to_have_count(0)
         expect(page.locator(".mk-edit-strip")).to_have_count(0)
         expect(page.locator("#markersInspectorBody")).not_to_contain_text("Adjusting this episode")
@@ -1231,6 +1411,89 @@ class TestAdjustEditor:
         expect(page.locator("#markersLockBtn")).to_be_disabled()
         expect(page.locator("#markersRedetectBtn")).to_be_enabled()
 
+    def test_adjust_and_lock_say_why_they_cant_act(self, authed_page: Page, app_url: str) -> None:
+        # Bootstrap 5.3 puts pointer-events: none on .btn:disabled, so a `disabled` button's tooltip never fires and
+        # the user gets a grey button with no reason at all.
+        inspector = _Inspector(authed_page, app_url, not_checked())
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        adjust = page.locator("#markersAdjustBtn")
+        expect(adjust).to_have_attribute("aria-disabled", "true")
+        expect(adjust).to_have_class(re.compile(r"\bmk-blocked\b"))
+        # Not natively disabled: that is what took its pointer events away.
+        assert adjust.get_attribute("disabled") is None
+        expect(adjust).to_have_attribute(
+            "title", "Nothing to adjust on this episode yet — Re-detect checks the file now."
+        )
+        # force: Playwright reads aria-disabled as disabled and won't click; a browser delivers this click for real.
+        adjust.click(force=True)
+        expect(page.locator("#toastNotification")).to_contain_text(
+            "Nothing to adjust on this episode yet", timeout=5000
+        )
+
+        lock = page.locator("#markersLockBtn")
+        expect(lock).to_have_attribute("title", "Nothing to lock on this episode yet — Re-detect checks the file now.")
+        lock.click(force=True)
+        expect(page.locator("#toastNotification")).to_contain_text("Nothing to lock on this episode yet", timeout=5000)
+        assert inspector.save_bodies == []
+
+        # They stay keyboard-reachable, so nothing in the blocked look may take the focus ring away (WCAG 2.4.7).
+        assert (
+            page.evaluate(
+                "() => [...document.styleSheets].flatMap((sheet) => { try { return [...sheet.cssRules]; }"
+                " catch (error) { return []; } })"
+                ".filter((rule) => rule.selectorText && rule.selectorText.includes('mk-blocked'))"
+                ".some((rule) => rule.style.boxShadow)"
+            )
+            is False
+        )
+
+    def test_every_button_says_why_while_an_edit_is_open(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        page = _open_editor(inspector)
+
+        for name in ("#markersLockBtn", "#markersRedetectBtn", "#markersAdjustBtn"):
+            button = page.locator(name)
+            expect(button).to_have_attribute("title", "Save or cancel the times you are adjusting first.")
+            button.click(force=True)
+            expect(page.locator("#toastNotification")).to_contain_text(
+                "Save or cancel the times you are adjusting first.", timeout=5000
+            )
+        # The edit is still there, and nothing was sent or queued.
+        expect(page.locator(".mk-edit-actions")).to_be_visible()
+        expect(page.locator("#markersLockModal")).to_be_hidden()
+        assert inspector.save_bodies == []
+        assert inspector.redetect_bodies == []
+
+    def test_a_save_that_fails_says_it_may_have_landed_and_drops_what_is_held(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        # api_markers.marker_item_save stores and locks the times before it publishes, so an error can arrive over a
+        # save that landed. Holding the pre-save payload would then show unlocked times that no longer exist.
+        inspector = _Inspector(authed_page, app_url, south_park())
+        inspector.save_answer = (500, {"error": "Internal Server Error"})
+        page = _open_editor(inspector)
+        page.evaluate(
+            "() => { window.__forgot = []; const real = window.markersSeason.forgetFile;"
+            " window.markersSeason.forgetFile = (p) => { window.__forgot.push(p); return real(p); }; }"
+        )
+        _handle(page, "opening", "start").press("ArrowRight")
+
+        with page.expect_response(_is_save, timeout=5000):
+            _save_button(page).click()
+
+        expect(page.locator("#toastNotification")).to_contain_text(
+            "Your times may already be saved — reload this file to see where they stand.", timeout=5000
+        )
+        # The Season view holds the same times under every season that lists this episode.
+        assert page.evaluate("() => window.__forgot") == [_MEDIA_FILE]
+        # And the tab's own payload is gone, so showing this file again re-reads it instead of serving the old times.
+        before = len(inspector.item_requests)
+        with page.expect_response(_is_item, timeout=5000):
+            inspector.open_result()
+        assert len(inspector.item_requests) == before + 1
+
     def test_a_save_that_fails_keeps_the_edit_on_screen(self, authed_page: Page, app_url: str) -> None:
         inspector = _Inspector(authed_page, app_url, south_park())
         inspector.save_answer = (409, {"error": "This file changed on disk since it was analysed; re-detect it first."})
@@ -1244,6 +1507,23 @@ class TestAdjustEditor:
         expect(_field(page, "intro", "start")).to_have_value("0:12")
         expect(_save_button(page)).to_be_enabled()
         expect(page.locator(".mk-saved")).to_have_count(0)
+
+
+@pytest.mark.e2e
+class TestEditorColoursInLight:
+    """Two contrasts the light theme was failing (WCAG 1.4.3 and 1.4.11)."""
+
+    def test_the_type_name_and_the_handle_border_are_dark_enough(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        page = _open_editor(inspector)
+        page.evaluate("() => document.documentElement.setAttribute('data-bs-theme', 'light')")
+
+        colours = page.evaluate(
+            "() => [getComputedStyle(document.querySelector('.mk-edit-type')).color,"
+            " getComputedStyle(document.querySelector('.mk-handle')).borderTopColor]"
+        )
+        # #7a5000 on --bs-tertiary-bg (#a86f00 was 4.07:1), and #6b4a00 against the bar's own amber (white was 2.24:1).
+        assert colours == ["rgb(122, 80, 0)", "rgb(107, 74, 0)"]
 
 
 @pytest.mark.e2e
@@ -1289,9 +1569,7 @@ class TestTypesAServerCantShow:
         expect(page.locator(".mk-edit-pending")).not_to_contain_text("Recap")
         expect(_save_button(page)).to_have_text("Save and publish to 2 servers")
 
-        with page.expect_response(
-            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
-        ):
+        with page.expect_response(_is_save, timeout=5000):
             _save_button(page).click()
         assert [m["type"] for m in inspector.save_bodies[0]["markers"]] == ["intro", "credits"]
 
@@ -1311,18 +1589,28 @@ class TestTypesAServerCantShow:
         expect(page.locator(".mk-edit-pending")).to_have_text("Nothing to save yet")
 
 
+# What Plex and Jellyfin show before the save: minutes away from the times it sends, so the timeline marks them as
+# disagreeing with the decision until the save moves them.
+_OLD_INTRO = _marker("intro", 76_508, 112_748)  # 1:16-1:52
+_OLD_CREDITS = _marker("credits", 1_265_000, 1_297_000)  # 21:05-21:37
+
+
 def every_result() -> dict:
     """An intro-and-credits file with one server per result the save can answer with."""
     payload = south_park()
     payload["decisions"]["credits"] = _decision("decided", ("credits", 1_250_000, 1_280_000))
     payload["servers"] = [
-        _server("plex-main", "Plex · Main", "plex", "will_replace", [], version_count=2),
+        _server(
+            "plex-main", "Plex · Main", "plex", "will_replace", [dict(_OLD_INTRO), dict(_OLD_CREDITS)], version_count=2
+        ),
         _server("emby-lab", "Emby · Lab", "emby", "will_add", []),
-        _server("jf-lab", "Jellyfin · Lab", "jellyfin", "will_add", []),
+        _server("jf-lab", "Jellyfin · Lab", "jellyfin", "will_replace", [dict(_OLD_INTRO)]),
         _server("plex-parents", "Plex · Parents", "plex", "not_enabled", [], markers_enabled=False),
         _server("jf-wait", "Jellyfin · Attic", "jellyfin", "waiting", []),
-        _server("jf-same", "Jellyfin · Shed", "jellyfin", "up_to_date", []),
+        _server("jf-same", "Jellyfin · Shed", "jellyfin", "up_to_date", [dict(_OLD_INTRO)]),
         _server("jf-review", "Jellyfin · Loft", "jellyfin", "will_add", []),
+        # markers.inspect._degraded_row: the publish still runs, but nothing is known about what it shows.
+        _server("plex-dark", "Plex · Dark", "plex", "unknown", None, error="Couldn't reach this server"),
     ]
     return payload
 
@@ -1350,6 +1638,7 @@ def every_result_answer() -> dict:
             _row("jf-wait", "Jellyfin · Attic", "jellyfin", "waiting", message="Not in this server's library yet"),
             _row("jf-same", "Jellyfin · Shed", "jellyfin", "unchanged"),
             _row("jf-review", "Jellyfin · Loft", "jellyfin", "needs_review", message="Sources disagree on credits"),
+            _row("plex-dark", "Plex · Dark", "plex", "written"),
         ],
     }
 
@@ -1377,12 +1666,13 @@ class TestSaveAndItsResults:
         inspector.save_answer = (200, every_result_answer())
         page = _open_editor(inspector)
 
-        with page.expect_response(
-            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
-        ):
+        with page.expect_response(_is_save, timeout=5000):
             _save_button(page).click()
 
         expect(page.locator(".mk-saved")).to_contain_text("Saved and locked. Your times stay until you unlock them.")
+        # The save replaced the editor the focus was in, so the focus lands on what it has to say.
+        expect(page.locator(".mk-saved")).to_have_attribute("role", "status")
+        expect(page.locator(".mk-saved")).to_be_focused()
         # The editor closes on a save: nothing is left to drag or cancel.
         expect(page.locator(".mk-edit-actions")).to_have_count(0)
         expect(page.locator(".mk-edit-strip")).to_have_count(0)
@@ -1431,6 +1721,52 @@ class TestSaveAndItsResults:
         expect(page.locator("#markersLockBtn")).to_have_text("Unlock")
         expect(page.locator(".mk-lane-decision .mk-lock")).to_have_count(2)
 
+    def test_a_server_that_took_the_save_shows_the_saved_times_and_stops_disagreeing(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        # The timeline drew each server's own marker against the new decision: >5 s apart (intro) or >10 s (credits)
+        # put a red bar and "Doesn't agree with the decision" on the very server whose card said "Updated".
+        inspector = _Inspector(authed_page, app_url, every_result())
+        inspector.save_answer = (200, every_result_answer())
+        page = _open_editor(inspector)
+        before = _lane(page, "opening", "Plex · Main now")
+        expect(before).to_contain_text("1:16–1:52")
+        expect(before.locator(".mk-disagree")).to_have_count(1)
+
+        with page.expect_response(_is_save, timeout=5000):
+            _save_button(page).click()
+
+        main_opening = _lane(page, "opening", "Plex · Main now")
+        expect(main_opening).to_contain_text("0:11–0:37")
+        expect(main_opening.locator(".mk-disagree")).to_have_count(0)
+        expect(main_opening).not_to_have_class(re.compile(r"\blane-disagree\b"))
+        expect(_lane(page, "ending", "Plex · Main now")).to_contain_text("20:50–21:20")
+        # Emby is sent the credits start alone, and runs them to the end of the file: no end it never got.
+        expect(_lane(page, "ending", "Emby · Lab now")).to_contain_text("20:50 →")
+        # A server that took nothing keeps what it has, ✕ and all.
+        failed = _lane(page, "opening", "Jellyfin · Lab now")
+        expect(failed).to_contain_text("1:16–1:52")
+        expect(failed.locator(".mk-disagree")).to_have_count(1)
+        # "Up to date" is a row that took them too.
+        expect(_lane(page, "opening", "Jellyfin · Shed now")).to_contain_text("0:11–0:37")
+
+    def test_a_server_whose_markers_couldnt_be_read_is_given_no_times_it_never_showed(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        inspector = _Inspector(authed_page, app_url, every_result())
+        inspector.save_answer = (200, every_result_answer())
+        page = _open_editor(inspector)
+
+        with page.expect_response(_is_save, timeout=5000):
+            _save_button(page).click()
+
+        # The row says it took them, but what this server shows was never read: the answer says what it was sent,
+        # not what it has, so the lane keeps saying so rather than claiming the saved times.
+        expect(_server_card(page, "plex-dark").locator(".mk-plan")).to_have_text("Updated")
+        lane = _lane(page, "opening", "Plex · Dark now")
+        expect(lane).to_contain_text("Couldn't read what the server shows")
+        expect(lane).not_to_contain_text("0:11–0:37")
+
     def test_a_server_that_took_some_types_says_which_one_it_couldnt(self, authed_page: Page, app_url: str) -> None:
         inspector = _Inspector(authed_page, app_url, _with_types(["recap"]))
         inspector.save_answer = (
@@ -1449,9 +1785,7 @@ class TestSaveAndItsResults:
             },
         )
         page = _open_editor(inspector)
-        with page.expect_response(
-            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
-        ):
+        with page.expect_response(_is_save, timeout=5000):
             _save_button(page).click()
 
         emby = _server_card(page, "emby-den")
@@ -1480,9 +1814,7 @@ class TestSaveAndItsResults:
             },
         )
         page = _open_editor(inspector)
-        with page.expect_response(
-            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
-        ):
+        with page.expect_response(_is_save, timeout=5000):
             _save_button(page).click()
 
         plex = _server_card(page, "plex-den")
@@ -1535,10 +1867,9 @@ class TestLockAndUnlock:
         page = inspector.open_tab()
         expect(page.locator("#markersLockBtn")).to_have_text("Lock")
 
-        with page.expect_response(
-            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
-        ):
-            page.locator("#markersLockBtn").click()
+        page.locator("#markersLockBtn").click()
+        with page.expect_response(_is_save, timeout=5000):
+            page.locator("#markersLockConfirm").click()
 
         assert inspector.save_bodies == [
             {
@@ -1569,12 +1900,91 @@ class TestLockAndUnlock:
         inspector.open_result()
         page = inspector.open_tab()
 
-        with page.expect_response(
-            lambda r: r.request.method == "POST" and r.url.endswith("/api/markers/item/markers"), timeout=5000
-        ):
-            page.locator("#markersLockBtn").click()
+        page.locator("#markersLockBtn").click()
+        expect(page.locator("#markersLockList li")).to_have_text(["Intro 0:11–0:37", "Credits 21:39 →"])
+        with page.expect_response(_is_save, timeout=5000):
+            page.locator("#markersLockConfirm").click()
 
         assert [m["type"] for m in inspector.save_bodies[0]["markers"]] == ["intro", "credits"]
+
+    def test_lock_says_what_it_will_do_before_it_does_it(self, authed_page: Page, app_url: str) -> None:
+        # Lock publishes to every owning server exactly as Save does, and Save says so on its own button.
+        inspector = _Inspector(authed_page, app_url, south_park())
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        page.locator("#markersLockBtn").click()
+
+        modal = page.locator("#markersLockModal")
+        expect(modal).to_be_visible()
+        expect(modal).to_contain_text("Lock these markers?")
+        expect(modal).to_contain_text("These times are kept exactly as they are, and later checks won't change them:")
+        expect(modal.locator("#markersLockList li")).to_have_text(["Intro 0:11–0:37", "Credits 21:39 →"])
+        expect(modal).to_contain_text("They go to your servers now, the same way Save sends them.")
+        expect(page.locator("#markersLockConfirm")).to_have_text("Lock and publish to 3 servers")
+        assert inspector.save_bodies == []
+
+        modal.get_by_role("button", name="Leave them as they are").click()
+        expect(modal).to_be_hidden()
+        assert inspector.save_bodies == []
+        expect(page.locator(".mk-chips")).not_to_contain_text("Locked by you")
+
+    def test_the_dialog_publishes_the_times_it_listed(self, authed_page: Page, app_url: str) -> None:
+        # A library run finishing behind the open dialog re-reads the file; Confirm must still send what was read.
+        inspector = _Inspector(authed_page, app_url, south_park())
+        inspector.save_answer = (200, {"markers": {}, "servers": []})
+        inspector.open_result()
+        page = inspector.open_tab()
+        page.locator("#markersLockBtn").click()
+        expect(page.locator("#markersLockList li")).to_have_text(["Intro 0:11–0:37", "Credits 21:39 →"])
+
+        inspector.payload = _intro_moved()
+        _announce(page, "intro_credits")
+
+        with page.expect_response(_is_save, timeout=5000):
+            page.locator("#markersLockConfirm").click()
+
+        assert inspector.save_bodies[0]["markers"][0] == {"type": "intro", "start_ms": 11_000, "end_ms": 37_000}
+        # Nothing was read behind the dialog either, so the list never changed under the user's eyes.
+        assert len(inspector.item_requests) == 1
+
+    def test_confirming_the_instant_the_dialog_appears_still_closes_it(self, authed_page: Page, app_url: str) -> None:
+        # Bootstrap ignores hide() while a dialog is still fading in, and the backdrop it leaves behind swallows
+        # every click on the page underneath.
+        inspector = _Inspector(authed_page, app_url, south_park())
+        inspector.save_answer = (200, {"markers": {}, "servers": []})
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        with page.expect_response(_is_save, timeout=5000):
+            page.evaluate(
+                "() => { document.getElementById('markersLockBtn').click();"
+                " document.getElementById('markersLockConfirm').click(); }"
+            )
+
+        expect(page.locator("#markersLockModal")).to_be_hidden()
+        expect(page.locator(".modal-backdrop")).to_have_count(0)
+
+    def test_a_dialog_that_was_never_open_doesnt_close_the_next_one(self, authed_page: Page, app_url: str) -> None:
+        # The hide is chased when Bootstrap ignores it, and a retry armed with nothing open would slam the next
+        # dialog shut as it appeared.
+        inspector = _Inspector(authed_page, app_url, south_park())
+        inspector.save_answer = (200, {"markers": {}, "servers": []})
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        # Confirm pressed with no dialog on screen: it hides a dialog that was never shown, and sends nothing.
+        page.evaluate("() => document.getElementById('markersLockConfirm').click()")
+        assert inspector.save_bodies == []
+
+        page.locator("#markersLockBtn").click()
+        expect(page.locator("#markersLockModal")).to_be_visible()
+        # Longer than the .modal-dialog transition, so a dialog that was going to close itself has done it.
+        page.wait_for_timeout(500)
+        expect(page.locator("#markersLockModal")).to_be_visible()
+        with page.expect_response(_is_save, timeout=5000):
+            page.locator("#markersLockConfirm").click()
+        assert len(inspector.save_bodies) == 1
 
     def test_lock_is_out_of_reach_when_no_server_could_take_the_markers(self, authed_page: Page, app_url: str) -> None:
         payload = south_park()
@@ -1584,7 +1994,17 @@ class TestLockAndUnlock:
         inspector.open_result()
         page = inspector.open_tab()
 
-        expect(page.locator("#markersLockBtn")).to_be_disabled()
+        lock = page.locator("#markersLockBtn")
+        expect(lock).to_be_disabled()
+        # Decided times with nowhere to send them: the button says that rather than "nothing to lock".
+        expect(lock).to_have_attribute(
+            "title", "No server with Intro & Credits on has this file, so there is nothing to lock."
+        )
+        lock.click(force=True)
+        expect(page.locator("#toastNotification")).to_contain_text(
+            "No server with Intro & Credits on has this file", timeout=5000
+        )
+        expect(page.locator("#markersLockModal")).to_be_hidden()
         assert inspector.save_bodies == []
 
     def test_adjust_waits_while_a_lock_is_in_flight(self, authed_page: Page, app_url: str) -> None:
@@ -1595,6 +2015,7 @@ class TestLockAndUnlock:
         page = inspector.open_tab()
 
         page.locator("#markersLockBtn").click()
+        page.locator("#markersLockConfirm").click()
 
         # The lock publishes to every server; starting an edit meanwhile would be thrown away by the answer.
         expect(page.locator("#markersAdjustBtn")).to_be_disabled()
@@ -1608,6 +2029,66 @@ class TestLockAndUnlock:
         )
         expect(page.locator("#markersAdjustBtn")).to_be_enabled(timeout=5000)
         expect(page.locator("#markersLockBtn")).to_have_text("Unlock")
+
+    def test_every_button_says_why_while_the_lock_is_publishing(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        held: list[Route] = []
+        authed_page.route("**/api/markers/item/markers", lambda route: held.append(route))
+        inspector.open_result()
+        page = inspector.open_tab()
+        page.locator("#markersLockBtn").click()
+        page.locator("#markersLockConfirm").click()
+        # The dialog's backdrop swallows a press until it has gone, as it does for the user.
+        expect(page.locator(".modal-backdrop")).to_have_count(0)
+
+        for name in ("#markersRedetectBtn", "#markersAdjustBtn", "#markersLockBtn"):
+            button = page.locator(name)
+            expect(button).to_have_attribute("title", "Your last change is still on its way to your servers.")
+            button.click(force=True)
+            expect(page.locator("#toastNotification")).to_contain_text(
+                "Your last change is still on its way to your servers.", timeout=5000
+            )
+        # The publish is still the only thing in flight: no second one, no job, no editor.
+        assert len(held) == 1
+        assert inspector.redetect_bodies == []
+        expect(page.locator(".mk-edit-actions")).to_have_count(0)
+
+        held[0].fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"markers": {"intro": _saved("intro", 11_000, 37_000)}, "servers": []}),
+        )
+        expect(page.locator("#markersAdjustBtn")).to_be_enabled(timeout=5000)
+
+    def test_an_unlock_dismissed_while_it_runs_can_be_opened_again(self, authed_page: Page, app_url: str) -> None:
+        # The whole flow around the hide that hideModal chases: the dialog is dismissed by hand while its request is
+        # still going, so the hide that lands after it has nothing to close. What happens to the retry it arms is
+        # pinned on its own by test_a_dialog_that_was_never_open_doesnt_close_the_next_one.
+        inspector = _Inspector(authed_page, app_url, locked_payload())
+        held: list[Route] = []
+        authed_page.route("**/api/markers/item/markers", lambda route: held.append(route))
+        inspector.open_result()
+        page = inspector.open_tab()
+        modal = page.locator("#markersUnlockModal")
+        page.locator("#markersLockBtn").click()
+        expect(modal).to_be_visible()
+        page.locator("#markersUnlockConfirm").click()
+
+        # The user gives up on the dialog while the request is still going.
+        modal.locator(".btn-close").click()
+        expect(modal).to_be_hidden()
+        held[0].fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"unlocked": ["intro", "credits"], "markers": {}, "decisions": {}}),
+        )
+        expect(page.locator("#toastNotification")).to_contain_text("Unlocked", timeout=5000)
+
+        page.locator("#markersLockBtn").click()
+        expect(modal).to_be_visible()
+        # Well past the fade in and out again, so a dialog that was going to close itself has finished doing it.
+        page.wait_for_timeout(1200)
+        expect(modal).to_be_visible()
 
     def test_a_lock_answering_after_the_file_changed_applies_nothing_and_frees_the_buttons(
         self, authed_page: Page, app_url: str
@@ -1627,6 +2108,7 @@ class TestLockAndUnlock:
         inspector.open_result(0)
         page = inspector.open_tab()
         page.locator("#markersLockBtn").click()
+        page.locator("#markersLockConfirm").click()
         expect(page.locator("#markersAdjustBtn")).to_be_disabled()
 
         # The user moves to another episode before the lock answers.
@@ -1676,9 +2158,7 @@ class TestLockAndUnlock:
 
         # The next read of the file has nothing locked any more.
         inspector.payload = south_park()
-        with page.expect_response(
-            lambda r: r.request.method == "DELETE" and r.url.endswith("/api/markers/item/markers"), timeout=5000
-        ):
+        with page.expect_response(_is_unlock, timeout=5000):
             page.locator("#markersUnlockConfirm").click()
 
         assert inspector.unlock_bodies == [{"path": _MEDIA_FILE, "types": ["intro", "credits"]}]
@@ -1697,9 +2177,7 @@ class TestLockAndUnlock:
         modal = page.locator("#markersUnlockModal")
         expect(modal).to_be_visible()
 
-        with page.expect_response(
-            lambda r: r.request.method == "DELETE" and r.url.endswith("/api/markers/item/markers"), timeout=5000
-        ):
+        with page.expect_response(_is_unlock, timeout=5000):
             page.locator("#markersUnlockConfirm").click()
 
         expect(page.locator("#toastNotification")).to_contain_text("hasn't been analysed yet", timeout=5000)
@@ -1708,9 +2186,7 @@ class TestLockAndUnlock:
         expect(page.locator("#markersLockBtn")).to_have_text("Unlock")
         # The confirm button comes back, so the user can try again without reopening anything.
         expect(page.locator("#markersUnlockConfirm")).to_be_enabled()
-        with page.expect_response(
-            lambda r: r.request.method == "DELETE" and r.url.endswith("/api/markers/item/markers"), timeout=5000
-        ):
+        with page.expect_response(_is_unlock, timeout=5000):
             page.locator("#markersUnlockConfirm").click()
         assert len(inspector.unlock_bodies) == 2
 
@@ -1727,6 +2203,204 @@ class TestLockAndUnlock:
         expect(modal).to_be_hidden()
         assert inspector.unlock_bodies == []
         expect(page.locator(".mk-chips")).to_contain_text("Locked by you")
+
+
+def _announce(page: Page, kind: str | None, event: str = "job_completed") -> None:
+    """Hand a finished job to the handlers the tab registered on the /jobs socket, as the server's event would.
+
+    ``tests/test_markers_inspector_job_events.py`` pins the other half — that the app emits this event, on this
+    namespace, with this key — which driving the handlers from here can't see.
+    """
+    fired = page.evaluate(
+        "([event, kind]) => { const socket = window.markersEditor.jobsSocket();"
+        " if (!socket || socket.nsp !== '/jobs') return -1;"
+        " const listeners = socket.listeners(event);"
+        " listeners.forEach((fn) => fn({id: 'job-1', kind: kind}));"
+        " return listeners.length; }",
+        [event, kind],
+    )
+    assert fired == 1, f"the tab has no {event} handler on the /jobs socket"
+
+
+def _intro_moved() -> dict:
+    """The same file after a job (or a Re-detect) settled on different times."""
+    payload = south_park()
+    payload["decisions"]["intro"] = _decision("decided", ("intro", 20_000, 45_000))
+    return payload
+
+
+@pytest.mark.e2e
+class TestWhatAJobChangesUnderTheTab:
+    """The tab holds one payload per file, and a job publishing markers changes what it describes."""
+
+    def test_the_tab_watches_the_jobs_socket(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        inspector.open_result()
+        # Nothing else on this page connects one: showing a file in the tab is what opens it.
+        with authed_page.expect_response(
+            lambda response: response.request.method == "GET" and "/socket.io/" in response.url, timeout=10_000
+        ):
+            inspector.open_tab()
+
+    def test_an_intro_and_credits_job_finishing_reads_the_file_again(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        inspector.open_result()
+        page = inspector.open_tab()
+        expect(_lane(page, "opening", "Decision")).to_contain_text("Intro 0:11–0:37")
+        assert len(inspector.item_requests) == 1
+
+        inspector.payload = _intro_moved()
+        with page.expect_response(_is_item, timeout=5000):
+            _announce(page, "intro_credits")
+
+        expect(_lane(page, "opening", "Decision")).to_contain_text("Intro 0:20–0:45")
+        # A previews job moves no marker, so it doesn't send the tab back to the API: the next read is the second
+        # Intro & Credits job's, which makes three in total rather than four.
+        _announce(page, "previews")
+        with page.expect_response(_is_item, timeout=5000):
+            _announce(page, "intro_credits")
+        assert len(inspector.item_requests) == 3
+
+    def test_a_job_with_no_kind_is_taken_as_one_that_may_have_moved_them(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        inspector.open_result()
+        page = inspector.open_tab()
+        inspector.payload = _intro_moved()
+
+        with page.expect_response(_is_item, timeout=5000):
+            _announce(page, None)
+
+        expect(_lane(page, "opening", "Decision")).to_contain_text("Intro 0:20–0:45")
+
+    def test_a_job_finishing_under_an_open_edit_leaves_the_typed_times_alone(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        page = _open_editor(inspector)
+        _handle(page, "opening", "start").press("ArrowRight")
+        expect(_field(page, "intro", "start")).to_have_value("0:12")
+        inspector.payload = _intro_moved()
+
+        # A job that ended in failure may still have published some of its files.
+        _announce(page, "intro_credits", event="job_failed")
+
+        expect(page.locator(".mk-edit-actions")).to_be_visible()
+        expect(_field(page, "intro", "start")).to_have_value("0:12")
+        assert len(inspector.item_requests) == 1
+        # What the caches held was dropped all the same, so the next look at this file reads it again.
+        with page.expect_response(_is_item, timeout=5000):
+            inspector.open_result()
+        expect(_lane(page, "opening", "Decision")).to_contain_text("Intro 0:20–0:45")
+
+    def test_a_read_while_re_detect_is_queueing_leaves_the_header_out_of_reach(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        # The blocked state is held in the tab, not on the button: a render in the middle of the queue request
+        # rewrites every button in the row, and a freed Re-detect would queue the same file twice.
+        inspector = _Inspector(authed_page, app_url, south_park())
+        held: list[Route] = []
+        authed_page.route("**/api/markers/item/redetect", lambda route: held.append(route))
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        page.locator("#markersRedetectBtn").click()
+        for name in ("#markersRedetectBtn", "#markersAdjustBtn", "#markersLockBtn"):
+            expect(page.locator(name)).to_have_attribute("title", "This file is on its way to the queue.")
+
+        # Another job lands and the tab reads the file again, re-rendering the header row under the request.
+        with page.expect_response(_is_item, timeout=5000):
+            _announce(page, "intro_credits")
+
+        redetect = page.locator("#markersRedetectBtn")
+        expect(redetect).to_have_attribute("title", "This file is on its way to the queue.")
+        # Nor can an edit be started under the request and thrown away by what it brings back.
+        page.locator("#markersAdjustBtn").click(force=True)
+        expect(page.locator(".mk-edit-actions")).to_have_count(0)
+        redetect.click(force=True)
+        expect(page.locator("#toastNotification")).to_contain_text(
+            "This file is on its way to the queue.", timeout=5000
+        )
+        assert len(held) == 1
+
+        held[0].fulfill(
+            status=202,
+            content_type="application/json",
+            body=json.dumps({"job_id": "9f8e7d6c-1111-4222-8333-444455556666"}),
+        )
+        expect(redetect).to_be_enabled(timeout=5000)
+        expect(page.locator("#markersAdjustBtn")).to_be_enabled()
+
+    def test_a_job_landing_after_a_failed_read_puts_the_file_on_screen(self, authed_page: Page, app_url: str) -> None:
+        # Re-detect is offered on a read that failed, so the job it queues has to reach the tab: there is no payload
+        # to re-read there, which is the one state a finished job is for.
+        failing = [True]
+
+        def item_handler(route: Route) -> None:
+            if failing[0]:
+                _fulfill_json(route, {"error": "Plex timed out"}, status=502)
+                return
+            _fulfill_json(route, south_park())
+
+        inspector = _Inspector(authed_page, app_url, south_park(), item_handler=item_handler)
+        inspector.open_result()
+        page = inspector.open_tab()
+        expect(page.locator("#markersInspectorBody")).to_contain_text("Couldn't load Intro & Credits for this file")
+
+        failing[0] = False
+        with page.expect_response(_is_item, timeout=5000):
+            _announce(page, "intro_credits")
+
+        expect(_lane(page, "opening", "Decision")).to_contain_text("Intro 0:11–0:37")
+        expect(page.locator("#markersAdjustBtn")).to_be_enabled()
+
+    def test_the_queued_toast_doesnt_wait_on_the_re_read(self, authed_page: Page, app_url: str) -> None:
+        # The job is queued the moment the POST answers; the read after it is about what *other* jobs changed.
+        held: list[Route] = []
+        answered: list[bool] = []
+
+        def item_handler(route: Route) -> None:
+            if answered:
+                held.append(route)
+                return
+            answered.append(True)
+            _fulfill_json(route, south_park())
+
+        inspector = _Inspector(authed_page, app_url, south_park(), item_handler=item_handler)
+        inspector.open_result()
+        page = inspector.open_tab()
+
+        page.locator("#markersRedetectBtn").click()
+
+        expect(page.locator("#toastNotification")).to_contain_text("Queued — see the Dashboard", timeout=5000)
+        expect(page.locator("#toastBody a")).to_have_text("9f8e7d6c")
+        # The read it fired off is still unanswered, so the confirmation didn't wait for it.
+        for _ in range(30):
+            if held:
+                break
+            page.wait_for_timeout(100)
+        assert len(held) == 1
+        _fulfill_json(held[0], south_park())
+        expect(page.locator("#markersRedetectBtn")).to_be_enabled(timeout=5000)
+
+    def test_re_detect_forgets_the_file_and_shows_it_afresh(self, authed_page: Page, app_url: str) -> None:
+        inspector = _Inspector(authed_page, app_url, south_park())
+        inspector.open_result()
+        page = inspector.open_tab()
+        page.evaluate(
+            "() => { window.__forgot = []; const real = window.markersSeason.forgetFile;"
+            " window.markersSeason.forgetFile = (p) => { window.__forgot.push(p); return real(p); }; }"
+        )
+        inspector.payload = _intro_moved()
+
+        with page.expect_response(_is_item, timeout=5000):
+            page.locator("#markersRedetectBtn").click()
+
+        assert inspector.redetect_bodies == [{"path": _MEDIA_FILE}]
+        expect(page.locator("#toastNotification")).to_contain_text("Queued", timeout=5000)
+        expect(_lane(page, "opening", "Decision")).to_contain_text("Intro 0:20–0:45")
+        # The Season view lists this episode too, so it forgets the season that holds it.
+        assert page.evaluate("() => window.__forgot") == [_MEDIA_FILE]
+        expect(page.locator("#markersRedetectBtn")).to_be_enabled()
 
 
 @pytest.mark.e2e

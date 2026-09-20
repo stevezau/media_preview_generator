@@ -331,6 +331,24 @@ html[data-bs-theme="light"] .mk-handle:focus-visible {
     outline-color: #1b1407;
 }
 
+/* The handle is the bar's own amber, so only this border separates the two: white gives 2.24:1, under the 3:1
+ * WCAG 1.4.11 minimum for a control's boundary. Dark themes already have a dark body background here. */
+html[data-bs-theme="light"] .mk-handle {
+    border-color: #6b4a00;
+}
+
+/* WCAG 2.5.8: the handle is 11 px wide but its target is 24 px, so a finger or an imprecise pointer can take
+ * hold of it. The handle has touch-action: none, so a touch here drags instead of panning the timeline. */
+.mk-handle::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 24px;
+    transform: translateX(-50%);
+}
+
 .mk-handle::after {
     content: "";
     position: absolute;
@@ -365,8 +383,9 @@ html[data-bs-theme="light"] .mk-handle:focus-visible {
     color: #e5a00d;
 }
 
+/* On --bs-tertiary-bg, #a86f00 gave 4.07:1 — under AA for 16 px/600 text. */
 html[data-bs-theme="light"] .mk-edit-type {
-    color: #a86f00;
+    color: #7a5000;
 }
 
 .mk-time {
@@ -406,6 +425,18 @@ html[data-bs-theme="light"] .mk-edit-type {
 
 .mk-edit-messages:empty {
     display: none;
+}
+
+/* Adjust and Lock when they can't act. They look like Bootstrap's disabled buttons but keep their pointer events,
+ * which .btn:disabled removes, so the tooltip still fires and a press can say why (markers_inspector.js setBlocked). */
+.btn.mk-blocked,
+.btn.mk-blocked:hover,
+.btn.mk-blocked:active {
+    opacity: var(--bs-btn-disabled-opacity, 0.65);
+    color: var(--bs-btn-color);
+    background-color: transparent;
+    border-color: var(--bs-btn-border-color);
+    cursor: not-allowed;
 }
 
 /* One action bar for the whole edit, under both zoom windows. */

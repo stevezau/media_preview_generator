@@ -6,8 +6,9 @@ disagree, this file is wrong and gets fixed, not paraphrased.
 
 Rendered, in the app's own theme: [`index.html`](index.html) · screenshots in [`shots/`](shots/).
 
-**Status:** Tasks 5, 6, 9, 10 and §9 are built. Notes marked *changed while building* record where the shipped UI
-differs from the drawing, and why.
+**Status:** Tasks 5, 6, 9, 10 and §9 are built, and so is adding a marker by hand. What is written here is what
+the app says today; the rendered pack in `index.html` is the earlier mockup and has not been redrawn. Notes
+marked *changed while building* record where the shipped UI differs from the drawing, and why.
 
 Wording rules applied: plain English, present tense, no internal setting names in the first sentence,
 tooltips ≤ 120 characters.
@@ -27,6 +28,22 @@ Entry points (Inspector → Intro & Credits, header row, beside the existing `Re
 | Button (when locked) | `Unlock` (icon `bi-unlock`) |
 | Button ⓘ (when locked) | `Let later checks set these times again.` |
 
+None of the three header buttons is ever `disabled`: Bootstrap takes the pointer events off a disabled button, so
+its tooltip can't fire and the user gets a grey button with no reason. They carry `aria-disabled` instead, and
+pressing one says why — the same sentence in the tooltip and in the toast:
+
+| Case | String |
+|---|---|
+| Adjust, nothing to drag (also the Season view's Edit, §5) | `Nothing to adjust on this episode yet — Re-detect checks the file now.` |
+| Lock, nothing decided yet | `Nothing to lock on this episode yet — Re-detect checks the file now.` |
+| Lock, times decided but no server has the file | `No server with Intro & Credits on has this file, so there is nothing to lock.` |
+| Any of them, while the editor is open | `Save or cancel the times you are adjusting first.` |
+| Any of them, while a lock is publishing | `Your last change is still on its way to your servers.` |
+| Any of them, before a file is open (a pasted preview path) | `No file is open in this tab yet.` |
+| Any of them, when the read failed or the version isn't on this disk (Re-detect stays offered for the first) | `This file's Intro & Credits couldn't be read.` |
+| Any of them, while Re-detect is being queued | `This file is on its way to the queue.` |
+| Any of them, while the file is being read | `This file is still loading.` |
+
 While editing:
 
 | Element | String |
@@ -41,7 +58,7 @@ While editing:
 | Keyboard hint ⓘ | `Tab to a handle, then use the arrow keys. You can also type a time straight into the boxes.` |
 | Credits/preview switch | `Runs to the end of the file` |
 | That switch's ⓘ | `Turn this off when something plays after the credits — a last scene, or a preview of the next episode.` |
-| Handle screen-reader label | `Intro start, 0 minutes 14 seconds` / `Intro end, 0 minutes 41 seconds` |
+| Handle, for a screen reader | a slider named `Intro start` / `Intro end`, whose value reads `0 minutes 14 seconds` (`aria-valuetext`, so a move is announced without renaming the control) |
 | Window ⓘ (unchanged) | `Zoomed to the start or end of the file, so a difference of a second is visible.` |
 
 Action bar (one for the whole edit, under both zoom windows):
@@ -62,8 +79,8 @@ Warnings (P-R2 — the editor warns, it does not refuse):
 |---|---|
 | Intro under 3 s | `That's shorter than most intros. This will still be saved.` |
 | Intro over 5 minutes | `That's longer than most intros. This will still be saved.` |
-| Intro/recap after the first third | `That's later in the file than intros usually are. This will still be saved.` |
-| Credits/preview in the first three quarters | `That's earlier than credits usually start. This will still be saved.` |
+| Intro/recap after the first third | `That's later in the file than intros usually are. This will still be saved.` (a recap says `recaps`) |
+| Credits/preview in the first three quarters | `That's earlier than credits usually start. This will still be saved.` (a preview says `previews`) |
 | Credits that stop before the file does | `Credits usually run to the end of the file. This will still be saved.` |
 
 Refusals (the only two — Save stays disabled until they're fixed):
@@ -72,6 +89,7 @@ Refusals (the only two — Save stays disabled until they're fixed):
 |---|---|
 | End at or before start | `The end has to come after the start.` |
 | Past the file's length | `That's past the end of the file (44:12).` |
+| Not a time at all (`abc`, `0:75`) | `That isn't a time. Try 1:23 or 0:14.` |
 
 Type this server can't show, while editing:
 
@@ -92,6 +110,11 @@ the first row goes; if they want the pack's, D8 and Task 5 Step 4 need the sente
 |---|---|
 | Chip (Inspector, matches the Season view's existing chip) | `🔒 Locked by you` |
 | Decision lane lock ⓘ | `You set these times. Later checks won't change them.` |
+| Lock dialog title | `Lock these markers?` |
+| Lock dialog body, line 1 | `These times are kept exactly as they are, and later checks won't change them:` |
+| Lock dialog body, line 2 | `They go to your servers now, the same way Save sends them.` |
+| Lock dialog, keep button | `Leave them as they are` |
+| Lock dialog, confirm button | `Lock and publish to 3 servers` (`Lock and publish to {n} server{s}` — Save's own count) |
 | Toast after Lock | `Locked — these times stay until you unlock them.` |
 | Unlock dialog title | `Unlock these markers?` |
 | Unlock dialog body, line 1 | `Your times stay on your servers for now:` |
@@ -127,7 +150,12 @@ Emby's credits end (D8 — accepted, published start-only, per-field note):
 
 Kept from today, unchanged: `All versions of this item share one set of markers`.
 
-Confirmation under the cards: `Saved and locked. Your times stay until you unlock them.`
+Confirmation under the cards: `Saved and locked. Your times stay until you unlock them.` It is a live region and
+takes the focus, which the save's re-render otherwise throws away (Cancel gives it back to `Adjust`).
+
+When the save answers with an error: `Couldn't finish saving: {error} Your times may already be saved — reload this
+file to see where they stand.` The endpoint stores and locks the times before it publishes, so an error can arrive
+over a save that landed.
 
 ## 4. The Q1 answer in words
 
