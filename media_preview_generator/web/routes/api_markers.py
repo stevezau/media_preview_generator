@@ -137,11 +137,32 @@ def marker_reconcile():
     return _check_servers_answer(run_markers_reconcile(priority=priority))
 
 
-def _registry() -> Any:
+def _registry(*, timeout_s: int | None = None) -> Any:
+    """The configured servers.
+
+    Args:
+        timeout_s: Cap every server's request timeout at this many seconds. The editor's publish runs inside a web
+            request, so it shortens the transport instead of inheriting the 30 s a job can afford (ruling P-R1); a
+            server already configured below the cap keeps its own value.
+
+    Returns:
+        A ``ServerRegistry``.
+    """
     from ...servers import ServerRegistry
     from ..settings_manager import get_settings_manager
 
-    return ServerRegistry.from_settings(list(get_settings_manager().get("media_servers") or []), legacy_config=None)
+    entries = list(get_settings_manager().get("media_servers") or [])
+    if timeout_s is not None:
+        entries = [{**entry, "timeout": _capped_timeout(entry.get("timeout"), timeout_s)} for entry in entries]
+    return ServerRegistry.from_settings(entries, legacy_config=None)
+
+
+def _capped_timeout(stored: object, cap: int) -> int:
+    """``stored`` seconds, never above ``cap``; the cap alone when settings.json holds something that isn't a number."""
+    try:
+        return min(int(stored or 30), cap)
+    except (TypeError, ValueError):
+        return cap
 
 
 def _without_secrets(value: Any, registry: Any) -> Any:
@@ -268,6 +289,47 @@ def marker_source_usage():
     return jsonify(out)
 
 
+def _resolve_item_path(get: Callable[[str], Any], registry: Any) -> tuple[str | None, tuple[Any, int] | None]:
+    """A local file path from ``path``, or from ``server_id`` + ``item_id`` (+ ``version_file``).
+
+    Args:
+        get: Reads one request field (``request.args.get``, or a JSON body's ``get``).
+        registry: The ``ServerRegistry``.
+
+    Returns:
+        ``(path, None)``, or ``(None, response)`` with the refusal to return as-is. The path is the server's answer,
+        not yet checked against the library roots: the caller still runs it through ``_library_file``.
+    """
+    from ...markers import inspect
+    from ...servers.base import ServerType
+
+    path = get("path")
+    if isinstance(path, str) and path.strip():
+        return path, None
+    server_id, item_id = get("server_id"), get("item_id")
+    if not isinstance(server_id, str) or not isinstance(item_id, str) or not server_id or not item_id:
+        return None, (jsonify({"error": "Give path, or server_id and item_id"}), 400)
+    cfg = registry.get_config(server_id)
+    server = registry.get(server_id)
+    if cfg is None or server is None:
+        return None, (jsonify({"error": "server not found"}), 404)
+    item_id_re = _PLEX_ITEM_ID_RE if cfg.type is ServerType.PLEX else _EMBYISH_ITEM_ID_RE
+    if not item_id_re.fullmatch(item_id):
+        return None, (jsonify({"error": "item_id isn't an item id this server uses"}), 400)
+    if not cfg.enabled:
+        return None, _server_off_response(cfg)
+    version_file = get("version_file")
+    try:
+        resolved = inspect.resolve_local_path(
+            server, cfg, item_id, version_file=version_file if isinstance(version_file, str) else None
+        )
+    except inspect.VersionNotHereError:
+        return None, (jsonify({"error": inspect.VERSION_NOT_HERE, "reason": "version_not_here"}), 404)
+    if not resolved:
+        return None, (jsonify({"error": "No file on this app's disk for that item"}), 404)
+    return resolved, None
+
+
 @api.route("/markers/item", methods=["GET"])
 @api_token_required
 def marker_item():
@@ -283,29 +345,11 @@ def marker_item():
     """
     from ...markers import inspect
     from ...markers.store import get_marker_store
-    from ...servers.base import ServerType
 
     registry = _registry()
-    path = request.args.get("path")
-    if not path:
-        server_id, item_id = request.args.get("server_id"), request.args.get("item_id")
-        if not server_id or not item_id:
-            return jsonify({"error": "Give path, or server_id and item_id"}), 400
-        cfg = registry.get_config(server_id)
-        server = registry.get(server_id)
-        if cfg is None or server is None:
-            return jsonify({"error": "server not found"}), 404
-        item_id_re = _PLEX_ITEM_ID_RE if cfg.type is ServerType.PLEX else _EMBYISH_ITEM_ID_RE
-        if not item_id_re.fullmatch(item_id):
-            return jsonify({"error": "item_id isn't an item id this server uses"}), 400
-        if not cfg.enabled:
-            return _server_off_response(cfg)
-        try:
-            path = inspect.resolve_local_path(server, cfg, item_id, version_file=request.args.get("version_file"))
-        except inspect.VersionNotHereError:
-            return jsonify({"error": inspect.VERSION_NOT_HERE, "reason": "version_not_here"}), 404
-        if not path:
-            return jsonify({"error": "No file on this app's disk for that item"}), 404
+    path, refused = _resolve_item_path(request.args.get, registry)
+    if refused is not None:
+        return refused
     safe = _library_file(path, registry)
     if safe is None:
         return jsonify({"error": "Path is not a file inside any server library"}), 400
@@ -342,6 +386,291 @@ def marker_item_redetect():
     if blocked is not None:
         return blocked
     return jsonify({"job_id": submit_redetect(safe)}), 202
+
+
+def _marker_dict(marker: Any, locked_at: str | None = None) -> dict:
+    return {
+        "type": marker.type.value,
+        "start_ms": marker.start_ms,
+        "end_ms": marker.end_ms,
+        "locked": marker.locked,
+        "locked_at": locked_at,
+    }
+
+
+def _stored_markers(store: Any, file_id: int) -> dict[str, dict]:
+    dates = store.locked_at(file_id)
+    return {m.type.value: _marker_dict(m, dates.get(m.type)) for m in store.get_markers(file_id).values()}
+
+
+def _marker_types(raw: object) -> tuple[list[Any] | None, str]:
+    """The ``types`` field as ``MarkerType``s, or the reason it isn't a list of them."""
+    from ...markers.models import MarkerType
+
+    names = [t.value for t in MarkerType]
+    if not isinstance(raw, list) or not raw:
+        return None, f"types must be a non-empty list of {', '.join(names)}"
+    out = []
+    for value in raw:
+        if not isinstance(value, str) or value not in names:
+            return None, f"types must be a non-empty list of {', '.join(names)}"
+        out.append(MarkerType(value))
+    return out, ""
+
+
+def _user_markers(raw: object, duration_ms: int) -> tuple[list[Any] | None, str]:
+    """The ``markers`` field as user markers, or the reason it can't be saved.
+
+    Only the two bounds of spec §5.5 rule 2 that a user's own marker keeps are enforced (ruling P-R2): inside the
+    file, and ending after it starts. The 3 s minimum, the intro caps and the first-35 % / last-25 % windows exist to
+    catch a source that is wrong, and a user marking a 2 s intro is not wrong — the editor warns, it doesn't refuse.
+    """
+    from ...markers.decide import EOF_CLAMP_MS
+    from ...markers.models import Marker, MarkerType, Source
+
+    names = [t.value for t in MarkerType]
+    if not isinstance(raw, list) or not raw:
+        return None, "markers must be a non-empty list of {type, start_ms, end_ms}"
+    out: list[Any] = []
+    seen: set[str] = set()
+    for entry in raw:
+        if not isinstance(entry, dict):
+            return None, "markers must be a non-empty list of {type, start_ms, end_ms}"
+        mtype = entry.get("type")
+        if mtype not in names:
+            return None, f"type must be one of {', '.join(names)}"
+        if mtype in seen:
+            return None, f"markers has {mtype} twice"
+        seen.add(mtype)
+        start = entry.get("start_ms")
+        if isinstance(start, bool) or not isinstance(start, int):
+            return None, f"{mtype}: start_ms must be a whole number of milliseconds"
+        end = entry.get("end_ms")
+        # No end (or null) means "runs to the end of the file", the way the editor's right-hand handle reads.
+        if end is None:
+            end = duration_ms
+        elif isinstance(end, bool) or not isinstance(end, int):
+            return None, f"{mtype}: end_ms must be a whole number of milliseconds, or null for the end of the file"
+        elif duration_ms < end <= duration_ms + EOF_CLAMP_MS:
+            end = duration_ms  # the same clamp every candidate gets: a couple of seconds over is the file's end
+        if start < 0 or start >= duration_ms or end > duration_ms:
+            return None, f"{mtype}: the marker has to be inside the file (0 to {duration_ms} ms)"
+        if end <= start:
+            return None, f"{mtype}: the marker has to end after it starts"
+        out.append(Marker(MarkerType(mtype), start, end, (Source.USER.value,)))
+    return out, ""
+
+
+def _owning_configs(path: str, registry: Any) -> tuple[list[Any], set[str]]:
+    """Every server whose library holds ``path``, and the ids of those with Intro & Credits on for it."""
+    from ...markers.ownership import marker_matches, owning_servers
+
+    configs = [cfg for cfg, _server, _matches in owning_servers(path, registry)]
+    return configs, set(marker_matches(path, configs))
+
+
+def _unshowable_type(saved: list[Any], configs: list[Any], enabled_ids: set[str]) -> str | None:
+    """Why one of the saved types can't be published at all, or None when every type has an owner that shows it."""
+    from ...markers.inspect import CAN_SHOW
+
+    shown: set[str] = set()
+    for cfg in configs:
+        if cfg.id in enabled_ids:
+            shown |= set(CAN_SHOW.get(cfg.type, ()))
+    missing = [m.type.value for m in saved if m.type.value not in shown]
+    if not missing:
+        return None
+    return f"No server with Intro & Credits turned on for this file can show a {' or '.join(sorted(missing))} marker"
+
+
+# What the editor calls each per-server outcome. The rows themselves are a job's rows, unchanged.
+# Every ServerStatus needs an entry: a missing one would leak the job's own `markers_*` wording into the editor.
+# `test_api_markers_edit.py` asserts the two sets match, so a new status can't ship without a word for it here.
+_EDITOR_RESULTS = {
+    "markers_written": "written",
+    "markers_up_to_date": "unchanged",
+    "markers_waiting": "waiting",
+    "markers_skipped": "not_enabled",
+    "markers_none": "nothing_to_publish",
+    "markers_needs_review": "needs_review",
+    "failed": "failed",
+}
+
+
+def _editor_server_row(row: dict, *, saved: list[Any], duration_ms: int) -> dict:
+    """One publish row in the editor's words, with what this server can't show and its per-field notes."""
+    from ...markers.inspect import CAN_SHOW
+    from ...markers.models import MarkerType
+    from ...markers.publishers.emby import credits_note
+    from ...servers.base import ServerType
+
+    server_type = ServerType(row["server_type"])
+    can_show = CAN_SHOW.get(server_type, ())
+    result = _EDITOR_RESULTS.get(row["status"], row["status"])
+    notes = []
+    # A note describes what the server will do with the marker, so it is only true of a server that took it.
+    if server_type is ServerType.EMBY and result not in ("not_enabled", "nothing_to_publish"):
+        # D8: an edited credits END is accepted on Emby and published start-only — never silently dropped, so the
+        # editor says what Emby will do with it. `can_show` is type-level and can't carry this.
+        note = credits_note(saved, duration_ms)
+        if note:
+            notes.append({"type": MarkerType.CREDITS.value, "field": "end", "note": note})
+    return {
+        "server_id": row["server_id"],
+        "server_name": row["server_name"],
+        "server_type": row["server_type"],
+        "result": result,
+        "message": row["message"],
+        "can_show": list(can_show),
+        "cant_show": [m.type.value for m in saved if m.type.value not in can_show],
+        "notes": notes,
+    }
+
+
+@api.route("/markers/item/markers", methods=["POST"])
+@api_token_required
+def marker_item_save():
+    """Save the user's own markers for one file, lock them, and publish to every owner inside this request.
+
+    Body: ``path`` (or ``server_id`` + ``item_id``, and optionally ``version_file``), plus ``markers``: a list of
+    ``{"type", "start_ms", "end_ms"}``, one entry per type, ``end_ms`` null or missing meaning "runs to the end of the
+    file". Saving is locking (ruling P-R3) — there is no adjusted-but-unlocked state — and the save lands before any
+    server is contacted, so a server that fails can't lose the edit (ruling P-R1).
+
+    Returns:
+        200 with ``markers`` (every stored marker for the file, the saved ones locked) and ``servers``: one row per
+        owning server with ``result`` (``written``, ``unchanged``, ``waiting``, ``failed``, ``not_enabled``,
+        ``nothing_to_publish`` or ``needs_review``), its ``message``, what it ``can_show``, the saved types it
+        ``cant_show``, and per-field ``notes`` (Emby's credits end). 400 for a body this can't be saved from, a path
+        outside every server library, or a type no enabled owner can show; 404 for an unknown server or item; 409 when
+        the server is off, no enabled owner has the file, or the file was never analysed or has changed since; 503
+        when the config directory isn't writable.
+    """
+    from ...markers.pipeline import (
+        PUBLISH_NOW_SERVER_TIMEOUT_S,
+        FileChangedError,
+        FileNotAnalysedError,
+        identity_changed,
+        publish_now,
+    )
+    from ...markers.settings import get_global_settings
+    from ...markers.store import get_marker_store
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "The request body must be a JSON object"}), 400
+    # One registry for the whole request: resolving the item already opens a session to the server the publish then
+    # reuses, and the shortened timeout is as right for the lookup as it is for the write.
+    registry = _registry(timeout_s=PUBLISH_NOW_SERVER_TIMEOUT_S)
+    path, refused = _resolve_item_path(data.get, registry)
+    if refused is not None:
+        return refused
+    safe = _library_file(path, registry)
+    if safe is None:
+        return jsonify({"error": "Path is not a file inside any server library"}), 400
+    blocked = _config_unwritable_response()
+    if blocked is not None:
+        return blocked
+
+    store = get_marker_store()
+    rec = store.get_file(safe)
+    if rec is None or not rec.duration_ms:
+        return jsonify(
+            {"error": "This file hasn't been analysed yet. Run Re-detect first.", "reason": "not_analysed"}
+        ), 409
+    if identity_changed(rec):
+        # The stored duration describes the old file, so every bound below would be checked against the wrong length.
+        return jsonify(
+            {"error": "This file changed on disk since it was analysed; re-detect it first.", "reason": "file_changed"}
+        ), 409
+    saved, problem = _user_markers(data.get("markers"), rec.duration_ms)
+    if saved is None:
+        return jsonify({"error": problem}), 400
+    configs, enabled_ids = _owning_configs(safe, registry)
+    if not enabled_ids:
+        return jsonify(
+            {
+                "error": "No server with Intro & Credits turned on has this file",
+                "reason": "no_marker_owner",
+            }
+        ), 409
+    refusal = _unshowable_type(saved, configs, enabled_ids)
+    if refusal is not None:
+        return jsonify({"error": refusal}), 400
+
+    store.save_user_markers(rec.id, saved, settings_fingerprint=get_global_settings().detection_fingerprint())
+    try:
+        rows = publish_now(safe, registry=registry)
+    except FileNotAnalysedError:
+        return jsonify(
+            {"error": "This file hasn't been analysed yet. Run Re-detect first.", "reason": "not_analysed"}
+        ), 409
+    except FileChangedError:
+        return jsonify(
+            {"error": "This file changed on disk since it was analysed; re-detect it first.", "reason": "file_changed"}
+        ), 409
+    payload = {
+        "canonical_path": safe,
+        "duration_ms": rec.duration_ms,
+        "markers": _stored_markers(store, rec.id),
+        "servers": [_editor_server_row(row, saved=saved, duration_ms=rec.duration_ms) for row in rows],
+    }
+    return jsonify(_without_secrets(payload, registry))
+
+
+@api.route("/markers/item/markers", methods=["DELETE"])
+@api_token_required
+def marker_item_unlock():
+    """Drop the user's lock on one or more marker types for a file.
+
+    Body: ``path`` (or ``server_id`` + ``item_id``, and optionally ``version_file``) and ``types``
+    (``["intro", "credits", "recap", "preview"]``). Nothing is published: the type goes back to "Needs review" and the
+    next Intro & Credits run decides and publishes it again.
+
+    Returns:
+        200 with ``unlocked`` (the types that were locked), the file's remaining ``markers`` and the ``decisions`` of
+        the unlocked types; 400 for a body this can't be read or a path outside every server library; 404 for an
+        unknown server or item; 409 when the server is off or the file was never analysed; 503 when the config
+        directory isn't writable.
+    """
+    from ...markers.store import get_marker_store
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "The request body must be a JSON object"}), 400
+    registry = _registry()
+    path, refused = _resolve_item_path(data.get, registry)
+    if refused is not None:
+        return refused
+    safe = _library_file(path, registry)
+    if safe is None:
+        return jsonify({"error": "Path is not a file inside any server library"}), 400
+    types, problem = _marker_types(data.get("types"))
+    if types is None:
+        return jsonify({"error": problem}), 400
+    blocked = _config_unwritable_response()
+    if blocked is not None:
+        return blocked
+    store = get_marker_store()
+    rec = store.get_file(safe)
+    if rec is None:
+        return jsonify(
+            {"error": "This file hasn't been analysed yet. Run Re-detect first.", "reason": "not_analysed"}
+        ), 409
+    unlocked = store.unlock_markers(rec.id, types)
+    decisions = store.get_decisions(rec.id)
+    return jsonify(
+        {
+            "canonical_path": safe,
+            "unlocked": [t.value for t in types if t in unlocked],
+            "markers": _stored_markers(store, rec.id),
+            "decisions": {
+                t.value: {"status": decisions[t].status.value, "reason": decisions[t].reason}
+                for t in types
+                if t in decisions
+            },
+        }
+    )
 
 
 def _library_episode(path: object, registry: Any) -> tuple[str | None, tuple[Any, int] | None]:

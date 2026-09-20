@@ -938,6 +938,7 @@ def test_known_file_decisions_and_evidence(store, factory):
                 "end_ms": 37_000,
                 "decided_by": ["chapters", "theintrodb"],
                 "locked": False,
+                "locked_at": None,
             },
             "proposed": None,
             "shortened_by": None,
@@ -951,6 +952,7 @@ def test_known_file_decisions_and_evidence(store, factory):
                 "end_ms": DURATION,
                 "decided_by": ["chapters"],
                 "locked": False,
+                "locked_at": None,
             },
             "proposed": None,
             "shortened_by": None,
@@ -959,7 +961,7 @@ def test_known_file_decisions_and_evidence(store, factory):
             "status": "needs_review",
             "reason": "disagree",
             "marker": None,
-            "proposed": {"start_ms": 1_000, "end_ms": 8_000},
+            "proposed": {"start_ms": 1_000, "end_ms": 8_000, "decided_by": ["x"]},
             "shortened_by": None,
         },
         "preview": {
@@ -998,16 +1000,43 @@ def test_known_file_decisions_and_evidence(store, factory):
 
 def test_locked_marker_shows_as_locked_and_is_published(store, factory):
     rec = _known_file(store, {t: _none(t) for t in MarkerType})
-    store.lock_marker(rec.id, Marker(T.INTRO, 5_000, 30_000, ("user",), locked=True))
+    store.save_user_markers(rec.id, [Marker(T.INTRO, 5_000, 30_000, ("user",))], settings_fingerprint="f")
     payload = inspect.item_payload(PATH, registry=_registry(server_config("plex", ServerType.PLEX)), store=store)
-    assert payload["decisions"]["intro"]["marker"] == {
+    marker = payload["decisions"]["intro"]["marker"]
+    locked_at = marker.pop("locked_at")
+    assert marker == {
         "type": "intro",
         "start_ms": 5_000,
         "end_ms": 30_000,
         "decided_by": ["user"],
         "locked": True,
     }
+    assert locked_at, "the editor shows when the user locked it"
     assert _row(payload, "plex")["plan"] == "will_add"
+
+
+def test_a_proposal_carries_the_sources_the_editor_would_override(store, factory):
+    """L100: the editor says what a Needs review proposal was based on before the user replaces it."""
+    rec = _known_file(store, {t: _none(t) for t in MarkerType})
+    store.save_decisions(
+        rec.id,
+        {
+            T.CREDITS: TypeDecision(
+                T.CREDITS,
+                DecisionStatus.NEEDS_REVIEW,
+                None,
+                Marker(T.CREDITS, 1_290_000, DURATION, ("chapters", "skipdb")),
+                "sources disagree",
+            )
+        },
+        settings_fingerprint="f",
+    )
+    payload = inspect.item_payload(PATH, registry=_registry(), store=store)
+    assert payload["decisions"]["credits"]["proposed"] == {
+        "start_ms": 1_290_000,
+        "end_ms": DURATION,
+        "decided_by": ["chapters", "skipdb"],
+    }
 
 
 def test_plex_up_to_date_when_current_equals_published_equals_decided(store, factory):
@@ -1991,7 +2020,7 @@ class TestSeasonPayload:
         assert eps[0]["intro"] == {
             "status": "decided",
             "reason": "agreed",
-            "marker": {"type": "intro", "start_ms": 127_000, "end_ms": 157_000, "decided_by": ["season_audio", "skipdb"], "locked": False},
+            "marker": {"type": "intro", "start_ms": 127_000, "end_ms": 157_000, "decided_by": ["season_audio", "skipdb"], "locked": False, "locked_at": None},
             "proposed": None,
         }  # fmt: skip
         assert (eps[0]["known"], eps[0]["duration_ms"]) == (True, DURATION)
@@ -2006,7 +2035,7 @@ class TestSeasonPayload:
             "status": "needs_review",
             "reason": "disagree",
             "marker": None,
-            "proposed": {"start_ms": 1_296_000, "end_ms": DURATION},
+            "proposed": {"start_ms": 1_296_000, "end_ms": DURATION, "decided_by": ["skipdb"]},
         }
         assert eps[1]["servers"]["plex-1"] == {"state": "waiting", "message": "Not in this server's library yet"}
         assert (eps[2]["known"], eps[2]["duration_ms"], eps[2]["evidence"]) == (False, None, [])

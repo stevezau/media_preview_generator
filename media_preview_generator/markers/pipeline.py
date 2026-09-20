@@ -113,6 +113,23 @@ PLEX_PASS_UNKNOWN_TTL_S = 5.0
 # Answers read from the saved settings alone: cheap, and wrong the moment the user saves, so never reused.
 _SETTINGS_ANSWERS = frozenset({Capability.DISABLED, Capability.NEEDS_CONFIRMATION})
 
+# The Inspector editor's publish (``publish_now``) runs inside a web request on one of eight gunicorn threads, so it is
+# bounded (ruling P-R1). Each server's own HTTP calls are capped by ``ServerConfig.timeout``, which the route shortens
+# to this. Plex's database lock is NOT covered: ``publishers/plex_db.BUSY_TIMEOUT_S`` is its own 30 s wait and has no
+# caller-side knob, so a Plex leg can still run well past the gate below. Shortening it needs a deadline threaded
+# through that publisher (its `_database`/`_local_checks` already take one).
+PUBLISH_NOW_SERVER_TIMEOUT_S = 8
+# A START GATE, not a cancellation: a server the fan-out hasn't STARTED by then isn't started at all. It stops one
+# unreachable server from multiplying into one wait per server; it cannot cut a server's call short once it began.
+PUBLISH_NOW_DEADLINE_S = 25.0
+# How long it waits for a job that is running the same file. A run can take minutes, so it gives up almost at once.
+PUBLISH_NOW_LOCK_WAIT_S = 2.0
+PUBLISH_DEADLINE_MESSAGE = "Couldn't publish to this server in time; the next Intro & Credits run publishes it"
+# Not "that run publishes it": a job that already read the markers publishes the pre-save answer, and the run after
+# it puts the user's marker there (the file's publish basis no longer matches, so it is written again).
+PUBLISH_BUSY_MESSAGE = "Intro & Credits is running for this file; the next run publishes your marker"
+SERVER_MARKERS_OFF = "Intro & Credits is off for this server"
+
 LocalDetector = Callable[..., "list[Candidate] | DetectorAnswer"]
 
 
@@ -549,7 +566,7 @@ def markers_for_path(store: MarkerStore, canonical_path: str) -> dict[MarkerType
         is no longer the one that was decided (replaced or gone).
     """
     rec = store.get_file(canonical_path)
-    if rec is None or not store.get_decisions(rec.id) or _identity_changed(rec):
+    if rec is None or not store.get_decisions(rec.id) or identity_changed(rec):
         return None
     return store.get_markers(rec.id)
 
@@ -669,7 +686,9 @@ def _decide(
     """
     order = _decision_order(ctx.settings)
     evidence = ctx.store.get_evidence(rec.id)
-    # A lock always wins (spec §5.5 rule 1); what respect_locks=False should change is for the phase 4 editor.
+    # A lock always wins (spec §5.5 rule 1). `markers.respect_locks` does not gate this: the editor only ever writes a
+    # lock the user asked for, and dropping it here would silently republish over that edit with no way back (the
+    # detected answer a lock replaced isn't stored). Turning the switch off is the user's cue to Unlock the type.
     locked = ctx.store.get_locked(rec.id)
 
     def decide_from(sources: tuple[str, ...]) -> dict[MarkerType, TypeDecision]:
@@ -1168,7 +1187,15 @@ def cached_capability(ctx: PipelineContext, cfg: ServerConfig, publisher: Marker
         return report
 
 
-def _identity_changed(rec: FileRecord) -> bool:
+def identity_changed(rec: FileRecord) -> bool:
+    """Whether the file on disk is no longer the one this record describes (spec §6.1: path + size + mtime).
+
+    Args:
+        rec: The stored file record.
+
+    Returns:
+        True when the file was replaced or is gone, so nothing stored about it can be trusted.
+    """
     try:
         st = os.stat(rec.canonical_path)
     except OSError:
@@ -1394,7 +1421,7 @@ def _publish_to(
             message = "This server can't show the markers found for this file" if markers else "No markers found"
             return _row(cfg, publisher.name, ServerStatus.NONE, message, path)
 
-        if _identity_changed(rec):
+        if identity_changed(rec):
             raise _FileChangedError(path)
         phase(f"Publishing to {cfg.name}…")
         try:
@@ -1458,6 +1485,125 @@ def _publish_to(
         return written if changed else _up_to_date(kept)
 
 
+class FileNotAnalysedError(Exception):
+    """The file has no stored duration, so nothing can be published for it yet (it was never detected)."""
+
+
+class FileChangedError(Exception):
+    """The file on disk is no longer the one markers.db describes."""
+
+
+def publish_now(
+    canonical_path: str,
+    *,
+    registry: Any,
+    live_config: Callable[[str], ServerConfig | None] = live_server_config,
+    deadline_s: float = PUBLISH_NOW_DEADLINE_S,
+    lock_wait_s: float = PUBLISH_NOW_LOCK_WAIT_S,
+    clock: Callable[[], float] = time.monotonic,
+) -> list[dict]:
+    """Publish a file's stored markers to every owning server once, inside one bounded web request (ruling P-R1).
+
+    This is the Inspector editor's publish, not a job: it takes no worker slot, queues nothing and starts no thread,
+    and every server it reaches goes through the same ``_publish_to`` a job uses — the same ``previous``,
+    ``duration_ms``, ``canonical_path``, ``own_previous`` and ``kept_types`` arguments, the same ``publish_state`` rows
+    and the same messages, so Check servers can't tell the two apart.
+
+    The bound has two halves. Each server's own HTTP calls are capped by its ``ServerConfig.timeout``, which the caller
+    shortens for this path; on top of that, ``deadline_s`` is a start gate — a server the fan-out hasn't started by
+    then isn't started at all, its row says so and its publish basis is cleared, so the next run publishes it. So N
+    slow servers can't multiply, but one server already under way still runs to its own limit: a Plex database write
+    waits up to ``publishers.plex_db.BUSY_TIMEOUT_S`` on top of the gate.
+
+    Args:
+        canonical_path: Local path of the file (already validated by the caller).
+        registry: A ``ServerRegistry``, ideally built with shortened per-server timeouts.
+        live_config: A server's saved config right now; consent is read from it before every write, as in a job.
+        deadline_s: Seconds the whole fan-out may take before the servers left are reported instead of contacted.
+        lock_wait_s: Seconds to wait for a job that is running this file right now.
+        clock: Monotonic clock (tests pass a fake).
+
+    Returns:
+        One row per owning server, in registry order, in the job's ``publisher_rows`` shape. Servers with Intro &
+        Credits off are included, as ``markers_skipped`` rows saying why.
+
+    Raises:
+        FileNotAnalysedError: The file isn't in markers.db, or its duration was never read.
+        FileChangedError: The file on disk changed since it was analysed.
+    """
+    store = get_marker_store()
+    rec = store.get_file(canonical_path)
+    if rec is None or not rec.duration_ms:
+        raise FileNotAnalysedError(canonical_path)
+    if identity_changed(rec):
+        raise FileChangedError(canonical_path)
+    ctx = PipelineContext(
+        registry=registry,
+        config=None,  # only build_context's detector checks read it; this path runs no detector
+        settings=get_global_settings(),
+        store=store,
+        priority=lambda: PRIORITY_LOW,
+        ffprobe="",  # nothing here probes: the file was probed by the run that stored its duration
+        clients={},
+        local_detectors=(),
+        chromaprint=ChromaprintState.ABSENT,
+        credits_text=TextDetState.ABSENT,
+        live_config=live_config,
+    )
+    item = ProcessableItem(canonical_path=canonical_path, server_id="", item_id_by_server={})
+    owning = _owning_servers(item, ctx)
+    marker_owners = _marker_owners(owning, canonical_path)
+    owner_ids = {owner.config.id for owner in marker_owners}
+    servers = _ItemServers(item, marker_owners)
+    markers = store.get_markers(rec.id)
+    needs_review = any(d.status is DecisionStatus.NEEDS_REVIEW for d in store.get_decisions(rec.id).values())
+    stop_at = clock() + deadline_s
+
+    def _later(cfg: ServerConfig, message: str, status: ServerStatus = ServerStatus.FAILED) -> dict:
+        """Record a server this request didn't publish to, so the next run does."""
+        last = store.get_publish_state(rec.id, cfg.id)
+        store.clear_publish_basis(rec.id, cfg.id)
+        store.set_publish_state(
+            rec.id,
+            cfg.id,
+            item_id=last.item_id if last else None,
+            markers=None,
+            status=STATE_BY_STATUS[status],
+            message=message,
+        )
+        return _row(cfg, "", status, message, canonical_path)
+
+    rows = []
+    # A job already running this file decided from the evidence as it was before the save, so letting the two publish
+    # at once could leave the user's edit on markers.db and the old answer on the servers. Waiting for the whole run
+    # would block a web thread for minutes, so the request gives up quickly and leaves the publish to the next run.
+    with _PATH_LOCKS.try_hold(canonical_path, lock_wait_s) as taken:
+        for owner in owning:
+            cfg = owner.config
+            if cfg.id not in owner_ids:
+                try:
+                    refused = _consent_problem(ctx, cfg, canonical_path)
+                except Exception as exc:
+                    logger.warning("Couldn't read the saved settings of {}: {}", cfg.name, type(exc).__name__)
+                    refused = f"Couldn't read this server's saved settings ({type(exc).__name__})"
+                rows.append(_row(cfg, "", ServerStatus.SKIPPED, refused or SERVER_MARKERS_OFF, canonical_path))
+                continue
+            if not taken:
+                rows.append(_later(cfg, PUBLISH_BUSY_MESSAGE, ServerStatus.WAITING))
+                continue
+            if clock() >= stop_at:
+                rows.append(_later(cfg, PUBLISH_DEADLINE_MESSAGE))
+                continue
+            try:
+                rows.append(_publish_to(owner, rec, markers, needs_review, servers, ctx, _no_phase))
+            except _FileChangedError:
+                rows.append(_later(cfg, "The file changed while it was being published"))
+            except Exception as exc:
+                logger.exception("Publishing the user's markers to {} failed for {}", cfg.name, canonical_path)
+                rows.append(_later(cfg, f"{type(exc).__name__}: {exc}"))
+    return rows
+
+
 def _clock(ms: int) -> str:
     s = ms // 1000
     return f"{s // 60}:{s % 60:02d}"
@@ -1505,7 +1651,7 @@ def _request_season_chapter_followups(ctx: PipelineContext, sibling_limits: dict
         stored = ctx.store.get_decisions(sibling.id).get(MarkerType.INTRO)
         if stored is None:
             continue
-        if _identity_changed(sibling):
+        if identity_changed(sibling):
             stale.append(path)
             continue
         if ctx.store.get_intro_chapter_limit(sibling.id) == (True, limit):
@@ -1668,7 +1814,7 @@ def _attempt(
         ctx.store.set_intro_chapter_limit(rec.id, intro_limit)
     markers = ctx.store.get_markers(rec.id)
     needs_review = any(decisions[t].status is DecisionStatus.NEEDS_REVIEW for t in types)
-    if _identity_changed(rec):
+    if identity_changed(rec):
         raise _FileChangedError(path)
     replaced = existing is not None and not unchanged
     rows = []

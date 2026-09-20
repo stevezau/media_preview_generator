@@ -28,6 +28,13 @@ def _decided(mtype, start, end, by=("chapters",)):
     return TypeDecision(mtype, DecisionStatus.DECIDED, Marker(mtype, start, end, by), None, "chapters")
 
 
+def _locked_decision(mtype=T.INTRO, start=1000, end=30_000):
+    """What `decide()` returns for a type the user locked."""
+    return TypeDecision(
+        mtype, DecisionStatus.DECIDED, Marker(mtype, start, end, ("user",), locked=True), None, store_mod.LOCKED_BY_USER
+    )
+
+
 class _FailOnce:
     """Connection proxy that raises once on one SQL statement (sqlite3.Connection attributes are read-only)."""
 
@@ -44,6 +51,16 @@ class _FailOnce:
 
     def __getattr__(self, name):
         return getattr(self._conn, name)
+
+
+class _FailOnPrefix(_FailOnce):
+    """Same, but matching the start of a statement (for the long parameterised INSERTs)."""
+
+    def execute(self, sql, *args):
+        if sql.startswith(self._statement) and not self.fired:
+            self.fired = True
+            raise sqlite3.OperationalError(f"injected failure on {sql}")
+        return self._conn.execute(sql, *args)
 
 
 def test_failed_begin_releases_the_lock_for_other_threads(store):
@@ -178,6 +195,115 @@ def test_save_decisions_never_overwrites_locked_marker(store):
     store.save_decisions(rec.id, {T.INTRO: _decided(T.INTRO, 11_000, 37_000)}, settings_fingerprint="f")
     assert store.get_markers(rec.id)[T.INTRO] == locked
     assert store.get_locked(rec.id) == {T.INTRO: locked}
+
+
+class TestUserMarkers:
+    """The Inspector editor's save and unlock (`save_user_markers` / `unlock_markers`)."""
+
+    def test_save_locks_every_type_and_records_the_decision_in_one_transaction(self, store):
+        rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
+        store.save_decisions(
+            rec.id,
+            {
+                T.INTRO: TypeDecision(
+                    T.INTRO, DecisionStatus.NEEDS_REVIEW, None, Marker(T.INTRO, 5, 6, ("skipdb",)), "x"
+                )
+            },
+            settings_fingerprint="old",
+        )
+        saved = store.save_user_markers(
+            rec.id,
+            [Marker(T.INTRO, 1_000, 30_000, ("user",)), Marker(T.CREDITS, 1_290_000, 1_320_000, ("user",))],
+            settings_fingerprint="fp-now",
+        )
+        assert saved == {
+            T.INTRO: Marker(T.INTRO, 1_000, 30_000, ("user",), locked=True),
+            T.CREDITS: Marker(T.CREDITS, 1_290_000, 1_320_000, ("user",), locked=True),
+        }
+        assert store.get_locked(rec.id) == saved
+        for mtype in (T.INTRO, T.CREDITS):
+            row = store.get_decisions(rec.id)[mtype]
+            assert (row.status, row.reason) is not None and row.status is DecisionStatus.DECIDED
+            assert row.reason == store_mod.LOCKED_BY_USER
+            assert (row.proposed_start_ms, row.proposed_end_ms, row.decided_by) == (None, None, ())
+            assert row.settings_fingerprint == "fp-now"
+        assert set(store.locked_at(rec.id)) == {T.INTRO, T.CREDITS}
+
+    def test_the_saved_reason_is_the_one_a_later_run_decides_with(self, store):
+        """A save and the next detection run must agree word for word, or the Inspector's text flips after a run."""
+        from media_preview_generator.markers.decide import DecisionContext, decide
+
+        locked = Marker(T.INTRO, 1_000, 30_000, ("user",), locked=True)
+        ctx = DecisionContext(1_320_000, False, "high", frozenset({T.INTRO}), ("chapters",), None)
+        assert decide([], ctx, {T.INTRO: locked})[T.INTRO].reason == store_mod.LOCKED_BY_USER
+
+    def test_a_save_whose_decision_write_fails_leaves_no_marker_either(self, store):
+        """P-R1: the save is all or nothing -- a half-saved edit (locked, but still "Needs review") is worse than
+        a refused one."""
+        rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
+        store._conn = _FailOnPrefix(store._conn, "INSERT OR REPLACE INTO decisions")
+        with pytest.raises(sqlite3.OperationalError):
+            store.save_user_markers(rec.id, [Marker(T.INTRO, 1_000, 30_000, ("user",))], settings_fingerprint="fp")
+        assert store.get_markers(rec.id) == {}
+        assert store.get_decisions(rec.id) == {}
+
+    def test_unlock_drops_the_lock_and_sends_the_type_back_to_needs_review(self, store):
+        rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
+        store.save_user_markers(rec.id, [Marker(T.INTRO, 1_000, 30_000, ("user",))], settings_fingerprint="fp")
+        assert store.unlock_markers(rec.id, [T.INTRO]) == frozenset({T.INTRO})
+        assert store.get_markers(rec.id) == {} and store.get_locked(rec.id) == {}
+        row = store.get_decisions(rec.id)[T.INTRO]
+        assert row.status is DecisionStatus.NEEDS_REVIEW
+        assert row.reason == store_mod.UNLOCKED_PENDING
+        # An empty fingerprint can never equal a real one, so the next run always re-decides and re-publishes.
+        assert row.settings_fingerprint == ""
+
+    def test_after_unlock_the_next_run_decides_and_republishes_the_type(self, store):
+        """The empty fingerprint is the mechanism: it makes the next run re-save the type (and, with the marker gone,
+        publish whatever it finds -- or take the user's marker off the servers when it finds nothing)."""
+        from media_preview_generator.markers.pipeline import _decisions_changed
+
+        rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
+        store.save_user_markers(rec.id, [Marker(T.INTRO, 1_000, 30_000, ("user",))], settings_fingerprint="fp")
+        assert not _decisions_changed(store, rec.id, {T.INTRO: _locked_decision()}, "fp")  # a run changes nothing
+        store.unlock_markers(rec.id, [T.INTRO])
+        same = {T.INTRO: TypeDecision(T.INTRO, DecisionStatus.NEEDS_REVIEW, None, None, store_mod.UNLOCKED_PENDING)}
+        assert _decisions_changed(store, rec.id, same, "fp")
+
+    def test_unlock_leaves_an_unlocked_marker_and_its_decision_alone(self, store):
+        """A mutant dropping ``AND locked=1`` from the DELETE would wipe a detected marker."""
+        rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
+        store.save_decisions(rec.id, {T.CREDITS: _decided(T.CREDITS, 1_290_000, 1_320_000)}, settings_fingerprint="f")
+        assert store.unlock_markers(rec.id, [T.CREDITS]) == frozenset()
+        assert store.get_markers(rec.id)[T.CREDITS].start_ms == 1_290_000
+        assert store.get_decisions(rec.id)[T.CREDITS].status is DecisionStatus.DECIDED
+
+    def test_unlock_only_touches_the_types_it_was_given(self, store):
+        rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
+        store.save_user_markers(
+            rec.id,
+            [Marker(T.INTRO, 1_000, 30_000, ("user",)), Marker(T.CREDITS, 1_290_000, 1_320_000, ("user",))],
+            settings_fingerprint="fp",
+        )
+        assert store.unlock_markers(rec.id, [T.INTRO]) == frozenset({T.INTRO})
+        assert set(store.get_locked(rec.id)) == {T.CREDITS}
+
+
+def test_save_decisions_stores_the_proposals_own_sources(store):
+    """L100: the editor shows what a proposal was based on, and a proposal has no row in `markers`."""
+    rec = store.upsert_file(_ident(), duration_ms=1_320_000, season_key=None, is_movie=False)
+    proposed = Marker(T.CREDITS, 1_290_000, 1_320_000, ("chapters", "theintrodb"))
+    store.save_decisions(
+        rec.id,
+        {
+            T.CREDITS: TypeDecision(T.CREDITS, DecisionStatus.NEEDS_REVIEW, None, proposed, "sources disagree"),
+            T.INTRO: TypeDecision(T.INTRO, DecisionStatus.NO_EVIDENCE, None, None, "nothing found"),
+        },
+        settings_fingerprint="f",
+    )
+    rows = store.get_decisions(rec.id)
+    assert rows[T.CREDITS].decided_by == ("chapters", "theintrodb")
+    assert rows[T.INTRO].decided_by == ()
 
 
 def test_markers_hash_is_order_independent_and_sensitive_to_times(store):
@@ -607,20 +733,122 @@ def test_open_refuses_a_newer_schema_version_before_any_ddl(tmp_path, monkeypatc
     assert not (tmp_path / "markers.db-wal").exists()
 
 
-def test_open_upgrades_an_older_schema_version(tmp_path):
-    path = str(tmp_path / "markers.db")
+# The two tables schema 1 shipped, written out so the migration is tested against what an existing install really
+# has -- not against today's `_SCHEMA` with its columns removed.
+_V1_MARKERS = """CREATE TABLE markers (
+    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    type TEXT NOT NULL,
+    start_ms INTEGER NOT NULL,
+    end_ms INTEGER NOT NULL,
+    decided_by TEXT NOT NULL,
+    locked INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (file_id, type))"""
+_V1_DECISIONS = """CREATE TABLE decisions (
+    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    proposed_start_ms INTEGER,
+    proposed_end_ms INTEGER,
+    settings_fingerprint TEXT NOT NULL,
+    decided_at TEXT NOT NULL,
+    PRIMARY KEY (file_id, type))"""
+
+
+def _schema_1_database(path, version="1"):
+    """A markers.db as schema 1 left it: no `markers.locked_at`, no `decisions.decided_by`."""
     raw = sqlite3.connect(path)
     for stmt in store_mod._SCHEMA:
+        if stmt.startswith("CREATE TABLE IF NOT EXISTS markers ") or stmt.startswith(
+            "CREATE TABLE IF NOT EXISTS decisions "
+        ):
+            continue
         raw.execute(stmt)
-    raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', '0')")
+    raw.execute(_V1_MARKERS)
+    raw.execute(_V1_DECISIONS)
+    raw.execute("INSERT INTO meta(key, value) VALUES ('schema_version', ?)", (version,))
     raw.commit()
     raw.close()
+    return raw
+
+
+def test_open_upgrades_an_older_schema_version(tmp_path):
+    path = str(tmp_path / "markers.db")
+    _schema_1_database(path, version="0")  # every step of the chain runs, including the empty 0 -> 1
     s = MarkerStore(path)
     try:
         row = s._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
         assert row["value"] == str(store_mod.SCHEMA_VERSION)
     finally:
         s.close()
+
+
+def test_a_schema_1_database_gains_the_lock_and_proposal_columns_and_keeps_its_rows(tmp_path):
+    """The columns Task 3 adds must reach an existing install: `_SCHEMA` is CREATE TABLE IF NOT EXISTS, so without
+    `_MIGRATIONS[1]` this database keeps the schema-1 tables and every read of the new columns raises."""
+    path = str(tmp_path / "markers.db")
+    _schema_1_database(path)
+    raw = sqlite3.connect(path)
+    raw.execute(
+        "INSERT INTO files (id, canonical_path, size, mtime_ns, duration_ms, season_key, is_movie, updated_at) "
+        "VALUES (1, '/m/Show/S01E01.mkv', 100, 1, 600000, NULL, 0, '2026-09-01T00:00:00+00:00')"
+    )
+    raw.execute(
+        "INSERT INTO markers (file_id, type, start_ms, end_ms, decided_by, locked, updated_at) "
+        "VALUES (1, 'intro', 1000, 30000, '[\"user\"]', 1, '2026-09-01T00:00:00+00:00')"
+    )
+    raw.execute(
+        "INSERT INTO decisions (file_id, type, status, reason, proposed_start_ms, proposed_end_ms, "
+        "settings_fingerprint, decided_at) VALUES (1, 'credits', 'needs_review', 'sources disagree', 500000, 600000, "
+        "'fp', '2026-09-01T00:00:00+00:00')"
+    )
+    raw.commit()
+    raw.close()
+
+    s = MarkerStore(path)
+    try:
+        assert s._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()["value"] == "2"
+        assert s.get_locked(1) == {T.INTRO: Marker(T.INTRO, 1000, 30000, ("user",), locked=True)}
+        assert s.locked_at(1) == {}  # a lock from before the column has no date, and that must not read as "today"
+        decision = s.get_decisions(1)[T.CREDITS]
+        assert (decision.proposed_start_ms, decision.proposed_end_ms) == (500000, 600000)
+        assert decision.decided_by == ()  # the column's default, not a crash
+        # The upgraded database still takes a new lock and a new proposal, with both new columns.
+        s.save_user_markers(1, [Marker(T.CREDITS, 500_000, 600_000, ("user",))], settings_fingerprint="fp")
+        assert set(s.locked_at(1)) == {T.CREDITS}
+        s.save_decisions(
+            1,
+            {
+                T.PREVIEW: TypeDecision(
+                    T.PREVIEW, DecisionStatus.NEEDS_REVIEW, None, Marker(T.PREVIEW, 1, 2, ("skipdb",)), "r"
+                )
+            },
+            settings_fingerprint="fp",
+        )
+        assert s.get_decisions(1)[T.PREVIEW].decided_by == ("skipdb",)
+    finally:
+        s.close()
+
+
+def test_a_failed_migration_leaves_the_schema_version_where_it_was(tmp_path, monkeypatch):
+    """The migration and the version write share one transaction: a half-migrated database must never record 2."""
+    path = str(tmp_path / "markers.db")
+    _schema_1_database(path)
+    monkeypatch.setattr(
+        store_mod,
+        "_MIGRATIONS",
+        {1: ("ALTER TABLE markers ADD COLUMN locked_at TEXT", "ALTER TABLE nope ADD COLUMN x TEXT")},
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        MarkerStore(path)
+    raw = sqlite3.connect(path)
+    try:
+        assert raw.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "1"
+        columns = {r[1] for r in raw.execute("PRAGMA table_info(markers)").fetchall()}
+        assert "locked_at" not in columns  # the first ALTER rolled back with the second
+    finally:
+        raw.close()
 
 
 def test_file_record_exposes_size_mtime_season_and_is_movie(store):

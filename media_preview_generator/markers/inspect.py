@@ -31,7 +31,10 @@ from .settings import ServerMarkersSettings, is_sports_library, load_server
 from .sources.server_markers import read_server_markers
 from .store import FileRecord, MarkerStore
 
-_CAN_SHOW: dict[ServerType, tuple[str, ...]] = {
+# The marker types each server can show at all. The editor refuses a type no enabled owner is in this table for
+# (spec §6.3: Plex and Emby take no recap or preview); an Emby credits *end* is not covered here -- it is accepted and
+# published start-only with ``publishers.emby.CREDITS_BEFORE_END_NOTE``, which is a per-field note, not a type.
+CAN_SHOW: dict[ServerType, tuple[str, ...]] = {
     ServerType.PLEX: ("intro", "credits"),
     ServerType.JELLYFIN: ("intro", "credits", "recap", "preview"),
     ServerType.EMBY: ("intro", "credits"),
@@ -282,7 +285,7 @@ def server_status_payload(server: Any, config: ServerConfig) -> dict:
         "enabled": settings.enabled,
         "settings": _settings_block(config, settings),
         "capability": _preview_capability(server, config, settings),
-        "can_show": list(_CAN_SHOW.get(config.type, ())),
+        "can_show": list(CAN_SHOW.get(config.type, ())),
         "libraries": [
             {
                 "id": lib.id,
@@ -583,7 +586,7 @@ def _server_row(
 ) -> dict:
     settings = load_server(cfg.markers, cfg.type.value)
     off_reason = _off_reason(cfg, settings, matches)
-    can_show = _CAN_SHOW.get(cfg.type, ())
+    can_show = CAN_SHOW.get(cfg.type, ())
     wanted = sorted((m for m in markers.values() if m.type.value in can_show), key=lambda m: (m.start_ms, m.type.value))
     file_state = store.get_publish_state(rec.id, cfg.id) if rec else None
     item_id = _item_id(server, cfg, canonical_path, file_state.item_id if file_state else None, matches)
@@ -651,7 +654,7 @@ def _degraded_row(cfg: ServerConfig, exc: Exception) -> dict:
         "server_type": cfg.type.value,
         "markers_enabled": False,
         "capability_state": CAPABILITY_UNKNOWN,
-        "can_show": list(_CAN_SHOW.get(cfg.type, ())),
+        "can_show": list(CAN_SHOW.get(cfg.type, ())),
         "current": None,
         "published": [],
         "publish_status": None,
@@ -676,16 +679,29 @@ def _shortened_by(decision: Any, registry: Any) -> dict | None:
     return {"servers": names}
 
 
-def _decision_dict(decision: Any, marker: Marker | None) -> dict:
-    """One type's stored decision in the Inspector's shape (``status`` None when nothing is stored)."""
+def _decision_dict(decision: Any, marker: Marker | None, locked_at: str | None = None) -> dict:
+    """One type's stored decision in the Inspector's shape (``status`` None when nothing is stored).
+
+    A locked marker carries ``locked_at`` (None for a lock made before the column existed), and a proposal carries the
+    sources it was based on, so the editor can say what it is about to override.
+    """
     return {
         "status": decision.status.value if decision else None,
         "reason": decision.reason if decision else "",
-        "marker": {**_marker_dict(marker), "decided_by": list(marker.decided_by), "locked": marker.locked}
+        "marker": {
+            **_marker_dict(marker),
+            "decided_by": list(marker.decided_by),
+            "locked": marker.locked,
+            "locked_at": locked_at if marker.locked else None,
+        }
         if marker
         else None,
         "proposed": (
-            {"start_ms": decision.proposed_start_ms, "end_ms": decision.proposed_end_ms}
+            {
+                "start_ms": decision.proposed_start_ms,
+                "end_ms": decision.proposed_end_ms,
+                "decided_by": list(decision.decided_by),
+            }
             if decision and decision.proposed_start_ms is not None
             else None
         ),
@@ -701,7 +717,9 @@ def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> d
         store: The markers store.
 
     Returns:
-        ``known``, ``canonical_path``, ``duration_ms``, ``is_movie``, ``decisions`` by type (``shortened_by``:
+        ``known``, ``canonical_path``, ``duration_ms``, ``is_movie``, ``decisions`` by type (``marker.locked_at`` when
+        the user locked it, ``proposed.decided_by`` = the sources behind a proposal the editor would override, and
+        ``shortened_by``:
         ``{"servers": [names]}`` when the servers' own markers shortened a decided credits/preview start, else None), ``evidence`` rows (empty
         lookups have ``type`` None) and one row per owning server with what it shows now (read live; None when that
         failed), what is ours there, this file's last publish (``publish_status``, ``publish_message``), the server
@@ -717,6 +735,7 @@ def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> d
     rec = store.get_file(canonical_path)
     decisions = store.get_decisions(rec.id) if rec else {}
     markers = store.get_markers(rec.id) if rec else {}
+    lock_dates = store.locked_at(rec.id) if rec else {}
     payload: dict = {
         "known": rec is not None,
         "canonical_path": canonical_path,
@@ -729,7 +748,7 @@ def item_payload(canonical_path: str, *, registry: Any, store: MarkerStore) -> d
     for mtype in MarkerType:
         d = decisions.get(mtype)
         payload["decisions"][mtype.value] = {
-            **_decision_dict(d, markers.get(mtype)),
+            **_decision_dict(d, markers.get(mtype), lock_dates.get(mtype)),
             "shortened_by": _shortened_by(d, registry) if d else None,
         }
     if rec:
@@ -848,7 +867,11 @@ def season_payload(canonical_path: str, *, registry: Any, store: MarkerStore) ->
         rec = store.get_file(path)
         decisions = store.get_decisions(rec.id) if rec else {}
         markers = store.get_markers(rec.id) if rec else {}
-        types = {mtype.value: _decision_dict(decisions.get(mtype), markers.get(mtype)) for mtype in _SEASON_TYPES}
+        lock_dates = store.locked_at(rec.id) if rec else {}
+        types = {
+            mtype.value: _decision_dict(decisions.get(mtype), markers.get(mtype), lock_dates.get(mtype))
+            for mtype in _SEASON_TYPES
+        }
         # Counted over every type, not only the two columns: a job publishes each decided type of a file even while
         # another type (a recap, say) is in Needs review, and that file's job row then says Needs review.
         in_review = [

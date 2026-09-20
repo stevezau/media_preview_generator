@@ -15,7 +15,7 @@ import sqlite3
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from loguru import logger
@@ -24,7 +24,7 @@ from .decide import DecisionStatus, TypeDecision
 from .models import SERVER_SOURCES, Candidate, FileIdentity, Marker, MarkerType, Source
 from .sources.server_markers import importer_database
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _SERVER_SOURCE_VALUES = (Source.SERVER_MARKERS.value, Source.SERVER_MARKERS_IMPORTED.value)
 # A file Check servers took for a server isn't taken for it again sooner (it may not have run: gone from disk, cancelled).
 _RECHECK_TAKEN_AGAIN = timedelta(days=1)
@@ -75,6 +75,8 @@ _SCHEMA = (
         origin TEXT NOT NULL DEFAULT '',
         version INTEGER NOT NULL,
         PRIMARY KEY (file_id, source, origin))""",
+    # ``locked_at`` is when the user locked the row, kept apart from ``updated_at`` so re-deciding or re-publishing
+    # around a lock can't overwrite the date the Inspector shows for the user's own edit. NULL on unlocked rows.
     """CREATE TABLE IF NOT EXISTS markers (
         file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
         type TEXT NOT NULL,
@@ -83,7 +85,10 @@ _SCHEMA = (
         decided_by TEXT NOT NULL,
         locked INTEGER NOT NULL DEFAULT 0,
         updated_at TEXT NOT NULL,
+        locked_at TEXT,
         PRIMARY KEY (file_id, type))""",
+    # ``decided_by`` holds the PROPOSED marker's sources (JSON list, ``[]`` when there is no proposal): a proposal has
+    # no row in ``markers``, and the editor shows what it was based on before the user overrides it.
     """CREATE TABLE IF NOT EXISTS decisions (
         file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
         type TEXT NOT NULL,
@@ -93,6 +98,7 @@ _SCHEMA = (
         proposed_end_ms INTEGER,
         settings_fingerprint TEXT NOT NULL,
         decided_at TEXT NOT NULL,
+        decided_by TEXT NOT NULL DEFAULT '[]',
         PRIMARY KEY (file_id, type))""",
     # markers_hash and verified_at are no longer written (always NULL); the columns stay until a schema bump.
     """CREATE TABLE IF NOT EXISTS publish_state (
@@ -236,9 +242,21 @@ _SCHEMA = (
 )
 
 # Ordered migrations: _MIGRATIONS[v] holds the statements that take an existing database from schema
-# version v to v+1. Empty for now -- SCHEMA_VERSION stays 1 until the first real migration lands; a
-# future bump appends `SCHEMA_VERSION - 1: (...)` here rather than changing this class's open logic.
-_MIGRATIONS: dict[int, tuple[str, ...]] = {}
+# version v to v+1. `_SCHEMA` is CREATE TABLE IF NOT EXISTS only, so a column added there alone never
+# reaches an existing install -- every new column needs its ALTER TABLE here too. A future bump appends
+# `SCHEMA_VERSION - 1: (...)` here rather than changing this class's open logic.
+_MIGRATIONS: dict[int, tuple[str, ...]] = {
+    1: (
+        "ALTER TABLE markers ADD COLUMN locked_at TEXT",
+        "ALTER TABLE decisions ADD COLUMN decided_by TEXT NOT NULL DEFAULT '[]'",
+    ),
+}
+
+# The reason stored (and shown) for a type the user locked in the Inspector. `decide.decide()` writes the same words
+# for a locked marker on the next run; `test_store.py` pins the two together so a save and a run never disagree.
+LOCKED_BY_USER = "locked by user"
+# The reason a just-unlocked type carries until the next detection run decides it again (`unlock_markers`).
+UNLOCKED_PENDING = "unlocked; the next run decides this type again"
 
 
 @dataclass(frozen=True)
@@ -274,7 +292,11 @@ class EvidenceRow:
 
 @dataclass(frozen=True)
 class DecisionRow:
-    """Stored decision for one marker type."""
+    """Stored decision for one marker type.
+
+    ``decided_by`` is what the *proposed* marker was based on (empty when the row proposes nothing): the Inspector's
+    editor shows it before the user overrides the proposal, and a proposal never reaches the ``markers`` table.
+    """
 
     type: MarkerType
     status: DecisionStatus
@@ -283,6 +305,7 @@ class DecisionRow:
     proposed_end_ms: int | None
     settings_fingerprint: str
     decided_at: str
+    decided_by: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -803,7 +826,7 @@ class MarkerStore:
                 proposed = d.proposed
                 conn.execute(
                     "INSERT OR REPLACE INTO decisions (file_id, type, status, reason, proposed_start_ms, proposed_end_ms, "
-                    "settings_fingerprint, decided_at) VALUES (?,?,?,?,?,?,?,?)",
+                    "settings_fingerprint, decided_at, decided_by) VALUES (?,?,?,?,?,?,?,?,?)",
                     (
                         file_id,
                         mtype.value,
@@ -813,6 +836,7 @@ class MarkerStore:
                         proposed.end_ms if proposed else None,
                         settings_fingerprint,
                         now,
+                        json.dumps(list(proposed.decided_by) if proposed else []),
                     ),
                 )
                 if locked:
@@ -853,20 +877,97 @@ class MarkerStore:
         return self._markers(file_id, locked_only=True)
 
     def lock_marker(self, file_id: int, marker: Marker) -> None:
-        """Store a user-locked marker; detection never replaces it (the Inspector editor calls this in phase 4)."""
+        """Store one user-locked marker; detection never replaces it.
+
+        The low-level primitive: it writes the ``markers`` row only. The Inspector editor calls
+        :meth:`save_user_markers`, which also records the decision so the file doesn't keep reading as
+        "Needs review" until the next run.
+        """
+        now = self._now()
         with self._tx() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO markers (file_id, type, start_ms, end_ms, decided_by, locked, updated_at) "
-                "VALUES (?,?,?,?,?,1,?)",
-                (
-                    file_id,
-                    marker.type.value,
-                    marker.start_ms,
-                    marker.end_ms,
-                    json.dumps(list(marker.decided_by)),
-                    self._now(),
-                ),
-            )
+            self._write_lock(conn, file_id, marker, now)
+
+    @staticmethod
+    def _write_lock(conn: sqlite3.Connection, file_id: int, marker: Marker, now: str) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO markers (file_id, type, start_ms, end_ms, decided_by, locked, updated_at, "
+            "locked_at) VALUES (?,?,?,?,?,1,?,?)",
+            (file_id, marker.type.value, marker.start_ms, marker.end_ms, json.dumps(list(marker.decided_by)), now, now),
+        )
+
+    def save_user_markers(
+        self, file_id: int, markers: Iterable[Marker], *, settings_fingerprint: str
+    ) -> dict[MarkerType, Marker]:
+        """Lock the user's own markers and record each type as decided by them, in one transaction.
+
+        The whole save lands or none of it does, and it lands before any server is contacted (plan ruling P-R1), so a
+        publish that fails can never lose the edit. The decision row is rewritten to
+        :data:`LOCKED_BY_USER` so the Inspector and the Season view stop saying "Needs review" straight away, with the
+        same words the next detection run writes for a locked type. The proposal the lock replaces is dropped for the
+        same reason: a run's own decision for a locked type carries none, so keeping it would make the row flip back
+        on the next run.
+
+        Args:
+            file_id: The file's row id.
+            markers: The markers to lock (one per type; a repeated type keeps the last).
+            settings_fingerprint: ``GlobalMarkersSettings.detection_fingerprint()`` right now, so the next run doesn't
+                rewrite these rows only because their fingerprint was stale.
+
+        Returns:
+            The locked markers by type, as stored.
+        """
+        saved = {m.type: replace(m, locked=True) for m in markers}
+        now = self._now()
+        with self._tx() as conn:
+            for mtype, marker in saved.items():
+                self._write_lock(conn, file_id, marker, now)
+                conn.execute(
+                    "INSERT OR REPLACE INTO decisions (file_id, type, status, reason, proposed_start_ms, "
+                    "proposed_end_ms, settings_fingerprint, decided_at, decided_by) VALUES (?,?,?,?,NULL,NULL,?,?,'[]')",
+                    (file_id, mtype.value, DecisionStatus.DECIDED.value, LOCKED_BY_USER, settings_fingerprint, now),
+                )
+        return saved
+
+    def unlock_markers(self, file_id: int, types: Iterable[MarkerType]) -> frozenset[MarkerType]:
+        """Drop the user's lock on these types and send each back to "Needs review" until the next run decides it.
+
+        The stored decision can't be restored here — a locked type's row says "locked by user", not what detection had
+        found — so the type is left with no answer and a stale fingerprint, which makes the next run re-decide and
+        re-publish it. What the servers still show is left alone on purpose: the next run replaces it.
+
+        Args:
+            file_id: The file's row id.
+            types: The marker types to unlock.
+
+        Returns:
+            The types that were actually locked (the rest were already unlocked or absent).
+        """
+        now = self._now()
+        unlocked: set[MarkerType] = set()
+        with self._tx() as conn:
+            for mtype in types:
+                cur = conn.execute(
+                    "DELETE FROM markers WHERE file_id=? AND type=? AND locked=1", (file_id, mtype.value)
+                )
+                if not cur.rowcount:
+                    continue
+                unlocked.add(mtype)
+                # An empty fingerprint never equals a real one, so `_decisions_changed` always re-saves this type.
+                conn.execute(
+                    "INSERT OR REPLACE INTO decisions (file_id, type, status, reason, proposed_start_ms, "
+                    "proposed_end_ms, settings_fingerprint, decided_at, decided_by) VALUES (?,?,?,?,NULL,NULL,'',?,'[]')",
+                    (file_id, mtype.value, DecisionStatus.NEEDS_REVIEW.value, UNLOCKED_PENDING, now),
+                )
+        return frozenset(unlocked)
+
+    def locked_at(self, file_id: int) -> dict[MarkerType, str]:
+        """When the user locked each locked marker of a file, by type (rows locked before this column are left out)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT type, locked_at FROM markers WHERE file_id=? AND locked=1 AND locked_at IS NOT NULL",
+                (file_id,),
+            ).fetchall()
+        return {MarkerType(r["type"]): r["locked_at"] for r in rows}
 
     def get_decisions(self, file_id: int) -> dict[MarkerType, DecisionRow]:
         """Stored decisions by type."""
@@ -881,6 +982,7 @@ class MarkerStore:
                 r["proposed_end_ms"],
                 r["settings_fingerprint"],
                 r["decided_at"],
+                tuple(json.loads(r["decided_by"] or "[]")),
             )
             for r in rows
         }

@@ -42,3 +42,34 @@ class KeyedLocks:
                 entry[1] -= 1
                 if entry[1] == 0:
                     del self._locks[key]
+
+    @contextmanager
+    def try_hold(self, key: Hashable, timeout: float) -> Iterator[bool]:
+        """Hold ``key``'s lock for the block when it can be taken within ``timeout``.
+
+        For callers that must not wait on a job: a web request can't block a thread behind a file whose run may take
+        minutes.
+
+        Args:
+            key: The lock's key.
+            timeout: Seconds to wait for the lock.
+
+        Yields:
+            True while holding the lock, False when it couldn't be taken in time (nothing is held then).
+        """
+        with self._guard:
+            entry = self._locks.get(key)
+            if entry is None:
+                entry = self._locks[key] = [self._lock_factory(), 0]
+            entry[1] += 1
+        acquired = False
+        try:
+            acquired = bool(entry[0].acquire(timeout=timeout))
+            yield acquired
+        finally:
+            if acquired:
+                entry[0].release()
+            with self._guard:
+                entry[1] -= 1
+                if entry[1] == 0:
+                    del self._locks[key]

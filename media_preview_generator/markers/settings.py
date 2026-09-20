@@ -112,6 +112,14 @@ class GlobalMarkersSettings:
         different real keys hash identically, so rotating the key alone doesn't force
         re-detection.
 
+        ``respect_locks`` is deliberately left out, and that is not an oversight. A lock is applied
+        after the rules have run — ``decide()`` takes it as a separate argument and a locked marker
+        wins whatever the evidence says (spec §5.5 rule 1) — so the setting changes nothing this
+        hash is for: whether a file's *stored decision* was reached under different rules and has to
+        be reached again. Including it would restamp every decision row in the library, and move
+        every ``decided_at``, the first time the switch is flipped, without changing a single
+        answer.
+
         Returns:
             A stable sha1 hex digest.
         """
