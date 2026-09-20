@@ -460,17 +460,29 @@ not established, and the owner has the coverage numbers in front of them. **Met.
 `feedback_setup_health_ux_pattern`. Blocks Tasks 5, 6, 9 and 10.
 
 **Files:**
-- Create: `docs/design/intro-credits/evidence/design/phase4.html` (the app's own theme, real values, the same style as
-  `evidence/design/index.html`), screenshots under `.superpowers/sdd/plan-phase4/shots/` (git-excluded)
+- Created (2026-09-20): `docs/design/intro-credits/evidence/design/phase4/` — `index.html` (the pack, built from the
+  app's own `style.css` + `markers_inspector.css` by relative path, Bootstrap vendored so it opens with no network),
+  `ui-copy.md` (every new string, in this section's order, for Tasks 5/6/9/10 to lift verbatim), `README.md`,
+  `shot.py`, `shots/*.png` (each surface dark and light, plus the editor at 390 px). A folder rather than the single
+  `phase4.html` this line first named, because the copy file and the shots belong beside the page; the shots are
+  committed under `docs/` (the repo's ignore rules keep an explicit exception for `docs/**/*.png`) instead of the
+  excluded `.superpowers/` path, so the owner still has them once the lane worktree is gone.
 
 **Steps**
-- [ ] **Step 1:** Draw the eight surfaces listed under "UI copy and mockups" above. Use real values from the lab or
-  the owner's library, anonymised in anything committed.
-- [ ] **Step 2:** Write every new string, including the ⓘ tooltips and the Setup Health `current` / `recommended`
-  values, in plain English, present tense, no internal setting names in the first sentence.
-- [ ] **Step 3:** For Setup Health, show the rows inside the existing Must fix / Recommended / All good buckets with
+- [x] **Step 1:** Draw the eight surfaces listed under "UI copy and mockups" above. Use real values from the lab or
+  the owner's library, anonymised in anything committed. — done. The pack uses invented data throughout (a show
+  called *Northern Lights*, three servers) rather than anonymising a real title. **One deviation from D8 is drawn,
+  not assumed:** D8 and Step 4 of Task 5 word recap/preview on Plex and Emby as a flat refusal; read strictly that
+  means a recap can never be adjusted while a Plex or Emby server has the file, even with a Jellyfin that would show
+  it. The pack draws editable-with-a-note for that case and keeps the refusal for "no server can show it", and puts
+  both to the owner. Whichever they pick, D8, Task 5 Step 4 and lab row 8 say the same thing afterwards.
+- [x] **Step 2:** Write every new string, including the ⓘ tooltips and the Setup Health `current` / `recommended`
+  values, in plain English, present tense, no internal setting names in the first sentence. — `ui-copy.md`.
+- [x] **Step 3:** For Setup Health, show the rows inside the existing Must fix / Recommended / All good buckets with
   the current → recommended pair, and the shipped `Change in <vendor> UI` badge where there is no button (there is no
-  "Manual" chip any more — `servers.js:2302`) — the pattern is fixed, the wording is not.
+  "Manual" chip any more — `servers.js:2302`) — the pattern is fixed, the wording is not. — done. **The shipped badge
+  does not fit one row**: "Plex's library database isn't on this machine" is fixed by moving the app or running the
+  helper, not in Plex's UI. Carried as an open wording question in `ui-copy.md`.
 - [ ] **Step 4:** Send the pack to the owner as one checkpoint, naming the Q1 wording (option (a)'s override
   sentence, or whichever option they pick) as the part most worth a hard look.
 - [ ] **Step 5:** Record the owner's answer, including any wording change, in the pack and in spec §14.
