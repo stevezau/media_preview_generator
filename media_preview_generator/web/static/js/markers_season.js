@@ -6,6 +6,9 @@
 // job of exactly these episodes; an identical pending/running job is reused and its id is returned either way, so
 // the toast always just says "Queued"). Loaded only when "Whole season" is picked, then kept per path; picking
 // another episode while it's open reloads that episode's season instead of dropping back to "This episode".
+// Every row has Edit, which shows that episode's own tab and opens markers_inspector.js's Adjust editor on it
+// (window.markersEditor.openFile); the editor calls forgetFile() back when a save, lock or unlock lands, so the
+// next look at the season re-reads it rather than rendering the times that edit has just replaced.
 // markers_inspector.js calls setItem(item) for every item and setPath(canonical path) once the item's data
 // arrives — setPath corrects a season already fetched under the item's media_file (used as a placeholder path
 // until the canonical one is known) if the two differ, and remembers the canonical path for that media_file so the
@@ -39,6 +42,7 @@
     };
     // Every state without its own colour (off, none, skipped) is the plain grey .mk-dot.
     const LEGEND = 'Dots: green = server shows this marker, amber = waiting, red = failed, grey = server not enabled, skipped or nothing sent yet';
+    const EDIT_TIP = 'Adjust this episode\'s intro and credits.';
 
     const cache = new Map();
     // media_file → the canonical path setPath reported for it (a file's canonical path doesn't change).
@@ -116,27 +120,36 @@
         return td;
     }
 
-    function actionCell(episode, servers) {
+    function rowButton(text, tip) {
+        const button = el('button', 'btn btn-sm btn-outline-secondary py-0', text);
+        button.type = 'button';
+        if (tip) {
+            button.setAttribute('data-bs-toggle', 'tooltip');
+            button.setAttribute('data-bs-placement', 'top');
+            button.title = tip;
+        }
+        return button;
+    }
+
+    // Edit is on every row, including one nothing was decided for: whether a file can be adjusted at all depends on
+    // what each server can show, which the season payload doesn't carry — the episode's own tab answers that, and
+    // says why when the answer is no. Nothing here says "published": the row's dots carry that, per server.
+    function actionCell(episode) {
         const td = el('td', 'mk-season-action');
+        const edit = rowButton('Edit', EDIT_TIP);
+        edit.addEventListener('click', function () { openEpisode(episode.path, true); });
         // Any type in Needs review, recap and preview included (they have no column), as counts.needs_review counts.
-        if (episode.needs_review) {
-            const button = el('button', 'btn btn-sm btn-outline-secondary py-0', 'Review');
-            button.type = 'button';
-            // e.g. ruling G3: season audio and a server's own marker only agree because both come from matching
-            // audio. Shown verbatim, never paraphrased.
-            const reason = episode.review_reason;
-            if (reason) {
-                button.setAttribute('data-bs-toggle', 'tooltip');
-                button.setAttribute('data-bs-placement', 'top');
-                button.title = reason;
-            }
-            button.addEventListener('click', function () { openEpisode(episode.path); });
-            td.appendChild(button);
+        if (!episode.needs_review) {
+            td.appendChild(edit);
             return td;
         }
-        const on = servers.filter(function (s) { return s.markers_enabled; });
-        const published = on.length && on.every(function (s) { return ((episode.servers || {})[s.server_id] || {}).state === 'ok'; });
-        if (published) td.appendChild(el('span', 'text-muted', 'Published'));
+        // e.g. ruling G3: season audio and a server's own marker only agree because both come from matching audio.
+        // Shown verbatim, never paraphrased.
+        const review = rowButton('Review', episode.review_reason);
+        review.addEventListener('click', function () { openEpisode(episode.path); });
+        const pair = el('div', 'd-flex gap-1');
+        pair.append(review, edit);
+        td.appendChild(pair);
         return td;
     }
 
@@ -188,7 +201,7 @@
                 typeCell(episode.credits, episode.duration_ms),
                 chipsCell(episode),
                 dotsCell(episode, servers),
-                actionCell(episode, servers),
+                actionCell(episode),
             );
             tbody.appendChild(row);
         });
@@ -254,9 +267,22 @@
         if (season) load();
     }
 
-    function openEpisode(episodePath) {
+    function openEpisode(episodePath, edit) {
         showView(false);
-        window.loadMarkersInspector({ server_id: '', item_id: '', media_file: episodePath, type: 'episode' });
+        const next = { server_id: '', item_id: '', media_file: episodePath, type: 'episode' };
+        if (edit) window.markersEditor.openFile(next);
+        else window.loadMarkersInspector(next);
+    }
+
+    // One episode was saved, locked or unlocked: every season held in the cache that lists it now shows times,
+    // chips or dots that edit has replaced. A season is cached under the path it was asked for — any one of its
+    // episodes — so the whole cache is checked, not just that path's entry (which lists it too).
+    function forgetFile(episodePath) {
+        if (!episodePath) return;
+        cache.forEach(function (payload, key) {
+            const lists = (payload.episodes || []).some(function (episode) { return episode.path === episodePath; });
+            if (lists) cache.delete(key);
+        });
     }
 
     function setItem(next) {
@@ -300,5 +326,5 @@
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wire);
     else wire();
 
-    window.markersSeason = { setItem: setItem, setPath: setPath };
+    window.markersSeason = { setItem: setItem, setPath: setPath, forgetFile: forgetFile };
 })();

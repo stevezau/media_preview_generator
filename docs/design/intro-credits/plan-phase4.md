@@ -622,15 +622,46 @@ without leaving the tab, and the built screen matches the approved mockup (any d
 `[sequential]` **[visible UI — from Task 2's pack]** — spec §7 item 4 ("Review opens that episode; editing is phase
 4").
 
-**Files:**
+**Files** *(as shipped: the editor is reached through `window.markersEditor`, which Task 5 already exported, so
+`markers_inspector.js` gains the entry point and the three calls that tell the Season view a file changed — no
+editor code is duplicated)*:
 - Modify: `media_preview_generator/web/static/js/markers_season.js` (`actionCell()` ~119, `chipsCell()` ~92 which
-  already renders the 🔒 chip), `tests/e2e/test_intro_credits_season.py`
+  already renders the 🔒 chip), `media_preview_generator/web/static/js/markers_inspector.js` (`openFile`,
+  `applySaved`, `unlock`), `tests/e2e/test_intro_credits_season.py`,
+  `docs/design/intro-credits/evidence/design/phase4/ui-copy.md` (§5's open question, answered), `docs/guides.md`
+  (the Season view paragraph said adjusting markers "comes in a later update")
 
 **Steps**
-- [ ] **Step 1:** An Edit action per row that opens that episode in the editor (the view switch already exists in
+- [x] **Step 1:** An Edit action per row that opens that episode in the editor (the view switch already exists in
   `openEpisode()` ~257), beside the existing Review button.
-- [ ] **Step 2:** After a save, the Season row's times, chips and per-server dots reflect it without a reload.
-- [ ] **Step 3:** e2e: edit from the Season view, come back, see 🔒 and the updated dots.
+- [x] **Step 2:** After a save, the Season row's times, chips and per-server dots reflect it without a reload.
+- [x] **Step 3:** e2e: edit from the Season view, come back, see 🔒 and the updated dots.
+
+**Notes (as built, 2026-09-20)**
+
+- **"Published" is dropped** (owner question 3 on `ui-copy.md`; the mockup dropped it and left it open). The word was
+  only ever printed when *every* enabled server's dot was already green, so it said nothing the three green dots do
+  not — while the dots say it per server and name each one in their tooltip. With Edit living in that column the
+  column is an action column: a status word in it makes the buttons start at a different x on every row, and a row
+  with no enabled server printed nothing at all, which read as "not published" rather than "nothing to publish".
+  Reversing this is one `el('span', …)` in `actionCell()`.
+- **Edit is on every row, including a row nothing was decided for.** Whether a file can be adjusted at all depends on
+  what each owning server can show (`markers_inspector.editableTypes` + `vendorsFor`), which the season payload does
+  not carry — so the season view cannot answer it without a second, partial copy of that rule. The episode's own tab
+  answers it instead, and the click is never silent: `editFile` shows **`Nothing to adjust on this episode yet —
+  Re-detect checks the file now.`** when the editor declines to open. That string is new — the mockup has no surface
+  for a row with no marker to drag (it is added to `ui-copy.md` §5).
+- **The editor was reused, not copied.** Task 5 already exported `window.markersEditor`; `open: startEditing` became
+  `openFile: editFile`, which awaits `loadMarkersInspector(item)` and only then opens the editor, and only while that
+  file is still the one on screen.
+- **"Without a reload" is a re-read, not a client-side patch.** A row's dots come from `store.get_publish_state`
+  (`inspect._dot`), whose vocabulary is not the editor's per-server `result` vocabulary; folding one into the other in
+  JS would be a second source of truth. Instead a save, lock or unlock calls `markersSeason.forgetFile(path)`, which
+  drops every cached season **that lists that episode** (a season is cached under the path it was asked for, which is
+  any one of its episodes), so the next look re-reads `GET /api/markers/season`. Both caches are dropped **before**
+  `applySaved`'s "is this still the file on screen?" guard and from the path the request set off with, not the path on
+  screen: the write reached the server either way, so a user who clicks another file mid-save must not get the
+  pre-save row back afterwards.
 
 **Proves:** `tests/e2e/test_intro_credits_season.py`.
 **Done when:** every episode in the Season view can be opened straight into the editor, and a save is visible in the

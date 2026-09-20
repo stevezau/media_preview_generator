@@ -678,7 +678,9 @@ season** lists the season's episodes (the same group season audio uses) with eac
 sources behind them, and one dot per server. A season of more than 40 episodes lists the 40 nearest, and the header
 says so ("60 episodes (showing the 40 nearest)"). It reads only this app's own records, so a whole season loads at
 once; **This episode** stays the place for what a server shows right now. An episode in **Needs review** has a
-**Review** button (its tooltip gives the reason) that opens that episode; adjusting markers comes in a later update.
+**Review** button (its tooltip gives the reason) that opens that episode. Every row also has an **Edit** button that
+opens that episode in the marker editor; once you save there, that row shows your times and its 🔒 lock the next time
+you open **Whole season**.
 
 **Publish N to M servers** queues a Normal-priority Intro & Credits job named `Intro & Credits: <show> · Season N`
 (or `· Specials`) for exactly the listed episodes: decided episodes go to every server that doesn't show them yet,

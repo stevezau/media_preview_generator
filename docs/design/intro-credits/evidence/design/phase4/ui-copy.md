@@ -148,9 +148,11 @@ If the owner picks option b instead, the badge stays `Keeps Plex's` and the line
 | Row action | `Edit` |
 | Row action ⓘ | `Adjust this episode's intro and credits.` |
 | Existing row action, unchanged | `Review` |
+| Toast, Edit on a row with no marker to drag (added in Task 6 — the mockup has no surface for it) | `Nothing to adjust on this episode yet — Re-detect checks the file now.` |
 
-**Open:** today a fully published row shows the word `Published` in this column. The mockup drops it and lets
-the three green dots say it. Keep it or drop it — owner's call.
+**Answered (Task 6, 2026-09-20): dropped.** `Published` was only printed when every enabled server's dot was
+already green, so it repeated the dots while saying less than they do — and in an action column a status word
+moves the buttons around. The reason is recorded in `plan-phase4.md` Task 6's notes.
 
 ## 6. Settings → Intro & Credits
 
@@ -231,7 +233,8 @@ Unchanged when there is no helper: `Written into this Plex server's database` an
 2. **`Change in Plex UI` on the database row** (§7) — that badge is right for three of the four Plex rows and
    wrong for `Plex's library database isn't on this machine`, which you fix by moving this app or running the
    helper. Leave it, or give that row a `Set up helper` button (which replaces the badge) once Task 10 lands?
-3. **`Published` in the Season view's action column** (§5) — keep the word beside `Edit`, or let the dots say it?
+3. ~~**`Published` in the Season view's action column** (§5) — keep the word beside `Edit`, or let the dots say
+   it?~~ **Answered (Task 6):** dropped; the dots say it. See §5.
 4. **Recap and preview on Plex and Emby** (§1) — refuse the edit outright, as D8 words it, or let it be
    adjusted and saved when some other server can show it, as the pack draws it?
 5. **The P-R6 "Intro & Credits is off" row is dismissible** (§7) — fine, or should it always show?

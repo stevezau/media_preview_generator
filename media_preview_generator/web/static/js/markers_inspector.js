@@ -15,7 +15,8 @@
 // shows how to get a file instead. Depends on app.js globals: apiPost, showToast, getCsrfToken,
 // _initBootstrapTooltips, _disposeBootstrapTooltips, and on window.bootstrap (Modal for Unlock, Tooltip for Lock).
 // Forwards every item and the resolved canonical path to window.markersSeason (markers_season.js), which owns the
-// "This episode" / "Whole season" toggle.
+// "This episode" / "Whole season" toggle, and tells it to forget a file whose markers a save, lock or unlock has
+// just changed. window.markersEditor.openFile is that view's Edit: load a file's tab and open the editor on it.
 // =========================================================================
 (function () {
     'use strict';
@@ -91,6 +92,8 @@
     };
     const LOCK_TIP = 'Keep these times exactly as they are. Later checks won\'t change them.';
     const UNLOCK_TIP = 'Let later checks set these times again.';
+    // The Season view's Edit reaches files the mockup's editor never does: one with no intro or credits to drag.
+    const NOTHING_TO_ADJUST = 'Nothing to adjust on this episode yet — Re-detect checks the file now.';
 
     const cache = new Map();
     let requestSeq = 0;
@@ -1014,11 +1017,12 @@
         if (button.getAttribute('data-bs-toggle') === 'tooltip') new bs.Tooltip(button);
     }
 
+    // Returns whether the editor opened, so the Season view's Edit can say why when it didn't.
     function startEditing() {
         const payload = shown && shown.payload;
-        if (!payload || !payload.duration_ms || editing) return;
+        if (!payload || !payload.duration_ms || editing) return false;
         const types = editableTypes(payload);
-        if (!types.length) return;
+        if (!types.length) return false;
         const model = {};
         types.forEach(function (type) {
             const seed = decisionSeed(payload, type);
@@ -1038,6 +1042,7 @@
         // Focus follows the button that was pressed into the editor, so a keyboard user is already on a handle.
         const first = $('markersInspectorBody').querySelector('.mk-handle:not([disabled])');
         if (first) first.focus({ preventScroll: true });
+        return true;
     }
 
     function cancelEdit() {
@@ -1058,7 +1063,7 @@
         const payload = shown.payload;
         const path = payload.canonical_path || shown.item.media_file;
         const body = markersBody(types, editing.model);
-        const started = { key: shown.key, seq: requestSeq };
+        const started = { key: shown.key, seq: requestSeq, path: path };
         editing.saving = true;
         render(payload, shown.item);
         try {
@@ -1072,10 +1077,14 @@
     }
 
     // The save answers with the stored markers and one row per server, not a whole item payload: fold what it says
-    // into the payload on screen and drop the cache, so the next visit re-reads the file from the API.
+    // into the payload on screen, so the next visit re-reads the file from the API.
     // ``started`` is where the request set off; an answer for a file the Inspector has since left is dropped.
     // Returns whether it was applied, so a caller doesn't announce a save the user can no longer see.
     function applySaved(answer, types, started) {
+        // The write landed on the server whichever file is on screen now, so both caches forget it first: an answer
+        // for a file the user has already left would otherwise leave its pre-save times to come back on the next visit.
+        cache.delete(started.key);
+        if (window.markersSeason) window.markersSeason.forgetFile(started.path);
         if (!shown || !shown.payload || shown.key !== started.key || started.seq !== requestSeq) return false;
         const payload = shown.payload;
         const saved = answer.markers || {};
@@ -1102,7 +1111,6 @@
         });
         results = { servers: answer.servers || [], markers: saved, sent: types.slice() };
         editing = null;
-        cache.delete(shown.key);
         render(payload, shown.item);
         return true;
     }
@@ -1207,7 +1215,7 @@
             };
         });
         const path = payload.canonical_path || shown.item.media_file;
-        const started = { key: shown.key, seq: requestSeq };
+        const started = { key: shown.key, seq: requestSeq, path: path };
         // The publish runs against every server: Adjust and Re-detect stay out of reach until it answers, so an edit
         // can't be started and then thrown away by the answer.
         busy = true;
@@ -1265,6 +1273,9 @@
         if (!payload || !modalEl) return;
         const types = String(modalEl.dataset.types || '').split(',').filter(Boolean);
         const path = payload.canonical_path || shown.item.media_file;
+        // The file being unlocked, held from before the await: an answer arriving after the user opened something
+        // else has to drop this file's cached payload, not the one they moved to.
+        const key = shown.key;
         const button = $('markersUnlockConfirm');
         if (button) button.disabled = true;
         try {
@@ -1273,7 +1284,8 @@
             showToast('Intro & Credits', 'Unlocked — the next check decides these times again.', 'success');
             // What the sources make of these types now is the API's answer, not something this page can work out.
             results = null;
-            cache.delete(shown.key);
+            cache.delete(key);
+            if (window.markersSeason) window.markersSeason.forgetFile(path);
             await loadMarkersInspector(shown.item);
         } catch (error) {
             showToast('Intro & Credits', `Couldn't unlock: ${error.message}`, 'danger');
@@ -1417,6 +1429,17 @@
         }
     }
 
+    // The Season view's Edit: show that episode's tab, then open the editor on it. Whatever the user did while this
+    // file's payload was in flight wins — another file, or "Whole season" — so the editor never opens over someone
+    // else's file or inside the hidden episode view. A file with nothing to adjust says so rather than doing nothing.
+    async function editFile(item) {
+        await loadMarkersInspector(item);
+        const episodeView = $('markersEpisodeView');
+        if (!shown || shown.item !== item || (episodeView && episodeView.hidden)) return;
+        // A file that wouldn't load already says so where the editor would have been.
+        if (shown.payload && !startEditing()) showToast('Intro & Credits', NOTHING_TO_ADJUST, 'info');
+    }
+
     // Nothing is loaded (or it failed): there is nothing to adjust or lock, whatever the buttons said a moment ago.
     function editorButtonsOff() {
         const adjust = $('markersAdjustBtn');
@@ -1470,10 +1493,10 @@
     else wireButtons();
 
     window.loadMarkersInspector = loadMarkersInspector;
-    // The Season view's Edit action (phase 4, Task 6) opens the same editor; the pure time helpers are exported
+    // The Season view's Edit action (phase 4, Task 6) opens this same editor; the pure time helpers are exported
     // beside it so they can be pinned without a JS test runner.
     window.markersEditor = {
-        open: startEditing,
+        openFile: editFile,
         parseClock: parseClock,
         spokenTime: spokenTime,
         lengthText: lengthText,
