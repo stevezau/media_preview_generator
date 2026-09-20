@@ -2068,6 +2068,12 @@ def row_24_jellyfin_store_survives_restart() -> dict:
     name = episode.rsplit("/", 1)[-1]
     items = {sid: p1.jf_items(sid)[episode]["id"] for sid in p1.JELLYFINS}
     want = expected_jellyfin(p1.item_payload(episode))
+    seed_job = None
+    if len(want) != 2:
+        # Running first on a fresh config, nothing has decided this file yet, so the premise below (an intro and
+        # credits to publish again) would fail on a working app. Decide it once, before the markers are dropped.
+        seed_job, _ = run_job({"file_paths": [episode], "library_name": "Phase 2 row 24 first decision"})
+        want = expected_jellyfin(p1.item_payload(episode))
     file_size = (p1.SYNTH_HOST_SEASON / name).stat().st_size
     for sid, item in items.items():
         p1.jf(sid, "DELETE", f"/MediaPreviewBridge/Markers/{item}")
@@ -2112,10 +2118,12 @@ def row_24_jellyfin_store_survives_restart() -> dict:
             checks[f"{sid}: strace attached"] = traces[sid].lines is not None
             checks[f"{sid}: strace: .tmp written, fsynced on the same descriptor, then renamed"] = fsync_before_rename(traces[sid].for_item(items[sid]))  # fmt: skip
     notes = [f"{sid}: store {published[sid]['store']['bytes']} bytes {published[sid]['store']['json']}; served {published[sid]['served']}" for sid in p1.JELLYFINS]  # fmt: skip
+    notes.insert(0, f"decided first by job {seed_job['id']} ({seed_job['status']})" if seed_job else "already decided before this row")  # fmt: skip
     notes += [f"{sid}: strace {'not attached: ' + t.error if t.lines is None else t.for_item(items[sid])}" for sid, t in traces.items()]  # fmt: skip
     evidence = {
         "items": items, "want": want, "file_size": file_size, "dropped": dropped, "published": published,
         "restarted": restarted, "scanned": scanned, "files": files,
+        "seed_job": {"id": seed_job["id"], "status": seed_job["status"]} if seed_job else None,
         "strace": {sid: {"attached": t.lines is not None, "error": t.error, "lines": t.for_item(items[sid])} for sid, t in traces.items()} or "off",
     }  # fmt: skip
     return checks_result(

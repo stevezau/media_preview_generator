@@ -4,6 +4,55 @@ On-screen credit text against the lab servers on `storage` (`up.sh`), real libra
 scrubbed from every result file. Rows and their evidence: `phase3_matrix.py`; per-row JSON in `results/p3-row-NN.json`
 (git-ignored).
 
+## PR image check (pr-241, 003a8d1) (2026-09-20)
+
+**Every row run on the published image passes.** Pulled from GHCR, not built here:
+`ghcr.io/stevezau/media_preview_generator@sha256:813f67cb5550d1ce0abd564c95b88b42379dbdb02ae48fbc4e589f5c677a9042`
+(`linux/amd64`, image label `revision` 1ec71ba7e7b363aa5dde4eb86fe14a4813f6d7fd).
+
+**In the image:**
+- `textdet_helper --check` exits 0 (Python 3.12.3).
+- The pinned model `/app/models/ch_PP-OCRv4_det_infer.onnx` is sha256
+  `d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9`.
+- `ffmpeg 8.1.2`.
+- `CREDITS_TEXT_VERSION` 2, `SKIP_FRAME_IGNORED` `frozenset({'vp9'})`, `server_markers.READER_VERSION` 4.
+
+**Lab:** `mlab-app` recreated on this image with `MLAB_APP_GPU=nvidia` and a fresh `mlab_app_config`, then
+`phase2_matrix.py configure` and `phase3_matrix.py configure`. Raw results kept in `results/pr-241/` (git-ignored):
+`p2-row-02.json`, `p2-row-24.json`, `p3-row-{01,02,03,16}.json` and `synth-audio-credits-text.json`.
+
+| Row | Result | Evidence |
+|---|---|---|
+| P3 1 Capability and Settings row | pass | Available in the CPU and GPU containers; a broken model path reports "Not available" naming it. |
+| P3 2 Scene after the credits, High then Medium | pass | High: Needs review, nothing published. Medium: published from credit text alone; both Embys say it skips to the end; the Inspector's Credit text lane shows start-end. |
+| P3 3 GPU decode and WebGPU | pass (on the second run, see below) | `-hwaccel cuda`, `scale_cuda=320:180`, `-threads 2`; self-test "GPU (median 11.78 ms per frame, CPU 17.92 ms; GPU/CPU 0.654 per round), pinned to 0000:02:00.0"; the GPU and CPU answers agree within 2 s at both edges. |
+| P3 16 A roll to the end of the file | pass | No end stored; the decision runs to the end of the file; 2 decodes, 1 refine window; neither Emby says it skips to the end. |
+| P2 24 Jellyfin store file | pass | Both Jellyfins: 145-byte complete JSON with the item's Intro, Outro and file size; served after publish, after a container restart and after a library scan; no `.tmp` left; strace shows write → `fsync` on the same descriptor → rename. |
+
+**Synth Audio re-check (credit text must give no answer): confirmed.** Phase 2 row 2 passes, and its own notes read
+"credits published: {}" at High and at Medium. The Inspector payload of all five episodes, read after that row and
+kept in `results/pr-241/synth-audio-credits-text.json`, shows one `credits_text` row with no start on each, and
+credits `no_evidence` on each.
+
+**Row 3 failed its first run, on GPU contention, not on the image.**
+- The self-test read "CPU (the GPU wasn't at least 10% faster than the CPU (median 17.08 vs 17.04 ms per frame;
+  GPU/CPU 0.977 per round))", so the row's "the self-test kept the GPU" check failed.
+- At that moment the host's own `whisper-asr` service held the GPU at 92–100% with 3.2 GiB in use, for the whole run.
+- Once it finished and the GPU read 0%, the same row passed with GPU/CPU 0.654. Everything else in the row (the CUDA
+  decode flags, the WebGPU helper, both answers) passed in both runs.
+- The app behaved correctly: it measured, found no gain, and moved text detection to the CPU. The same flip under
+  another load on the card is recorded on `plex` in "Side-by-side on `plex` (roadmap checkpoint 2, owner,
+  2026-09-19)".
+- The failing run's own result file was overwritten by the passing re-run, and the app container is recreated inside
+  the row, so its log went with it. The numbers and the `nvidia-smi` readings above are from watching that run, not
+  from a kept artefact. `results/pr-241/p3-row-03.json` is the passing run.
+
+**Harness fix (row 24, `phase2_matrix.py`).** Row 24 read the file's decided intro and credits *before* dropping the
+markers, so on a fresh config, where nothing had decided that file yet, its premise failed and every comparison
+against an empty expectation failed with it. It now decides the file once first. Verified by wiping
+`mlab_app_config`, configuring, and running row 24 alone: pass, with the seeding job's id and status in the row's
+own evidence (`seed_job`).
+
 ## Final (final-2, bd9e561) (2026-09-19)
 
 **The 12 storage rows (1–11 and 16) pass on the first run.** Rows 12–15 run on `plex` (another agent) and are not part
