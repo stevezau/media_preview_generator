@@ -1,7 +1,17 @@
 # The Plex marker agent, beside Plex. Run this on the machine Plex runs on — that is the whole point of it.
 #
-#   printf 'AGENT_TOKEN=%s\n' "$(openssl rand -hex 24)" > .env && chmod 600 .env
+#   cat > .env <<'EOF'
+#   AGENT_TOKEN=<paste the output of: openssl rand -hex 24>
+#   PLEX_CONFIG=/path/to/plex/config
+#   PUID=1000
+#   PGID=1000
+#   EOF
+#   chmod 600 .env
 #   docker compose up -d
+#
+# AGENT_TOKEN and PLEX_CONFIG have no default at all: leave either out and compose stops with a message naming it,
+# rather than starting an agent with nothing mounted. PUID/PGID do fall back to 1000:1000 — set them if Plex runs
+# as anyone else, because an agent running as the wrong user starts and looks healthy but can write no markers.
 #
 # Then paste the same key, and this machine's address (http://<this-host>:9494), into the app:
 # Servers → your Plex → Edit → Intro & Credits → Plex marker agent.
@@ -10,26 +20,34 @@ services:
     image: ghcr.io/stevezau/plex-marker-agent:1.0.0
     container_name: plex-marker-agent
     restart: unless-stopped
-    # The user that owns Plex's database. Plex's own container runs as this user (PLEX_UID/PLEX_GID); the agent
-    # can't write the database as anyone else, and refuses to try.
-    user: "1000:1000"
+    # The user that owns Plex's database — the same PUID/PGID Plex's own container runs as. The agent can't write
+    # the database as anyone else, and refuses to try. 1000:1000 is only the common case, not a promise about yours.
+    user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       # The shared key. Keep it in .env (never in this file, never in the image).
       AGENT_TOKEN: ${AGENT_TOKEN:?set AGENT_TOKEN in .env}
       # Plex's config folder as THIS container sees it. The agent derives the database path from it and never takes
       # a path from the app.
       PLEX_CONFIG_DIR: /plex/Library/Application Support/Plex Media Server
-      AGENT_PORT: 9494
+      AGENT_PORT: ${AGENT_PORT:-9494}
       TZ: ${TZ:-UTC}
     volumes:
-      # Plex's config volume. Read-write: writing markers is the job. Nothing else on the host is mounted.
-      - /path/to/plex/config:/plex
+      # Plex's config folder on THIS host. Read-write: writing markers is the job. Nothing else on the host is
+      # mounted. It must be the same local disk Plex itself uses — a copy or a network share is refused, not written.
+      - ${PLEX_CONFIG:?set PLEX_CONFIG in .env to Plex's config folder on this host}:/plex
     ports:
-      # Bind to the interface the app reaches this host on. The key is the only thing between a caller and Plex's
-      # database, so don't publish this to the internet.
-      - "9494:9494"
+      # All interfaces by default, because the app that calls this is on another machine — that is the only reason
+      # the agent exists, and 127.0.0.1 would make it unreachable. Set AGENT_BIND in .env to the one LAN address the
+      # app reaches this host on if this machine has more than one. The key is all that stands between a caller and
+      # Plex's database: keep this on your LAN and never forward the port from the internet.
+      - "${AGENT_BIND:-0.0.0.0}:${AGENT_PORT:-9494}:${AGENT_PORT:-9494}"
     networks:
       - plex
+    # It opens one SQLite file as a normal user; nothing it does needs a capability or a setuid binary.
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
     deploy:
       resources:
         limits:

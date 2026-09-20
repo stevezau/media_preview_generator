@@ -123,6 +123,9 @@ include = ["media_preview_generator*"]
 testpaths = ["tests"]
 addopts = [
     "--cov=media_preview_generator",
+    # The Plex marker agent ships in its own folder, outside the package, but tests/test_plex_marker_agent.py
+    # covers it like any other module — without this its lines counted towards nothing at all.
+    "--cov=plex-marker-agent",
     "--cov-report=term-missing",
     "--cov-fail-under=70",
     "--tb=short",
@@ -155,7 +158,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["media_preview_generator"]
+source = ["media_preview_generator", "plex-marker-agent"]
 omit = [
     "*/tests/*",
     "*/__pycache__/*",

@@ -42,34 +42,47 @@ It refuses exactly what the in-process writer refuses, because it *is* the in-pr
 
 ## Running it
 
+`docker-compose.yml` is in this folder; everything that has to match your machine lives in `.env` beside it.
+`AGENT_TOKEN` and `PLEX_CONFIG` have no default — leave either out and compose stops with a message naming it,
+instead of starting an agent with nothing mounted. `PUID`/`PGID` do fall back to `1000`, so set them if Plex runs
+as anyone else: an agent running as the wrong user starts and reports healthy, then writes no markers at all.
+
 ```bash
-printf 'AGENT_TOKEN=%s\n' "$(openssl rand -hex 24)" > .env
+{
+  printf 'AGENT_TOKEN=%s\n' "$(openssl rand -hex 24)"
+  printf 'PLEX_CONFIG=%s\n' /path/to/plex/config
+  printf 'PUID=%s\nPGID=%s\n' 1000 1000
+} > .env
 chmod 600 .env
 docker compose up -d
 ```
 
-`docker-compose.yml` is in this folder; change the Plex config volume and the `user:` line to match your Plex
-container, then paste the address (`http://<this-machine>:9494`) and the same key into the app:
+Then paste the address (`http://<this-machine>:9494`) and the same key into the app:
 **Servers → your Plex → Edit → Intro & Credits → Plex marker agent**.
 
-Without compose:
+Without compose — note `--env-file .env`, so the key comes out of the file you just wrote rather than an empty
+shell variable (an empty `AGENT_TOKEN` makes the agent exit on start and the container restart in a loop):
 
 ```bash
+# --user takes no .env value here; put the uid:gid that owns Plex's database in it yourself.
 docker run -d --name plex-marker-agent --restart unless-stopped \
   --user 1000:1000 \
-  -e AGENT_TOKEN="$AGENT_TOKEN" \
+  --env-file .env \
   -e PLEX_CONFIG_DIR="/plex/Library/Application Support/Plex Media Server" \
   -v /path/to/plex/config:/plex \
   -p 9494:9494 \
+  --security-opt no-new-privileges:true --cap-drop ALL \
   ghcr.io/stevezau/plex-marker-agent:1.0.0
 ```
 
 | Setting | What it is |
 |---|---|
 | `AGENT_TOKEN` | The key both sides share. Required — the agent won't start without one. Never logged. |
+| `PLEX_CONFIG` | Plex's config folder **on this host** (compose only; the `-v` source above). Required. |
 | `PLEX_CONFIG_DIR` | Plex's config folder as **this container** sees it. The database path is derived from it. |
-| `AGENT_PORT` | Port to listen on (default 9494). |
-| `user:` / `--user` | The user that owns Plex's database (the same `PLEX_UID`/`PLEX_GID` Plex runs as). The agent is non-root and can't write the database as anyone else. |
+| `AGENT_PORT` | Port to listen on (default 9494). It moves what the agent binds *inside* the container, so the published port has to move with it: compose derives the mapping from this one value, but a hand-written `docker run` needs its `-p` changed to match. |
+| `AGENT_BIND` | Host address compose publishes on (default `0.0.0.0`, all interfaces). Set it to the one LAN address the app reaches this machine on if this host has several. |
+| `PUID` / `PGID` | The user that owns Plex's database (the same values Plex's own container runs as). Defaults to `1000`. The agent is non-root and can't write the database as anyone else. |
 
 Three things to keep in mind:
 
@@ -92,6 +105,23 @@ The image carries no ffmpeg, no GPU drivers and none of the app's media librarie
 `--no-deps`, and `requirements.txt` holds the handful of libraries it really needs — each line copied from the app's
 `pyproject.toml`, with a test that fails if one drifts.
 
+`requirements.txt` is the hand-written input; `requirements.lock.txt` is what the image actually installs. It pins
+the whole closure (the transitive libraries too) at one version each with `--generate-hashes`, and the Dockerfile
+installs it with `--require-hashes`, so two builds of one tag are the same image rather than whatever PyPI happened
+to serve that day. The base image is pinned by digest for the same reason. Regenerate the lock after editing
+`requirements.txt` — from the repository root:
+
+```bash
+docker run --rm -v "$PWD/plex-marker-agent:/w" -w /w python:3.12-slim-bookworm \
+  sh -c 'pip install pip-tools && pip-compile --generate-hashes --strip-extras --no-header \
+           --output-file=requirements.lock.txt requirements.txt'
+```
+
+CI builds this image, boots it and calls it on every pull request (`marker-agent-image` in `.github/workflows/ci.yml`),
+so a new module-scope import under `markers/publishers/` that the `--no-deps` install can't satisfy fails a PR
+instead of a release. Releases are cut by pushing a `marker-agent-v<version>` tag, which runs
+`.github/workflows/marker-agent.yml`.
+
 ## Versions
 
 The agent has its own version (`AGENT_VERSION`, the image tag) and implements one or more numbered **protocols** —
@@ -106,6 +136,11 @@ version and protocols off every answer, so a mismatch is caught on the first cal
 
 A new protocol number is only ever *added* to the agent, never swapped, so an agent can serve an older app while you
 update them one at a time. Update the agent first: a newer agent still speaks the older app's protocol.
+
+`AGENT_VERSION` in `plex_marker_agent.py` is the one place that version is decided. The image tag in
+`docker-compose.yml` and in the `docker run` above are copies of it that a human has to read, so a test
+(`TestTheImageStaysInStepWithTheApp`) fails when either drifts from it, and the release workflow refuses a
+`marker-agent-v<version>` tag whose version isn't the one the code reports.
 
 ## The contract
 

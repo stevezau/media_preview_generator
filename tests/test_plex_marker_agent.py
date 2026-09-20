@@ -6,6 +6,7 @@ lives outside the package and is imported from its folder.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import sys
 import tomllib
@@ -14,6 +15,10 @@ from unittest.mock import MagicMock
 from urllib.parse import urlsplit
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 from media_preview_generator.markers.models import Marker, MarkerType
 from media_preview_generator.markers.publishers import plex_db, plex_remote
@@ -38,6 +43,36 @@ INTRO = Marker(T.INTRO, 11_000, 37_000, ("chapters",))
 LOCKED_INTRO = Marker(T.INTRO, 20_000, 44_000, ("user",), locked=True)
 CREDITS = Marker(T.CREDITS, 1_299_000, DUR, ("chapters",))
 AUTH = {"Authorization": f"Bearer {TOKEN}", plex_remote.PROTOCOL_HEADER: str(plex_remote.AGENT_PROTOCOL)}
+
+
+def _requirement_lines(filename: str) -> list[str]:
+    """The meaningful lines of a requirements file, with pip's trailing-backslash wrapping undone."""
+    text = (AGENT_DIR / filename).read_text().replace("\\\n", " ")
+    return [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+
+
+def _direct_requirements() -> list[tuple[str, str]]:
+    """The agent's hand-written input requirements, as ``(canonical name, version specifier)`` pairs."""
+    parsed = [Requirement(line) for line in _requirement_lines("requirements.txt")]
+    return [(canonicalize_name(req.name), str(req.specifier)) for req in parsed]
+
+
+def _lock_entries() -> dict[str, str]:
+    """Each whole ``name==version --hash=sha256:... --hash=...`` block of the lock, keyed by canonical name."""
+    entries: dict[str, str] = {}
+    for line in _requirement_lines("requirements.lock.txt"):
+        pinned = Requirement(line.split(" ", 1)[0])
+        entries[canonicalize_name(pinned.name)] = line
+    return entries
+
+
+def _locked_versions() -> dict[str, str]:
+    """The exact version the lock pins for each distribution."""
+    versions: dict[str, str] = {}
+    for name, entry in _lock_entries().items():
+        specifier = Requirement(entry.split(" ", 1)[0]).specifier
+        versions[name] = next(iter(specifier)).version
+    return versions
 
 
 @pytest.fixture(autouse=True)
@@ -471,9 +506,60 @@ class TestTheImageStaysInStepWithTheApp:
         assert lines, "the agent image must pin its dependencies"
         assert set(lines) <= app_deps
 
+    def test_every_direct_dependency_is_pinned_in_the_lock_the_image_installs(self):
+        # requirements.txt is the hand-written input; requirements.lock.txt is what the Dockerfile installs, with
+        # --require-hashes. Editing one without regenerating the other means the image ships something nobody chose.
+        locked = _locked_versions()
+        assert locked, "the agent image must install a hash-pinned lock"
+        for name, _ in _direct_requirements():
+            assert name in locked, f"{name} is in requirements.txt but not pinned in requirements.lock.txt"
+
+    def test_the_lock_pins_a_version_the_input_actually_allows(self):
+        # A lock regenerated against a stale requirements.txt would sail past the test above: every name is still
+        # there, just at a version the range no longer permits.
+        locked = _locked_versions()
+        for name, specifier in _direct_requirements():
+            assert Version(locked[name]) in SpecifierSet(specifier), (
+                f"requirements.lock.txt pins {name}=={locked[name]}, which requirements.txt's '{specifier}' excludes"
+            )
+
+    def test_the_dockerfile_actually_installs_the_lock_the_tests_above_guard(self):
+        # Without this, the three lock tests guard a file the image need not use: reverting the Dockerfile to
+        # `-r requirements.txt`, or to a floating `FROM python:3.12-slim-bookworm`, leaves them all green while the
+        # README's reproducibility claim quietly becomes false.
+        # Instructions only, with line continuations joined — a comment that happens to quote the right flags must
+        # not satisfy this, and a wrapped RUN must not hide from it.
+        dockerfile = (AGENT_DIR / "Dockerfile").read_text().replace("\\\n", " ")
+        instructions = [line for line in dockerfile.splitlines() if not line.lstrip().startswith("#")]
+        installs = [line for line in instructions if "pip wheel" in line and "-r " in line]
+        assert len(installs) == 1, f"expected exactly one dependency install, found {installs}"
+        assert "--require-hashes" in installs[0] and "requirements.lock.txt" in installs[0]
+        assert any("COPY plex-marker-agent/requirements.lock.txt" in line for line in instructions)
+
+        bases = [line for line in instructions if line.startswith("FROM ")]
+        assert bases, "the image must declare a base"
+        for base in bases:
+            assert "@sha256:" in base, f"base pinned by tag, not digest: {base}"
+
+    def test_every_locked_distribution_carries_hashes(self):
+        # --require-hashes refuses the whole file if one entry has none, so a hand-edited lock breaks the build
+        # rather than the image. Catch it here instead.
+        for name, entry in _lock_entries().items():
+            assert "--hash=sha256:" in entry, f"{name} is pinned without a hash; --require-hashes will refuse the file"
+
     def test_the_version_the_agent_reports_is_one_this_app_accepts(self):
         assert not plex_remote.agent_too_old(plex_marker_agent.AGENT_VERSION)
         assert plex_remote.AGENT_PROTOCOL in plex_marker_agent.PROTOCOLS
+
+    @pytest.mark.parametrize("document", ["docker-compose.yml", "README.md"])
+    def test_the_image_tag_people_are_told_to_pull_is_the_version_the_agent_reports(self, document):
+        # AGENT_VERSION is the one place this number is decided. docker-compose.yml and README.md hand the user a
+        # copy of it, and the app refuses an agent whose version it doesn't accept — so a tag that drifts from the
+        # source sends people to an image that argues with the app they just configured.
+        text = (AGENT_DIR / document).read_text()
+        tags = set(re.findall(r"ghcr\.io/[\w.-]+/plex-marker-agent:(\S+)", text))
+        assert tags, f"{document} should name the image tag the user is told to pull"
+        assert tags == {plex_marker_agent.AGENT_VERSION}
 
 
 class TestWhichPlexTheAgentServes:

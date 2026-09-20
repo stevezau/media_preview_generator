@@ -453,6 +453,111 @@ jobs:
           fi
           echo "$MODEL_PATH matches the pin ($expected)"
 
+  marker-agent-image:
+    # The Plex marker agent (plex-marker-agent/) installs the app's wheel with --no-deps, so the only libraries in
+    # that image are the ones requirements.lock.txt names. tests/test_plex_marker_agent.py can't see when that stops
+    # being enough: it imports the agent inside a full dev environment, so a new module-scope `import numpy`
+    # anywhere under markers/publishers/ would leave every one of those tests green and still kill the container at
+    # boot. Nothing else in CI builds this image. This job is what proves the --no-deps install still works: it
+    # builds it, boots it and calls it.
+    #
+    # Runs on every event this workflow handles, with no `if:` of its own (only `needs: lint`). paths-ignore doesn't exclude
+    # plex-marker-agent/, and `*.md` only matches top-level markdown (a GitHub path glob's `*` doesn't cross `/`),
+    # so a change anywhere in that folder reaches this job. amd64 only — the release workflow
+    # (.github/workflows/marker-agent.yml) builds arm64 on a native runner, and the image has no compiled code, so
+    # an arm64 build here would only re-prove the same pure-Python wheels.
+    name: Plex marker agent image (build, boot, call)
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CHECK_IMAGE: plex-marker-agent:ci
+      CONTAINER: plex-marker-agent-ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the agent image (loaded locally, never pushed)
+        uses: docker/build-push-action@v6
+        with:
+          # The repository root: the image installs the app's own source, which is what the agent runs.
+          context: .
+          file: plex-marker-agent/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ env.CHECK_IMAGE }}
+          # No GHA layer cache, deliberately. A fork's pull_request run gets a read-only cache token, and
+          # `cache-to` then fails the whole build (the same hardening docker-pr.yml documents). A cold build of
+          # this image is ~74s locally — a few minutes on a runner — so there is nothing worth that risk.
+
+      - name: Boot it and call it
+        run: |
+          set -euo pipefail
+          # A throwaway key for this one container, generated here and masked out of the log. The agent refuses to
+          # start without one, so booting it at all needs a value; it is never committed and never leaves this job.
+          token="$(openssl rand -hex 24)"
+          echo "::add-mask::$token"
+
+          config_dir="$RUNNER_TEMP/plex-config"
+          mkdir -p "$config_dir"
+          trap 'docker logs "$CONTAINER" 2>&1 | tail -40 || true; docker rm -f "$CONTAINER" >/dev/null 2>&1 || true' EXIT
+
+          docker run -d --name "$CONTAINER" \
+            -e AGENT_TOKEN="$token" \
+            -e PLEX_CONFIG_DIR=/plex \
+            -v "$config_dir:/plex" \
+            -p 127.0.0.1:9494:9494 \
+            "$CHECK_IMAGE"
+
+          # The image's own HEALTHCHECK hits /v1/health, so "healthy" already means gunicorn imported the app —
+          # which is the --no-deps claim under test.
+          for _ in $(seq 1 60); do
+            status="$(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo gone)"
+            if [[ "$status" == "healthy" ]]; then
+              break
+            fi
+            if [[ "$status" == "gone" || "$status" == "unhealthy" ]]; then
+              echo "::error::Container went $status before it became healthy"
+              exit 1
+            fi
+            sleep 2
+          done
+          if [[ "$(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER")" != "healthy" ]]; then
+            echo "::error::Container never became healthy"
+            exit 1
+          fi
+          echo "Container is healthy"
+
+          # /v1/health takes no key; /v1/ping needs one and reaches the app's own plex_db code.
+          curl -fsS http://127.0.0.1:9494/v1/health > health.json
+          curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:9494/v1/ping > ping.json
+          jq -e '.ok == true' health.json > /dev/null
+          jq -e '.ok == true and (.result | has("db_present") and has("machine_identifier"))' ping.json > /dev/null
+
+          # An unauthenticated call is refused and says nothing about this Plex.
+          code="$(curl -s -o unauth.json -w '%{http_code}' http://127.0.0.1:9494/v1/ping)"
+          if [[ "$code" != "401" ]]; then
+            echo "::error::/v1/ping without a key answered $code, expected 401"
+            exit 1
+          fi
+          jq -e '.ok == false and .error.kind == "auth" and (.error | has("message") | not)' unauth.json > /dev/null
+
+          # The image reports the version the source says it should, so a stale build can't be published quietly.
+          expected="$(python3 -c 'import ast, sys; body = ast.parse(open(sys.argv[1]).read()).body; print(next(n.value.value for n in body if isinstance(n, ast.Assign) and any(getattr(t, "id", "") == "AGENT_VERSION" for t in n.targets)))' plex-marker-agent/plex_marker_agent.py)"
+          actual="$(jq -r '.agent.version' ping.json)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::The image reports agent version $actual, plex_marker_agent.py says $expected"
+            exit 1
+          fi
+          echo "Agent $actual answered /v1/health and /v1/ping, and refused a call without the key"
+
   context:
     runs-on: ubuntu-latest
     # Just resolves git/branch metadata — no test results needed. Letting

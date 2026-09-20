@@ -1,0 +1,234 @@
+name: Plex marker agent — build and publish image
+
+on:
+  push:
+    tags:
+      - "marker-agent-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish (e.g. marker-agent-v1.0.0). The build uses that tag's commit."
+        required: true
+
+# GHCR, with the workflow's own token — the same registry and auth docker-pr.yml uses. (The app image goes to
+# Docker Hub under DOCKER_USERNAME/DOCKER_PASSWORD; the agent is a separate, much smaller image and the compose
+# file and README both name ghcr.io, so those secrets are never needed here.)
+permissions:
+  contents: read
+  packages: write
+
+# Two tag pushes must not race the manifest that both would write.
+concurrency:
+  group: marker-agent
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: plex-marker-agent
+
+jobs:
+  resolve:
+    name: Resolve and check the version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      version: ${{ steps.ver.outputs.version }}
+      image: ${{ steps.ver.outputs.image }}
+      app_version: ${{ steps.app.outputs.version }}
+    steps:
+      - name: Resolve tag
+        id: tag
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^marker-agent-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag must look like marker-agent-vX.Y.Z (got '$TAG')"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # A manual run builds the tag it names, never the branch it was started from; checkout fails if the tag doesn't exist.
+      - name: Checkout the tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          fetch-depth: 0  # setuptools-scm needs full history for the app version baked into the image
+          persist-credentials: false
+
+      - name: Check the build is the tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "$(git rev-parse "refs/tags/${TAG}^{commit}")" ]]; then
+            echo "::error::Checked-out commit is not ${TAG}"
+            exit 1
+          fi
+
+      - name: The tag is the version the agent reports
+        id: ver
+        # plex_marker_agent.AGENT_VERSION is the single source of truth for this number; the image tags in
+        # docker-compose.yml and README.md are copies a test keeps in step with it. Checking the git tag here closes
+        # the last gap: a release can't publish an image whose tag disagrees with what the running agent tells the app.
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          version="${TAG#marker-agent-v}"
+          # Parsed, not imported: the module imports flask and the app package, neither of which this runner has.
+          reported="$(python3 -c 'import ast, sys; body = ast.parse(open(sys.argv[1]).read()).body; print(next(n.value.value for n in body if isinstance(n, ast.Assign) and any(getattr(t, "id", "") == "AGENT_VERSION" for t in n.targets)))' plex-marker-agent/plex_marker_agent.py)"
+          if [[ "$reported" != "$version" ]]; then
+            echo "::error::${TAG} would publish :${version}, but AGENT_VERSION says ${reported}. Bump one to match the other."
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${OWNER,,}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Publishing ghcr.io/${OWNER,,}/${IMAGE_NAME}:${version}"
+
+      # Its own interpreter, like every other pip-installing job here (ci.yml's lint, gpu-tests.yml): the runner's
+      # /usr/bin/python3 is PEP 668 externally-managed, so a bare `pip install` into it errors out.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve the app version to bake into the image
+        id: app
+        # .dockerignore excludes .git/, so setuptools-scm inside the build has no history to describe from and would
+        # ship the Dockerfile's 0.0.0.dev0. Compute it out here, where the full history IS checked out, so the wheel
+        # inside the agent says which app build it came from. `marker-agent-v*` is not a release tag, so this
+        # describes from the last app release — that is the point, not a bug.
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet "setuptools-scm>=8"
+          version="$(python3 -m setuptools_scm 2>/dev/null || true)"
+          if [[ -z "$version" ]]; then
+            echo "::warning::setuptools-scm could not describe this commit; baking 0.0.0.dev0"
+            version="0.0.0.dev0"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "App wheel version: $version"
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: resolve
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Native runners per architecture, like ci.yml's app image — no QEMU. Plex runs on plenty of arm64 boxes,
+          # and the agent has to run on the same machine Plex does, so arm64 is not optional here.
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.resolve.outputs.tag }}
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          # The repository root: the image installs the app's own source, which is what the agent runs.
+          context: .
+          file: plex-marker-agent/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            SETUPTOOLS_SCM_PRETEND_VERSION=${{ needs.resolve.outputs.app_version }}
+          outputs: type=image,name=${{ needs.resolve.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: marker-agent-digest-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish the version tag
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: marker-agent-digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create the multi-arch manifest
+        # One tag, the exact one docker-compose.yml and README.md tell people to pull. No `:latest`: the app refuses
+        # an agent older than its MIN_AGENT_VERSION by name, so the operator is told which version to move to — a
+        # floating tag would quietly move an agent that holds Plex's database open, with nothing asking for it.
+        working-directory: /tmp/digests
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            -t "${{ needs.resolve.outputs.image }}:${{ needs.resolve.outputs.version }}" \
+            $(printf '${{ needs.resolve.outputs.image }}@sha256:%s ' *)
+
+      - name: Both architectures are in the published manifest
+        env:
+          REF: ${{ needs.resolve.outputs.image }}:${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$REF" --raw > manifest.json
+          for arch in amd64 arm64; do
+            if ! jq -e --arg a "$arch" '.manifests[] | select(.platform.architecture == $a)' manifest.json > /dev/null; then
+              echo "::error::$REF has no linux/$arch"
+              exit 1
+            fi
+          done
+          echo "$REF carries linux/amd64 and linux/arm64"
+
+      - name: Summary
+        # No GitHub release is created on purpose. scripts/refresh_release_notes.py takes EVERY non-draft release
+        # with no tag filter, and version_check.py reads /releases/latest — so a release named marker-agent-v1.0.0
+        # would become the app's "latest version" for every user. The image in GHCR is the artifact.
+        run: |
+          {
+            echo "## Plex marker agent ${{ needs.resolve.outputs.version }} published"
+            echo ""
+            echo '```bash'
+            echo "docker pull ${{ needs.resolve.outputs.image }}:${{ needs.resolve.outputs.version }}"
+            echo '```'
+            echo ""
+            echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
+            echo "- App wheel inside the image: \`${{ needs.resolve.outputs.app_version }}\`"
+            echo "- No GitHub release: a \`marker-agent-v*\` release would be served to users as the app's own latest version."
+          } >> "$GITHUB_STEP_SUMMARY"
