@@ -131,9 +131,74 @@ restarts the server, installs the older build, restarts, then puts the current b
 Jellyfin's install row keeps its existing id (`plugin_installed`), Emby's is `markers_plugin_installed`; the outdated
 row is `markers_plugin_outdated` on both.
 
+## Row 13 — phase 1-3 regression on the final image
+
+**Result: 52 of 52 rows pass** (phase 2 24 of 24, phase 1 16 of 16 through phase 2 row 19, phase 3 12 of 12), on the
+final images: app `plex-previews:phase4-lab` `sha256:6132dddab13b40de7e7…`, agent `plex-marker-agent:phase4-lab`
+`sha256:835cc48b425d43d8305…`. Product bugs: none. One row failed once, on a stale reference file (below).
+Listing: `MLAB_DIR=<lab> ./phase4_summary.py row13`. Run by `phase4_row13_run.sh`, one row per process, after
+`phase4_row13_reset.py` and a fresh config (2026-09-21).
+
+| Matrix | Rows, in the order run | Result |
+|---|---|---|
+| Phase 2 | 23, 1, 21, 17, 19, 22, 2, 3, 4, 18, 5, 6, 8, 7, 9, 10, 11, 12, 13, 14, 16, 15, 20, 24 | 24 of 24 pass |
+| Phase 1 (inside phase 2 row 19, 600 s wait) | 14, 1, 2, 3, 13, 4, 6, 5, 7, 8, 9, 10, 16, 18, 19, 17 | 16 of 16 pass |
+| Phase 3 | 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16 | 12 of 12 pass (row 10 on its second run) |
+
+Phase 2 rows 25 and 26 and phase 3 row 17 were not run again: they passed earlier today on this image (17 phase-4 rows).
+Phase 3 row 11 re-runs phase 2 rows 1, 3 and 8 and phase 1 rows 2 and 7 itself, so those result files carry that later run.
+Phase 3 rows 12-15 belong to the plex host and are not part of this.
+
+### Two setup lessons
+
+1. **Row order is not numeric.** Each results doc names its order (phase 2 starts 23, 1, 21, 17, 19; phase 3 needs row 2's
+   stored answer for rows 2-9). The order is now in `phase4_row13_run.sh`.
+2. **Phase 2 row 19 (the phase 1 regression) does not reset `markers.db`.** Run on the earlier config, phase 1 row 1
+   reports `markers_up_to_date` where the regression expects `markers_published`. The documented clean state is: our markers
+   off the lab servers, `mlab-app` and `mlab_app_config` removed, `./app.sh recreate`, `./phase2_matrix.py configure`.
+
+### The clean-up, as a script
+
+`phase4_row13_reset.py` is the "Lab reset used" step of the phase 1 and 2 results as a script (none was committed).
+Detection off, one normal job over the lab's own libraries (the phase 1 scale mounts are left alone), and only our
+markers go; Plex's own rows stay. The first job wrote 19 files and left 14 Jellyfin plugin store entries on each Jellyfin
+(files from 2026-09-19 and 2026-09-20). The app's new `markers.db` has no record of them, so they read as the server's
+own: the fresh-config limit in phase 1's findings, not a new bug. The script deletes those store entries for lab items
+through the plugin's own DELETE, keeps the one file an earlier lab test left (Synth Show S01E01), checks Emby's plugin
+`Stored` count is 0, and exits 1 if anything else is left. Also archived, not deleted, under `results/before-row13/`: the
+old run's log and script, and phase 1's `S01E01 - Extended` and `S01E03 - Copy` from the Synth Chapters season. Servers were
+rescanned before the run.
+
+### Phase 3 row 10: a stale reference, decided with evidence
+
+It failed on its first run: "every start is within 1 s of the harness: False". Nine of the ten movies matched. The tenth
+(movie 10 in the row's list, harness order) was 5533.000 s in the app against 5544.007 s in `evidence/eval/phase3_credits_gpu.json`, 11.0 s earlier.
+That file dates from 2026-09-18 (credit text rule J version 1); the images carry version 3. Evidence, not assumption:
+
+- The current harness, `credits-text --decode gpu --sets 80 --online`, answers 5533.007 s for that movie. The app's 5533.000 s
+  is within 7 ms of it, so the app still reproduces the harness on the same decode path.
+- Across the 61 files the old and new harness runs share, 5 answers moved, all earlier and all starts, none an end
+  (deltas in seconds): 62.0, 11.0, 72.2, 164.0 and 35.0 earlier. Of the ten movies only that one moved; the other nine agree with
+  both references.
+- The check stayed at 1 s. The reference was regenerated instead. `--sets 205` cannot run: it stops on a file the library
+  replaced on 2026-09-20 (one of the set's recordings; a `FileNotFoundError`). So the committed set 205 answers (movie credit
+  truth) were kept and `movies40`/`tv40` are the new run; `reference_note` in the file says so. Row 10 then passed (10 of 10 starts
+  within 1 s, ends equal, None for None).
+- The reference file is git-ignored (`evidence/**/*.json`), so it is local to `storage`; the old one is in
+  `results/before-row13/phase3_credits_gpu.rule-j-v2.json`, the new run in `results/phase3_credits_gpu.rule-j-v3.json`.
+- One of the ten (movie 3 in the row's list) sits in set 205, which was not regenerated; the app still matched its old answer.
+- The regenerated run reports a GPU decode fallback on that same movie ("gpu_fallbacks"; the earlier reference listed
+  it and one other), so its reference answer comes from the CPU rerun. The app's answer equals it to 7 ms.
+
+### Not run
+
+- Phase 2 rows 25 and 26 and phase 3 row 17: passed earlier today on this image; not repeated.
+- Phase 3 rows 12-15: plex-host rows, outside this regression.
+- Set 205 of the credit-text harness could not be regenerated (above); its old answers stayed in the reference.
+
 ## What did not run, or ran differently
 
-- **Row 13** (phase 1–3 regression on this image): not run, as instructed; the later step does it.
+- **Row 13** (phase 1–3 regression on this image): ran afterwards; see the section above.
 - **A real anime episode** for row 9: synthetic, as above.
 - **The Inspector's page for the D8 refusal (row 8):** the API refusals and the `can_show` the Inspector reads are
   asserted; no browser check of the editor's disabled control beyond the e2e tests in `tests/e2e`.
