@@ -968,6 +968,81 @@ def row_16_roll_to_the_end() -> dict:
     return checks_result(16, "A roll that runs to the end of the file", premise, checks, evidence, notes)
 
 
+@row(17)
+def row_17_locked_credits_from_credit_text() -> dict:
+    """A locked credits marker whose detected answer came from credit text: a forced run still detects, doesn't
+    replace it, and the Inspector shows both."""
+    # phase4_matrix imports this module, so its helpers are imported when the row runs, not at load.
+    import phase4_matrix as p4
+
+    lock = (560_000, 640_000)  # off the roll's 540 s and inside the movie's last 25 %
+    evidence: dict[str, Any] = {}
+    try:
+        p2.set_publish_when("medium")
+        credits_job("row 17 detect", force=True)
+        detected = p1.item_payload(MOVIE)
+        evidence["detected"] = {
+            "decision": detected["decisions"]["credits"],
+            "credit_text": credits_evidence(MOVIE),
+            "served": p4.served(MOVIE),
+        }
+        status, saved, _ = p1.save_markers(MOVIE, [p4.marker("credits", lock)])
+        evidence["saved"] = {"status": status, "served": p4.served(MOVIE), "stored": p4.stored_times(MOVIE)}
+        fetched_before = max(e["fetched_at"] for e in credits_evidence(MOVIE))
+        job, files = credits_job("row 17 forced", force=True)
+        forced = p1.item_payload(MOVIE)
+        evidence["forced"] = {
+            "job": job["id"],
+            "statuses": p4.job_statuses(files, MOVIE),
+            "decision": forced["decisions"]["credits"],
+            "credit_text": credits_evidence(MOVIE),
+            "served": p4.served(MOVIE),
+            "stored": p4.stored_times(MOVIE),
+        }
+    finally:
+        cleanup_errors = p1.run_cleanup(
+            lambda: p1.unlock_markers(MOVIE, ["credits"]),
+            lambda: p2.set_publish_when("high"),
+            lambda: credits_job("row 17 cleanup", force=True),
+            lambda: evidence.update(cleanup={"served": p4.served(MOVIE), "stored": p4.stored_times(MOVIE)}),
+        )
+    detected_decision = evidence["detected"]["decision"]["marker"] or {}
+    forced_decision = evidence["forced"]["decision"]["marker"] or {}
+    forced_text = evidence["forced"]["credit_text"]
+    premise = {
+        "credit text alone decided the credits at Medium, near the roll's 540 s": "credits_text"
+        in (detected_decision.get("decided_by") or [])
+        and near_truth(evidence["detected"]["credit_text"])
+        and not detected_decision.get("locked"),
+        "the lock took on every server before the forced run": status == 200
+        and evidence["saved"]["served"] == p4.expected(None, lock),
+    }
+    checks = {
+        "the forced run completed with every server up to date": job["status"] == "completed"
+        and evidence["forced"]["statuses"] == dict.fromkeys(p2.ALL_MARKER_SERVERS, "markers_up_to_date"),
+        "it detected again: the credit text evidence is newer and still near 540 s": near_truth(forced_text)
+        and max(e["fetched_at"] for e in forced_text) > fetched_before,
+        "it did not replace the lock: the decision is still the user's, at the locked times": (
+            forced_decision.get("start_ms"), forced_decision.get("end_ms"), forced_decision.get("locked")
+        ) == (*lock, True)
+        and forced_decision.get("decided_by") == ["user"],
+        "the Inspector shows both: the locked decision and the credit text row": forced["decisions"]["credits"][
+            "reason"
+        ]
+        == "locked by user"
+        and any(e["source"] == "credits_text" and e["type"] == "credits" for e in forced_text),
+        "every server still serves the locked times and not credit text's": evidence["forced"]["served"]
+        == p4.expected(None, lock),
+        "markers.db holds the lock": evidence["forced"]["stored"] == {"credits": (*lock, 1)},
+        "unlock and a High run leave none of the locked times on any server": all(
+            all(t != "credits" or s != lock[0] for t, s, _ in rows) for rows in evidence["cleanup"]["served"].values()
+        ),
+        "and the row is no longer locked in markers.db": evidence["cleanup"]["stored"].get("credits", (0, 0, 0))[2] == 0,
+        "the lab was put back (unlocked, High, movie re-run)": not cleanup_errors,
+    }  # fmt: skip
+    return checks_result(17, "A locked credits marker whose answer came from credit text", premise, checks, evidence)
+
+
 # ------------------------------------------------------------------------------------------------------- driver
 
 

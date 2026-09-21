@@ -14,8 +14,8 @@
 #   ./phase4_row12_up.sh down         remove both
 #
 # Images (override with MLAB_APP_IMAGE / MLAB_AGENT_IMAGE):
-#   docker build -t media_preview_generator:p4-agent .
-#   docker build -f plex-marker-agent/Dockerfile -t plex-marker-agent:lab .
+#   docker build -t plex-previews:phase4-lab .
+#   docker build -f plex-marker-agent/Dockerfile -t plex-marker-agent:phase4-lab .
 #
 # MLAB_DIR sets the lab folder holding env and synth/ (default: this script's folder), as in up.sh.
 set -euo pipefail
@@ -23,8 +23,8 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly LAB_DIR="${MLAB_DIR:-$SCRIPT_DIR}"
 readonly ENV_FILE="${LAB_DIR}/env"
-readonly APP_IMAGE="${MLAB_APP_IMAGE:-media_preview_generator:p4-agent}"
-readonly AGENT_IMAGE="${MLAB_AGENT_IMAGE:-plex-marker-agent:lab}"
+readonly APP_IMAGE="${MLAB_APP_IMAGE:-plex-previews:phase4-lab}"
+readonly AGENT_IMAGE="${MLAB_AGENT_IMAGE:-plex-marker-agent:phase4-lab}"
 readonly PLEX_CONFIG_IN_AGENT="/plexcfg/Library/Application Support/Plex Media Server"
 
 export MLAB_MOUNTS_ONLY=1

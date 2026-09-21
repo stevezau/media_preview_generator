@@ -174,6 +174,28 @@ def wait_until(what: str, fn, timeout: float = 300, every: float = 2) -> Any:
         time.sleep(every)
 
 
+def run_cleanup(*steps: Any) -> list[str]:
+    """Run every cleanup step of a row, whatever the others do, and return what went wrong.
+
+    A raise inside a ``finally`` skips the lines after it and replaces the row's own error, so a row's cleanup is a
+    list of steps run here instead; the row puts the answer in its checks.
+
+    Args:
+        steps: Callables taking no arguments.
+
+    Returns:
+        One line per step that raised (empty when every step ran clean).
+    """
+    errors = []
+    for step in steps:
+        try:
+            step()
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {scrub(str(exc))[:300]}")
+            say(f"  cleanup step failed: {errors[-1]}")
+    return errors
+
+
 # ------------------------------------------------------------------------------------------------- configuration
 
 
@@ -884,6 +906,13 @@ def row_06_jellyfin_wipe_matrix() -> dict:
         {"reference": reference, "steps": steps},
         [f"{s['step']}: {'kept' if s['ok'] else s['changed']}" for s in steps],
     )
+
+
+def plex_detection_prefs() -> dict[str, str]:
+    """Lab Plex's intro and credits detection settings as they stand."""
+    _, prefs = plex("GET", "/:/prefs")
+    wanted = ("GenerateIntroMarkerBehavior", "GenerateCreditsMarkerBehavior")
+    return {s["id"]: s["value"] for s in prefs["MediaContainer"]["Setting"] if s["id"] in wanted}
 
 
 def plex_set_prefs(**prefs: str) -> None:
@@ -2048,6 +2077,227 @@ def row_14_security() -> dict:
         "Security: /api/markers/* without auth refused; path traversal -> 400",
         "pass" if passed else "fail",
         {"routes": routes, "unauthenticated": checks, "traversal": traversal},
+    )
+
+
+# ------------------------------------------------------------------------------------- phase 4: locked markers, agent
+
+
+def save_markers(path: str, markers: list[dict], *, timeout: int = 90) -> tuple[int, Any, float]:
+    """The Inspector's Save: ``POST /api/markers/item/markers``.
+
+    Args:
+        path: The file as the app sees it.
+        markers: ``{"type", "start_ms", "end_ms"}`` entries.
+        timeout: Seconds to wait for the response.
+
+    Returns:
+        The status, the body, and how long the request took (the save publishes before it answers).
+    """
+    started = time.monotonic()
+    status, body = app("POST", "/api/markers/item/markers", {"path": path, "markers": markers}, timeout=timeout)
+    return status, body, time.monotonic() - started
+
+
+def unlock_markers(path: str, types: list[str]) -> tuple[int, Any]:
+    """The Inspector's Unlock: ``DELETE /api/markers/item/markers``.
+
+    Args:
+        path: The file as the app sees it.
+        types: Marker types to unlock.
+
+    Returns:
+        The status and the body.
+    """
+    return app("DELETE", "/api/markers/item/markers", {"path": path, "types": types})
+
+
+STORED_MARKERS_SCRIPT = (
+    "import json,sqlite3,sys;"
+    "c=sqlite3.connect('file:/config/markers.db?mode=ro',uri=True);"
+    "print(json.dumps([dict(zip(('type','start_ms','end_ms','locked','decided_by'),r)) for r in c.execute("
+    "'select m.type,m.start_ms,m.end_ms,m.locked,m.decided_by from markers m join files f on f.id=m.file_id "
+    "where f.canonical_path=? order by m.type',(sys.argv[1],))]))"
+)
+
+
+def stored_markers(path: str, container: str = "mlab-app") -> dict[str, dict]:
+    """The marker rows markers.db holds for one file, read straight from the file (read-only), not through the API.
+
+    Args:
+        path: The file as the app sees it.
+        container: The app container whose /config/markers.db to read.
+
+    Returns:
+        ``type -> {"start_ms", "end_ms", "locked", "decided_by"}``.
+    """
+    out = sh("docker", "exec", container, "python3", "-c", STORED_MARKERS_SCRIPT, path)
+    return {r.pop("type"): r for r in json.loads(out.strip().splitlines()[-1])}
+
+
+ROW12_SCRIPT = HERE / "phase4_row12_agent.py"
+
+
+def row12_steps(*steps: str) -> dict[str, dict]:
+    """Run steps of the agent row (``phase4_row12_agent.py``) and read what each one recorded.
+
+    Args:
+        steps: Step names, in the order they run.
+
+    Returns:
+        ``step -> the evidence it recorded`` (its ``ok`` says whether it held).
+
+    Raises:
+        RuntimeError: The script failed to run at all.
+    """
+    out = subprocess.run(
+        [VENV_PYTHON, str(ROW12_SCRIPT), "run", *steps], capture_output=True, text=True, timeout=1500, cwd=HERE
+    )
+    if out.returncode != 0:
+        raise RuntimeError(f"phase4_row12_agent.py run -> {out.returncode}: {scrub(out.stderr[-1500:])}")
+    recorded = json.loads((RESULTS / "phase4-row-12.json").read_text())
+    return {name: recorded[name] for name in steps}
+
+
+@row(20)
+def row_20_locked_marker_on_plex() -> dict:
+    """A locked credits marker under Keep Plex's (Q1) on Plex: the save replaces Plex's own credits, and after Plex's
+    forced detection puts its own back, a normal job and a forced job both write the locked times again."""
+    rick = library_files(RICK_SEASON)[0]
+    item = plex_parts()[rick]["item"]
+    steps: list[dict] = []
+
+    def credits_now() -> list[tuple[int, int]]:
+        return credits_of(plex_served(item))
+
+    def plex_detects() -> list[tuple[int, int]]:
+        plex("PUT", f"/library/metadata/{item}/credits", force=1)
+        plex_wait_idle(min_wait=10, timeout=480)
+        steps.append({"step": "Plex forced credits detection", "served": credits_now()})
+        return credits_now()
+
+    def job(step: str, *, force: bool = False) -> dict:
+        done = wait_job(
+            start_markers_job({"file_paths": [rick], "force": force, "library_name": f"P1 row 20 {step}"})["id"]
+        )
+        entry = {
+            "step": step,
+            "rows": server_rows(done["id"])[0],
+            "served": credits_now(),
+            "stored": stored_markers(rick).get("credits"),
+            "inspector": plex_view(rick),
+        }
+        steps.append(entry)
+        say(f"  {step}: {entry['rows']['servers'].get('mlab-plex')}; credits {entry['served']}")
+        return entry
+
+    detection_before = plex_detection_prefs()
+    try:
+        plex_set_prefs(**dict.fromkeys(detection_before, "asap"))
+        set_redetect("restore")
+        unlock_markers(rick, ["credits", "intro"])
+        job("P0 normal job, nothing locked")
+        ours = credits_now()
+        set_redetect("keep_plex")
+        # Take our rows off first: what Plex serves afterwards is then certainly its own detection, whatever it finds.
+        sh(str(HERE / "plexdb.sh"), f"delete from taggings where metadata_item_id={item} and text='credits'")
+        emptied = credits_now()
+        plex_credits = plex_detects()
+        kept = job("K1 normal job (keep_plex, nothing locked)")
+        duration = item_payload(rick)["duration_ms"]
+        lock = (plex_credits[0][0] - 20_000, plex_credits[0][1] - 4_000)
+        status, saved, seconds = save_markers(rick, [{"type": "credits", "start_ms": lock[0], "end_ms": lock[1]}])
+        plex_row = next((s for s in (saved or {}).get("servers", []) if s["server_id"] == "mlab-plex"), {})
+        after_save = {"served": credits_now(), "stored": stored_markers(rick).get("credits")}
+        steps.append(
+            {"step": "save (lock)", "status": status, "seconds": round(seconds, 2), "plex_row": plex_row, **after_save}
+        )
+        say(f"  save: {status} in {seconds:.1f}s, Plex row {plex_row.get('result')}, credits {after_save['served']}")
+        replaced_by_plex = plex_detects()
+        normal = job("K2 normal job (keep_plex, locked)")
+        forced = job("K3 forced job (keep_plex, locked)", force=True)
+        unlock_status, _ = unlock_markers(rick, ["credits"])
+        set_redetect("restore")
+        back = job("B1 normal job after unlock (restore)")
+    finally:
+        cleanup_errors = run_cleanup(
+            lambda: set_redetect("restore"),
+            lambda: unlock_markers(rick, ["credits", "intro"]),
+            lambda: plex_set_prefs(**detection_before),
+            lambda: job("cleanup normal job"),
+        )
+
+    locked_row = {"type": "credits", "start_ms": lock[0], "end_ms": lock[1], "locked": 1, "decided_by": '["user"]'}
+    checks = {
+        "premise: Plex's forced detection wrote credits into an item that had none": not emptied
+        and len(plex_credits) == 1
+        and plex_credits[0] != lock,
+        "keep_plex keeps Plex's credits while nothing is locked": kept["served"] == plex_credits,
+        "the save is a 200 that lists the Plex row as written": status == 200 and plex_row.get("result") == "written",
+        "the save says the locked marker replaced Plex's own credits": plex_row.get("replaced_own") == ["credits"],
+        "Plex serves exactly the locked times before the request returned": after_save["served"] == [lock],
+        "markers.db holds them locked": after_save["stored"] is not None
+        and {k: after_save["stored"][k] for k in locked_row if k != "type"}
+        == {k: v for k, v in locked_row.items() if k != "type"},
+        "Plex's forced detection put its own credits back over the locked ones": replaced_by_plex == plex_credits,
+        "a normal job writes the locked times again": normal["served"] == [lock]
+        and normal["rows"]["servers"].get("mlab-plex") == "markers_written",
+        "a forced job leaves them": forced["served"] == [lock],
+        "still locked in markers.db after the forced job": (forced["stored"] or {}).get("locked") == 1
+        and (forced["stored"] or {}).get("start_ms") == lock[0],
+        "unlock returns 200": unlock_status == 200,
+        # What detection decides after an unlock is decided afresh (an online source may answer differently a run
+        # later), so "back" is the decision markers.db now holds, unlocked, and no longer the locked times.
+        "after unlock and restore Plex serves what the run decided, unlocked, and not the locked times": (
+            back["stored"] or {}
+        ).get("locked")
+        == 0
+        and back["served"] == [((back["stored"] or {}).get("start_ms"), (back["stored"] or {}).get("end_ms"))]
+        and back["served"] != [lock],
+        "the lab was put back (Keep Plex's off, detection settings, our decision)": not cleanup_errors,
+    }
+    notes = [f"{k}: {v}" for k, v in checks.items()] + [
+        f"ours {ours}; Plex's {plex_credits}; locked {lock}; file {duration} ms",
+        f"K2 message {normal['rows']['messages'].get('mlab-plex')!r}; Inspector {normal['inspector'].get('plan')} {normal['inspector'].get('plan_reason')!r}",
+    ]
+    return write_result(
+        20,
+        "A locked credits marker on Plex under Keep Plex's, then Plex's forced detection",
+        "pass" if all(checks.values()) else "fail",
+        {"item": item, "checks": checks, "steps": steps},
+        notes,
+    )
+
+
+@row(21)
+def row_21_plex_through_the_agent() -> dict:
+    """A Plex whose database the app can't open (row 11's case) publishes through the agent instead of going
+    read-only: the app container sees no database, the agent's answer is `ready`, and the markers land in Plex."""
+    recorded = row12_steps("isolated", "published")
+    isolated, published = recorded["isolated"], recorded["published"]
+    cleaned: dict = {}
+    try:
+        key = plex_parts()[synth_path(1)]["item"]
+        served = [(m["type"], m["start"], m["end"]) for m in plex_served(key)]
+    finally:
+        cleanup_errors = run_cleanup(lambda: cleaned.update(row12_steps("cleaned_up")["cleaned_up"]))
+    checks = {
+        "the app container has no Plex database": isolated["plex_database_visible_in_app_container"] is False,
+        "without the agent the app can't publish": isolated["capability_without_the_agent"]["state"] != "ready",
+        "with the agent the capability is ready": isolated["capability_with_the_agent"]["state"] == "ready",
+        "the isolated step held": isolated["ok"] is True,
+        "the publish step held": published["ok"] is True,
+        "the rows the step left were taken off again": cleaned.get("ok") is True and not cleanup_errors,
+        "Plex serves intro 10-40 s and credits 100-120 s": sorted(served)
+        == [("credits", 100_000, 120_000), ("intro", 10_000, 40_000)],
+    }
+    notes = [f"{k}: {v}" for k, v in checks.items()] + [f"served {sorted(served)}"]
+    return write_result(
+        21,
+        "Plex on a database the app can't open publishes through the agent",
+        "pass" if all(checks.values()) else "fail",
+        {"checks": checks, "isolated": isolated, "published": published, "served": served},
+        notes,
     )
 
 

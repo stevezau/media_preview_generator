@@ -32,6 +32,9 @@ LAB = Path(os.environ.get("MLAB_DIR") or HERE).resolve()
 RESULTS = LAB / "results"
 APP = "http://127.0.0.1:18081"
 PLEX = "http://127.0.0.1:32402"
+# The agent image the skew and wrong-Plex steps start their own containers from (the two long-lived containers come
+# from phase4_row12_up.sh, which reads the same variable).
+AGENT_IMAGE = os.environ.get("MLAB_AGENT_IMAGE", "plex-marker-agent:phase4-lab")
 AGENT_URL = "http://mlab-plex-agent:9494"
 OLD_AGENT_URL = "http://mlab-plex-agent-old:9494"
 APP_PLEX_CONFIG = "/plexcfg/Library/Application Support/Plex Media Server"
@@ -432,7 +435,7 @@ def step_skew() -> dict:
         "-p", "127.0.0.1:19495:9494",
         "-e", f"AGENT_TOKEN={ENV['MLAB_AGENT_TOKEN']}",
         "-e", "PLEX_CONFIG_DIR=/plexcfg/Library/Application Support/Plex Media Server",
-        "-v", "mlab_plex_config:/plexcfg", "--entrypoint", "sh", "plex-marker-agent:lab", "-c",
+        "-v", "mlab_plex_config:/plexcfg", "--entrypoint", "sh", AGENT_IMAGE, "-c",
         "cp /app/*.py /tmp/ && sed -i 's/^AGENT_VERSION = .*/AGENT_VERSION = \"0.3.0\"/;"
         "s/^PROTOCOLS = .*/PROTOCOLS = [99]/' /tmp/plex_marker_agent.py && "
         "exec gunicorn wsgi:app --chdir /tmp --bind 0.0.0.0:9494 --workers 1 --threads 4",
@@ -479,7 +482,7 @@ def step_wrong_plex() -> dict:
         "-p", "127.0.0.1:19496:9494",
         "-e", f"AGENT_TOKEN={ENV['MLAB_AGENT_TOKEN']}",
         "-e", "PLEX_CONFIG_DIR=/plexcfg/Library/Application Support/Plex Media Server",
-        "-v", "mlab_other_plexcfg:/plexcfg", "plex-marker-agent:lab",
+        "-v", "mlab_other_plexcfg:/plexcfg", AGENT_IMAGE,
     )  # fmt: skip
     wait_until(
         "the other agent to answer",

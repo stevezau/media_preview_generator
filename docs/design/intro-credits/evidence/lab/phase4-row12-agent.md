@@ -1,5 +1,8 @@
 # Phase 4 lab row 12 — the Plex marker agent, two containers
 
+> Re-run on the final image (commit `97fa74e`, app `sha256:9e388619…`, agent `sha256:357e917c…`): all 9 steps pass
+> again; see `phase4-results.md` row 12. The image names below are the ones this first run used.
+
 The plan's row 12: *"the app container **without** the Plex config volume + the agent container **with** it; markers
 published through it; a wrong token refused; a version mismatch refused; the agent stopped → Plex read-only with a
 clear message."* Run on the storage lab against the claimed lab Plex 1.43.4 (`mlab-plex`); nothing on the `plex` host

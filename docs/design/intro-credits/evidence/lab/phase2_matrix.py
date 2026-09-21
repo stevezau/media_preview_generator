@@ -2131,6 +2131,272 @@ def row_24_jellyfin_store_survives_restart() -> dict:
     )
 
 
+EMBY_MARKER_TYPE = {"IntroStart": 1, "IntroEnd": 2, "CreditsStart": 3}
+EMBY_MARKER_NAME = {"IntroStart": "Intro", "IntroEnd": "Intro End", "CreditsStart": "Credits"}
+REPLACE_MARKER_ROWS = """
+import json, sqlite3, sys
+db = sqlite3.connect("/config/data/library.db")
+item, rows = int(sys.argv[1]), json.loads(sys.argv[2])
+db.execute("delete from Chapters3 where ItemId = ? and MarkerType != 0", (item,))
+index = db.execute("select coalesce(max(ChapterIndex), -1) from Chapters3 where ItemId = ?", (item,)).fetchone()[0]
+for marker_type, ticks, name in rows:
+    index += 1
+    db.execute(
+        "insert into Chapters3 (ItemId, ChapterIndex, StartPositionTicks, Name, MarkerType) values (?, ?, ?, ?, ?)",
+        (item, index, ticks, name, marker_type),
+    )
+db.commit()
+db.close()
+"""
+
+
+def emby_set_own_marker_rows(server_id: str, path: str, marks: list[tuple[str, int]]) -> None:
+    """Make an Emby item's marker rows exactly ``marks`` (plain chapters stay), as Emby's own detection would leave
+    them and not the plugin: our plugin's rows and stored copy are dropped first, then the rows are written into
+    library.db with the container stopped (Emby's detection is an Emby Premiere feature the lab doesn't have).
+
+    Args:
+        server_id: ``mlab-emby`` or ``mlab-emby49``.
+        path: The file as the servers see it.
+        marks: ``(MarkerType name, ms)`` pairs: ``IntroStart``, ``IntroEnd``, ``CreditsStart``. Empty clears every row.
+
+    Raises:
+        RuntimeError: The database script or a docker command failed.
+    """
+    item = emby_items(server_id)[path]["id"]
+    emby_bridge(server_id, "DELETE", item)
+    rows = [(EMBY_MARKER_TYPE[kind], ms * p1.TICKS_PER_MS, EMBY_MARKER_NAME[kind]) for kind, ms in marks]
+    volume = sh(
+        "docker", "inspect", server_id, "--format",
+        '{{range .Mounts}}{{if eq .Destination "/config"}}{{.Name}}{{end}}{{end}}',
+    ).strip()  # fmt: skip
+    image = sh("docker", "inspect", "mlab-app", "--format", "{{.Config.Image}}").strip()
+    sh("docker", "stop", server_id, timeout=120)
+    try:
+        sh("docker", "run", "--rm", "-u", "1000:1000", "--entrypoint", "python3", "-v", f"{volume}:/config", image,
+           "-c", REPLACE_MARKER_ROWS, item, json.dumps(rows))  # fmt: skip
+    finally:
+        sh("docker", "start", server_id)
+        emby_wait_healthy(server_id)
+    say(f"{server_id}: marker rows of item {item} are now {marks}")
+
+
+@row(25)
+def row_25_locked_marker_through_emby_publisher() -> dict:
+    """A locked marker through the Emby publisher on 4.10 and 4.9 under Keep Emby's (Q1): only the locked type is
+    posted with ReplaceOwn, the rest of the set without it; it survives Emby's own wipe and Check servers, and unlock
+    hands the type back to detection."""
+    # phase4_matrix imports this module, so its helpers are imported when the row runs, not at load.
+    import phase4_matrix as p4
+
+    ep = p1.synth_path(2)
+    intro_truth, credits_truth = p4.truth(2)
+    own = p4.emby_own_marks(("intro", "credits"))
+    own_served = p4.expected_on("mlab-emby", p4.EMBY_OWN_INTRO, (p4.EMBY_OWN_CREDITS_START, 0))
+    steps: dict[str, Any] = {}
+
+    def keep(*, on: bool) -> None:
+        for sid in EMBY_SERVERS:
+            p4.set_keep_emby(sid, keep=on)
+
+    def plant(marks: list[tuple[str, int]]) -> None:
+        for sid in EMBY_SERVERS:
+            emby_set_own_marker_rows(sid, ep, marks)
+
+    def read() -> dict[str, list]:
+        return {sid: p4.served_on(sid, ep) for sid in EMBY_SERVERS}
+
+    p4.set_settings()
+    keep(on=False)
+    p4.settle(ep, 2)
+    try:
+        keep(on=True)
+        plant(own)
+        job, files = p4.run_job(ep, "row 25 keep_emby, nothing locked")
+        steps["kept"] = {"served": read(), "statuses": {sid: p4.server_status(files, ep, sid) for sid in EMBY_SERVERS}}
+
+        status, body, _ = p4.save(ep, p4.INTRO_EDIT, None)
+        steps["intro locked"] = {
+            "status": status,
+            "served": read(),
+            "rows": {sid: p4.save_result(body, sid) for sid in EMBY_SERVERS},
+        }
+
+        for sid in EMBY_SERVERS:
+            emby_refresh(sid, p4.item_id(sid, ep), "FullRefresh", True)
+        # Emby's wipe drops every marker row, its own credits included, and the plugin writes its stored copy back
+        # (the locked intro and our credits). The intro alone can't say the wipe happened: it was there before it.
+        after_wipe = {sid: p4.expected_on(sid, p4.INTRO_EDIT, credits_truth) for sid in EMBY_SERVERS}
+        with contextlib.suppress(TimeoutError):  # a wipe that never lands fails the check below
+            wait_until("Emby's wipe and the plugin's write-back", lambda: read() == after_wipe, timeout=90, every=3)
+        steps["after Emby's own wipe"] = {"served": read()}
+
+        check_job, check_files, _ = reconcile_job()
+        second_job, second_files, _ = reconcile_job()
+        steps["check servers"] = {
+            "served": read(),
+            "listed": ep in [f["file"] for f in check_files],
+            "second_listed": ep in [f["file"] for f in second_files],
+        }
+
+        unlocked_status, _ = p1.unlock_markers(ep, ["intro"])
+        keep(on=False)
+        run_job({"file_paths": [ep], "library_name": "Phase 4 row 25 unlock", "force": False})
+        steps["unlocked, restore"] = {"status": unlocked_status, "served": read()}
+
+        keep(on=True)
+        p1.unlock_markers(ep, p4.UNLOCK_ALL)
+        plant(own)
+        both_status, both, _ = p4.save(ep, p4.INTRO_EDIT, p4.CREDITS_EDIT)
+        steps["both locked"] = {
+            "status": both_status,
+            "served": read(),
+            "rows": {sid: p4.save_result(both, sid) for sid in EMBY_SERVERS},
+        }
+    finally:
+        cleanup_errors = p1.run_cleanup(
+            *[lambda sid=sid: p4.set_keep_emby(sid, keep=False) for sid in EMBY_SERVERS],
+            *[lambda sid=sid: emby_set_own_marker_rows(sid, ep, []) for sid in EMBY_SERVERS],
+            lambda: p4.settle(ep, 2),
+        )
+
+    edit_intro = ("intro", *p4.INTRO_EDIT)
+    checks: dict[str, bool] = {}
+    for sid in EMBY_SERVERS:
+        rows_one = steps["intro locked"]["rows"][sid]
+        rows_both = steps["both locked"]["rows"][sid]
+        checks.update({
+            f"{sid}: premise: Keep Emby's left Emby's own rows in place": steps["kept"]["served"][sid] == own_served,
+            f"{sid}: the save replaced Emby's own intro alone (intro is ours, credits still Emby's)": steps["intro locked"]["served"][sid]
+            == sorted([edit_intro, ("credits", p4.EMBY_OWN_CREDITS_START, None)]),
+            f"{sid}: it says it replaced Emby's own intro": rows_one["result"] == "written" and sorted(rows_one["replaced_own"]) == ["intro"],
+            f"{sid}: after Emby's own wipe the plugin writes its copy back: the locked intro and our credits": steps[
+                "after Emby's own wipe"
+            ]["served"][sid]
+            == p4.expected_on(sid, p4.INTRO_EDIT, credits_truth),
+            f"{sid}: Check servers leaves it as it is": steps["check servers"]["served"][sid]
+            == steps["after Emby's own wipe"]["served"][sid],
+            f"{sid}: unlock and restore hand the intro and credits back to detection": steps["unlocked, restore"]["served"][sid]
+            == p4.expected_on(sid, intro_truth, credits_truth),
+            f"{sid}: locking both under Keep Emby's replaces both of Emby's own types": steps["both locked"]["served"][sid]
+            == p4.expected_on(sid, p4.INTRO_EDIT, p4.CREDITS_EDIT)
+            and sorted(rows_both["replaced_own"]) == ["credits", "intro"],
+        })  # fmt: skip
+    checks["the Keep Emby's job ran and recorded ours behind Emby's own rows (markers_written on both)"] = (
+        job["status"] == "completed" and steps["kept"]["statuses"] == dict.fromkeys(EMBY_SERVERS, "markers_written")
+    )
+    checks["the lab was put back (Keep Emby's off, Emby's own rows cleared, episode settled)"] = not cleanup_errors
+    checks["Check servers completed, and a second run has nothing left to do for the file"] = (
+        check_job["status"] == "completed"
+        and second_job["status"] == "completed"
+        and not steps["check servers"]["second_listed"]
+    )
+    checks["unlock is a 200"] = steps["unlocked, restore"]["status"] == 200
+    checks["both saves are 200"] = steps["intro locked"]["status"] == 200 and steps["both locked"]["status"] == 200
+    return checks_result(
+        25, "A locked marker through the Emby publisher, with and without ReplaceOwn", checks, {"steps": steps}
+    )
+
+
+SEASON_EDIT_SCRIPT = """
+import asyncio, json, sys
+from playwright.async_api import async_playwright
+APP, SHOT, EPISODE, LABEL, START, END = sys.argv[1:7]
+async def main():
+    out = {}
+    async with async_playwright() as p:
+        b = await p.chromium.launch(); pg = await b.new_page(viewport={"width": 1500, "height": 1100})
+        await pg.goto(f"{APP}/login"); await pg.fill("#token", sys.stdin.read().strip()); await pg.keyboard.press("Enter")
+        await pg.wait_for_timeout(3000); await pg.goto(f"{APP}/bif-viewer")
+        await pg.wait_for_function("() => document.querySelector('#serverSelect option[value=mlab-plex]')", timeout=20000)
+        await pg.select_option("#serverSelect", "mlab-plex")
+        await pg.fill("#searchInput", "Synth Chapters"); await pg.click("#searchBtn")
+        result = pg.locator(f'.result-item[data-media-file="{EPISODE}"]')
+        await result.first.wait_for(timeout=30000); await result.first.click()
+        await pg.click("#inspectorMarkersTabBtn"); await pg.wait_for_timeout(2000)
+        await pg.click("label[for='markersViewSeason']")
+        await pg.wait_for_function("() => { const b = document.querySelector('#markersSeasonBody'); return b && b.innerText && !b.innerText.includes('Loading') }", timeout=30000)
+        row = pg.locator(f'#markersSeasonBody tr[data-episode="{LABEL}"]')
+        out["before"] = " ".join((await row.inner_text()).split())
+        await row.locator(".mk-season-action").get_by_role("button", name="Edit", exact=True).click()
+        await pg.wait_for_selector(".mk-edit-actions", timeout=15000)
+        strip = pg.locator('.mk-edit-strip[data-edit-type="intro"]')
+        await strip.locator(".mk-time").nth(0).fill(START)
+        await strip.locator(".mk-time").nth(1).fill(END)
+        out["pending"] = " ".join((await pg.locator(".mk-edit-pending").inner_text()).split())
+        async with pg.expect_response(lambda r: r.url.endswith("/api/markers/item/markers") and r.request.method == "POST", timeout=30000) as saved:
+            await pg.locator(".mk-edit-actions .mk-edit-save").click()
+        response = await saved.value
+        out["save_status"] = response.status
+        await pg.wait_for_timeout(2500)
+        await pg.click("label[for='markersViewSeason']")
+        await pg.wait_for_function("() => { const b = document.querySelector('#markersSeasonBody'); return b && b.innerText && !b.innerText.includes('Loading') }", timeout=30000)
+        await pg.wait_for_timeout(1500)
+        row = pg.locator(f'#markersSeasonBody tr[data-episode="{LABEL}"]')
+        out["after"] = " ".join((await row.inner_text()).split())
+        out["dots"] = await row.evaluate("r => Array.from(r.querySelectorAll('.mk-dot')).map(d => d.className + ' | ' + (d.title || ''))")
+        out["chips"] = await row.evaluate("r => Array.from(r.querySelectorAll('.mk-chip')).map(c => c.innerText.trim())")
+        await pg.screenshot(path=SHOT, full_page=True)
+        await b.close()
+    print(json.dumps(out))
+asyncio.run(main())
+"""
+
+
+@row(26)
+def row_26_season_view_edit_a_row() -> dict:
+    """Season view -> Edit a row -> save: the row and its per-server dots update, and every server shows the edit."""
+    import phase4_matrix as p4
+
+    p1.SHOTS.mkdir(parents=True, exist_ok=True)
+    ep = p1.synth_path(2)
+    label = "E02"
+    start, end = ("0:20", "0:44")
+    intro_truth, credits_truth = p4.truth(2)
+    p4.set_settings()
+    p4.settle(ep, 2)
+    shot = p1.SHOTS / "p2-row26-season-edit.png"
+    try:
+        run = subprocess.run(
+            [p1.VENV_PYTHON, "-c", SEASON_EDIT_SCRIPT, p1.APP, str(shot), ep, label, start, end],
+            input=ENV["MLAB_APP_TOKEN"], capture_output=True, text=True, timeout=300,
+        )  # fmt: skip
+        try:
+            seen = json.loads(run.stdout.strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError):
+            return write_result(26, "Season view Edit", "fail", {"error": scrub((run.stdout + run.stderr)[-1500:])})
+        api = app_ok("GET", f"/api/markers/season?{urllib.parse.urlencode({'path': ep})}")
+        after = {"served": p4.served(ep), "stored": p4.stored_times(ep)}
+    finally:
+        cleanup_errors = p1.run_cleanup(lambda: p4.settle(ep, 2))
+    episode = next(e for e in api["episodes"] if e["episode"] == label)
+    intro_edit = (20_000, 44_000)
+    stored_credits = after["stored"].get("credits")
+    checks = {
+        "the lab was put back (episode settled on its chapters)": not cleanup_errors,
+        "the row read the detected intro before the edit": "0:17 – 0:47" in seen["before"],
+        "the editor's save was a 200": seen["save_status"] == 200,
+        "the Season view row now shows the edited intro": "0:20 – 0:44" in seen["after"],
+        "the row says it is locked by the user": any("Locked by you" in chip for chip in seen["chips"]),
+        "the Season data holds the edited, locked intro": (
+            episode["intro"]["marker"]["start_ms"], episode["intro"]["marker"]["end_ms"], episode["intro"]["marker"]["locked"]
+        ) == (*intro_edit, True),
+        "every per-server dot is green (written), one per server": len(seen["dots"]) == len(ALL_MARKER_SERVERS)
+        and all("mk-dot-ok" in dot for dot in seen["dots"]),
+        "markers.db holds the edited intro locked": after["stored"]["intro"] == (*intro_edit, 1),
+        "the credits the editor saved with it start where they were detected": stored_credits is not None
+        and stored_credits[0] == credits_truth[0],
+        "every server serves the edited intro": all(
+            ("intro", *intro_edit) in rows for rows in after["served"].values()
+        ),
+        "every server serves the credits at the stored start": all(
+            any(t == "credits" and s == stored_credits[0] for t, s, _ in rows) for rows in after["served"].values()
+        ),
+    }  # fmt: skip
+    notes = [f"before {seen['before']!r}; pending {seen['pending']!r}; after {seen['after']!r}", f"chips {seen['chips']}", f"screenshot {shot}"]  # fmt: skip
+    return checks_result(26, "Season view: Edit a row, save, the row and its dots update", checks, {"seen": seen, "api": episode, "after": after}, notes)  # fmt: skip
+
+
 def main(argv: list[str]) -> int:
     # A stopped run (SIGTERM) still runs the finally blocks that start containers again and put lab state back.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))

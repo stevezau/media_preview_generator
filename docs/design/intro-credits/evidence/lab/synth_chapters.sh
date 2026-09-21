@@ -11,6 +11,15 @@
 #   synth/_staging/Synth Chapters (2021) - S01E01 - Extended.webm               130 s: E01 plus a 10 s tail chapter
 #   synth/_staging/Synth Chapters (2021) - S01E03 - Plexonly.webm               116 s: another cut of E03 (credits to
 #                                                                                the end)
+#   synth/_staging/Synth Chapters (2021) - S01E04.webm                          120 s, chapters: Chapter 1 | Intro |
+#                                                                                Chapter 2 | Ending 1:40-2:00 (an anime
+#                                                                                ED, phase 4 row 9)
+#   synth/_staging/Synth Chapters (2021) - S01E05.webm                          120 s, chapters: Chapter 1 | Intro |
+#                                                                                Chapter 2, no credits chapter (a lone
+#                                                                                generic Intro, phase 4 row 9)
+#   synth/_staging/Synth Chapters (2021) - S01E06.webm                          120 s, chapters: Chapter 1 | Intro |
+#                                                                                Chapter 2 | End 1:40-2:00 (a final
+#                                                                                scene, not credits: the negative case)
 #   synth/Synth Movie (2023)/Synth Movie (2023) - 1080p.webm and - 720p.webm    120 s each, two versions of one movie:
 #       Opening | Story | End Credits 1:40-2:00
 #   synth/_plexonly/Synth Chapters (2021)/Season 01/                             empty; up.sh mounts it into mlab-plex only
@@ -113,6 +122,16 @@ encode "${STAGING_DIR}/${SHOW} - S01E01 - Extended.webm" 1 "${segments[@]}"
 # A 116 s cut of S01E03 that only Plex will see (the version-drift row copies it into synth/_plexonly and removes it).
 encode "${STAGING_DIR}/${SHOW} - S01E03 - Plexonly.webm" 3 \
     "Chapter 1|0|25|chapter" "Intro|25|55|intro" "Chapter 2|55|100|chapter" "Credits|100|116|credits"
+
+# Phase 4 row 9 (Task 15): the credits chapter an anime release calls "Ending", and an episode with only a generic
+# "Intro" chapter and no credits chapter, and one whose last chapter is "End" (a final scene, never credits). The row
+# copies all three next to S01E01-03 and removes them afterwards.
+encode "${STAGING_DIR}/${SHOW} - S01E04.webm" 4 \
+    "Chapter 1|0|10|chapter" "Intro|10|40|intro" "Chapter 2|40|100|chapter" "Ending|100|120|credits"
+encode "${STAGING_DIR}/${SHOW} - S01E05.webm" 5 \
+    "Chapter 1|0|20|chapter" "Intro|20|50|intro" "Chapter 2|50|120|chapter"
+encode "${STAGING_DIR}/${SHOW} - S01E06.webm" 6 \
+    "Chapter 1|0|10|chapter" "Intro|10|40|intro" "Chapter 2|40|100|chapter" "End|100|120|credits"
 
 # Two versions of one movie (Jellyfin 12.0 alternate versions, Emby version items, one Plex item): same chapters. The
 # title metadata names the version, so the files differ.
