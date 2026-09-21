@@ -292,7 +292,9 @@ footage — **not** on epilogue text cards ("Two months later…").
 `ffmpeg -threads 2 [-hwaccel cuda -hwaccel_output_format cuda] -skip_frame nokey -ss <tail start> -copyts -i <file>
 -an -sn -dn -fps_mode passthrough -vf "scale…320:180…,showinfo" -f rawvideo -` (pts from `showinfo`). Tail = last
 **900 s** for a movie or a file of unknown kind, **450 s** for a TV episode (a `season_key` on the file's record;
-T-R4 — a longer tail on an unknown-kind file only costs extra decode). Measured tails (lab scale run chapter
+T-R4 — a longer tail on an unknown-kind file only costs extra decode) **by default**, user-adjustable in Advanced
+(`markers.credits_window`, §8): 5, 10, 15, 20 or 30 min, separately for TV episodes and for movies (a file of unknown
+kind follows the movie value). Measured tails (lab scale run chapter
 truth): TV credits (400 episodes) median 72 s, p95 267 s, 390 within 450 s (the 10 beyond are 462–463 s and
 chapter mislabels at 1,365–2,578 s); movies (102) p95 563 s, max 852 s, all within 900 s — covers 205/205 measured
 movie credits lengths too (median 233 s, p95 529 s). Keyframe rows are read in ffmpeg's own output order, **never
@@ -861,7 +863,7 @@ Show a mockup and confirm wording before building each screen.
      machine; Plex re-detection replaces ours and we put them back; viewers need Plex Pass or Plex Home.
    - Servers page cards themselves are unchanged.
 2. **Settings → Intro & Credits** (shared detection only): detect Intros / Credits / Recaps; "Publish when"
-   High / Medium; "Never overwrite my edits"; ordered sources (chapters, TheIntroDB + optional key + today's usage
+   High / Medium; ordered sources (chapters, TheIntroDB + optional key + today's usage
    from its headers, IntroDB.app, SkipDB, season audio, credit text, markers already on servers) with measured numbers
    in ⓘ copy. The credit text row is live and its switch works (no longer a disabled placeholder): it shows the
    same "Not available" badge and reason as season audio's row when this container can't run it (Task 10's copy).
@@ -890,7 +892,7 @@ Show a mockup and confirm wording before building each screen.
 "markers": {
   "detect": {"intro": true, "credits": true, "recap": false},
   "publish_when": "high",
-  "respect_locks": true,
+  "credits_window": {"tv_s": null, "movie_s": null},
   "sources": [
     {"id": "chapters", "enabled": true},
     {"id": "theintrodb", "enabled": false, "api_key": ""},
@@ -902,6 +904,12 @@ Show a mockup and confirm wording before building each screen.
   ]
 }
 ```
+`credits_window` (added after v15, no schema bump: a block without it reads as Automatic) is `null` (Automatic: 450 s
+TV, 900 s movie and unknown kind) or one of 300, 600, 900, 1200, 1800 seconds per kind. It is part of the detection
+fingerprint only when not Automatic, and a chosen window stores its credit text answers under a version of its own
+(`CREDITS_TEXT_VERSION` + window seconds × 1000), so an answer read from another window is asked again while
+Automatic keeps the version it always had. A longer window costs a longer decode for every file. The movie credits sanity bound (`decide.MOVIE_CREDITS_MAX_FROM_END_MS`, 900 s) follows a movie window above it, so a longer window's findings are not discarded. The removed
+`respect_locks` key is ignored when found in an older `settings.json`.
 Per server (`media_servers[]`):
 ```json
 "markers": {
@@ -1779,3 +1787,10 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   are, so a backend finding the same *number* of boxes in different *places* passed and then answered differently
   from the CPU path — and this self-test is the only runtime check there is. It now compares `detect()`, which costs
   the same (`count` is `len(detect(...))`). §5.4 Guard; pinned in `test_textdet_helper`.
+- 2026-09-22 · **Where to look for credits is a setting; "Never overwrite my edits" is gone** (§5.4 Frames, §7 item 2,
+  §8). Advanced (collapsed) in Settings → Intro & Credits holds two selects, TV episodes and Movies, each Automatic or
+  5/10/15/20/30 min (`markers.credits_window`). Automatic is byte-for-byte the old 450 s / 900 s. The window is in the
+  detection fingerprint only when set, and a chosen window changes the stored answer's version, so nothing is decoded
+  again on upgrade and a changed window never serves an answer read from another. `markers.respect_locks` was removed:
+  it gated nothing since a lock always wins (§5.5 rule 1; verified: no reader of it was left in the pipeline), so the
+  switch only suggested a choice that did not exist. An old `settings.json` that has it still loads.

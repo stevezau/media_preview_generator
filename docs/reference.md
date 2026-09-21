@@ -268,7 +268,7 @@ Shared detection settings — one file is detected once, whatever the publish ru
 {
   "detect": {"intro": true, "credits": true, "recap": false},
   "publish_when": "high",
-  "respect_locks": true,
+  "credits_window": {"tv_s": null, "movie_s": null},
   "sources": [
     {"id": "chapters", "enabled": true},
     {"id": "theintrodb", "enabled": false, "api_key": ""},
@@ -287,7 +287,7 @@ Shared detection settings — one file is detected once, whatever the publish ru
 | `detect.credits` | bool | `true` | TV episodes and movies. |
 | `detect.recap` | bool | `false` | Jellyfin's player is the only one with a Skip Recap button. |
 | `publish_when` | `"high"` \| `"medium"` | `"high"` | **High:** chapters publish on their own unless two other independent sources agree on something different (then Needs review); without chapters, two independent sources must agree. **Medium:** also accepts a single source that checks the file's own cut — chapters, on-screen credit text (credits), or a SkipDB `exact`/`shifted` match (intros and recaps only). IntroDB, TheIntroDB, season audio and markers already on servers never decide alone at either level, and season audio (or `season_audio_previous`) with markers already on servers isn't an agreeing pair on its own. |
-| `respect_locks` | bool | `true` | Settings → "Never overwrite my edits". Stored and returned, but **a lock wins whatever it is set to**: the marker editor only writes a lock you asked for, and dropping it would republish over your edit with no way back. To let detection decide a type again, unlock it (`DELETE /api/markers/item/markers`). The Inspector's **Adjust** drags a marker, or adds one for a type nothing was found for; saving it locks it and publishes it to every owner at once (`POST /api/markers/item/markers`). |
+| `credits_window` | object | `{"tv_s": null, "movie_s": null}` | Settings → Intro & Credits → Advanced → "Where to look for credits". How far from the end of a file on-screen credit text is searched for. `tv_s` applies to TV episodes, `movie_s` to movies and files of unknown kind. Each is `null` (Automatic: last 450 s of an episode, 900 s of a movie) or one of `300`, `600`, `900`, `1200`, `1800` seconds; anything else is refused with a 400 naming the key. A key left out means Automatic, and a partial post merges over the stored value. A longer window decodes longer for every file. A movie window above 15 minutes also raises how far before the end a movie's credits may start (still 900 s otherwise). Changing it decides files again, and files already read on another window are read again. A stored value that isn't valid is treated as Automatic (logged). |
 | `sources` | array | see above | Evidence sources, in checking/precedence order. Reordering in the UI reorders this array. |
 | `sources[].id` | one of `chapters`, `theintrodb`, `introdb`, `skipdb`, `season_audio`, `credits_text`, `server_markers` | — | `credits_text` runs where text detection is available (see `GET /api/markers/sources/local`); it decides credits alone only at `"medium"`. `season_audio` runs where ffmpeg has chromaprint (see `GET /api/markers/sources/local`); it only confirms intros another source found. Its previous-season hint is stored as `season_audio_previous` evidence (not a settings id). |
 | `sources[].enabled` | bool | varies | `theintrodb` defaults to `false` (used without the vendor's written permission); the rest default to `true`. |

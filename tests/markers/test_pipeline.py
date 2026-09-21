@@ -1151,7 +1151,10 @@ class TestEvidenceAndDecisions:
         assert clients["skipdb"].calls == []
         assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value  # skipdb's stored agreement doesn't count
 
-    def test_locks_count_even_when_respect_locks_is_off(self, store, media):
+    # `respect_locks` was a setting that gated nothing; an old settings.json still carrying it, either way round,
+    # must give the same answer as one without it: the lock wins.
+    @pytest.mark.parametrize("old_setting", [{}, {"respect_locks": False}, {"respect_locks": True}])
+    def test_a_lock_wins_whatever_an_old_settings_file_says(self, store, media, old_setting):
         reg = _registry(media, ServerType.PLEX)
         plex = ready_publisher()
         st = os.stat(media)
@@ -1162,7 +1165,7 @@ class TestEvidenceAndDecisions:
         store.lock_marker(rec.id, locked)
         clients = _clients(theintrodb=LookupResult("ok", (TIDB_INTRO,)))
         out, _ = _run(
-            _ctx(store, reg, clients=clients, settings_raw={**INTRO_ONLY, "respect_locks": False}),
+            _ctx(store, reg, clients=clients, settings_raw={**INTRO_ONLY, **old_setting}),
             media,
             {"plex-1": plex},
         )

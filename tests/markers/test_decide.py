@@ -2749,3 +2749,31 @@ class TestDecisionMatrix:
             got = _got(decide(order, ctx(level, types=(mtype,)), {})[mtype])
             assert got[:3] == (status, shown, decided_by)
             assert got[3].startswith(reason) if reason.endswith(": ") else got[3] == reason
+
+
+class TestMovieCreditsCapFollowsTheWindow:
+    """A movie credits start is refused more than the cap before the end; the credits window raises the cap."""
+
+    LONG_MOVIE_MS = 10_800_000  # 3 h: the last-25% rule stays out of the way of a 30 min window
+
+    @pytest.mark.parametrize(
+        ("cap_ms", "from_end_ms", "expected"),
+        [
+            (900_000, 900_000, None),
+            (900_000, 900_001, "movie credits start more than 900 s before the end"),
+            (1_200_000, 1_200_000, None),
+            (1_200_000, 1_200_001, "movie credits start more than 1200 s before the end"),
+            (1_800_000, 1_500_000, None),
+            (1_800_000, 1_800_001, "movie credits start more than 1800 s before the end"),
+        ],
+    )
+    def test_cap(self, cap_ms, from_end_ms, expected):
+        ctx = DecisionContext(
+            self.LONG_MOVIE_MS, True, "medium", frozenset({T.CREDITS}), (), movie_credits_max_from_end_ms=cap_ms
+        )
+        candidate = Candidate(T.CREDITS, self.LONG_MOVIE_MS - from_end_ms, None, S.CREDITS_TEXT)
+        assert sanity_problem(candidate, ctx) == expected
+
+    def test_an_episode_is_never_capped_by_it(self):
+        ctx = DecisionContext(1_320_000, False, "medium", frozenset({T.CREDITS}), (), movie_credits_max_from_end_ms=1)
+        assert sanity_problem(Candidate(T.CREDITS, 1_000_000, None, S.CREDITS_TEXT), ctx) is None

@@ -472,3 +472,108 @@ class TestLoadGlobal:
         g = ms.load_global({"publish_when": "sometimes"})
         assert g.publish_when == "high"
         assert "Ignoring invalid Intro & Credits settings" in loguru_caplog.text
+
+
+# The default block's detection fingerprint as the build before `credits_window` (and with `respect_locks`) made it:
+# an install that never touches the window must keep it, or every stored decision is restamped on upgrade.
+FINGERPRINT_BEFORE_CREDITS_WINDOW = "06fa6eaf506e60d492ae5a862514be2ac35a3ce0"
+
+
+class TestCreditsWindow:
+    @pytest.mark.parametrize("raw", [None, {}, {"tv_s": None, "movie_s": None}])
+    def test_automatic_when_absent_empty_or_null(self, raw):
+        block, err = ms.validate_global({"credits_window": raw}, None)
+        assert err == "" and block["credits_window"] == {"tv_s": None, "movie_s": None}
+
+    def test_a_block_without_the_key_is_automatic(self):
+        block, err = ms.validate_global({"publish_when": "medium"}, None)
+        assert err == "" and block["credits_window"] == {"tv_s": None, "movie_s": None}
+
+    @pytest.mark.parametrize("seconds", [300, 600, 900, 1200, 1800])
+    @pytest.mark.parametrize("key", ["tv_s", "movie_s"])
+    def test_accepts_each_offered_window_for_each_kind(self, key, seconds):
+        block, err = ms.validate_global({"credits_window": {key: seconds}}, None)
+        other = "movie_s" if key == "tv_s" else "tv_s"
+        assert err == "" and block["credits_window"] == {key: seconds, other: None}
+
+    @pytest.mark.parametrize("key", ["tv_s", "movie_s"])
+    @pytest.mark.parametrize(
+        "bad",
+        [0, -300, 299, 450, 2400, 7200, "600", "auto", "", 600.0, 600.5, True, False, [600], {"s": 600}],
+    )
+    def test_rejects_anything_that_is_not_an_offered_window(self, key, bad):
+        block, err = ms.validate_global({"credits_window": {key: bad}}, None)
+        assert block is None
+        assert err == (
+            f"markers.credits_window.{key} must be null (Automatic) or one of 300, 600, 900, 1200, 1800 (seconds)"
+        )
+
+    @pytest.mark.parametrize("raw", ["600", 600, [600], True])
+    def test_rejects_a_window_that_is_not_an_object(self, raw):
+        block, err = ms.validate_global({"credits_window": raw}, None)
+        assert block is None and err == "markers.credits_window must be an object"
+
+    def test_rejects_unknown_keys(self):
+        block, err = ms.validate_global({"credits_window": {"tv_s": 300, "anime_s": 300}}, None)
+        assert block is None and err == "markers.credits_window has unknown keys: anime_s"
+
+    def test_load_global_carries_the_chosen_windows(self):
+        g = ms.load_global({"credits_window": {"tv_s": 600, "movie_s": 1800}})
+        assert (g.credits_tv_s, g.credits_movie_s) == (600, 1800)
+
+    def test_load_global_defaults_to_automatic(self):
+        g = ms.load_global({})
+        assert (g.credits_tv_s, g.credits_movie_s) == (None, None)
+
+    def test_a_stored_bad_window_falls_back_to_automatic_and_keeps_the_rest(self, loguru_caplog):
+        stored = {"publish_when": "medium", "credits_window": {"tv_s": 450, "movie_s": 900}}
+        g = ms.load_global(stored)
+        assert (g.credits_tv_s, g.credits_movie_s) == (None, None)
+        assert g.publish_when == "medium"
+        assert "Ignoring invalid credits search window" in loguru_caplog.text
+        assert "markers.credits_window.tv_s" in loguru_caplog.text
+
+    @pytest.mark.parametrize("stored", ["x", 5, ["a"], {"unknown": 1}])
+    def test_a_stored_window_of_the_wrong_shape_falls_back_to_automatic(self, stored):
+        g = ms.load_global({"publish_when": "medium", "credits_window": stored})
+        assert (g.credits_tv_s, g.credits_movie_s, g.publish_when) == (None, None, "medium")
+
+    def test_default_block_is_automatic(self):
+        assert ms.DEFAULT_GLOBAL_MARKERS["credits_window"] == {"tv_s": None, "movie_s": None}
+
+    def test_the_default_fingerprint_is_the_one_before_the_window_existed(self):
+        assert ms.load_global({}).detection_fingerprint() == FINGERPRINT_BEFORE_CREDITS_WINDOW
+
+    @pytest.mark.parametrize(
+        "window",
+        [{"tv_s": 600}, {"movie_s": 600}, {"tv_s": 600, "movie_s": 600}, {"tv_s": 300}, {"movie_s": 1800}],
+    )
+    def test_fingerprint_changes_when_the_window_does(self, window):
+        automatic = ms.load_global({}).detection_fingerprint()
+        assert ms.load_global({"credits_window": window}).detection_fingerprint() != automatic
+
+    def test_fingerprint_tells_the_two_kinds_apart(self):
+        tv = ms.load_global({"credits_window": {"tv_s": 600}}).detection_fingerprint()
+        movie = ms.load_global({"credits_window": {"movie_s": 600}}).detection_fingerprint()
+        both = ms.load_global({"credits_window": {"tv_s": 600, "movie_s": 600}}).detection_fingerprint()
+        assert len({tv, movie, both}) == 3
+
+    def test_fingerprint_tells_two_windows_apart(self):
+        a = ms.load_global({"credits_window": {"tv_s": 600}}).detection_fingerprint()
+        b = ms.load_global({"credits_window": {"tv_s": 1200}}).detection_fingerprint()
+        assert a != b
+
+
+class TestRespectLocksIsGone:
+    def test_an_old_settings_json_that_still_has_it_loads_and_changes_nothing(self):
+        plain = ms.load_global({"publish_when": "medium"})
+        for old in (True, False):
+            g = ms.load_global({"publish_when": "medium", "respect_locks": old})
+            assert g == plain
+            assert g.detection_fingerprint() == plain.detection_fingerprint()
+
+    def test_it_is_not_kept_in_the_validated_block_nor_the_defaults(self):
+        block, err = ms.validate_global({"respect_locks": False}, None)
+        assert err == "" and "respect_locks" not in block
+        assert "respect_locks" not in ms.DEFAULT_GLOBAL_MARKERS
+        assert not hasattr(ms.load_global({}), "respect_locks")

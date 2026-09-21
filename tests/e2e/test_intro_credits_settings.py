@@ -29,7 +29,7 @@ def _default_markers() -> dict:
     return {
         "detect": {"intro": True, "credits": True, "recap": False},
         "publish_when": "high",
-        "respect_locks": True,
+        "credits_window": {"tv_s": None, "movie_s": None},
         "sources": [
             {"id": "chapters", "enabled": True},
             {"id": "theintrodb", "enabled": False, "api_key": ""},
@@ -188,7 +188,7 @@ class TestIntroCreditsSettings:
         expect(authed_page.locator("#markersDetectRecap")).not_to_be_checked()
         expect(authed_page.locator("#markersPublishHigh")).to_be_checked()
         expect(authed_page.locator("#markersPublishMedium")).not_to_be_checked()
-        expect(authed_page.locator("#markersRespectLocks")).to_be_checked()
+        expect(authed_page.locator("#markersCreditsWindowTv")).to_have_value("", timeout=5000)
         assert _source_ids(authed_page) == SOURCE_ORDER
         theintrodb = authed_page.locator("#markersSourceList .markers-source[data-id='theintrodb']")
         expect(theintrodb.locator(".markers-source-enabled")).not_to_be_checked()
@@ -408,7 +408,7 @@ class TestIntroCreditsSettings:
             Source.CREDITS_TEXT: "credit text",
         }
         not_in_the_tooltip = {
-            Source.USER: "a marker you locked isn't detection evidence; it wins through 'Never overwrite my edits'",
+            Source.USER: "a marker you locked isn't detection evidence; a lock always wins",
             Source.SERVER_MARKERS: "markers already on a server only ever confirm (its own row says so)",
             Source.SERVER_MARKERS_IMPORTED: "an importer plugin's copy counts as its database's source, never alone",
         }
@@ -459,12 +459,13 @@ class TestIntroCreditsSettings:
     def test_stored_order_and_values_render(self, authed_page: Page, app_url: str) -> None:
         markers = _default_markers()
         markers["publish_when"] = "medium"
-        markers["respect_locks"] = False
+        markers["credits_window"] = {"tv_s": 600, "movie_s": 1800}
         markers["detect"]["intro"] = False
         markers["sources"] = [markers["sources"][3], *markers["sources"][:3], *markers["sources"][4:]]
         _open_settings(authed_page, app_url, markers)
         expect(authed_page.locator("#markersPublishMedium")).to_be_checked(timeout=5000)
-        expect(authed_page.locator("#markersRespectLocks")).not_to_be_checked()
+        expect(authed_page.locator("#markersCreditsWindowTv")).to_have_value("600")
+        expect(authed_page.locator("#markersCreditsWindowMovie")).to_have_value("1800")
         expect(authed_page.locator("#markersDetectIntro")).not_to_be_checked()
         assert _source_ids(authed_page) == ["skipdb", "chapters", "theintrodb", "introdb", *SOURCE_ORDER[4:]]
 
@@ -478,14 +479,82 @@ class TestIntroCreditsSettings:
         expected["detect"]["recap"] = True
         assert sent == expected
 
-    def test_publish_when_and_locks_are_sent(self, authed_page: Page, app_url: str) -> None:
+    def test_publish_when_is_sent(self, authed_page: Page, app_url: str) -> None:
         captured = _open_settings(authed_page, app_url, _default_markers())
         expect(authed_page.locator("#markersPublishHigh")).to_be_checked(timeout=5000)
         authed_page.locator("label[for='markersPublishMedium']").click()
-        _wait_for_post(authed_page, captured, lambda m: m["publish_when"] == "medium")
-        authed_page.locator("label[for='markersRespectLocks']").click()
-        sent = _wait_for_post(authed_page, captured, lambda m: m["respect_locks"] is False)
-        assert sent["publish_when"] == "medium"
+        sent = _wait_for_post(authed_page, captured, lambda m: m["publish_when"] == "medium")
+        assert sent["credits_window"] == {"tv_s": None, "movie_s": None}
+
+    def test_the_never_overwrite_switch_is_gone(self, authed_page: Page, app_url: str) -> None:
+        _open_settings(authed_page, app_url, _default_markers())
+        expect(authed_page.locator("#markersRespectLocks")).to_have_count(0)
+        expect(authed_page.locator("#section-markers")).not_to_contain_text("Never overwrite my edits")
+
+    def test_advanced_is_collapsed_by_default_and_opens(self, authed_page: Page, app_url: str) -> None:
+        _open_settings(authed_page, app_url, _default_markers())
+        toggle = authed_page.locator("#markersAdvancedToggle")
+        expect(toggle).to_have_text("Advanced")
+        expect(toggle).to_have_attribute("aria-expanded", "false")
+        expect(authed_page.locator("#markersAdvanced")).not_to_be_visible()
+        expect(authed_page.locator("#markersCreditsWindowTv")).not_to_be_visible()
+        toggle.click()
+        expect(authed_page.locator("#markersAdvanced")).to_be_visible(timeout=5000)
+        expect(toggle).to_have_attribute("aria-expanded", "true")
+        expect(authed_page.locator("#markersAdvanced h6")).to_contain_text("Where to look for credits")
+
+    def test_credits_window_selects_show_automatic_and_offer_every_window(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        _open_settings(authed_page, app_url, _default_markers())
+        authed_page.locator("#markersAdvancedToggle").click()
+        tv = authed_page.locator("#markersCreditsWindowTv")
+        movie = authed_page.locator("#markersCreditsWindowMovie")
+        expect(authed_page.locator("label[for='markersCreditsWindowTv']")).to_have_text("TV episodes")
+        expect(authed_page.locator("label[for='markersCreditsWindowMovie']")).to_have_text("Movies")
+        expect(tv).to_have_value("")
+        expect(movie).to_have_value("")
+        assert tv.locator("option").all_inner_texts() == [
+            "Automatic (last 7½ min)", "5 min", "10 min", "15 min", "20 min", "30 min",
+        ]  # fmt: skip
+        assert movie.locator("option").all_inner_texts() == [
+            "Automatic (last 15 min)", "5 min", "10 min", "15 min", "20 min", "30 min",
+        ]  # fmt: skip
+        assert tv.locator("option").evaluate_all("els => els.map((el) => el.value)") == [
+            "", "300", "600", "900", "1200", "1800",
+        ]  # fmt: skip
+
+    def test_credits_window_tooltip_is_the_approved_text(self, authed_page: Page, app_url: str) -> None:
+        _open_settings(authed_page, app_url, _default_markers())
+        icon = authed_page.locator("#markersAdvanced h6 .info-icon")
+        tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
+        assert tooltip == (
+            "How far from the end of a file to search for the credit roll. Automatic fits nearly every library. "
+            "Raise it only if credits are being missed because they start earlier than this. A longer window takes "
+            "longer to decode for every file."
+        )
+
+    def test_changing_the_tv_window_sends_exactly_that(self, authed_page: Page, app_url: str) -> None:
+        captured = _open_settings(authed_page, app_url, _default_markers())
+        authed_page.locator("#markersAdvancedToggle").click()
+        authed_page.locator("#markersCreditsWindowTv").select_option("1200")
+        sent = _wait_for_post(authed_page, captured, lambda m: m["credits_window"]["tv_s"] == 1200)
+        expected = _default_markers()
+        expected["credits_window"] = {"tv_s": 1200, "movie_s": None}
+        assert sent == expected
+
+    def test_changing_the_movie_window_then_back_to_automatic(self, authed_page: Page, app_url: str) -> None:
+        captured = _open_settings(authed_page, app_url, _default_markers())
+        authed_page.locator("#markersAdvancedToggle").click()
+        movie = authed_page.locator("#markersCreditsWindowMovie")
+        movie.select_option("300")
+        sent = _wait_for_post(authed_page, captured, lambda m: m["credits_window"]["movie_s"] == 300)
+        assert sent["credits_window"] == {"tv_s": None, "movie_s": 300}
+        movie.select_option("")
+        sent = _wait_for_post(
+            authed_page, captured, lambda m: m["credits_window"]["movie_s"] is None and len(captured) > 1
+        )
+        assert sent["credits_window"] == {"tv_s": None, "movie_s": None}
 
     def test_move_skipdb_to_top_with_up_button(self, authed_page: Page, app_url: str) -> None:
         captured = _open_settings(authed_page, app_url, _default_markers())

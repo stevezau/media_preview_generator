@@ -13,7 +13,6 @@ def test_settings_get_masks_theintrodb_key(client):
         {
             "detect": {"intro": True, "credits": True, "recap": False},
             "publish_when": "high",
-            "respect_locks": True,
             "sources": [{"id": "theintrodb", "enabled": True, "api_key": "secret-abc"}],
         },
     )
@@ -57,7 +56,7 @@ def test_settings_post_without_sources_keeps_stored_key(client):
 STORED_GLOBAL = {
     "detect": {"intro": True, "credits": False, "recap": True},
     "publish_when": "high",
-    "respect_locks": False,
+    "credits_window": {"tv_s": 600, "movie_s": None},
     "sources": [
         {"id": "skipdb", "enabled": False},
         {"id": "chapters", "enabled": True},
@@ -89,7 +88,8 @@ def test_settings_post_partial_markers_block_keeps_everything_it_doesnt_name(cli
 def test_settings_post_partial_detect_keeps_the_other_types(client):
     stored = _post_markers(client, {"detect": {"credits": True}})
     assert stored["detect"] == {"intro": True, "credits": True, "recap": True}
-    assert stored["sources"] == STORED_GLOBAL["sources"] and stored["respect_locks"] is False
+    assert stored["sources"] == STORED_GLOBAL["sources"]
+    assert stored["credits_window"] == {"tv_s": 600, "movie_s": None}
 
 
 def test_settings_post_some_sources_updates_them_in_place(client):
@@ -615,3 +615,70 @@ def test_a_key_the_header_cant_carry_is_refused(client):
     posted = {"plex": {"agent": {"enabled": True, "url": "http://plex-host.lan:9494", "token": "key\u2019with-quote"}}}
     resp = client.put(f"/api/servers/{sid}", json={"markers": posted})
     assert resp.status_code == 400 and "agent.token" in resp.get_json()["error"]
+
+
+def test_settings_get_returns_the_credits_window(client):
+    from media_preview_generator.web.settings_manager import get_settings_manager
+
+    get_settings_manager().set("markers", {"credits_window": {"tv_s": 300, "movie_s": 1800}})
+    body = client.get("/api/settings").get_json()
+    assert body["markers"]["credits_window"] == {"tv_s": 300, "movie_s": 1800}
+
+
+@pytest.mark.parametrize(
+    ("posted", "expected"),
+    [
+        ({"tv_s": 1200, "movie_s": 300}, {"tv_s": 1200, "movie_s": 300}),
+        ({"tv_s": None, "movie_s": None}, {"tv_s": None, "movie_s": None}),
+        ({"tv_s": None, "movie_s": 1800}, {"tv_s": None, "movie_s": 1800}),
+    ],
+)
+def test_settings_post_credits_window_round_trips(client, posted, expected):
+    stored = _post_markers(client, {"credits_window": posted})
+    assert stored["credits_window"] == expected
+    assert client.get("/api/settings").get_json()["markers"]["credits_window"] == expected
+
+
+def test_settings_post_one_kind_of_window_keeps_the_other(client):
+    # The stored tv window is 600; a post that only names movies must not reset it to Automatic.
+    stored = _post_markers(client, {"credits_window": {"movie_s": 900}})
+    assert stored["credits_window"] == {"tv_s": 600, "movie_s": 900}
+
+
+def test_settings_post_without_a_window_keeps_the_stored_one(client):
+    assert _post_markers(client, {"publish_when": "medium"})["credits_window"] == {"tv_s": 600, "movie_s": None}
+
+
+@pytest.mark.parametrize(
+    ("posted", "message"),
+    [
+        ({"tv_s": 450}, "markers.credits_window.tv_s must be null (Automatic) or one of 300, 600, 900, 1200, 1800"),
+        ({"movie_s": "600"}, "markers.credits_window.movie_s must be null (Automatic) or one of 300, 600, 900, 1200"),
+        ({"movie_s": True}, "markers.credits_window.movie_s must be null (Automatic) or one of 300, 600, 900, 1200"),
+        ({"other_s": 300}, "markers.credits_window has unknown keys: other_s"),
+        ("600", "markers.credits_window must be an object"),
+    ],
+)
+def test_settings_post_bad_credits_window_is_refused_and_nothing_is_saved(client, posted, message):
+    import copy
+
+    from media_preview_generator.web.settings_manager import get_settings_manager
+
+    get_settings_manager().set("markers", copy.deepcopy(STORED_GLOBAL))
+    resp = client.post("/api/settings", json={"markers": {"credits_window": posted}})
+    assert resp.status_code == 400
+    assert message in resp.get_json()["error"]
+    assert get_settings_manager().get("markers") == STORED_GLOBAL
+
+
+def test_a_stored_markers_block_with_respect_locks_still_loads_and_saves_without_it(client):
+    import copy
+
+    from media_preview_generator.web.settings_manager import get_settings_manager
+
+    get_settings_manager().set("markers", {**copy.deepcopy(STORED_GLOBAL), "respect_locks": False})
+    assert client.get("/api/settings").status_code == 200
+    resp = client.post("/api/settings", json={"markers": {"publish_when": "medium", "respect_locks": True}})
+    assert resp.status_code == 200
+    stored = get_settings_manager().get("markers")
+    assert "respect_locks" not in stored and stored["publish_when"] == "medium"

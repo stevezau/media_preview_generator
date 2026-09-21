@@ -512,15 +512,6 @@
                                 <label class="btn btn-outline-secondary" for="markersPublishMedium">Medium</label>
                             </div>
                         </div>
-                        <div class="markers-opt">
-                            <div>
-                                <label for="markersRespectLocks">Never overwrite my edits</label>
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Markers you adjust or lock in the Inspector always win and are never replaced by detection."><i class="bi bi-info-circle"></i></button>
-                            </div>
-                            <div class="form-check form-switch markers-switch">
-                                <input class="form-check-input" type="checkbox" role="switch" id="markersRespectLocks" checked>
-                            </div>
-                        </div>
                     </div>
 
                     <div>
@@ -647,6 +638,27 @@
                                 </div>
                             </li>
                         </ol>
+                    </div>
+                </div>
+
+                <div class="mt-3">
+                    <button class="btn btn-sm btn-link px-0" type="button" data-bs-toggle="collapse" data-bs-target="#markersAdvanced" aria-expanded="false" aria-controls="markersAdvanced" id="markersAdvancedToggle">
+                        <i class="bi bi-chevron-right me-1"></i>Advanced
+                    </button>
+                    <div class="collapse" id="markersAdvanced">
+                        <div class="card card-body mt-2">
+                            <h6 class="mb-3">Where to look for credits
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How far from the end of a file to search for the credit roll. Automatic fits nearly every library. Raise it only if credits are being missed because they start earlier than this. A longer window takes longer to decode for every file."><i class="bi bi-info-circle"></i></button>
+                            </h6>
+                            <div class="markers-opt mb-3">
+                                <label for="markersCreditsWindowTv">TV episodes</label>
+                                <select class="form-select form-select-sm w-auto" id="markersCreditsWindowTv"><option value="" selected>Automatic (last 7½ min)</option><option value="300">5 min</option><option value="600">10 min</option><option value="900">15 min</option><option value="1200">20 min</option><option value="1800">30 min</option></select>
+                            </div>
+                            <div class="markers-opt">
+                                <label for="markersCreditsWindowMovie">Movies</label>
+                                <select class="form-select form-select-sm w-auto" id="markersCreditsWindowMovie"><option value="" selected>Automatic (last 15 min)</option><option value="300">5 min</option><option value="600">10 min</option><option value="900">15 min</option><option value="1200">20 min</option><option value="1800">30 min</option></select>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1147,7 +1159,9 @@ function _applyMarkersSettings(markers) {
     const medium = block.publish_when === 'medium';
     document.getElementById('markersPublishHigh').checked = !medium;
     document.getElementById('markersPublishMedium').checked = medium;
-    document.getElementById('markersRespectLocks').checked = block.respect_locks !== false;
+    const creditsWindow = block.credits_window || {};
+    document.getElementById('markersCreditsWindowTv').value = creditsWindow.tv_s == null ? '' : String(creditsWindow.tv_s);
+    document.getElementById('markersCreditsWindowMovie').value = creditsWindow.movie_s == null ? '' : String(creditsWindow.movie_s);
 
     if (!Array.isArray(block.sources)) return;
     const list = document.getElementById('markersSourceList');
@@ -1169,6 +1183,12 @@ function _applyMarkersSettings(markers) {
     _refreshMarkersSourceControls();
 }
 
+// "" is Automatic, sent as null.
+function _creditsWindowValue(id) {
+    const value = document.getElementById(id).value;
+    return value === '' ? null : Number(value);
+}
+
 function _collectMarkersSettings() {
     return {
         detect: {
@@ -1177,7 +1197,10 @@ function _collectMarkersSettings() {
             recap: document.getElementById('markersDetectRecap').checked,
         },
         publish_when: document.querySelector('input[name="markersPublishWhen"]:checked')?.value || 'high',
-        respect_locks: document.getElementById('markersRespectLocks').checked,
+        credits_window: {
+            tv_s: _creditsWindowValue('markersCreditsWindowTv'),
+            movie_s: _creditsWindowValue('markersCreditsWindowMovie'),
+        },
         sources: _markersSourceItems().map((li) => {
             const entry = { id: li.dataset.id, enabled: li.querySelector('.markers-source-enabled').checked };
             if (li.dataset.id === 'theintrodb') {

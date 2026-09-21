@@ -244,6 +244,26 @@ class TestFindCredits:
         assert decodes.calls[0]["start_s"] == 870.0
 
     @pytest.mark.parametrize(
+        ("path", "duration_ms", "is_episode", "tail_s", "start_s"),
+        [
+            (MOVIE.canonical_path, 6_000_000, False, None, 5100.0),  # Automatic: 900 s
+            (MOVIE.canonical_path, 6_000_000, False, 1800.0, 4200.0),
+            (MOVIE.canonical_path, 6_000_000, False, 300.0, 5700.0),
+            (EPISODE.canonical_path, 1_320_000, True, None, 870.0),  # Automatic: 450 s
+            (EPISODE.canonical_path, 1_320_000, True, 1200.0, 120.0),
+            (EPISODE.canonical_path, 1_320_000, True, 300.0, 1020.0),
+        ],
+    )
+    def test_the_tail_starts_tail_s_before_the_end_or_by_kind_when_none(
+        self, monkeypatch, probes, path, duration_ms, is_episode, tail_s, start_s
+    ):
+        decodes = Decodes([])
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        detector.find_credits(path, duration_ms=duration_ms, is_episode=is_episode, tail_s=tail_s, ffmpeg="/ff",
+                              detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+        assert decodes.calls[0]["start_s"] == start_s
+
+    @pytest.mark.parametrize(
         "thinning",
         [frames.KeyframeThinning(), frames.KeyframeThinning(48, False), frames.KeyframeThinning(None, True)],
     )
@@ -566,7 +586,8 @@ def ctx(tmp_path):
     clock = SimpleNamespace(now=NOW)
     # run_memo as PipelineContext answers outside a run of the file: a fresh dict every call, nothing kept.
     yield SimpleNamespace(config=SimpleNamespace(ffmpeg_path="/usr/lib/jellyfin-ffmpeg/ffmpeg"), force=False, store=store,
-                          now=lambda: clock.now, clock=clock, run_memo=lambda path: {})  # fmt: skip
+                          now=lambda: clock.now, clock=clock, run_memo=lambda path: {},
+                          settings=SimpleNamespace(credits_tv_s=None, credits_movie_s=None))  # fmt: skip
     store.close()
 
 
@@ -602,6 +623,29 @@ class TestDetect:
         assert phase == [detector.READING_PHASE]
         call["detect_boxes"](frames.np.zeros((2, 180, 320), frames.np.uint8))
         assert pool.calls == [("NVIDIA", "cuda:0")]
+
+    @pytest.mark.parametrize(
+        ("which", "tv_s", "movie_s", "tail_s"),
+        [
+            ("movie", None, None, 900.0),
+            ("episode", None, None, 450.0),
+            ("movie", 1800, None, 900.0),
+            ("episode", None, 1800, 450.0),
+            ("movie", None, 1800, 1800.0),
+            ("episode", 300, None, 300.0),
+            ("movie", 300, 600, 600.0),
+            ("episode", 300, 600, 300.0),
+        ],
+    )
+    def test_the_tail_it_asks_for_is_the_users_window_for_the_files_kind(
+        self, monkeypatch, pool, ctx, which, tv_s, movie_s, tail_s
+    ):
+        seen = self._find(monkeypatch, None)
+        ctx.settings.credits_tv_s, ctx.settings.credits_movie_s = tv_s, movie_s
+        rec = MOVIE if which == "movie" else EPISODE
+        detector.detect_credits_text(rec, ctx=ctx)
+        assert seen[0]["tail_s"] == tail_s
+        assert seen[0]["is_episode"] is (which == "episode")
 
     def test_a_scene_after_the_roll_gives_the_candidate_its_end(self, monkeypatch, pool, ctx):
         self._find(monkeypatch, (5690.4996, 5899.0004))

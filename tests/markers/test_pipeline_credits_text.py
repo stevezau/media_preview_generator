@@ -30,11 +30,14 @@ T = MarkerType
 START_S = 1_290.25
 
 
-def settings(level="high", **sources):
+def settings(level="high", credits_window=None, **sources):
     enabled = {"chapters": True, "theintrodb": False, "introdb": False, "skipdb": False, "season_audio": False,
                "credits_text": True, "server_markers": False, **sources}  # fmt: skip
-    return {"detect": {"intro": False, "credits": True}, "publish_when": level,
-            "sources": [{"id": k, "enabled": v} for k, v in enabled.items()]}  # fmt: skip
+    block = {"detect": {"intro": False, "credits": True}, "publish_when": level,
+             "sources": [{"id": k, "enabled": v} for k, v in enabled.items()]}  # fmt: skip
+    if credits_window is not None:
+        block["credits_window"] = credits_window
+    return block
 
 
 @pytest.fixture
@@ -57,8 +60,8 @@ def find(monkeypatch):
     return fake
 
 
-def ctx_for(store, media, level="high", *, force=False, clients=None, **sources):
-    return _ctx(store, _registry(media, ServerType.PLEX), settings_raw=settings(level, **sources),
+def ctx_for(store, media, level="high", *, force=False, clients=None, credits_window=None, **sources):
+    return _ctx(store, _registry(media, ServerType.PLEX), settings_raw=settings(level, credits_window, **sources),
                 detectors=(detector.credits_text_spec(),), force=force, clients=clients)  # fmt: skip
 
 
@@ -292,3 +295,132 @@ def test_the_web_app_and_the_pipeline_never_load_onnxruntime_or_opencv(tmp_path)
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
     assert out.stdout.strip().splitlines()[-1] == "[]", out.stderr[-2000:]
+
+
+@pytest.fixture
+def movie(tmp_path):
+    folder = tmp_path / "media" / "movies" / "Heat (1995) {imdb-tt0113277}"
+    folder.mkdir(parents=True)
+    f = folder / "Heat (1995).mkv"
+    f.write_bytes(b"x" * 100)
+    return str(f)
+
+
+ambiguous = test_pipeline.ambiguous
+
+
+class TestCreditsWindow:
+    """The window the user chose reaches the frame extractor, per kind; Automatic is the old 450 s / 900 s."""
+
+    @pytest.fixture(params=["episode", "movie", "unknown_kind"])
+    def kind(self, request, media, movie, ambiguous):
+        """(kind, path): an SxxEyy path is an episode, a path with an id and no episode is a movie, and a file whose
+        show folder only has a tmdb id reads as a movie too until a server says otherwise (unknown kind)."""
+        return request.param, {"episode": media, "movie": movie, "unknown_kind": ambiguous}[request.param]
+
+    @pytest.mark.parametrize(
+        ("window", "tail_by_kind"),
+        [
+            (None, {"episode": 450.0, "movie": 900.0, "unknown_kind": 900.0}),
+            ({"tv_s": None, "movie_s": None}, {"episode": 450.0, "movie": 900.0, "unknown_kind": 900.0}),
+            ({"tv_s": 1200}, {"episode": 1200.0, "movie": 900.0, "unknown_kind": 900.0}),
+            ({"movie_s": 1800}, {"episode": 450.0, "movie": 1800.0, "unknown_kind": 1800.0}),
+            ({"tv_s": 300, "movie_s": 600}, {"episode": 300.0, "movie": 600.0, "unknown_kind": 600.0}),
+        ],
+    )
+    def test_the_extractor_is_asked_for_the_tail_of_the_files_kind(self, store, find, kind, window, tail_by_kind):
+        name, path = kind
+        _run(ctx_for(store, path, credits_window=window), path, pubs(), stage="process")
+        (call,) = find.calls
+        assert call["tail_s"] == tail_by_kind[name]
+        assert call["is_episode"] is (name == "episode")
+
+    def test_the_start_the_extractor_reads_from_is_the_end_minus_the_tail(self, store, media, find):
+        # End to end down to the frame extractor's own arithmetic: DUR is the file's length in ms.
+        ctx = ctx_for(store, media, credits_window={"tv_s": 600})
+        _run(ctx, media, pubs(), stage="process")
+        tail_s = find.calls[0]["tail_s"]
+        assert frames.tail_start_s(DUR, tail_s=tail_s) == DUR / 1000.0 - 600.0
+
+    def test_the_kinds_a_window_does_not_name_are_still_automatic_in_the_stored_version(self, store, media, movie):
+        ctx_tv = ctx_for(store, media, credits_window={"tv_s": 600})
+        ctx_movie = ctx_for(store, movie, credits_window={"tv_s": 600})
+        spec = detector.credits_text_spec()
+        ep, mv = (
+            store.upsert_file(*_identity(media), duration_ms=DUR, season_key="s", is_movie=False),
+            store.upsert_file(*_identity(movie), duration_ms=DUR, season_key=None, is_movie=True),
+        )
+        assert spec.answer_version(ep, ctx_tv) == detector.CREDITS_TEXT_VERSION + 600_000
+        assert spec.answer_version(mv, ctx_movie) == detector.CREDITS_TEXT_VERSION
+
+    def test_automatic_stores_the_answer_under_the_version_it_always_had(self, store, media):
+        spec = detector.credits_text_spec()
+        rec = store.upsert_file(*_identity(media), duration_ms=DUR, season_key="s", is_movie=False)
+        assert detector.CREDITS_TEXT_VERSION == 3
+        assert spec.answer_version(rec, ctx_for(store, media)) == 3
+        assert spec.answer_version(rec, ctx_for(store, media, credits_window={"tv_s": None, "movie_s": None})) == 3
+
+    def test_an_answer_read_on_another_window_is_read_again_and_stored_under_the_new_one(self, store, media, find):
+        _run(ctx_for(store, media), media, pubs(), stage="process")
+        assert len(find.calls) == 1
+        rec = store.get_file(media)
+        assert store.evidence_version(rec.id, Source.CREDITS_TEXT) == detector.CREDITS_TEXT_VERSION
+
+        wider = ctx_for(store, media, credits_window={"tv_s": 1200})
+        _run(wider, media, pubs(), stage="process")
+        assert len(find.calls) == 2 and find.calls[1]["tail_s"] == 1200.0
+        assert store.evidence_version(rec.id, Source.CREDITS_TEXT) == detector.CREDITS_TEXT_VERSION + 1_200_000
+
+    def test_the_answer_for_a_window_is_not_read_again_while_that_window_stays(self, store, media, find):
+        window = {"tv_s": 1200}
+        _run(ctx_for(store, media, credits_window=window), media, pubs(), stage="process")
+        out, _ = _run(ctx_for(store, media, credits_window=window), media, pubs(), stage="check")
+        assert out is not None and len(find.calls) == 1
+
+    def test_going_back_to_automatic_reads_the_file_again(self, store, media, find):
+        _run(ctx_for(store, media, credits_window={"tv_s": 1200}), media, pubs(), stage="process")
+        _run(ctx_for(store, media), media, pubs(), stage="process")
+        assert len(find.calls) == 2 and find.calls[1]["tail_s"] == 450.0
+
+    def test_an_answer_stored_before_the_setting_existed_is_not_read_again_on_automatic(self, store, media, find):
+        # An install that upgrades and keeps Automatic: version 3, exactly what the old build stored.
+        _run(ctx_for(store, media), media, pubs(), stage="process")
+        assert store.evidence_version(store.get_file(media).id, Source.CREDITS_TEXT) == 3
+        out, _ = _run(ctx_for(store, media, credits_window={"tv_s": None}), media, pubs(), stage="check")
+        assert out is not None and len(find.calls) == 1
+
+    def test_changing_the_window_of_the_other_kind_does_not_read_a_file_again(self, store, media, find):
+        _run(ctx_for(store, media), media, pubs(), stage="process")
+        out, _ = _run(ctx_for(store, media, credits_window={"movie_s": 1800}), media, pubs(), stage="check")
+        assert out is not None and len(find.calls) == 1
+
+
+def _identity(path):
+    import os
+
+    from media_preview_generator.markers.models import FileIdentity
+
+    st = os.stat(path)
+    return (FileIdentity(path, st.st_size, st.st_mtime_ns),)
+
+
+class TestMovieWindowReachesTheDecision:
+    LONG_MOVIE_MS = 10_800_000
+    START_S = 9_300.0  # 1500 s before the end: past the default 900 s cap, inside a 30 min window
+
+    @pytest.mark.parametrize(
+        ("window", "published"), [(None, False), ({"movie_s": 1200}, False), ({"movie_s": 1800}, True)]
+    )
+    def test_a_movie_credits_start_beyond_15_min_publishes_only_within_the_window(
+        self, store, movie, find, window, published
+    ):
+        find.answer = self.START_S
+        plex = ready_publisher()
+        ctx = ctx_for(store, movie, "medium", credits_window=window)
+        out, _ = _run(ctx, movie, {"plex-1": plex}, probe=_probe(duration=self.LONG_MOVIE_MS), stage="process")
+        assert (out.outcome_key == FileOutcome.PUBLISHED.value) is published
+        if published:
+            assert plex.write.call_args.args == (
+                "item-plex-1",
+                [Marker(T.CREDITS, 9_300_000, self.LONG_MOVIE_MS, ("credits_text",))],
+            )

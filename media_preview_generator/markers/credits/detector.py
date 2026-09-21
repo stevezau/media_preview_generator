@@ -40,6 +40,11 @@ if TYPE_CHECKING:
 # and 15, phase3-harness.md and
 # broadcast-tv.md "Rule J version 3"). Stored answers of version 2 are asked again because these starts differ.
 CREDITS_TEXT_VERSION = 3
+# A stored answer's version is CREDITS_TEXT_VERSION for Automatic (what it has always been, so nothing is decoded again
+# on upgrade) and CREDITS_TEXT_VERSION + window seconds * this for a window the user chose. The smallest window
+# (300 s) gives 300,003, so a chosen window's version never equals Automatic's, and another window's answer is asked
+# again.
+_WINDOW_VERSION_STEP = 1000
 READING_PHASE = "Reading the credits…"
 REFINING_PHASE = "Refining the credits start…"
 REFINING_END_PHASE = "Finding where the credits end…"
@@ -79,6 +84,7 @@ def find_credits(
     *,
     duration_ms: int,
     is_episode: bool,
+    tail_s: float | None = None,
     ffmpeg: str,
     detect_boxes: Callable[[np.ndarray], list[tuple[rule_j.Box, ...]]],
     gpu: str | None,
@@ -108,7 +114,8 @@ def find_credits(
     Args:
         path: The media file (read only).
         duration_ms: Its duration.
-        is_episode: Read the last 450 s instead of 900 s (T-R4).
+        is_episode: Picks the default tail when ``tail_s`` is None: the last 450 s instead of 900 s (T-R4).
+        tail_s: The length of the tail to read, overriding both (the user's window in Settings); None = by kind.
         ffmpeg: ffmpeg binary.
         detect_boxes: Text boxes per chunk of luma planes.
         gpu: The worker's GPU type, None on a CPU worker.
@@ -141,7 +148,9 @@ def find_credits(
             drop_non_key=thinning.drop_non_key, **decode,
         )  # fmt: skip
 
-    tail_start = frames.tail_start_s(duration_ms, is_episode=is_episode)
+    tail_start = frames.tail_start_s(
+        duration_ms, tail_s=frames.tail_length_s(is_episode=is_episode) if tail_s is None else tail_s
+    )
     key_rows = keyframes(tail_start, None)
     # Text that never moves off one spot across the story is a channel or score bug, a ticker or a timecode, not
     # credits, so everything that reads a frame's own text reads the rows without it: which of the run's frames are
@@ -282,6 +291,7 @@ def detect_credits_text(
             rec.canonical_path,
             duration_ms=rec.duration_ms,
             is_episode=rec.season_key is not None,
+            tail_s=_tail_s(rec, ctx),
             ffmpeg=getattr(ctx.config, "ffmpeg_path", None) or "ffmpeg",
             detect_boxes=lambda planes: pool.detect_boxes(planes, gpu=gpu, gpu_device_path=gpu_device_path),
             gpu=gpu,
@@ -307,6 +317,28 @@ def detect_credits_text(
     return [Candidate(MarkerType.CREDITS, int(round(result.start_s * 1000)), end_ms, Source.CREDITS_TEXT)]
 
 
+def _tail_s(rec: FileRecord, ctx: PipelineContext) -> float:
+    """The tail length for a file: the user's window for its kind, else the default. A file whose path names no
+    episode (``season_key`` None) is a movie, as it is everywhere else."""
+    return frames.tail_length_s(
+        is_episode=rec.season_key is not None, tv_s=ctx.settings.credits_tv_s, movie_s=ctx.settings.credits_movie_s
+    )
+
+
+def credits_answer_version(rec: FileRecord, ctx: PipelineContext) -> int:
+    """The version a file's credit text answer is stored under, which depends on the window it was read from.
+
+    Args:
+        rec: The file.
+        ctx: The job's context.
+
+    Returns:
+        :data:`CREDITS_TEXT_VERSION` when the user has no window for the file's kind, else that with the window added.
+    """
+    chosen = ctx.settings.credits_tv_s if rec.season_key is not None else ctx.settings.credits_movie_s
+    return CREDITS_TEXT_VERSION if chosen is None else CREDITS_TEXT_VERSION + chosen * _WINDOW_VERSION_STEP
+
+
 def credits_text_spec() -> LocalDetectorSpec:
     """The detector as the pipeline registers it: credits only, on a worker whenever it decodes, answers kept per file
     identity.
@@ -321,5 +353,6 @@ def credits_text_spec() -> LocalDetectorSpec:
         types=frozenset({MarkerType.CREDITS}),
         detect=detect_credits_text,
         version=CREDITS_TEXT_VERSION,
+        version_of=credits_answer_version,
         needs_worker=credits_text_needs_worker,
     )

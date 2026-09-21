@@ -443,6 +443,8 @@ def _merge_global_markers_update(stored: object, posted: object) -> object:
     merged = {**stored, **posted}
     if isinstance(stored.get("detect"), dict) and isinstance(posted.get("detect"), dict):
         merged["detect"] = {**stored["detect"], **posted["detect"]}
+    if isinstance(stored.get("credits_window"), dict) and isinstance(posted.get("credits_window"), dict):
+        merged["credits_window"] = {**stored["credits_window"], **posted["credits_window"]}
     if isinstance(stored.get("sources"), list) and isinstance(posted.get("sources"), list):
         merged["sources"] = _merge_sources_update(stored["sources"], posted["sources"])
     return merged

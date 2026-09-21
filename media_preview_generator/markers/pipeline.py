@@ -37,6 +37,7 @@ from .audio.season import season_audio_spec, season_intro_chapter_limits
 from .credits.detector import credits_text_spec
 from .credits.textdet_helper import TextDetState, text_detection_state
 from .decide import (
+    MOVIE_CREDITS_MAX_FROM_END_MS,
     DecisionContext,
     DecisionStatus,
     TypeDecision,
@@ -174,6 +175,8 @@ class LocalDetectorSpec:
             raises ``DetectorUnavailableError`` when it can't answer this time.
         stores: Sources its candidates are stored under, each candidate under its own ``source``; empty = ``source``.
         version: Stored with its answer; an answer from another version is asked again, even for decided types.
+        version_of: ``version_of(file, ctx)``: the version for this file when it depends on the file or the settings
+            (credit text: the window the user chose for the file's kind); None: ``version``.
         due: ``due(file, ctx)``: whether a stored answer of this version is out of date anyway (None: never).
         needs_worker: ``needs_worker(file, ctx)``: whether it needs a GPU/CPU worker now (None: always). One that
             doesn't runs on the checking thread, unless another detector that has to run at the same source needs a
@@ -188,9 +191,14 @@ class LocalDetectorSpec:
     detect: LocalDetector
     stores: frozenset[Source] = frozenset()
     version: int = 1
+    version_of: Callable[[FileRecord, PipelineContext], int] | None = None
     due: Callable[[FileRecord, PipelineContext], bool] | None = None
     needs_worker: Callable[[FileRecord, PipelineContext], bool] | None = None
     followups: Callable[[FileRecord, PipelineContext], Iterable[str]] | None = None
+
+    def answer_version(self, rec: FileRecord, ctx: PipelineContext) -> int:
+        """The version a stored answer for ``rec`` must have to count."""
+        return self.version if self.version_of is None else self.version_of(rec, ctx)
 
     @property
     def stored_sources(self) -> frozenset[Source]:
@@ -695,15 +703,23 @@ def _decide(
     """
     order = _decision_order(ctx.settings)
     evidence = ctx.store.get_evidence(rec.id)
-    # A lock always wins (spec §5.5 rule 1). `markers.respect_locks` does not gate this: the editor only ever writes a
-    # lock the user asked for, and dropping it here would silently republish over that edit with no way back (the
-    # detected answer a lock replaced isn't stored). Turning the switch off is the user's cue to Unlock the type.
+    # A lock always wins (spec §5.5 rule 1): the editor only ever writes a lock the user asked for, and dropping it here
+    # would silently republish over that edit with no way back (the detected answer a lock replaced isn't stored). To
+    # let detection decide a type again the user unlocks it.
     locked = ctx.store.get_locked(rec.id)
 
     def decide_from(sources: tuple[str, ...]) -> dict[MarkerType, TypeDecision]:
         enabled = set(sources)
         dctx = DecisionContext(
-            rec.duration_ms or 0, rec.is_movie, ctx.settings.publish_when, types, sources, intro_chapter_limit
+            rec.duration_ms or 0,
+            rec.is_movie,
+            ctx.settings.publish_when,
+            types,
+            sources,
+            intro_chapter_limit,
+            movie_credits_max_from_end_ms=max(
+                MOVIE_CREDITS_MAX_FROM_END_MS, (ctx.settings.credits_movie_s or 0) * 1000
+            ),
         )
         return decide([c for c in evidence if c.source.value in enabled], dctx, locked)
 
@@ -792,14 +808,15 @@ def _answer_from_another_version(ctx: PipelineContext, rec: FileRecord, spec: Lo
     """Whether the detector stored an answer (under any of its sources) with a version other than its own."""
     return any(
         ctx.store.evidence_fetched_at(rec.id, source) is not None
-        and ctx.store.evidence_version(rec.id, source) != spec.version
+        and ctx.store.evidence_version(rec.id, source) != spec.answer_version(rec, ctx)
         for source in spec.stored_sources
     )
 
 
 def _detector_due(ctx: PipelineContext, rec: FileRecord, spec: LocalDetectorSpec) -> bool:
     """Whether a detector's stored answer is missing, from another version, or out of date by its own ``due``."""
-    if any(ctx.store.evidence_version(rec.id, source) != spec.version for source in spec.stored_sources):
+    version = spec.answer_version(rec, ctx)
+    if any(ctx.store.evidence_version(rec.id, source) != version for source in spec.stored_sources):
         return True
     return bool(spec.due and spec.due(rec, ctx))
 
@@ -909,7 +926,7 @@ def _run_detector(
     ctx.store.replace_detector_answer(
         rec.id,
         {source: [c for c in found if c.source is source] for source in spec.stored_sources},
-        version=spec.version,
+        version=spec.answer_version(rec, ctx),
         run=(spec.source, answer.signature) if isinstance(answer, DetectorAnswer) else None,
     )
 

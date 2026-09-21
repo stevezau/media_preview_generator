@@ -187,11 +187,34 @@ class TestCommand:
         assert cmd.count("-bsf:V:0") == (1 if bsf else 0)
 
     @pytest.mark.parametrize(
-        ("duration_ms", "episode", "expected"),
-        [(6_000_000, False, 5100.0), (1_320_000, True, 870.0), (300_000, True, 0.0), (600_000, False, 0.0)],
+        ("duration_ms", "tail_s", "expected"),
+        [(6_000_000, 900.0, 5100.0), (1_320_000, 450.0, 870.0), (300_000, 450.0, 0.0), (600_000, 900.0, 0.0),
+         (6_000_000, 1800.0, 4200.0), (1_320_000, 300.0, 1020.0)],
+    )  # fmt: skip
+    def test_tail_start(self, duration_ms, tail_s, expected):
+        assert frames.tail_start_s(duration_ms, tail_s=tail_s) == expected
+
+    @pytest.mark.parametrize(
+        ("is_episode", "tv_s", "movie_s", "expected"),
+        [
+            # Automatic is what it has always been: 450 s an episode, 900 s a movie or a file of unknown kind.
+            (True, None, None, 450.0),
+            (False, None, None, 900.0),
+            # A window applies to its own kind only.
+            (True, 600, None, 600.0),
+            (False, 600, None, 900.0),
+            (True, None, 1800, 450.0),
+            (False, None, 1800, 1800.0),
+            (True, 300, 1800, 300.0),
+            (False, 300, 1800, 1800.0),
+        ],
     )
-    def test_tail_start(self, duration_ms, episode, expected):
-        assert frames.tail_start_s(duration_ms, is_episode=episode) == expected
+    def test_tail_length_follows_the_window_for_the_files_kind(self, is_episode, tv_s, movie_s, expected):
+        assert frames.tail_length_s(is_episode=is_episode, tv_s=tv_s, movie_s=movie_s) == expected
+
+    def test_tail_length_with_no_window_arguments_is_automatic(self):
+        assert frames.tail_length_s(is_episode=True) == 450.0
+        assert frames.tail_length_s(is_episode=False) == 900.0
 
 
 def _fake_ffmpeg(

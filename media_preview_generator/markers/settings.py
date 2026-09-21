@@ -30,6 +30,9 @@ SOURCE_IDS: tuple[str, ...] = (
 PUBLISH_WHEN_VALUES: tuple[str, ...] = ("high", "medium")
 ON_PLEX_REDETECT_VALUES: tuple[str, ...] = ("restore", "keep_plex")
 ON_EMBY_REDETECT_VALUES: tuple[str, ...] = ("restore", "keep_emby")
+# The credit text search windows Settings offers (seconds from the end of the file); None is Automatic.
+CREDITS_WINDOW_VALUES_S: tuple[int, ...] = (300, 600, 900, 1200, 1800)
+_CREDITS_WINDOW_KEYS: tuple[str, ...] = ("tv_s", "movie_s")
 SECRET_MASK = "****"
 _API_KEY_MAX_LEN = 200
 _AGENT_URL_MAX_LEN = 500
@@ -40,7 +43,7 @@ _SPORTS_NAME_RE = re.compile(r"\bsports?\b", re.IGNORECASE)
 DEFAULT_GLOBAL_MARKERS: dict[str, Any] = {
     "detect": {"intro": True, "credits": True, "recap": False},
     "publish_when": "high",
-    "respect_locks": True,
+    "credits_window": {"tv_s": None, "movie_s": None},
     "sources": [
         {"id": "chapters", "enabled": True},
         {"id": "theintrodb", "enabled": False, "api_key": ""},
@@ -98,8 +101,11 @@ class GlobalMarkersSettings:
     detect_credits: bool
     detect_recap: bool
     publish_when: str
-    respect_locks: bool
     sources: tuple[SourceSetting, ...]
+    # How far from the end of a file credit text detection looks, in seconds; None = Automatic (the detector's own
+    # 450 s for a TV episode, 900 s for a movie or a file of unknown kind).
+    credits_tv_s: int | None = None
+    credits_movie_s: int | None = None
 
     def source(self, source_id: str) -> SourceSetting | None:
         """Return the setting for ``source_id`` or None."""
@@ -123,13 +129,14 @@ class GlobalMarkersSettings:
         different real keys hash identically, so rotating the key alone doesn't force
         re-detection.
 
-        ``respect_locks`` is deliberately left out, and that is not an oversight. A lock is applied
-        after the rules have run — ``decide()`` takes it as a separate argument and a locked marker
-        wins whatever the evidence says (spec §5.5 rule 1) — so the setting changes nothing this
-        hash is for: whether a file's *stored decision* was reached under different rules and has to
-        be reached again. Including it would restamp every decision row in the library, and move
-        every ``decided_at``, the first time the switch is flipped, without changing a single
-        answer.
+        The credit text window is part of the hash, but only once it is not Automatic: an install that never
+        touches it keeps the hash it has always had, so nothing is restamped on upgrade. Changing it changes the
+        credits answer, so decisions made on another window are made again.
+
+        Locks are not part of it, and that is not an oversight. A lock is applied after the rules have run —
+        ``decide()`` takes it as a separate argument and a locked marker wins whatever the evidence says (spec §5.5
+        rule 1) — so it changes nothing this hash is for: whether a file's *stored decision* was reached under
+        different rules and has to be reached again.
 
         Returns:
             A stable sha1 hex digest.
@@ -139,6 +146,8 @@ class GlobalMarkersSettings:
             "publish_when": self.publish_when,
             "sources": [[s.id, s.enabled, bool(s.api_key)] for s in self.sources],
         }
+        if self.credits_tv_s is not None or self.credits_movie_s is not None:
+            payload["credits_window"] = [self.credits_tv_s, self.credits_movie_s]
         return hashlib.sha1(json.dumps(payload, sort_keys=True).encode(), usedforsecurity=False).hexdigest()
 
 
@@ -260,12 +269,43 @@ def validate_global(raw: object, existing: object) -> tuple[dict | None, str]:
     sources, err = _normalise_sources(raw.get("sources"), existing_sources)
     if err:
         return None, err
+    credits_window, err = _normalise_credits_window(raw.get("credits_window"))
+    if err:
+        return None, err
     return {
         "detect": detect,
         "publish_when": publish_when,
-        "respect_locks": bool(raw.get("respect_locks", True)),
+        "credits_window": credits_window,
         "sources": sources,
     }, ""
+
+
+def _normalise_credits_window(raw: object) -> tuple[dict | None, str]:
+    """Validate a posted ``markers.credits_window``.
+
+    Args:
+        raw: The posted value: None or absent (both Automatic), or ``{"tv_s": .., "movie_s": ..}`` where each is None
+            (Automatic) or one of :data:`CREDITS_WINDOW_VALUES_S`. A key left out is Automatic.
+
+    Returns:
+        ``(block, "")`` on success, ``(None, message)`` on error.
+    """
+    if raw is None:
+        return dict(DEFAULT_GLOBAL_MARKERS["credits_window"]), ""
+    allowed = ", ".join(str(v) for v in CREDITS_WINDOW_VALUES_S)
+    if not isinstance(raw, dict):
+        return None, "markers.credits_window must be an object"
+    unknown = sorted(str(k) for k in raw if k not in _CREDITS_WINDOW_KEYS)
+    if unknown:
+        return None, f"markers.credits_window has unknown keys: {', '.join(unknown)}"
+    out: dict[str, int | None] = {}
+    for key in _CREDITS_WINDOW_KEYS:
+        value = raw.get(key)
+        # type() is int: a bool is an int and 300.0 == 300, but neither is a window the UI offers.
+        if value is not None and not (type(value) is int and value in CREDITS_WINDOW_VALUES_S):
+            return None, f"markers.credits_window.{key} must be null (Automatic) or one of {allowed} (seconds)"
+        out[key] = value
+    return out, ""
 
 
 def _stored_agent_token(existing: object) -> str:
@@ -415,7 +455,13 @@ def load_global(raw: object) -> GlobalMarkersSettings:
         warning, since a settings.json a previous release wrote should always validate) when
         ``raw`` is a dict that fails validation.
     """
-    block, err = validate_global(raw if isinstance(raw, dict) else {}, raw)
+    stored = raw if isinstance(raw, dict) else {}
+    # A bad window falls back to Automatic on its own: it must not throw away the sources and switches beside it.
+    window, window_err = _normalise_credits_window(stored.get("credits_window"))
+    if window_err or window is None:
+        logger.warning("Ignoring invalid credits search window ({}); using Automatic instead.", window_err)
+        window = dict(DEFAULT_GLOBAL_MARKERS["credits_window"])
+    block, err = validate_global({**stored, "credits_window": None}, raw)
     if err or block is None:
         if err:
             logger.warning("Ignoring invalid Intro & Credits settings ({}); using defaults instead.", err)
@@ -425,8 +471,9 @@ def load_global(raw: object) -> GlobalMarkersSettings:
         detect_credits=block["detect"]["credits"],
         detect_recap=block["detect"]["recap"],
         publish_when=block["publish_when"],
-        respect_locks=block["respect_locks"],
         sources=tuple(SourceSetting(s["id"], s["enabled"], s.get("api_key", "")) for s in block["sources"]),
+        credits_tv_s=window["tv_s"],
+        credits_movie_s=window["movie_s"],
     )
 
 

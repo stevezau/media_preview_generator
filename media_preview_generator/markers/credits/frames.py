@@ -101,18 +101,35 @@ class KeyframeThinning(NamedTuple):
     drop_non_key: bool = False
 
 
-def tail_start_s(duration_ms: int, *, is_episode: bool) -> float:
-    """Where the tail starts: the last 450 s of an episode, the last 900 s of anything else (T-R4).
+def tail_length_s(*, is_episode: bool, tv_s: int | None = None, movie_s: int | None = None) -> float:
+    """How much of the end is the tail: the last 450 s of an episode, the last 900 s of anything else (T-R4), unless
+    the user chose a window in Settings.
+
+    Args:
+        is_episode: The file is a TV episode (a file of unknown kind is not).
+        tv_s: The user's window for episodes, None for Automatic.
+        movie_s: The user's window for movies and files of unknown kind, None for Automatic.
+
+    Returns:
+        Seconds.
+    """
+    chosen = tv_s if is_episode else movie_s
+    if chosen is not None:
+        return float(chosen)
+    return EPISODE_TAIL_S if is_episode else MOVIE_TAIL_S
+
+
+def tail_start_s(duration_ms: int, *, tail_s: float) -> float:
+    """Where the tail starts.
 
     Args:
         duration_ms: The file's duration.
-        is_episode: The file is a TV episode.
+        tail_s: The tail's length (:func:`tail_length_s`).
 
     Returns:
         Seconds from the start of the file, never below 0.
     """
-    tail = EPISODE_TAIL_S if is_episode else MOVIE_TAIL_S
-    return max(0.0, duration_ms / 1000.0 - tail)
+    return max(0.0, duration_ms / 1000.0 - tail_s)
 
 
 def _scale_filter(gpu: str | None, hw_active: bool, keep_on_gpu: bool) -> str:

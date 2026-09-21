@@ -85,6 +85,8 @@ class DecisionContext:
     Attributes:
         intro_chapter_limit_ms: The season's limit on an intro chapter deciding alone (:func:`intro_chapter_limit_ms`
             of the other episodes); None when the season can't tell.
+        movie_credits_max_from_end_ms: How far before the end a movie's credits may start. It follows a credits
+            window the user set beyond the default, or a longer window would decode more and then discard what it found.
     """
 
     duration_ms: int
@@ -93,6 +95,7 @@ class DecisionContext:
     enabled_types: frozenset[MarkerType]
     source_order: tuple[str, ...]
     intro_chapter_limit_ms: int | None = None
+    movie_credits_max_from_end_ms: int = MOVIE_CREDITS_MAX_FROM_END_MS
 
 
 @dataclass(frozen=True)
@@ -164,8 +167,8 @@ def sanity_problem(candidate: Candidate, ctx: DecisionContext) -> str | None:
     else:
         if start * 100 < 75 * d:
             return f"{candidate.type.value} starts before the last 25% of the file"
-        if candidate.type is MarkerType.CREDITS and ctx.is_movie and d - start > MOVIE_CREDITS_MAX_FROM_END_MS:
-            return "movie credits start more than 900 s before the end"
+        if candidate.type is MarkerType.CREDITS and ctx.is_movie and d - start > ctx.movie_credits_max_from_end_ms:
+            return f"movie credits start more than {ctx.movie_credits_max_from_end_ms // 1000} s before the end"
     return None
 
 
