@@ -661,7 +661,9 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    change, an item the server replaced; a drifted Plex item's current version files too), plus files with decided
    credits or preview whose server's stored answer is empty or unusable, on a 1/2/4/8/16-day backoff (at most 5
    re-reads, failed ones included), and the files of items whose last publish failed, on the same backoff (at most 5
-   retries per failure). Locked markers re-assert (§5.5 rule 1). Plex
+   retries per failure). A file with a marker the user locked that an owning server never received (its last publish
+   there `failed` or `skipped`: the server was down or not ready when the editor saved) is listed on every run with no
+   backoff, until a server has it. Locked markers re-assert (§5.5 rule 1). Plex
    `on_plex_redetect` = `restore` (default) or `keep_plex`; Emby `on_emby_redetect` = `restore` or `keep_emby`.
    `keep_plex` keeps Plex's markers (§14 2026-09-14), not stored as evidence.
 7. **Outcomes** per server: markers written / reused / needs review / skipped + reason.
@@ -1742,6 +1744,14 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   locks included), and a server not started within 25 s (`PUBLISH_NOW_DEADLINE_S`) isn't started, its row says so and the
   next run publishes it. A job running the same file makes the request leave the publish to the next run (2 s wait).
   Cost accepted: the 25 s is a start gate, so one server already under way can outlast it by a small multiple of 8 s.
+- 2026-09-21 · **A locked edit a server never received is always due on Check servers** (§6.2 step 6; found by phase 4
+  lab row 7, Jellyfin stopped while the editor saved). The server shows what this app last left there, so it hasn't
+  drifted, and a `skipped` publish isn't a failed item, so no run listed the file until another job happened to; and the
+  editor labelled that server "Intro & Credits off" with "Turn on Intro & Credits". Now a skipped row of a server with
+  Intro & Credits on is `failed` in the editor ("Your times are saved. This server gets them at the next Check servers
+  run."), and Check servers lists every file with a locked marker whose last publish to an owning server was `failed`
+  or `skipped`, on every run, with no backoff (at most 100 files a run, so a server that stays not ready can't crowd
+  out the other lists): the user's own edit isn't left waiting a day.
 - 2026-09-21 · **Saving is locking, and the editor clamps rather than judges** (§5.5 rule 1, rule 2; plan P-R2, P-R3).
   There is no adjusted-but-unlocked marker. A marker the user saves keeps two of rule 2's bounds (inside the file, ends
   after it starts); the 3 s minimum, the intro cap and the position windows exist to catch a wrong source and are not

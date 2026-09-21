@@ -368,7 +368,7 @@ column) holds:
 | `retry_delay` | int | Present only on a retry or verify job: seconds waited before it took a slot. |
 | `retry_not_before` | ISO-8601 timestamp | Present only on a retry or verify job: the due time (survives a restart without waiting again in full). |
 | `verify` | bool | Present only on a verify job: the delayed check of files published after they were replaced. It queues no further verify job, and doesn't retry a file gone from disk. |
-| `reconcile` | bool | Present only on a Check servers job: it lists the files of drifted published items (and of items whose last publish failed, and decided files to ask servers again about) instead of libraries or paths. |
+| `reconcile` | bool | Present only on a Check servers job: it lists the files of drifted published items (and of items whose last publish failed, files with a locked marker a server never received, and decided files to ask servers again about) instead of libraries or paths. |
 | `paused_by_schedule` | bool | Set when a schedule's stop time paused the job: that schedule's next start (or **Run now**) resumes it. Any resume, and a pause by hand, clears it (a job cancelled while so paused keeps it); a Re-run drops it. |
 
 Retries (files not yet on disk, not yet in a server's library, or on a Plex whose Plex Pass check didn't answer)

@@ -502,17 +502,29 @@ _EDITOR_RESULTS = {
 }
 
 
-def _editor_server_row(row: dict, *, saved: list[Any], duration_ms: int) -> dict:
-    """One publish row in the editor's words, with what this server can't show and its per-field notes."""
+def _editor_server_row(row: dict, *, saved: list[Any], duration_ms: int, enabled_ids: set[str]) -> dict:
+    """One publish row in the editor's words, with what this server can't show and its per-field notes.
+
+    Args:
+        row: The server's publish row (a job's row shape).
+        saved: The markers just saved.
+        duration_ms: The file's duration.
+        enabled_ids: The servers with Intro & Credits on for this file.
+    """
     from ...markers.inspect import CAN_SHOW
     from ...markers.models import MarkerType
-    from ...markers.outcomes import REPLACED_OWN
+    from ...markers.outcomes import REPLACED_OWN, ServerStatus
     from ...markers.publishers.emby import credits_note
     from ...servers.base import ServerType
 
     server_type = ServerType(row["server_type"])
     can_show = CAN_SHOW.get(server_type, ())
     result = _EDITOR_RESULTS.get(row["status"], row["status"])
+    # A job calls both "skipped": a server Intro & Credits is off for, and one it is on for that couldn't take the
+    # markers just now (down, plugin missing). Only the first is "off" -- telling the second to turn it on is wrong,
+    # and the user's times still have to reach it, which is what "failed" says.
+    if row["status"] == ServerStatus.SKIPPED.value and row["server_id"] in enabled_ids:
+        result = "failed"
     notes = []
     # A note describes what the server will do with the marker, so it is only true of a server that took it.
     if server_type is ServerType.EMBY and result not in ("not_enabled", "nothing_to_publish"):
@@ -623,7 +635,9 @@ def marker_item_save():
         "canonical_path": safe,
         "duration_ms": rec.duration_ms,
         "markers": _stored_markers(store, rec.id),
-        "servers": [_editor_server_row(row, saved=saved, duration_ms=rec.duration_ms) for row in rows],
+        "servers": [
+            _editor_server_row(row, saved=saved, duration_ms=rec.duration_ms, enabled_ids=enabled_ids) for row in rows
+        ],
     }
     return jsonify(_without_secrets(payload, registry))
 

@@ -1659,6 +1659,33 @@ class MarkerStore:
             ).fetchall()
         return [r["canonical_path"] for r in rows]
 
+    def files_with_undelivered_locks(self, server_ids: Iterable[str]) -> list[tuple[str, str]]:
+        """Files with a marker the user locked whose last publish to one of these servers didn't land.
+
+        ``failed`` (the write or the publish deadline failed) and ``skipped`` (the server couldn't take markers then:
+        down, plugin missing) both mean the user's edit never reached the server. ``waiting`` is left out: it is a Plex
+        item whose other versions haven't agreed yet, and publishing this file again can't make them agree.
+
+        Args:
+            server_ids: The servers to look at.
+
+        Returns:
+            ``(canonical_path, server_id)`` pairs, sorted by path then server.
+        """
+        ids = sorted(set(server_ids))
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT f.canonical_path, p.server_id FROM markers m "
+                "JOIN files f ON f.id = m.file_id JOIN publish_state p ON p.file_id = m.file_id "
+                f"WHERE m.locked=1 AND p.status IN ('failed','skipped') AND p.server_id IN ({marks}) "  # noqa: S608
+                "ORDER BY f.canonical_path, p.server_id",
+                ids,
+            ).fetchall()
+        return [(r["canonical_path"], r["server_id"]) for r in rows]
+
     def server_rechecks_due(
         self, server_ids: Iterable[str], *, now: datetime, after: Sequence[timedelta], limit: int
     ) -> list[tuple[str, str]]:

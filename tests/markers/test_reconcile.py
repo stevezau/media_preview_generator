@@ -671,10 +671,65 @@ class TestServersToAskAgain:
         store.close()
 
 
+class TestUndeliveredLocks:
+    """A locked edit a server never got (it was down, or not ready, when the editor saved) is always due on Check
+    servers: no backoff, because the user asked for it by hand."""
+
+    @staticmethod
+    def _locked(store, path, server_id, status):
+        rec = store.upsert_file(FileIdentity(path, 1, 1), duration_ms=120_000, season_key=None, is_movie=False)
+        store.save_user_markers(rec.id, [Marker(T.INTRO, 1_000, 30_000, ("user",))], settings_fingerprint="fp")
+        store.set_publish_state(rec.id, server_id, item_id="7", markers=None, status=status)
+
+    @pytest.mark.parametrize("status", ["failed", "skipped"])
+    def test_a_locked_file_a_server_did_not_get_is_listed(self, store, media, status):
+        path = media("a.mkv")
+        self._locked(store, path, "jf-1", status)
+        registry = _registry(server_config("jf-1", ServerType.JELLYFIN, root=media.root))
+        assert reconcile.files_of_undelivered_locks(registry=registry, store=store, limit=10) == [path]
+
+    @pytest.mark.parametrize("change", ["file-deleted", "server-off", "intro-and-credits-off", "another-library"])
+    def test_files_the_pipeline_could_not_run_are_left_out(self, store, media, change):
+        path = media("a.mkv")
+        self._locked(store, path, "jf-1", "failed")
+        kwargs = {"root": media.root}
+        if change == "file-deleted":
+            os.remove(path)
+        elif change == "server-off":
+            kwargs["enabled"] = False
+        elif change == "intro-and-credits-off":
+            kwargs["markers"] = {"enabled": False, "library_ids": None}
+        else:
+            kwargs["root"] = media.root + "/elsewhere"
+        registry = _registry(server_config("jf-1", ServerType.JELLYFIN, **kwargs))
+        assert reconcile.files_of_undelivered_locks(registry=registry, store=store, limit=10) == []
+
+    def test_a_file_two_servers_missed_is_listed_once_and_the_limit_caps_the_files(self, store, media):
+        paths = [media(f"{n}.mkv") for n in range(3)]
+        for path in paths:
+            self._locked(store, path, "jf-1", "failed")
+            self._locked(store, path, "emby-1", "skipped")
+        registry = _registry(
+            server_config("jf-1", ServerType.JELLYFIN, root=media.root),
+            server_config("emby-1", ServerType.EMBY, root=media.root),
+        )
+        assert reconcile.files_of_undelivered_locks(registry=registry, store=store, limit=10) == paths
+        assert reconcile.files_of_undelivered_locks(registry=registry, store=store, limit=2) == paths[:2]
+        assert reconcile.files_of_undelivered_locks(registry=registry, store=store, limit=0) == []
+
+    def test_a_publish_to_a_server_that_is_not_checked_here_does_not_list_the_file(self, store, media):
+        path = media("a.mkv")
+        self._locked(store, path, "plex-1", "failed")
+        registry = _registry(server_config("jf-1", ServerType.JELLYFIN, root=media.root))
+        assert reconcile.files_of_undelivered_locks(registry=registry, store=store, limit=10) == []
+
+
 class TestCheckServersListing:
-    def _listing(self, store, drifts, *, rechecks=(), failed=(), warnings=(), max_files=500, **kwargs):
-        """``rechecks``: files asked of jf-1 again; ``failed``: files of Plex item "9", whose last publish failed."""
+    def _listing(self, store, drifts, *, rechecks=(), failed=(), locked=(), warnings=(), max_files=500, **kwargs):
+        """``rechecks``: files asked of jf-1 again; ``failed``: files of Plex item "9", whose last publish failed;
+        ``locked``: files with a locked edit a server never received (``self.locked_files`` is that lookup)."""
         with (
+            patch.object(reconcile, "files_of_undelivered_locks", return_value=list(locked)) as self.locked_files,
             patch.object(reconcile, "find_drift", return_value=(list(drifts), list(warnings))) as find,
             patch.object(
                 reconcile, "files_of_failed_items", return_value={p: frozenset({("plex-1", "9")}) for p in failed}
@@ -724,6 +779,34 @@ class TestCheckServersListing:
         assert listing.retries == {path: frozenset({("plex-1", "9")}) for path in ("/tv/S/e3.mkv", "/tv/S/e1.mkv")}
         assert listing.listed_at == NOW.isoformat()
 
+    def test_files_with_a_locked_edit_a_server_missed_are_listed_and_count_against_the_limit(self, store):
+        drifts = [reconcile.Drift("plex-1", "2", Shown.REPLACED, ("/tv/S/e2.mkv",))]
+        listing, _find, retry, ask = self._listing(
+            store,
+            drifts,
+            locked=["/tv/S/e5.mkv", "/tv/S/e2.mkv"],  # e2 is also drifted: one file, not two
+            failed=["/tv/S/e3.mkv"],
+            rechecks=["/tv/S/e4.mkv"],
+        )
+        assert [i.canonical_path for i in listing.items] == [f"/tv/S/e{n}.mkv" for n in (2, 3, 4, 5)]
+        self.locked_files.assert_called_once_with(registry="reg", store=store, limit=reconcile.UNDELIVERED_LOCKS_MAX)
+        retry.assert_called_once_with(registry="reg", store=store, limit=500 - 2, now=NOW)
+        ask.assert_called_once_with(registry="reg", store=store, limit=500 - 3, now=NOW)
+        # Nothing is counted for them: they are due again on every run until a server has them.
+        assert "/tv/S/e5.mkv" not in listing.retries and "/tv/S/e5.mkv" not in listing.rechecks
+
+    @pytest.mark.parametrize(
+        ("max_files", "drifted", "room_for_locks"),
+        [(500, 0, 100), (500, 450, 50), (150, 0, 100), (80, 0, 80)],
+        ids=["a full run", "drift takes most of it", "a small run", "a run smaller than the cap"],
+    )
+    def test_locked_edits_a_server_missed_are_capped_so_they_cannot_crowd_out_the_other_lists(
+        self, store, max_files, drifted, room_for_locks
+    ):
+        drifts = [reconcile.Drift("plex-1", str(n), Shown.REPLACED, (f"/tv/S/d{n}.mkv",)) for n in range(drifted)]
+        self._listing(store, drifts, max_files=max_files)
+        assert self.locked_files.call_args.kwargs["limit"] == room_for_locks
+
     def test_the_listing_survives_a_round_trip_through_the_jobs_config(self, store):
         drifts = [reconcile.Drift("plex-1", "2", Shown.REPLACED, ("/tv/S/e2.mkv", "/tv/S/e1.mkv")),
                   reconcile.Drift("jf-1", "x", Shown.MISSING, ("/tv/S/e1.mkv",))]  # fmt: skip
@@ -760,6 +843,7 @@ class TestCheckServersListing:
         _listing, _find, retry, ask = self._listing(store, [], cancel_check=lambda: True)
         retry.assert_not_called()
         ask.assert_not_called()
+        self.locked_files.assert_not_called()
 
     def test_more_unfixable_drift_than_a_run_takes_neither_hides_later_drift_nor_starves_rechecks(self, tmp_path):
         clock = {"t": NOW}

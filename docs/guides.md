@@ -876,7 +876,9 @@ The checks above only run for files a job looks at. To check everything this app
 Credits · Check servers**: **Start New Job → Intro & Credits → Check servers** on the Dashboard,
 `POST /api/markers/reconcile`, or a schedule in **Automation → Schedules** (type **Intro & Credits → Check servers**;
 the server and library pickers don't apply). Nothing is scheduled by default. It runs at Low priority unless you pick
-another, and only one runs at a time: asking again while one is queued or running reuses it ("A Check servers job is
+another. A marker you locked in the Inspector that a server didn't get (it was down or not ready when you saved)
+is published again on every run until the server has it. Only one runs at a time: asking again while one is queued or
+running reuses it ("A Check servers job is
 already queued"), and a schedule tick then queues nothing. **Re-run** on a finished Check servers job asks the same
 way. When the job already there is paused, the message is "A Check servers job is paused. Resume or cancel it on the
 dashboard." A job paused by its schedule's stop time is resumed by that schedule's next start (or **Run now**), even

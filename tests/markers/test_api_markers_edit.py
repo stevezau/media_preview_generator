@@ -343,7 +343,9 @@ class TestSaveStoresAndPublishes:
             "server_id": "plex-1",
             "server_name": "PLEX-1",
             "server_type": "plex",
-            "result": _EDITOR_RESULTS[status.value],
+            # plex-1 has Intro & Credits on, so a skipped row is a server that couldn't take the markers, not one
+            # that is off (see test_an_enabled_server_that_could_not_take_the_markers_is_reported_as_failed).
+            "result": "failed" if status is ServerStatus.SKIPPED else _EDITOR_RESULTS[status.value],
             "message": "why",
             "can_show": ["intro", "credits"],
             "cant_show": [],
@@ -351,6 +353,42 @@ class TestSaveStoresAndPublishes:
             "replaced_own": [],
         }
         assert not _EDITOR_RESULTS[status.value].startswith("markers_")
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Can't reach this Jellyfin server",
+            "Install the Media Preview Bridge plugin",
+            "Confirm the Plex database write to turn this on",
+        ],
+    )
+    def test_an_enabled_server_that_could_not_take_the_markers_is_reported_as_failed(
+        self, client, servers, known, episode, published, message
+    ):
+        """The editor tells a server with Intro & Credits on that couldn't take the markers (down, no plugin) apart
+        from one that is off: the off badge says "Turn on Intro & Credits", which is wrong advice for the first."""
+        published.rows = [_row("jf-1", "jellyfin", "markers_skipped", message)]
+        resp = _save(client, episode, [{"type": "intro", "start_ms": 5_000, "end_ms": 35_000}])
+        row = resp.get_json()["servers"][0]
+        assert (row["server_id"], row["result"], row["message"]) == ("jf-1", "failed", message)
+
+    def test_a_server_with_intro_and_credits_off_is_still_reported_as_off(
+        self, client, media, known, episode, published
+    ):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        get_settings_manager().set(
+            "media_servers", [_server("plex-1", "plex", media), _server("jf-1", "jellyfin", media, markers=False)]
+        )
+        published.rows = [
+            _row("plex-1", "plex", "markers_skipped", "Can't reach this server"),
+            _row("jf-1", "jellyfin", "markers_skipped", "Intro & Credits is off for this server"),
+        ]
+        resp = _save(client, episode, [{"type": "intro", "start_ms": 5_000, "end_ms": 35_000}])
+        assert {r["server_id"]: r["result"] for r in resp.get_json()["servers"]} == {
+            "plex-1": "failed",
+            "jf-1": "not_enabled",
+        }
 
     def test_the_types_a_lock_took_off_a_server_reach_the_editor_by_name(
         self, client, servers, known, episode, published

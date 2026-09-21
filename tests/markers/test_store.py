@@ -1323,6 +1323,57 @@ class TestPublishedItems:
         assert any("idx_publish_state_item" in str(tuple(row)) for row in plan)
 
 
+class TestUndeliveredLocks:
+    """Check servers must find a user's locked edit that a server never received (spec §6.2 step 6, ruling P-R1)."""
+
+    LOCKED = Marker(MarkerType.INTRO, 1_000, 30_000, ("user",), locked=True)
+
+    def _file(self, store, path="/m/a.mkv", *, locked=True):
+        rec = store.upsert_file(FileIdentity(path, 1, 1), duration_ms=120_000, season_key=None, is_movie=False)
+        if locked:
+            store.save_user_markers(rec.id, [self.LOCKED], settings_fingerprint="fp")
+        return rec
+
+    @pytest.mark.parametrize(
+        ("status", "listed"),
+        [("failed", True), ("skipped", True), ("waiting", False), ("written", False)],
+        ids=lambda v: str(v),
+    )
+    def test_a_locked_file_is_listed_for_the_servers_whose_last_publish_did_not_land(self, store, status, listed):
+        rec = self._file(store)
+        store.set_publish_state(rec.id, "jf-1", item_id="7", markers=None, status=status)
+        assert store.files_with_undelivered_locks(["jf-1"]) == ([("/m/a.mkv", "jf-1")] if listed else [])
+
+    def test_a_file_nobody_locked_is_never_listed(self, store):
+        rec = self._file(store, locked=False)
+        store.set_publish_state(rec.id, "jf-1", item_id="7", markers=None, status="failed")
+        assert store.files_with_undelivered_locks(["jf-1"]) == []
+
+    def test_unlocking_takes_the_file_off_the_list(self, store):
+        rec = self._file(store)
+        store.set_publish_state(rec.id, "jf-1", item_id="7", markers=None, status="failed")
+        store.unlock_markers(rec.id, [MarkerType.INTRO])
+        assert store.files_with_undelivered_locks(["jf-1"]) == []
+
+    def test_only_the_servers_asked_for_count_and_each_pair_is_listed_once_in_path_order(self, store):
+        b, a = self._file(store, "/m/b.mkv"), self._file(store, "/m/a.mkv")
+        for rec in (a, b):
+            store.set_publish_state(rec.id, "jf-1", item_id="7", markers=None, status="failed")
+            store.set_publish_state(rec.id, "emby-1", item_id="7", markers=None, status="skipped")
+            store.set_publish_state(rec.id, "plex-1", item_id="7", markers=None, status="failed")
+        assert store.files_with_undelivered_locks(["jf-1", "emby-1"]) == [
+            ("/m/a.mkv", "emby-1"),
+            ("/m/a.mkv", "jf-1"),
+            ("/m/b.mkv", "emby-1"),
+            ("/m/b.mkv", "jf-1"),
+        ]
+
+    def test_no_servers_lists_nothing(self, store):
+        rec = self._file(store)
+        store.set_publish_state(rec.id, "jf-1", item_id="7", markers=None, status="failed")
+        assert store.files_with_undelivered_locks([]) == []
+
+
 class TestServerRechecks:
     """Decided files whose server answered "no markers", taken by Check servers on a backoff: 1, 2, 4, 8, 16 days."""
 

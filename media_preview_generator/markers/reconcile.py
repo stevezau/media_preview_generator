@@ -9,7 +9,8 @@ heal, a Plex version added since, an item the server replaced), which publishes 
 (Keep Plex's / Keep Emby's, versions, consent). A drifted Plex item's current version files run too, so a file that
 replaced a version this app ran gets its own decision there. It also runs decided files whose server had no markers of
 its own, with a backoff, so that server's detection since can still shorten their credits (rule 7), and the files of
-items whose last publish failed, on the same backoff.
+items whose last publish failed, on the same backoff. A marker the user locked that a server never received (it was
+down or not ready when the editor saved) is different: no backoff, every run publishes it again until it lands.
 """
 
 from __future__ import annotations
@@ -44,6 +45,9 @@ LISTING_CONFIG_KEY = "check_servers_listing"
 READ_BACK_BATCH = 500
 # Files of a run kept for decided files to ask servers again about while more drifted files wait than a run takes.
 RECHECK_SHARE = 100
+# Files of a run that a user's locked edit may take. A hand-made edit is rare; the cap keeps a server that stays
+# not ready (plugin missing) from crowding out the drift retries and rechecks with files no run can fix.
+UNDELIVERED_LOCKS_MAX = 100
 # Drift whose item still exists: its current files run along with the files this app published there.
 _RUN_LIVE_FILES = frozenset({Shown.VERSIONS_CHANGED, Shown.REPLACED, Shown.MISSING})
 
@@ -282,6 +286,37 @@ def files_of_failed_items(
     return {path: frozenset(items) for path, items in items_by_path.items()}
 
 
+def files_of_undelivered_locks(*, registry: Any, store: MarkerStore, limit: int) -> list[str]:
+    """Files whose locked marker a server that Intro & Credits goes to never received.
+
+    The editor saves and locks first and publishes inside the request (ruling P-R1); a server that was down or not
+    ready then is left for "the next Check servers run", as the editor tells the user. Nothing else lists such a file:
+    the server shows what this app last left there, so it hasn't drifted, and a skipped publish isn't a failed item, so
+    the retry backoff never reaches it. A user's own edit isn't left waiting a day, so each run lists the file again
+    until a server has it. A server that stays not ready (plugin missing) keeps its files listed: each costs a cached
+    capability check and no write, and ``UNDELIVERED_LOCKS_MAX`` bounds how many a run takes.
+
+    Args:
+        registry: The job's ``ServerRegistry``.
+        store: The markers store.
+        limit: Most files to list.
+
+    Returns:
+        The files, sorted, that the pipeline can run for a server they were missed on.
+    """
+    if limit <= 0:
+        return []
+    configs = {
+        cfg.id: cfg for cfg in registry.configs() if cfg.enabled and load_server(cfg.markers, cfg.type.value).enabled
+    }
+    runnable = (
+        path
+        for path, server_id in store.files_with_undelivered_locks(list(configs))
+        if _runnable(path, [configs[server_id]])
+    )
+    return list(dict.fromkeys(runnable))[:limit]
+
+
 @dataclass(frozen=True)
 class CheckServersListing:
     """The files one Check servers run checks.
@@ -491,21 +526,30 @@ def check_servers_listing(
         warnings.append(f"{left} more changed file(s) are checked on a later run")
     store.record_drift_listed((drift.server_id, drift.item_id) for drift in chosen)
     now = _utcnow()
+    undelivered: list[str] = []
     retried: dict[str, frozenset[tuple[str, str]]] = {}
     asked_again: dict[str, frozenset[str]] = {}
     if not check():
-        retried = files_of_failed_items(registry=registry, store=store, limit=max_files - len(drifted), now=now)
-        listed = set(drifted) | set(retried)
+        undelivered = files_of_undelivered_locks(
+            registry=registry, store=store, limit=min(max_files - len(drifted), UNDELIVERED_LOCKS_MAX)
+        )
+        held = set(drifted) | set(undelivered)
+        retried = files_of_failed_items(registry=registry, store=store, limit=max_files - len(held), now=now)
+        listed = held | set(retried)
         asked_again = files_to_ask_servers_again(registry=registry, store=store, limit=max_files - len(listed), now=now)
     logger.info(
-        "Check servers: {} published item(s) changed on servers ({} file(s) this run); {} file(s) of items whose last "
-        "publish failed; {} decided file(s) to ask servers again for their own markers",
+        "Check servers: {} published item(s) changed on servers ({} file(s) this run); {} file(s) with a locked marker "
+        "a server never received; {} file(s) of items whose last publish failed; {} decided file(s) to ask servers "
+        "again for their own markers",
         len(drifts),
         len(drifted),
+        len(undelivered),
         len(retried),
         len(asked_again),
     )
-    paths = sorted(set(drifted) | set(retried) | set(asked_again), key=lambda p: (os.path.dirname(p), p))
+    paths = sorted(
+        set(drifted) | set(undelivered) | set(retried) | set(asked_again), key=lambda p: (os.path.dirname(p), p)
+    )
     return CheckServersListing(
         _listed_items(paths),
         warnings,
