@@ -1765,7 +1765,7 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   after it starts); the 3 s minimum, the intro cap and the position windows exist to catch a wrong source and are not
   applied, so the editor warns and still saves. Adding a marker where nothing was found starts from a round time
   (intro/recap 0:00–0:30, credits the last 60 s, preview the last 30 s) so it can't be read as something detected.
-  `respect_locks` does not gate a lock: it stays in the settings block, but a lock wins whatever it is set to.
+  `respect_locks` does not gate a lock: it stays in the settings block, but a lock wins whatever it is set to. (Since removed: see the entry below.)
 - 2026-09-21 · **Setup Health gets an Intro & Credits section** (§7 item 6, §9; plan D6, P-R5, P-R6). The method stays
   `previews_readiness()` and the envelope gains a `markers` section (or plugin rows for Jellyfin and Emby) built from the
   facts the Edit tab already computed, so the two can't disagree. A server with the feature off gets one `recommended`,

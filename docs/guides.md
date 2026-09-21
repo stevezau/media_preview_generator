@@ -628,7 +628,7 @@ A marker you lock is never replaced by detection; to let detection decide a type
 credit text is searched for, separately for **TV episodes** and **Movies**. Each is **Automatic** (the last 7½
 minutes of an episode, the last 15 minutes of a movie or of a file that isn't recognised as an episode) or 5, 10, 15,
 20 or 30 minutes. Automatic fits nearly every library: raise a window only if credits are being missed because they
-start earlier than it reaches. A longer window takes longer to decode for every file, and a movie window above 15 minutes also lets a movie's credits start that early. Changing it reads files
+start earlier than it reaches. A longer window takes longer to decode for every file, and a window you choose also lets credits start that early: without it a start earlier than the last quarter of the file, or (for a movie window above 15 minutes) more than 15 minutes from the end, would be found and then refused. It never lets credits start before the middle of the file. Changing it reads files
 again on the new window (files you leave on Automatic are not read again). Locked markers are unaffected.
 
 **TheIntroDB** is used without the site's written permission (its terms restrict server-side use); it's off by

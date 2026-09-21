@@ -495,6 +495,10 @@ def _validate_and_coerce_settings_updates(
 
         # Merged over the stored block as readers see it: a stored block that doesn't validate reads as the defaults.
         stored_block, _stored_err = validate_global(existing_markers, existing_markers)
+        if stored_block is None and isinstance(existing_markers, dict):
+            # As ``load_global`` does: a bad stored window reads as Automatic on its own, so a partial post can't
+            # reset the sources and switches beside it to the defaults.
+            stored_block, _stored_err = validate_global({**existing_markers, "credits_window": None}, existing_markers)
         merged = _merge_global_markers_update(stored_block, updates["markers"])
         block, err = validate_global(merged, existing_markers)
         if err:

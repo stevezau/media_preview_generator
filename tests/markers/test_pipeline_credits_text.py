@@ -424,3 +424,34 @@ class TestMovieWindowReachesTheDecision:
                 "item-plex-1",
                 [Marker(T.CREDITS, 9_300_000, self.LONG_MOVIE_MS, ("credits_text",))],
             )
+
+    def test_a_movie_window_under_15_min_keeps_the_900_s_floor(self, store, movie, find):
+        # The cap is max(900 s, window): a small window must not lower it, or a credits start 800 s out (found by
+        # another source) would be refused although nothing changed for someone who narrowed the window.
+        find.answer = 10_000.0  # 800 s before the end of a 3 h movie
+        plex = ready_publisher()
+        ctx = ctx_for(store, movie, "medium", credits_window={"movie_s": 300})
+        out, _ = _run(ctx, movie, {"plex-1": plex}, probe=_probe(duration=self.LONG_MOVIE_MS), stage="process")
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+
+
+class TestTvWindowReachesTheDecision:
+    """The last-25% rule yields to a TV window the user chose: without it a wider window would decode more and then
+    have its answer discarded."""
+
+    START_S = 820.0  # 500 s before the end of the 22 min episode: before its last 25% (330 s)
+
+    @pytest.mark.parametrize(("window", "published"), [(None, False), ({"tv_s": 300}, False), ({"tv_s": 600}, True)])
+    def test_a_credits_start_before_the_last_quarter_publishes_only_within_the_window(
+        self, store, media, find, window, published
+    ):
+        find.answer = self.START_S
+        plex = ready_publisher()
+        ctx = ctx_for(store, media, "medium", credits_window=window)
+        out, _ = _run(ctx, media, {"plex-1": plex}, probe=_probe(duration=DUR), stage="process")
+        assert (out.outcome_key == FileOutcome.PUBLISHED.value) is published
+        if published:
+            assert plex.write.call_args.args == (
+                "item-plex-1",
+                [Marker(T.CREDITS, 820_000, DUR, ("credits_text",))],
+            )

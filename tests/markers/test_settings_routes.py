@@ -682,3 +682,15 @@ def test_a_stored_markers_block_with_respect_locks_still_loads_and_saves_without
     assert resp.status_code == 200
     stored = get_settings_manager().get("markers")
     assert "respect_locks" not in stored and stored["publish_when"] == "medium"
+
+
+def test_settings_post_partial_block_over_a_bad_stored_window_keeps_the_sources_beside_it(client):
+    # A hand-edited window that doesn't validate reads as Automatic on its own (as load_global does): a partial post
+    # must not throw the stored sources and switches away with it, which would change the fingerprint and re-decide
+    # every file.
+    stored = {**STORED_GLOBAL, "credits_window": {"tv_s": 450, "movie_s": None}}
+    result = _post_markers(client, {"publish_when": "medium"}, stored=stored)
+    assert result["sources"] == STORED_GLOBAL["sources"]
+    assert result["detect"] == STORED_GLOBAL["detect"]
+    assert result["publish_when"] == "medium"
+    assert result["credits_window"] == {"tv_s": None, "movie_s": None}

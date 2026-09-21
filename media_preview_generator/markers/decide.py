@@ -87,6 +87,9 @@ class DecisionContext:
             of the other episodes); None when the season can't tell.
         movie_credits_max_from_end_ms: How far before the end a movie's credits may start. It follows a credits
             window the user set beyond the default, or a longer window would decode more and then discard what it found.
+        credits_window_ms: The credits window the user chose for this file's kind, 0 for Automatic. Credits starting
+            within it are sane even where the last-25% rule would refuse them, for the same reason: a window the user
+            widened must not decode more only for the answer to be discarded.
     """
 
     duration_ms: int
@@ -96,6 +99,7 @@ class DecisionContext:
     source_order: tuple[str, ...]
     intro_chapter_limit_ms: int | None = None
     movie_credits_max_from_end_ms: int = MOVIE_CREDITS_MAX_FROM_END_MS
+    credits_window_ms: int = 0
 
 
 @dataclass(frozen=True)
@@ -165,7 +169,11 @@ def sanity_problem(candidate: Candidate, ctx: DecisionContext) -> str | None:
         if length > MAX_INTRO_MS:
             return f"{candidate.type.value} too long"
     else:
-        if start * 100 < 75 * d:
+        # Never before the middle of the file, so a window longer than a short file can't switch the rule off.
+        inside_chosen_window = (
+            candidate.type is MarkerType.CREDITS and d - start <= ctx.credits_window_ms and start * 2 >= d
+        )
+        if start * 100 < 75 * d and not inside_chosen_window:
             return f"{candidate.type.value} starts before the last 25% of the file"
         if candidate.type is MarkerType.CREDITS and ctx.is_movie and d - start > ctx.movie_credits_max_from_end_ms:
             return f"movie credits start more than {ctx.movie_credits_max_from_end_ms // 1000} s before the end"

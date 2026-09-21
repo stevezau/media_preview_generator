@@ -2777,3 +2777,61 @@ class TestMovieCreditsCapFollowsTheWindow:
     def test_an_episode_is_never_capped_by_it(self):
         ctx = DecisionContext(1_320_000, False, "medium", frozenset({T.CREDITS}), (), movie_credits_max_from_end_ms=1)
         assert sanity_problem(Candidate(T.CREDITS, 1_000_000, None, S.CREDITS_TEXT), ctx) is None
+
+
+class TestChosenWindowLetsCreditsStartBeforeTheLast25Percent:
+    """The last-25% rule refuses a credits start; a window the user chose overrides it, and Automatic doesn't."""
+
+    EPISODE_MS = 45 * 60_000  # last 25% = 11.25 min
+    MOVIE_MS = 100 * 60_000  # last 25% = 25 min
+
+    @pytest.mark.parametrize(
+        ("duration_ms", "is_movie", "window_ms", "from_end_ms", "expected"),
+        [
+            # Automatic (0): unchanged from before the setting existed.
+            (EPISODE_MS, False, 0, 12 * 60_000, "credits starts before the last 25% of the file"),
+            (EPISODE_MS, False, 0, 11 * 60_000, None),
+            # A 20 min TV window: a start 12 min out is fine, 21 min out is past the window.
+            (EPISODE_MS, False, 20 * 60_000, 12 * 60_000, None),
+            (EPISODE_MS, False, 20 * 60_000, 20 * 60_000, None),
+            (EPISODE_MS, False, 20 * 60_000, 20 * 60_000 + 1, "credits starts before the last 25% of the file"),
+            # A 30 min movie window on a 100 min film (27 min out is 27% of the file): needs both the cap and this.
+            (MOVIE_MS, True, 30 * 60_000, 27 * 60_000, None),
+            (MOVIE_MS, True, 30 * 60_000, 30 * 60_000 + 1, "credits starts before the last 25% of the file"),
+            (MOVIE_MS, True, 0, 27 * 60_000, "credits starts before the last 25% of the file"),
+        ],
+    )
+    def test_credits_start(self, duration_ms, is_movie, window_ms, from_end_ms, expected):
+        ctx = DecisionContext(
+            duration_ms,
+            is_movie,
+            "medium",
+            frozenset({T.CREDITS}),
+            (),
+            movie_credits_max_from_end_ms=max(900_000, window_ms) if is_movie else 900_000,
+            credits_window_ms=window_ms,
+        )
+        candidate = Candidate(T.CREDITS, duration_ms - from_end_ms, None, S.CREDITS_TEXT)
+        assert sanity_problem(candidate, ctx) == expected
+
+    def test_a_preview_still_needs_the_last_25_percent(self):
+        # The window is about credits; a preview that starts earlier is still refused.
+        ctx = DecisionContext(
+            self.EPISODE_MS, False, "medium", frozenset({T.PREVIEW}), (), credits_window_ms=30 * 60_000
+        )
+        candidate = Candidate(T.PREVIEW, self.EPISODE_MS - 20 * 60_000, None, S.CHAPTERS)
+        assert sanity_problem(candidate, ctx) == "preview starts before the last 25% of the file"
+
+    @pytest.mark.parametrize(
+        ("from_end_ms", "expected"),
+        [
+            (10 * 60_000, None),  # the middle of a 20 min episode
+            (10 * 60_000 + 1, "credits starts before the last 25% of the file"),
+            (18 * 60_000, "credits starts before the last 25% of the file"),  # a mislabelled chapter at 2:00
+        ],
+    )
+    def test_a_window_longer_than_the_file_still_needs_the_second_half(self, from_end_ms, expected):
+        episode_ms = 20 * 60_000
+        ctx = DecisionContext(episode_ms, False, "medium", frozenset({T.CREDITS}), (), credits_window_ms=30 * 60_000)
+        candidate = Candidate(T.CREDITS, episode_ms - from_end_ms, None, S.CREDITS_TEXT)
+        assert sanity_problem(candidate, ctx) == expected
