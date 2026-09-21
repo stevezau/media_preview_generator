@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Preview Inspector - Media Preview Generator{% endblock %}
+{% block title %}{{ 'Intro & Credits' if initial_tab == 'markers' else 'Preview Inspector' }} - Media Preview Generator{% endblock %}
 
 {% block head %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/pages/bif_viewer.css') }}">
@@ -19,8 +19,13 @@
      centered text-block is the sole flex child. -->
 <header class="page-header preview-inspector-header">
     <div class="w-100 text-center">
+        {% if initial_tab == 'markers' %}
+        <h1 class="page-title"><i class="bi bi-skip-forward me-2"></i>Intro &amp; Credits</h1>
+        <p class="page-subtitle mb-0">Search a media server by title to see, adjust or add its skip markers.</p>
+        {% else %}
         <h1 class="page-title"><i class="bi bi-film me-2"></i>Preview Inspector</h1>
         <p class="page-subtitle mb-0">Search a media server by title, or paste a preview file path directly.</p>
+        {% endif %}
     </div>
 </header>
 
@@ -191,10 +196,17 @@
      JS hides it when a search runs or the viewer opens. -->
 <div id="emptyState" class="text-center py-5">
     <i class="bi bi-film d-block mb-3" style="font-size: 3rem; opacity: 0.25;"></i>
+    {% if initial_tab == 'markers' %}
+    <p class="text-muted mb-1">Search a title above, then open a file to see its skip markers.</p>
+    <p class="text-muted small mb-0">
+        Intro &amp; Credits has to be turned on for a server first: Settings &rarr; Servers.
+    </p>
+    {% else %}
     <p class="text-muted mb-1">Search a title above to inspect its preview thumbnails.</p>
     <p class="text-muted small mb-0">
         Or paste a preview file path directly to skip the lookup.
     </p>
+    {% endif %}
 </div>
 
 <!-- Lock confirmation (Intro & Credits tab). Lock publishes to every owning server exactly as Save does, so it
@@ -627,6 +639,14 @@
     $('pathInput').addEventListener('keydown', e => {
         if (e.key === 'Enter') $('loadPathBtn').click();
     });
+
+    // The Tools menu's "Intro & Credits" entry opens this page on that tab (server-rendered as initial_tab).
+    (function _openInitialTab() {
+        if ({{ 'true' if initial_tab == 'markers' else 'false' }}) {
+            const btn = document.getElementById('inspectorMarkersTabBtn');
+            if (btn && window.bootstrap) window.bootstrap.Tab.getOrCreateInstance(btn).show();
+        }
+    })();
 
     // D11 — preload from a deep-link query param. The Files panel on
     // the dashboard adds a shortcut button per row that links here as

@@ -122,8 +122,13 @@ def schedules_page():
 @main.route("/bif-viewer")
 @login_required
 def bif_viewer():
-    """BIF thumbnail viewer for troubleshooting preview quality."""
-    return render_template("bif_viewer.html")
+    """Preview Inspector: BIF thumbnails, and the Intro & Credits tab.
+
+    ``?tab=markers`` (the Tools menu's "Intro & Credits" entry) opens the page on the Intro & Credits tab.
+    """
+    return render_template(
+        "bif_viewer.html", initial_tab="markers" if request.args.get("tab") == "markers" else "frames"
+    )
 
 
 @main.route("/servers")

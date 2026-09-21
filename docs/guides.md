@@ -681,7 +681,7 @@ order its episodes arrived in.
 
 ### Adjusting, adding and locking markers
 
-The Inspector's Intro & Credits tab has three buttons for setting a marker yourself. Adjust stays greyed out until a job
+Open it from **Tools → Intro & Credits** (the same page as Tools → Preview Inspector, opened on its Intro & Credits tab), search for a title and open a file. The Intro & Credits tab has three buttons for setting a marker yourself. Adjust stays greyed out until a job
 has read the file's length.
 
 - **Adjust** opens the editor on the timeline. Drag the handle at each edge of a marker, or type the times. **Save and

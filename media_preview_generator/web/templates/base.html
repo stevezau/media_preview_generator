@@ -151,8 +151,15 @@
                                 </a>
                             </li>
                             <li>
-                                <a class="dropdown-item {% if request.endpoint == 'main.bif_viewer' %}active{% endif %}" href="{{ url_for('main.bif_viewer') }}">
+                                <a class="dropdown-item {% if request.endpoint == 'main.bif_viewer' and request.args.get('tab') != 'markers' %}active{% endif %}" href="{{ url_for('main.bif_viewer') }}">
                                     <i class="bi bi-film me-2"></i>Preview Inspector
+                                </a>
+                            </li>
+                            <li>
+                                {# Same page as the Preview Inspector, opened on its Intro & Credits tab: the editor and
+                                   the Whole-season view live there. A separate entry so it can be found. #}
+                                <a class="dropdown-item {% if request.endpoint == 'main.bif_viewer' and request.args.get('tab') == 'markers' %}active{% endif %}" href="{{ url_for('main.bif_viewer', tab='markers') }}">
+                                    <i class="bi bi-skip-forward me-2"></i>Intro &amp; Credits
                                 </a>
                             </li>
                             <li><hr class="dropdown-divider"></li>
