@@ -1,6 +1,7 @@
 ---
 name: Test Writer
 description: Writes pytest tests following project conventions and fixtures
+model: sonnet
 tools:
   - Read
   - Write

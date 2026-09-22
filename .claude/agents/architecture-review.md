@@ -1,6 +1,7 @@
 ---
 name: Architecture Review
 description: Audits a code diff for the eight bug shapes that have shipped to production in this codebase before. MUST be invoked before any commit the assistant creates.
+model: opus
 tools:
   - Read
   - Grep

@@ -1,6 +1,7 @@
 ---
 name: Code Reviewer
 description: Reviews code for project conventions, FFmpeg patterns, GPU handling, and security
+model: sonnet
 tools:
   - Read
   - Grep
