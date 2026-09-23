@@ -771,6 +771,11 @@ first time you turn it on for a Plex server:
   markers go to keeps its own and shows one: the row says **"Keeping Plex's credits"** and the Inspector **"Kept
   Plex's own marker"**. **Check servers** still watches that marker: once Plex no longer has it, or the server is
   switched to **Use ours**, it runs the file, which then reads it and writes ours.
+- Plex detects in a library only when its server setting (Settings → Library → *Generate intro / credits video
+  markers*) **and** the library's own setting (Edit library → Advanced → *Enable intro / credits detection*) are on.
+  With **Use ours**, **Servers → Edit → Setup Health** lists the Intro & Credits libraries where both are on, each
+  with a **Turn off** that switches off only that library's own setting. With **Keep Plex's** it doesn't warn. See
+  [Previews Readiness](guides/previews-readiness.md#intro-credits).
 - **A marker you adjust or lock in the Inspector is the exception**: it is written over Plex's own markers of that
   type even on a server set to **Keep Plex's**, and the server's row says so — *"Replaced Plex's own marker. This
   server is set to keep Plex's, but a marker you adjust always wins."* The Inspector says it before you save, too.

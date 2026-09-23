@@ -133,6 +133,7 @@ real library mounted read-only.
 | Tag row | Plex looks up `tag_type=12 AND tag=''`. A row created with `tag=NULL` is ignored (Plex makes its own); a new row is only served after a PMS restart. **Reuse Plex's row; never create one.** | (lab) |
 | Serving shifts | Credits start served **+2 s** vs DB; non-final credits end **−2 s**. Intro unchanged. Prod native markers show the same. | (lab) + prod API |
 | Plex Pass | **An unclaimed / no-Pass server serves no markers at all**, even ones in its DB, and hides marker settings. Viewers also need Pass or Plex Home. | (lab) + support.plex.tv |
+| When Plex's own detection runs | In a library only when **both** hold: the server pref (`GET /:/prefs`) `GenerateIntroMarkerBehavior` / `GenerateCreditsMarkerBehavior` ∈ `never`\|`scheduled`\|`asap` is not `never`, **and** the library pref (`GET /library/sections/<id>/prefs`) `enableIntroMarkerGeneration` (TV libraries only) / `enableCreditsMarkerGeneration`, a bool defaulting to `true`, is on. Plex's own summary of the library pref: "Detect … for items in this library when enabled in server settings." Written per library with `PUT /library/sections/<id>/prefs?<pref>=0`, the same write as `enableBIFGeneration`. | (lab, 2026-09-23) |
 | DB location | WAL mode (checked on prod). SQLite: "All processes using a database must be on the same host computer; WAL does not work over a network filesystem." The app must run on the same host as Plex to write. Prod `plex` host: local ext4 → OK. | sqlite.org/wal.html + prod |
 | Are Plex's markers right? | **Not always.** Prod South Park S01 intros ~80 s late (frames + studio chapters put the theme at 0:09–0:37); several credits markers past end of file. | prod DB + frame check |
 
@@ -1928,3 +1929,16 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   - LOWs: a kept status from a file gone from disk or replaced says nothing about its item; `publish_now` names kept
     types only on a server that still keeps its own and got the last run's rows, and a write with nothing to send
     leaves a failed item row failed, for its retry.
+- 2026-09-23 · **Setup Health checks Plex's own detection per library, and not under "Keep Plex's"** (owner-approved
+  mockup; §3.1 "When Plex's own detection runs", §7 item 6). The `markers_plex_detection` row read only the
+  server-wide prefs and always recommended Off, so it warned about libraries whose own switch was already off, and
+  warned a server set to "Keep Plex's", which wants Plex's markers. Now, per Plex server with Intro & Credits on and
+  "Use ours": the row lists each library in the server's Intro & Credits selection (`marker_libraries`) where Plex
+  effectively detects (server pref not `never` AND library pref on), with the types (intro only in TV libraries), and
+  a per-library **Turn off** (`POST /api/servers/<id>/plex-marker-detection`) that writes only that library's listed
+  `enable…MarkerGeneration` prefs, after the usual confirm; the server-wide prefs are never written. Nothing listed →
+  All good; "Keep Plex's" → an All good "Keeping Plex's own markers: its detection can stay on". A library switch that
+  can't be read (older Plex, a failed request) falls back to the server-wide wording with `current: unknown` and no
+  buttons. The library prefs are the one fact the row reads itself (`readiness.marker_facts`), only when the
+  server-wide detection is on and "Use ours" is chosen, and fresh, so the row refreshes after Turn off. The row keeps
+  its id, so an earlier Dismiss still applies.

@@ -38,6 +38,26 @@ if TYPE_CHECKING:
 
     from ..config import Config
 
+# Each library's own intro/credits detection switch (Edit library → Advanced). Plex detects in a library only when
+# this is on AND the server-wide ``Generate…MarkerBehavior`` pref isn't ``never``. Only TV libraries have the intro
+# one; both default to on.
+LIBRARY_MARKER_DETECTION_PREFS: dict[str, str] = {
+    "intro": "enableIntroMarkerGeneration",
+    "credits": "enableCreditsMarkerGeneration",
+}
+
+
+def _pref_bool(value: Any) -> bool | None:
+    """A bool pref's value as plexapi casts it, or as Plex's raw ``1``/``0``/``true``/``false``; None otherwise."""
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("1", "true"):
+        return True
+    if text in ("0", "false"):
+        return False
+    return None
+
 
 def _plex_item_id(m: Any) -> str:
     """Return Plex's bare ``ratingKey`` for ``m`` (e.g. ``"54321"``).
@@ -2217,6 +2237,98 @@ class PlexServer(MediaServer):
             except NotFound:
                 out[key] = None
         return out
+
+    def get_library_marker_detection(self, library_ids: Collection[str]) -> dict[str, dict[str, Any]] | None:
+        """Each library's own intro/credits detection switch (Edit library → Advanced), read fresh.
+
+        Read the same way as ``enableBIFGeneration`` (:meth:`get_vendor_extraction_status`): the section list, then
+        each wanted section's ``/prefs``.
+
+        Args:
+            library_ids: Section keys to read. Sections not listed, and anything but movie and TV libraries, are
+                left out.
+
+        Returns:
+            ``{section_key: {"type": "movie" | "show", "intro": bool | None, "credits": bool | None}}``. A pref this
+            section doesn't list (a movie library's intro, or an older Plex) or whose prefs couldn't be read is
+            None. None when the section list itself couldn't be read.
+        """
+        from ..plex_client import retry_plex_call
+
+        wanted = {str(library_id) for library_id in library_ids}
+        if not wanted:
+            return {}
+        try:
+            sections = retry_plex_call(self._connect().library.sections)
+        except Exception as exc:
+            logger.debug("Plex library detection prefs unavailable for {}: {}", self.name, exc)
+            return None
+        out: dict[str, dict[str, Any]] = {}
+        for section in sections:
+            section_type = str(getattr(section, "type", "") or "")
+            section_key = str(getattr(section, "key", "") or "")
+            if section_type not in ("movie", "show") or section_key not in wanted:
+                continue
+            entry: dict[str, Any] = {"type": section_type, "intro": None, "credits": None}
+            out[section_key] = entry
+            try:
+                settings = retry_plex_call(section.settings)
+            except Exception as exc:
+                logger.debug("Plex library {} detection prefs unavailable on {}: {}", section_key, self.name, exc)
+                continue
+            by_id = {str(getattr(setting, "id", "")): setting for setting in settings}
+            for kind, pref in LIBRARY_MARKER_DETECTION_PREFS.items():
+                if pref in by_id:
+                    entry[kind] = _pref_bool(getattr(by_id[pref], "value", None))
+        return out
+
+    def turn_off_library_marker_detection(self, library_id: str, prefs: Collection[str]) -> str | None:
+        """Switch Plex's own intro and/or credits detection off for one library, never server-wide.
+
+        The same ``PUT /library/sections/{id}/prefs`` write as :meth:`_set_bif_via_prefs_subpath`, which also works
+        for custom-agent libraries.
+
+        Args:
+            library_id: The section key.
+            prefs: Names from :data:`LIBRARY_MARKER_DETECTION_PREFS`, each set to off.
+
+        Returns:
+            None on success, otherwise why not.
+
+        Raises:
+            ValueError: ``prefs`` is empty or names anything else.
+        """
+        from urllib.parse import quote, urlencode
+
+        from ..plex_client import retry_plex_call
+
+        allowed = set(LIBRARY_MARKER_DETECTION_PREFS.values())
+        names = list(dict.fromkeys(prefs))
+        if not names or any(name not in allowed for name in names):
+            raise ValueError(f"prefs must be one or both of {sorted(allowed)}")
+        try:
+            plex = self._connect()
+            sections = retry_plex_call(plex.library.sections)
+        except Exception as exc:
+            return f"couldn't list Plex's libraries: {exc}"
+        section = next((s for s in sections if str(getattr(s, "key", "") or "") == str(library_id)), None)
+        if section is None:
+            return f"library {library_id} not found on this Plex"
+        section_type = str(getattr(section, "type", "") or "")
+        if section_type not in ("movie", "show"):
+            return f"library {library_id} is not a movie or TV library"
+        if LIBRARY_MARKER_DETECTION_PREFS["intro"] in names and section_type != "show":
+            return f"library {library_id} has no intro detection: only TV libraries do"
+        url = f"/library/sections/{quote(str(library_id), safe='')}/prefs?{urlencode({name: 0 for name in names})}"
+        try:
+            plex.query(url, method=plex._session.put)
+        except Exception as exc:
+            logger.warning(
+                "Could not turn off Plex's own marker detection for library {} on {!r}: {}", library_id, self.name, exc
+            )
+            return str(exc)
+        logger.info("Turned off {} for Plex library {} on {!r}", ", ".join(names), library_id, self.name)
+        return None
 
     def get_markers(self, item_id: str) -> list[dict] | None:
         """Intro/credits markers Plex serves for an item (``includeMarkers=1``); None on error."""

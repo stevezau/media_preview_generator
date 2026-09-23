@@ -339,7 +339,7 @@ good", and nothing about markers is checked or contacted. The rows are read from
 tab runs, so the two never disagree. A fact the check never got to read shows no row: a Plex whose database is on
 another machine says nothing about Plex Pass until that is fixed.
 
-None of these rows has a toggle. Each one says what to change and where.
+Only Plex's detection row has buttons, one **Turn off** per library. Every other row says what to change and where.
 
 ### Plex
 
@@ -359,10 +359,20 @@ None of these rows has a toggle. Each one says what to change and where.
   **refused this app's key** (set the same shared key on both sides), **and this app are different versions** (the
   Intro & Credits tab says which to update), **is beside a different Plex** (check the address: markers would have
   gone into the wrong database). While it is red, no marker reaches this server.
-- **Plex's own detection can replace your markers** (recommended) / **Plex's own detection is off**. When Plex analyses
-  a file again it replaces the markers on it with its own, ours included. The next Intro & Credits run puts ours
-  back, but the file shows Plex's times until then. Turn off *Generate intro video markers* and *Generate credits video markers* in Plex
-  (Settings → Library), or choose "Keep Plex's" under "When Plex has its own markers" in the Intro & Credits tab.
+- **Plex's own detection can replace your markers** (recommended). When Plex analyses a file again it replaces the
+  markers on it with its own, ours included. The next Intro & Credits run puts ours back, but the file shows Plex's
+  times until then. Plex detects in a library only when both of its settings are on: the server's *Generate intro
+  video markers* / *Generate credits video markers* (Settings → Library) and the library's own *Enable intro
+  detection* / *Enable credits detection* (Edit library → Advanced; only TV libraries have the intro one). The row
+  lists each library Intro & Credits goes to where both are on, and what Plex detects there, for example
+  **TV Shows · intro, credits** and **Movies · credits**. **Turn off** switches off that library's own setting for the
+  types listed, after a confirmation. Plex's server setting and your other libraries stay as they are.
+  - **Plex's own detection is off** / **…is off in your Intro & Credits libraries**: nothing to do.
+  - **Keeping Plex's own markers: its detection can stay on**: the server is set to "Keep Plex's" under "When Plex
+    has its own markers", so Plex's detection is what you asked for.
+  - If a library's own setting can't be read (an older Plex, or Plex didn't answer), the row falls back to the server
+    setting alone, shows **unknown**, and has no buttons: turn the settings off in Plex yourself, or choose "Keep
+    Plex's".
 
 ### Jellyfin and Emby
 

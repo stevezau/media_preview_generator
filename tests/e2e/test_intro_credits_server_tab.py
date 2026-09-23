@@ -1258,6 +1258,7 @@ class TestSetupHealthMarkerRows:
     def test_failing_rows_split_across_must_fix_and_recommended(self, authed_page: Page, app_url: str) -> None:
         from media_preview_generator.markers.readiness import MarkerFacts, plex_section
 
+        # The library's own switch couldn't be read: the server-wide row, with nothing to click.
         facts = MarkerFacts(
             enabled=True,
             state="needs_pass",
@@ -1267,6 +1268,8 @@ class TestSetupHealthMarkerRows:
                 "fs_type": "ext4",
                 "detection": {"intro": "scheduled", "credits": "never"},
             },
+            libraries=(("2", "TV Shows"),),
+            library_detection=None,
         )
         payload = {"vendor": "plex", "overall_ok": False, "sections": [plex_section(facts)]}
 
@@ -1291,6 +1294,93 @@ class TestSetupHealthMarkerRows:
         expect(recommended.get_by_text("Dismiss")).to_be_visible()
 
         expect(authed_page.locator("#editReadinessBadge")).to_have_text("action needed")
+
+    @staticmethod
+    def _detection_envelope(library_detection: dict | None, *, keep_plex: bool = False) -> dict:
+        """Plex ready in every way but its own detection: on server-wide for both types, TV Shows and Movies."""
+        from media_preview_generator.markers.readiness import MarkerFacts, plex_section
+
+        facts = MarkerFacts(
+            enabled=True,
+            state="ready",
+            details={
+                "plex_pass": True,
+                "lock_holder": True,
+                "fs_type": "ext4",
+                "detection": {"intro": "scheduled", "credits": "asap"},
+            },
+            keep_plex=keep_plex,
+            libraries=(("2", "TV Shows"), ("1", "Movies")),
+            library_detection=library_detection,
+        )
+        return {"vendor": "plex", "overall_ok": True, "sections": [plex_section(facts)]}
+
+    def test_detection_lists_each_library_with_its_own_turn_off(self, authed_page: Page, app_url: str) -> None:
+        both_on = {
+            "2": {"type": "show", "intro": True, "credits": True},
+            "1": {"type": "movie", "intro": None, "credits": True},
+        }
+        tv_off = {**both_on, "2": {"type": "show", "intro": False, "credits": False}}
+        before, after = self._detection_envelope(both_on), self._detection_envelope(tv_off)
+        self._open_health(authed_page, app_url, _plex_server(), before)
+        turned_off: list = []
+
+        # Registered after the page's own stub: once the Turn off POST has been answered, Plex reads TV Shows off.
+        authed_page.route(
+            "**/api/servers/*/previews-readiness", lambda route: _fulfill(route, after if turned_off else before)
+        )
+
+        def turn_off(route: Route) -> None:
+            turned_off.append(route.request.post_data_json)
+            _fulfill(route, {"ok": True, "library_id": "2", "prefs": turned_off[-1]["prefs"]})
+
+        authed_page.route("**/api/servers/plex-1/plex-marker-detection", turn_off)
+
+        recommended = authed_page.locator("#editReadinessBody details[data-tier='recommended']")
+        expect(recommended).to_contain_text("Plex's own detection can replace your markers", timeout=5000)
+        expect(recommended).to_contain_text("Plex detects on its own in these libraries:")
+        tv = recommended.locator(".readiness-library[data-library-id='2']")
+        movies = recommended.locator(".readiness-library[data-library-id='1']")
+        expect(tv).to_contain_text("TV Shows")
+        expect(tv).to_contain_text("intro, credits")
+        expect(movies).to_contain_text("Movies")
+        expect(movies).to_have_text(re.compile(r"Movies\s*credits\s*Turn off"))
+        expect(recommended).to_contain_text(
+            "Turn off = Edit library → Advanced → Enable intro / credits detection, that library only."
+        )
+        # A fixable row: the Recommended badge, not "Change in Plex UI", and it can still be dismissed.
+        expect(recommended).not_to_contain_text("Change in Plex UI")
+        expect(recommended.get_by_text("Dismiss")).to_be_visible()
+
+        tv.get_by_role("button", name="Turn off").click()
+        expect(authed_page.locator("#readinessConfirmBody")).to_contain_text("TV Shows only", timeout=5000)
+        with authed_page.expect_response(
+            lambda r: r.url.endswith("/api/servers/plex-1/plex-marker-detection") and r.request.method == "POST"
+        ) as answered:
+            authed_page.locator("#readinessConfirmSubmit").click()
+
+        assert answered.value.request.post_data_json == {
+            "library_id": "2",
+            "prefs": ["enableIntroMarkerGeneration", "enableCreditsMarkerGeneration"],
+        }
+        # The row refreshes: TV Shows is gone, Movies still offers its own Turn off.
+        expect(authed_page.locator(".toast", has_text="Applied")).to_be_visible(timeout=10000)
+        expect(authed_page.locator("#editReadinessBody .readiness-library[data-library-id='2']")).to_have_count(0)
+        expect(authed_page.locator("#editReadinessBody .readiness-library[data-library-id='1']")).to_be_visible()
+        assert len(turned_off) == 1
+
+    def test_keep_plex_shows_an_all_good_row_and_no_turn_off(self, authed_page: Page, app_url: str) -> None:
+        both_on = {
+            "2": {"type": "show", "intro": True, "credits": True},
+            "1": {"type": "movie", "intro": None, "credits": True},
+        }
+        self._open_health(authed_page, app_url, _plex_server(), self._detection_envelope(both_on, keep_plex=True))
+
+        all_good = authed_page.locator("#editReadinessBody details[data-tier='ok']")
+        expect(all_good).to_contain_text("Keeping Plex's own markers: its detection can stay on", timeout=5000)
+        expect(authed_page.locator("#editReadinessBody details[data-tier='recommended']")).to_have_count(0)
+        expect(authed_page.locator("#editReadinessBody .readiness-library")).to_have_count(0)
+        expect(authed_page.locator("#editReadinessBody")).not_to_contain_text("Plex's own detection can replace")
 
     def test_the_feature_off_row_lands_in_all_good(self, authed_page: Page, app_url: str) -> None:
         """P-R6: emitted as recommended + ok, so it reads as a passing row rather than being dropped."""
