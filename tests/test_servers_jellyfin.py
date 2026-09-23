@@ -1493,7 +1493,7 @@ class TestInstallPluginRepositoryUrl:
         assert "repositories" not in posted
         assert posted["install_params"]["repositoryUrl"] == self.OLD_URL
         add_step = next(s for s in result["steps"] if s["step"] == "add_repository")
-        assert add_step["detail"] == "already present"
+        assert add_step["detail"] == f"already present ({self.OLD_URL})"
 
     def test_reuses_new_url_when_already_registered(self, jelly):
         result, posted = self._run_install(jelly, [{"Name": "Media Preview Bridge", "Url": self.NEW_URL}])
@@ -1501,6 +1501,20 @@ class TestInstallPluginRepositoryUrl:
         assert result["ok"] is True
         assert "repositories" not in posted
         assert posted["install_params"]["repositoryUrl"] == self.NEW_URL
+
+    def test_prefers_the_new_url_when_both_are_registered_in_any_order(self, jelly):
+        """A server that somehow has both addresses registered must install from the
+        new one regardless of which order Jellyfin returns them in — the fix picks
+        by preference order, not by scanning the server's repository list."""
+        for order in ([self.OLD_URL, self.NEW_URL], [self.NEW_URL, self.OLD_URL]):
+            repos = [{"Name": "Media Preview Bridge", "Url": url} for url in order]
+            result, posted = self._run_install(jelly, repos)
+
+            assert "repositories" not in posted, order
+            assert posted["install_params"]["repositoryUrl"] == self.NEW_URL, order
+            assert result["ok"] is True
+            add_step = next(s for s in result["steps"] if s["step"] == "add_repository")
+            assert self.NEW_URL in add_step["detail"], order
 
 
 class TestUninstallPlugin:

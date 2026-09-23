@@ -1,0 +1,25 @@
+# Everything the app talks to, grouped by whether you need it. Three groups: one row of three cards.
+- group: Required
+  items:
+    - name: Plex, Emby or Jellyfin
+      note: any mix; Jellyfin 10.10 or newer
+    - name: Docker
+      note: linux/amd64 or linux/arm64, Unraid template included
+    - name: Write access where previews live
+      note: Plex's data folder, or the media folder for Emby and Jellyfin
+- group: GPUs (optional)
+  items:
+    - name: NVIDIA
+      note: CUDA decoding, also on Windows through WSL2
+    - name: Intel and AMD
+      note: VAAPI decoding on Linux
+    - name: No GPU
+      note: CPU workers do the same job
+- group: Automation (optional)
+  items:
+    - name: Sonarr and Radarr
+      note: import and upgrade webhooks
+    - name: Tdarr and FileFlows
+      note: a webhook after each transcode
+    - name: The servers themselves
+      note: Plex (Plex Pass), Emby (Premiere) and Jellyfin webhooks, or Recently Added polling

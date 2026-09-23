@@ -8,7 +8,7 @@ dynamic = ["version"]
 authors = [
     {name = "Steve Adams", email = "stevezau@gmail.com"},
 ]
-description = "GPU-accelerated video preview thumbnail generation for Plex, Emby, and Jellyfin media servers"
+description = "GPU-accelerated preview thumbnails and Skip Intro/Credits markers for Plex, Emby and Jellyfin"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -103,15 +103,10 @@ test = [
     "vcrpy>=6.0.0",
     # tests/markers/credits/rapidocr_reference.py: the verbatim rapidocr post-processing uses shapely.
     "shapely==2.1.2",
-    # tests/test_docs_site.py builds the docs site; CI installs only `.[test]`.
-    "media-preview-generator[docs]",
-]
-# Docs site (mkdocs.yml). docs.yml installs exactly this list. mkdocs is capped below 2.0:
-# Material for MkDocs does not support MkDocs 2.0's rewritten plugin/theme system.
-docs = [
-    "mkdocs>=1.6.1,<2",
-    "mkdocs-material>=9.7.7,<10",
-    "markdown-callouts>=0.4.0,<0.5",
+    # tests/test_docs_site.py builds the Jekyll site (docs/) through tests/docs_toolchain.py and
+    # shares one build across xdist workers with a file lock; the llms-full generator reads YAML.
+    "filelock>=3.12",
+    "pyyaml>=6.0",
 ]
 dev = [
     "media-preview-generator[test]",

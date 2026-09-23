@@ -171,14 +171,16 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(UTC).isoformat()
 
 
-def seed_jobs(config_dir: str | Path) -> int:
+def seed_jobs(config_dir: str | Path) -> dict[str, Any]:
     """Seed fake job rows into the ``jobs.db`` under ``config_dir``.
 
     Uses ``JobStorage.upsert`` so the schema stays in lockstep with
     whatever the app currently expects. Safe to call on a fresh config
-    directory — JobStorage creates the DB if missing.
+    directory — JobStorage creates the DB if missing. Also records a
+    per-server publish result for the Tears of Steel job, for the Publish
+    screenshot's Files tab.
 
-    Returns the number of rows seeded.
+    Returns ``{"count": <rows seeded>, "tears_job_id": <Tears of Steel job id>}``.
     """
     # Imported lazily so importing this module doesn't drag in the whole
     # web app just to read fixture data.
@@ -195,14 +197,17 @@ def seed_jobs(config_dir: str | Path) -> int:
         now = datetime.now(UTC)
         rows: list[Job] = []
 
-        # 6 completed jobs spread across the last two days + both vendors.
+        # 6 completed jobs: 5 single-file Radarr imports of the lab's open
+        # films (one per vendor, matching the screenshots' worker/publish
+        # rows) plus one scheduled library pass so the table still shows
+        # scale next to the single-file rows.
         completed_fixtures = [
+            ("Tears of Steel (2012)", "plex-home", "Home Plex", "plex", 1, 1),
+            ("Sintel (2010)", "jellyfin-home", "Home Jellyfin", "jellyfin", 1, 1),
+            ("Big Buck Bunny (2008)", "emby-home", "Home Emby", "emby", 1, 1),
+            ("Elephants Dream (2006)", "plex-home", "Home Plex", "plex", 1, 1),
+            ("Cosmos Laundromat (2015)", "jellyfin-home", "Home Jellyfin", "jellyfin", 1, 1),
             ("Movies", "plex-home", "Home Plex", "plex", 842, 842),
-            ("TV Shows", "plex-home", "Home Plex", "plex", 124, 124),
-            ("Movies", "jellyfin-home", "Home Jellyfin", "jellyfin", 312, 312),
-            ("Shows", "jellyfin-home", "Home Jellyfin", "jellyfin", 58, 58),
-            ("Films", "emby-home", "Home Emby", "emby", 401, 401),
-            ("Kids", "plex-home", "Home Plex", "plex", 47, 47),
         ]
         for i, (lib, sid, sname, stype, total, processed) in enumerate(completed_fixtures):
             created = now - timedelta(hours=(i + 1) * 3, minutes=7 * i)
@@ -270,7 +275,29 @@ def seed_jobs(config_dir: str | Path) -> int:
         for row in rows:
             storage.upsert(row)
 
-        return len(rows)
+        # Record a per-server publish for the Tears of Steel job (D9 shape,
+        # Worker._capture_publishers in media_preview_generator/jobs/worker.py:528-566)
+        # so its Files tab shows one pill per server — the Publish screenshot.
+        from media_preview_generator.web.jobs import JobManager  # noqa: PLC0415
+
+        tears = next(row for row in rows if row.library_name == "Tears of Steel (2012)")
+        video = "/media/movies/Tears of Steel (2012)/Tears of Steel (2012).mp4"
+        publishers = [
+            {"server_id": "plex-home", "server_name": "Home Plex", "server_type": "plex", "adapter_name": "plex_bundle",
+             "status": "published", "message": "", "frame_source": "extracted", "canonical_path": video,
+             "output_paths": ["/plex/Media/localhost/3/f1c2a9e0d4b7.bundle/Contents/Indexes/index-sd.bif"]},
+            {"server_id": "jellyfin-home", "server_name": "Home Jellyfin", "server_type": "jellyfin",
+             "adapter_name": "jellyfin_trickplay", "status": "published", "message": "", "frame_source": "extracted",
+             "canonical_path": video, "output_paths": ["/media/movies/Tears of Steel (2012)/Tears of Steel (2012).trickplay"]},
+            {"server_id": "emby-home", "server_name": "Home Emby", "server_type": "emby", "adapter_name": "emby_sidecar",
+             "status": "published", "message": "", "frame_source": "extracted", "canonical_path": video,
+             "output_paths": ["/media/movies/Tears of Steel (2012)/Tears of Steel (2012)-320-10.bif"]},
+        ]  # fmt: skip
+        JobManager(config_dir=str(config_dir)).record_file_result(
+            tears.id, video, "generated", worker="GPU Worker 1 (NVIDIA TITAN RTX)", servers=publishers
+        )
+
+        return {"count": len(rows), "tears_job_id": tears.id}
     finally:
         storage.close()
 

@@ -671,9 +671,10 @@ class JellyfinServer(EmbyApiClient):
 
         # 2. Append our repo if missing, under the current address. The install below
         # must name the repository that's actually registered.
-        known_urls = (self.PLUGIN_REPO_URL, *self.LEGACY_PLUGIN_REPO_URLS)
+        # Prefer the current URL when a server somehow has both, so the result never depends on list order.
+        registered = {r.get("Url") for r in repos if isinstance(r, dict)}
         registered_url = next(
-            (r.get("Url") for r in repos if isinstance(r, dict) and r.get("Url") in known_urls),
+            (url for url in (self.PLUGIN_REPO_URL, *self.LEGACY_PLUGIN_REPO_URLS) if url in registered),
             None,
         )
         if registered_url is None:
@@ -694,7 +695,7 @@ class JellyfinServer(EmbyApiClient):
                 _record("add_repository", False, str(exc))
                 return result
         else:
-            _record("add_repository", True, "already present")
+            _record("add_repository", True, f"already present ({registered_url})")
 
         # 3. Trigger install. Jellyfin downloads asynchronously — POST
         # only queues the job. The package name in the URL must match

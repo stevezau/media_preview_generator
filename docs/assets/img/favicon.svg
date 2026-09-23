@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Media Preview Generator">
+  <!-- The 16/32 px cut of logo.svg (spec §9). Every rectangle edge sits on the 2-unit grid, so at
+       16 px it lands on whole pixels; the preview frame is larger and has no pointer tail, because at
+       16 px the tail made the frame read as a small TV. -->
+  <rect width="32" height="32" rx="6" fill="#e5a00d"/>
+  <rect x="6" y="4" width="22" height="14" rx="2" fill="#0f0f1a"/>
+  <path d="M14 8v6l6-3z" fill="#e5a00d"/>
+  <rect y="22" width="32" height="4" fill="#0f0f1a"/>
+  <circle cx="18" cy="24" r="4" fill="#0f0f1a"/>
+</svg>

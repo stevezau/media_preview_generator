@@ -1,8 +1,9 @@
 ---
-description: What each Previews Readiness check means and how to fix it, so Plex, Emby and Jellyfin show the preview thumbnails this app generates.
+title: Previews Readiness
+heading: Previews Readiness
+description: What each Previews Readiness check means and how to fix it, so Plex, Emby and Jellyfin show the preview thumbnails
+  this app generates.
 ---
-
-# Previews Readiness
 
 > [Back to Guides](../guides.md) · [Configuration & API Reference](../reference.md) · [Multi-Media-Server Guide](../multi-server.md)
 

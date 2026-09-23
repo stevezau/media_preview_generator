@@ -1,8 +1,10 @@
 ---
-description: Use the Media Preview Generator web UI, trigger jobs from Sonarr, Radarr or Plex webhooks, handle HDR and Dolby Vision, and fix common problems.
+title: Guides & Troubleshooting
+heading: Guides & Troubleshooting
+description: Use the Media Preview Generator web UI, trigger jobs from Sonarr, Radarr or Plex webhooks, handle HDR and Dolby
+  Vision, and fix common problems.
+render_with_liquid: false
 ---
-
-# Guides & Troubleshooting
 
 > [Back to Docs](README.md)
 
@@ -599,9 +601,7 @@ drag-to-reorder:
 | TheIntroDB | Optional **API key** (masked once saved). Works without one (500 lookups/day); your own free key raises that. Off by default — see the note below. |
 | IntroDB.app | No key needed, TV only. |
 | SkipDB | Free, only counts an answer matched to your file's own length. |
-| Matching audio across a season | TV intros. Finds the theme tune a season's episodes share. On its own it was 91 right, 13 wrong and 14 missed on 118 test episodes (Plex's own intro detection: 23 right, 15 wrong), so it publishes an intro by itself when nothing else answers — a show no online database has still gets intros.
-The online sources are still asked on their usual schedule (one with no entry again after 14 days): one that later
-agrees confirms the intro, one that disagrees sends it to **Needs review**. When another source disagrees, the episode goes to **Needs review**. A server's own marker doesn't count as a second source for it, since a server's intro detection matches audio too, but one that agrees doesn't hold it back either: season audio then decides as it would alone. One that disagrees sends the episode to **Needs review**, and the previous-season hint (below) plus only a server's own marker goes to **Needs review** too. Needs an ffmpeg with chromaprint, which the amd64 Docker image has; elsewhere Settings shows **Not available** and why. CPU, about 2 s per episode, at most 2 at once. See [Season audio and weekly releases](#season-audio-and-weekly-releases). |
+| Matching audio across a season | TV intros. Finds the theme tune a season's episodes share. On its own it was 91 right, 13 wrong and 14 missed on 118 test episodes (Plex's own intro detection: 23 right, 15 wrong), so it publishes an intro by itself when nothing else answers — a show no online database has still gets intros. The online sources are still asked on their usual schedule (one with no entry again after 14 days): one that later agrees confirms the intro, one that disagrees sends it to **Needs review**. When another source disagrees, the episode goes to **Needs review**. A server's own marker doesn't count as a second source for it, since a server's intro detection matches audio too, but one that agrees doesn't hold it back either: season audio then decides as it would alone. One that disagrees sends the episode to **Needs review**, and the previous-season hint (below) plus only a server's own marker goes to **Needs review** too. Needs an ffmpeg with chromaprint, which the amd64 Docker image has; elsewhere Settings shows **Not available** and why. CPU, about 2 s per episode, at most 2 at once. See [Season audio and weekly releases](#season-audio-and-weekly-releases). |
 | On-screen credit text | Finds where the credit roll starts from text on screen in the last 15 minutes of a movie (7.5 of an episode, or the window you set under Advanced), and stops the skip at the last credit when a scene follows the roll (Emby skips to the end of the file). Tested alone on 80 files: within 10 s on 66 (61 when decoded on the CPU), more than 30 s early on 1. Text that stays in one place through the story (a channel logo, a score bug, a ticker) is ignored, and a file with text on screen through most of its ending (a burnt-in timecode, say) still gets no answer. Credits already running when those last minutes begin are still found, by reading 2 more minutes back. Credits that start in the first 30 seconds of those minutes right after a scene, or more than 1½ minutes before them, get no answer. It publishes credits on its own. On TV recordings with a channel logo or other on-screen graphics it is about as accurate as Plex's own credits detection, not better: on its own it skipped into the story on 4–5 of the 39 episodes we checked and put credits on 4–5 of 12 sports broadcasts, which have none (sports libraries are left out of Intro & Credits unless you tick them). Uses your GPU when a quick self-test shows it is faster than the CPU and finds the same text; otherwise the CPU (about 10–30 s per file; 4K without a GPU up to about 2 min). A file where every frame is a keyframe (ProRes, DNxHD, MJPEG, all-intra H.264) is checked for text one frame every 2 seconds at the end; its whole ending is still read from disk, so a very high-bitrate one on a slow network share can still time out. It is then left alone for a day unless it changes or you Re-detect it. |
 | Markers already on your servers | Second opinion only — see below. |
 
@@ -681,7 +681,7 @@ alone for 7 days once 3 of its episodes came back with nothing, while no episode
 (one saved by an earlier run counts). The 7 days run from then: a new episode that comes back with nothing meanwhile
 doesn't add to them. After them the show's episodes are asked again, older ones due their re-check included, and it
 takes 3 more with nothing to leave it alone again. The log says so once per pause, at INFO: "TheIntroDB has no entry
-for 3 or more episodes of <show> …; its episodes aren't looked up there until <date>". **Re-detect** in the Inspector
+for 3 or more episodes of \<show\> …; its episodes aren't looked up there until \<date\>". **Re-detect** in the Inspector
 always asks.
 
 ### Needs review
@@ -1043,7 +1043,7 @@ what every source you turned on answered, in your source order. For example:
 - Per server: "sent intro and credits to Plex", "Plex already has our intro", "nothing sent to Plex", "waiting for Plex
   to add the file to its library" (the job tries it again), and the types that server keeps as its own.
 - Per source: its answer ("no entry", "none", "credits from 47:36"), or why it wasn't asked: "not needed (already
-  decided)", "skipped (daily limit reached, …)", "skipped (no data for this show; asked again after <date>)", "not
+  decided)", "skipped (daily limit reached, …)", "skipped (no data for this show; asked again after \<date\>)", "not
   read (every server keeps its own credits)". **(saved earlier)**
   means the answer was stored before (by an earlier run, or while the job checked another episode of the season) and
   was used without asking again.
@@ -1090,7 +1090,7 @@ table covers every state the check can report, using its exact wording:
 | *(Plex)* "Plex doesn't have its database open through this folder right now (Plex is stopped, or this app sees a different path to the file). Markers are only written while Plex is running." | Same same-host proof, failing because nothing has the database open | Start Plex; recheck the mounted path |
 | *(Plex)* "Plex hasn't created its marker tag yet. Run Plex's own intro or credits detection once on any item, then try again." | Markers reuse a database row Plex creates itself the first time it ever writes a marker | Run Plex's own intro or credits analysis once on any item, then recheck |
 | *(Jellyfin)* Amber "Update needed" badge, "— installed 1.0.0.0" (the version the plugin reports; "installed version unknown" when it doesn't say) + **Update** button; the job's rows say "Update Media Preview Bridge (installed …) to get markers support" | An older plugin build predates the markers feature | Click **Update** |
-| *(Plex)* "Plex […] data has an unknown shape; not writing markers." / "Plex's database has more than one marker tag row, so it's unclear which one Plex serves; not writing markers." | A future Plex version changed its database in a way the app doesn't recognise | Check for an app update; report your Plex version in an issue |
+| *(Plex)* "Plex \[…\] data has an unknown shape; not writing markers." / "Plex's database has more than one marker tag row, so it's unclear which one Plex serves; not writing markers." | A future Plex version changed its database in a way the app doesn't recognise | Check for an app update; report your Plex version in an issue |
 | *(Plex)* "Plex is busy writing its database; trying again on the next run (…)." | Another process (usually Plex itself) holds the database briefly | Nothing — it retries on the next job |
 | *(Jellyfin)* "Can't reach this Jellyfin server" / "Can't reach the Media Preview Bridge markers endpoint on this Jellyfin server" | A transient connection problem | Confirm the server is up and reachable; recheck |
 | *(Jellyfin)* "Jellyfin rejected this server's credentials; reconnect it" | The stored token/login no longer works | Reconnect the server from the Servers page |
@@ -1121,7 +1121,7 @@ A file's row for one server (the job's Files panel, the Inspector) can also say:
 | Evidence detail: "Markers on this server look imported from …; not a second opinion for that database" | That server's markers came from a plugin that imports a skip database (IntroDB/TheIntroDB, SkipDB or AniSkip), so they don't confirm that database's own answer | Nothing; this is expected |
 | Job warning: "TheIntroDB's daily lookup limit was reached: N files were checked without it. It resets at 00:00 UTC; the files it left undecided are checked again automatically after that (or add a TheIntroDB API key for a higher limit)." | The source's daily budget (or the smaller share full-library backfills may spend) ran out partway through the job | Nothing to fix; a **TheIntroDB recheck** job waits for 00:00 UTC and checks those files again. Add your own TheIntroDB API key for a higher limit. (IntroDB and SkipDB say "run the library again after that" instead: their files aren't rechecked automatically.) |
 | File reason ends with "…; TheIntroDB not checked (daily limit reached)" | This file's result could still change once the source is available again — a file every other source already decided doesn't get this note | Nothing; the TheIntroDB recheck job asks for it after 00:00 UTC, and nothing was stored for this source, so any later run asks it too |
-| Log: "TheIntroDB has no entry for 3 or more episodes of <show> …; its episodes aren't looked up there until <date>" | TheIntroDB had nothing for 3 episodes of the show and an answer for none, so the show's episodes stop using its daily lookups for 7 days | Nothing; after the date its episodes are asked again. **Re-detect** in the Inspector asks at once |
+| Log: "TheIntroDB has no entry for 3 or more episodes of \<show\> …; its episodes aren't looked up there until \<date\>" | TheIntroDB had nothing for 3 episodes of the show and an answer for none, so the show's episodes stop using its daily lookups for 7 days | Nothing; after the date its episodes are asked again. **Re-detect** in the Inspector asks at once |
 
 Per-file job outcomes use plainer labels in the job queue and Files panel: **Markers written** (the job changed
 what a server shows), **Up to date** (every server already showed this),
@@ -1179,14 +1179,14 @@ Non-DV HDR content (HDR10, HLG, HDR10+) uses a configurable algorithm, set in **
 
 **What:** the trickiest HDR format — has no HDR10 fallback layer, so the standard tone-mapping path can't read it. **What to do:** nothing — the tool picks the right path for whatever GPU you have. (NVIDIA users: see the warning below.)
 
-The tool picks the fastest working path per GPU vendor:
+The tool picks a path for each GPU vendor:
 
-| Vendor | Typical speed on 4K | Notes |
-|---|---|---|
-| Intel iGPU / Arc | **~17×** (UHD 770) | Uses Jellyfin's DV-aware patch — currently the fastest path |
-| NVIDIA | ~10–16× (Turing); faster on Ada/Hopper | Needs Vulkan driver — see the NVIDIA warning below |
-| AMD Radeon | (untested locally; same flags as NVIDIA) | |
-| CPU-only fallback | ~5–10× (CPU-bound) | When no GPU is available |
+| Vendor | Notes |
+|---|---|
+| Intel iGPU / Arc | Uses Jellyfin's DV-aware patch |
+| NVIDIA | Needs Vulkan driver — see the NVIDIA warning below |
+| AMD Radeon | Untested locally |
+| CPU-only fallback | No hardware Vulkan, so thumbnails come out with a green and purple tint |
 
 The image ships **jellyfin-ffmpeg 8.1.2** as its preferred FFmpeg because Jellyfin's fork carries a Dolby-Vision-aware tone-mapping patch upstream FFmpeg still lacks. Non-amd64 builds fall back to the base image's FFmpeg 8.1.2 automatically.
 
@@ -1202,7 +1202,7 @@ You don't have to do anything for these — the container handles them on startu
 > [!IMPORTANT]
 > **NVIDIA users: set `NVIDIA_DRIVER_CAPABILITIES=all` (or include `graphics`).**
 >
-> Dolby Vision Profile 5 needs the NVIDIA Vulkan driver inside the container. NVIDIA's container toolkit only loads it when the `graphics` capability is declared. The common `compute,video,utility` setting is fine for everything else but **not** for Dolby Vision Profile 5 — without `graphics`, the app can't tone-map those files and their thumbnails come out visibly dim.
+> Dolby Vision Profile 5 needs the NVIDIA Vulkan driver inside the container. NVIDIA's container toolkit only loads it when the `graphics` capability is declared. The common `compute,video,utility` setting is fine for everything else but **not** for Dolby Vision Profile 5 — without `graphics`, the app can't tone-map those files and their thumbnails come out with a green and purple tint.
 >
 > **Fix:** add `-e NVIDIA_DRIVER_CAPABILITIES=all` to your `docker run` command (or set it in the `environment:` block of your compose file) and restart the container. `all` is what the official NVIDIA Vulkan images use. If you prefer minimum privilege, `compute,video,utility,graphics` works too.
 >
@@ -1234,7 +1234,7 @@ Use this table to diagnose common failures quickly.
 | Job warning: "N file(s) still weren't indexed by the media server after N retries, so no more retries are queued. The next scheduled scan will pick them up." | The media server hadn't added the file to its library by the last retry | Nothing, if you have a scheduled scan: it picks the file up once the server has it. Otherwise raise **Retry count** or **Initial retry delay** (Settings → Retry policy), or check the file is under a library folder the server scans. |
 | Radarr/Sonarr cannot reach webhook URL | Network routing or hostname issue | Use host IP or reachable Docker hostname (not `localhost`), then verify firewall and port `8080`. |
 | New job starts after I paused | Global pause not set or UI not refreshed | Use **Pause Processing** (Current Job or Job Queue header). Pause is global and persisted; in-flight files finish before workers idle. |
-| DV Profile 5 thumbnails are visibly dim, and the log warns that no working Vulkan device was found | The container can't reach a hardware Vulkan device, so the app skips Profile 5 tone mapping and extracts plain frames instead | Pass an iGPU to the container with `--device /dev/dri:/dev/dri` (Intel/AMD), or for NVIDIA set `NVIDIA_DRIVER_CAPABILITIES=all` so the NVIDIA Vulkan driver gets injected. Most users already pass `/dev/dri` for hardware video acceleration, which brings the Vulkan driver along for free. |
+| DV Profile 5 thumbnails have a green and purple tint, and the log warns that no working Vulkan device was found | The container can't reach a hardware Vulkan device, so the app skips Profile 5 tone mapping and extracts plain frames instead | Pass an iGPU to the container with `--device /dev/dri:/dev/dri` (Intel/AMD), or for NVIDIA set `NVIDIA_DRIVER_CAPABILITIES=all` so the NVIDIA Vulkan driver gets injected. Most users already pass `/dev/dri` for hardware video acceleration, which brings the Vulkan driver along for free. |
 
 ### Validate Plex Config Path
 

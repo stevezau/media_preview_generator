@@ -82,6 +82,11 @@ jobs:
       - name: Ruff format check
         run: ruff format --check .
 
+      - name: actionlint (Pages workflows)
+        uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: -color .github/workflows/docs.yml .github/workflows/jellyfin-plugin.yml
+
   unit:
     # Shards the unit suite 3 ways so the required `test` check (below) only has to wait on
     # the slowest shard, not the whole 12,641-test suite serially. A repo ruleset requires a
@@ -108,6 +113,12 @@ jobs:
           # dep changes. Warm runs save ~60s of wheel downloads.
           cache: pip
           cache-dependency-path: pyproject.toml
+
+      - name: Set up Ruby (tests/test_docs_site.py builds the Jekyll site)
+        uses: ruby/setup-ruby@v1
+        with:
+          working-directory: docs
+          bundler-cache: true
 
       - name: Install FFmpeg + mediainfo
         # Plain apt-get rather than awalsh128/cache-apt-pkgs-action: the
@@ -140,6 +151,7 @@ jobs:
         # from the CLI would need clearing addopts anyway).
         env:
           COVERAGE_FILE: .coverage.unit-${{ matrix.shard }}
+          MPG_REQUIRE_DOCS_BUILD: "1"
         run: >-
           pytest --shard-id=$((${{ matrix.shard }} - 1)) --num-shards=3
           --cov-fail-under=0

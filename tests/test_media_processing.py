@@ -1911,8 +1911,8 @@ class TestProactiveDVSkip:
         thumbnails.  The pre-flight guard in ``generate_images`` checks
         ``get_vulkan_device_info()["is_software"]`` and, when true,
         skips libplacebo entirely and falls through to a plain
-        ``fps=...,scale=...`` filter chain that produces dim-but-
-        colour-correct output.
+        ``fps=...,scale=...`` filter chain with no tone mapping, whose
+        thumbnails get a green and purple tint.
         """
         args = self._run_generate(
             "Dolby Vision, Version 1.0, dvhe.05.06, BL+EL+RPU",

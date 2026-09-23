@@ -9,12 +9,14 @@ Pick the right doc for what you're trying to do.
 | I want to... | Go to |
 |---|---|
 | **Install and run it** — Docker, Docker Compose, GPU setup, Unraid | [Getting Started](getting-started.md) |
+| **Fix a specific problem**: slow Plex previews, GPUs, Jellyfin trickplay, Emby, Sonarr/Radarr, HDR | [How-to](how-to.md) |
 | **Operate it day-to-day** — Web UI, webhooks, schedules, Plex direct, Recently Added | [Guides](guides.md) |
 | **Add Emby or Jellyfin (and/or multiple Plex servers)** — how to connect each server, sign-in tips, and what to expect when more than one server contains the same file | [Multi-Media-Server](multi-server.md) |
 | **Look up a setting or endpoint** — config keys, env vars, REST API, WebSocket events | [Reference](reference.md) |
 | **Troubleshoot something** — common errors and fixes | [Guides — Troubleshooting](guides.md#troubleshooting) |
 | **Read common questions** — "does it work with…", "how many workers…", HDR behavior | [FAQ](faq.md) |
 | **Contribute code** — dev setup, tests, style, PRs | [Contributing](https://github.com/stevezau/media_preview_generator/blob/dev/CONTRIBUTING.md) |
+| **Film and image credits** | [Credits](credits.md) |
 
 ## Quick Links
 

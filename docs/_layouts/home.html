@@ -1,0 +1,391 @@
+---
+layout: default
+---
+{%- comment -%}
+The landing page. Section order is docs/design/site-redesign.md §4. House style (§7): plain words,
+few em dashes, one concrete example per section, nothing every self-hosted app has, and no speed
+number that doesn't come from docs/benchmark/ (tests/test_site_claims.py). Copy lives here and in
+_data/*.yml. The player and HDR pictures are captures from throwaway lab servers playing freely
+licensed films (docs/design/site-redesign-lab/: films.json has each film's attribution and licence,
+results/captures.json the requests that prove each thumbnail came from this app); the tour's app
+pictures come from the screenshot harness and its fixture (see _data/tour.yml). Every <img> carries
+width/height at half its 2x capture's pixels (tested).
+{%- endcomment -%}
+<main id="main">
+
+  <section class="hero">
+    <div class="wrap">
+      <div class="hero__inner">
+        <h1>Your media server's slowest jobs, <em>done on your GPU</em></h1>
+        <p class="hero__sub">
+          Media Preview Generator makes the preview thumbnails and the Skip Intro and Skip Credits
+          markers for Plex, Emby and Jellyfin. It starts the moment Sonarr or Radarr imports a file and
+          sends the results to every server at once.
+        </p>
+        <div class="hero__cta">
+          <a class="btn btn--primary btn--lg" href="{{ '/getting-started/' | relative_url }}">
+            Get started
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
+          </a>
+          <a class="btn btn--ghost btn--lg" href="{{ site.repo }}">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.4-1.8-1.4-1.8-1.1-.7 0-.7 0-.7 1.2.1 1.9 1.2 1.9 1.2 1.1 1.9 2.9 1.3 3.6 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2 0-.4-.5-1.6.2-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.4 4.7 18.4 5 18.4 5c.7 1.6.2 2.8.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .5Z"/></svg>
+            View source
+          </a>
+        </div>
+        <p class="hero__meta">
+          <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> One Docker container</span>
+          <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> Plex, Emby and Jellyfin</span>
+          <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg> CPU fallback built in</span>
+          {%- comment -%} A requirement, not a reassurance: an info mark, and a link to the mounts it means. {%- endcomment -%}
+          <a href="{{ '/getting-started/#volume-mounts' | relative_url }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-5M12 8h.01"/></svg> Needs write access where previews live</a>
+        </p>
+      </div>
+
+      <figure class="hero__shot">
+        <div class="frame">
+          <img src="{{ '/images/player-plex.webp' | relative_url }}" width="1280" height="720"
+               alt="Plex's web player paused on Tears of Steel, the pointer on the seek bar at 5:07 and a preview thumbnail of that scene above it">
+        </div>
+        <figcaption>
+          Plex's web player on a test server, mid-scrub. The thumbnail above the timeline came from this
+          app. Tears of Steel, (CC) Blender Foundation | mango.blender.org, <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>.
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
+  {%- comment -%}
+  Only numbers you can check on this site. A speed number comes from docs/benchmark/summary.json and
+  nowhere else, and its link below needs docs/benchmark.md (both tests/test_site_claims.py). site.js
+  counts them up on first view; the real value is in the HTML, so with the script blocked the strip
+  still reads correctly. The modifier class lets three facts fill one row until a fourth (the
+  benchmark) exists.
+  {%- endcomment %}
+  <section class="stats-band" aria-label="Media Preview Generator at a glance">
+    <div class="wrap">
+      <ul class="stats stats--{{ site.data.stats | size }}" role="list">
+        {%- for s in site.data.stats %}
+        <li class="stat">
+          <p class="stat__value"><span data-countup>{{ s.value }}</span>{% if s.unit %}<span class="stat__unit">{{ s.unit }}</span>{% endif %}</p>
+          <p class="stat__label">{{ s.label }}</p>
+          <p class="stat__note">{{ s.note }}{% if s.source == "benchmark" %} <a href="{{ '/benchmark/' | relative_url }}">How it was measured</a>{% endif %}</p>
+        </li>
+        {%- endfor %}
+      </ul>
+    </div>
+  </section>
+
+  <section class="section section--tint">
+    <div class="wrap reveal">
+      <div class="section__head section__head--center" style="margin-bottom:0">
+        <span class="eyebrow">The problem</span>
+        <h2>The built-in generators fall behind</h2>
+        <p class="section__lede">
+          Plex, Emby and Jellyfin can make these thumbnails themselves. They do it inside the media server,
+          mostly on the CPU, and mostly on a schedule; Plex's own help page warns that a large library can
+          take days. Until then, the episode that arrived on Friday night has a timeline with no pictures on
+          it, and finding the scene where you fell asleep means guessing.
+        </p>
+        <p class="section__lede" style="margin-top:1rem">
+          Media Preview Generator does the job on the GPU, one file at a time, as each file arrives.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="how-it-works">
+    <div class="wrap">
+      <div class="section__head section__head--center">
+        <span class="eyebrow">How it works</span>
+        <h2>From a new file to a preview on every server</h2>
+        <p class="section__lede">You set it up once. After that, every new file goes through these five steps on its own.</p>
+      </div>
+      {%- comment -%}
+      Markup and behaviour are Shortlist's tour: see its comments in main.css and site.js. Additions:
+      a capture more than 0.6 as tall as it is wide gets .tour-panel--tall, which main.css narrows to the
+      scale of the wide strips around it (today that is the webhook page, step 1); each picture links to
+      the full-size capture; --shot-w (its CSS width) lets a phone show it at a readable size and scroll.
+      {%- endcomment %}
+      <div class="tour" style="--tour-steps:{{ site.data.tour | size }}">
+        <div class="tour__rail" aria-hidden="true"><span class="tour__rail-fill"></span></div>
+        {%- for s in site.data.tour %}
+        <div class="tour-step">
+          <p class="tour-step__num" aria-hidden="true">{{ forloop.index }}</p>
+          <h3 class="tour-step__title">{{ s.title }}</h3>
+          <p class="tour-step__body">{{ s.body }}</p>
+        </div>
+        {%- assign strip_height = s.width | times: 0.6 %}
+        <figure class="tour-panel{% if s.height > strip_height %} tour-panel--tall{% endif %}">
+          <div class="frame frame--chrome">
+            <div class="frame__bar">
+              <span class="frame__dot"></span><span class="frame__dot"></span><span class="frame__dot"></span>
+              <span class="frame__title">{{ site.demo_host }}{{ s.path }}</span>
+            </div>
+            <a class="tour-panel__shot" href="{{ s.image | prepend: '/images/' | relative_url }}" title="Open the full-size picture">
+              <img src="{{ s.image | prepend: '/images/' | relative_url }}" alt="{{ s.alt }}" loading="lazy" width="{{ s.width }}" height="{{ s.height }}" style="--shot-w: {{ s.width }}px">
+            </a>
+          </div>
+        </figure>
+        {%- endfor %}
+      </div>
+    </div>
+  </section>
+
+  <section class="section section--tint" id="three-servers">
+    <div class="wrap reveal">
+      <div class="section__head section__head--center">
+        <span class="eyebrow">One file, three servers</span>
+        <h2>Plex, Jellyfin and Emby from one decode</h2>
+        <p class="section__lede">
+          Run more than one server and the app reads each file once, then writes what each one expects:
+          a BIF for Plex, a BIF next to the video for Emby, trickplay tiles for Jellyfin.
+        </p>
+      </div>
+      <figure class="players">
+        <div class="frame players__scroll">
+          <img src="{{ '/images/players-3up.webp' | relative_url }}" width="1648" height="369" loading="lazy"
+               alt="Tears of Steel in the Plex, Jellyfin and Emby web players, each showing a preview thumbnail over the seek bar">
+        </div>
+        <figcaption>
+          The same film on three test servers, each scrubbed to the same point. Full size:
+          <a href="{{ '/images/player-plex.webp' | relative_url }}">Plex</a>,
+          <a href="{{ '/images/player-jellyfin.webp' | relative_url }}">Jellyfin</a>,
+          <a href="{{ '/images/player-emby.webp' | relative_url }}">Emby</a>. Tears of Steel, (CC) Blender Foundation | mango.blender.org, <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>.
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="section" id="hdr">
+    <div class="wrap reveal">
+      <div class="section__head section__head--center">
+        <span class="eyebrow">HDR and Dolby Vision</span>
+        <h2>Previews in normal colour, not grey or green</h2>
+        <p class="section__lede">
+          A frame grabbed from HDR video without tone mapping comes out flat and grey, and Dolby Vision can
+          come out green. The app tone-maps HDR10, HLG and HDR10+, and uses the HDR10 layer of Dolby Vision
+          profiles 7 and 8. Profile 5 needs a GPU with a hardware Vulkan driver.
+        </p>
+      </div>
+      <figure class="pair">
+        <div class="frame">
+          <img src="{{ '/images/hdr-before-after.webp' | relative_url }}" width="708" height="211" loading="lazy"
+               alt="The same HDR frame twice: grey and flat without tone mapping, natural colour from this app">
+        </div>
+        <figcaption>
+          The same moment of Cosmos Laundromat in HDR: left, a plain FFmpeg frame grab; right, the frame
+          from the preview file this app made. Cosmos Laundromat, an Open Movie project created by Blender
+          Studio and directed by Mathieu Auvray; HDR re-grade by Netflix with Blender Foundation and
+          Fotokem's Keep Me Posted (Netflix Open Content),
+          <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.
+        </figcaption>
+      </figure>
+      <p class="center mt-lg">
+        <a class="btn btn--ghost" href="{{ '/hdr-dolby-vision-thumbnails/' | relative_url }}">
+          HDR and Dolby Vision in detail
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
+        </a>
+      </p>
+    </div>
+  </section>
+
+  <section class="section section--tint" id="features">
+    <div class="wrap reveal">
+      <div class="section__head section__head--center">
+        <span class="eyebrow">Features</span>
+        <h2>What you get</h2>
+      </div>
+      <div class="grid grid--3 grid--trio">
+        {%- for f in site.data.features %}
+        <div class="card">
+          <div class="card__icon" aria-hidden="true">{{ f.icon }}</div>
+          <h3>{{ f.title }}</h3>
+          <p>{{ f.body }}</p>
+          {%- if f.url %}
+          <a class="card__more" href="{{ f.url | relative_url }}">{{ f.link }}<span aria-hidden="true">→</span></a>
+          {%- endif %}
+        </div>
+        {%- endfor %}
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="works-with">
+    <div class="wrap reveal">
+      <div class="section__head section__head--center">
+        <span class="eyebrow">Works with</span>
+        <h2>What goes in, and what comes out</h2>
+      </div>
+      <div class="pipeline">
+        <div class="pipeline__stage">
+          <h3>Something new arrives</h3>
+          <p>Sonarr · Radarr · Tdarr · server webhooks · schedules</p>
+        </div>
+        <span class="pipeline__arrow" aria-hidden="true">→</span>
+        <div class="pipeline__stage pipeline__stage--core">
+          <h3>One GPU decode</h3>
+          <p>NVIDIA, Intel or AMD, or the CPU</p>
+        </div>
+        <span class="pipeline__arrow" aria-hidden="true">→</span>
+        <div class="pipeline__stage">
+          <h3>Each server's own format</h3>
+          <p>Plex BIF · Emby BIF · Jellyfin trickplay</p>
+        </div>
+      </div>
+      <p class="works-with__note">
+        Only a media server and Docker are required. Everything else is used if you already run it.
+      </p>
+      <div class="grid grid--3 grid--trio">
+        {%- for g in site.data.works_with %}
+        <div class="card">
+          <h3>{{ g.group }}</h3>
+          <ul class="supports">
+            {%- for i in g.items %}
+            <li><strong>{{ i.name }}</strong><span>{{ i.note }}</span></li>
+            {%- endfor %}
+          </ul>
+        </div>
+        {%- endfor %}
+      </div>
+      <div class="works-with__skip">
+        <p class="works-with__note">Skip Intro and Skip Credits, per server:</p>
+        <ul class="supports">
+          {%- for i in site.data.works_with_skip %}
+          <li><strong>{{ i.name }}</strong><span>{{ i.note }}</span></li>
+          {%- endfor %}
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="section section--tint" id="compare">
+    <div class="wrap reveal">
+      <div class="section__head section__head--center">
+        <span class="eyebrow">Compared with the built-ins</span>
+        <h2>Keep the <span class="nowrap">built-in</span> if it keeps up</h2>
+        <p class="section__lede">
+          The generators in Plex, Emby and Jellyfin need no setup and cost nothing extra. This app is for
+          when they don't keep up with your library, and it costs some setup: a container, GPU passthrough,
+          and write access to where each server keeps its previews.
+        </p>
+      </div>
+      <p class="center">
+        <a class="btn btn--ghost" href="{{ '/comparison/' | relative_url }}">
+          See the side-by-side comparison
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
+        </a>
+      </p>
+    </div>
+  </section>
+
+  <section class="section" id="install">
+    <div class="wrap reveal">
+      <div class="section__head section__head--center">
+        <span class="eyebrow">Quick start</span>
+        <h2>Start the container, open the web UI</h2>
+        <p class="section__lede">
+          Open <code>http://your-server:8080</code>, log in with the token saved in <code>auth.json</code> in
+          your app config folder (or your own, set with <code>WEB_AUTH_TOKEN</code>), and the setup wizard
+          connects your servers.
+        </p>
+      </div>
+      {%- comment -%}
+      One service, inline. docker-compose.example.yml holds three alternatives (GPU, CPU, Unraid) with
+      the same container name and port, so fetching it and running `docker compose up -d` starts all
+      three and fails. tests/test_docs_site.py parses this block as YAML and checks it is one service
+      that matches the docker run beside it.
+      {%- endcomment %}
+      <div class="grid grid--2 install__code">
+        <div class="codeblock">
+          <div class="codeblock__bar">
+            <span>docker-compose.yml</span>
+            <button class="copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg><span class="copy__label">Copy</span></button>
+          </div>
+<pre><code># docker-compose.yml: set the paths, then docker compose up -d
+services:
+  media-preview-generator:
+    image: {{ site.docker_image }}:latest
+    container_name: media-preview-generator
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    devices:
+      - /dev/dri:/dev/dri  # Intel or AMD GPU; delete both lines if you have none
+    # NVIDIA: delete the two lines above, uncomment these five
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - {driver: nvidia, count: all, capabilities: [gpu]}
+    environment:
+      - PUID=1000
+      - PGID=1000
+      # - NVIDIA_DRIVER_CAPABILITIES=all  # NVIDIA
+    volumes:
+      - /path/to/media:/media  # can be :ro if you only run Plex
+      - /path/to/plex/config:/plex
+      - /path/to/app/config:/config</code></pre>
+        </div>
+        <div class="codeblock">
+          <div class="codeblock__bar">
+            <span>docker run</span>
+            <button class="copy" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg><span class="copy__label">Copy</span></button>
+          </div>
+<pre><code>docker run -d --name media-preview-generator \
+  --restart unless-stopped -p 8080:8080 \
+  --device /dev/dri:/dev/dri \
+  -e PUID=1000 -e PGID=1000 \
+  -v /path/to/media:/media \
+  -v /path/to/plex/config:/plex \
+  -v /path/to/app/config:/config \
+  {{ site.docker_image }}:latest</code></pre>
+        </div>
+      </div>
+      <p class="center mt-lg install__note">
+        NVIDIA with <code>docker run</code>? Use <code>--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all</code> instead of <code>--device /dev/dri</code>.
+        No GPU, or on Windows or macOS? Delete the <code>--device /dev/dri</code> line (in compose, the two <code>devices</code> lines).
+        Plex needs its data folder read-write; Emby and Jellyfin need the media folder <span class="nowrap">read-write</span>.
+        <a href="{{ '/getting-started/' | relative_url }}">Full requirements &rarr;</a>
+      </p>
+    </div>
+  </section>
+
+  <section class="section section--tint" id="faq">
+    <div class="wrap">
+      <div class="section__head section__head--center">
+        <span class="eyebrow">Questions</span>
+        <h2>Common questions</h2>
+      </div>
+      <div class="faq">
+        {%- for q in site.data.faq %}
+        <details>
+          <summary>{{ q.q }}</summary>
+          <div class="faq__body">{{ q.a | markdownify }}</div>
+        </details>
+        {%- endfor %}
+      </div>
+      <p class="center mt-lg">
+        <a class="btn btn--ghost" href="{{ '/faq/' | relative_url }}">
+          Read the full FAQ
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
+        </a>
+      </p>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap reveal">
+      <div class="cta">
+        <h2>Give it a try</h2>
+        <p>It's free and MIT licensed. If something doesn't work, open an issue and say what you tried.</p>
+        <div class="hero__cta">
+          <a class="btn btn--primary btn--lg" href="{{ '/getting-started/' | relative_url }}">Install it</a>
+          <a class="btn btn--ghost btn--lg" href="{{ site.repo }}">Star it on GitHub</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+{% include faq-jsonld.html %}

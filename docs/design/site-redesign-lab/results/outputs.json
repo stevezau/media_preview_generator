@@ -1,0 +1,27 @@
+{
+  "checked_at": "2026-09-23T14:03:10+00:00",
+  "emby": {
+    "Big Buck Bunny (2008)": true,
+    "Cosmos Laundromat (2015)": true,
+    "Cosmos Laundromat HDR (2015)": true,
+    "Elephants Dream (2006)": true,
+    "Sintel (2010)": true,
+    "Tears of Steel (2012)": true
+  },
+  "jellyfin": {
+    "Big Buck Bunny (2008)": true,
+    "Cosmos Laundromat (2015)": true,
+    "Cosmos Laundromat HDR (2015)": true,
+    "Elephants Dream (2006)": true,
+    "Sintel (2010)": true,
+    "Tears of Steel": true
+  },
+  "plex": {
+    "Big Buck Bunny (2008)": true,
+    "Cosmos Laundromat HDR (2015)": true,
+    "Cosmos Laundromat: First Cycle": true,
+    "Elephants Dream (2006)": true,
+    "Sintel": true,
+    "Tears of Steel": true
+  }
+}

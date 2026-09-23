@@ -1,0 +1,44 @@
+# Short FAQ: the landing page shows these, and they are the FAQPage structured data on / and /faq/.
+# Worded the way people type them into a search box. Every q must also be a heading on docs/faq.md
+# (tested). Links are site paths: data files aren't rewritten by jekyll-relative-links.
+- q: Why are my Plex preview thumbnails taking so long?
+  a: >-
+    Plex makes them inside the server, on the CPU, one frame every 2 seconds by default, during its
+    scheduled maintenance window and optionally when media is added. Plex's own help page says a
+    large library can take days. You can space the frames out in Plex, or hand the job to a GPU with
+    this app, which starts on each file as it arrives. [More](/plex-preview-thumbnails-slow/)
+- q: Can I generate Plex preview thumbnails with a GPU?
+  a: >-
+    Not with Plex itself: Plex documents no GPU option for this job. Media Preview Generator runs it
+    with FFmpeg on an NVIDIA, Intel or AMD GPU and writes the result where Plex expects it, in Plex's
+    data folder, which it needs read-write. [More](/plex-preview-thumbnails-gpu/)
+- q: How do I make Jellyfin trickplay generation faster?
+  a: >-
+    Start with Jellyfin's own settings: hardware decoding, key-frame-only extraction, and more FFmpeg
+    threads than the default of 1. If it still falls behind, this app can make the trickplay tiles on
+    a GPU, on another machine if you like, and tell Jellyfin about them. [More](/jellyfin-trickplay-gpu/)
+- q: Does Emby's thumbnail extraction use the GPU?
+  a: >-
+    No. Emby's built-in BIF extraction has no GPU option. This app makes Emby BIF files on a GPU and
+    saves them next to each video, where Emby looks for them, so the media folder must be writable.
+    [More](/emby-bif-thumbnails-gpu/)
+- q: Can previews be made as soon as Sonarr or Radarr imports a file?
+  a: >-
+    Yes. Add a webhook in Sonarr or Radarr for import and upgrade. The app waits for a quiet period (60
+    seconds by default), makes the previews, and retries while the media server is still indexing the
+    new file.
+    [More](/sonarr-radarr-preview-thumbnails/)
+- q: Why are my HDR or Dolby Vision preview thumbnails washed out or green?
+  a: >-
+    The frames were grabbed without tone mapping, so HDR colours land in an ordinary picture. This app
+    tone-maps HDR10, HLG and HDR10+, and uses the HDR10 layer of Dolby Vision profiles 7 and 8. Profile
+    5 needs a GPU with a hardware Vulkan driver in the container. [More](/hdr-dolby-vision-thumbnails/)
+- q: Do I need a GPU to use Media Preview Generator?
+  a: >-
+    No. Without one it runs on CPU workers; set how many in Settings, Processing Options. With a GPU,
+    decoding moves off the CPU, and a file the GPU can't decode is retried on the CPU by the same worker.
+- q: Does it run on Windows or Unraid?
+  a: >-
+    Yes, in Docker. There is an Unraid Community Applications template. On Windows (Docker Desktop with
+    WSL2) only NVIDIA GPUs are used; Intel and AMD GPUs there, and everything on macOS, run on the CPU.
+    [More](/getting-started/#windows)

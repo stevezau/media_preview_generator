@@ -1,9 +1,9 @@
 ---
-title: "Generate Plex preview thumbnails with a GPU"
-description: "Plex has no documented GPU option for preview thumbnails. Run Media Preview Generator in Docker with an NVIDIA, Intel or AMD GPU to make them."
+title: Generate Plex preview thumbnails with a GPU
+heading: Generate Plex preview thumbnails with a GPU (NVIDIA, Intel, AMD)
+description: Plex has no documented GPU option for preview thumbnails. Run Media Preview Generator in Docker with an NVIDIA,
+  Intel or AMD GPU to make them.
 ---
-
-# Generate Plex preview thumbnails with a GPU (NVIDIA, Intel, AMD)
 
 Plex's built-in preview thumbnail generator documents no GPU option. Plex describes it as a CPU-intensive job. To make Plex's preview thumbnails on a GPU, run Media Preview Generator in Docker and pass the GPU through:
 
@@ -11,6 +11,10 @@ Plex's built-in preview thumbnail generator documents no GPU option. Plex descri
 - **Intel or AMD:** `--device /dev/dri`.
 
 It decodes each video with FFmpeg on the GPU and writes the BIF file into Plex's data folder. Plex then serves it as if Plex had made it. GPU acceleration works on Linux hosts, and on Windows for NVIDIA only.
+
+![Plex's web player mid-scrub, showing a preview thumbnail this app made](images/player-plex.webp)
+
+*Plex's web player on a test server. Tears of Steel, (CC) Blender Foundation \| mango.blender.org, [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).*
 
 ## What's supported
 
@@ -63,7 +67,7 @@ For Docker Compose, Unraid and permission problems with `/dev/dri`, see:
 - **Path mappings** if Plex and the container see the media at different paths. See [Path Mappings](reference.md#path-mappings).
 - **Plex's own generation off.** Set **Settings → Library → Generate video preview thumbnails** to **Never**, so Plex doesn't redo the work.
 
-Then open `http://YOUR_IP:8080`, get the token with `docker logs media-preview-generator | grep "Token:"`, and sign in to Plex in the setup wizard.
+Then open `http://YOUR_IP:8080`, log in with the token saved in `auth.json` in your app config folder (or your own, set with `WEB_AUTH_TOKEN`), and sign in to Plex in the setup wizard.
 
 ## Check the GPU is being used
 
@@ -78,14 +82,13 @@ If many of your files always fall back, raise **CPU Workers** above 0. Those fil
 - Start with one worker per GPU, then raise it while watching load. See [Performance Tuning](getting-started.md#performance-tuning).
 - **FFmpeg threads** per GPU caps how many CPU cores each worker may use. Lower it if CPU is the bottleneck.
 - The frame interval defaults to 10 seconds (1–60). Plex's own documented default is 2 seconds. Fewer frames means less work.
-- On unRAID, mergerfs or JBOD shares, set **Processing Order → Random** for full scans. Workers then read from different disks ([FAQ](faq.md#generation-feels-disk-bound-on-my-multi-disk-setup-unraidmergerfsjbod--how-do-i-speed-it-up)).
+- On unRAID, mergerfs or JBOD shares, set **Processing Order → Random** for full scans. Workers then read from different disks ([FAQ](faq.md#why-is-generation-slow-on-my-unraid-or-mergerfs-array)).
 
 ## Limits
 
 - Docker only, with a web UI and no CLI.
 - Plex must scan a new file before its BIF can be written. The app retries after 1, 2 and 5 minutes by default ([retry queue](multi-server.md#slow-backoff-retry-queue)).
-- There is no published benchmark against Plex's built-in generator. Speed depends on the GPU, codec, storage and interval.
-- Video preview thumbnails only. It makes no chapter thumbnails and does no intro or credit detection.
+- Video preview thumbnails only, not chapter thumbnails.
 
 ## Related
 

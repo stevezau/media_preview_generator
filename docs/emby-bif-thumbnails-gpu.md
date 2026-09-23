@@ -1,11 +1,15 @@
 ---
-title: "Emby preview thumbnails (BIF) with GPU acceleration"
-description: "Emby's thumbnail extraction has no GPU option. Media Preview Generator makes Emby BIF files on a GPU and saves them next to each video."
+title: Emby preview thumbnails (BIF) with GPU acceleration
+heading: Emby preview thumbnails (BIF) with GPU acceleration
+description: Emby's thumbnail extraction has no GPU option. Media Preview Generator makes Emby BIF files on a GPU and saves
+  them next to each video.
 ---
 
-# Emby preview thumbnails (BIF) with GPU acceleration
-
 Emby's built-in video preview thumbnail extraction has no GPU option. Emby staff describe it as FFmpeg plus Emby's own BIF writer. To make Emby's BIF files on a GPU, run Media Preview Generator in Docker. It decodes each video with FFmpeg on an NVIDIA, Intel or AMD GPU. It then saves `<video name>-320-10.bif` next to the video, the file name Emby itself uses when it saves previews into media folders, and tells Emby to pick it up. This needs write access to the media folder.
+
+![Emby's web player mid-scrub, showing a preview thumbnail this app made](images/player-emby.webp)
+
+*Emby's web player on a test server. Tears of Steel, (CC) Blender Foundation \| mango.blender.org, [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).*
 
 ## What Emby does on its own
 
@@ -15,7 +19,7 @@ Emby's built-in video preview thumbnail extraction has no GPU option. Emby staff
 - **HDR.** Emby's core now tone-maps BIF images, per forum reports. A community plugin did this before the core did ([forum](https://emby.media/community/topic/118095-suggestion-for-bif-file-generation/), user report).
 
 > [!NOTE]
-> A GPU doesn't always help. One Emby plugin developer argues most of the time goes on reading and seeking the file, so hardware decode gains little ([forum](https://emby.media/community/topic/49481-fr-use-hw-acceleration-for-chapter-image-extraction/)). On slow or busy disks that's true for this project too. A GPU helps when storage can keep up. On multi-disk shares, see the FAQ on [disk-bound setups](faq.md#generation-feels-disk-bound-on-my-multi-disk-setup-unraidmergerfsjbod--how-do-i-speed-it-up).
+> A GPU doesn't always help. One Emby plugin developer argues most of the time goes on reading and seeking the file, so hardware decode gains little ([forum](https://emby.media/community/topic/49481-fr-use-hw-acceleration-for-chapter-image-extraction/)). On slow or busy disks that's true for this project too. A GPU helps when storage can keep up. On multi-disk shares, see the FAQ on [disk-bound setups](faq.md#why-is-generation-slow-on-my-unraid-or-mergerfs-array).
 
 ## How Media Preview Generator makes Emby BIFs
 
@@ -57,4 +61,4 @@ See the [comparison page](comparison.md) for when Emby's built-in is the better 
 - Write access to the media folders is required for Emby output.
 - On Windows only NVIDIA GPUs are accelerated, and on macOS none are.
 - Dolby Vision Profile 5 needs a hardware Vulkan driver in the container ([HDR and Dolby Vision](hdr-dolby-vision-thumbnails.md)).
-- Video preview thumbnails only. It makes no chapter images and does no intro or credit detection.
+- It doesn't make chapter images.

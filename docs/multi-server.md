@@ -1,9 +1,10 @@
 ---
-title: "Preview thumbnails for Plex, Emby and Jellyfin from one instance"
-description: "Run one Media Preview Generator for Plex, Emby and Jellyfin at once: adding servers, output formats, webhook routing, retries and the Jellyfin plugin."
+title: Preview thumbnails for Plex, Emby and Jellyfin from one instance
+heading: Multi-Media-Server Support (Plex / Emby / Jellyfin)
+description: 'Run one Media Preview Generator for Plex, Emby and Jellyfin at once: adding servers, output formats, webhook
+  routing, retries and the Jellyfin plugin.'
+render_with_liquid: false
 ---
-
-# Multi-Media-Server Support (Plex / Emby / Jellyfin)
 
 > [Back to Docs](README.md)
 
@@ -12,7 +13,7 @@ from a single instance. A new file is processed exactly once (one FFmpeg pass
 on the GPU) and the resulting frames are published to **every** configured
 server that owns it, in the format that server expects.
 
-![Servers page showing one card per Plex / Jellyfin / Emby server, each with connection status and library count](images/servers.webp)
+![Servers page showing one card per Plex / Jellyfin / Emby server, each with connection status and library count](images/tour-resolve.webp)
 
 > [!NOTE]
 > The universal webhook URL is configured on the **Automation** page
@@ -219,7 +220,7 @@ For Jellyfin, the plugin's stock `ItemAdded` template carries `ItemId` /
 to Jellyfin's API once to translate the id to a path. If you want to
 skip that callback, configure the plugin's template body to be:
 
-```handlebars
+```json
 {
   "path": "{{Item.Path}}",
   "trigger": "file_added"
@@ -298,6 +299,8 @@ dispatch code path, so the journal short-circuit, frame cache, and
 per-publisher skip-if-exists all apply on retry. Retries are cheap
 when the publish has already succeeded through some other path
 (e.g. Plex's own webhook firing after its scan completes).
+
+![A Jellyfin job waiting to retry while the server indexes a new file](images/tour-retry.webp)
 
 ---
 

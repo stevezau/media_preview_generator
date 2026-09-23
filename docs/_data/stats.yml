@@ -1,0 +1,16 @@
+# The numbers under the hero. Each is a count you can check on this site, or (source: benchmark) the
+# ratio in docs/benchmark/summary.json, which tests/test_site_claims.py compares it against.
+# "webhook URL" names only senders POST /api/webhooks/incoming recognises by their payload; that too
+# is tested. Tdarr and FileFlows post {"file_path": ...} to /api/webhooks/custom, so they aren't named.
+- value: "1"
+  label: decode per file
+  note: Several servers hold the same file? It is read once, and each server gets its own format.
+  source: fact
+- value: "3"
+  label: media servers
+  note: Plex, Emby and Jellyfin, in any mix, from one container.
+  source: fact
+- value: "1"
+  label: webhook URL
+  note: Sonarr, Radarr, Plex, Emby and Jellyfin can all post to the same address. The app works out who sent it.
+  source: fact

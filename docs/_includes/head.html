@@ -1,0 +1,59 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+{% seo %}
+
+<link rel="icon" href="{{ '/assets/img/favicon.svg' | relative_url }}" type="image/svg+xml">
+<link rel="icon" href="{{ '/assets/img/favicon-32.png' | relative_url }}" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="{{ '/assets/img/apple-touch-icon.png' | relative_url }}">
+<link rel="stylesheet" href="{{ '/assets/css/main.css' | relative_url }}">
+<meta name="theme-color" content="#08080a" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#fcfcfb" media="(prefers-color-scheme: light)">
+
+{%- comment -%}
+Set the theme before first paint, so nobody sees the wrong palette flash on every page load.
+{%- endcomment -%}
+<script>
+  (function () {
+    try {
+      var stored = localStorage.getItem("mpg-theme");
+      var prefersLight = window.matchMedia("(prefers-color-scheme: light)").matches;
+      document.documentElement.dataset.theme = stored || (prefersLight ? "light" : "dark");
+    } catch (e) {
+      document.documentElement.dataset.theme = "dark";
+    }
+  })();
+</script>
+
+{%- comment -%}
+What this software is, for search engines and AI crawlers. jekyll-seo-tag adds WebSite (home) or
+WebPage (elsewhere); this adds the application itself on every page.
+{%- endcomment -%}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": ["SoftwareApplication", "SoftwareSourceCode"],
+  "name": {{ site.title | jsonify }},
+  "description": {{ site.description | strip_newlines | jsonify }},
+  "url": {{ '/' | absolute_url | jsonify }},
+  "applicationCategory": "MultimediaApplication",
+  "applicationSubCategory": "Video preview thumbnail and skip marker generator for Plex, Emby and Jellyfin",
+  "operatingSystem": "Linux (Docker, amd64 and arm64)",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "license": "https://opensource.org/licenses/MIT",
+  "author": { "@type": "Person", "name": {{ site.author.name | jsonify }}, "url": {{ site.author.url | jsonify }} },
+  "downloadUrl": {{ site.docker_image_url | jsonify }},
+  "codeRepository": {{ site.repo | jsonify }},
+  "softwareRequirements": "Docker; Plex Media Server, Emby Server, or Jellyfin 10.10 or newer",
+  "featureList": [
+    "Video preview thumbnails for Plex (BIF), Emby (BIF) and Jellyfin (trickplay)",
+    "GPU decoding on NVIDIA, Intel and AMD, with automatic CPU fallback",
+    "Starts per file from Sonarr, Radarr, Tdarr, media-server or custom webhooks",
+    "Decodes each file once when several servers hold it",
+    "Skip Intro and Skip Credits markers for Plex, Emby and Jellyfin, detected once per file",
+    "Tone-maps HDR10, HLG and HDR10+ previews and uses the HDR10 layer of Dolby Vision 7 and 8",
+    "Web UI and REST API"
+  ]
+}
+</script>

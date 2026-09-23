@@ -15,10 +15,9 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
-        # mkdocs.yml uses a !!python tag (GitHub-compatible heading slugs) that
-        # safe_load rejects; `mkdocs build --strict` in tests validates it instead.
-        exclude: ^mkdocs\.yml$
       - id: check-json
+        # A Liquid template (front matter + loops) that Jekyll renders into the search index.
+        exclude: ^docs/search\.json$
       - id: check-added-large-files
         args: [--maxkb=500]
       - id: detect-private-key

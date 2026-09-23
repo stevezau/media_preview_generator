@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  {% include head.html %}
+</head>
+<body data-search-index="{{ '/search.json' | relative_url }}">
+  <a class="skip-link" href="#main">Skip to content</a>
+  {% include nav.html %}
+
+  {{ content }}
+
+  {% include footer.html %}
+
+  <dialog class="search-dialog" id="search-dialog" aria-label="Search the documentation">
+    <div class="search-dialog__input">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>
+      </svg>
+      <input type="search" id="search-input" placeholder="Search the docs…" autocomplete="off" aria-label="Search query">
+      <button class="icon-btn" id="search-close" type="button" aria-label="Close search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M6 6l12 12M18 6L6 18"/>
+        </svg>
+      </button>
+    </div>
+    <ul class="search-results" id="search-results"></ul>
+  </dialog>
+
+  <script src="{{ '/assets/js/site.js' | relative_url }}" defer></script>
+</body>
+</html>

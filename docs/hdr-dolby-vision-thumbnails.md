@@ -1,9 +1,9 @@
 ---
-title: "HDR and Dolby Vision preview thumbnails for Plex, Jellyfin and Emby"
-description: "Washed-out or green previews come from HDR frames not tone-mapped. This app tone-maps HDR10, HLG and Dolby Vision; DV Profile 5 needs a Vulkan GPU."
+title: HDR and Dolby Vision preview thumbnails for Plex, Jellyfin and Emby
+heading: HDR and Dolby Vision preview thumbnails without washed-out or green frames
+description: Washed-out or green previews come from HDR frames not tone-mapped. This app tone-maps HDR10, HLG and Dolby Vision;
+  DV Profile 5 needs a Vulkan GPU.
 ---
-
-# HDR and Dolby Vision preview thumbnails without washed-out or green frames
 
 Washed-out, grey or green preview thumbnails come from frames taken from HDR video without tone mapping them to SDR. Tone mapping converts HDR's brightness and colour range into the smaller range a JPEG thumbnail can show. Media Preview Generator does this automatically:
 
@@ -47,7 +47,7 @@ In Docker Compose, set `NVIDIA_DRIVER_CAPABILITIES=all` under `environment:`. `c
 
 Intel and AMD need no extra step beyond passing `/dev/dri`, which also brings the Mesa Vulkan driver.
 
-**Without a hardware Vulkan driver,** the app can't run the Profile 5 tone-mapping path. It logs a warning and extracts those frames without tone mapping, so their thumbnails come out visibly dim. If only a software Vulkan driver is found (the usual case on NVIDIA without the `graphics` capability), the dashboard also shows a notice. With no Vulkan at all, the log is the only sign. For a diagnostic bundle to attach to a GitHub issue, use `GET /api/system/vulkan/debug`.
+**Without a hardware Vulkan driver,** the app can't run the Profile 5 tone-mapping path. It logs a warning and extracts those frames without tone mapping, so their thumbnails come out with a green and purple tint. If only a software Vulkan driver is found (the usual case on NVIDIA without the `graphics` capability), the dashboard also shows a notice. With no Vulkan at all, the log is the only sign. For a diagnostic bundle to attach to a GitHub issue, use `GET /api/system/vulkan/debug`.
 
 ## Checking the result
 
@@ -57,12 +57,12 @@ Intel and AMD need no extra step beyond passing `/dev/dri`, which also brings th
 
 ## Speed
 
-Dolby Vision Profile 5 is the slowest format to process. The docs list rough, unbenchmarked expected speeds per GPU vendor. Treat them as indications, because they depend on the GPU, codec and storage ([FAQ](faq.md#why-is-cpu-usage-high-when-i-have-a-gpu-configured)). HDR files also use more CPU and memory per worker than SDR, because some of the colour conversion moves between GPU and CPU memory.
+Dolby Vision Profile 5 is the slowest format to process. How long it takes depends on the GPU, the codec and your storage, and each GPU vendor needs something different ([FAQ](faq.md#why-is-cpu-usage-high-when-i-have-a-gpu-configured)). HDR files also use more CPU and memory per worker than SDR, because some of the colour conversion moves between GPU and CPU memory.
 
 ## Limits
 
 - Dolby Vision Profile 5 on NVIDIA needs the `graphics` capability, as above.
-- Where no GPU reaches the container, there is no hardware Vulkan driver, so Profile 5 files get the dim fallback. That covers CPU-only hosts, macOS, and AMD or Intel on Windows.
+- Without a GPU that provides hardware Vulkan, Profile 5 thumbnails come out with a green and purple tint. That covers CPU-only hosts, macOS, AMD or Intel on Windows, and NVIDIA without the `graphics` capability.
 - The thumbnails are SDR by design. Preview thumbnails are small JPEGs, not HDR images.
 
 ## Related

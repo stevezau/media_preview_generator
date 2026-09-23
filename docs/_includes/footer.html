@@ -1,0 +1,86 @@
+<footer class="footer">
+  <div class="wrap">
+    <div class="footer__grid">
+      <div>
+        <a class="brand" href="{{ '/' | relative_url }}">
+          <img class="brand__mark" src="{{ '/assets/img/logo.svg' | relative_url }}" alt="" width="27" height="27">
+          <span class="brand__name">Media Preview Generator</span>
+        </a>
+        <p class="footer__blurb">
+          Makes Plex, Emby and Jellyfin preview thumbnails on your GPU, and Skip Intro and Skip Credits markers, as each new file arrives.
+        </p>
+      </div>
+
+      {%- comment -%}
+        Children are listed too, not just the top-level sections. Every docs page then carries a
+        link to every other, which is how the deeper pages get crawled at all — the sitemap alone
+        was not enough to get them indexed. So the fix for an eighteen-link column is to SPLIT it,
+        never to drop links: "How-to" is a self-contained set and gets its own column, which
+        balances against Project and Related instead of towering over them.
+      {%- endcomment -%}
+      <div>
+        <h4>Documentation</h4>
+        <ul>
+          {%- for item in site.nav -%}
+            {%- unless item.title == 'How-to' -%}
+              <li><a href="{{ item.url | relative_url }}">{{ item.title }}</a></li>
+              {%- for kid in item.children -%}
+                <li class="footer__kid"><a href="{{ kid.url | relative_url }}">{{ kid.title }}</a></li>
+              {%- endfor -%}
+            {%- endunless -%}
+          {%- endfor -%}
+        </ul>
+      </div>
+
+      {%- for item in site.nav -%}
+        {%- if item.title == 'How-to' -%}
+          <div>
+            <h4><a href="{{ item.url | relative_url }}">{{ item.title }}</a></h4>
+            <ul>
+              {%- for kid in item.children -%}
+                <li><a href="{{ kid.url | relative_url }}">{{ kid.title }}</a></li>
+              {%- endfor -%}
+            </ul>
+          </div>
+        {%- endif -%}
+      {%- endfor -%}
+
+      <div>
+        <h4>Project</h4>
+        <ul>
+          <li><a href="{{ site.repo }}">Source on GitHub</a></li>
+          <li><a href="{{ site.repo }}/releases">Releases</a></li>
+          <!-- Above "Report a bug" on purpose: most people arriving here have a question, not a
+               defect, and whichever door is listed first is the one they take. -->
+          <li><a href="{{ site.repo }}/discussions">Ask a question</a></li>
+          <li><a href="{{ site.repo }}/issues/new/choose">Report a bug</a></li>
+          <li><a href="{{ site.docker_image_url }}">Container image</a></li>
+          <li><a class="footer__support" href="{{ site.repo }}">
+            <svg class="footer__star" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1Z"/></svg>
+            Star on GitHub</a></li>
+          <li><a class="footer__support" href="https://ko-fi.com/stevezau">
+            <svg class="footer__cup" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 8h1a4 4 0 0 1 0 8h-1M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4ZM6 2v2M10 2v2M14 2v2"/></svg>
+            Buy me a coffee</a></li>
+        </ul>
+      </div>
+
+      <div>
+        <h4>Related</h4>
+        <ul>
+          <li><a href="https://www.plex.tv/">Plex</a></li>
+          <li><a href="https://jellyfin.org/">Jellyfin</a></li>
+          <li><a href="https://emby.media/">Emby</a></li>
+          <li><a href="https://sonarr.tv/">Sonarr</a></li>
+          <li><a href="https://radarr.video/">Radarr</a></li>
+          <li><a href="https://shortlistapp.dev/">Shortlist</a></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="footer__base">
+      <span>MIT licensed · © {{ 'now' | date: "%Y" }} Steven Adams</span>
+      <span>Not affiliated with Plex, Emby or Jellyfin. Their names are trademarks of their owners.</span>
+      <span>Films in the screenshots: Blender Foundation (CC BY) and Netflix Open Content (CC BY 4.0). <a href="{{ '/credits/' | relative_url }}">Credits</a></span>
+    </div>
+  </div>
+</footer>

@@ -1,9 +1,9 @@
 ---
-title: "Faster Jellyfin trickplay generation with a GPU"
-description: "Speed up Jellyfin trickplay with its own settings first (threads, key frames, hardware decode, tone mapping), then offload it to a GPU container."
+title: Faster Jellyfin trickplay generation with a GPU
+heading: Faster Jellyfin trickplay generation
+description: Speed up Jellyfin trickplay with its own settings first (threads, key frames, hardware decode, tone mapping),
+  then offload it to a GPU container.
 ---
-
-# Faster Jellyfin trickplay generation
 
 Jellyfin (10.9+) makes trickplay images itself. The quickest wins are in its own trickplay options, most of which ship off:
 
@@ -14,6 +14,10 @@ Jellyfin (10.9+) makes trickplay images itself. The quickest wins are in its own
 
 If a backlog is still too slow, you can move the work off Jellyfin. You might want it on another machine, or you might run Plex or Emby too. Media Preview Generator can write Jellyfin's native trickplay tiles from a GPU in its own Docker container. That needs Jellyfin 10.10 or newer.
 
+![Jellyfin's web player mid-scrub, showing a preview thumbnail this app made](images/player-jellyfin.webp)
+
+*Jellyfin's web player on a test server. Tears of Steel, (CC) Blender Foundation \| mango.blender.org, [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).*
+
 ## Start with Jellyfin's own settings
 
 These live under **Dashboard → Playback → Trickplay**. Defaults are from Jellyfin's [`TrickplayOptions.cs`](https://github.com/jellyfin/jellyfin/blob/master/MediaBrowser.Model/Configuration/TrickplayOptions.cs), checked 23 September 2026.
@@ -22,7 +26,7 @@ These live under **Dashboard → Playback → Trickplay**. Defaults are from Jel
 - **FFmpeg threads** (`ProcessThreads`, default 1). Raise it if the server has spare cores.
 - **Process priority** (`ProcessPriority`, default below normal). Playback wins when the CPU is busy, at the cost of slower trickplay.
 - **Hardware decoding** (`EnableHwAcceleration`, default off).
-- **Hardware MJPEG encoding** (`EnableHwEncoding`, default off). Jellyfin's help text says it only works with QSV, VA-API, VideoToolbox and RKMPP ([source](https://git.uninsane.org/shelvacu-mirrors/jellyfin-web/commit/b07553a05883b07e198e3f5d150f2686b23ec13c)).
+- **Hardware MJPEG encoding** (`EnableHwEncoding`, default off). Jellyfin's help text says it only works with QSV, VA-API, VideoToolbox and RKMPP ([source](https://github.com/jellyfin/jellyfin-web/blob/master/src/strings/en-us.json)).
 - **Interval and width** (default 10 seconds, 320 px, 10×10 tiles). A longer interval means fewer frames to make.
 
 Hardware decoding is not a guaranteed win. A Jellyfin core team member [has said](https://forum.jellyfin.org/t-solved-trickplay-slow-w-nvidia-gpu-nvdec) its use in 10.9 trickplay is "not the most efficient". Users report it failing on some files, or not measurably beating the CPU ([#13468](https://github.com/jellyfin/jellyfin/issues/13468)). Test on a few files before relying on it.
@@ -90,4 +94,4 @@ Install Jellyfin's **Webhook** plugin. Add a Generic destination pointing at `ht
 - Docker only, with a web UI and no CLI.
 - On Windows only NVIDIA GPUs are accelerated, and on macOS none are.
 - New files are retried after 1, 2 and 5 minutes by default while Jellyfin indexes them ([retry queue](multi-server.md#slow-backoff-retry-queue)).
-- It makes trickplay only: no chapter images, and no intro or credit detection.
+- It doesn't make chapter images.

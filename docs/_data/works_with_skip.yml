@@ -1,0 +1,14 @@
+# Per-server Skip Intro / Skip Credits requirements, rendered as a small list under the
+# works-with grid (docs/_layouts/home.html). Kept out of works_with.yml's groups: a fourth
+# group of three would break grid--trio's even-rows layout (see main.css's .grid--trio comment).
+- name: Plex
+  note: >-
+    Viewers need Plex Pass; the app runs on the Plex machine or next to it via the Plex
+    marker agent.
+- name: Jellyfin
+  note: >-
+    Jellyfin 10.11 or 12.0 with the Media Preview Bridge plugin (the one trickplay uses).
+- name: Emby
+  note: >-
+    Emby 4.9 or 4.10 with the Media Preview Bridge for Emby plugin; Skip Intro needs Emby
+    Premiere, Skip Credits doesn't.

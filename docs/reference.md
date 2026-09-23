@@ -1,8 +1,9 @@
 ---
-description: Every Media Preview Generator setting, environment variable, path mapping and REST API endpoint, with defaults, request and response examples.
+title: Configuration & API Reference
+heading: Configuration & API Reference
+description: Every Media Preview Generator setting, environment variable, path mapping and REST API endpoint, with defaults,
+  request and response examples.
 ---
-
-# Configuration & API Reference
 
 > [Back to Docs](README.md)
 
@@ -451,9 +452,9 @@ or when its file's row was "not in library" and the server confirmed the item mi
 (the normal retry above, `source: "reconcile"`, attempt 1; like `manual` jobs, it and its retries queue no not-on-disk
 retry and no verify job) and the item is dropped only once that retry is queued. A run cancelled or failed before
 then, or with `webhook_retry_count` 0, drops nothing, so the next run confirms the item again. Check servers queues no
-other retry (a later run lists what still waits). Other warnings: `Skipped <server>:
-<reason>`, `Couldn't check <server>`, `Couldn't check <server>: no connection to it`, `Couldn't read what N item(s)
-show on <server>`. With nothing to list it completes at once (log "Every server checked still shows what this app
+other retry (a later run lists what still waits). Other warnings: `Skipped <server>: <reason>`,
+`Couldn't check <server>`, `Couldn't check <server>: no connection to it`, `Couldn't read what N item(s) show on <server>`.
+With nothing to list it completes at once (log "Every server checked still shows what this app
 published").
 
 ### Outcome keys
@@ -714,8 +715,8 @@ episode"}` (no `SxxEyy` in its name). `500` `{"error": "Couldn't build the Seaso
 
 **Request:** `{"path"}` — any episode of the season.
 
-**Response:** `202` with `{"job_id"}` — a NORMAL-priority, not forced Intro & Credits job named `Intro & Credits:
-<show> · Season N` (or `· Specials`) for exactly the episodes `GET /api/markers/season` lists for that path (same
+**Response:** `202` with `{"job_id"}` — a NORMAL-priority, not forced Intro & Credits job named
+`Intro & Credits: <show> · Season N` (or `· Specials`) for exactly the episodes `GET /api/markers/season` lists for that path (same
 folder and season number, at most the 40 nearest), so a folder holding several seasons only sends this one: decided
 episodes are sent to every server that doesn't show them yet, undecided ones are checked again. While a Publish of the
 same episodes is still queued or running, its id is returned instead of starting a second one. For example

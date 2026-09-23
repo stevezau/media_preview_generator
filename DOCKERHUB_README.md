@@ -1,44 +1,106 @@
-<!-- This file is the Docker Hub "Full Description" and is auto-synced by CI.
-     When you update README.md significantly, update this file to match.
-     Docker Hub does not render mermaid diagrams, GitHub admonitions, or relative images. -->
+<!-- The Docker Hub "Full Description", synced by CI (ci.yml update-dockerhub-description) on each
+     release tag. It is README.md with every link and image made absolute (Docker Hub has no repository
+     to resolve a relative path against) and without the badge block or centred HTML. Three differences
+     are deliberate: the logo is a sized <img> of the PNG, the captions are _italics_ rather than
+     HTML sub tags, and the Image Tags section is Docker-only. tests/test_readmes.py fails when the
+     sections the two files share drift apart, so edit both. -->
+
+<img src="https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/icon.png" alt="" width="110" height="110">
 
 # Media Preview Generator
 
-GPU-accelerated video preview thumbnail generation for **Plex, Emby, and Jellyfin**. **Web UI only** — no CLI.
+**Your media server's slowest jobs, done on your GPU.** Media Preview Generator makes the preview
+thumbnails and the Skip Intro and Skip Credits markers for Plex, Emby and Jellyfin. It starts the moment
+Sonarr or Radarr imports a file and sends the results to every server at once. Self-hosted, one Docker
+container.
 
-> Previously named **Plex Generate Previews** at `stevezzau/plex_generate_vid_previews`. **That image has been retired and no longer receives updates** — this repo (`stevezzau/media_preview_generator`) is the only one published. If you're still on the old name, update your `compose` file's `image:` line to `stevezzau/media_preview_generator` and re-pull — settings and volumes carry over unchanged.
+**[Explore the docs »](https://mediapreviewgenerator.dev/)** ·
+[Quick start](#quick-start) ·
+[How it compares](https://mediapreviewgenerator.dev/comparison/) ·
+[Ask a question](https://github.com/stevezau/media_preview_generator/discussions) ·
+[Report a bug](https://github.com/stevezau/media_preview_generator/issues/new?labels=bug)
 
-**The Problem:** Built-in preview generation has gaps depending on which server you run:
+![Tears of Steel in the Plex, Jellyfin and Emby web players, each showing a preview thumbnail over the seek bar](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/players-3up.webp)
 
-- **Plex** documents no GPU option for preview thumbnails, and calls the job CPU-intensive.
-- **Emby** has no GPU option for thumbnail extraction.
-- **Jellyfin** can use hardware decoding for trickplay, but it's off by default, and by default the job runs at below-normal priority with one thread.
+_Plex, Jellyfin and Emby web players on test servers, each paused mid-scrub on the same film. The
+thumbnails were made by this app. Tears of Steel, (CC) Blender Foundation | mango.blender.org,
+[CC BY 3.0](https://creativecommons.org/licenses/by/3.0/)._
 
-See the [dated, sourced comparison](https://mediapreviewgenerator.dev/comparison/) for details and for when the built-ins are the better choice.
+## What it does
 
-**The Solution:** This tool runs preview generation **off the media server** on a machine of your choosing, uses every GPU it finds, and processes files in parallel. When two or more servers contain the same file, FFmpeg runs only once — the result is then written out in each server's expected format.
+Plex, Emby and Jellyfin can make preview thumbnails themselves, but they do it inside the server, mostly
+on the CPU, and mostly on a schedule. On a big library that can take days, and the episode that arrived
+tonight can sit with a blank timeline until the next maintenance window.
+
+**Media Preview Generator makes them on your GPU, for each file as it arrives.** When more than one
+server holds the same file, it decodes it once and writes each server's own format.
+
+**It also adds Skip Intro and Skip Credits.** It finds each file's intro and end credits once and sends
+the markers to every server that has the file. When it isn't sure, it sends nothing and the file waits
+for your review.
+
+## What it looks like
+
+| It finds every server with that file |
+| --- |
+| ![Servers page with one card each for Plex, Jellyfin and Emby](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-resolve.webp) |
+
+| One GPU pass per file |
+| --- |
+| ![Dashboard with GPU workers making previews for three films](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-extract.webp) |
+
+| Each server gets its own format |
+| --- |
+| ![One film's previews published to Plex, Jellyfin and Emby](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-publish.webp) |
+
+| It waits for slow servers |
+| --- |
+| ![A Jellyfin job waiting to retry while the server indexes a new film](https://raw.githubusercontent.com/stevezau/media_preview_generator/main/docs/images/tour-retry.webp) |
+
+_App screenshots come from a test setup with made-up servers; the job titles are open films._
 
 ## Features
 
-**One FFmpeg pass, every server.** Point it at Plex, Emby, Jellyfin — any mix,
-any number — and a single generation run writes the right output format to each
-(Plex BIF bundle, Emby sidecar BIF, Jellyfin trickplay tiles).
+**GPU first, CPU when needed**
+- **Every GPU you pass in.** NVIDIA, Intel and AMD on Linux; NVIDIA on Windows through WSL2. Each GPU passed to the container gets its own workers.
+- **CPU fallback built in.** A file the GPU can't decode is retried on the CPU by the same worker.
+- **Key-frame skipping.** Jumps between key frames when a file's key-frame spacing allows it.
 
-**Automation that just works.** Radarr / Sonarr / Tdarr / FileFlows webhooks,
-Plex direct (Plex Pass), Recently Added polling, cron & interval schedules —
-all share one universal inbound URL with vendor auto-detection. A backoff
-retry (1 m → 2 m → 5 m by default; raise the retry count for 15 m and
-60 m) handles files your server hasn't indexed yet. Source-aware dedup re-runs automatically when a file is swapped
-(e.g. a Sonarr/Radarr quality upgrade) and skips when nothing changed.
+**Starts on its own**
+- **Webhooks.** Sonarr, Radarr, Sportarr, Tdarr, FileFlows, Plex (Plex Pass), Emby (Premiere) and Jellyfin, or any JSON with a path. Sonarr, Radarr and the three servers can share one URL.
+- **Schedules.** Recently Added polling, plus cron and interval schedules.
+- **Manual Generation.** Search your servers by title (a whole show, a movie or one episode), or browse the media folders, and make previews for just those.
+- **Retries and skips.** Retries after 1, 2 and 5 minutes by default while a server indexes a new file, and skips files whose previews are current.
 
-**Hardware you already have.** NVIDIA, AMD, Intel — per-GPU worker counts and
-FFmpeg threads, automatic in-place CPU retry if a codec fails on the GPU, and
-HDR / Dolby Vision tone mapping (including Profile 5 via libplacebo). A
-**Previews Readiness** panel on each server audits every flag that affects
-whether your previews actually show up, with one-click toggles and typed
-confirmation for destructive changes.
+**Every server from one decode**
+- **Each server's own format.** A BIF in Plex's data folder, a BIF next to the video for Emby, and Jellyfin trickplay tiles (next to the video, or in Jellyfin's data folder with the companion plugin).
+- **Previews Readiness.** Checks each server's settings and offers fixes one library at a time.
 
-## Quick Start
+**Right colours**
+- **HDR tone mapping.** Tone-maps HDR10, HLG and HDR10+, and uses the HDR10 layer of Dolby Vision profiles 7 and 8. Profile 5 needs a GPU with a hardware Vulkan driver.
+
+**Skip Intro and Skip Credits**
+- **Found once, sent to every server.** Finds intros and end credits from the file's chapters, online skip databases (TheIntroDB, IntroDB.app, SkipDB), the season's theme song or the credit roll itself (read on the GPU when that's faster), then sends the markers to every server. When it isn't sure, the file waits for your review instead of getting a guess. Off until you [turn it on](https://mediapreviewgenerator.dev/guides/#turning-it-on) for a server.
+- **Yours to correct.** Tools → Intro & Credits adjusts, adds and locks a file's markers by hand, and Setup Health checks each server's Intro & Credits setup.
+- **Plex.** Viewers need Plex Pass. The app runs on the Plex machine, or next to it through the [Plex marker agent](https://mediapreviewgenerator.dev/guides/#plex-on-another-machine-the-plex-marker-agent).
+- **Jellyfin.** Jellyfin 10.11 or 12.0, with the Media Preview Bridge plugin (the one trickplay uses).
+- **Emby.** Emby 4.9 or 4.10, with the Media Preview Bridge for Emby plugin. Skip Intro needs Emby Premiere; Skip Credits doesn't.
+
+## Where it fits
+
+It sits next to Sonarr, Radarr and Tdarr and takes over the media server's own preview job. Once it
+runs, the server's own generation is the same work done twice. The app's
+[Previews Readiness](https://mediapreviewgenerator.dev/guides/previews-readiness/) panel says which
+setting to turn off on each server, and which to leave on: switching Jellyfin's trickplay off deletes
+the tiles this app wrote. If your server's own generator keeps up, you don't need this: see
+[how it compares](https://mediapreviewgenerator.dev/comparison/).
+
+## Quick start
+
+**You'll need:** Docker · Plex, Emby or Jellyfin (Jellyfin 10.10 or newer), reachable from the
+container · write access where previews go: Plex's data folder, or the media folder for Emby and
+Jellyfin. A GPU is optional: its driver on the host, plus the NVIDIA Container Toolkit for NVIDIA on
+Linux.
 
 ```bash
 docker run -d \
@@ -46,22 +108,19 @@ docker run -d \
   --restart unless-stopped \
   -p 8080:8080 \
   --device /dev/dri:/dev/dri \
-  -e PUID=1000 \
-  -e PGID=1000 \
-  -v /path/to/media:/media:ro \
-  -v /path/to/plex/config:/plex:rw \
-  -v /path/to/app/config:/config:rw \
-  -v /etc/localtime:/etc/localtime:ro \
+  -e PUID=1000 -e PGID=1000 \
+  -v /path/to/media:/media \
+  -v /path/to/plex/config:/plex \
+  -v /path/to/app/config:/config \
   stevezzau/media_preview_generator:latest
 ```
 
-Replace `/path/to/media`, `/path/to/plex/config`, and `/path/to/app/config` with your actual paths.
+- Intel or AMD: `--device /dev/dri` as above. NVIDIA: `--gpus all -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all` instead. No GPU, or on Windows or macOS? Delete the `--device /dev/dri` line.
+- Plex writes into `/plex`, so the media can be `:ro`. Emby, and Jellyfin in its default layout, write next to each video, so for them the media mount must be read-write. No Plex? Drop the `/plex` mount.
+- Open `http://YOUR_IP:8080` and sign in with the token saved in `auth.json` in your app config folder (or pin your own with `-e WEB_AUTH_TOKEN=...`), then follow the setup wizard.
+- The image is `stevezzau/media_preview_generator`. The double z is the Docker Hub account's name, not a typo.
 
-> **Emby or Jellyfin?** This command is for Plex, which only writes into `/plex`, so the media stays `:ro`. Emby and Jellyfin (default layout) write previews next to each video, so change the media mount to `:rw`. See [Volume Mounts](https://github.com/stevezau/media_preview_generator/blob/main/docs/getting-started.md#volume-mounts).
-
-> **Timezone:** The `/etc/localtime` mount ensures log timestamps and scheduled jobs use your local time. Alternatively, use `-e TZ=America/New_York` (replace with your [timezone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)).
-
-Then open `http://YOUR_IP:8080`, retrieve the authentication token from container logs, and complete the setup wizard. All settings (Plex connection, GPU config, processing options) are configured in the web UI Settings page.
+Docker Compose, Unraid and GPU details: [Getting started](https://mediapreviewgenerator.dev/getting-started/).
 
 ## Image Tags
 
@@ -73,177 +132,39 @@ Then open `http://YOUR_IP:8080`, retrieve the authentication token from containe
 
 See the [releases page](https://github.com/stevezau/media_preview_generator/releases) for version history and per-release notes.
 
-## Volume Mounts
-
-| Container Path | Purpose | Mode |
-|----------------|---------|------|
-| `/media` | Your media files | `ro` for Plex only. `rw` for Emby, or Jellyfin in its default layout (previews are written next to each video). |
-| `/plex` | Plex application data (where BIF files are stored) | `rw` |
-| `/config` | App settings, schedules, job history | `rw` |
-
-## Docker Compose
-
-### GPU (Intel / AMD / NVIDIA)
-
-```yaml
-services:
-  plex-previews:
-    image: stevezzau/media_preview_generator:latest
-    container_name: media-preview-generator
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    # Intel / AMD GPU (VAAPI)
-    devices:
-      - /dev/dri:/dev/dri
-    # NVIDIA: remove 'devices' above, uncomment below
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-    environment:
-      # NVIDIA only (uncomment if using NVIDIA):
-      # - NVIDIA_VISIBLE_DEVICES=all
-      # Use 'all' so the NVIDIA Vulkan driver is injected; 'graphics' is
-      # required for Dolby Vision Profile 5 libplacebo tone-mapping.
-      # - NVIDIA_DRIVER_CAPABILITIES=all
-      - PUID=1000
-      - PGID=1000
-    volumes:
-      # :ro is fine for Plex. Use :rw for Emby, or Jellyfin in its default layout.
-      - /path/to/your/media:/media:ro
-      - /path/to/plex/config:/plex:rw
-      - /path/to/app/config:/config:rw
-      - /etc/localtime:/etc/localtime:ro
-```
-
-### CPU-Only
-
-Set GPU Workers to 0 and CPU Workers as needed in the web UI Settings.
-
-```yaml
-services:
-  plex-previews:
-    image: stevezzau/media_preview_generator:latest
-    container_name: media-preview-generator
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    environment:
-      - PUID=1000
-      - PGID=1000
-    volumes:
-      # :ro is fine for Plex. Use :rw for Emby, or Jellyfin in its default layout.
-      - /path/to/your/media:/media:ro
-      - /path/to/plex/config:/plex:rw
-      - /path/to/app/config:/config:rw
-      - /etc/localtime:/etc/localtime:ro
-```
-
-## GPU Support
-
-| GPU Type | Platform | Acceleration | Docker Flag |
-|----------|----------|--------------|-------------|
-| **NVIDIA** | Linux | CUDA/NVENC | `--gpus all` |
-| **AMD** | Linux | VAAPI | `--device /dev/dri` |
-| **Intel** | Linux | QuickSync/VAAPI | `--device /dev/dri` |
-| **NVIDIA** | Windows | CUDA/NVENC | `--gpus all` (Docker Desktop, WSL2 backend) |
-| **AMD/Intel** | Windows | — | Not available — CPU only |
-| **Apple Silicon / Intel** | macOS | — | Not available — CPU only |
-
-> **NVIDIA on Windows works under Docker.** The NVIDIA Windows driver exposes CUDA and NVDEC into WSL2, so Docker Desktop with the WSL2 backend accelerates just like Linux — use `--gpus all` as below, with no extra install inside WSL.
-
-> **AMD/Intel on Windows and all GPUs on macOS cannot be accelerated under Docker.** Docker Desktop runs a Linux VM, and D3D11VA and VideoToolbox are host-OS frameworks it cannot reach — those setups process on CPU. Run the container on a Linux host if you need GPU acceleration. Apple Silicon still benefits from the native ARM64 image (no Rosetta overhead).
-
-### NVIDIA GPU
-
-Prerequisites (Linux hosts): NVIDIA drivers + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
-
-On **Windows**, skip the Container Toolkit — Docker Desktop provides it. You need the NVIDIA Windows driver, the WSL2 backend, and an up-to-date WSL kernel (`wsl --update`). Omit `--device /dev/dri:/dev/dri` on Windows.
-
-```bash
-docker run -d \
-  --gpus all \
-  -e NVIDIA_VISIBLE_DEVICES=all \
-  -e NVIDIA_DRIVER_CAPABILITIES=all \
-  -e PUID=1000 \
-  -e PGID=1000 \
-  -p 8080:8080 \
-  -v /path/to/media:/media:ro \
-  -v /path/to/plex/config:/plex:rw \
-  -v /path/to/app/config:/config:rw \
-  -v /etc/localtime:/etc/localtime:ro \
-  stevezzau/media_preview_generator:latest
-```
-
-### GPU + CPU Fallback
-
-CPU fallback is automatic. If a file fails on the GPU (unsupported codec, driver crash, etc.), the same worker automatically retries it on the CPU and the dashboard shows a yellow "CPU fallback" badge so you know it happened. No separate worker pool to configure — increase **CPU Workers** above `0` only if you have a lot of content that never decodes on the GPU and you want those files to route straight to dedicated CPU workers.
-
-## Environment Variables
-
-All application settings (Plex, GPU, processing) are configured in the web UI Settings page. `settings.json` in `/config` is the single source of truth. The only infrastructure env vars that remain active:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CONFIG_DIR` | `/config` | Path to config directory |
-| `WEB_PORT` | `8080` | Web server port |
-| `PUID` | `1000` | User ID (Unraid: `99`) |
-| `PGID` | `1000` | Group ID (Unraid: `100`) |
-| `TZ` | Host | Timezone (e.g. `America/New_York`) |
-| `CORS_ORIGINS` | `*` | CORS allowed origins |
-| `HTTPS` | `false` | Enable HTTPS |
-| `DEV_RELOAD` | `false` | Enable dev reload |
-
-Application-level env vars (PLEX_URL, PLEX_TOKEN, CPU_THREADS, etc.) act as one-time seed values on first startup. They are migrated into settings.json. After that, settings.json is the source of truth.
-
-## Unraid
-
-Search for "media-preview-generator" in Community Applications, or run manually:
-
-```bash
-docker run -d \
-  --name media-preview-generator \
-  --restart unless-stopped \
-  -p 8080:8080 \
-  --device /dev/dri:/dev/dri \
-  -e PUID=99 \
-  -e PGID=100 \
-  -v /mnt/user/data/plex:/data/plex:ro \
-  -v "/mnt/cache/appdata/plex/Library/Application Support/Plex Media Server":/plex:rw \
-  -v /mnt/user/appdata/media-preview-generator:/config:rw \
-  -v /etc/localtime:/etc/localtime:ro \
-  stevezzau/media_preview_generator:latest
-```
-
-## Performance Tuning
-
-Configure GPU and CPU workers per-GPU in the web UI under **Settings**.
-
-## Important Notes
-
-- **Don't add `init: true`** to your docker-compose file — this container manages its own processes internally, and `init: true` conflicts with that.
-- **Use your host IP for Plex** -- the container cannot reach `localhost` on your host. Use `http://192.168.1.100:32400`, not `http://localhost:32400`.
-- **Recommended Plex setting** -- set "Generate video preview thumbnails" to **Never** in Plex settings. This tool replaces that with GPU-accelerated processing.
-
 ## Documentation
 
-Full documentation is available on GitHub:
+The docs are also a website: **[mediapreviewgenerator.dev](https://mediapreviewgenerator.dev/)**.
 
-- [Getting Started](https://github.com/stevezau/media_preview_generator/blob/main/docs/getting-started.md) — Docker, GPU, Unraid, networking
-- [Guides & Troubleshooting](https://github.com/stevezau/media_preview_generator/blob/main/docs/guides.md) — Web UI, schedules, webhooks, HDR, troubleshooting
-- [Configuration & API Reference](https://github.com/stevezau/media_preview_generator/blob/main/docs/reference.md) — All settings, env vars, and REST API
-- [FAQ](https://github.com/stevezau/media_preview_generator/blob/main/docs/faq.md) — Common questions about setup, performance, and compatibility
+| Page | What's in it |
+| --- | --- |
+| [Getting started](https://mediapreviewgenerator.dev/getting-started/) | Docker, GPUs, mounts, Unraid, networking |
+| [How it compares](https://mediapreviewgenerator.dev/comparison/) | Plex, Jellyfin and Emby built-in generation, side by side |
+| [Guides](https://mediapreviewgenerator.dev/guides/) | The web UI, webhooks, schedules, troubleshooting |
+| [Multi-server](https://mediapreviewgenerator.dev/multi-server/) | Plex, Emby and Jellyfin from one instance |
+| [Reference](https://mediapreviewgenerator.dev/reference/) | Every setting, environment variable and API endpoint |
+| [FAQ](https://mediapreviewgenerator.dev/faq/) | Windows, GPUs, RAM, skipped files |
+| [Why Plex previews are slow](https://mediapreviewgenerator.dev/plex-preview-thumbnails-slow/) | What Plex does, and what to change |
+| [Plex previews with a GPU](https://mediapreviewgenerator.dev/plex-preview-thumbnails-gpu/) | Moving Plex's preview job to a GPU |
+| [Faster Jellyfin trickplay](https://mediapreviewgenerator.dev/jellyfin-trickplay-gpu/) | Jellyfin's own settings first, then a GPU |
+| [Emby BIF previews with a GPU](https://mediapreviewgenerator.dev/emby-bif-thumbnails-gpu/) | Emby BIFs made on a GPU, next to each video |
+| [Previews on Sonarr or Radarr import](https://mediapreviewgenerator.dev/sonarr-radarr-preview-thumbnails/) | Webhooks, quiet period, retries |
+| [HDR and Dolby Vision previews](https://mediapreviewgenerator.dev/hdr-dolby-vision-thumbnails/) | Tone mapping, and the Dolby Vision 5 caveat |
+| [Skip Intro and Skip Credits](https://mediapreviewgenerator.dev/skip-intro-credits/) | What each server needs, how they're found, limits |
 
-## Support
+## Support the project
 
-- [Report a Bug](https://github.com/stevezau/media_preview_generator/issues/new?labels=bug)
-- [Request a Feature](https://github.com/stevezau/media_preview_generator/issues/new?labels=enhancement)
-- [GitHub Repository](https://github.com/stevezau/media_preview_generator)
+It's free and MIT licensed. Helping is optional.
+
+- **[Star it on GitHub](https://github.com/stevezau/media_preview_generator)**: free, and it's how other server owners find it.
+- **[Buy me a coffee on Ko-fi](https://ko-fi.com/stevezau)**: no account needed.
+
+## Get help
+
+- **Previews don't show up?** Open the server's Previews Readiness panel in the app. It names the setting that's in the way.
+- **Not sure it's a bug?** Ask in [Discussions](https://github.com/stevezau/media_preview_generator/discussions).
+- **Found a bug?** [Open an issue](https://github.com/stevezau/media_preview_generator/issues/new?labels=bug) with the app version and what you tried.
 
 ## License
 
-MIT License. See [LICENSE](https://github.com/stevezau/media_preview_generator/blob/main/LICENSE) for details.
+MIT, see [LICENSE](https://github.com/stevezau/media_preview_generator/blob/main/LICENSE). Recent development is AI-assisted (Claude); every change is reviewed and tested.
