@@ -89,7 +89,27 @@ media_preview_generator/
 - **Configuration**: `settings.json` is the sole source of truth. Env vars are one-time seed values migrated on first start. Infrastructure vars (`CONFIG_DIR`, `WEB_PORT`, `PUID`, `PGID`, `TZ`, `CORS_ORIGINS`) remain active.
 - **GPU config**: Per-GPU in settings (`gpu_config`: enabled, workers, ffmpeg_threads per device).
 - **Error handling**: Custom exceptions + `retry_plex_call()` with backoff for Plex API. `CodecNotSupportedError` for FFmpeg fallback.
-- **Commits**: Follow Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `chore:`). **Before creating any commit, dispatch the `Architecture Review` agent** (`.claude/agents/architecture-review.md`) against the staged diff. Block on HIGH severity findings; discuss MED before committing; LOW is informational. This catches the eight production-bug shapes that have shipped before — bug-blind tests, un-wrapped failure_scope, lazy-init races, vestigial blocking work, comments-vs-code drift.
+- **Commits**: Follow Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `chore:`).
+- **Architecture Review — by risk, not by habit.** The agent
+  (`.claude/agents/architecture-review.md`) runs on the strong model and costs ~100k tokens a run,
+  so spend it where bugs are expensive. Dispatch it, and block on HIGH findings, when the diff:
+  - **writes anything to a Plex config directory** (BIF output paths, `Media/localhost/**`,
+    index files) — a wrong path corrupts someone's library;
+  - touches **FFmpeg command construction, codec fallback, or HDR detection**;
+  - touches **GPU detection, the worker pool, or anything concurrent** — lazy-init races are
+    bug shape 3 and have shipped before;
+  - changes the **`settings.json` schema or `upgrade.py` migrations**;
+  - touches **auth, tokens, or the `@login_required` / `@api_token_required` decorators**;
+  - changes **path sanitization** (`sanitize_path`, `_safe_resolve_within`) or **webhook handlers**,
+    both of which take untrusted input;
+  - is a **release commit or a Dockerfile change**, whatever it contains.
+
+  Skip it for docs, comments, logging, test-only, template/CSS-only, and dependency-bump commits —
+  `ruff`, the 1321-test suite and CI already cover those, and a review there finds style, not bugs.
+
+  Block on HIGH severity findings; discuss MED before committing; LOW is informational. This catches
+  the eight production-bug shapes that have shipped before — bug-blind tests, un-wrapped
+  failure_scope, lazy-init races, vestigial blocking work, comments-vs-code drift.
 - **Docker awareness**: Check `utils.is_docker_environment()` for container-specific behavior.
 
 ## Security
