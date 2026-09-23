@@ -18,10 +18,10 @@ from unittest.mock import ANY, MagicMock, create_autospec, patch
 
 import pytest
 
-from media_preview_generator.markers import pipeline, reconcile
+from media_preview_generator.markers import job_runner, pipeline, reconcile
 from media_preview_generator.markers.decide import DecisionStatus, TypeDecision
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, Source
-from media_preview_generator.markers.outcomes import FileOutcome, kept_own_reason
+from media_preview_generator.markers.outcomes import VERSIONS_UNCHECKED, FileOutcome, kept_own_reason
 from media_preview_generator.markers.probe import Chapter, MediaProbe
 from media_preview_generator.markers.publishers import plex_db
 from media_preview_generator.markers.publishers.base import Capability, CapabilityReport, PublishError, Shown
@@ -653,6 +653,57 @@ def test_a_deleted_version_stops_blocking_the_types_it_disagreed_on(plex_item):
     item.delete_part("2160p")
     assert _outcomes(item.run("1080p"), item.run("1080p")) == ["published", "up_to_date"]
     assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.commits == 2
+
+
+def test_a_version_plex_still_lists_but_that_is_gone_from_disk_doesnt_hold_the_item_back(plex_item):
+    # Found on the owner's server: Sonarr deleted the Bluray copy at 17:25, and Plex still listed it when the WEBDL copy
+    # was decided at 18:01; the item waited for the deleted copy forever.
+    item = plex_item()
+    item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    os.remove(item.paths["2160p"])  # Plex hasn't scanned since: its part is still live
+    out = item.run("1080p")
+    assert _outcomes(out) == ["published"] and "reason_code" not in out.publisher_rows[0]
+    assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.commits == 1
+    assert _outcomes(item.run("1080p")) == ["up_to_date"] and item.commits == 1
+
+
+def test_a_version_on_disk_but_never_checked_waits_and_its_retry_publishes_once_it_is_deleted(plex_item):
+    item = plex_item()
+    item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    out = item.run("1080p")
+    row = out.publisher_rows[0]
+    assert (row["status"], row["reason_code"]) == ("markers_waiting", VERSIONS_UNCHECKED)
+    assert job_runner.retry_reason(row) == VERSIONS_UNCHECKED  # the job queues its retry
+    assert _outcomes(out) == ["waiting"]
+    assert "intro, credits" in row["message"] and item.served() == []
+    os.remove(item.paths["2160p"])  # deleted before the retry runs; Plex still lists it
+    assert _outcomes(item.run("1080p")) == ["published"]
+    assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS]
+
+
+def test_versions_that_were_checked_and_disagree_wait_without_a_retry(plex_item):
+    item = plex_item()
+    item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    item.chapters[item.paths["2160p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT - 19_000)
+    item.run("1080p")
+    for version in ("2160p", "1080p"):
+        row = item.run(version).publisher_rows[0]
+        assert row["status"] == "markers_waiting" and "reason_code" not in row
+        assert job_runner.retry_reason(row) is None
+    assert item.served() == [SHOWN_INTRO]
+
+
+def test_a_version_on_a_disk_that_isnt_mounted_is_still_waited_for(plex_item, tmp_path):
+    item = plex_item(in_item=("1080p",))
+    item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    unmounted = str(tmp_path / "unmounted" / "Show (2020) {tvdb-1}" / "Season 01" / "Show (2020) - S01E01 - 2160p.mkv")
+    item._sql(
+        ("INSERT INTO media_items (id, metadata_item_id) VALUES (2, 7)",),
+        ("INSERT INTO media_parts (id, media_item_id, file) VALUES (2, 2, ?)", (unmounted,)),
+    )
+    row = item.run("1080p").publisher_rows[0]
+    assert (row["status"], row["reason_code"]) == ("markers_waiting", VERSIONS_UNCHECKED)
+    assert item.served() == []
 
 
 def test_a_transient_failure_keeps_the_item_row_so_the_next_run_removes_the_credits(plex_item):

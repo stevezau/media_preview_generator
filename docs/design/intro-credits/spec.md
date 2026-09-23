@@ -740,7 +740,9 @@ at the last write), `atomic_writes`.
   `tag_type=12, tag=''` row; rewrite `pv:intros`/`pv:credits` in every part's `extra_data` (sorted keys, rebuilt
   `url`). Write credits start as `served − 2000 ms`.
 - Tag row missing → `NeedsPlexDetectionOnce` (never create it).
-- Multi-version items share one marker set: publish only when all parts' decisions agree within 2 s.
+- Multi-version items share one marker set: publish only when all parts' decisions agree within 2 s. A part never
+  decided whose file is on none of its path-mapped disks (Plex lists a deleted file until it scans) takes no part; one
+  on disk and never decided is waited for, and the job retries the waiting file (§14, 2026-09-24).
 - Unknown schema (columns/JSON shape differ from 1.43, `extra_data` in neither of Plex's two forms) → stop writing,
   show message. A part is written back in the form it has (JSON with `url`, or the URL-encoded form alone). A
   URL-encoded part we empty is left as `""` — what Plex's own rollback makes of the `{"url":""}` an emptied JSON part
@@ -1969,3 +1971,19 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   "Decided by" are counted again from its Files-panel rows (`stored_groups`, as a revived job counts); a revived retry
   reads the head's rows to skip files it settled and ends the chain when none is left; deleting a head cancels its
   retry still counting down; a live head refuses a pause, and the chain's end clears any pause on it.
+- 2026-09-24 · **A Plex version deleted from disk no longer holds its item back; one not checked yet is retried** (§6.3).
+  On the owner's server 12 items sat on "Waiting for this item's other versions to agree" with no retry queued, e.g.
+  Big Bang Theory S12E05: intro and credits were decided at 18:01 UTC on the WEBDL copy, but Plex still listed the
+  Bluray copy Sonarr had deleted at 17:25 (Plex drops a part only when it scans). That copy was never checked, so
+  `markers_for_path` had no decision for it, and `agreed_across_versions` kept every type off the item. Now the Plex
+  publisher leaves out of the agreement a version with no decision whose file is on none of the disks the server's path
+  mappings give for it (`fs.gone_from_disk`, the fingerprint sweep's check moved there: at least one of those folders
+  must still be there, so an unmounted disk never makes a version look gone, and a stale file handle doesn't either).
+  A version on disk and never checked is still waited for, but the row now carries `reason_code`
+  `versions_unchecked`, a retry reason (`RETRY_REASON_CODES`): the job retries the file on the usual retry schedule
+  ("with another version not checked yet"), so a copy deleted after the decision stops blocking at the next retry.
+  Versions that were checked and disagree carry no code, as before: retrying changes nothing until one of them does.
+  Being a retry reason, it ranks the file "waiting" in `file_outcome` even with a type in review (so does a version
+  replaced on disk and not checked again yet); versions that disagree leave a type in review ranked first.
+  Every other case writes the item as before (the real-database tests in `test_publisher_contract.py` and
+  `test_plex_db_publisher.py` are unchanged). The 12 items already waiting are published by their file's next run.

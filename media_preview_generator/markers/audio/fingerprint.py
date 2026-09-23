@@ -18,6 +18,7 @@ from enum import Enum
 import numpy as np
 from loguru import logger
 
+from ..fs import gone_from_disk
 from ..locks import KeyedLocks
 from ..probe import kill_and_collect, stuck_processes
 from ..store import SEASON_PAIR_WINDOW, FileRecord, FingerprintCheck, MarkerStore, StoredFingerprint
@@ -359,28 +360,6 @@ def ensure_fingerprint(
         return points
 
 
-def _gone_from_disk(path: str, folders: dict[str, bool]) -> bool:
-    """Whether a file is gone while its folder is still there (``folders`` caches each folder's answer).
-
-    An unmounted library must never look gone: its folders are missing too. A read that fails with another error (a
-    stale network file handle) doesn't count as gone either. A hard-mounted share that stalls makes these calls block
-    instead of fail, which is why :func:`start_fingerprint_sweep` runs the sweep on its own thread.
-    """
-    folder = os.path.dirname(path)
-    if folders.get(folder) is False:
-        return False
-    try:
-        os.stat(path)
-        return False
-    except FileNotFoundError:
-        pass
-    except OSError:
-        return False
-    if folder not in folders:
-        folders[folder] = os.path.isdir(folder)
-    return folders[folder]
-
-
 def sweep_fingerprint_cache(
     store: MarkerStore, *, limit: int = MAX_SWEEP_CHECKS, budget_s: float = SWEEP_BUDGET_S
 ) -> int:
@@ -405,7 +384,9 @@ def sweep_fingerprint_cache(
     for check in store.fingerprint_checks(limit):
         if _monotonic() >= deadline:
             break
-        if _gone_from_disk(check.canonical_path, folders):
+        # A stalled hard-mounted share blocks these stats, which is why start_fingerprint_sweep runs this on its own
+        # thread.
+        if gone_from_disk([check.canonical_path], folders):
             gone.append(check)
         checked_up_to = check.file_id
     if checked_up_to is None:

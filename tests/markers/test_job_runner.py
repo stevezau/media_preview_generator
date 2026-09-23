@@ -1666,6 +1666,12 @@ NOT_IN_LIBRARY_ROW = _row("markers_waiting", "Not in this server's library yet",
 PLEX_PASS_UNKNOWN_ROW = _row(
     "markers_waiting", "Can't reach Plex to confirm Plex Pass", sid="plex-1", reason_code="plex_pass_unknown"
 )
+VERSIONS_UNCHECKED_ROW = _row(
+    "markers_waiting",
+    "Waiting for this item's other versions to agree on: intro, credits",
+    sid="plex-1",
+    reason_code="versions_unchecked",
+)
 
 
 class TestLibraryRetry:
@@ -1889,8 +1895,10 @@ class TestLibraryRetry:
             ([NOT_IN_LIBRARY_ROW], "not in a server's library yet"),
             ([PLEX_PASS_UNKNOWN_ROW], "not checked on Plex yet"),  # Plex restarting: the Pass check didn't answer
             ([PLEX_PASS_UNKNOWN_ROW, NOT_IN_LIBRARY_ROW], "not in a server's library or not checked on Plex yet"),
+            # Another version of the Plex item is on disk but unchecked: it may be checked, or deleted, by then.
+            ([VERSIONS_UNCHECKED_ROW], "with another version not checked yet"),
         ],
-        ids=["not-indexed", "plex-pass-unknown", "both"],
+        ids=["not-indexed", "plex-pass-unknown", "both", "versions-unchecked"],
     )
     def test_each_retry_reason_gets_the_retry_and_its_log_line(self, env, retry_env, rows, reason):
         retry_env.results.append(("/m/a.mkv", "markers_waiting", rows))

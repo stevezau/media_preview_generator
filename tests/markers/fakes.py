@@ -125,6 +125,7 @@ def ready_publisher(name="plex_db", types=("intro", "credits"), *, atomic_writes
     # The Plex publisher records the item's versions on every write that has markers to leave; the pipeline writes a
     # Plex item recorded without them once more.
     pub.last_item_files = ("/plex/item-7.mkv",) if name == "plex_db" else None
+    pub.last_unchecked_versions = False
     pub.shows.return_value = Shown.OURS
     return pub
 
@@ -168,6 +169,9 @@ class FakePlexItems:
                 error, self.fail_next = self.fail_next, None
                 raise error
             pub.last_item_files = tuple(sorted(self.parts[item_id]))
+            pub.last_unchecked_versions = any(
+                sibling_markers(path) is None for path in self.parts[item_id] if path != canonical_path
+            )
             mine = {m.type: m for m in pub.project(markers)}
             desired = []
             for mtype, marker in mine.items():

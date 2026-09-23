@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from loguru import logger
 
-from ..fs import filesystem_type, is_local_filesystem, is_network_filesystem
+from ..fs import filesystem_type, gone_from_disk, is_local_filesystem, is_network_filesystem
 from ..models import Marker, MarkerType
 from .base import (
     Capability,
@@ -1518,6 +1518,11 @@ class PlexMarkerPublisher(MarkerPublisher):
                 return decided
         return None
 
+    def _gone_from_disk(self, plex_file: str) -> bool:
+        """Whether a version's file is on none of the disks the server's path mappings give for it (``gone_from_disk``:
+        a disk that isn't mounted never makes it look gone)."""
+        return gone_from_disk(self._local_candidates(plex_file))
+
     def _desired(
         self, parts: list[_Part], markers: list[Marker], canonical_path: str, prior: list[Marker]
     ) -> list[Marker]:
@@ -1527,7 +1532,8 @@ class PlexMarkerPublisher(MarkerPublisher):
         decided, has that type and agrees within ``VERSION_AGREEMENT_MS`` (spec §6.3). Which version's times are
         written -- the calling file's, or what this app already left on the item -- is
         :func:`~.base.agreed_across_versions`'s rule, including the exception a locked type makes; it isn't restated
-        here.
+        here. A version never decided whose file is gone from disk (Plex lists a deleted file until its next scan)
+        takes no part; one still on disk is waited for, and sets ``last_unchecked_versions``.
 
         Raises:
             PublishError: Stacked multi-part files.
@@ -1546,7 +1552,14 @@ class PlexMarkerPublisher(MarkerPublisher):
                 "This Plex item has no file matching this path (yet); check the server's path mappings"
             )
         # None = never decided, so no type is desired yet. {} = decided with no markers.
-        decisions = [self._sibling_decision(p.file) for p in others]
+        decisions = []
+        for part in others:
+            decided = self._sibling_decision(part.file)
+            # A deleted file has no decision (markers_for_path), and waiting for one would hold the item back forever.
+            if decided is None and self._gone_from_disk(part.file):
+                continue
+            decisions.append(decided)
+        self.last_unchecked_versions = any(decided is None for decided in decisions)
         return self.project(agreed_across_versions(markers, decisions, prior, (MarkerType.INTRO, MarkerType.CREDITS)))
 
     def _local_files(self, version_files: tuple[str, ...]) -> tuple[str, ...]:
@@ -1583,6 +1596,7 @@ class PlexMarkerPublisher(MarkerPublisher):
         self.last_write_changed = False
         self.last_replaced_own_types = frozenset()
         self.last_item_files = None
+        self.last_unchecked_versions = False
         keep_plex = self._live_settings().on_plex_redetect == "keep_plex"
         kept_before = frozenset(kept_types)
         # Until the item's rows are read, what was kept stays kept (or is released by the setting).

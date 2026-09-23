@@ -49,6 +49,7 @@ from .outcomes import (
     READ_BACK_FAILED,
     RETRY_REASON_CODES,
     VERIFY_LATER,
+    VERSIONS_UNCHECKED,
     FileOutcome,
     ServerStatus,
 )
@@ -96,8 +97,8 @@ def retry_reason(row: object) -> str | None:
         row: One of the pipeline's per-server rows.
 
     Returns:
-        The reason code of a waiting row the job retries (the server hasn't indexed the file yet, or Plex didn't answer
-        its Plex Pass check); None for any other row.
+        The reason code of a waiting row the job retries (the server hasn't indexed the file yet, Plex didn't answer
+        its Plex Pass check, or another version of its Plex item hasn't been checked yet); None for any other row.
     """
     if not isinstance(row, dict) or row.get("status") != ServerStatus.WAITING.value:
         return None
@@ -125,6 +126,7 @@ _RETRY_WORDS = {
     NOT_ON_DISK: "not on disk",
     NOT_IN_LIBRARY: "not in a server's library",
     PLEX_PASS_UNKNOWN: "not checked on Plex",
+    VERSIONS_UNCHECKED: "with another version not checked",
 }
 
 

@@ -45,14 +45,15 @@ def file_outcome(statuses: set[str], *, needs_review: bool, waiting_to_retry: bo
     First match wins:
 
     1. Any server failed → failed: a broken write or check, even when another server took the markers.
-    2. A server waiting with a retry queued (it hasn't indexed the file yet, or Plex Pass is unconfirmed) → waiting,
-       even when a marker type needs review: the job runs the file again.
+    2. A server waiting with a retry queued (it hasn't indexed the file yet, Plex Pass is unconfirmed, or another
+       version of the file's Plex item is on disk but not checked yet) → waiting, even when a marker type needs review:
+       the job runs the file again.
     3. Any server written → published (or waiting while another server waits for the item's other versions): the job
        changed what a server shows. A type still in review is named in the file's summary.
     4. The sources don't agree on an enabled marker type → needs review: nothing was written, and only the user settles
        it, even when the agreed types are up to date.
-    5. Any server waiting (the item's other versions don't agree yet) → waiting, even when another server is up to
-       date.
+    5. Any server waiting (the item's other versions were checked and don't agree) → waiting, even when another server
+       is up to date.
     6. Any server up to date → up to date.
     7. Any server with nothing to publish, or no rows → no markers.
     8. Every server skipped (no publisher, plugin missing, turned off) → skipped.
@@ -90,7 +91,10 @@ def file_outcome(statuses: set[str], *, needs_review: bool, waiting_to_retry: bo
 NOT_IN_LIBRARY = "not_in_library"
 # Plex answered its database checks but not the Plex Pass check (restarting, an HTTP blip).
 PLEX_PASS_UNKNOWN = "plex_pass_unknown"
-RETRY_REASON_CODES = frozenset({NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN})
+# Plex shows one marker set per item, and another version of this file's item is on disk but hasn't been checked yet.
+# Versions that were checked and disagree carry no code: trying again changes nothing until one of them changes.
+VERSIONS_UNCHECKED = "versions_unchecked"
+RETRY_REASON_CODES = frozenset({NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN, VERSIONS_UNCHECKED})
 
 
 # Skipped-file message for trailers and other extras (``external_ids.is_extra``).

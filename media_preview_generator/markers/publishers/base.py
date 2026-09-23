@@ -261,6 +261,10 @@ class MarkerPublisher(ABC):
     # Set by every ``write`` that read the item: the item's version files that write computed the marker set for. The
     # caller records them and passes them back to ``shows``. None where items have no shared versions (Jellyfin, Emby).
     last_item_files: tuple[str, ...] | None = None
+    # Set by every ``write``: whether another version of the item is on disk but not decided yet, so what the item
+    # doesn't show waits for that version's first run, not for versions that disagree (the job tries the file again
+    # later). False where items have no shared versions (Jellyfin, Emby).
+    last_unchecked_versions: bool = False
 
     @abstractmethod
     def capability(self) -> CapabilityReport:

@@ -1099,6 +1099,66 @@ class TestMultiVersionMatrix:
         assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 1
 
 
+class TestAVersionGoneFromDisk:
+    """A version Plex still lists (it hasn't scanned since) whose file is gone from every mapped disk isn't waited for.
+
+    Plex's parts carry Plex's own paths; only the path-mapped local paths are looked at.
+    """
+
+    @pytest.fixture
+    def disks(self, tmp_path):
+        for disk in ("disk1", "disk2"):
+            (tmp_path / disk / "tv").mkdir(parents=True)
+        (tmp_path / "disk1" / "tv" / "A.mkv").write_bytes(b"a")
+        return tmp_path
+
+    def _publisher(self, tmp_path, disks: tuple[str, ...]):
+        folder = tmp_path / "Plex Media Server"
+        db = _make_db(folder, parts=(("/plexmedia/tv/A.mkv", None), ("/plexmedia/tv/B.mkv", None)))
+        mappings = [{"plex_prefix": "/plexmedia", "local_prefix": str(tmp_path / disk)} for disk in disks]
+        return db, _publisher(tmp_path, folder, mappings=mappings, sibling_markers=lambda _path: None)
+
+    @pytest.mark.parametrize(
+        ("disks_mapped", "b_on", "b_folder_removed", "written"),
+        [
+            (("disk1",), None, False, True),  # deleted: its folder is still there
+            (("disk1",), "disk1", False, False),  # on disk, never checked: waited for
+            (("disk1",), None, True, False),  # its folder is missing too: an unmounted disk looks like this
+            (("disk1", "disk2"), None, False, True),
+            (("disk1", "disk2"), "disk2", False, False),  # moved to the other disk
+        ],
+        ids=["deleted", "unchecked", "folder-missing", "deleted-from-both-disks", "on-the-other-disk"],
+    )
+    def test_only_a_version_on_no_mapped_disk_stops_counting(
+        self, tmp_path, disks, disks_mapped, b_on, b_folder_removed, written
+    ):
+        if b_on:
+            (tmp_path / b_on / "tv" / "B.mkv").write_bytes(b"b")
+        if b_folder_removed:
+            (tmp_path / "disk1" / "tv" / "A.mkv").unlink()
+            (tmp_path / "disk1" / "tv").rmdir()
+        db, pub = self._publisher(tmp_path, disks_mapped)
+        path = str(tmp_path / "disk1" / "tv" / "A.mkv")
+        assert _write_one(pub, [INTRO], path=path) == ([INTRO] if written else [])
+        assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == int(written)
+        # Only a version still to be checked makes the job try the file again.
+        assert pub.last_unchecked_versions is (not written)
+
+    def test_a_decided_version_that_disagrees_is_not_unchecked(self, tmp_path, disks):
+        (tmp_path / "disk1" / "tv" / "B.mkv").write_bytes(b"b")
+        folder = tmp_path / "Plex Media Server"
+        _make_db(folder, parts=(("/plexmedia/tv/A.mkv", None), ("/plexmedia/tv/B.mkv", None)))
+        late = {T.INTRO: Marker(T.INTRO, INTRO.start_ms + 5_000, INTRO.end_ms, ("chapters",))}
+        pub = _publisher(
+            tmp_path,
+            folder,
+            mappings=[{"plex_prefix": "/plexmedia", "local_prefix": str(tmp_path / "disk1")}],
+            sibling_markers=lambda _path: late,
+        )
+        assert _write_one(pub, [INTRO], path=str(tmp_path / "disk1" / "tv" / "A.mkv")) == []
+        assert pub.last_unchecked_versions is False
+
+
 class TestCapabilityDetails:
     def _db_with_other_part(self, tmp_path, extra):
         folder = tmp_path / "Plex Media Server"

@@ -16,7 +16,13 @@ from media_preview_generator.markers import pipeline
 from media_preview_generator.markers.audio.fingerprint import ChromaprintState
 from media_preview_generator.markers.decide import DecisionStatus
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
-from media_preview_generator.markers.outcomes import OUTCOME_KEYS, FileOutcome, ServerStatus, file_outcome
+from media_preview_generator.markers.outcomes import (
+    OUTCOME_KEYS,
+    VERSIONS_UNCHECKED,
+    FileOutcome,
+    ServerStatus,
+    file_outcome,
+)
 from media_preview_generator.markers.pipeline import LocalDetectorSpec, PipelineContext, check_item, process_item
 from media_preview_generator.markers.probe import Chapter, MediaProbe, ProbeError
 from media_preview_generator.markers.publishers.base import (
@@ -2963,6 +2969,23 @@ class TestPublishFanOut:
         assert row["message"] == "Waiting for this item's other versions to agree on: credits"
         assert "reason_code" not in row
 
+    def test_waiting_for_a_version_not_checked_yet_carries_its_reason_code(self, store, media):
+        # The job retries it: the other version may be checked, or deleted from disk, by then.
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+
+        def write(item_id, markers, **kwargs):
+            plex.last_unchecked_versions = True
+            return []
+
+        plex.write.side_effect = write
+        out = self._decided(store, media, reg, {"plex-1": plex})
+        row = out.publisher_rows[0]
+        assert row["status"] == ServerStatus.WAITING.value
+        assert row["message"] == "Waiting for this item's other versions to agree on: intro, credits"
+        assert row["reason_code"] == "versions_unchecked"
+        assert out.outcome_key == FileOutcome.WAITING.value
+
     @pytest.mark.parametrize("state", [c for c in Capability if c is not Capability.READY], ids=lambda c: c.value)
     def test_every_capability_state_other_than_ready_skips_with_its_message(self, store, media, state):
         reg = _registry(media, ServerType.PLEX)
@@ -4306,9 +4329,11 @@ class TestPlexItems:
         out_a = self._check(store, reg, items, a, CHAPTERS_CREDITS_ONLY, clients=review)
         assert items.calls[-1]["previous"] == [INTRO_CH]
         assert items.served("42") == []  # our intro is gone; B still disagrees on credits
-        # The intros in review outrank a Plex row that wrote nothing (waiting for the versions, no retry queued).
+        # B was replaced and isn't checked again yet: A's row waits for it with a retry queued, which outranks A's intro
+        # in review (a version checked and disagreeing queues none: the review would rank first).
         assert out_a.publisher_rows[0]["status"] == ServerStatus.WAITING.value
-        assert out_a.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        assert out_a.publisher_rows[0]["reason_code"] == VERSIONS_UNCHECKED
+        assert out_a.outcome_key == FileOutcome.WAITING.value
         out_b = self._check(store, reg, items, b, CHAPTERS_CREDITS_ONLY, clients=review)
         assert out_b.publisher_rows[0]["status"] == ServerStatus.WRITTEN.value
         assert out_b.outcome_key == FileOutcome.PUBLISHED.value  # the write changed what Plex shows
@@ -4318,6 +4343,24 @@ class TestPlexItems:
         assert out_a.outcome_key == FileOutcome.NEEDS_REVIEW.value
         assert items.served("42") == [SERVED_CREDITS]
         assert store.get_item_publish_state("plex-1", "42").markers == (CREDITS_CH,)
+
+    @pytest.mark.parametrize(
+        ("other_checked", "reason_code", "outcome"),
+        [(False, VERSIONS_UNCHECKED, FileOutcome.WAITING), (True, None, FileOutcome.NEEDS_REVIEW)],
+        ids=["other-version-unchecked", "other-version-checked-and-disagrees"],
+    )
+    def test_a_type_in_review_ranks_below_waiting_only_for_a_version_the_job_retries_for(
+        self, store, versions, other_checked, reason_code, outcome
+    ):
+        a, b = versions
+        reg, items = self._plex(a, [a, b])
+        if other_checked:
+            self._check(store, reg, items, b, CHAPTERS_EARLY_CREDITS)  # its credits start 19 s before A's
+        review = _clients(theintrodb=LookupResult("ok", (TIDB_INTRO,)))
+        out = self._check(store, reg, items, a, CHAPTERS_CREDITS_ONLY, clients=review)  # A's intro in review
+        (row,) = out.publisher_rows
+        assert (row["status"], row.get("reason_code")) == (ServerStatus.WAITING.value, reason_code)
+        assert out.outcome_key == outcome.value
 
     def test_a_version_with_nothing_to_show_takes_off_what_another_version_left(self, store, versions):
         a, b = versions

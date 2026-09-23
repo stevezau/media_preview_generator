@@ -1,8 +1,10 @@
-"""Filesystem type of a path, for the "Plex DB must be on this host" rule (SQLite WAL needs a local filesystem)."""
+"""Filesystem type of a path, for the "Plex DB must be on this host" rule (SQLite WAL needs a local filesystem), and
+whether a file is gone from disk."""
 
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from typing import NamedTuple
 
 # Docker Desktop shares (fakeowner, grpcfuse, virtiofs) and WSL 9p are network-backed even when they look local.
@@ -131,3 +133,36 @@ def is_network_filesystem(fs_type: str | None) -> bool:
 def is_local_filesystem(fs_type: str | None) -> bool:
     """Whether a filesystem type is known to be a local disk (unknown types are not)."""
     return bool(fs_type) and fs_type in LOCAL_FS_TYPES
+
+
+def gone_from_disk(paths: Iterable[str], folders: dict[str, bool] | None = None) -> bool:
+    """Whether a file is gone: on none of the local paths it can be at, while a folder of one of them is still there.
+
+    An unmounted library must never look gone: its folders are missing too. A read that fails with another error (a
+    stale network file handle) doesn't count as gone either. A hard-mounted share that stalls makes these calls block
+    instead of fail.
+
+    Args:
+        paths: The file's local paths, one per mapped disk (a single path where there is one disk).
+        folders: Each folder's answer, cached across calls.
+
+    Returns:
+        True when no path holds the file and at least one of their folders exists.
+    """
+    folders = {} if folders is None else folders
+    folder_there = False
+    for path in paths:
+        folder = os.path.dirname(path)
+        if folders.get(folder) is False:
+            continue
+        try:
+            os.stat(path)
+            return False
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
+        if folder not in folders:
+            folders[folder] = os.path.isdir(folder)
+        folder_there = folder_there or folders[folder]
+    return folder_there

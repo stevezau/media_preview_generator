@@ -69,6 +69,7 @@ from .outcomes import (
     RETRY_REASON_CODES,
     STATE_BY_STATUS,
     VERIFY_LATER,
+    VERSIONS_UNCHECKED,
     FileOutcome,
     ServerStatus,
     file_outcome,
@@ -1709,6 +1710,7 @@ def _publish_to(
         changed = publisher.last_write_changed
         kept = publisher.last_kept_types
         replaced_own = publisher.last_replaced_own_types
+        unchecked_versions = publisher.last_unchecked_versions
         if nothing_to_send and item_row is not None and item_row.status != "written":
             # Nothing was sent: another version's failed write stays on record for its retry (files_of_failed_items).
             version = item_row.version
@@ -1732,13 +1734,21 @@ def _publish_to(
         shown_types = {m.type for m in ours} | kept
         waiting_for = [m.type.value for m in wanted if m.type not in shown_types]
         if waiting_for:
-            # Plex shows a type only when every version of the item is decided and agrees on it.
+            # Plex shows a type only when every version of the item is decided and agrees on it. A version not checked
+            # yet may be checked (or deleted) later, so the job tries this file again; versions that disagree don't.
             message = with_kept_note(
                 f"Waiting for this item's other versions to agree on: {', '.join(waiting_for)}", note
             )
             message = with_sentence(message, override)
             return _says_override(
-                _finish(ServerStatus.WAITING, message, name=publisher.name, item_id=item_id, published=ours)
+                _finish(
+                    ServerStatus.WAITING,
+                    message,
+                    name=publisher.name,
+                    item_id=item_id,
+                    published=ours,
+                    reason_code=VERSIONS_UNCHECKED if unchecked_versions else None,
+                )
             )
         if ours:
             message = f"{len(ours)} marker(s)"
