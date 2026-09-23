@@ -78,7 +78,7 @@ E. Metadata: README badges (CI, release, image size, Ko-fi), Docker Hub `short-d
 5. New Search Console property for the domain (the github.io property's history doesn't carry over);
    robots.txt starts working at that point.
 
-## Code issues found during the docs audit (fixed on branch `stevezau/docs-audit-code-fixes`)
+## Code issues found during the docs audit (fixed in #292)
 
 - Settings page retry copy is wrong (`web/templates/settings.html:141-147` says 30 s doubling; real
   schedule is 60 s/2 m/5 m/15 m/60 m scaled by "Initial retry delay" ÷ 30).
@@ -95,8 +95,8 @@ E. Metadata: README badges (CI, release, image size, Ko-fi), Docker Hub `short-d
 
 ## Needs the owner
 
-- Domain purchase + DNS (later). Ko-fi username. GitHub social preview upload (no API).
-- Search Console property + sitemap submission.
+- Domain purchase + DNS (later). GitHub social preview upload (no API).
+- Search Console: URL-prefix property on site_url (HTML-tag token in `mkdocs.yml`), then submit `sitemap.xml`.
 - AlternativeTo listing, awesome-selfhosted PR, subreddit posts (respect each channel's rules).
 
 ## Baseline (2026-09-23, WebSearch + Exa)
