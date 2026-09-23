@@ -12,7 +12,7 @@ import pytest
 from media_preview_generator.markers.credits import detector, frames, rule_j
 from media_preview_generator.markers.credits.textdet_helper import TextDetUnavailableError
 from media_preview_generator.markers.models import Candidate, FileIdentity, MarkerType, Source
-from media_preview_generator.markers.pipeline import DetectorUnavailableError
+from media_preview_generator.markers.pipeline import DetectorAnswer, DetectorUnavailableError
 from media_preview_generator.markers.probe import MediaProbe, ProbeStalledError, ProbeTimeoutError
 from media_preview_generator.markers.store import FileRecord, MarkerStore
 from media_preview_generator.processing.generator import CodecNotSupportedError
@@ -528,16 +528,19 @@ class TestFindCredits:
         assert (decodes.calls[1]["start_s"], decodes.calls[1]["length_s"]) == (0.0, 50.0)
         assert (result.start_s, len(decodes.calls)) == (None, 2)
 
-    def test_a_roll_longer_than_the_rows_before_the_tail_too_gets_no_answer(self, monkeypatch, probes):
-        # The window before the tail is the roll as well: the run still starts under 30 s after the first row read.
+    def test_a_roll_that_fills_every_step_to_the_middle_of_the_file_gets_no_answer(self, monkeypatch, probes):
+        # The window before the tail is the roll as well, so the next step is read -- only as far as the middle of the
+        # 1320 s file (660 s), and it is the roll too: the run still starts under 30 s after the first row read.
         tail = [(870.0 + 2 * i, 3, 10.0) for i in range(225)]
         before = [(750.0 + 2 * i, 3, 10.0) for i in range(60)]
-        decodes = Decodes(tail, before)
+        to_the_middle = [(660.0 + 2 * i, 3, 10.0) for i in range(45)]
+        decodes = Decodes(tail, before, to_the_middle)
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
         result = detector.find_credits(EPISODE.canonical_path, duration_ms=1_320_000, is_episode=True, ffmpeg="/ff",
                                        detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
         assert (result.start_s, result.end_s, result.fine_rows) == (None, None, ())
-        assert len(decodes.calls) == 2
+        assert [(c["start_s"], c["length_s"]) for c in decodes.calls] == [(870.0, None), (750.0, 120.0), (660.0, 90.0)]
+        assert result.key_rows[0][0] == 660.0
 
     def test_a_roll_less_than_30_s_into_the_tail_gets_no_answer(self, monkeypatch, probes):
         # A file shorter than its tail whose roll starts 10 s in. With under 30 s of the tail before the run, rule J
@@ -559,6 +562,136 @@ class TestFindCredits:
         assert rule_j.coarse_start(roll).pts_s == 10.0
         assert (result.start_s, result.end_s) == (None, None)
         assert len(decodes.calls) == 1
+
+
+LONG_EPISODE_MS = 2_640_000  # 44 min: the 450 s tail starts at 2190 s, the middle is at 1320 s
+
+
+class FileDecodes:
+    """Every decode answered from one file's rows cut to the window asked for, ``[start_s, start_s + length_s)`` (to the
+    end with no length): lit story without text, then the roll from ``roll_from`` to the end, a keyframe every 2 s and a
+    1 fps frame every second. ``timeouts`` are keyframe windows (by start) whose decode runs out of time."""
+
+    def __init__(self, roll_from: float, *, timeouts: tuple[float, ...] = ()):
+        self.roll_from, self.timeouts = roll_from, timeouts
+        self.calls: list[dict] = []
+
+    def row(self, t: float) -> tuple:
+        return (t, 3, 10.0) if t >= self.roll_from else (t, 0, 120.0)
+
+    def __call__(self, path, *, start_s, length_s, keyframes_only, **kwargs):
+        self.calls.append({"start_s": start_s, "length_s": length_s, "keyframes_only": keyframes_only, **kwargs})
+        if keyframes_only and start_s in self.timeouts:
+            raise frames.DecodeTimeoutError(f"decoding {os.path.basename(path)} timed out")
+        end_s = LONG_EPISODE_MS / 1000 if length_s is None else start_s + length_s
+        every = 2 if keyframes_only else 1
+        return [self.row(float(t)) for t in range(0, LONG_EPISODE_MS // 1000, every) if start_s <= t < end_s]
+
+    def windows(self, *, keyframes_only: bool | None = None) -> list[tuple[float, float | None]]:
+        return [(c["start_s"], c["length_s"]) for c in self.calls if keyframes_only in (None, c["keyframes_only"])]
+
+
+class TestStepsBeforeTheTail:
+    """While the rows read so far still open on the run, the step before them is read and joined too, never before the
+    middle of the file and all of them within one decode's time limit."""
+
+    def _find(self, monkeypatch, decodes, tail_s=None):
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        return detector.find_credits(EPISODE.canonical_path, duration_ms=LONG_EPISODE_MS, is_episode=True, tail_s=tail_s,
+                                     ffmpeg="/ff", detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
+
+    def test_a_roll_that_began_200_s_before_the_tail_is_found_on_the_second_step(self, monkeypatch, probes):
+        # The tail and the first step are all roll; the second step holds 40 s of story before the roll's first card.
+        decodes = FileDecodes(1990.0)
+        result = self._find(monkeypatch, decodes)
+        assert (result.start_s, result.end_s) == (1990.0, None)
+        assert decodes.windows() == [(2190.0, None), (2070.0, 120.0), (1950.0, 120.0), (1970.0, 21.0)]
+        assert result.key_rows[0][0] == 1950.0
+        # The first step keeps the decode's own limit, exactly as before; a later one gets what is left of the shared one.
+        assert "timeout_s" not in decodes.calls[0] and "timeout_s" not in decodes.calls[1]
+        assert 0 < decodes.calls[2]["timeout_s"] <= detector.LOOK_BACK_TIMEOUT_S
+        step = {k: v for k, v in decodes.calls[2].items() if k not in ("start_s", "length_s", "timeout_s")}
+        assert step == {k: v for k, v in decodes.calls[1].items() if k not in ("start_s", "length_s")}
+
+    def test_a_roll_that_began_before_the_middle_of_the_file_gets_no_answer(self, monkeypatch, probes):
+        # Every step is the roll, so they go on to the middle (1320 s) and stop there: the last is the 30 s left, and
+        # the run still starts at the first row read.
+        decodes = FileDecodes(1200.0)
+        result = self._find(monkeypatch, decodes)
+        assert (result.start_s, result.end_s, result.fine_rows) == (None, None, ())
+        steps = [(2070.0 - 120 * i, 120.0) for i in range(7)]
+        assert decodes.windows() == [(2190.0, None), *steps, (1320.0, 30.0)]
+        assert result.key_rows[0][0] == 1320.0
+
+    @pytest.mark.parametrize(
+        ("roll_from", "start_s", "windows"),
+        [
+            (2400.0, 2400.0, [(2190.0, None)]),  # inside the tail after story: no step
+            (2220.0, 2220.0, [(2190.0, None)]),  # 30 s into the tail after story: no step
+            (2160.0, 2160.0, [(2190.0, None), (2070.0, 120.0)]),  # 30 s before the tail
+            (2100.0, 2100.0, [(2190.0, None), (2070.0, 120.0)]),  # 90 s before: 30 s of story, just enough
+            # The step's cost, kept: on the tail's first keyframe the step before is story, so the join is refused ...
+            (2190.0, None, [(2190.0, None), (2070.0, 120.0)]),
+            # ... and 100 s before, 20 s of story is too little and the rows no longer open on the run.
+            (2090.0, None, [(2190.0, None), (2070.0, 120.0)]),
+        ],
+    )  # fmt: skip
+    def test_where_the_tail_or_one_step_answers_nothing_more_is_read_and_the_result_is_the_same(
+        self, monkeypatch, probes, roll_from, start_s, windows
+    ):
+        # Byte for byte what the single step gave: the whole result is compared against the same code with the later
+        # steps switched off, and the only keyframe windows read are the tail and at most the one step.
+        decodes = FileDecodes(roll_from)
+        result = self._find(monkeypatch, decodes)
+        assert decodes.windows(keyframes_only=True) == windows
+        assert result.start_s == start_s
+        one_step = FileDecodes(roll_from)
+        monkeypatch.setattr(detector, "_can_step_back", lambda read_from_s, duration_ms: False)
+        assert self._find(monkeypatch, one_step) == result
+        assert one_step.calls == decodes.calls
+
+    @pytest.mark.parametrize(
+        ("credits_s", "start_s", "windows"),
+        [
+            # A 300 s window and 450 s of credits: the first step is all roll, the second holds 90 s of story first.
+            (450, 2190.0, [(2340.0, None), (2220.0, 120.0), (2100.0, 120.0), (2170.0, 21.0)]),
+            # Pinned as a known cost, the same as before on the first step: a roll whose first card is a step's first
+            # keyframe. The step before is story, so the run doesn't carry on into it and the join is refused.
+            (420, None, [(2340.0, None), (2220.0, 120.0), (2100.0, 120.0)]),
+            # ... and one that starts after under 30 s of lit story in a step: too little story, and the rows no longer
+            # open on the run, so nothing more is read.
+            (400, None, [(2340.0, None), (2220.0, 120.0)]),
+        ],
+    )  # fmt: skip
+    def test_a_users_window_shorter_than_the_credits_steps_back_to_them(
+        self, monkeypatch, probes, credits_s, start_s, windows
+    ):
+        decodes = FileDecodes(LONG_EPISODE_MS / 1000 - credits_s)
+        result = self._find(monkeypatch, decodes, tail_s=300.0)
+        assert result.start_s == start_s
+        assert decodes.windows() == windows
+
+    def test_steps_that_would_start_past_the_time_limit_are_not_read(self, monkeypatch, probes):
+        # The first step used up the look-back's time: the second is never started and the roll has no answer.
+        monkeypatch.setattr(detector, "LOOK_BACK_TIMEOUT_S", 0.0)
+        decodes = FileDecodes(1990.0)
+        result = self._find(monkeypatch, decodes)
+        assert (result.start_s, result.fine_rows) == (None, ())
+        assert decodes.windows() == [(2190.0, None), (2070.0, 120.0)]
+
+    def test_a_later_step_that_runs_out_of_time_is_no_answer_not_a_timeout(self, monkeypatch, probes):
+        # Stopping as "the roll began too early" is what the shared limit means; a timeout would leave the file alone
+        # for a day and then decode it all again, for the same answer.
+        decodes = FileDecodes(1990.0, timeouts=(1950.0,))
+        result = self._find(monkeypatch, decodes)
+        assert (result.start_s, result.fine_rows) == (None, ())
+        assert decodes.windows() == [(2190.0, None), (2070.0, 120.0), (1950.0, 120.0)]
+
+    def test_the_first_step_running_out_of_time_is_still_a_timeout(self, monkeypatch, probes):
+        # As it always was: the file is left alone for a day (T-R7).
+        decodes = FileDecodes(1990.0, timeouts=(2070.0,))
+        with pytest.raises(frames.DecodeTimeoutError):
+            self._find(monkeypatch, decodes)
 
 
 class FakePool:
@@ -611,7 +744,9 @@ class TestDetect:
         cancel = lambda: False  # noqa: E731 — identity is asserted: the detector must forward this exact callable
         assert detector.detect_credits_text(
             MOVIE, ctx=ctx, gpu="NVIDIA", gpu_device_path="cuda:0", phase_callback=phase.append, cancel_check=cancel
-        ) == [Candidate(MarkerType.CREDITS, 5_690_500, None, Source.CREDITS_TEXT)]
+        ) == DetectorAnswer(
+            (Candidate(MarkerType.CREDITS, 5_690_500, None, Source.CREDITS_TEXT),), "steps back to the middle"
+        )
         (call,) = seen
         assert (call["path"], call["duration_ms"], call["is_episode"], call["ffmpeg"], call["gpu"], call["gpu_device_path"]) == (
             MOVIE.canonical_path, 6_000_000, False, "/usr/lib/jellyfin-ffmpeg/ffmpeg", "NVIDIA", "cuda:0")  # fmt: skip
@@ -649,9 +784,9 @@ class TestDetect:
 
     def test_a_scene_after_the_roll_gives_the_candidate_its_end(self, monkeypatch, pool, ctx):
         self._find(monkeypatch, (5690.4996, 5899.0004))
-        assert detector.detect_credits_text(MOVIE, ctx=ctx) == [
-            Candidate(MarkerType.CREDITS, 5_690_500, 5_899_000, Source.CREDITS_TEXT)
-        ]
+        assert detector.detect_credits_text(MOVIE, ctx=ctx).candidates == (
+            Candidate(MarkerType.CREDITS, 5_690_500, 5_899_000, Source.CREDITS_TEXT),
+        )
 
     @pytest.mark.parametrize(
         ("rec", "episode"),
@@ -665,7 +800,8 @@ class TestDetect:
     )
     def test_only_a_file_in_a_season_is_read_as_an_episode(self, monkeypatch, pool, ctx, rec, episode):
         seen = self._find(monkeypatch, None)
-        assert detector.detect_credits_text(rec, ctx=ctx) == []
+        # "Nothing found" is stored with the look-back's basis too, or credits_text_due would ask it again every run.
+        assert detector.detect_credits_text(rec, ctx=ctx) == DetectorAnswer((), "steps back to the middle")
         assert seen[0]["is_episode"] is episode
 
     def test_a_gpu_decode_failure_is_a_codec_error_for_the_workers_cpu_rerun(self, monkeypatch, pool, ctx):
@@ -776,7 +912,7 @@ def test_spec_carries_the_version_and_asks_whether_a_worker_is_needed():
     )
     assert (spec.stored_sources, spec.due, spec.needs_worker, spec.followups) == (
         frozenset({Source.CREDITS_TEXT}),
-        None,
+        detector.credits_text_due,
         detector.credits_text_needs_worker,
         None,
     )

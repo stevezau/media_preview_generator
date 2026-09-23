@@ -107,8 +107,12 @@ TEXT_ALL_THROUGH_SHARE = 0.8
 # When the run is under STORY_BEFORE_RUN_S into the tail and only dark rows (luma under 30) come before it there, the
 # roll may have begun before the tail (the lab's Heeramandi episodes: 462 s rolls against a 450 s tail), so the
 # keyframes of this much before the tail are read too, and the run is judged on both when it continues into them
-# (:func:`opens_on_the_run`, :func:`joined_before`). With 30 s of rows still wanted before the run, a roll that began up
-# to 90 s before the tail is answered.
+# (:func:`opens_on_the_run`, :func:`joined_before`). While the joined rows still open on the run, the detector reads
+# another step of this length before them and joins again, never before the middle of the file
+# (``detector.find_credits``). With 30 s of rows still wanted before the run, a roll that began in the first 30 s of a
+# step after lit story is not answered: 90-120 s before the tail on the first step, as before, and the same 30 s of
+# every later one. Nor is one whose first card is a step's first keyframe: the step before it is story, which the run
+# doesn't continue into.
 READ_BEFORE_TAIL_S = 120.0
 # A channel bug, a score bug, a ticker or a burnt-in timecode is text in the *same place* all through the story, while
 # a roll's text is only there for the roll. So a box position the detector keeps finding right across the story doesn't
@@ -741,17 +745,17 @@ def opens_on_the_run(rows: Sequence[Row], coarse: Coarse, params: RuleParams = R
     True when the run starts less than ``STORY_BEFORE_RUN_S`` after the first row and every row before its first credit
     frame is dark (luma under ``params.dark``, as the dark bridge counts it: a roll's own dark ground reads 18 on the
     lab's Heeramandi episodes). The detector then reads ``READ_BEFORE_TAIL_S`` more, and keeps it only when the run
-    continues into it (:func:`joined_before`). A run after a lit frame is not cut off by the tail -- story came first --
-    so nothing more is read and it stays without an answer (a story caption 28 s into a tail, followed by 400 s of
-    story, is one such run).
+    continues into it (:func:`joined_before`); it asks again of the joined rows, and reads another step while they
+    still open on the run. A run after a lit frame is not cut off by the rows -- story came first -- so nothing more is
+    read and it stays without an answer (a story caption 28 s into a tail, followed by 400 s of story, is one such run).
 
     Args:
-        rows: Keyframe rows of the tail, in decode order.
+        rows: Keyframe rows of the tail, or of the tail joined to the steps read before it, in decode order.
         coarse: The coarse start (the run's anchored start, reached back over the rest of the roll).
         params: Rule thresholds.
 
     Returns:
-        Whether the rows before the tail are worth reading.
+        Whether the rows before these are worth reading.
 
     Raises:
         ValueError: ``rows`` holds no run, so there is none to ask about. This step finds the runs again, so it is
@@ -782,11 +786,14 @@ def joined_before(
     as one longer tail would answer on the next card. The run's first row instead of its anchored start would keep that
     roll, but also a lone dark subtitle frame before the tail, followed by dark rows and a caption run on a night scene
     in it, which is story. The run must still start 30 s after the first row read (:func:`text_all_through`), so a roll
-    that began more than ``READ_BEFORE_TAIL_S`` − ``STORY_BEFORE_RUN_S`` (90 s) before the tail has no answer either.
+    that began more than ``READ_BEFORE_TAIL_S`` − ``STORY_BEFORE_RUN_S`` (90 s) before ``rows`` has no answer from this
+    join. The detector joins the next step before the joined rows the same way when they still open on the run
+    (:func:`opens_on_the_run`), so ``rows`` is the tail on the first step and, after it, the tail with the steps read
+    so far in front of it; a roll that began within 30 s after lit story at the start of a step stays without one.
 
     Args:
-        before: Keyframe rows of the window before the tail, in decode order.
-        rows: Keyframe rows of the tail, in decode order.
+        before: Keyframe rows of the window before ``rows``, in decode order.
+        rows: Keyframe rows of the tail, or of the tail joined to the steps already read before it, in decode order.
         params: Rule thresholds.
         overlays: The tail's own overlays (:func:`overlay_boxes`), which the joined rows are read without. They are
             not gathered again from the joined rows: a roll that began before the tail is exactly the shape that must

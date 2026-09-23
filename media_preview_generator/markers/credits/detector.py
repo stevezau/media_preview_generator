@@ -11,6 +11,7 @@ item 14) from walking a start back over story keyframes whose only box is a chan
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -24,7 +25,7 @@ from . import frames, rule_j
 from .textdet_helper import TextDetUnavailableError, get_textdet_pool
 
 if TYPE_CHECKING:
-    from ..pipeline import LocalDetectorSpec, PipelineContext
+    from ..pipeline import DetectorAnswer, LocalDetectorSpec, PipelineContext
     from ..store import FileRecord
 
 # Stored with every answer. Bump it when rule J, the tail lengths, the frame format or the model change: stored answers
@@ -39,12 +40,21 @@ if TYPE_CHECKING:
 # the first and earlier only under the second, and no end moved on either set or decode path (spec §13 items 14
 # and 15, phase3-harness.md and
 # broadcast-tv.md "Rule J version 3"). Stored answers of version 2 are asked again because these starts differ.
+# Reading on before the tail step by step while the roll still fills what was read (2026-09-23) is not a version: no
+# answer that was found moves. A "nothing found" stored before it is asked again once instead, and only where the steps
+# now read further than the one step did (:func:`credits_text_due`).
 CREDITS_TEXT_VERSION = 3
 # A stored answer's version is CREDITS_TEXT_VERSION for Automatic (what it has always been, so nothing is decoded again
 # on upgrade) and CREDITS_TEXT_VERSION + window seconds * this for a window the user chose. The smallest window
 # (300 s) gives 300,003, so a chosen window's version never equals Automatic's, and another window's answer is asked
 # again.
 _WINDOW_VERSION_STEP = 1000
+# Stored with every answer as what it was based on (``detector_runs``). An answer without it was read when the look-back
+# stopped after one step (:func:`credits_text_due`).
+LOOK_BACK_BASIS = "steps back to the middle"
+# Every step read before the tail shares the one decode's time limit the single step had, so a file's worst case stays
+# what it was: a step that would start past it, or runs past it, ends the look-back with no answer.
+LOOK_BACK_TIMEOUT_S = frames.DECODE_TIMEOUT_S
 READING_PHASE = "Reading the credits…"
 REFINING_PHASE = "Refining the credits start…"
 REFINING_END_PHASE = "Finding where the credits end…"
@@ -67,7 +77,7 @@ class CreditsTextResult:
             (empty unless more than 30 s follows that keyframe).
         overlays: The text that never moved (``rule_j.overlay_boxes``), gathered from the **tail's** rows. Anything
             reading ``key_rows`` back has to be handed these rather than gather them again: on the branch that reads
-            the 120 s before the tail, ``key_rows`` is the joined rows, and a roll that began before the tail is
+            the steps before the tail, ``key_rows`` is the joined rows, and a roll that began before the tail is
             exactly the shape that must not be read as its own overlay.
     """
 
@@ -107,9 +117,13 @@ def find_credits(
 
     A roll can begin before the tail does. When the run starts under 30 s into the tail and nothing lit comes before it
     (``rule_j.opens_on_the_run``), the keyframes of the ``rule_j.READ_BEFORE_TAIL_S`` before the tail are read through
-    the same keyframe pass, and rule J runs on both when the run continues into them (``rule_j.joined_before``). That
-    window can give no keyframe at all; on the GPU no frames is a GPU failure, and the worker's CPU rerun then gives
-    the same no answer.
+    the same keyframe pass, and rule J runs on both when the run continues into them (``rule_j.joined_before``). While
+    the joined rows still open on the run, the step before them is read and joined the same way, until the roll's
+    start has story before it. The first step reads what it always has; the later ones never read before the middle of
+    the file (the earliest a credits start is ever kept, ``decide``), nor a step too short to hold the 30 s of story
+    rule J wants before a run, and all of them share one decode's time limit (``LOOK_BACK_TIMEOUT_S``). A roll still
+    filling the rows when either stops has no answer, as one that began too early always had. A step can give no
+    keyframe at all; on the GPU no frames is a GPU failure, and the worker's CPU rerun then gives the same no answer.
 
     Args:
         path: The media file (read only).
@@ -142,10 +156,11 @@ def find_credits(
     decode = {"ffmpeg": ffmpeg, "gpu": gpu, "gpu_device_path": gpu_device_path, "detect_boxes": detect_boxes,
               "cancel_check": cancel_check, "start_time_s": start_time_s}  # fmt: skip
 
-    def keyframes(start_s: float, length_s: float | None) -> list[rule_j.Row]:
+    def keyframes(start_s: float, length_s: float | None, timeout_s: float | None = None) -> list[rule_j.Row]:
+        limit = {} if timeout_s is None else {"timeout_s": timeout_s}
         return frames.decode_rows(
             path, start_s=start_s, length_s=length_s, keyframes_only=True, fps=None, keep_every=thinning.keep_every,
-            drop_non_key=thinning.drop_non_key, **decode,
+            drop_non_key=thinning.drop_non_key, **decode, **limit,
         )  # fmt: skip
 
     tail_start = frames.tail_start_s(
@@ -171,13 +186,23 @@ def find_credits(
     # overlay_boxes takes its story by time while that check reads decode order (the reordering measured on the 80 is
     # 10-21 s, and this branch's story is under 30 s all told).
     if coarse is not None and tail_start > 0 and rule_j.opens_on_the_run(key_rows, coarse):
+        deadline = time.monotonic() + LOOK_BACK_TIMEOUT_S
         before_start = max(0.0, tail_start - rule_j.READ_BEFORE_TAIL_S)
         before_rows = keyframes(before_start, tail_start - before_start)
-        joined = rule_j.joined_before(before_rows, key_rows, overlays=overlays)
-        if joined is not None:
+        while (joined := rule_j.joined_before(before_rows, key_rows, overlays=overlays)) is not None:
             key_rows = joined
             rule_rows = rule_j.without_overlays(key_rows, overlays)
             coarse = rule_j.coarse_start(key_rows, without=rule_rows)
+            # Rows that no longer open on the run are judged as they always were. The other two stops leave rows that
+            # still do, the run under 30 s after their first row, which text_all_through answers with nothing.
+            if not rule_j.opens_on_the_run(key_rows, coarse) or not _can_step_back(before_start, duration_ms):
+                break
+            read_from = before_start
+            before_start = max(duration_ms / 2000.0, read_from - rule_j.READ_BEFORE_TAIL_S)
+            before_rows = _step_rows(keyframes, before_start, read_from, deadline)
+            if before_rows is None:
+                logger.info("Out of time reading back for the start of the credits of {}", os.path.basename(path))
+                break
     if coarse is None or rule_j.text_all_through(key_rows, coarse):
         return CreditsTextResult(None, None, tuple(key_rows), (), (), overlays)
     show(REFINING_PHASE)
@@ -201,6 +226,26 @@ def find_credits(
     end_rows = frames.decode_rows(path, start_s=end_start, length_s=end_length, keyframes_only=False, fps=1, **decode)
     end_s = rule_j.credits_end(rule_rows, coarse, rule_j.without_overlays(end_rows, overlays), duration_s)
     return CreditsTextResult(start_s, end_s, tuple(key_rows), tuple(fine_rows), tuple(end_rows), overlays)
+
+
+def _can_step_back(read_from_s: float, duration_ms: int) -> bool:
+    """Whether another step can be read before ``read_from_s``: one that starts no earlier than the middle of the file
+    and is long enough to hold the ``rule_j.STORY_BEFORE_RUN_S`` of story before a run that an answer needs."""
+    return read_from_s - duration_ms / 2000.0 >= rule_j.STORY_BEFORE_RUN_S
+
+
+def _step_rows(
+    keyframes: Callable[[float, float, float], list[rule_j.Row]], start_s: float, end_s: float, deadline: float
+) -> list[rule_j.Row] | None:
+    """One later step's keyframes, decoded within what is left of the look-back's time, or None when that ran out
+    before or during the decode."""
+    remaining_s = deadline - time.monotonic()
+    if remaining_s <= 0:
+        return None
+    try:
+        return keyframes(start_s, end_s - start_s, remaining_s)
+    except frames.DecodeTimeoutError:
+        return None
 
 
 def _timed_out_lately(rec: FileRecord, ctx: PipelineContext) -> bool:
@@ -255,7 +300,7 @@ def detect_credits_text(
     phase_callback: Callable[[str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
     pause_check: Callable[[], bool] | None = None,
-) -> list[Candidate]:
+) -> DetectorAnswer:
     """The local detector: a credits candidate from the file's on-screen credit roll.
 
     A paused job doesn't block the worker here (T-R9): one file's decode is bounded, and the job pauses between files.
@@ -270,8 +315,8 @@ def detect_credits_text(
         pause_check: Unused.
 
     Returns:
-        One candidate (its end None when the roll runs to the end of the file, Q3), or [] when the tail holds no credit
-        roll ("nothing found").
+        One candidate (its end None when the roll runs to the end of the file, Q3), or none when the tail holds no
+        credit roll ("nothing found"); either way based on :data:`LOOK_BACK_BASIS`.
 
     Raises:
         CodecNotSupportedError: The GPU decode failed; the worker reruns the file on the CPU.
@@ -279,7 +324,7 @@ def detect_credits_text(
             day, cancelled, text detection failed); nothing is stored.
     """
     from ...processing.generator import CodecNotSupportedError
-    from ..pipeline import DetectorUnavailableError
+    from ..pipeline import DetectorAnswer, DetectorUnavailableError
 
     reason = _gives_up(rec, ctx)
     if reason is not None:
@@ -312,9 +357,10 @@ def detect_credits_text(
         raise DetectorUnavailableError(str(exc)) from exc
     if result.start_s is None:
         logger.debug("No credit roll in the end of {}", os.path.basename(rec.canonical_path))
-        return []
+        return DetectorAnswer((), LOOK_BACK_BASIS)
     end_ms = None if result.end_s is None else int(round(result.end_s * 1000))
-    return [Candidate(MarkerType.CREDITS, int(round(result.start_s * 1000)), end_ms, Source.CREDITS_TEXT)]
+    found = Candidate(MarkerType.CREDITS, int(round(result.start_s * 1000)), end_ms, Source.CREDITS_TEXT)
+    return DetectorAnswer((found,), LOOK_BACK_BASIS)
 
 
 def _tail_s(rec: FileRecord, ctx: PipelineContext) -> float:
@@ -339,6 +385,30 @@ def credits_answer_version(rec: FileRecord, ctx: PipelineContext) -> int:
     return CREDITS_TEXT_VERSION if chosen is None else CREDITS_TEXT_VERSION + chosen * _WINDOW_VERSION_STEP
 
 
+def credits_text_due(rec: FileRecord, ctx: PipelineContext) -> bool:
+    """Whether a stored answer of this version is asked again anyway: a "nothing found" read when the look-back
+    stopped after one step, on a file where it now reads further.
+
+    Nothing else can differ. A found start had story before it within the one step, so the steps after it are never
+    read and it is the same answer; and a file whose one step already reached within 30 s of its middle reads nothing
+    more now. Asked once: the answer it stores is based on :data:`LOOK_BACK_BASIS`.
+
+    Args:
+        rec: The file.
+        ctx: The job's context.
+
+    Returns:
+        True when the detector should read the file again.
+    """
+    if not rec.duration_ms or ctx.store.get_detector_run(rec.id, Source.CREDITS_TEXT) == LOOK_BACK_BASIS:
+        return False
+    stored = [row for row in ctx.store.evidence_rows(rec.id) if row.source is Source.CREDITS_TEXT]
+    if not stored or any(row.type is not None for row in stored):
+        return False
+    first_step_s = max(0.0, frames.tail_start_s(rec.duration_ms, tail_s=_tail_s(rec, ctx)) - rule_j.READ_BEFORE_TAIL_S)
+    return _can_step_back(first_step_s, rec.duration_ms)
+
+
 def credits_text_spec() -> LocalDetectorSpec:
     """The detector as the pipeline registers it: credits only, on a worker whenever it decodes, answers kept per file
     identity.
@@ -354,5 +424,6 @@ def credits_text_spec() -> LocalDetectorSpec:
         detect=detect_credits_text,
         version=CREDITS_TEXT_VERSION,
         version_of=credits_answer_version,
+        due=credits_text_due,
         needs_worker=credits_text_needs_worker,
     )

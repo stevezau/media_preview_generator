@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 import sys
 from unittest.mock import MagicMock, patch
@@ -217,6 +218,51 @@ class TestStoredAnswers:
         assert store.evidence_version(rec.id, Source.CREDITS_TEXT) is None
         _run(ctx_for(store, media, force=True), media, pubs(), stage="process")
         assert len(find.calls) == 2
+
+    @staticmethod
+    def _stored_by_the_one_step_build(store, media, answer, *, duration, window=None):
+        """What a build whose look-back stopped after one step stored: this version's answer, with no basis."""
+        one_step = dataclasses.replace(detector.credits_text_spec(), detect=lambda rec, **kwargs: list(answer))
+        ctx = _ctx(store, _registry(media, ServerType.PLEX), settings_raw=settings(credits_window=window),
+                   detectors=(one_step,))  # fmt: skip
+        _run(ctx, media, pubs(), probe=_probe(duration=duration), stage="process")
+        rec = store.get_file(media)
+        assert store.get_detector_run(rec.id, Source.CREDITS_TEXT) is None
+        return rec
+
+    @pytest.mark.parametrize(
+        ("answer", "duration", "window", "asked"),
+        [
+            # 450 s tail: the one step reads from 120 s before it, which is 30 s past the middle from a 20 min file on.
+            ((), 1_200_000, None, True),
+            ((), 1_199_000, None, False),
+            # A 300 s window: from a 15 min file on.
+            ((), 900_000, {"tv_s": 300}, True),
+            ((), 899_000, {"tv_s": 300}, False),
+            # A start that was found had story before it within the one step: the steps never change it.
+            ((Candidate(T.CREDITS, 1_290_250, None, Source.CREDITS_TEXT),), DUR, None, False),
+        ],
+    )
+    def test_a_nothing_found_from_the_one_step_build_is_read_again_only_where_the_steps_read_further(
+        self, store, media, find, answer, duration, window, asked
+    ):
+        rec = self._stored_by_the_one_step_build(store, media, answer, duration=duration, window=window)
+        version = store.evidence_version(rec.id, Source.CREDITS_TEXT)
+        ctx = ctx_for(store, media, credits_window=window)
+        out, _ = _run(ctx, media, pubs(), probe=_probe(duration=duration), stage="check")
+        assert (out is None) is asked  # None: handed to a worker to decode
+        assert find.calls == []
+        assert store.evidence_version(rec.id, Source.CREDITS_TEXT) == version  # no version was bumped to get here
+
+    def test_it_is_read_again_once(self, store, media, find):
+        rec = self._stored_by_the_one_step_build(store, media, (), duration=DUR)
+        find.answer = None
+        _run(ctx_for(store, media), media, pubs(), stage="process")
+        assert len(find.calls) == 1
+        assert store.get_detector_run(rec.id, Source.CREDITS_TEXT) == detector.LOOK_BACK_BASIS
+        assert store.evidence_version(rec.id, Source.CREDITS_TEXT) == detector.CREDITS_TEXT_VERSION
+        out, _ = _run(ctx_for(store, media), media, pubs(), stage="check")
+        assert out is not None and len(find.calls) == 1
 
     def test_a_gpu_decode_failure_reaches_the_workers_cpu_rerun(self, store, media, find):
         find.answer = frames.GpuDecodeError("the GPU decoded no frames")

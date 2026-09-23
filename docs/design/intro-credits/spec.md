@@ -459,11 +459,19 @@ and its answer is version 2's (`rule_j.boxes_of`).
    episode. Every file of the sets has at least 84 s of the tail before its run and a share of at most 0.54. When the
    run is under 30 s into the tail and nothing lit comes before it in the tail (luma under 30), the roll may have
    begun before the tail. The keyframes of the 120 s before the tail are then read through the same keyframe pass.
-   They are kept only when the run carries on into them, and the run is judged on both (final review, round 3). This
+   They are kept only when the run carries on into them, and the run is judged on both (final review, round 3). While
+   the joined rows still open on the run the same way, the 120 s before them are read and joined in turn (2026-09-23):
+   never before the middle of the file (no credits start before it is ever kept), never a step under 30 s, and all
+   the steps within one decode's 600 s: the first keeps that limit as before, each later one gets what is left of it.
+   A roll still filling the rows when the steps stop has no answer; a later step running out of time is that answer,
+   not a timeout (T-R7). This
    answers the lab's five Heeramandi episodes, whose 462 s credits start before the 450 s tail, on the roll's first
-   card. The costs: a roll that starts 0–30 s into the tail after a scene gets no answer. So does one that began more
-   than 90 s before the tail (30 s of rows are still wanted before the run). So does one with only its first card
-   before the tail when the anchor steps over it (the join is judged on the anchored start). The lab scale run's 400
+   card, in one step. The costs: a roll that starts 0–30 s into the tail after a scene gets no answer. So does one that
+   starts in the first 30 s of a step after story (30 s of rows are still wanted before the run, and the rows no longer
+   open on it): 90–120 s before the tail, as before, and the same 30 s of every later step. So does one whose first
+   card is a step's first keyframe (the step before is story, which the run doesn't carry on into). So does one with
+   only its first card before the tail when the anchor steps over it (the join is judged on the anchored start). The
+   lab scale run's 400
    episodes have none of them: its 10 credits chapters starting 420 s or more before the end are those five and five
    mislabels. A file whose channel logo text detection boxes on 80 % of the story
    loses its answer too: on 51 broadcast recordings with channel logos that was one right answer, against five wrong
@@ -1109,8 +1117,10 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     version 2's 30 s floor (§5.4 step 8) left a roll starting before the tail, or in its first 30 s, without an
     answer. Round 3 reads the 120 s before the tail when nothing lit comes before the run in the tail, and keeps it
     when the run carries on into it. That answers the lab's five Heeramandi episodes on the roll's first card. A
-    roll that starts 0–30 s into the tail after a scene still gets none. So does one that began more than 90 s before
-    the tail, and one whose only card before the tail the anchor steps over. The lab's chapter truth has none of them.
+    roll that starts 0–30 s into the tail after a scene still gets none. So did one that began more than 90 s before
+    the tail; since 2026-09-23 the steps go on while the joined rows still open on the run, to the middle of the file,
+    and a roll starting in the first 30 s of any step after story, or on a step's first keyframe, gets none. So does
+    one whose only card before the tail the anchor steps over. The lab's chapter truth has none of them.
 15. **Credit text on broadcast TV with on-screen graphics is still less accurate than on anything else** — 51
     frame-checked broadcast files (39 episodes of 13 shows with a channel or show logo, 12 sports feeds;
     `evidence/eval/broadcast-tv.md`). On a dark story frame one box is enough (a channel logo alone); on a lit one, a
@@ -1794,3 +1804,21 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   again on upgrade and a changed window never serves an answer read from another. `markers.respect_locks` was removed:
   it gated nothing since a lock always wins (§5.5 rule 1; verified: no reader of it was left in the pipeline), so the
   switch only suggested a choice that did not exist. An old `settings.json` that has it still loads.
+- 2026-09-23 · **Credit text keeps reading back while the credits still fill what it read** (owner; §5.4 step 8,
+  §13 item 14). After the 120 s step before the tail, while the joined rows still open on the run, the 120 s before
+  them are read and joined the same way (`rule_j.opens_on_the_run`, `rule_j.joined_before`, unchanged), until the
+  roll's start has story before it. The later steps never read before the middle of the file (the same floor the
+  decision's sanity keeps a credits start to), skip a step under 30 s (it can't hold the story an answer needs), and
+  share one decode's 600 s with the first (`detector.LOOK_BACK_TIMEOUT_S`); a later step that runs out of time is no
+  answer, not a timeout. A roll that began before the middle stays without an answer, as one that began more than
+  90 s before the tail did. **No found answer moves**: a found start had story before it within the tail or the one
+  step, so no later step is read. Checked against the previous build on 32,384 synthetic files (story lit or dark,
+  2 s or 5 s keyframes, a channel bug or none, a scene after or none, windows of Automatic, 300, 600 and 1800 s):
+  all 15,237 it answered come out the same, decodes included, and 3,452 it left unanswered now have one. So
+  `CREDITS_TEXT_VERSION` stays 3. A "nothing found" stored before this is asked again once, only where it can
+  change: credits still undecided, and a file long enough that a second step fits (from 20 min for an episode on
+  Automatic, 35 min for a movie; `detector.credits_text_due`). Every answer now carries the basis
+  `detector.LOOK_BACK_BASIS` (`detector_runs`) that tells the two apart. Costs: a roll starting in the first 30 s
+  of a step after story, or on a step's first keyframe, still gets no answer — the old 90–120 s gap, now once per
+  step; and a found start before the chosen window is still held to the last-25 % rule and, for a movie, to
+  max(900 s, the movie window), so on Automatic a movie's new answers (all over 990 s out) are refused there.
