@@ -2138,3 +2138,23 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   (a "no entry" again after `NO_DATA_RETRY`, 14 days); one that agrees confirms it, one that disagrees sends it to
   review. TheIntroDB's Low-priority saving for chapters-only files (`_only_confirming_chapters`) doesn't apply to it.
   Chapters and credit-text decisions behave as before.
+- 2026-09-24 · **A weekly online re-check** (owner-approved; §5.2, §6.2). A "no entry" was asked again after
+  `NO_DATA_RETRY` (14 days) only when some job happened to list the file. Now `triggers.schedule_online_recheck` arms a
+  timer from the due time kept in markers.db's `meta` table (`online_recheck_due`): the first start sets it a week
+  ahead, and each firing stores the next a week later before it queues anything, so restarts don't reset it and a
+  second arming mid-run can't fire twice. One that passed while the app was down, or that can't be used (unreadable,
+  or without a time zone), fires at start; one further off than a week is brought to a week from now. A start with
+  Intro & Credits off on every server arms nothing and leaves markers.db unopened. It queues one LOW job ("Intro &
+  Credits: weekly online re-check", config `online_recheck`), or none while one is queued or running; the lookup and
+  the creation run under `FOLLOW_UP_LOCK`, as for the TheIntroDB recheck. Queueing stops at the first due file; the
+  job lists them all at run time (`pipeline.online_recheck_files`, stopping on a cancel): the files still on disk where
+  an enabled online source's stored "no entry" is older than `NO_DATA_RETRY` and a type is undecided or decided by
+  season audio alone (with or without agreeing server markers; a locked marker never counts). Files decided by
+  chapters, alone or not, are left out. It is an ordinary
+  run: only the due lookups happen, a detector reads the file only when its own answer is due, TheIntroDB's budget and
+  per-series pause apply, and a file the budget refused goes to the TheIntroDB recheck. Nothing is queued while
+  Intro & Credits is off everywhere or every online source is off. Its log is grouped like the decide-again job's:
+  files an online source now has an entry for, or whose decisions changed, log their lines, then one line such as
+  "Weekly online re-check (12 files): 2 newly found online, 10 unchanged". No user setting. A timer rather than a
+  pending job waiting on `retry_not_before`: a pending job older than the restart requeue's age limit (at most a day)
+  isn't revived, so a week-long wait would be failed by the next restart.

@@ -544,6 +544,31 @@ def _decide_again_after_upgrade(config_dir: str) -> None:
         )
 
 
+def _schedule_weekly_online_recheck(config_dir: str) -> None:
+    """Arm the weekly Intro & Credits job that asks the online databases again about files they had no entry for
+    (``markers.triggers.schedule_online_recheck``: its due time is kept in markers.db, so a restart doesn't reset it).
+
+    Runs after the restart requeue: a re-check due at once finds a revived one queued and doesn't queue another. With
+    Intro & Credits off on every server it arms nothing and leaves markers.db unopened; a start after it is turned on
+    arms it. Never raises.
+    """
+    from .settings_manager import get_settings_manager
+
+    try:
+        get_settings_manager(config_dir)
+        from ..markers.triggers import markers_enabled_anywhere, schedule_online_recheck
+
+        if not markers_enabled_anywhere():
+            return
+        schedule_online_recheck()
+    except Exception as exc:
+        logger.warning(
+            "Couldn't schedule the weekly Intro & Credits online re-check ({}: {}); the next start tries again",
+            type(exc).__name__,
+            exc,
+        )
+
+
 def _log_build_provenance() -> None:
     """Log the running build's branch / SHA / build date at INFO.
 
@@ -950,6 +975,7 @@ def create_app(config_dir: str | None = None) -> Flask:
     _requeue_interrupted_on_startup(config_dir)
     # After it, so a revived one is found instead of queueing a second.
     _decide_again_after_upgrade(config_dir)
+    _schedule_weekly_online_recheck(config_dir)
 
     # Start scheduler
     schedule_manager.start()

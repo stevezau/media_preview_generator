@@ -55,6 +55,7 @@ from .job_log import (
     decide_again_line,
     file_lines,
     kept_types,
+    online_recheck_line,
     review_note,
     season_line,
     season_of,
@@ -129,6 +130,7 @@ RECHECK_AFTER = tuple(timedelta(days=days) for days in (1, 2, 4, 8, 16))
 # A file replaced while it is analysed is detected again from scratch; one that keeps changing is being written.
 MAX_ATTEMPTS = 3
 _ONLINE_LABELS = {Source.THEINTRODB: "TheIntroDB", Source.INTRODB: "IntroDB", Source.SKIPDB: "SkipDB"}
+ONLINE_SOURCES = tuple(_ONLINE_LABELS)
 PARSER_VERSIONS = {
     Source.THEINTRODB: theintrodb.PARSER_VERSION,
     Source.INTRODB: introdb.PARSER_VERSION,
@@ -315,6 +317,10 @@ class PipelineContext:
         decide_again: The one-off job after settings v16 that decides the files in Needs review (and those waiting for
             their item's other versions) again: like a Season job, a file whose decisions didn't change logs no lines
             of its own, and the job ends with one line for them (``summary_lines``). It runs files as any job does.
+        online_recheck: The weekly job that asks the online databases again about files they had no entry for
+            (``online_recheck_files``): only a file an online database now has an entry for, or whose decisions
+            changed, logs lines of its own, and the job ends with one line for them all (``summary_lines``). It runs
+            files as any job does.
     """
 
     registry: Any
@@ -336,6 +342,7 @@ class PipelineContext:
     season_recheck: bool = False
     recheck_label: str = SEASON_RECHECK_LABEL
     decide_again: bool = False
+    online_recheck: bool = False
     decided_by: DecidedByTally = field(default_factory=DecidedByTally, repr=False)
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
@@ -379,11 +386,13 @@ class PipelineContext:
     # Per file handed on before it finished, like ``_pending_skips``: what its earlier stages did with each source, so
     # the stage that finishes it logs a source the checking thread asked as asked by this job.
     _run_notes: dict[str, RunNotes] = field(default_factory=dict, repr=False)
-    # For the job's last lines: files written per server name, a Season job's unchanged episodes per season, and per
-    # file a decide-again job ran, whether its decisions changed and whether a type is still in review.
+    # For the job's last lines: files written per server name, a Season job's unchanged episodes per season, per file a
+    # decide-again job ran, whether its decisions changed and whether a type is still in review, and per file the weekly
+    # online re-check ran, whether an online database now has an entry for it and whether its decisions changed.
     _sent: dict[str, int] = field(default_factory=dict, repr=False)
     _seasons: dict[str, list[SeasonEpisode]] = field(default_factory=dict, repr=False)
     _decided_again: list[tuple[bool, bool]] = field(default_factory=list, repr=False)
+    _rechecked_online: list[tuple[bool, bool]] = field(default_factory=list, repr=False)
     _summary_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # Per file: the ``sequence_number`` its latest run of this job started at (``ran_since``).
     _run_started: dict[str, int] = field(default_factory=dict, repr=False)
@@ -499,10 +508,14 @@ class PipelineContext:
         return taken
 
     def _note_finished(
-        self, rows: list[dict], season: tuple[str, SeasonEpisode] | None, decided_again: tuple[bool, bool] | None
+        self,
+        rows: list[dict],
+        season: tuple[str, SeasonEpisode] | None,
+        decided_again: tuple[bool, bool] | None,
+        rechecked_online: tuple[bool, bool] | None = None,
     ) -> None:
         """Count one file's rows for the job's totals line, a Season job's episode for its season's line, and a
-        decide-again job's file for its line."""
+        decide-again or weekly online re-check job's file for its line."""
         with self._summary_lock:
             for row in rows:
                 name = str(row.get("server_name") or row.get("server_id") or "")
@@ -512,10 +525,12 @@ class PipelineContext:
                 self._seasons.setdefault(season[0], []).append(season[1])
             if decided_again is not None:
                 self._decided_again.append(decided_again)
+            if rechecked_online is not None:
+                self._rechecked_online.append(rechecked_online)
 
     def summary_lines(self, outcome: dict[str, int]) -> list[str]:
-        """The lines a job ends its log with: a Season job's one line per season (a decide-again job's one line), then
-        the totals.
+        """The lines a job ends its log with: a Season job's one line per season (a decide-again or weekly online
+        re-check job's one line), then the totals.
 
         Args:
             outcome: The job's file counts per outcome (files finished before a restart included).
@@ -527,6 +542,7 @@ class PipelineContext:
             sent = dict(self._sent)
             seasons = {season: list(episodes) for season, episodes in self._seasons.items()}
             decided_again = list(self._decided_again)
+            rechecked_online = list(self._rechecked_online)
         with self._budget_lock:
             skipped: dict[str, int] = {}
             for source, count in self._budget_exhausted.items():
@@ -536,6 +552,8 @@ class PipelineContext:
         lines = [season_line(season, episodes, self.recheck_label) for season, episodes in sorted(seasons.items())]
         if self.decide_again:
             lines.append(decide_again_line(decided_again))
+        if self.online_recheck:
+            lines.append(online_recheck_line(rechecked_online))
         return [*lines, totals_line(outcome, sent, skipped)]
 
 
@@ -731,6 +749,7 @@ def build_context(
     season_recheck: bool = False,
     recheck_label: str = SEASON_RECHECK_LABEL,
     decide_again: bool = False,
+    online_recheck: bool = False,
 ) -> PipelineContext:
     """Context from live settings (used by the job runner).
 
@@ -749,6 +768,7 @@ def build_context(
         season_recheck: A Season job or a TheIntroDB recheck (``PipelineContext.season_recheck``).
         recheck_label: Which of the two (``PipelineContext.recheck_label``).
         decide_again: The decide-again job after settings v16 (``PipelineContext.decide_again``).
+        online_recheck: The weekly online re-check (``PipelineContext.online_recheck``).
 
     Returns:
         A context for one job.
@@ -781,6 +801,7 @@ def build_context(
         season_recheck=season_recheck,
         recheck_label=recheck_label,
         decide_again=decide_again,
+        online_recheck=online_recheck,
     )
 
 
@@ -877,6 +898,49 @@ def _needs_lookup(ctx: PipelineContext, rec: FileRecord, source: Source, refresh
         return True
     rows = [r for r in ctx.store.evidence_rows(rec.id) if r.source is source and r.origin == ""]
     return all(r.type is None for r in rows) and ctx.now() - fetched > NO_DATA_RETRY
+
+
+def online_recheck_files(store: MarkerStore, settings: GlobalMarkersSettings, now: datetime) -> Iterator[str]:
+    """The files the weekly online re-check lists: an enabled online source's stored "no entry" is due again (older
+    than ``NO_DATA_RETRY``, as ``_needs_lookup`` asks it again), and its answer could still change a decision.
+
+    That is a file with a type undecided (Needs review or nothing found), or one season audio decided alone: an online
+    answer confirms that intro or sends it to review (``_decided_beyond_chapters``). A file decided otherwise, by
+    chapters alone included, isn't listed; nor is one gone from disk, which would otherwise be listed every week.
+
+    Args:
+        store: The markers store.
+        settings: Global detection settings.
+        now: The current time (UTC).
+
+    Yields:
+        The local paths, sorted, each checked as it is reached (so a caller can stop early); none when every online
+        source is off.
+    """
+    sources = [source for source in ONLINE_SOURCES if settings.source_enabled(source.value)]
+    if not sources:
+        return
+    for path in store.files_with_old_empty_lookups(sources, now - NO_DATA_RETRY):
+        if _online_answer_could_decide(store, path) and os.path.isfile(path):
+            yield path
+
+
+def _online_answer_could_decide(store: MarkerStore, path: str) -> bool:
+    """Whether a file has a type undecided (True when the store knows no decisions for it) or one decided by season
+    audio alone (a locked marker never counts)."""
+    rec = store.get_file(path)
+    if rec is None:
+        return False
+    decisions = store.get_decisions(rec.id)
+    if not decisions:
+        return True
+    if any(row.status in _UNDECIDED for row in decisions.values()):
+        return True
+    # Only a decided type keeps an unlocked marker (``MarkerStore.save_decisions``).
+    return any(
+        not marker.locked and set(marker.decided_by) <= _SEASON_AUDIO_AND_SERVERS
+        for marker in store.get_markers(rec.id).values()
+    )
 
 
 # Sources without a switch of their own, each ranked right after the source whose switch they ride on.
@@ -2434,6 +2498,26 @@ def _server_result(
     return ServerResult(row, ours, kept, withheld)
 
 
+def _found_online(ctx: PipelineContext, rec: FileRecord, notes: RunNotes) -> bool:
+    """Whether an online source this run asked stored an entry for the file.
+
+    A run that isn't forced asks a source only when it has no stored answer, a "no entry" that is due, or one from an
+    older parser (``_needs_lookup``), so this is a database that newly has the file, bar the rare parser upgrade.
+
+    Args:
+        ctx: The job's context.
+        rec: The file.
+        notes: What this run did with each source.
+
+    Returns:
+        True when one did.
+    """
+    asked = {source for source, origin in notes.asked if source in _ONLINE_LABELS and origin == ""}
+    return any(
+        row.source in asked and row.origin == "" and row.type is not None for row in ctx.store.evidence_rows(rec.id)
+    )
+
+
 def _log_file(
     ctx: PipelineContext,
     rec: FileRecord,
@@ -2450,17 +2534,21 @@ def _log_file(
 
     A Season job (and a TheIntroDB recheck) logs only files whose decisions changed; the rest go into their season's
     summary line. A recheck can also list movies: a file that isn't an episode logs its own lines there. A
-    decide-again job logs only files whose decisions changed too; the rest go into its one summary line.
+    decide-again job logs only files whose decisions changed too; the rest go into its one summary line. The weekly
+    online re-check also logs a file an online database now has an entry for.
     """
-    season = decided_again = None
+    season = decided_again = rechecked_online = None
     if ctx.season_recheck and (rec.season_key is not None or ctx.recheck_label == SEASON_RECHECK_LABEL):
         name, episode = season_of(rec.canonical_path)
         season = (name, SeasonEpisode(episode, changed, review_note(decisions, types)))
     if ctx.decide_again:
         in_review = any(decisions[t].status is DecisionStatus.NEEDS_REVIEW for t in types if t in decisions)
         decided_again = (changed, in_review)
-    ctx._note_finished(rows, season, decided_again)
-    if (season is not None or decided_again is not None) and not changed:
+    if ctx.online_recheck:
+        rechecked_online = (_found_online(ctx, rec, notes), changed)
+    ctx._note_finished(rows, season, decided_again, rechecked_online)
+    grouped = season is not None or decided_again is not None or rechecked_online is not None
+    if grouped and not changed and not (rechecked_online is not None and rechecked_online[0]):
         return
     sources = source_answers(
         ctx.settings.ordered_enabled_sources(),
