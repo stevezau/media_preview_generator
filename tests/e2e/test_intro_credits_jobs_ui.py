@@ -510,7 +510,7 @@ class TestQueueRows:
         expect(row).to_contain_text("↳")
         expect(row).to_contain_text("follows e64567e1")
         expect(row.locator(".job-kind-badge")).to_have_text("Intro & Credits")
-        expect(page.locator(f"#job-row-{preview['id']} .job-kind-badge")).to_have_count(0)
+        expect(page.locator(f"#job-row-{preview['id']} .job-kind-badge")).to_have_text("Previews")
 
         page.locator(f"#job-files-toggle-{follower['id']}").click()
         detail = page.locator(f"#job-detail-{follower['id']}")
@@ -718,6 +718,7 @@ class TestQueueRows:
         page = dashboard([verify, retry])
         card = page.locator(f"#active-job-{verify['id']}")
         expect(card).to_be_visible(timeout=5000)
+        expect(card.locator(".job-kind-badge")).to_have_text("Intro & Credits")
         expect(card.locator(".retry-countdown-label")).to_have_text("Checking again in 10 min")
         expect(card).to_contain_text("Waiting to check again")
         expect(card).not_to_contain_text("Backing off after a failure")
@@ -1049,6 +1050,7 @@ class TestFilesPanel:
         assert pill.get_attribute("title") == "Home Plex — Generated"
         expect(page.locator("#fileResultsBody .markers-server-note")).to_have_count(0)
         expect(page.locator("#logsModalHeader")).not_to_contain_text("Intro & Credits")
+        expect(page.locator("#logsModalHeader .job-kind-badge")).to_have_text("Previews")
 
 
 def _running(job: dict, paused: bool = False) -> dict:

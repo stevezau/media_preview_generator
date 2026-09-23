@@ -130,8 +130,8 @@ function _renderModalHeader(job) {
         + `>${escapeHtmlText(meta.label)}</span>`;
 
     const chips = [];
-    if (typeof _isMarkersJob === 'function' && _isMarkersJob(job)) {
-        chips.push('<span class="badge text-bg-dark job-kind-badge">Intro &amp; Credits</span>');
+    if (typeof _jobKindBadgeHtml === 'function') {
+        chips.push(_jobKindBadgeHtml(job));
     }
     if (cfg.source) {
         chips.push('<span class="badge bg-light text-dark border">'

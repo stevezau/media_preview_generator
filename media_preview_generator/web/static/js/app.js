@@ -1561,6 +1561,18 @@ function _isMarkersJob(job) {
 }
 window._isMarkersJob = _isMarkersJob;
 
+// job_kinds.parse_job_kind defaults a missing/unknown kind to previews server-side, so this mirrors that default.
+const JOB_KIND_PREVIEWS = 'previews';
+const JOB_KIND_LABELS = { [JOB_KIND_PREVIEWS]: 'Previews', [JOB_KIND_INTRO_CREDITS]: 'Intro & Credits' };
+
+// The one place every job's kind tag is built — the queue table row, the "waiting to retry" active-job
+// card and the modal header (job_modal.js) all call this so the label and markup can't drift between them.
+function _jobKindBadgeHtml(job) {
+    const label = JOB_KIND_LABELS[job && job.kind] || JOB_KIND_LABELS[JOB_KIND_PREVIEWS];
+    return `<span class="badge text-bg-dark me-1 job-kind-badge">${escapeHtml(label)}</span>`;
+}
+window._jobKindBadgeHtml = _jobKindBadgeHtml;
+
 // 'own' = paused on its own (it has handed its job slot back), 'all' = held by Pause all (keeps its slot), '' = neither.
 // Pause all doesn't set an Intro & Credits job's own flag, so the global flag is read here; a job paused before a
 // restart comes back running + paused without a slot, which reads as 'own' too.
@@ -2131,14 +2143,14 @@ function updateJobQueue(force) {
             && jobs.some(function (j) { return String(j.id) === String(job.config.follows_job_id); })
             ? String(job.config.follows_job_id)
             : '';
-        const nameHtml = isMarkers
-            ? (followsId ? '<span class="text-muted job-follow-arrow" aria-hidden="true">↳</span>' : '')
-                + '<span class="badge text-bg-dark me-1 job-kind-badge">Intro &amp; Credits</span>'
-                + `<span class="fw-medium">${escapeHtml(_markersDisplayName(job.library_name)) || 'All Libraries'}</span>`
-                + (followsId
-                    ? `<span class="badge border text-body-secondary fw-normal job-follows" title="Runs after preview job ${escapeHtmlAttr(followsId.substring(0, 8))} finishes">follows ${escapeHtml(followsId.substring(0, 8))}</span>`
-                    : '')
-            : `<span class="fw-medium">${escapeHtml(job.library_name) || 'All Libraries'}</span>`;
+        const nameHtml = (followsId ? '<span class="text-muted job-follow-arrow" aria-hidden="true">↳</span>' : '')
+            + _jobKindBadgeHtml(job)
+            + (isMarkers
+                ? `<span class="fw-medium">${escapeHtml(_markersDisplayName(job.library_name)) || 'All Libraries'}</span>`
+                    + (followsId
+                        ? `<span class="badge border text-body-secondary fw-normal job-follows" title="Runs after preview job ${escapeHtmlAttr(followsId.substring(0, 8))} finishes">follows ${escapeHtml(followsId.substring(0, 8))}</span>`
+                        : '')
+                : `<span class="fw-medium">${escapeHtml(job.library_name) || 'All Libraries'}</span>`);
         const nameTitle = isMarkers && !libraryTitle && job.library_name
             ? ` title="${escapeHtmlAttr(job.library_name)}"`
             : libraryTitle;
@@ -2383,10 +2395,10 @@ function updateActiveJobs(runningJobs, force) {
             libraryDisplay = escapeHtml(job.library_name.slice('Retry: '.length));
         }
         if (_isMarkersJob(job)) {
-            libraryDisplay = '<span class="badge text-bg-dark me-1 job-kind-badge">Intro &amp; Credits</span>'
-                + (escapeHtml(_markersDisplayName(job.library_name)) || 'All Libraries')
+            libraryDisplay = (escapeHtml(_markersDisplayName(job.library_name)) || 'All Libraries')
                 + _renderMarkersRetryChip(job);
         }
+        libraryDisplay = _jobKindBadgeHtml(job) + libraryDisplay;
 
         let progressBlock;
         if (isRetryWaiting) {

@@ -169,4 +169,5 @@ class TestActiveJobWaitingToRetry:
         expect(card).to_contain_text("Waiting to retry")
         expect(card).to_contain_text("Next attempt in 5 min")
         expect(card).to_contain_text("Attempt 2 of 5")
+        expect(card.locator(".job-kind-badge")).to_have_text("Previews")
         expect(authed_page.locator(f"#job-row-{job['id']}")).to_contain_text("Retry starting in 5 min")
