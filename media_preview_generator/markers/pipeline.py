@@ -37,10 +37,10 @@ from .audio.season import season_audio_spec, season_intro_chapter_limits
 from .credits.detector import credits_text_spec
 from .credits.textdet_helper import TextDetState, text_detection_state
 from .decide import (
-    MOVIE_CREDITS_MAX_FROM_END_MS,
     DecisionContext,
     DecisionStatus,
     TypeDecision,
+    credits_limits_ms,
     decide,
 )
 from .external_ids import ids_from_path, ids_from_server_dict, is_extra, merge_ids
@@ -708,8 +708,13 @@ def _decide(
     # let detection decide a type again the user unlocks it.
     locked = ctx.store.get_locked(rec.id)
 
-    # The window of the file's kind, chosen the way the detector chooses it (an episode has a season key).
-    credits_window_s = ctx.settings.credits_tv_s if rec.season_key is not None else ctx.settings.credits_movie_s
+    # The window of the file's kind, chosen the way the detector chooses it (an episode has a season key); the credit
+    # text detector bounds its reads with the same two numbers (``credits.detector._earliest_start_s``).
+    credits_window_ms, movie_cap_ms = credits_limits_ms(
+        is_episode=rec.season_key is not None,
+        tv_window_s=ctx.settings.credits_tv_s,
+        movie_window_s=ctx.settings.credits_movie_s,
+    )
 
     def decide_from(sources: tuple[str, ...]) -> dict[MarkerType, TypeDecision]:
         enabled = set(sources)
@@ -720,10 +725,8 @@ def _decide(
             types,
             sources,
             intro_chapter_limit,
-            movie_credits_max_from_end_ms=max(
-                MOVIE_CREDITS_MAX_FROM_END_MS, (ctx.settings.credits_movie_s or 0) * 1000
-            ),
-            credits_window_ms=(credits_window_s or 0) * 1000,
+            movie_credits_max_from_end_ms=movie_cap_ms,
+            credits_window_ms=credits_window_ms,
         )
         return decide([c for c in evidence if c.source.value in enabled], dctx, locked)
 

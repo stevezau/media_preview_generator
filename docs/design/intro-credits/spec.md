@@ -459,19 +459,23 @@ and its answer is version 2's (`rule_j.boxes_of`).
    episode. Every file of the sets has at least 84 s of the tail before its run and a share of at most 0.54. When the
    run is under 30 s into the tail and nothing lit comes before it in the tail (luma under 30), the roll may have
    begun before the tail. The keyframes of the 120 s before the tail are then read through the same keyframe pass.
-   They are kept only when the run carries on into them, and the run is judged on both (final review, round 3). While
-   the joined rows still open on the run the same way, the 120 s before them are read and joined in turn (2026-09-23):
-   never before the middle of the file (no credits start before it is ever kept), never a step under 30 s, and all
-   the steps within one decode's 600 s: the first keeps that limit as before, each later one gets what is left of it.
-   A roll still filling the rows when the steps stop has no answer; a later step running out of time is that answer,
-   not a timeout (T-R7). This
-   answers the lab's five Heeramandi episodes, whose 462 s credits start before the 450 s tail, on the roll's first
-   card, in one step. The costs: a roll that starts 0–30 s into the tail after a scene gets no answer. So does one that
-   starts in the first 30 s of a step after story (30 s of rows are still wanted before the run, and the rows no longer
-   open on it): 90–120 s before the tail, as before, and the same 30 s of every later step. So does one whose first
-   card is a step's first keyframe (the step before is story, which the run doesn't carry on into). So does one with
-   only its first card before the tail when the anchor steps over it (the join is judged on the anchored start). The
-   lab scale run's 400
+   They are kept only when the run carries on into them, and the run is judged on both (final review, round 3). The
+   run has then crossed the tail's edge, so while it still starts under 30 s after the first row read, the 120 s
+   before the rows read so far are read and put in front in turn (2026-09-23) whatever they hold: more of the roll
+   moves the start back, and story is what the start needs before it. The later steps read no further back than 30 s
+   before the earliest credits start rule 2 of §5.5 keeps for the file (`decide.earliest_credits_start_ms`, one
+   function both sides call: the last 25 %, or a chosen window never before the middle, and for a movie
+   max(900 s, the movie window) from the end) — any earlier start would be refused, and those 30 s are the story a
+   start on that line needs. The first step reads what it always has, even where it lies wholly before that line (a
+   movie on Automatic, whose tail starts at the 900 s cap): narrowed, it would change answers that were found. All the
+   steps share one decode's 600 s: the first keeps that limit as before, each later one gets what is left of it. A
+   run still too close to the first row when the steps stop has no answer; a later step running out of time is that
+   answer, not a timeout (T-R7). This answers the lab's five Heeramandi episodes, whose 462 s credits start before
+   the 450 s tail, on the roll's first card, in one step. The costs: a roll that starts 0–30 s into the tail after a
+   scene gets no answer, and so does one whose first card is the tail's own first keyframe with story before the tail
+   (the join at the tail's edge is refused; a caption run on a night scene at the start of the tail has the same
+   rows). So does one with only its first card before the tail when the anchor steps over it (the join is judged on
+   the anchored start). The lab scale run's 400
    episodes have none of them: its 10 credits chapters starting 420 s or more before the end are those five and five
    mislabels. A file whose channel logo text detection boxes on 80 % of the story
    loses its answer too: on 51 broadcast recordings with channel logos that was one right answer, against five wrong
@@ -555,7 +559,9 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
 2. Sanity checks apply to every candidate, chapters included: inside the file (end ≤ duration + 2 s, clamped to the
    duration; unknown duration fails; a segment can't end before it starts); length ≥ 3 s for every type and ≤ 300 s for
    intros and recaps; intro/recap starts in the first 35% and must not run to the end of the file (end missing or
-   ≥ duration − 2 s); credits/preview start in the last 25%; movie credits start ≤ 900 s from the end.
+   ≥ duration − 2 s); credits/preview start in the last 25%; movie credits start ≤ 900 s from the end. (A chosen
+   credits window moves both, §8; the earliest credits start they keep is `decide.earliest_credits_start_ms`, which
+   the credit text detector's reads before its tail are bounded by, §5.4 step 8.)
 3. Chapters → accept (first intro/recap chapter, last credits/preview chapter; on a tie the one with the earlier end),
    unless two agreeing independent non-chapter sources contradict the chapter → **"Needs review"**. One contradicting
    source never overrides chapters. When two or more independent sources agree with the chapter's checked edge, the
@@ -1117,9 +1123,9 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     version 2's 30 s floor (§5.4 step 8) left a roll starting before the tail, or in its first 30 s, without an
     answer. Round 3 reads the 120 s before the tail when nothing lit comes before the run in the tail, and keeps it
     when the run carries on into it. That answers the lab's five Heeramandi episodes on the roll's first card. A
-    roll that starts 0–30 s into the tail after a scene still gets none. So did one that began more than 90 s before
-    the tail; since 2026-09-23 the steps go on while the joined rows still open on the run, to the middle of the file,
-    and a roll starting in the first 30 s of any step after story, or on a step's first keyframe, gets none. So does
+    roll that starts 0–30 s into the tail after a scene still gets none, nor does one whose first card is the tail's
+    first keyframe. So did one that began more than 90 s before the tail; since 2026-09-23 the steps go on while the
+    run starts under 30 s after the first row read, back to 30 s before the earliest start the decision keeps. So does
     one whose only card before the tail the anchor steps over. The lab's chapter truth has none of them.
 15. **Credit text on broadcast TV with on-screen graphics is still less accurate than on anything else** — 51
     frame-checked broadcast files (39 episodes of 13 shows with a channel or show logo, 12 sports feeds;
@@ -1804,21 +1810,33 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   again on upgrade and a changed window never serves an answer read from another. `markers.respect_locks` was removed:
   it gated nothing since a lock always wins (§5.5 rule 1; verified: no reader of it was left in the pipeline), so the
   switch only suggested a choice that did not exist. An old `settings.json` that has it still loads.
-- 2026-09-23 · **Credit text keeps reading back while the credits still fill what it read** (owner; §5.4 step 8,
-  §13 item 14). After the 120 s step before the tail, while the joined rows still open on the run, the 120 s before
-  them are read and joined the same way (`rule_j.opens_on_the_run`, `rule_j.joined_before`, unchanged), until the
-  roll's start has story before it. The later steps never read before the middle of the file (the same floor the
-  decision's sanity keeps a credits start to), skip a step under 30 s (it can't hold the story an answer needs), and
-  share one decode's 600 s with the first (`detector.LOOK_BACK_TIMEOUT_S`); a later step that runs out of time is no
-  answer, not a timeout. A roll that began before the middle stays without an answer, as one that began more than
-  90 s before the tail did. **No found answer moves**: a found start had story before it within the tail or the one
-  step, so no later step is read. Checked against the previous build on 32,384 synthetic files (story lit or dark,
-  2 s or 5 s keyframes, a channel bug or none, a scene after or none, windows of Automatic, 300, 600 and 1800 s):
-  all 15,237 it answered come out the same, decodes included, and 3,452 it left unanswered now have one. So
-  `CREDITS_TEXT_VERSION` stays 3. A "nothing found" stored before this is asked again once, only where it can
-  change: credits still undecided, and a file long enough that a second step fits (from 20 min for an episode on
-  Automatic, 35 min for a movie; `detector.credits_text_due`). Every answer now carries the basis
-  `detector.LOOK_BACK_BASIS` (`detector_runs`) that tells the two apart. Costs: a roll starting in the first 30 s
-  of a step after story, or on a step's first keyframe, still gets no answer — the old 90–120 s gap, now once per
-  step; and a found start before the chosen window is still held to the last-25 % rule and, for a movie, to
-  max(900 s, the movie window), so on Automatic a movie's new answers (all over 990 s out) are refused there.
+- 2026-09-23 · **Credit text keeps reading back until the credits' start has story before it** (owner; §5.4 step 8,
+  §5.5 rule 2, §13 item 14). The tail's own step is unchanged: it is read when the tail opens on the run, and kept
+  only when the run carries on into it (`rule_j.opens_on_the_run`, `rule_j.joined_before`). The run has then crossed
+  the tail's edge, so while it still starts under 30 s after the first row read (`rule_j.too_little_story`), the
+  120 s before the rows read so far are read and put in front whatever they hold (`rule_j.rows_before`): more of the
+  roll moves the start back, and story is what the start needs. That closes both gaps a first cut left — a roll
+  whose first card is a step's first keyframe (a 300 s TV window with 420 s of credits) and one starting 0–30 s into
+  a step after story (the old 90–120 s before the tail). **Never read what the decision refuses**: the later steps
+  stop 30 s before the earliest credits start rule 2 keeps, one function both sides call
+  (`decide.earliest_credits_start_ms`, with `decide.credits_limits_ms` mapping the user's windows for the pipeline
+  and the detector alike): the last 25 % (a stepped-back start is outside the chosen window, so the window doesn't
+  exempt it), and for a movie max(900 s, the movie window) from the end. The 30 s are the story a start on that line
+  needs. On Automatic a movie takes no step after the first. **The first step is unchanged** even where it lies
+  wholly before that line: narrowed to the line, or to 30 s before it, it turned 1,028 found answers into none on
+  the synthetic sweep below — every one a start the decision refuses, but found answers all the same. All the steps
+  share one decode's 600 s (`detector.LOOK_BACK_TIMEOUT_S`); a later step that runs out of time is no answer, not a
+  timeout. **No found answer moves**: a found start had its story within the tail or the first step, so no later
+  step is read. Checked against the previous build on 32,384 synthetic files (story lit or dark, 2 s or 5 s
+  keyframes, a channel bug or none, a scene after or none, windows of Automatic, 300, 600 and 1800 s): all 15,237 it
+  answered come out the same, decodes included. Of its 17,147 misses 2,804 now have an answer; of the 14,343 left,
+  7,518 began before the earliest start the decision keeps, 5,841 start 30 s or more inside the tail (rule J's own
+  misses on the sweep's channel-bug shapes, not the look-back's), 496 have their first card 0–30 s into the tail
+  (unchanged, see above), and 488 are a dark story under a channel bug in front of the roll: the bug's frames are
+  credit frames there, so the run reaches back through the story — the tail's overlays are the only ones read, and
+  that tail holds no story to find the bug in. So `CREDITS_TEXT_VERSION` stays 3. A "nothing found" stored before
+  this is asked again once, only while credits are undecided and a step after the first can be read (an episode on
+  Automatic from 36 min, never a movie on Automatic; `detector.credits_text_due`); every answer now carries the basis
+  `detector.LOOK_BACK_BASIS` (`detector_runs`) that tells the two apart. Still costs: a roll that starts 0–30 s into
+  the tail after a scene, or on the tail's own first keyframe with story before the tail (the join at the tail's
+  edge is refused, as a caption run on a night scene there needs).

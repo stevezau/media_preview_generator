@@ -9,10 +9,13 @@ import pytest
 
 from media_preview_generator.markers import decide as decide_module
 from media_preview_generator.markers.decide import (
+    MIN_SEGMENT_MS,
     DecisionContext,
     DecisionStatus,
     TypeDecision,
+    credits_limits_ms,
     decide,
+    earliest_credits_start_ms,
     intro_chapter_length_ms,
     intro_chapter_limit_ms,
     sanity_problem,
@@ -2835,3 +2838,80 @@ class TestChosenWindowLetsCreditsStartBeforeTheLast25Percent:
         ctx = DecisionContext(episode_ms, False, "medium", frozenset({T.CREDITS}), (), credits_window_ms=30 * 60_000)
         candidate = Candidate(T.CREDITS, episode_ms - from_end_ms, None, S.CREDITS_TEXT)
         assert sanity_problem(candidate, ctx) == expected
+
+
+def _position_problem_as_written_before(mtype, start, ctx):
+    """The credits/preview position rules as ``sanity_problem`` spelled them out before ``earliest_credits_start_ms``."""
+    d = ctx.duration_ms
+    inside_chosen_window = mtype is T.CREDITS and d - start <= ctx.credits_window_ms and start * 2 >= d
+    if start * 100 < 75 * d and not inside_chosen_window:
+        return f"{mtype.value} starts before the last 25% of the file"
+    if mtype is T.CREDITS and ctx.is_movie and d - start > ctx.movie_credits_max_from_end_ms:
+        return f"movie credits start more than {ctx.movie_credits_max_from_end_ms // 1000} s before the end"
+    return None
+
+
+class TestEarliestCreditsStart:
+    """The one earliest credits start both sides read: ``sanity_problem`` refuses exactly the starts before it, and the
+    credit text detector never reads further back for one (``detector.find_credits``)."""
+
+    DURATIONS = (999_999, 1_320_000, 1_321_472, 2_700_000, 6_000_003, 10_800_000)
+    WINDOWS = (0, 300_000, 600_000, 1_200_000, 1_800_000)
+
+    @staticmethod
+    def _ctx(duration_ms, is_movie, window_ms, types=frozenset({T.CREDITS})):
+        return DecisionContext(duration_ms, is_movie, "medium", types, (), movie_credits_max_from_end_ms=max(
+            900_000, window_ms), credits_window_ms=window_ms)  # fmt: skip
+
+    @pytest.mark.parametrize("mtype", [T.CREDITS, T.PREVIEW])
+    def test_the_position_rules_refuse_what_they_refused_before(self, mtype):
+        rng = random.Random(20260923)
+        for duration_ms, is_movie, window_ms in itertools.product(self.DURATIONS, (False, True), self.WINDOWS):
+            ctx = self._ctx(duration_ms, is_movie, window_ms, frozenset({mtype}))
+            edges = (duration_ms // 2, -(-75 * duration_ms // 100), duration_ms - window_ms, duration_ms - 900_000)
+            starts = {edge + nudge for edge in edges for nudge in (-1, 0, 1)}
+            starts |= {rng.randrange(duration_ms - MIN_SEGMENT_MS) for _ in range(200)}
+            for start in sorted(s for s in starts if 0 <= s < duration_ms - MIN_SEGMENT_MS):
+                candidate = Candidate(mtype, start, None, S.CHAPTERS)
+                assert sanity_problem(candidate, ctx) == _position_problem_as_written_before(mtype, start, ctx), (
+                    duration_ms, is_movie, window_ms, start)  # fmt: skip
+
+    def test_sanity_refuses_exactly_the_credits_starts_before_it(self):
+        for duration_ms, is_movie, window_ms in itertools.product(self.DURATIONS, (False, True), self.WINDOWS):
+            ctx = self._ctx(duration_ms, is_movie, window_ms)
+            earliest = earliest_credits_start_ms(duration_ms, is_movie=is_movie, credits_window_ms=window_ms,
+                                                 movie_credits_max_from_end_ms=ctx.movie_credits_max_from_end_ms)  # fmt: skip
+            for start in (earliest - 1, earliest, earliest + 1):
+                problem = sanity_problem(Candidate(T.CREDITS, start, None, S.CREDITS_TEXT), ctx)
+                assert (problem is None) is (start >= earliest), (duration_ms, is_movie, window_ms, start, problem)
+
+    @pytest.mark.parametrize(
+        ("duration_ms", "is_movie", "window_ms", "expected_ms"),
+        [
+            (2_700_000, False, 0, 2_025_000),  # a 45 min episode on Automatic: the last 25 %
+            (2_700_000, False, 300_000, 2_025_000),  # a 5 min window reaches less far than the last 25 %
+            (2_700_000, False, 1_200_000, 1_500_000),  # a 20 min window reaches further
+            (2_700_000, False, 1_800_000, 1_350_000),  # ... but never before the middle
+            (7_200_000, True, 0, 6_300_000),  # a 2 h movie on Automatic: the 900 s cap
+            (7_200_000, True, 300_000, 6_300_000),  # a small window never lowers the cap
+            (7_200_000, True, 1_800_000, 5_400_000),  # a 30 min window raises it, and the last 25 % agrees
+            (7_200_000, False, 0, 5_400_000),  # a file of unknown kind isn't capped
+        ],
+    )
+    def test_the_earliest_start(self, duration_ms, is_movie, window_ms, expected_ms):
+        cap_ms = max(900_000, window_ms) if is_movie else 900_000
+        assert earliest_credits_start_ms(duration_ms, is_movie=is_movie, credits_window_ms=window_ms,
+                                         movie_credits_max_from_end_ms=cap_ms) == expected_ms  # fmt: skip
+
+    @pytest.mark.parametrize(
+        ("is_episode", "tv_s", "movie_s", "expected"),
+        [
+            (True, None, None, (0, 900_000)),
+            (False, None, None, (0, 900_000)),
+            (True, 300, 1800, (300_000, 1_800_000)),  # the movie cap follows the movie window whatever the kind
+            (False, 300, 1800, (1_800_000, 1_800_000)),
+            (False, 1200, 600, (600_000, 900_000)),  # never below 900 s
+        ],
+    )
+    def test_the_limits_from_the_users_windows(self, is_episode, tv_s, movie_s, expected):
+        assert credits_limits_ms(is_episode=is_episode, tv_window_s=tv_s, movie_window_s=movie_s) == expected

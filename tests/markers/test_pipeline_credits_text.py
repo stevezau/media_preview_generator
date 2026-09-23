@@ -231,31 +231,39 @@ class TestStoredAnswers:
         return rec
 
     @pytest.mark.parametrize(
-        ("answer", "duration", "window", "asked"),
+        ("kind", "answer", "duration", "window", "asked"),
         [
-            # 450 s tail: the one step reads from 120 s before it, which is 30 s past the middle from a 20 min file on.
-            ((), 1_200_000, None, True),
-            ((), 1_199_000, None, False),
-            # A 300 s window: from a 15 min file on.
-            ((), 900_000, {"tv_s": 300}, True),
-            ((), 899_000, {"tv_s": 300}, False),
+            # An episode on Automatic: the one step starts 570 s before the end, and a later one can be read only
+            # while that is more than 30 s after the last 25 % -- from a 36 min episode on.
+            ("episode", (), 2_164_000, None, True),
+            ("episode", (), 2_160_000, None, False),
+            # A 300 s TV window: the one step starts 420 s before the end, so from a 26 min episode on.
+            ("episode", (), 1_564_000, {"tv_s": 300}, True),
+            ("episode", (), 1_560_000, {"tv_s": 300}, False),
             # A start that was found had story before it within the one step: the steps never change it.
-            ((Candidate(T.CREDITS, 1_290_250, None, Source.CREDITS_TEXT),), DUR, None, False),
+            ("episode", (Candidate(T.CREDITS, 2_000_000, None, Source.CREDITS_TEXT),), 2_700_000, None, False),
+            # A movie on Automatic never: its one step is already all before the 900 s cap.
+            ("movie", (), 10_800_000, None, False),
+            # With a 5 min movie window the one step is 420 s out and the cap still 900 s, so it is read again ...
+            ("movie", (), 10_800_000, {"movie_s": 300}, True),
+            # ... and with a 30 min one the cap is the window itself, which the tail already starts at.
+            ("movie", (), 10_800_000, {"movie_s": 1800}, False),
         ],
     )
-    def test_a_nothing_found_from_the_one_step_build_is_read_again_only_where_the_steps_read_further(
-        self, store, media, find, answer, duration, window, asked
+    def test_a_nothing_found_from_the_one_step_build_is_read_again_only_where_a_later_step_can_be_read(
+        self, request, store, find, kind, answer, duration, window, asked
     ):
-        rec = self._stored_by_the_one_step_build(store, media, answer, duration=duration, window=window)
+        path = request.getfixturevalue("media" if kind == "episode" else "movie")
+        rec = self._stored_by_the_one_step_build(store, path, answer, duration=duration, window=window)
         version = store.evidence_version(rec.id, Source.CREDITS_TEXT)
-        ctx = ctx_for(store, media, credits_window=window)
-        out, _ = _run(ctx, media, pubs(), probe=_probe(duration=duration), stage="check")
+        ctx = ctx_for(store, path, credits_window=window)
+        out, _ = _run(ctx, path, pubs(), probe=_probe(duration=duration), stage="check")
         assert (out is None) is asked  # None: handed to a worker to decode
         assert find.calls == []
         assert store.evidence_version(rec.id, Source.CREDITS_TEXT) == version  # no version was bumped to get here
 
     def test_it_is_read_again_once(self, store, media, find):
-        rec = self._stored_by_the_one_step_build(store, media, (), duration=DUR)
+        rec = self._stored_by_the_one_step_build(store, media, (), duration=2_700_000)
         find.answer = None
         _run(ctx_for(store, media), media, pubs(), stage="process")
         assert len(find.calls) == 1

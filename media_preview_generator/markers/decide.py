@@ -169,15 +169,71 @@ def sanity_problem(candidate: Candidate, ctx: DecisionContext) -> str | None:
         if length > MAX_INTRO_MS:
             return f"{candidate.type.value} too long"
     else:
-        # Never before the middle of the file, so a window longer than a short file can't switch the rule off.
-        inside_chosen_window = (
-            candidate.type is MarkerType.CREDITS and d - start <= ctx.credits_window_ms and start * 2 >= d
-        )
-        if start * 100 < 75 * d and not inside_chosen_window:
+        window_ms = ctx.credits_window_ms if candidate.type is MarkerType.CREDITS else 0
+        if start < _earliest_placed_ms(d, window_ms):
             return f"{candidate.type.value} starts before the last 25% of the file"
-        if candidate.type is MarkerType.CREDITS and ctx.is_movie and d - start > ctx.movie_credits_max_from_end_ms:
+        if candidate.type is MarkerType.CREDITS and start < earliest_credits_start_ms(
+            d,
+            is_movie=ctx.is_movie,
+            credits_window_ms=ctx.credits_window_ms,
+            movie_credits_max_from_end_ms=ctx.movie_credits_max_from_end_ms,
+        ):
             return f"movie credits start more than {ctx.movie_credits_max_from_end_ms // 1000} s before the end"
     return None
+
+
+def _earliest_placed_ms(duration_ms: int, window_ms: int) -> int:
+    """The earliest credits or preview start the position rule keeps: the last 25 % of the file, or anywhere inside a
+    window the user chose (0 for none) that doesn't reach before the middle of the file -- so a window longer than a
+    short file can't switch the rule off.
+
+    Integer ceilings, so ``start >= this`` is exactly the cross-multiplication ``start * 100 >= 75 * d`` (and
+    ``start * 2 >= d``), with no float rounding at the boundary.
+    """
+    last_quarter = -(-75 * duration_ms // 100)
+    inside_window = max(duration_ms - window_ms, -(-duration_ms // 2))
+    return min(last_quarter, inside_window)
+
+
+def earliest_credits_start_ms(
+    duration_ms: int, *, is_movie: bool, credits_window_ms: int, movie_credits_max_from_end_ms: int
+) -> int:
+    """The earliest credits start rule 2 keeps for a file; :func:`sanity_problem` refuses every earlier one.
+
+    The credit text detector reads before its tail no further than this allows (``detector.find_credits``), so the
+    two read the same numbers: a start it could find earlier would only be refused here.
+
+    Args:
+        duration_ms: The file's duration.
+        is_movie: The file is a movie (the movie cap applies).
+        credits_window_ms: The credits window the user chose for the file's kind, 0 for Automatic.
+        movie_credits_max_from_end_ms: How far before the end a movie's credits may start.
+
+    Returns:
+        Milliseconds from the start of the file: the last 25 % (or a chosen window, never before the middle), and for
+        a movie no more than ``movie_credits_max_from_end_ms`` before the end.
+    """
+    earliest = _earliest_placed_ms(duration_ms, credits_window_ms)
+    if is_movie:
+        earliest = max(earliest, duration_ms - movie_credits_max_from_end_ms)
+    return earliest
+
+
+def credits_limits_ms(*, is_episode: bool, tv_window_s: int | None, movie_window_s: int | None) -> tuple[int, int]:
+    """A file's credits window and movie cap, from the windows the user chose (``markers.credits_window``).
+
+    Args:
+        is_episode: The file is a TV episode (it has a season); anything else follows the movie window.
+        tv_window_s: The window for TV episodes, None for Automatic.
+        movie_window_s: The window for movies and files of unknown kind, None for Automatic.
+
+    Returns:
+        ``(credits_window_ms, movie_credits_max_from_end_ms)`` as :class:`DecisionContext` takes them: the window of
+        the file's kind (0 for Automatic), and the movie cap, which follows a movie window above
+        ``MOVIE_CREDITS_MAX_FROM_END_MS`` but never drops below it.
+    """
+    chosen = tv_window_s if is_episode else movie_window_s
+    return (chosen or 0) * 1000, max(MOVIE_CREDITS_MAX_FROM_END_MS, (movie_window_s or 0) * 1000)
 
 
 def _group(candidate: Candidate) -> str:

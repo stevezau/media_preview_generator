@@ -32,7 +32,13 @@ from media_preview_generator.markers import credits as credits_package
 from media_preview_generator.markers.credits import rule_j
 from media_preview_generator.markers.credits.detector import CREDITS_TEXT_VERSION, CreditsTextResult, find_credits
 from media_preview_generator.markers.credits.frames import FRAME_H, FRAME_W, GpuDecodeError
-from media_preview_generator.markers.decide import DecisionContext, DecisionStatus, decide
+from media_preview_generator.markers.decide import (
+    DecisionContext,
+    DecisionStatus,
+    credits_limits_ms,
+    decide,
+    earliest_credits_start_ms,
+)
 from media_preview_generator.markers.models import Candidate, MarkerType, Source
 from media_preview_generator.markers.probe import MediaProbe
 
@@ -57,10 +63,11 @@ GATE_SETS = {"80": ("movies40", "tv40"), "205": ("movie_credit_truth",)}
 PACKAGE_ROOT = Path(credits_package.__file__).parents[2]
 # The credit text detector and the package code outside it that shapes its answers: the tail decode's arguments and
 # the probe. tests/markers_eval pins that every package module these files import is listed here or changes no answer.
-DETECTOR_SOURCES = ("markers/credits/*.py", "markers/probe.py", "processing/hwaccel.py")
+# ``markers/decide.py`` is here for ``earliest_credits_start_ms``, which bounds the steps before the tail.
+DETECTOR_SOURCES = ("markers/credits/*.py", "markers/probe.py", "processing/hwaccel.py", "markers/decide.py")
 # The detector files that choose which windows are decoded (so they are in the ffmpeg command, the decode cache's key)
 # but never what a decode of a given command returns: :func:`decode_digest` leaves them out.
-RULE_FILES = ("markers/credits/rule_j.py", "markers/credits/detector.py")
+RULE_FILES = ("markers/credits/rule_j.py", "markers/credits/detector.py", "markers/decide.py")
 SHEET_TIMEOUT_S = 300
 # Q5: every answer that moves by more than this against an earlier run is frame-checked.
 CHANGED_BY_S = 10.0
@@ -250,6 +257,16 @@ class TextRows:
     ends_found: int = 0
     ends_published: Counter = field(default_factory=Counter)
     files: list[dict] = field(default_factory=list)
+
+
+def _earliest_start_s(duration_ms: int, *, is_episode: bool) -> float:
+    """The earliest credits start :func:`_decided` keeps (Automatic, and a file that isn't an episode is a movie), which
+    bounds the app's steps before the tail exactly as the pipeline's own bound does."""
+    window_ms, movie_cap_ms = credits_limits_ms(is_episode=is_episode, tv_window_s=None, movie_window_s=None)
+    earliest_ms = earliest_credits_start_ms(
+        duration_ms, is_movie=not is_episode, credits_window_ms=window_ms, movie_credits_max_from_end_ms=movie_cap_ms
+    )
+    return earliest_ms / 1000.0
 
 
 def _decided(
@@ -522,9 +539,11 @@ class CreditsTextCache:
     def _find(self, path: str, *, is_episode: bool, gpu: str | None) -> CreditsTextResult:
         serving = self._decodes.serving() if self._decodes is not None else contextlib.nullcontext()
         with serving:
+            duration_ms = self._probe(path).duration_ms
             return find_credits(
-                path, duration_ms=self._probe(path).duration_ms, is_episode=is_episode, ffmpeg=self._ffmpeg,
+                path, duration_ms=duration_ms, is_episode=is_episode, ffmpeg=self._ffmpeg,
                 detect_boxes=self._detect_boxes, gpu=gpu, gpu_device_path=self._gpu_device if gpu else None,
+                earliest_start_s=_earliest_start_s(duration_ms, is_episode=is_episode),
             )  # fmt: skip
 
     def result(self, path: str, *, is_episode: bool) -> dict:
@@ -1055,13 +1074,16 @@ def _sweep_answer(
     """
     gpu = "NVIDIA" if decode == "gpu" else None
     duration_ms = probe(path).duration_ms
+    earliest_s = _earliest_start_s(duration_ms, is_episode=is_episode)
     with decodes.serving():
         try:
             found = find_credits(path, duration_ms=duration_ms, is_episode=is_episode, ffmpeg=ffmpeg,
-                                 detect_boxes=detect_boxes, gpu=gpu, gpu_device_path=gpu_device if gpu else None)  # fmt: skip
+                                 detect_boxes=detect_boxes, gpu=gpu, gpu_device_path=gpu_device if gpu else None,
+                                 earliest_start_s=earliest_s)  # fmt: skip
         except GpuDecodeError:
             found = find_credits(path, duration_ms=duration_ms, is_episode=is_episode, ffmpeg=ffmpeg,
-                                 detect_boxes=detect_boxes, gpu=None, gpu_device_path=None)  # fmt: skip
+                                 detect_boxes=detect_boxes, gpu=None, gpu_device_path=None,
+                                 earliest_start_s=earliest_s)  # fmt: skip
     return found.start_s, found.end_s
 
 
