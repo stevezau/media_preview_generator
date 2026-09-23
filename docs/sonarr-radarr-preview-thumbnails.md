@@ -1,4 +1,5 @@
 ---
+title: "Plex, Emby and Jellyfin previews when Sonarr or Radarr import a file"
 description: "Add a Sonarr or Radarr webhook for import and upgrade. Previews are made after a 60 s quiet period, with retries while the server indexes the file."
 ---
 

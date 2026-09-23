@@ -1,4 +1,5 @@
 ---
+title: "Faster Jellyfin trickplay generation with a GPU"
 description: "Speed up Jellyfin trickplay with its own settings first (threads, key frames, hardware decode, tone mapping), then offload it to a GPU container."
 ---
 
@@ -77,7 +78,7 @@ The plugin tells Jellyfin about tiles that something else wrote ([plugin README]
 Install it with one click from the Servers page. Or add this repository in Jellyfin → **Dashboard → Plugins → Repositories**, then install **Media Preview Bridge**:
 
 ```text
-https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json
+https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json
 ```
 
 ## Triggering from Jellyfin

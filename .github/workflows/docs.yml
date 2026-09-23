@@ -3,7 +3,7 @@ name: Docs site — build and deploy to GitHub Pages
 # The ONE workflow that deploys GitHub Pages. A Pages deploy replaces the whole site, and
 # the site also serves the Jellyfin plugin repository manifest that every Jellyfin install
 # of Media Preview Bridge polls:
-#   https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json
+#   https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json
 # So every deploy ships the docs AND a manifest:
 #   - push to dev / manual run: re-publishes the LIVE manifest unchanged.
 #   - called by jellyfin-plugin.yml: publishes the freshly patched manifest it hands over
@@ -41,8 +41,9 @@ env:
   # Docs-only deploys copy this live manifest and fail if it's missing, so a
   # brand-new Pages site must be bootstrapped once by a plugin release
   # (jellyfin-plugin.yml seeds from the template on a genuine 404).
-  # When the site moves to a custom domain, update this URL and PREV_URL there.
-  LIVE_MANIFEST_URL: https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json
+  # Keep in step with PREV_URL in jellyfin-plugin.yml and PLUGIN_REPO_URL in
+  # media_preview_generator/servers/jellyfin.py.
+  LIVE_MANIFEST_URL: https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json
 
 jobs:
   deploy:

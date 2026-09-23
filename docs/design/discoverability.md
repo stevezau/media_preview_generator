@@ -1,7 +1,7 @@
 # Discoverability, docs site and SEO pass
 
 Status: shipped 2026-09-23 (#291 docs site; app-code fixes below in a follow-up PR). Live at
-https://stevezau.github.io/media_preview_generator/. Owner follow-ups and outreach drafts:
+https://mediapreviewgenerator.dev/. Owner follow-ups and outreach drafts:
 `docs/design/discoverability-outreach.md`. Excluded from the docs build (`docs/design/`).
 
 Method source: the sibling-project playbook (audit → crawl plumbing → llms.txt → structured
@@ -12,13 +12,9 @@ data → intent pages → images → repo metadata → verify with real retrieva
 - **Name stays "Media Preview Generator".** No rename: search engines already recommend it by
   this name, and the retired `stevezzau/plex_generate_vid_previews` image still outranks the
   current one months after the last rename.
-- **Domain: undecided.** Build on `https://stevezau.github.io/media_preview_generator/`. Switching
-  later = `site_url` in `mkdocs.yml` + a `docs/CNAME` file + a new Search Console property.
-  Candidates: mediapreviewgenerator.com (preferred), .dev, .media. previewgenerator.com was
-  registered by an unknown party on 2026-09-18.
-- **robots.txt is inert on a github.io project path** (crawlers read it only at the host root).
-  Still generate it so the custom-domain switch needs no work; submit the sitemap in Search
-  Console directly meanwhile.
+- **Domain: `mediapreviewgenerator.dev`**, live 2026-09-23 (Route 53 DNS, GitHub-verified, Let's Encrypt
+  cert via Pages). github.io URLs 301 to the matching page; a lab Jellyfin 10.11 was shown to follow a
+  cross-host 301 for the plugin manifest before the switch. The app recognises both manifest URLs.
 - **Generator: MkDocs Material**, built and deployed by GitHub Actions.
 - **Intro/credits detection is NOT shipped** (lives on `feat/markers-detection`). No page, no
   llms.txt claim, until it merges. `docs/faq.md` and `docs/getting-started.md` correctly say it
@@ -27,7 +23,8 @@ data → intent pages → images → repo metadata → verify with real retrieva
 
 ## Hard constraint: the Jellyfin plugin manifest
 
-Pages already serves `https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json`,
+Pages serves `https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json` (older installs use the
+github.io address, which 301s there),
 which every Jellyfin install of the plugin polls. `.github/workflows/jellyfin-plugin.yml`
 (`publish-pages`) builds it by fetching the LIVE manifest and patching in the new release
 (version, checksum, zip URL — values that only exist at plugin-release time). A Pages deploy
@@ -67,9 +64,9 @@ E. Metadata: README badges (CI, release, image size, Ko-fi), Docker Hub `short-d
    (current + deprecated mirror), `pyproject` Documentation URL, ~20 GitHub topics, homepage field
    → docs site once live.
 
-## Switching to a custom domain (checklist)
+## Switching to a custom domain (checklist — done 2026-09-23)
 
-1. `site_url` in `mkdocs.yml`; add `docs/CNAME` with the bare domain.
+1. `site_url` in `mkdocs.yml`; the domain itself is set in the repo's Pages settings (Actions deploys, no CNAME file).
 2. `LIVE_MANIFEST_URL` in `.github/workflows/docs.yml` and `PREV_URL` in `jellyfin-plugin.yml`.
 3. The absolute docs URLs in `README.md`, `DOCKERHUB_README.md`, `llms.txt`, `pyproject.toml`; regenerate
    `llms-full.txt` (`python scripts/generate_llms_full.py`).
@@ -78,7 +75,7 @@ E. Metadata: README badges (CI, release, image size, Ko-fi), Docker Hub `short-d
 5. New Search Console property for the domain (the github.io property's history doesn't carry over);
    robots.txt starts working at that point.
 
-## Code issues found during the docs audit (fixed on branch `stevezau/docs-audit-code-fixes`)
+## Code issues found during the docs audit (fixed in #292)
 
 - Settings page retry copy is wrong (`web/templates/settings.html:141-147` says 30 s doubling; real
   schedule is 60 s/2 m/5 m/15 m/60 m scaled by "Initial retry delay" ÷ 30).
@@ -95,9 +92,20 @@ E. Metadata: README badges (CI, release, image size, Ko-fi), Docker Hub `short-d
 
 ## Needs the owner
 
-- Domain purchase + DNS (later). Ko-fi username. GitHub social preview upload (no API).
-- Search Console property + sitemap submission.
-- AlternativeTo listing, awesome-selfhosted PR, subreddit posts (respect each channel's rules).
+Done 2026-09-23: GitHub social preview uploaded; Search Console URL-prefix property verified
+(token in `mkdocs.yml`), sitemap submitted, indexing requested for home + comparison; retired
+Docker Hub image's short description set to "RETIRED — moved to …".
+
+Still open:
+- Outreach posts — drafts and per-channel rules in `docs/design/discoverability-outreach.md`
+  (awesome-selfhosted-data rejects AI-written entries; r/PleX bans self-promotion).
+- Current image's Docker Hub short description fills in on the next release tag (ci.yml syncs it
+  from `pyproject.toml`), or paste it by hand.
+- Re-run the baseline queries below around 2026-10-21, once Google has indexed the site.
+- Search Console: add a Domain property for mediapreviewgenerator.dev (DNS TXT) and submit the sitemap.
+- Settings label "Initial retry delay" reads 30 s while the first retry waits 1 min (copy under
+  the slider explains it); renaming is the owner's call.
+- Dolby Vision Profile 5 "dim without Vulkan" has never been checked on a real P5 clip.
 
 ## Baseline (2026-09-23, WebSearch + Exa)
 

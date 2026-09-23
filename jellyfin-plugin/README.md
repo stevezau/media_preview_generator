@@ -13,7 +13,7 @@ Jellyfin has no API for writing media segments (intro, credits, recap, preview) 
 In Jellyfin admin → Dashboard → Plugins → Repositories → **+** add:
 
 ```
-https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json
+https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json
 ```
 
 Then go to Catalogue → install **Media Preview Bridge**. Restart Jellyfin.

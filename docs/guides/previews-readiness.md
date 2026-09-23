@@ -152,6 +152,7 @@ into *this* container **read-write**. It's a pure read-only probe —
 PUID/PGID), `unset` (no folder configured).
 
 **Requirements (all three):**
+
 1. The **Media Preview Bridge plugin** installed in Jellyfin (it's the
    only thing that registers off-media tiles with the correct thumbnail
    count). The plugin section becomes a hard requirement when off-media is on.
@@ -172,6 +173,7 @@ container path in the server's **Jellyfin config folder** field.
 **What it checks:** vendor's scan-time trickplay generation flag.
 
 **Why it matters:**
+
 - **With the Media Preview Bridge plugin installed (Mode A):**
   recommend **off**. The plugin registers previews directly; scan-time
   extraction is wasted CPU.

@@ -124,7 +124,7 @@ dev = [
 Homepage = "https://github.com/stevezau/media_preview_generator"
 Repository = "https://github.com/stevezau/media_preview_generator"
 Issues = "https://github.com/stevezau/media_preview_generator/issues"
-Documentation = "https://stevezau.github.io/media_preview_generator/"
+Documentation = "https://mediapreviewgenerator.dev/"
 
 [tool.setuptools.packages.find]
 where = ["."]

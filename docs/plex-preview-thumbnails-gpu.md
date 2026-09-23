@@ -1,4 +1,5 @@
 ---
+title: "Generate Plex preview thumbnails with a GPU"
 description: "Plex has no documented GPU option for preview thumbnails. Run Media Preview Generator in Docker with an NVIDIA, Intel or AMD GPU to make them."
 ---
 

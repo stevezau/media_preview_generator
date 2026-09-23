@@ -1,4 +1,5 @@
 ---
+title: "Why Plex video preview thumbnails take so long"
 description: "Plex makes preview thumbnails on the CPU inside the server, at a frame every 2 seconds by default. How to tune Plex, or move the work to a GPU."
 ---
 

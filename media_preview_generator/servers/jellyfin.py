@@ -433,7 +433,11 @@ class JellyfinServer(EmbyApiClient):
     # A valid GUID no library item has; the admin-only Markers route answers it with the plugin's own 404.
     _BRIDGE_ACCESS_PROBE_ID = "ffffffffffffffffffffffffffffffff"
     PLUGIN_GUID = "c2cb9bf9-7c5d-4f1a-9a07-2d6f5e5b0001"
-    PLUGIN_REPO_URL = "https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json"
+    PLUGIN_REPO_URL = "https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json"
+    # The docs site moved here from GitHub Pages' default address, which now 301s to
+    # PLUGIN_REPO_URL. Jellyfin follows the redirect, so a repository registered under
+    # the old address keeps working; treat it as ours rather than adding a duplicate.
+    LEGACY_PLUGIN_REPO_URLS = ("https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json",)
 
     def check_plugin_installed(self) -> dict[str, Any]:
         """Probe the plugin's anonymous Ping endpoint.
@@ -665,8 +669,15 @@ class JellyfinServer(EmbyApiClient):
             return result
         _record("read_repositories", True, f"{len(repos)} existing")
 
-        # 2. Append our repo if missing.
-        if not any(isinstance(r, dict) and r.get("Url") == self.PLUGIN_REPO_URL for r in repos):
+        # 2. Append our repo if missing, under the current address. The install below
+        # must name the repository that's actually registered.
+        known_urls = (self.PLUGIN_REPO_URL, *self.LEGACY_PLUGIN_REPO_URLS)
+        registered_url = next(
+            (r.get("Url") for r in repos if isinstance(r, dict) and r.get("Url") in known_urls),
+            None,
+        )
+        if registered_url is None:
+            registered_url = self.PLUGIN_REPO_URL
             new_repos = list(repos)
             new_repos.append(
                 {
@@ -696,7 +707,7 @@ class JellyfinServer(EmbyApiClient):
                 f"/Packages/Installed/{quote(self.PLUGIN_NAME)}",
                 params={
                     "assemblyGuid": self.PLUGIN_GUID,
-                    "repositoryUrl": self.PLUGIN_REPO_URL,
+                    "repositoryUrl": registered_url,
                 },
             ).raise_for_status()
             _record("queue_install", True, "queued")

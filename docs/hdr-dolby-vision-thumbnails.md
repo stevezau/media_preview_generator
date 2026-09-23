@@ -1,4 +1,5 @@
 ---
+title: "HDR and Dolby Vision preview thumbnails for Plex, Jellyfin and Emby"
 description: "Washed-out or green previews come from HDR frames not tone-mapped. This app tone-maps HDR10, HLG and Dolby Vision; DV Profile 5 needs a Vulkan GPU."
 ---
 

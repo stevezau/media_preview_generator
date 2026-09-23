@@ -507,10 +507,12 @@ For media you add to Plex **manually** — copying files into a watched folder, 
 This uses Plex's built-in webhook feature. The app calls Plex's account API to register its own `/api/webhooks/plex` endpoint, so you don't have to copy/paste anything into Plex Web → Settings → Webhooks (though you still can if you'd rather).
 
 **Requirements:**
+
 - An active **Plex Pass** subscription on the server-owner account. Plex's webhook feature is Plex-Pass-only.
 - **Mobile Push Notifications enabled** on your Plex server. This is the catch: Plex's `library.new` event is delivered through the same code path as mobile push notifications, and if push notifications are off, library events are silently dropped. Enable them under Plex Web → Settings → General (toggle *Enable mobile push notifications*). You don't have to actually use mobile push — they just need to be turned on.
 
 **Setup:**
+
 1. Open the web UI → **Automation** → **Triggers** tab and scroll to (or click) the **Plex Direct** sidebar link.
 2. The URL field is pre-filled with the URL you're currently accessing the app at (typically correct for same-host setups). If your Plex Media Server is on a different host or behind a different network/proxy, override it with a URL Plex can reach.
 3. Click **Test reachability** to verify the URL is routable. The app self-POSTs a synthetic ping; success means Plex should also be able to deliver.
@@ -528,11 +530,13 @@ A scheduled poll for items where Plex's `addedAt` falls within a configured look
 **The scanner is a first-class schedule type.**  You create, edit, enable, disable, and delete Recently Added scanners through the same Schedules UI as any other scheduled job — and you can create **multiple scanners** with different libraries, intervals, or lookback windows.  For example: scan Movies every 15 minutes with a 1-hour lookback, and your 4K library every 6 hours with a 24-hour lookback.
 
 **Quick start (one click):**
+
 1. Open the web UI → **Automation** → **Triggers** tab → **Recently Added Scanner** (sidebar link).
 2. Click **Create default scanner**.  A schedule is created with sensible defaults: runs every **15 minutes**, lookback window **1 hour**, all libraries.
 3. That's it.  You can stop here, or continue to customize it.
 
 **Customize or add more scanners:**
+
 1. Click **Manage in Schedules tab** on the scanner card, or switch to the **Schedules** tab directly.
 2. Click **Add Schedule** (or **Edit** on an existing scanner).
 3. In the modal, choose **Scan mode → Recently added only**.  The Schedule Type field defaults to Interval; pick your frequency.

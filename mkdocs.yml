@@ -1,7 +1,8 @@
 site_name: Media Preview Generator
-# The one place the public URL lives. Moving to a custom domain = change this line
-# + add docs/CNAME. Canonical links, og:url, JSON-LD, sitemap.xml and robots.txt all derive from it.
-site_url: https://stevezau.github.io/media_preview_generator/
+# The one place the public URL lives. The custom domain itself is set in the repo's Pages
+# settings (deploys come from Actions, so no CNAME file). Canonical links, og:url, JSON-LD,
+# sitemap.xml and robots.txt all derive from this line.
+site_url: https://mediapreviewgenerator.dev/
 site_description: >-
   Generate Plex, Emby and Jellyfin video preview thumbnails fast with GPU-accelerated FFmpeg.
   Self-hosted, runs in Docker, free and open source.
@@ -102,8 +103,8 @@ extra:
   social_image: images/social-preview.jpg
   author_url: https://github.com/stevezau
   download_url: https://hub.docker.com/r/stevezzau/media_preview_generator
-  # Search Console HTML-tag token (same Google account as the shortlist docs).
-  google_site_verification: cqlqedFcoobifs1lLaDIdbBPCPurJ-JlDAIVOTs_02k
+  # Search Console HTML-tag token for the URL-prefix property on site_url.
+  google_site_verification: 4mF2CtkEhiwWMtZzzHyTfMPWE6WNR0OYHCcRjSjFmk8
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/stevezau/media_preview_generator
