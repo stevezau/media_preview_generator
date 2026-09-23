@@ -1742,6 +1742,7 @@ def _fuzz_case(rng):
     return lengths, events
 
 
+@pytest.mark.timeout(120)  # 40 fuzz cases take ~26 s alone; addopts' --timeout=30 killed the worker under load
 @pytest.mark.parametrize("with_audio", [False, True], ids=["chapters-only", "season-audio-worker"])
 def test_arrivals_reruns_replacements_deletions_and_restarts_end_with_the_all_at_once_decisions(tmp_path, with_audio):
     rng = random.Random(20260915 + with_audio)
