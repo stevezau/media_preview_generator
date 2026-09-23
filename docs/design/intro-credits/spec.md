@@ -660,9 +660,16 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    doesn't ask a local detector again on a normal run** (only a forced run, an answer of another version, or an
    answer the decision rests on does); a chapter decision is final for credits text (C7) — a server never asked for
    the file, and not yet published to, is still read once, since rule 7 lets its own markers shorten decided
-   credits; an empty or unusable answer isn't asked again while everything stays decided. Decide, store. Stored
-   chapter and online evidence carries its rules or parser version; a file whose stored version is older is probed
-   or asked again on the next run.
+   credits; an empty or unusable answer isn't asked again while everything stays decided. **No local detector reads
+   the file for a type no answer of ours would be shown for**, on any run, forced included: every server the file's
+   markers go to keeps its own (`keep_plex`, `keep_emby`) and shows its own of that type now — rule 7's own markers
+   (never ours, an importer plugin's or another cut's), read from each server on that run in one read the evidence
+   read shares — and the type isn't locked. Left undecided that way, the type is stored `disabled` with the reason
+   "kept Plex's own marker" instead of Needs review, and the rows say "Keeping Plex's credits"; what is sent to a
+   server is exactly what an undecided type sends. Worked out again on every run and never stored as an answer, so
+   "Use ours", a server losing its marker or a new destination without one reads the file on the next run (§14
+   2026-09-23). Decide, store. Stored chapter and online evidence carries its rules or parser version; a file whose
+   stored version is older is probed or asked again on the next run.
 4. **Season step.** Intros need siblings. A job fingerprints the season folder's missing episodes on its workers,
    matches cached fingerprints inline, and queues a Season job for same-season episodes outside the job whose inputs
    changed (R3). An episode alone in its season group uses up to 4 cached fingerprints of the previous season (§5.3).
@@ -774,7 +781,8 @@ at the last write), `atomic_writes`.
   none this file → waiting, not in library). POST carries this file's size; every POST is confirmed by reading the
   chapters back (not shown → DELETE, failed). An unchanged set whose stored state matches (same ticks and size, not
   stale) sends nothing. `shows()` reads the chapter rows (credits compared by start). `keep_emby` posts without
-  `ReplaceOwn` and records the types Emby shows its own rows of as kept; the plugin still stores ours for them. A
+  `ReplaceOwn` and records the types Emby shows its own rows of as kept; the plugin still stores ours for them (a
+  decided type only: one the file wasn't read for, §6.2 step 3, has none to store). A
   **locked** type is never kept (§5.5 rule 1): since `ReplaceOwn` is per POST and not per type, a locked type Emby
   still shows its own rows of is re-posted alone with `ReplaceOwn`, then the whole set is posted again without it, and
   that type is reported in `last_replaced_own_types`.
@@ -1840,3 +1848,22 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   `detector.LOOK_BACK_BASIS` (`detector_runs`) that tells the two apart. Still costs: a roll that starts 0–30 s into
   the tail after a scene, or on the tail's own first keyframe with story before the tail (the join at the tail's
   edge is refused, as a caption run on a night scene there needs).
+- 2026-09-23 · **Under "Keep Plex's" / "Keep Emby's", a file isn't read for a type the server already shows its own
+  of** (§6.2 step 3). Found on the owner's server: a Plex-only, Keep Plex's library queued 10,011 movies and 77 of 83
+  checked had Plex's own credits, yet credit text decoded every tail (~10 s GPU, 20–130 s CPU), because server markers
+  only agree (rule 7) and an undecided type always asks its detector, while the publisher then left Plex's rows alone
+  (§6.3) — every answer was thrown away. Now, per type, when every server the markers go to keeps its own and shows
+  its own now, no local detector runs for it; one server that would show ours (Use ours, no marker of its own, a
+  Jellyfin, another cut, an importer plugin's copy, our own rows on the item, an unknown result after a failed write)
+  reads the file as before, and a lock always does (rule 1). "Shows its own now" is a read of each server on that run:
+  a stored answer with markers is never read again, and the server's markers come after the detectors in the default
+  order, so a stored answer would miss a server that lost its marker and a first run would have none. That read is
+  shared with the evidence read (a first run still asks each server once) and costs one read per later run of such a
+  file, as a decided and kept type's read-back did. The stored evidence and its read schedule
+  are unchanged, so no other type's decision moves. The type is stored `disabled`, reason "kept Plex's own marker"
+  (the chip and the Season view show it), the job row "Keeping Plex's credits" with Up to date, not Needs review. What
+  a server shows is unchanged: Plex's publisher already leaves Plex's rows of a type it isn't sent
+  (`test_a_type_left_undecided_for_plexs_own_leaves_the_item_as_deciding_it_would`); only the record no longer lists
+  a never-decided type as kept. On Emby the plugin no longer holds a hidden copy of ours for that type, so a refresh
+  that deletes Emby's own rows leaves the type empty until the next run reads the file, where the plugin used to put
+  ours back at once.

@@ -408,6 +408,26 @@ class TestKeepEmbys:
             assert ours == [INTRO, CREDITS_TO_END] and publisher.last_kept_types == frozenset()
             assert emby.markers_shown() == [("IntroStart", 126_771), ("IntroEnd", 157_068), ("CreditsStart", 1_295_324)]
 
+    def test_a_type_left_undecided_for_embys_own_shows_the_same_but_isnt_stored_out_of_sight(self, emby):
+        # The pipeline doesn't read a file for a type every server keeps its own of (spec §6.2, §14 2026-09-23), so
+        # that type reaches the write undecided. Emby shows the same; the plugin just holds no hidden copy of ours for
+        # it, which it would have shown once Emby's own rows were gone (the next run reads the file then instead).
+        def after(markers):
+            fake = FakeEmby(emby.path)
+            fake.rows += EMBY_INTRO
+            publisher = _publisher(fake, "keep_emby")
+            ours = _write(fake, markers, publisher=publisher)
+            return (ours, fake.replace_own, fake.markers_shown(), publisher.last_kept_types), fake.stored
+
+        decided, stored_when_decided = after([INTRO, CREDITS_TO_END])
+        undecided, stored_when_undecided = after([CREDITS_TO_END])
+
+        shown = [("IntroStart", 60_000), ("IntroEnd", 90_000), ("CreditsStart", 1_295_324)]
+        assert decided == ([CREDITS_TO_END], [False], shown, frozenset({T.INTRO}))
+        assert undecided == ([CREDITS_TO_END], [False], shown, frozenset())
+        assert stored_when_decided == (1_267_710_000, 1_570_680_000, 12_953_240_000)
+        assert stored_when_undecided == (None, None, 12_953_240_000)
+
     def test_kept_type_with_emby_rows_still_there_sends_nothing(self, emby):
         emby.rows += EMBY_INTRO
         publisher = _publisher(emby, "keep_emby")

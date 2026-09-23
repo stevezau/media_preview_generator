@@ -450,10 +450,13 @@
             } else if (d.status === 'no_evidence') {
                 chips.appendChild(el('span', 'badge text-bg-secondary', `${label}: No markers found`));
             } else if (d.status === 'disabled') {
-                // The backend records "detection off" either way; intros and recaps are never looked for in movies.
+                // The rules record "detection off", also for intros and recaps, which are never looked for in movies.
+                // A job that didn't read the file for a type every server keeps its own of says so instead ("kept
+                // Plex's own marker", markers.outcomes.kept_own_reason).
                 const notForMovies = payload.is_movie && START_SEGMENTS.indexOf(type) !== -1;
+                const keptOwn = d.reason && d.reason !== 'detection off' ? capitalise(d.reason) : '';
                 chips.appendChild(el('span', 'badge text-bg-secondary opacity-75',
-                    `${label}: ${notForMovies ? 'not used for movies' : 'Detection off'}`));
+                    `${label}: ${keptOwn || (notForMovies ? 'not used for movies' : 'Detection off')}`));
             }
         });
         // The same chip the Season view shows for a locked row (markers_season.js), so the two read alike.

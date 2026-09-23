@@ -90,20 +90,43 @@ RETRY_REASON_CODES = frozenset({NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN})
 EXTRAS_NOT_CHECKED = "Extras aren't checked for markers"
 
 
-def kept_note(kept_types: Iterable[MarkerType], wanted: Iterable[Marker], vendor: str) -> str:
-    """Row and Inspector wording for the decided types a server keeps as its own ("Keep Plex's", "Keep Emby's").
+def kept_note(
+    kept_types: Iterable[MarkerType],
+    wanted: Iterable[Marker],
+    vendor: str,
+    *,
+    not_decided: Iterable[MarkerType] = (),
+) -> str:
+    """Row and Inspector wording for the types a server keeps as its own ("Keep Plex's", "Keep Emby's").
 
     Args:
         kept_types: The types kept as the server's own.
         wanted: The decided markers.
         vendor: The server's brand as users know it (``Plex``, ``Emby``).
+        not_decided: Types left undecided because every server keeps its own and shows one, so the file wasn't read
+            for them (``kept_own_reason``); named whether or not they are in ``wanted``.
 
     Returns:
-        "keeping Plex's credits" (or "intro and credits"); "" when none of ``wanted`` is kept.
+        "keeping Plex's credits" (or "intro and credits"); "" when none of ``wanted`` is kept and nothing was left
+        undecided that way.
     """
-    kept, wanted_types = set(kept_types), {m.type for m in wanted}
-    names = [t.value for t in MarkerType if t in kept and t in wanted_types]
+    kept, wanted_types, undecided = set(kept_types), {m.type for m in wanted}, set(not_decided)
+    names = [t.value for t in MarkerType if (t in kept and t in wanted_types) or t in undecided]
     return f"keeping {vendor}'s {' and '.join(names)}" if names else ""
+
+
+def kept_own_reason(vendors: Iterable[str]) -> str:
+    """Decision reason for a type the file wasn't read for: every server its markers go to keeps its own and shows one.
+
+    Args:
+        vendors: The brands of those servers as users know them (``Plex``, ``Emby``), repeats allowed.
+
+    Returns:
+        "kept Plex's own marker", or "kept Plex's and Emby's own markers".
+    """
+    names = list(dict.fromkeys(vendors))
+    owners = " and ".join(f"{name}'s" for name in names)
+    return f"kept {owners} own marker{'s' if len(names) > 1 else ''}"
 
 
 def with_kept_note(message: str, note: str) -> str:

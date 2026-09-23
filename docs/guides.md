@@ -759,7 +759,10 @@ first time you turn it on for a Plex server:
   our credits are still written. Once kept, no job touches Plex's markers of that type — not a forced **Re-detect**,
   not a run after a failed or skipped attempt, not another version of the item — until you switch the server to
   **Use ours** (the next job writes ours) or Plex no longer has markers of that type (then ours are written
-  again). Markers that are simply gone are written again either way.
+  again). Markers that are simply gone are written again either way. A file Plex already has its own markers of a
+  type for isn't read again for that type (no credit-text or season-audio pass), as long as every server the file's
+  markers go to keeps its own and shows one: the row says **"Keeping Plex's credits"** and the Inspector **"Kept
+  Plex's own marker"**.
 - **A marker you adjust or lock in the Inspector is the exception**: it is written over Plex's own markers of that
   type even on a server set to **Keep Plex's**, and the server's row says so — *"Replaced Plex's own marker. This
   server is set to keep Plex's, but a marker you adjust always wins."* The Inspector says it before you save, too.

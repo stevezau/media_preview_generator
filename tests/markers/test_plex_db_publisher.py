@@ -1631,6 +1631,36 @@ class TestKeepPlexs:
         assert (_write_one(pub, [INTRO]), pub.last_kept_types) == ([INTRO], frozenset())
         assert _served(db) == [(T.INTRO, 11_000, 37_000), (T.CREDITS, 1_184_721, 1_210_721)]
 
+    @pytest.mark.parametrize(
+        ("others", "previous"),
+        [([], []), ([INTRO], []), ([INTRO], [INTRO])],
+        ids=["movie", "episode-first-run", "episode-later-run"],
+    )
+    def test_a_type_left_undecided_for_plexs_own_leaves_the_item_as_deciding_it_would(self, tmp_path, others, previous):
+        # The pipeline doesn't read a file for a type every server keeps its own of (spec §6.2, §14 2026-09-23), so
+        # that type reaches the write undecided. The item must come out byte for byte as when it was decided and kept.
+        def item_after(name, markers):
+            folder = tmp_path / name / "Plex Media Server"
+            db = _make_db(folder)
+            _insert_taggings(db, (7, 563, 0, "credits", 1_154_521, 1_188_521, CREDITS_ROW_EXTRA))
+            _set_part_extra(db, 1, encode_extra_data({"pv:credits": NATIVE_CREDITS}))
+            pub = _publisher(tmp_path / name, folder, redetect="keep_plex")
+            if previous:
+                _write_one(pub, previous)  # our intro from an earlier run
+            ours = _write_one(pub, markers, previous=previous)
+            taggings = _rows(db, "SELECT [index], text, time_offset, end_time_offset, extra_data FROM taggings")
+            parts = _rows(db, "SELECT id, file, extra_data FROM media_parts ORDER BY id")
+            return (ours, pub.last_write_changed, sorted(taggings), parts), pub.last_kept_types
+
+        decided, kept_when_decided = item_after("decided", [*others, CREDITS_NONFINAL])
+        undecided, kept_when_undecided = item_after("undecided", others)
+
+        assert decided == undecided
+        assert (0, "credits", 1_154_521, 1_188_521, CREDITS_ROW_EXTRA) in undecided[2]  # Plex's row, untouched
+        assert json.loads(undecided[3][0][2])["pv:credits"] == NATIVE_CREDITS
+        # Only this app's record differs: a type it never decided isn't recorded as kept.
+        assert (kept_when_decided, kept_when_undecided) == ({T.CREDITS}, frozenset())
+
     def test_a_plex_row_matching_our_decision_isnt_newly_kept_when_the_record_is_stale(self, tmp_path):
         # The record says the old intro while Plex already shows the new one (recording failed after the COMMIT).
         folder = tmp_path / "Plex Media Server"

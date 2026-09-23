@@ -59,6 +59,7 @@ from .outcomes import (
     ServerStatus,
     file_outcome,
     kept_note,
+    kept_own_reason,
     replaced_own_note,
     with_kept_note,
     with_sentence,
@@ -400,7 +401,7 @@ class _FileChangedError(Exception):
 
 
 class _ItemServers:
-    """The owning servers of one file, asked for item ids and external ids at most once each."""
+    """The owning servers of one file, asked for item ids, external ids and markers at most once each."""
 
     def __init__(self, item: ProcessableItem, owning: list[_Owning]) -> None:
         self._path = item.canonical_path
@@ -409,6 +410,7 @@ class _ItemServers:
         self._item_ids: dict[str, str | None] = {}
         self._asked_ids = False
         self._server_ids: MediaIds | None = None
+        self._markers: dict[str, list[Candidate] | None] = {}
 
     def item_id(self, owner: _Owning) -> str | None:
         """The server's item id for this file (hint first), or None when the server doesn't have it (yet).
@@ -447,6 +449,23 @@ class _ItemServers:
                     self._server_ids = ids_from_server_dict(raw)
                     break
         return self._server_ids
+
+    def markers(self, owner: _Owning, item_id: str, duration_ms: int | None) -> list[Candidate] | None:
+        """The server's markers for this file (``read_server_markers``), read at most once per run.
+
+        The check for types every server keeps its own markers of runs before the evidence read, so the two share one
+        answer. None: they couldn't be read, or may describe another cut.
+        """
+        sid = owner.config.id
+        if sid not in self._markers:
+            try:
+                self._markers[sid] = read_server_markers(
+                    owner.server, owner.config, item_id, duration_ms=duration_ms, canonical_path=self._path
+                )
+            except Exception as exc:
+                logger.debug("Reading markers on {} failed for {}: {}", owner.config.name, self._path, exc)
+                self._markers[sid] = None
+        return self._markers[sid]
 
 
 def build_clients(settings: GlobalMarkersSettings) -> dict[str, Any]:
@@ -1063,6 +1082,21 @@ def _importer_plugin(ctx: PipelineContext, owner: _Owning) -> tuple[bool, str | 
     return found is not None, found or None
 
 
+def _counted_as(ctx: PipelineContext, owner: _Owning, found: list[Candidate]) -> tuple[Source, list[Candidate], str]:
+    """The source a server's markers count as, the markers, and the detail stored with them (spec §5.5 rule 8).
+
+    Markers on a server with an importer plugin are that database's copy; on one whose plugin list couldn't be read
+    they may be, so they count as "none there" and are read again like an empty answer.
+    """
+    if found and owner.config.type in _IMPORTER_PLUGIN_SERVERS:
+        readable, importer = _importer_plugin(ctx, owner)
+        if not readable:
+            return Source.SERVER_MARKERS, [], PLUGINS_UNKNOWN_DETAIL
+        if importer:
+            return Source.SERVER_MARKERS_IMPORTED, found, imported_detail(importer)
+    return Source.SERVER_MARKERS, found, ""
+
+
 def _read_server_markers(
     ctx: PipelineContext, rec: FileRecord, servers: _ItemServers, refresh: bool, *, first_read_only: bool
 ) -> None:
@@ -1091,13 +1125,7 @@ def _read_server_markers(
         item_wide = cfg.type in _ITEM_WIDE_MARKERS
         if item_wide and ctx.store.published_to_item(cfg.id, item_id):
             continue
-        try:
-            found = read_server_markers(
-                owner.server, cfg, item_id, duration_ms=rec.duration_ms, canonical_path=rec.canonical_path
-            )
-        except Exception as exc:
-            logger.debug("Reading markers on {} failed for {}: {}", cfg.name, rec.canonical_path, exc)
-            found = None
+        found = servers.markers(owner, item_id, rec.duration_ms)
         if found is None:
             if not _server_rows(ctx, rec, cfg.id):
                 # Remembered, so a run with everything decided doesn't ask again; a run still missing evidence does.
@@ -1116,15 +1144,7 @@ def _read_server_markers(
             continue
         if item_wide and ctx.store.published_to_item(cfg.id, item_id):
             continue  # another version of this item was published while the read was out: it may show ours
-        source, detail = Source.SERVER_MARKERS, ""
-        if found and cfg.type in _IMPORTER_PLUGIN_SERVERS:
-            readable, importer = _importer_plugin(ctx, owner)
-            if not readable:
-                # They may be a crowd database's copy: stored as "none there", so they don't count and are read again
-                # like an empty answer.
-                found, detail = [], PLUGINS_UNKNOWN_DETAIL
-            elif importer:
-                source, detail = Source.SERVER_MARKERS_IMPORTED, imported_detail(importer)
+        source, found, detail = _counted_as(ctx, owner, found)
         ctx.store.replace_evidence(
             rec.id,
             source,
@@ -1158,6 +1178,71 @@ def _server_markers_due(ctx: PipelineContext, rec: FileRecord, server_id: str, *
         # Check servers keeps to its backoff for an empty answer it already read again.
         return ctx.store.server_recheck_due(rec.id, server_id, now=ctx.now(), after=RECHECK_AFTER)
     return True
+
+
+def _own_types_now(
+    ctx: PipelineContext, rec: FileRecord, servers: _ItemServers, owner: _Owning
+) -> frozenset[MarkerType]:
+    """The types a server shows markers of its own detection of for this file, read from the server on this run.
+
+    Not from stored evidence: a stored answer with markers is never read again, and a server that lost its marker must
+    be seen on the next run. The evidence read shares this answer (``_ItemServers.markers``), so a server the run
+    reads anyway is asked once. "Own" is rule 7's (spec §5.5), from the same code the evidence comes from: the reader
+    answers None for another cut (a Plex item with a version more than 2 s apart, another version's Emby item), an
+    importer plugin's copy counts as its database (``_counted_as``), and Jellyfin's and Emby's readers leave ours out.
+    Plex can't tell ours from its own, so a type this app has on the item or left there from this file is never the
+    server's own, and after a failed write, when what is ours there may be unknown, no type is.
+    """
+    cfg = owner.config
+    item_id = servers.item_id(owner)
+    if not item_id:
+        return frozenset()
+    item_row = ctx.store.get_item_publish_state(cfg.id, item_id)
+    if item_row is not None and item_row.status == "failed":
+        return frozenset()
+    last = ctx.store.get_publish_state(rec.id, cfg.id)
+    ours = {m.type for m in (item_row.markers if item_row else ())} | {m.type for m in (last.markers if last else ())}
+    found = servers.markers(owner, item_id, rec.duration_ms)
+    if found is None:
+        return frozenset()
+    source, found, _detail = _counted_as(ctx, owner, found)
+    if source is not Source.SERVER_MARKERS:
+        return frozenset()
+    return frozenset(c.type for c in found) - ours
+
+
+def _kept_by_every_destination(
+    ctx: PipelineContext,
+    rec: FileRecord,
+    servers: _ItemServers,
+    owners: list[_Owning],
+    types: frozenset[MarkerType],
+) -> frozenset[MarkerType]:
+    """The types no answer of ours would be shown for, so no local detector reads the file for them.
+
+    A type qualifies when every server the file's markers go to keeps its own markers ("Keep Plex's", "Keep Emby's")
+    and shows its own of that type now; a locked type never does (a lock wins, spec §5.5 rule 1). Worked out on every
+    run from the saved settings and what the servers show, and never stored, so switching a server to "Use ours", a
+    server losing its marker or a new destination without one reads the file again. Every server's setting is checked
+    before any server is asked.
+
+    Returns:
+        Those types; empty when any server's settings or markers can't be read.
+    """
+    candidates = types - frozenset(ctx.store.get_locked(rec.id))
+    if not candidates or not owners:
+        return frozenset()
+    try:
+        if not all(_live_markers_settings(ctx, owner.config).keeps_server_markers for owner in owners):
+            return frozenset()
+    except Exception as exc:
+        logger.warning("Couldn't read the saved server settings for {}: {}", rec.canonical_path, type(exc).__name__)
+        return frozenset()
+    for owner in owners:
+        candidates &= _own_types_now(ctx, rec, servers, owner)
+        if not candidates:
+            break
+    return candidates
 
 
 def _row(
@@ -1305,7 +1390,11 @@ def _publish_to(
     servers: _ItemServers,
     ctx: PipelineContext,
     phase: Callable[[str], None],
+    *,
+    kept_own: frozenset[MarkerType] = frozenset(),
 ) -> dict:
+    # kept_own: types this run left undecided because every server keeps its own and the file wasn't read for them.
+    # Only the row's wording names them; what is sent is exactly what an undecided type sends.
     cfg = owner.config
     path = rec.canonical_path
     store = ctx.store
@@ -1399,7 +1488,7 @@ def _publish_to(
     def _up_to_date(kept_types: frozenset[MarkerType]) -> dict:
         if needs_review and not wanted:
             return _row(cfg, publisher.name, ServerStatus.NEEDS_REVIEW, "Sources don't agree yet", path)
-        message = with_kept_note("", kept_note(kept_types, wanted, vendor)) or "Up to date"
+        message = with_kept_note("", kept_note(kept_types, wanted, vendor, not_decided=kept_own)) or "Up to date"
         message = with_kept_note(message, _shown_differently([m for m in wanted if m.type not in kept_types]))
         return _row(cfg, publisher.name, ServerStatus.UP_TO_DATE, message, path)
 
@@ -1459,6 +1548,8 @@ def _publish_to(
         if not wanted and previous == [] and own_previous is None and not holds_kept:
             if needs_review:
                 return _row(cfg, publisher.name, ServerStatus.NEEDS_REVIEW, "Sources don't agree yet", path)
+            if kept_own:
+                return _up_to_date(frozenset())  # the server shows its own, as it would with that type decided
             message = "This server can't show the markers found for this file" if markers else "No markers found"
             return _row(cfg, publisher.name, ServerStatus.NONE, message, path)
 
@@ -1508,7 +1599,7 @@ def _publish_to(
         if not changed and _unchanged(version):
             return _up_to_date(kept)  # a forced run whose write changed nothing
         store.set_publish_basis(rec.id, cfg.id, decided_hash=decided_hash, item_version=version)
-        note = with_kept_note(kept_note(kept, wanted, vendor), _shown_differently(ours))
+        note = with_kept_note(kept_note(kept, wanted, vendor, not_decided=kept_own), _shown_differently(ours))
         override = replaced_own_note(replaced_own, vendor)
 
         def _says_override(row: dict) -> dict:
@@ -1678,6 +1769,9 @@ def _summary(
             parts.append(f"{mtype.value} {_clock(d.marker.start_ms)}–{_clock(d.marker.end_ms)} ({by})")
         elif d.status is DecisionStatus.NEEDS_REVIEW:
             parts.append(f"{mtype.value} needs review")
+        elif d.status is DecisionStatus.DISABLED:
+            # Only a type every server keeps its own of is off among the enabled types (``kept_own_reason``).
+            parts.append(f"{mtype.value}: {d.reason}")
         else:
             parts.append(f"{mtype.value}: none")
     text = "; ".join(parts) or "Nothing to detect for this file"
@@ -1812,6 +1906,11 @@ def _attempt(
     gather_all = ctx.force
     decisions = _decide(ctx, rec, types, intro_limit)
     lookup_ids: MediaIds | None = None
+    # Types every server the markers go to keeps its own of and shows now: an answer of ours would never be shown, so
+    # no local detector reads the file for them. Asked once a detector would run, at most once per run.
+    kept_everywhere: frozenset[MarkerType] | None = None
+    not_read: set[MarkerType] = set()
+    read: set[MarkerType] = set()  # types a detector that still ran answers too
     for source_id in ctx.settings.ordered_enabled_sources():
         source = Source(source_id)
         refresh = _refreshing(ctx, path, source)
@@ -1853,6 +1952,24 @@ def _attempt(
                 for spec in ctx.local_detectors
                 if spec.source is source and _detector_pending(ctx, rec, spec, decisions, types, refresh=refresh)
             ]
+            if pending and kept_everywhere is None:
+                kept_everywhere = _kept_by_every_destination(ctx, rec, servers, owners, types)
+            if pending and kept_everywhere:
+                reading = []
+                for spec in pending:
+                    if _detector_pending(ctx, rec, spec, decisions, types - kept_everywhere, refresh=refresh):
+                        reading.append(spec)
+                        read.update(spec.types)
+                    else:
+                        not_read.update(spec.types & kept_everywhere)
+                if len(reading) < len(pending):
+                    logger.debug(
+                        "Not reading {} at {}: every server keeps its own {}",
+                        os.path.basename(path),
+                        source.value,
+                        " and ".join(t.value for t in MarkerType if t in not_read),
+                    )
+                pending = reading
             if not local and any(_needs_worker(ctx, rec, spec) for spec in pending):
                 return None  # sources already refreshed stay marked; the worker refreshes the rest
             for spec in pending:
@@ -1873,6 +1990,15 @@ def _attempt(
             decisions = _decide(ctx, rec, types, intro_limit)
 
     decisions = _decide(ctx, rec, types, intro_limit)
+    # A type left undecided only because the file wasn't read for it is nothing for the user to review: the servers'
+    # own markers stay whatever it would decide. A type other sources decided anyway stays decided.
+    kept_own = frozenset(t for t in not_read - read if decisions[t].status is not DecisionStatus.DECIDED)
+    if kept_own:
+        reason = kept_own_reason(owner.config.type.value.capitalize() for owner in owners)
+        decisions = {
+            **decisions,
+            **{t: TypeDecision(t, DecisionStatus.DISABLED, None, None, reason) for t in kept_own},
+        }
     fingerprint = ctx.settings.detection_fingerprint()
     if _decisions_changed(ctx.store, rec.id, decisions, fingerprint):
         ctx.store.save_decisions(rec.id, decisions, settings_fingerprint=fingerprint)
@@ -1888,7 +2014,7 @@ def _attempt(
         # Per-server publish state already tolerates a partial fan-out; a busy Plex DB can hold a write for 30 s.
         if cancelled():
             return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
-        row = _publish_to(owner, rec, markers, needs_review, servers, ctx, phase)
+        row = _publish_to(owner, rec, markers, needs_review, servers, ctx, phase, kept_own=kept_own)
         if replaced and row["status"] in (ServerStatus.WRITTEN.value, ServerStatus.UP_TO_DATE.value):
             row[VERIFY_LATER] = True
         rows.append(row)
