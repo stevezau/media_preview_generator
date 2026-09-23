@@ -1,3 +1,7 @@
+---
+description: "Run one Media Preview Generator for Plex, Emby and Jellyfin at once: adding servers, output formats, webhook routing, retries and the Jellyfin plugin."
+---
+
 # Multi-Media-Server Support (Plex / Emby / Jellyfin)
 
 > [Back to Docs](README.md)
@@ -7,7 +11,7 @@ from a single instance. A new file is processed exactly once (one FFmpeg pass
 on the GPU) and the resulting frames are published to **every** configured
 server that owns it, in the format that server expects.
 
-![Servers page showing one card per Plex / Jellyfin / Emby server, each with connection status and library count](images/servers.png)
+![Servers page showing one card per Plex / Jellyfin / Emby server, each with connection status and library count](images/servers.webp)
 
 > [!NOTE]
 > The universal webhook URL is configured on the **Automation** page
@@ -25,7 +29,7 @@ This page covers:
 - [Library ownership and retry semantics](#library-ownership-and-retry-semantics)
 - [Smart dedup: skipping work that's already done](#smart-dedup-skipping-work-thats-already-done)
 - [Slow-backoff retry queue](#slow-backoff-retry-queue)
-- [Jellyfin trickplay extraction flag (the most common gotcha)](#jellyfin-trickplay-extraction-flag-the-most-common-gotcha)
+- [Previews Readiness — the unified "is everything set up right?" panel](#previews-readiness--the-unified-is-everything-set-up-right-panel)
 - [BIF Viewer (multi-server)](#bif-viewer-multi-server)
 - [Plex multi-server auto-discovery](#plex-multi-server-auto-discovery)
 - [REST API summary](#rest-api-summary)
@@ -37,9 +41,9 @@ This page covers:
 Two reasons:
 
 1. **Built-in generation has gaps.**
-   - **Plex's** preview generation is single-threaded software (no GPU support).
-   - **Emby's** Video Preview Thumbnail task is software-only ([forum](https://emby.media/community/index.php?/topic/145196-)) — no GPU support.
-   - **Jellyfin** does support HW-accelerated trickplay generation, but it runs on the same machine as the server, so it competes with playback for CPU and GPU. (A historical issue with the legacy Intel i965 VAAPI driver on older Intel CPUs caused slowness for some users — that's been [resolved upstream](https://github.com/jellyfin/jellyfin/commit/db55d983f83f2b17e749a21ae35968fa0e83a915).)
+   - **Plex** documents no GPU option for preview thumbnails.
+   - **Emby's** Video Preview Thumbnail task is software-only ([forum](https://emby.media/community/index.php?/topic/145196-)) — no GPU option.
+   - **Jellyfin** can use hardware decoding for trickplay, but it's off by default, and by default the job runs at below-normal priority with one thread, inside the server process. (A historical issue with the legacy Intel i965 VAAPI driver on older Intel CPUs caused slowness for some users — that's been [resolved upstream](https://github.com/jellyfin/jellyfin/commit/db55d983f83f2b17e749a21ae35968fa0e83a915).)
 2. **Multi-server users do redundant work.** If you run more than one
    server (a surprisingly common setup), each one generates its own
    previews from the same source files. This tool processes each file
@@ -172,13 +176,21 @@ Each server type expects a different on-disk layout. The app picks the right for
 | Emby | `emby_sidecar` | Next to the media file: `{basename}-{width}-{interval}.bif` |
 | Jellyfin | `jellyfin_trickplay` | Next to the media file: `{basename}.trickplay/{width} - 10x10/{0,1,…}.jpg` (folders of 10×10 tile sheets). Optionally **off the media drive** — see below. |
 
+Because Emby and default-layout Jellyfin write next to the media file, this container needs the media mounted **read-write** for them. A `:ro` mount makes each write fail with "Read-only file system". Plex only writes into its config folder, so `:ro` media is fine there. See [Volume Mounts](getting-started.md#volume-mounts).
+
 **Why Jellyfin's format is different.** Jellyfin (10.9 onwards) reads its own native JPG tile-grid format — *not* BIF. BIF would require users to install a third-party plugin (Jellyscrub) on their Jellyfin server. This app writes the native format, so no extra plugin is needed.
 
 **Optional: store Jellyfin trickplay off the media drive.** By default the app writes tiles next to each video. If you'd rather keep the media drive clean (like Plex), turn on **Store trickplay off the media drive** on the Jellyfin server card. The app then writes into Jellyfin's data folder (`<config>/data/trickplay/<id[:2]>/<id>/{width} - 10x10/`) instead. This needs, all together: the **Media Preview Bridge plugin** installed, Jellyfin's config dir bind-mounted **read-write** into this container (set the path in the server's **Jellyfin config folder** field), and `SaveTrickplayWithMedia` **off** for the libraries. The **Setup Health** tab guides every step and flags anything missing. Flipping this on doesn't move tiles already written next to the media — they stay until cleaned up by the usual orphan sweep or removed manually. See [previews readiness → off-media](guides/previews-readiness.md#jellyfin-config-folder).
 
 **Required Jellyfin library settings.** Three per-library settings need to be set so Jellyfin reads the trickplay folders this app writes — most importantly **Save trickplay images to media folders** = on. The Servers page in this app has a one-click **"Disable on this server"** button that flips all three correctly. See the in-app help for what each setting does.
 
-**Optional Jellyfin plugin (recommended).** Installing the **Media Preview Bridge** plugin (one-click install from the Servers page) makes trickplay register *instantly* the moment this app finishes writing the tiles. Without the plugin, trickplay still appears — but only after Jellyfin's nightly trickplay sweep (default 3 AM) imports the files. See [Jellyfin Plugin](../jellyfin-plugin/README.md) for details.
+**Optional Jellyfin plugin (recommended).** Installing the **Media Preview Bridge** plugin (one-click install from the Servers page) makes trickplay register *instantly* the moment this app finishes writing the tiles. Without the plugin, keep Jellyfin's **Extract trickplay images during library scan** on: Jellyfin then picks the tiles up on its next library scan. With that flag off and no plugin, new tiles wait for Jellyfin's daily trickplay task (3 AM by default). See [Jellyfin Plugin](https://github.com/stevezau/media_preview_generator/blob/dev/jellyfin-plugin/README.md) for details.
+
+To install the plugin by hand instead, add this repository URL in Jellyfin → **Dashboard → Plugins → Repositories**, then install **Media Preview Bridge** from the Catalogue and restart Jellyfin. Updates then arrive through Jellyfin's normal plugin updates.
+
+```text
+https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json
+```
 
 ---
 
@@ -262,13 +274,22 @@ which only exists *after* Plex has scanned the file), the dispatcher
 schedules a retry instead of waiting for the user to fire a manual
 re-run.
 
-**Backoff schedule:** 30 s → 2 m → 5 m → 15 m → 60 m, then give up
-and log. Total ~80 minutes — covers slow Plex full-scan windows
-without becoming a runaway loop.
+The same retry also covers files no server knows yet, stale paths, and
+Emby/Jellyfin publishes still waiting for the server to register the item.
 
-**Coalescing:** one pending retry per canonical path. Subsequent
-webhooks for the same file while a retry is pending replace the
-existing timer rather than piling up new ones.
+**Backoff schedule:** the wait before each retry is 1 m → 2 m → 5 m →
+15 m → 60 m. Two settings under **Settings → Retry policy** shape it:
+
+- **Retry count** (default 3, max 10) sets how many retries run. With the
+  default, that's 1 m → 2 m → 5 m, then it stops (about 8 minutes in
+  total). Set it to 5 for the full ~83-minute schedule. Retries after the
+  fifth wait 60 m each.
+- **Initial retry delay** (default 30) scales the whole schedule by
+  *value ÷ 30*. The default leaves it unchanged, and 60 doubles every wait.
+  Values of 15 or less all halve it (30 s → 1 m → 2.5 m …).
+
+**One job per attempt:** each retry runs as its own "Retry: …" job that
+covers only the files still pending, not the whole original batch.
 
 **Reuses the dedup machinery:** retries call back into the same
 dispatch code path, so the journal short-circuit, frame cache, and

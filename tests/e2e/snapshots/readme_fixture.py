@@ -1,14 +1,19 @@
 """Sanitized fixtures for README screenshot regeneration.
 
 Produces a settings.json + jobs.db pair with plausible — but entirely
-fake — data for docs/images/ captures. No IPs, no real hostnames, no
-real server names. See ``regen_readme.py`` for the capture driver that
+fake — data for docs/images/ captures. No real hostnames, no real
+server names. See ``regen_readme.py`` for the capture driver that
 consumes these helpers.
 
-The fake host ``your-server.local`` is RFC-6762-reserved (``.local``)
-and cannot leak anywhere public. The three vendors (plex / emby /
-jellyfin) are seeded so the Servers page renders a multi-vendor card
-row, matching the README claim that the tool supports all three.
+The fake hosts below are RFC-1918 private addresses (``192.168.1.0/24``)
+— exactly what a real home LAN install would show, but not routable
+anywhere public, so they cannot leak. Each vendor gets its own address
+(``PLEX_HOST`` / ``JELLYFIN_HOST`` / ``EMBY_HOST``) so the Servers page
+renders three visibly distinct cards; ``APP_HOST`` is the address the
+app itself would be reached at (used for webhook URLs in
+``regen_readme.py``). The three vendors (plex / emby / jellyfin) are
+seeded so the Servers page renders a multi-vendor card row, matching
+the README claim that the tool supports all three.
 """
 
 from __future__ import annotations
@@ -19,7 +24,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-FAKE_HOST = "your-server.local"
+APP_HOST = "192.168.1.10"
+APP_PORT = 8080
+PLEX_HOST = "192.168.1.20"
+JELLYFIN_HOST = "192.168.1.21"
+EMBY_HOST = "192.168.1.22"
 
 FAKE_SERVERS: list[dict[str, Any]] = [
     {
@@ -27,7 +36,7 @@ FAKE_SERVERS: list[dict[str, Any]] = [
         "type": "plex",
         "name": "Home Plex",
         "enabled": True,
-        "url": f"https://plex.{FAKE_HOST}:32400",
+        "url": f"http://{PLEX_HOST}:32400",
         "auth": {"token": "x" * 20},
         "verify_ssl": False,
         "timeout": 30,
@@ -49,7 +58,7 @@ FAKE_SERVERS: list[dict[str, Any]] = [
         "type": "jellyfin",
         "name": "Home Jellyfin",
         "enabled": True,
-        "url": f"https://jellyfin.{FAKE_HOST}:8096",
+        "url": f"http://{JELLYFIN_HOST}:8096",
         "auth": {"api_key": "y" * 32},
         "verify_ssl": True,
         "timeout": 30,
@@ -67,7 +76,7 @@ FAKE_SERVERS: list[dict[str, Any]] = [
         "type": "emby",
         "name": "Home Emby",
         "enabled": True,
-        "url": f"https://emby.{FAKE_HOST}:8096",
+        "url": f"http://{EMBY_HOST}:8096",
         "auth": {"api_key": "z" * 32},
         "verify_ssl": True,
         "timeout": 30,
@@ -80,6 +89,26 @@ FAKE_SERVERS: list[dict[str, Any]] = [
         "server_identity": "emby-identity-fake",
     },
 ]
+
+# Clean, non-truncated GPU names for the live-detection API stub
+# (``/api/system/status``) in ``regen_readme.py``. Real ``lspci``/``nvidia-smi``
+# output is often a long raw string (e.g. "Intel Corporation Raptor Lake-S GT1
+# [UHD Graphics 770] (rev 04)") that a narrow sidebar column truncates with an
+# ellipsis — not something we want in a marketing screenshot. ``device``
+# matches the ``device`` key on the corresponding ``gpu_config`` entry above
+# so saved per-GPU worker/thread counts bind to the right card instead of
+# falling back to defaults.
+FAKE_GPUS: list[dict[str, Any]] = [
+    {"type": "nvidia", "device": "cuda:0", "name": "NVIDIA TITAN RTX", "status": "ok"},
+    {"type": "intel", "device": "/dev/dri/renderD128", "name": "Intel UHD Graphics 770", "status": "ok"},
+]
+# Per-GPU worker count, aligned index-for-index with FAKE_GPUS. Single
+# source of truth for both the gpu_config below and the /api/jobs/workers
+# stub in regen_readme.py (the dashboard's "WORKERS" panel) — otherwise the
+# two can silently drift and the panel shows a worker count that doesn't
+# match the "Workers" steppers shown elsewhere on the same page.
+FAKE_GPU_WORKERS = [3, 1]
+FAKE_CPU_THREADS = 4
 
 
 def _base_settings() -> dict[str, Any]:
@@ -95,22 +124,24 @@ def _base_settings() -> dict[str, Any]:
         "thumbnail_interval": 10,
         "thumbnail_quality": 4,
         "regenerate_thumbnails": False,
-        "cpu_threads": 4,
+        "cpu_threads": FAKE_CPU_THREADS,
         "gpu_config": [
             {
                 "index": 0,
+                "device": FAKE_GPUS[0]["device"],
                 "vendor": "NVIDIA",
-                "model": "NVIDIA TITAN RTX",
+                "model": FAKE_GPUS[0]["name"],
                 "enabled": True,
-                "workers": 3,
+                "workers": FAKE_GPU_WORKERS[0],
                 "ffmpeg_threads": 2,
             },
             {
                 "index": 1,
+                "device": FAKE_GPUS[1]["device"],
                 "vendor": "Intel",
-                "model": "Intel UHD Graphics 770",
+                "model": FAKE_GPUS[1]["name"],
                 "enabled": True,
-                "workers": 1,
+                "workers": FAKE_GPU_WORKERS[1],
                 "ffmpeg_threads": 2,
             },
         ],
@@ -244,4 +275,16 @@ def seed_jobs(config_dir: str | Path) -> int:
         storage.close()
 
 
-__all__ = ["FAKE_HOST", "FAKE_SERVERS", "write_settings", "seed_jobs"]
+__all__ = [
+    "APP_HOST",
+    "APP_PORT",
+    "PLEX_HOST",
+    "JELLYFIN_HOST",
+    "EMBY_HOST",
+    "FAKE_SERVERS",
+    "FAKE_GPUS",
+    "FAKE_GPU_WORKERS",
+    "FAKE_CPU_THREADS",
+    "write_settings",
+    "seed_jobs",
+]

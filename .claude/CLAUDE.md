@@ -17,6 +17,10 @@ pytest --no-cov tests/test_config.py            # Single file, skip coverage
 pytest -m e2e -n 8 --no-cov                     # E2E: cap at 8 workers, NOT -n auto (see below)
 pytest -m e2e -n 0 --no-cov                     # E2E serial (also fine)
 pytest -n 0                                     # Serial mode (for debugging)
+
+# Docs — after editing anything under docs/, regenerate llms-full.txt
+python scripts/generate_llms_full.py            # writes llms-full.txt
+python scripts/generate_llms_full.py --check    # CI-style: non-zero exit if stale
 ```
 
 **E2E parallelism cap:** Do NOT run `pytest -m e2e -n auto` on a multi-core box.
@@ -95,7 +99,9 @@ media_preview_generator/
 - Never log Plex tokens. Tokens come via `PLEX_TOKEN` env var.
 - Web endpoints use `@login_required` or `@api_token_required` decorators.
 - File paths sanitized via `utils.sanitize_path()` and `_safe_resolve_within()`.
-- Media paths are read-only; only write to Plex config directories.
+- Write only preview outputs: Plex BIFs into the Plex config dir; Emby BIFs and default-layout Jellyfin
+  trickplay next to the video (so those users need a writable media mount); off-media Jellyfin trickplay
+  into Jellyfin's config dir. Never write anything else under media paths.
 
 ## BIF File Format
 

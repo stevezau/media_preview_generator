@@ -77,4 +77,4 @@ The DLL lands at `bin/Release/net9.0/Jellyfin.Plugin.MediaPreviewBridge.dll`. Dr
 
 ## Release process
 
-Tag with `plugin-vX.Y.Z.W` (matching the Jellyfin version family). The CI workflow at `.github/workflows/jellyfin-plugin.yml` builds the DLL, attaches the zip to a GitHub release, and updates `manifest.json` on the `gh-pages` branch — Jellyfin's plugin catalogue auto-detects the new version.
+Tag with `plugin-vX.Y.Z.W` (matching the Jellyfin version family). The CI workflow at `.github/workflows/jellyfin-plugin.yml` builds the DLL, attaches the zip to a GitHub release, and deploys the updated `manifest.json` to GitHub Pages together with the docs site (via `.github/workflows/docs.yml`) — Jellyfin's plugin catalogue auto-detects the new version.
