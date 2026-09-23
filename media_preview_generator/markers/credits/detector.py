@@ -53,8 +53,9 @@ _WINDOW_VERSION_STEP = 1000
 # Stored with every answer as what it was based on (``detector_runs``). An answer without it was read when the look-back
 # stopped after one step (:func:`credits_text_due`).
 LOOK_BACK_BASIS = "steps back to the earliest kept start"
-# Every step read before the tail shares the one decode's time limit the single step had, so a file's worst case stays
-# what it was: a step that would start past it, or runs past it, ends the look-back with no answer.
+# The first step before the tail keeps the one decode's time limit it always had, counted from its start, and every
+# later step gets what is left of it, so a file's worst case stays what it was. Every later step that would start past
+# it, or runs past it, is a timeout like any decode's (T-R7): the file is asked again the next day.
 LOOK_BACK_TIMEOUT_S = frames.DECODE_TIMEOUT_S
 READING_PHASE = "Reading the credits…"
 REFINING_PHASE = "Refining the credits start…"
@@ -123,10 +124,12 @@ def find_credits(
     run has then crossed the tail's edge, so while it still starts under 30 s after the first row read
     (``rule_j.too_little_story``) the step before is read and put in front too (``rule_j.rows_before``), whether it is
     more of the roll or the story the start needs, until the start has that story. The first step reads what it always
-    has; the later ones never read further back than 30 s before ``earliest_start_s``, and all of them share one
-    decode's time limit (``LOOK_BACK_TIMEOUT_S``). A run still too close to the first row when either stops has no
-    answer, as one that began too early always had. A step can give no keyframe at all; on the GPU no frames is a GPU
-    failure, and the worker's CPU rerun then gives the same no answer.
+    has; the later ones never read further back than 30 s before ``earliest_start_s`` and are never shorter than 30 s
+    (:func:`_next_step_start`), and all of them share one decode's time limit (``LOOK_BACK_TIMEOUT_S``): a later step
+    that runs past it is a timeout, as any decode's is. A run still too close to the first row when the steps stop has
+    no answer, as one that began too early always had. The first step can give no keyframe at all; on the GPU no
+    frames is a GPU failure there, and the worker's CPU rerun then gives the same no answer. A later step with no
+    keyframe is no rows, on the GPU too (:func:`_step_rows`).
 
     Args:
         path: The media file (read only).
@@ -147,7 +150,7 @@ def find_credits(
         The start, the end, and the rows they came from.
 
     Raises:
-        frames.GpuDecodeError: The GPU decode failed or gave no frames.
+        frames.GpuDecodeError: The GPU decode failed, or the tail or the first step before it gave no frames.
         frames.DecodeTimeoutError: A decode, or the start time or video packet probe before them, ran past its time
             limit.
         frames.FrameDecodeError: ffprobe couldn't read the start time, either probe wasn't started (earlier ffprobes
@@ -206,14 +209,10 @@ def find_credits(
             # Stopping with too little story before the run leaves it to text_all_through, which answers nothing.
             if coarse is None or not rule_j.too_little_story(key_rows, coarse):
                 break
-            if not _can_step_back(before_start, earliest_start_s):
+            read_from, before_start = before_start, _next_step_start(before_start, earliest_start_s)
+            if before_start is None:
                 break
-            read_from = before_start
-            before_start = max(earliest_start_s - rule_j.STORY_BEFORE_RUN_S, read_from - rule_j.READ_BEFORE_TAIL_S)
             before_rows = _step_rows(keyframes, before_start, read_from, deadline)
-            if before_rows is None:
-                logger.info("Out of time reading back for the start of the credits of {}", os.path.basename(path))
-                break
             # The run crossed the tail's edge at the first step, so a later step is kept whatever it holds: more of the
             # roll moves the start back, and story is what the start needs before it.
             joined = rule_j.rows_before(before_rows, key_rows)
@@ -242,25 +241,46 @@ def find_credits(
     return CreditsTextResult(start_s, end_s, tuple(key_rows), tuple(fine_rows), tuple(end_rows), overlays)
 
 
-def _can_step_back(read_from_s: float, earliest_start_s: float | None) -> bool:
-    """Whether a step after the first can be read before ``read_from_s``: no further back than the
-    ``rule_j.STORY_BEFORE_RUN_S`` of story a start at ``earliest_start_s`` needs before it. Any start further back is
-    one the decision refuses. None (no bound given) reads no step after the first."""
-    return earliest_start_s is not None and read_from_s > earliest_start_s - rule_j.STORY_BEFORE_RUN_S
+def _next_step_start(read_from_s: float, earliest_start_s: float | None) -> float | None:
+    """Where the step after the first that ends at ``read_from_s`` starts, or None when no such step is read.
+
+    A step is ``rule_j.READ_BEFORE_TAIL_S`` long and reads no further back than the ``rule_j.STORY_BEFORE_RUN_S`` of
+    story a start at ``earliest_start_s`` needs before it: any start further back is one the decision refuses. Nor is
+    it ever shorter than that 30 s. A sliver could hold no keyframe at all, and on the GPU a decode with no frames
+    stands for a GPU failure; so a remainder under 30 s is read with the step before it (up to 150 s long), and one
+    left over after the first step is not read. None (no bound given) reads no step after the first.
+    """
+    if earliest_start_s is None:
+        return None
+    floor_s = earliest_start_s - rule_j.STORY_BEFORE_RUN_S
+    if read_from_s - floor_s < rule_j.STORY_BEFORE_RUN_S:
+        return None
+    start_s = read_from_s - rule_j.READ_BEFORE_TAIL_S
+    return start_s if start_s - floor_s >= rule_j.STORY_BEFORE_RUN_S else floor_s
 
 
 def _step_rows(
     keyframes: Callable[[float, float, float], list[rule_j.Row]], start_s: float, end_s: float, deadline: float
-) -> list[rule_j.Row] | None:
-    """One later step's keyframes, decoded within what is left of the look-back's time, or None when that ran out
-    before or during the decode."""
+) -> list[rule_j.Row]:
+    """One later step's keyframes, decoded within what is left of the look-back's time.
+
+    A step with no keyframe is no rows, on the GPU too: the tail and the first step have already decoded on it, so a
+    GPU decode that exits cleanly with no frames here is the window, not the GPU (``frames.GpuNoFramesError``). Any
+    other GPU failure still raises, for the worker's CPU rerun.
+
+    Raises:
+        frames.DecodeTimeoutError: The look-back's time ran out before or during the decode. It is a timeout like any
+            decode's, so a stalled mount leaves the file for a day (T-R7) rather than storing "nothing found".
+    """
     remaining_s = deadline - time.monotonic()
     if remaining_s <= 0:
-        return None
+        raise frames.DecodeTimeoutError(
+            f"reading before the tail of the credits ran past {LOOK_BACK_TIMEOUT_S:g} s before {end_s:.0f} s"
+        )
     try:
         return keyframes(start_s, end_s - start_s, remaining_s)
-    except frames.DecodeTimeoutError:
-        return None
+    except frames.GpuNoFramesError:
+        return []
 
 
 def _timed_out_lately(rec: FileRecord, ctx: PipelineContext) -> bool:
@@ -419,9 +439,10 @@ def credits_text_due(rec: FileRecord, ctx: PipelineContext) -> bool:
     stopped after one step, on a file where a step after the first can be read now.
 
     Nothing else can differ. A found start had story before it within the one step, so the steps after it are never
-    read and it is the same answer; and where the first step already reaches back to 30 s before the earliest start the
-    decision keeps -- every movie on Automatic, whose first step is all before its 900 s cap -- nothing more is read
-    now. Asked once: the answer it stores is based on :data:`LOOK_BACK_BASIS`.
+    read and it is the same answer; and where no step of 30 s or more fits between the first step and 30 s before the
+    earliest start the decision keeps (:func:`_next_step_start`) -- every movie on Automatic, whose first step is all
+    before its 900 s cap -- nothing more is read now. A file of unknown kind (no season, not a movie) reads the movie
+    tail but has no cap, so it can be asked. Asked once: the answer it stores is based on :data:`LOOK_BACK_BASIS`.
 
     Args:
         rec: The file.
@@ -437,7 +458,7 @@ def credits_text_due(rec: FileRecord, ctx: PipelineContext) -> bool:
         return False
     tail_start = frames.tail_start_s(rec.duration_ms, tail_s=_tail_s(rec, ctx))
     first_step_s = max(0.0, tail_start - rule_j.READ_BEFORE_TAIL_S)
-    return tail_start > 0 and _can_step_back(first_step_s, _earliest_start_s(rec, ctx))
+    return tail_start > 0 and _next_step_start(first_step_s, _earliest_start_s(rec, ctx)) is not None
 
 
 def credits_text_spec() -> LocalDetectorSpec:

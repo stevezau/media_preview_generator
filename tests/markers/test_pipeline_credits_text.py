@@ -233,13 +233,17 @@ class TestStoredAnswers:
     @pytest.mark.parametrize(
         ("kind", "answer", "duration", "window", "asked"),
         [
-            # An episode on Automatic: the one step starts 570 s before the end, and a later one can be read only
-            # while that is more than 30 s after the last 25 % -- from a 36 min episode on.
-            ("episode", (), 2_164_000, None, True),
-            ("episode", (), 2_160_000, None, False),
-            # A 300 s TV window: the one step starts 420 s before the end, so from a 26 min episode on.
-            ("episode", (), 1_564_000, {"tv_s": 300}, True),
-            ("episode", (), 1_560_000, {"tv_s": 300}, False),
+            # An episode on Automatic: the one step starts 570 s before the end, and a later one (never under 30 s) fits
+            # only while that is at or after the last 25 % -- from a 38 min episode on.
+            ("episode", (), 2_280_000, None, True),
+            ("episode", (), 2_279_000, None, False),
+            # A 300 s TV window: the one step starts 420 s before the end, so from a 28 min episode on.
+            ("episode", (), 1_680_000, {"tv_s": 300}, True),
+            ("episode", (), 1_679_000, {"tv_s": 300}, False),
+            # No season and not a movie: the movie's 900 s tail, but no 900 s cap -- the last 25 % bounds it, so a 70 min
+            # file is asked where a movie of the same length is not.
+            ("unknown", (), 4_200_000, None, True),
+            ("movie", (), 4_200_000, None, False),
             # A start that was found had story before it within the one step: the steps never change it.
             ("episode", (Candidate(T.CREDITS, 2_000_000, None, Source.CREDITS_TEXT),), 2_700_000, None, False),
             # A movie on Automatic never: its one step is already all before the 900 s cap.
@@ -253,8 +257,10 @@ class TestStoredAnswers:
     def test_a_nothing_found_from_the_one_step_build_is_read_again_only_where_a_later_step_can_be_read(
         self, request, store, find, kind, answer, duration, window, asked
     ):
-        path = request.getfixturevalue("media" if kind == "episode" else "movie")
+        path = request.getfixturevalue({"episode": "media", "movie": "movie", "unknown": "unknown_kind"}[kind])
         rec = self._stored_by_the_one_step_build(store, path, answer, duration=duration, window=window)
+        assert (rec.season_key is not None, rec.is_movie) == {"episode": (True, False), "movie": (False, True),
+                                                               "unknown": (False, False)}[kind]  # fmt: skip
         version = store.evidence_version(rec.id, Source.CREDITS_TEXT)
         ctx = ctx_for(store, path, credits_window=window)
         out, _ = _run(ctx, path, pubs(), probe=_probe(duration=duration), stage="check")
@@ -361,6 +367,16 @@ def movie(tmp_path):
 
 
 ambiguous = test_pipeline.ambiguous
+
+
+@pytest.fixture
+def unknown_kind(tmp_path):
+    """A file whose path names no id and no episode: neither in a season nor a movie until a server says so."""
+    folder = tmp_path / "media" / "other" / "Home Videos"
+    folder.mkdir(parents=True)
+    f = folder / "Summer Trip.mkv"
+    f.write_bytes(b"x" * 100)
+    return str(f)
 
 
 class TestCreditsWindow:

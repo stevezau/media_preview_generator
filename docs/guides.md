@@ -631,9 +631,12 @@ minutes of an episode, the last 15 minutes of a movie or of a file that isn't re
 20 or 30 minutes. Automatic fits nearly every library: raise a window only if credits are being missed because they
 start earlier than it reaches. When the credits are already rolling where the window begins, the search follows them
 back two minutes at a time until it finds where they start, but only as far as a start could still be used: the last
-quarter of the file, and for a movie 15 minutes from the end (or your movie window, if that is longer). So on
-Automatic a movie is never read further back, and a window that covers your credits is still the surer choice. It
-never spends longer on this than the ten minutes a single decode is allowed. A longer window takes longer to decode for every file, and a window you choose also lets credits start that early: without it a start earlier than the last quarter of the file, or (for a movie window above 15 minutes) more than 15 minutes from the end, would be found and then refused. It never lets credits start before the middle of the file. Changing it reads files
+quarter of the file, and for a movie 15 minutes from the end (or your movie window, if that is longer). The first two
+minutes before the window are always read when the credits fill its start; on Automatic a movie is never read further
+back than that. A file that isn't recognised as an episode or a movie gets the movie window but not the 15-minute
+limit, so for it the last quarter is the limit. A window that covers your credits is still the surer choice. It never
+spends longer on this than the ten minutes a single decode is allowed; a file that runs out of that time (a slow or
+stalled network share) is tried again the next day. A longer window takes longer to decode for every file, and a window you choose also lets credits start that early: without it a start earlier than the last quarter of the file, or (for a movie window above 15 minutes) more than 15 minutes from the end, would be found and then refused. It never lets credits start before the middle of the file. Changing it reads files
 again on the new window (files you leave on Automatic are not read again). Locked markers are unaffected.
 
 **TheIntroDB** is used without the site's written permission (its terms restrict server-side use); it's off by

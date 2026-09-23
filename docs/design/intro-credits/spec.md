@@ -465,13 +465,19 @@ and its answer is version 2's (`rule_j.boxes_of`).
    moves the start back, and story is what the start needs before it. The later steps read no further back than 30 s
    before the earliest credits start rule 2 of §5.5 keeps for the file (`decide.earliest_credits_start_ms`, one
    function both sides call: the last 25 %, or a chosen window never before the middle, and for a movie
-   max(900 s, the movie window) from the end) — any earlier start would be refused, and those 30 s are the story a
-   start on that line needs. The first step reads what it always has, even where it lies wholly before that line (a
-   movie on Automatic, whose tail starts at the 900 s cap): narrowed, it would change answers that were found. All the
-   steps share one decode's 600 s: the first keeps that limit as before, each later one gets what is left of it. A
-   run still too close to the first row when the steps stop has no answer; a later step running out of time is that
-   answer, not a timeout (T-R7). This answers the lab's five Heeramandi episodes, whose 462 s credits start before
-   the 450 s tail, on the roll's first card, in one step. The costs: a roll that starts 0–30 s into the tail after a
+   max(900 s, the movie window) from the end; a file of unknown kind — no season, not a movie — reads the movie's tail
+   but has no such cap) — any earlier start would be refused, and those 30 s are the story a start on that line
+   needs. No later step is shorter than 30 s: a remainder under that is read with the step before it (up to 150 s),
+   and one left right after the first step isn't read. A window that short can hold no keyframe, and on the GPU a
+   decode with no frames stands for a GPU failure, which would rerun the whole file on the CPU. A later step the GPU
+   does decode no frames from is no rows (`frames.GpuNoFramesError`; the tail and the first step have already decoded
+   on that GPU), while any other GPU failure still reruns on the CPU. The first step reads what it always has, even
+   where it lies wholly before that line (a movie on Automatic, whose tail starts at the 900 s cap): narrowed, it
+   would change answers that were found. All the steps share one decode's 600 s: the first keeps that limit as
+   before, each later one gets what is left of it, and a later step that would start past it or runs past it is a
+   timeout like any decode's (T-R7) — a stalled mount leaves the file for a day rather than storing "nothing found".
+   A run still too close to the first row when the steps stop has no answer. This answers the lab's five Heeramandi
+   episodes, whose 462 s credits start before the 450 s tail, on the roll's first card, in one step. The costs: a roll that starts 0–30 s into the tail after a
    scene gets no answer, and so does one whose first card is the tail's own first keyframe with story before the tail
    (the join at the tail's edge is refused; a caption run on a night scene at the start of the tail has the same
    rows). So does one with only its first card before the tail when the anchor steps over it (the join is judged on
@@ -1832,21 +1838,32 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   (`decide.earliest_credits_start_ms`, with `decide.credits_limits_ms` mapping the user's windows for the pipeline
   and the detector alike): the last 25 % (a stepped-back start is outside the chosen window, so the window doesn't
   exempt it), and for a movie max(900 s, the movie window) from the end. The 30 s are the story a start on that line
-  needs. On Automatic a movie takes no step after the first. **The first step is unchanged** even where it lies
-  wholly before that line: narrowed to the line, or to 30 s before it, it turned 1,028 found answers into none on
-  the synthetic sweep below — every one a start the decision refuses, but found answers all the same. All the steps
-  share one decode's 600 s (`detector.LOOK_BACK_TIMEOUT_S`); a later step that runs out of time is no answer, not a
-  timeout. **No found answer moves**: a found start had its story within the tail or the first step, so no later
-  step is read. Checked against the previous build on 32,384 synthetic files (story lit or dark, 2 s or 5 s
-  keyframes, a channel bug or none, a scene after or none, windows of Automatic, 300, 600 and 1800 s): all 15,237 it
-  answered come out the same, decodes included. Of its 17,147 misses 2,804 now have an answer; of the 14,343 left,
+  needs. On Automatic a movie takes no step after the first. A file of unknown kind (no season, not a movie) reads
+  the movie's tail but has no 900 s cap, so the last 25 % bounds it: on Automatic it can step back from 68 min on.
+  **No later step is under 30 s** (`detector._next_step_start`): a remainder under that is read with the step before
+  it, up to 150 s, and one left right after the first step isn't read — a sliver can hold no keyframe, and on the GPU
+  no frames is a GPU failure that reruns the whole file on the CPU (a 36 min 8 s episode with 5 s keyframes would
+  have read a 2 s step). A later step the GPU decodes no frames from is no rows (`frames.GpuNoFramesError`, raised
+  only for a clean exit with no frames; the tail and the first step have already decoded on that GPU); any other GPU
+  failure still reruns. **The first step is unchanged** even where it lies wholly before that line: narrowed to the
+  line, or to 30 s before it, it turned 1,028 found answers into none on the synthetic sweep below — every one a
+  start the decision refuses, but found answers all the same. All the steps share one decode's 600 s
+  (`detector.LOOK_BACK_TIMEOUT_S`): the first keeps its own limit, the later ones get what is left, and a later step
+  that would start past it or runs past it is a **timeout** like any decode's (T-R7). A stalled NFS read on the first
+  step must leave the file for a day, not store a "nothing found" that is never asked again. **No found answer
+  moves**: a found start had its story within the tail or the first step, so no later step is read. Checked against
+  the previous build on 32,384 synthetic files (story lit or dark, 2 s or 5 s keyframes, a channel bug or none, a
+  scene after or none, episodes and movies on Automatic and on 300, 600 and 1800 s windows;
+  `evidence/credits/lookback_sweep.py` reproduces every number here): all 15,237 it answered come out the same,
+  decodes included. Of its 17,147 misses 2,804 now have an answer; of the 14,343 left,
   7,518 began before the earliest start the decision keeps, 5,841 start 30 s or more inside the tail (rule J's own
   misses on the sweep's channel-bug shapes, not the look-back's), 496 have their first card 0–30 s into the tail
   (unchanged, see above), and 488 are a dark story under a channel bug in front of the roll: the bug's frames are
   credit frames there, so the run reaches back through the story — the tail's overlays are the only ones read, and
   that tail holds no story to find the bug in. So `CREDITS_TEXT_VERSION` stays 3. A "nothing found" stored before
   this is asked again once, only while credits are undecided and a step after the first can be read (an episode on
-  Automatic from 36 min, never a movie on Automatic; `detector.credits_text_due`); every answer now carries the basis
+  Automatic from 38 min, a file of unknown kind from 68 min, never a movie on Automatic; `detector.credits_text_due`);
+  every answer now carries the basis
   `detector.LOOK_BACK_BASIS` (`detector_runs`) that tells the two apart. Still costs: a roll that starts 0–30 s into
   the tail after a scene, or on the tail's own first keyframe with story before the tail (the join at the tail's
   edge is refused, as a caption run on a night scene there needs).

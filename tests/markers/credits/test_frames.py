@@ -26,6 +26,7 @@ from media_preview_generator.markers.credits.frames import (
     DecodeTimeoutError,
     FrameDecodeError,
     GpuDecodeError,
+    GpuNoFramesError,
     KeyframeThinning,
 )
 from media_preview_generator.markers.probe import (
@@ -468,11 +469,13 @@ class TestRunDecode:
         assert type(excinfo.value) is error
 
     def test_no_frames_on_the_gpu_is_a_gpu_failure(self):
+        # A GPU failure to everything that catches one; the narrower class is only for the credit text detector's
+        # later steps before the tail, which read an empty window as no rows (a non-zero exit stays the plain class).
         with pytest.raises(GpuDecodeError, match="no frames") as excinfo:
             frames.run_decode(
                 _fake_ffmpeg([], []), hw_active=True, pts_offset_s=0.0, detect_boxes=lambda p: [()] * len(p)
             )
-        assert type(excinfo.value) is GpuDecodeError
+        assert type(excinfo.value) is GpuNoFramesError
 
     def test_no_frames_on_the_cpu_is_an_empty_answer(self):
         assert (
