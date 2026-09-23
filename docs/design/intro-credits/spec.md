@@ -1904,12 +1904,9 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     stored kept status (`decisions`, `outcomes.is_kept_own`), and Check servers reads them back as it reads kept types
     (gone → `Shown.MISSING`; Use ours → released). Existing storage, no schema change; `item_kept_types` and so
     `published_to_item`'s evidence gating are unchanged.
-  - **A Plex version that decided a type isn't left waiting (MED 2).** Plex writes a type only when every version
-    decided it alike, so a version left to Plex's marker would keep another version that decided the type in
-    "Waiting for this item's other versions" forever. A type another local version of the item decided
-    (`store.files_for_item`) is read on a Plex file as before the skip, so the publisher gets exactly the inputs it
-    got before (both agree, Plex's rows kept) rather than a new "don't wait" rule whose result would only be argued
-    identical.
+  - **A Plex version that decided a type isn't left waiting (MED 2; superseded below).** Plex writes a type only when
+    every version decided it alike, so a version left to Plex's marker kept another version that decided the type in
+    "Waiting for this item's other versions" forever.
   - **A kept episode doesn't re-queue its season (MED 3).** Season audio never runs for it, so its stored answer's
     signature never catches up; the three sibling predicates (`season_audio_followups`, `_request_redecide`,
     `season_audio_answer_outdated`) treat its intro as settled, and the season chapter step doesn't ask again for a
@@ -1921,9 +1918,13 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     from an earlier write (a write with nothing to send doesn't read the item), so a version added since read as
     "versions changed" on every Check servers run. Such a row has nothing to agree on across versions, so its read-back
     doesn't compare them.
-  - **The order of a Plex item's versions doesn't matter (MED B).** When a version waits on a type another version
-    left to Plex's marker, it asks the job to run that version again, which now reads the type (MED 2) — a job sorting
-    by path otherwise left the deciding version waiting.
+  - **A Plex item with several versions is read exactly as before this feature (MED B; replaces MED 2's fix).** The
+    per-version fixes (read a version when another decided the type; ask the job to re-run a version left to Plex) each
+    left an order they didn't cover — the last, one scan listing both versions, where the Season follow-up drops the
+    re-run — and three multi-version bugs in a row said the cell doesn't fit the skip: Plex's one marker set per item
+    ties every version's decision together. So a Plex file is never skipped, and never given the kept status, when its
+    item has more than one part (the markers read's own parts request, shared; unknown counts as several), and that
+    machinery is gone. A kept status an earlier build stored on such an item is read again on the file's next run.
   - LOWs: a kept status from a file gone from disk or replaced says nothing about its item; `publish_now` names kept
     types only on a server that still keeps its own and got the last run's rows, and a write with nothing to send
     leaves a failed item row failed, for its retry.

@@ -412,6 +412,7 @@ class _ItemServers:
         self._asked_ids = False
         self._server_ids: MediaIds | None = None
         self._markers: dict[str, list[Candidate] | None] = {}
+        self._parts: dict[str, dict[str, list[int | None] | None]] = {}
 
     def item_id(self, owner: _Owning) -> str | None:
         """The server's item id for this file (hint first), or None when the server doesn't have it (yet).
@@ -459,14 +460,37 @@ class _ItemServers:
         """
         sid = owner.config.id
         if sid not in self._markers:
+            server = _PartsKept(owner.server, self._parts.setdefault(sid, {}))
             try:
                 self._markers[sid] = read_server_markers(
-                    owner.server, owner.config, item_id, duration_ms=duration_ms, canonical_path=self._path
+                    server, owner.config, item_id, duration_ms=duration_ms, canonical_path=self._path
                 )
             except Exception as exc:
                 logger.debug("Reading markers on {} failed for {}: {}", owner.config.name, self._path, exc)
                 self._markers[sid] = None
         return self._markers[sid]
+
+    def part_count(self, owner: _Owning, item_id: str) -> int | None:
+        """How many parts the server's item has across its versions (Plex), as the markers read asked for them; None
+        when that read didn't ask (no markers there) or got no answer."""
+        durations = self._parts.get(owner.config.id, {}).get(item_id)
+        return len(durations) if durations else None
+
+
+class _PartsKept:
+    """A server client whose ``get_part_durations`` answers are kept, so the markers read's request is asked once."""
+
+    def __init__(self, server: Any, kept: dict[str, list[int | None] | None]) -> None:
+        self._server = server
+        self._kept = kept
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._server, name)
+
+    def get_part_durations(self, item_id: str) -> list[int | None] | None:
+        if item_id not in self._kept:
+            self._kept[item_id] = self._server.get_part_durations(item_id)
+        return self._kept[item_id]
 
 
 def build_clients(settings: GlobalMarkersSettings) -> dict[str, Any]:
@@ -1210,30 +1234,12 @@ def _own_types_now(
     if source is not Source.SERVER_MARKERS:
         return frozenset()
     own = frozenset(c.type for c in found) - ours
-    if own and cfg.type is ServerType.PLEX:
-        # Plex shows one set per item and writes a type only once every version decided it alike. Another version
-        # that decided a type would wait on this one forever, so this one is read as before the skip and the publisher
-        # gets what it always got (it then keeps Plex's rows of the type, as before).
-        own -= _decided_on_other_versions(ctx, rec, cfg.id, item_id)
+    if own and cfg.type is ServerType.PLEX and servers.part_count(owner, item_id) != 1:
+        # Plex shows one marker set per item and writes a type only once every version decided it alike, so a version
+        # left undecided keeps the others waiting. An item with several versions (or parts we can't count) is read as
+        # before this feature.
+        return frozenset()
     return own
-
-
-def _request_versions_left_to_the_server(
-    ctx: PipelineContext, rec: FileRecord, server_id: str, item_id: str, types: set[MarkerType]
-) -> None:
-    """Ask again for the item's other versions whose last run left one of ``types`` to the server's own marker.
-
-    Their next run reads the type (``_decided_on_other_versions``), so the item's versions can agree; without it the
-    version that decided it waits until they run for another reason.
-    """
-    paths = []
-    for path in ctx.store.files_for_item(server_id, item_id):
-        other = ctx.store.get_file(path) if path != rec.canonical_path else None
-        decisions = ctx.store.get_decisions(other.id) if other is not None else {}
-        if any(t in decisions and is_kept_own(decisions[t].status, decisions[t].reason) for t in types):
-            paths.append(path)
-    if paths:
-        ctx.request_followups(paths)
 
 
 def _kept_own_applies(ctx: PipelineContext, cfg: ServerConfig, rec: FileRecord, store: MarkerStore) -> bool:
@@ -1244,17 +1250,6 @@ def _kept_own_applies(ctx: PipelineContext, cfg: ServerConfig, rec: FileRecord, 
         logger.warning("Couldn't read the saved settings of {}: {}", cfg.name, type(exc).__name__)
         return False
     return keeps and store.get_publish_state(rec.id, cfg.id) is not None
-
-
-def _decided_on_other_versions(
-    ctx: PipelineContext, rec: FileRecord, server_id: str, item_id: str
-) -> frozenset[MarkerType]:
-    """Types another local file of the same server item decided (its versions that published there, any status)."""
-    decided: set[MarkerType] = set()
-    for path in ctx.store.files_for_item(server_id, item_id):
-        if path != rec.canonical_path:
-            decided.update(markers_for_path(ctx.store, path) or ())
-    return frozenset(decided)
 
 
 def _kept_by_every_destination(
@@ -1668,9 +1663,7 @@ def _publish_to(
         shown_types = {m.type for m in ours} | kept
         waiting_for = [m.type.value for m in wanted if m.type not in shown_types]
         if waiting_for:
-            # Plex shows a type only when every version of the item is decided and agrees on it. A version that left
-            # a type to Plex's own marker reads it on its next run now that this one decided it: ask for that run.
-            _request_versions_left_to_the_server(ctx, rec, cfg.id, item_id, {MarkerType(t) for t in waiting_for})
+            # Plex shows a type only when every version of the item is decided and agrees on it.
             message = with_kept_note(
                 f"Waiting for this item's other versions to agree on: {', '.join(waiting_for)}", note
             )

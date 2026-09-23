@@ -81,6 +81,7 @@ def _plex(path, setting="keep_plex", rows=(PLEX_CREDITS,)):
     reg = _registry(path, ServerType.PLEX)
     reg.configs_by_id["plex-1"].markers["plex"]["on_plex_redetect"] = setting
     reg.get("plex-1").get_markers.return_value = None if rows is None else list(rows)
+    reg.get("plex-1").get_part_durations.return_value = [DUR]  # one version, one part
     return reg
 
 
@@ -143,6 +144,7 @@ class TestNotRead:
         # One read of Plex: the check and the evidence read share it, and Plex's credits are stored as before.
         rec = store.get_file(media)
         assert reg.get("plex-1").get_markers.call_count == 1
+        assert reg.get("plex-1").get_part_durations.call_count == 1  # the version check reuses the read's parts
         assert Candidate(T.CREDITS, 1_290_000, None, Source.SERVER_MARKERS, origin="plex-1") in store.get_evidence(
             rec.id
         )
@@ -298,7 +300,7 @@ class TestReadAsBefore:
 
     @pytest.mark.parametrize(
         "failure",
-        ["emby-plugins-unreadable", "no-item-id", "settings-unreadable", "plex-markers-raise"],
+        ["emby-plugins-unreadable", "no-item-id", "settings-unreadable", "plex-markers-raise", "plex-parts-unknown"],
     )
     def test_whatever_can_t_be_read_reads_the_file(self, store, movie, monkeypatch, failure):
         if failure == "emby-plugins-unreadable":  # its markers may be an importer's copy (PLUGINS_UNKNOWN_DETAIL)
@@ -320,6 +322,8 @@ class TestReadAsBefore:
             monkeypatch.setattr(pipeline, "_live_markers_settings", unreadable)
         elif failure == "plex-markers-raise":
             reg.get("plex-1").get_markers.side_effect = RuntimeError("Plex restarting")
+        elif failure == "plex-parts-unknown":  # can't tell whether the item has one version
+            reg.get("plex-1").get_part_durations.return_value = []
         detectors = _Detectors()
 
         _job(store, reg, movie, detectors, pubs)
