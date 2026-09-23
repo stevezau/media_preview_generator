@@ -1,4 +1,5 @@
 ---
+title: "GPU video preview thumbnails for Plex, Emby and Jellyfin"
 description: Media Preview Generator creates Plex, Emby and Jellyfin video preview thumbnails with GPU-accelerated FFmpeg. Install guide, settings, API and FAQ.
 ---
 

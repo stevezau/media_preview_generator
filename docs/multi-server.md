@@ -1,4 +1,5 @@
 ---
+title: "Preview thumbnails for Plex, Emby and Jellyfin from one instance"
 description: "Run one Media Preview Generator for Plex, Emby and Jellyfin at once: adding servers, output formats, webhook routing, retries and the Jellyfin plugin."
 ---
 

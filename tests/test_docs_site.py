@@ -28,6 +28,7 @@ pytestmark = pytest.mark.timeout(180)
 
 @dataclass
 class _Head:
+    title: str | None = None
     canonical: str | None = None
     description: str | None = None
     og_image: str | None = None
@@ -40,10 +41,14 @@ class _HeadParser(HTMLParser):
         self.head = _Head()
         self._in_json_ld = False
         self._json_chunks: list[str] = []
+        self._in_title = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr = dict(attrs)
-        if tag == "link" and attr.get("rel") == "canonical":
+        if tag == "title":
+            self._in_title = True
+            self.head.title = ""
+        elif tag == "link" and attr.get("rel") == "canonical":
             self.head.canonical = attr.get("href")
         elif tag == "meta" and attr.get("name") == "description":
             self.head.description = attr.get("content")
@@ -54,10 +59,14 @@ class _HeadParser(HTMLParser):
             self._json_chunks = []
 
     def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self.head.title += data
         if self._in_json_ld:
             self._json_chunks.append(data)
 
     def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self._in_title = False
         if tag == "script" and self._in_json_ld:
             self.head.json_ld.append(json.loads("".join(self._json_chunks)))
             self._in_json_ld = False
@@ -186,6 +195,21 @@ class TestHeadTags:
             assert head.description != mkdocs_config.site_description, name
             assert len(head.description) <= 155, name
             assert head.og_image == mkdocs_config.site_url + mkdocs_config.extra["social_image"], name
+
+    def test_search_facing_pages_name_a_media_server_in_title_when_built(self, pages: dict[str, _Head]) -> None:
+        # <title> is the link text in search results. Without a front-matter `title:`, Material
+        # falls back to the short sidebar label ("Compared with Built-ins"), which names no server.
+        reference_pages = {
+            "faq/index.html",
+            "getting-started/index.html",
+            "guides/index.html",
+            "guides/previews-readiness/index.html",
+            "reference/index.html",
+        }
+        for name, head in pages.items():
+            if name in reference_pages:
+                continue
+            assert head.title and re.search(r"Plex|Emby|Jellyfin", head.title), f"{name}: {head.title!r}"
 
     def test_home_json_ld_describes_app_and_website_from_config(
         self, pages: dict[str, _Head], mkdocs_config: MkDocsConfig

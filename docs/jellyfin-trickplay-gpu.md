@@ -1,4 +1,5 @@
 ---
+title: "Faster Jellyfin trickplay generation with a GPU"
 description: "Speed up Jellyfin trickplay with its own settings first (threads, key frames, hardware decode, tone mapping), then offload it to a GPU container."
 ---
 
