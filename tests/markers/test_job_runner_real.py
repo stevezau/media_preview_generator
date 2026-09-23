@@ -212,6 +212,61 @@ class TestRetryThroughThePipeline:
             (setup.path, "markers_published")
         ]
         assert engine.jm.get_file_results(retry.id) == []
+        # Its counts are the file's latest result, not its first run's "Waiting", and they're stored with the job.
+        decided = {"intro": {"chapters": 1}, "credits": {"chapters": 1}}
+        assert _outcome(engine.jm, first) == {"markers_published": 1}
+        assert head.progress.marker_sources == decided
+        stored = JobManager(config_dir=engine.jm.config_dir).get_job(first)
+        assert (stored.progress.outcome, stored.progress.marker_sources) == ({"markers_published": 1}, decided)
+
+    def test_a_file_the_first_run_couldnt_find_counts_in_decided_by_once_the_retry_decides_it(
+        self, engine, setup, monkeypatch
+    ):
+        _, publishers = setup.make([("jf-1", ServerType.JELLYFIN)])
+        copying = setup.path + ".partial"
+        os.rename(setup.path, copying)  # Sonarr's import is still copying the file
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            first = triggers.create_intro_credits_job(
+                library_name="x", priority=2, source="sonarr", file_paths=[setup.path]
+            ).id
+            job_runner.run_intro_credits_job(first)
+            (retry,) = self._retries(engine.jm)
+            assert _outcome(engine.jm, first) == {"skipped_file_not_found": 1}
+            assert not engine.jm.get_job(first).progress.marker_sources
+            os.rename(copying, setup.path)
+            self._run_retry(monkeypatch, retry)
+
+        head = engine.jm.get_job(first)
+        assert head.status is JobStatus.COMPLETED
+        assert _outcome(engine.jm, first) == {"markers_published": 1}
+        assert head.progress.marker_sources == {"intro": {"chapters": 1}, "credits": {"chapters": 1}}
+
+    def test_a_retry_revived_after_a_restart_with_its_file_done_ends_the_chain(self, engine, setup, monkeypatch):
+        # The retry published the file on the head's Files panel, then the app restarted before the retry finished.
+        registry, publishers = setup.make([("jf-1", ServerType.JELLYFIN)])
+        registry.get("jf-1").resolve_remote_path_to_item_id.return_value = None
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            first = triggers.create_intro_credits_job(
+                library_name="x", priority=2, source="sonarr", file_paths=[setup.path]
+            ).id
+            job_runner.run_intro_credits_job(first)
+            (retry,) = self._retries(engine.jm)
+            engine.jm.record_file_result(
+                first,
+                setup.path,
+                "markers_published",
+                "",
+                "",
+                servers=[{"server_id": "jf-1", "status": "markers_written"}],
+            )
+            self._run_retry(monkeypatch, retry)
+
+        publishers["jf-1"].write.assert_not_called()  # read from the head's rows: not written twice
+        head = engine.jm.get_job(first)
+        assert (head.status, head.config["last_outcome"]) == (JobStatus.COMPLETED, "completed")
+        assert _outcome(engine.jm, first) == {"markers_published": 1}
 
     def test_files_that_settled_keep_their_results_while_the_waiting_one_retries(self, engine, setup, monkeypatch):
         registry, publishers = setup.make([("jf-1", ServerType.JELLYFIN)])
@@ -240,6 +295,7 @@ class TestRetryThroughThePipeline:
         assert rows == {second: "markers_published", setup.path: "markers_published"}
         assert [c.args[0] for c in publishers["jf-1"].write.call_args_list] == ["item-jf-2", "item-jf-1"]
         assert engine.jm.get_job(first).status is JobStatus.COMPLETED
+        assert _outcome(engine.jm, first) == {"markers_published": 2}
 
     @pytest.mark.parametrize("count", [1, 2])
     def test_a_file_the_server_never_adds_fails_the_row_when_retries_run_out_as_a_preview_chain_does(
@@ -434,6 +490,8 @@ class TestCheckServersThroughThePipeline(TestRetryThroughThePipeline):
     test_files_that_settled_keep_their_results_while_the_waiting_one_retries = None
     test_a_file_the_server_never_adds_fails_the_row_when_retries_run_out_as_a_preview_chain_does = None
     test_an_old_top_level_retry_job_still_runs = None
+    test_a_retry_revived_after_a_restart_with_its_file_done_ends_the_chain = None
+    test_a_file_the_first_run_couldnt_find_counts_in_decided_by_once_the_retry_decides_it = None
     test_retry_for_one_server_does_not_write_the_server_that_already_has_the_markers = None
     test_a_failed_server_on_the_file_still_retries_the_server_that_hasnt_indexed_it = None
     test_a_folder_job_skips_its_extras_and_queues_no_retry_for_them = None

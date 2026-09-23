@@ -1588,6 +1588,8 @@ class JobManager:
             elif outcome == "completed":
                 job.status = JobStatus.COMPLETED
                 job.completed_at = now_iso
+                # A pause (a stop time's included) ends with the chain, as complete_job ends it.
+                self.clear_pause_flag(job.id)
                 job.progress.retry_eta = None
                 job.progress.retry_wait_total = None
                 job.error = None
@@ -1611,6 +1613,7 @@ class JobManager:
             elif outcome == "exhausted":
                 job.status = JobStatus.FAILED
                 job.completed_at = now_iso
+                self.clear_pause_flag(job.id)
                 job.progress.retry_eta = None
                 job.progress.retry_wait_total = None
                 job.error = reason or f"Retry chain exhausted after {attempt} attempts"
@@ -2091,6 +2094,10 @@ class JobManager:
                     ", ".join(b[:8] for b in blockers),
                 )
                 return False
+            for jid in child_ids:
+                # A retry still counting down to its run stops instead of running for a deleted chain.
+                if self._jobs[jid].status is JobStatus.PENDING:
+                    self.request_cancellation(jid)
             for jid in (job_id, *child_ids):
                 self._delete_job_log_file(jid)
                 self._delete_file_results(jid)
@@ -2638,6 +2645,9 @@ class JobManager:
         with self._lock:
             job = self._jobs.get(job_id)
             if not job or job.status != JobStatus.RUNNING:
+                return False
+            # A chain head shows its hidden retry's run; nothing would ever resume a pause held on the head itself.
+            if is_live_retry_chain(job.config):
                 return False
             if by_schedule and job.paused:
                 return False

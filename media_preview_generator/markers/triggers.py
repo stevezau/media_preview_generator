@@ -13,7 +13,7 @@ from ..job_kinds import JOB_KIND_INTRO_CREDITS
 from ..servers.base import ServerConfig
 from ..servers.ownership import webhook_path_candidates
 from ..servers.registry import UnsupportedServerTypeError, server_config_from_dict
-from ..web.jobs import PRIORITY_HIGH, PRIORITY_NORMAL, Job, get_job_manager
+from ..web.jobs import PRIORITY_HIGH, PRIORITY_NORMAL, Job, get_job_manager, is_live_retry_chain
 from ..web.settings_manager import get_settings_manager
 from .audio.season import season_group
 from .external_ids import ids_from_path, is_season_folder
@@ -341,6 +341,8 @@ def submit_redetect(path: str) -> str:
                 and cfg.get("source") == _REDETECT_SOURCE
                 and cfg.get("force")
                 and list(cfg.get("file_paths") or []) == [path]
+                # A job only counting down to its retry has done its forced run; its retry forces nothing.
+                and not is_live_retry_chain(cfg)
             ):
                 logger.info("Re-detect for {} is already queued as job {}", os.path.basename(path), job.id[:8])
                 return job.id
@@ -390,6 +392,8 @@ def submit_season_publish(episode: str) -> str:
                 job.kind == JOB_KIND_INTRO_CREDITS
                 and cfg.get("source") == _SEASON_PUBLISH_SOURCE
                 and sorted(cfg.get("file_paths") or []) == episodes
+                # A job only counting down to its retry has published; its retry lists only the files still waiting.
+                and not is_live_retry_chain(cfg)
             ):
                 logger.info("Publish for {} is already queued as job {}", os.path.basename(group.folder), job.id[:8])
                 return job.id

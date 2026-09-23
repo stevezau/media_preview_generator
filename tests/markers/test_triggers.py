@@ -570,6 +570,15 @@ class TestRedetect:
         )
         assert triggers.submit_redetect(self.PATH) != preview.id
 
+    def test_a_job_only_counting_down_to_its_retry_is_not_reused(self, jm):
+        # Its forced run is done; its hidden retry forces nothing, so a second Re-detect gets a job of its own.
+        first = triggers.submit_redetect(self.PATH)
+        jm.start_job(first)
+        _schedule_retry(jm, first)
+        second = triggers.submit_redetect(self.PATH)
+        assert second != first
+        assert (jm.get_job(second).config["force"], jm.get_job(second).config["file_paths"]) == (True, [self.PATH])
+
     def test_double_click_creates_one_job(self, jm, monkeypatch):
         real_create_job = jm.create_job
 
@@ -592,6 +601,21 @@ class TestRedetect:
             t.join(timeout=5)
         assert len(results) == 2 and results[0] == results[1]
         assert len(self._ic_jobs(jm)) == 1
+
+
+def _schedule_retry(jm, job_id):
+    """Put a job into the state markers/job_runner.py leaves it in when its files still wait: a scheduled retry."""
+    jm.upsert_retry_chain_job(
+        canonical_path="",
+        basename="",
+        attempt=1,
+        max_attempts=3,
+        next_run_at="2026-09-23T10:01:00+00:00",
+        wait_seconds=60,
+        outcome="scheduled",
+        originating_job_id=job_id,
+    )
+    assert jm.get_job(job_id).status.value == "pending"
 
 
 class TestSeasonPublish:
@@ -705,3 +729,12 @@ class TestSeasonPublish:
     def test_a_preview_job_is_never_reused(self, jm, season):
         preview = jm.create_job(library_name="x", config={"source": "inspector_season", "file_paths": season})
         assert triggers.submit_season_publish(season[0]) != preview.id
+
+    def test_a_job_only_counting_down_to_its_retry_is_not_reused(self, jm, season):
+        # It has published; its hidden retry lists only the files still waiting.
+        first = triggers.submit_season_publish(season[0])
+        jm.start_job(first)
+        _schedule_retry(jm, first)
+        second = triggers.submit_season_publish(season[0])
+        assert second != first
+        assert jm.get_job(second).config["file_paths"] == season

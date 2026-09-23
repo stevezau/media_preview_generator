@@ -56,7 +56,7 @@ from .ownership import marker_libraries
 from .pipeline import budget_exhausted_warnings, build_context, cached_capability, kind_handlers
 from .reconcile import LISTING_CONFIG_KEY, RECONCILE_SOURCE, CheckServersListing
 from .settings import load_server
-from .source_counts import stored_groups
+from .source_counts import DecidedByTally, stored_groups
 from .store import MarkerStore
 
 _POLL_S = 1.0
@@ -178,6 +178,34 @@ def _upsert_chain(
             type(exc).__name__,
             exc,
         )
+
+
+# File outcomes whose markers a run doesn't count in "Decided by" (``pipeline`` counts a file unless it failed; no
+# owner or no file means nothing was decided).
+_NOT_DECIDED_OUTCOMES = frozenset(
+    {FileOutcome.FAILED.value, FileOutcome.NO_OWNERS.value, FileOutcome.FILE_NOT_FOUND.value}
+)
+
+
+def _recount_chain_head(jm, head_id: str, store) -> None:
+    """Count the chain head's outcome and "Decided by" again from its Files-panel rows, which its retries update.
+
+    A retry counts only its own files; the head's row shows every file's latest result. Rows capped by the Files
+    panel's per-outcome limit no longer list every file, so the counts are left as they are then. Never raises; the
+    next chain state (``_upsert_chain``) stores them.
+    """
+    try:
+        rows = jm.get_file_results(head_id, dedup_by_path=True)
+        if any(not row.get("file") for row in rows):
+            return
+        sources = DecidedByTally()
+        for row in rows:
+            if row.get("outcome") not in _NOT_DECIDED_OUTCOMES:
+                sources.add(stored_groups(store, row["file"]))
+        jm.set_job_outcome(head_id, dict(Counter(row.get("outcome") for row in rows)))
+        jm.set_marker_sources(head_id, sources.snapshot())
+    except Exception as exc:
+        logger.warning("Couldn't count the results of Intro & Credits job {} again: {}", head_id, type(exc).__name__)
 
 
 def _end_chain(jm, cfg: dict, waiting: dict[str, set[str]]) -> None:
@@ -1140,8 +1168,9 @@ def run_intro_credits_job(job_id: str) -> None:
                 checks_replaced_later = sent_files and not (cfg.get("verify") or cfg.get("verify_chain"))
                 listed = {item.canonical_path for item in items}
                 # A revived job still owes the later check of the replaced files it published before the restart.
+                # A retry's rows are its chain head's.
                 items, carried, replaced_before_restart, carried_outcomes = _skip_finished_before_restart(
-                    jm, job_id, items, ctx.store
+                    jm, chain_head or job_id, items, ctx.store
                 )
                 if carried_outcomes:
                     # The pipeline never decides for a file without an owner; the store may still hold an old run's.
@@ -1152,6 +1181,10 @@ def run_intro_credits_job(job_id: str) -> None:
                 if not items:
                     jm.set_job_outcome(job_id, carried)
                     _complete(jm, job_id, carried, warnings)
+                    if chain_head:
+                        # A retry revived after a restart that had settled all its files: nothing is left to wait.
+                        _recount_chain_head(jm, chain_head, ctx.store)
+                        _end_chain(jm, cfg, {})
                     if replaced_before_restart and checks_replaced_later:
                         _queue_verify(job, cfg, replaced_before_restart, sender_paths)
                     sweep_store = ctx.store
@@ -1237,6 +1270,8 @@ def run_intro_credits_job(job_id: str) -> None:
                 jm.set_job_outcome(job_id, outcome)
                 # Worker threads store their snapshots in any order; the last one stored may not be the newest.
                 jm.set_marker_sources(job_id, ctx.decided_by.snapshot())
+                if chain_head and not (result["cancelled"] or cancel_check()):
+                    _recount_chain_head(jm, chain_head, ctx.store)
                 if result["cancelled"] or cancel_check():
                     jm.cancel_job(job_id)
                     return

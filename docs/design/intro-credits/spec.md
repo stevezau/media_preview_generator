@@ -1964,3 +1964,8 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   works (the retry reads `force_fire_now`), and a live head isn't run again when the queue resumes; a Check servers
   run or a schedule's job whose only work left is its retry chain doesn't hold back the next run. An old top-level
   "Retry:" job still runs; if its files still wait, it heads a chain of its own.
+  Review fixes (two MEDs, LOWs): Inspector Re-detect and Season Publish don't reuse a job that is only counting down
+  to its retry (its retry is not forced and lists only the waiting files); after each retry the head's outcome and
+  "Decided by" are counted again from its Files-panel rows (`stored_groups`, as a revived job counts); a revived retry
+  reads the head's rows to skip files it settled and ends the chain when none is left; deleting a head cancels its
+  retry still counting down; a live head refuses a pause, and the chain's end clears any pause on it.

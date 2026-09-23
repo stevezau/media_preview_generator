@@ -1319,6 +1319,22 @@ class TestQueueing:
         ):
             assert reconcile.run_markers_reconcile() == ("r1", True)
 
+    @pytest.mark.parametrize("state", ["pending", "running"])
+    def test_a_run_with_only_its_retry_chain_left_doesnt_hold_back_a_new_one(self, jm, state):
+        # Its own check is done; its hidden retry lists only the files a server hadn't added yet.
+        head = MagicMock(
+            id="r0",
+            kind=JOB_KIND_INTRO_CREDITS,
+            config={"reconcile": True, "is_retry_chain": True, "last_outcome": "scheduled"},
+        )
+        getattr(jm, f"get_{state}_jobs").return_value = [head]
+        with (
+            patch("media_preview_generator.markers.triggers.markers_enabled_anywhere", return_value=True),
+            patch("media_preview_generator.markers.triggers.create_intro_credits_job", return_value=MagicMock(id="r1")),
+        ):
+            assert reconcile.unfinished_reconcile_job() is None
+            assert reconcile.run_markers_reconcile() == ("r1", True)
+
     def test_two_calls_at_once_queue_one_job(self, jm):
         created = []
         entered = threading.Event()

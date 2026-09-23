@@ -1371,6 +1371,18 @@ class TestDeleteJobCascadesToRetryChildren:
         assert jm.get_job(b_modern) is not None
         assert jm.get_job(b_legacy) is not None
 
+    def test_delete_chain_head_stops_a_retry_still_counting_down(self, jm):
+        head_id, modern_id, legacy_id = _seed_failed_chain_with_children(jm)
+        waiting = jm.create_job(
+            library_name="Retry: Foo",
+            config={"is_retry": True, "parent_job_id": head_id, "retry_attempt": 2, "max_retries": 3},
+        )
+        assert jm.delete_job(head_id) is True
+        # Its thread's backoff wait polls the flag and stops instead of running for a chain that's gone.
+        assert jm.is_cancellation_requested(waiting.id) is True
+        # Finished children have no thread to stop.
+        assert jm.is_cancellation_requested(modern_id) is False
+
     def test_delete_chain_head_refuses_when_child_is_running(self, jm):
         head_id, modern_id, legacy_id = _seed_failed_chain_with_children(jm)
         # Force the modern child into the running set so it can't be safely
@@ -1384,6 +1396,43 @@ class TestDeleteJobCascadesToRetryChildren:
         assert jm.get_job(head_id) is not None, "head must remain"
         assert jm.get_job(modern_id) is not None, "running child must remain"
         assert jm.get_job(legacy_id) is not None, "siblings must not be partially deleted on refusal"
+
+
+class TestChainHeadPause:
+    """A live chain head does no work itself (its hidden retry runs), so nothing would resume a pause held on it."""
+
+    def _running_head(self, jm):
+        head = _seed_originating_job(jm)
+        jm.upsert_retry_chain_job(
+            canonical_path="", basename="", attempt=1, max_attempts=3, next_run_at=None, wait_seconds=None,
+            outcome="running", originating_job_id=head.id,
+        )  # fmt: skip
+        assert jm.get_job(head.id).status == JobStatus.RUNNING
+        return head.id
+
+    @pytest.mark.parametrize("by_schedule", [False, True], ids=["by-hand", "stop-time"])
+    def test_a_live_chain_head_refuses_a_pause(self, jm, by_schedule):
+        head_id = self._running_head(jm)
+        assert jm.request_pause(head_id, by_schedule=by_schedule) is False
+        head = jm.get_job(head_id)
+        assert head.paused is False and "paused_by_schedule" not in head.config
+        assert jm.is_pause_requested(head_id) is False
+
+    @pytest.mark.parametrize("outcome", ["completed", "exhausted"])
+    def test_the_chain_ending_clears_a_pause_held_on_the_head(self, jm, outcome):
+        head_id = self._running_head(jm)
+        with jm._lock:  # a pause from before the chain took the head over
+            jm._jobs[head_id].paused = True
+            jm._jobs[head_id].config["paused_by_schedule"] = True
+            jm._pause_flags[head_id] = True
+        jm.upsert_retry_chain_job(
+            canonical_path="", basename="", attempt=1, max_attempts=3, next_run_at=None, wait_seconds=None,
+            outcome=outcome, originating_job_id=head_id,
+        )  # fmt: skip
+        head = jm.get_job(head_id)
+        assert head.paused is False and "paused_by_schedule" not in head.config
+        assert jm.is_pause_requested(head_id) is False
+        assert JobManager(config_dir=jm.config_dir).get_job(head_id).paused is False
 
 
 class TestGetStatsExcludesHiddenRetryChildren:
