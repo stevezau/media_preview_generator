@@ -127,9 +127,9 @@ def find_credits(
     has; the later ones never read further back than 30 s before ``earliest_start_s`` and are never shorter than 30 s
     (:func:`_next_step_start`), and all of them share one decode's time limit (``LOOK_BACK_TIMEOUT_S``): a later step
     that runs past it is a timeout, as any decode's is. A run still too close to the first row when the steps stop has
-    no answer, as one that began too early always had. The first step can give no keyframe at all; on the GPU no
-    frames is a GPU failure there, and the worker's CPU rerun then gives the same no answer. A later step with no
-    keyframe is no rows, on the GPU too (:func:`_step_rows`).
+    no answer, as one that began too early always had. A step whose window holds no keyframe isn't empty: ffmpeg gives
+    the first keyframe after the window (exit 0, on the GPU and the CPU alike), which is the first row already read,
+    and the join drops it, so the step adds nothing (``evidence/credits/empty-window-decode.md``).
 
     Args:
         path: The media file (read only).
@@ -150,7 +150,9 @@ def find_credits(
         The start, the end, and the rows they came from.
 
     Raises:
-        frames.GpuDecodeError: The GPU decode failed, or the tail or the first step before it gave no frames.
+        frames.GpuDecodeError: The GPU decode failed or gave no frames. A keyframe pass gives none only when no
+            keyframe follows its start anywhere in the file (a VP9 tail whose container flags none): a window without
+            one gives the first keyframe after it instead.
         frames.DecodeTimeoutError: A decode, or the start time or video packet probe before them, ran past its time
             limit.
         frames.FrameDecodeError: ffprobe couldn't read the start time, either probe wasn't started (earlier ffprobes
@@ -212,7 +214,7 @@ def find_credits(
             read_from, before_start = before_start, _next_step_start(before_start, earliest_start_s)
             if before_start is None:
                 break
-            before_rows = _step_rows(keyframes, before_start, read_from, deadline)
+            before_rows = _step_rows(keyframes, before_start, read_from, deadline, cancel_check, os.path.basename(path))
             # The run crossed the tail's edge at the first step, so a later step is kept whatever it holds: more of the
             # roll moves the start back, and story is what the start needs before it.
             joined = rule_j.rows_before(before_rows, key_rows)
@@ -246,9 +248,12 @@ def _next_step_start(read_from_s: float, earliest_start_s: float | None) -> floa
 
     A step is ``rule_j.READ_BEFORE_TAIL_S`` long and reads no further back than the ``rule_j.STORY_BEFORE_RUN_S`` of
     story a start at ``earliest_start_s`` needs before it: any start further back is one the decision refuses. Nor is
-    it ever shorter than that 30 s. A sliver could hold no keyframe at all, and on the GPU a decode with no frames
-    stands for a GPU failure; so a remainder under 30 s is read with the step before it (up to 150 s long), and one
-    left over after the first step is not read. None (no bound given) reads no step after the first.
+    it ever shorter than that 30 s: a remainder under it is read with the step before it (up to 150 s long), and one
+    left over after the first step is not read. What that saves is a decode of its own -- an ffmpeg start, a seek and
+    a hardware decoder brought up -- for a sliver that holds a keyframe or two at most, and often none: a keyframe pass
+    over a window without one gives the first keyframe after it (exit 0, on the GPU and the CPU alike), which is the
+    first row already read, so :func:`rule_j.rows_before` drops it (``evidence/credits/empty-window-decode.md``).
+    None (no bound given) reads no step after the first.
     """
     if earliest_start_s is None:
         return None
@@ -260,27 +265,29 @@ def _next_step_start(read_from_s: float, earliest_start_s: float | None) -> floa
 
 
 def _step_rows(
-    keyframes: Callable[[float, float, float], list[rule_j.Row]], start_s: float, end_s: float, deadline: float
+    keyframes: Callable[[float, float, float], list[rule_j.Row]],
+    start_s: float,
+    end_s: float,
+    deadline: float,
+    cancel_check: Callable[[], bool] | None,
+    name: str,
 ) -> list[rule_j.Row]:
     """One later step's keyframes, decoded within what is left of the look-back's time.
 
-    A step with no keyframe is no rows, on the GPU too: the tail and the first step have already decoded on it, so a
-    GPU decode that exits cleanly with no frames here is the window, not the GPU (``frames.GpuNoFramesError``). Any
-    other GPU failure still raises, for the worker's CPU rerun.
-
     Raises:
+        frames.DecodeCancelledError: The job was cancelled. Asked first, so a cancel that lands once the time has also
+            run out is recorded as a cancel, not as a timeout that keeps the file back for a day.
         frames.DecodeTimeoutError: The look-back's time ran out before or during the decode. It is a timeout like any
             decode's, so a stalled mount leaves the file for a day (T-R7) rather than storing "nothing found".
     """
+    if cancel_check and cancel_check():
+        raise frames.DecodeCancelledError(f"cancelled before decoding {name}")
     remaining_s = deadline - time.monotonic()
     if remaining_s <= 0:
         raise frames.DecodeTimeoutError(
-            f"reading before the tail of the credits ran past {LOOK_BACK_TIMEOUT_S:g} s before {end_s:.0f} s"
+            f"reading before the tail of the credits of {name} ran past {LOOK_BACK_TIMEOUT_S:g} s before {end_s:.0f} s"
         )
-    try:
-        return keyframes(start_s, end_s - start_s, remaining_s)
-    except frames.GpuNoFramesError:
-        return []
+    return keyframes(start_s, end_s - start_s, remaining_s)
 
 
 def _timed_out_lately(rec: FileRecord, ctx: PipelineContext) -> bool:

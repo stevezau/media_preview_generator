@@ -81,12 +81,6 @@ class GpuDecodeError(FrameDecodeError):
     """The GPU decode failed or gave no frames; the worker reruns the file on the CPU."""
 
 
-class GpuNoFramesError(GpuDecodeError):
-    """The GPU decode exited cleanly and gave no frames. A GPU failure like any other -- unless the file has already
-    decoded on this GPU and the window can hold no keyframe, which the credit text detector's later steps before the
-    tail tell apart (``detector._step_rows``)."""
-
-
 class DecodeTimeoutError(FrameDecodeError):
     """The decode ran past its time limit (on the GPU or the CPU: never a reason to rerun on the CPU, T-R7)."""
 
@@ -413,8 +407,7 @@ def run_decode(
 
     Raises:
         DecodeCancelledError: Cancelled (ffmpeg is killed).
-        GpuDecodeError: The GPU decode exited non-zero, or (:class:`GpuNoFramesError`, a narrower kind) gave no
-            frames.
+        GpuDecodeError: The GPU decode exited non-zero or gave no frames.
         DecodeTimeoutError: The decode (on the GPU or the CPU) ran past ``timeout_s``; ffmpeg is killed.
         FrameDecodeError: ffmpeg couldn't be started, a CPU decode exited non-zero, text detection answered boxes for a
             number of frames it wasn't asked or boxes that aren't four numbers each, or a clean exit wrote a number of
@@ -493,7 +486,7 @@ def run_decode(
         error = GpuDecodeError if hw_active else FrameDecodeError
         raise error(f"ffmpeg exited {returncode} decoding {name} {where}: {tail}")
     if not boxes and hw_active:
-        raise GpuNoFramesError(f"the GPU decoded no frames from {name}")
+        raise GpuDecodeError(f"the GPU decoded no frames from {name}")
     pts = [_parse_pts(value, pts_offset_s) for value in _PTS_RE.findall(stderr)]
     if len(pts) != len(boxes):
         # ffmpeg exited cleanly, so a showinfo line per frame is the contract. Pairing anyway would put a frame's boxes

@@ -519,9 +519,10 @@ class TestFindCredits:
         assert len(decodes.calls) == 2
 
     def test_a_tail_less_than_120_s_into_the_file_reads_from_its_start(self, monkeypatch, probes):
-        # A 500 s episode: the tail starts at 50 s, so the window before it is the file's first 50 s.
+        # A 500 s episode: the tail starts at 50 s, so the window before it is the file's first 50 s. It holds no
+        # keyframe, so ffmpeg gives the first one after it -- the tail's own first row, which the join drops.
         tail = [(50.0 + 2 * i, 3, 10.0) for i in range(224)]
-        decodes = Decodes(tail, [])
+        decodes = Decodes(tail, tail[:1])
         monkeypatch.setattr(detector.frames, "decode_rows", decodes)
         result = detector.find_credits(EPISODE.canonical_path, duration_ms=500_000, is_episode=True, ffmpeg="/ff",
                                        detect_boxes=count, gpu=None, gpu_device_path=None)  # fmt: skip
@@ -569,14 +570,16 @@ LONG_EPISODE_S = 2640  # 44 min: the 450 s tail starts at 2190 s, the last 25 % 
 class FileDecodes:
     """Every decode answered from one file's rows cut to the window asked for, ``[start_s, start_s + length_s)`` (to the
     end with no length): lit story without text, then the roll from ``roll_from`` to the end, a keyframe every
-    ``keyframe_s`` and a 1 fps frame every second. Keyframe windows (by start) in ``timeouts`` run out of time, in
-    ``gpu_fails`` fail on the GPU, and in ``empty`` hold no keyframe; a GPU decode with no frames raises what
-    ``frames.run_decode`` raises for it."""
+    ``keyframe_s`` except in ``no_keyframes`` (a ``[from, to)`` span, as in a long GOP), and a 1 fps frame every second.
+    A keyframe pass over a window with no keyframe in it gives the first keyframe after the window, as ffmpeg does
+    (``evidence/credits/empty-window-decode.md``). Keyframe windows (by start) in ``timeouts`` run out of time, and in
+    ``gpu_fails`` fail on the GPU."""
 
     def __init__(self, roll_from: float, *, duration_s: int = LONG_EPISODE_S, keyframe_s: int = 2,
-                 timeouts: tuple[float, ...] = (), gpu_fails: tuple[float, ...] = (), empty: tuple[float, ...] = ()):  # fmt: skip
+                 no_keyframes: tuple[float, float] = (0.0, 0.0), timeouts: tuple[float, ...] = (),
+                 gpu_fails: tuple[float, ...] = ()):  # fmt: skip
         self.roll_from, self.duration_s, self.keyframe_s = roll_from, duration_s, keyframe_s
-        self.timeouts, self.gpu_fails, self.empty = timeouts, gpu_fails, empty
+        self.no_keyframes, self.timeouts, self.gpu_fails = no_keyframes, timeouts, gpu_fails
         self.calls: list[dict] = []
 
     def row(self, t: float) -> tuple:
@@ -590,13 +593,15 @@ class FileDecodes:
         if keyframes_only and start_s in self.gpu_fails:
             raise frames.GpuDecodeError(f"ffmpeg exited 1 decoding {name} on the GPU")
         end_s = self.duration_s if length_s is None else start_s + length_s
-        every = self.keyframe_s if keyframes_only else 1
-        rows = [self.row(float(t)) for t in range(0, self.duration_s, every) if start_s <= t < end_s]
-        if keyframes_only and start_s in self.empty:
-            rows = []
-        if not rows and kwargs.get("gpu"):
-            raise frames.GpuNoFramesError(f"the GPU decoded no frames from {name}")
-        return rows
+        if not keyframes_only:
+            return [self.row(float(t)) for t in range(0, self.duration_s) if start_s <= t < end_s]
+        keyframes = [
+            float(t) for t in range(0, self.duration_s, self.keyframe_s)
+            if not self.no_keyframes[0] <= t < self.no_keyframes[1]
+        ]  # fmt: skip
+        inside = [t for t in keyframes if start_s <= t < end_s]
+        after = [t for t in keyframes if t >= end_s][:1]
+        return [self.row(t) for t in (inside or after)]
 
     def windows(self, *, keyframes_only: bool | None = None) -> list[tuple[float, float | None]]:
         return [(c["start_s"], c["length_s"]) for c in self.calls if keyframes_only in (None, c["keyframes_only"])]
@@ -747,12 +752,16 @@ class TestStepsBeforeTheTail:
 
     def test_a_step_under_30_s_is_never_read(self, monkeypatch, probes):
         # A 36 min 8 s episode with a keyframe every 5 s, the roll filling the tail and the first step. The last 25 %
-        # is at 1626 s, so a later step could only read 1596-1598 s: a 2 s window with no keyframe, which on the GPU
-        # is a decode with no frames. It isn't read, and the worker has no GPU failure to rerun on the CPU.
+        # is at 1626 s, so a later step could only read 1596-1598 s. That window holds no keyframe, so its decode would
+        # give back the 1600 s keyframe the first step already read: a decode for nothing, and it isn't made.
         decodes = FileDecodes(1000.0, duration_s=2168, keyframe_s=5)
-        result = self._find(monkeypatch, decodes, earliest_start_s=1626.0, gpu="NVIDIA")
+        result = self._find(monkeypatch, decodes, earliest_start_s=1626.0)
         assert (result.start_s, result.fine_rows) == (None, ())
         assert decodes.windows() == [(1718.0, None), (1598.0, 120.0)]
+        assert result.key_rows[0] == decodes.row(1600.0)
+        assert decodes(EPISODE.canonical_path, start_s=1596.0, length_s=2.0, keyframes_only=True) == [
+            decodes.row(1600.0)
+        ]
 
     def test_a_remainder_under_30_s_is_read_with_the_step_before_it(self, monkeypatch, probes):
         # A 45 min episode on Automatic: the tail starts at 2250 s and the last 25 % at 2025 s, so the steps may reach
@@ -762,29 +771,21 @@ class TestStepsBeforeTheTail:
         assert result.start_s is None
         assert decodes.windows() == [(2250.0, None), (2130.0, 120.0), (1995.0, 135.0)]
 
-    @pytest.mark.parametrize(
-        ("step", "raised"),
-        [
-            # A later step the GPU decodes no frames from is no rows: the tail and the first step already decoded on
-            # it. The steps go on (none fits after this one), and no GPU failure reaches the worker.
-            ("later, no frames", None),
-            # Any other GPU failure on a later step still reaches it, for the CPU rerun.
-            ("later, fails", frames.GpuDecodeError),
-            # The first step with no frames is a GPU failure, as it always was.
-            ("first, no frames", frames.GpuNoFramesError),
-        ],
-    )
-    def test_the_gpu_on_a_step_before_the_tail(self, monkeypatch, probes, step, raised):
-        at = 2070.0 if step.startswith("first") else 1950.0
-        decodes = FileDecodes(1990.0, **({"gpu_fails": (at,)} if step.endswith("fails") else {"empty": (at,)}))
-        if raised is None:
-            result = self._find(monkeypatch, decodes, gpu="NVIDIA")
-            assert (result.start_s, result.fine_rows) == (None, ())
-            assert decodes.windows() == [(2190.0, None), (2070.0, 120.0), (1950.0, 120.0)]
-            return
-        with pytest.raises(raised) as excinfo:
+    def test_a_later_step_with_no_keyframe_in_it_adds_nothing(self, monkeypatch, probes):
+        # No keyframe from 1940 s to 2076 s (a long GOP). The second step, 1950-2070 s, holds none, so ffmpeg gives the
+        # 2076 s keyframe after it -- exit 0, on the GPU as on the CPU -- which is the first row the first step already
+        # read, and the join drops it.
+        decodes = FileDecodes(1990.0, no_keyframes=(1940.0, 2076.0))
+        result = self._find(monkeypatch, decodes, gpu="NVIDIA")
+        assert (result.start_s, result.fine_rows) == (None, ())
+        assert decodes.windows() == [(2190.0, None), (2070.0, 120.0), (1950.0, 120.0)]
+        times = [row[0] for row in result.key_rows]
+        assert times[0] == 2076.0 and times.count(2076.0) == 1
+
+    def test_a_gpu_failure_on_a_later_step_still_reaches_the_worker(self, monkeypatch, probes):
+        decodes = FileDecodes(1990.0, gpu_fails=(1950.0,))
+        with pytest.raises(frames.GpuDecodeError, match="exited 1"):
             self._find(monkeypatch, decodes, gpu="NVIDIA")
-        assert type(excinfo.value) is raised
 
     def test_the_first_step_running_out_of_time_is_still_a_timeout(self, monkeypatch, probes):
         # As it always was: the file is left alone for a day (T-R7).
@@ -986,6 +987,19 @@ class TestDetect:
             detector.detect_credits_text(rec, ctx=ctx)
         identity = FileIdentity(rec.canonical_path, rec.size, rec.mtime_ns)
         assert ctx.store.credits_text_timed_out_at(identity) == NOW
+
+    def test_a_cancel_between_steps_before_the_tail_is_a_cancel_not_a_timeout(self, monkeypatch, pool, ctx, probes):
+        # The job is cancelled while the first step decodes, and by the time the second would start the look-back's
+        # time is up too. The cancel is what happened: nothing is recorded, and the file isn't kept back for a day.
+        monkeypatch.setattr(detector, "LOOK_BACK_TIMEOUT_S", 0.0)
+        rec = FileRecord(8, EPISODE.canonical_path, 100, 1, LONG_EPISODE_S * 1000, EPISODE.season_key, False)
+        decodes = FileDecodes(1990.0)
+        monkeypatch.setattr(detector.frames, "decode_rows", decodes)
+        with pytest.raises(DetectorUnavailableError, match="cancelled"):
+            detector.detect_credits_text(rec, ctx=ctx, cancel_check=lambda: len(decodes.calls) >= 2)
+        assert decodes.windows() == [(2190.0, None), (2070.0, 120.0)]
+        identity = FileIdentity(rec.canonical_path, rec.size, rec.mtime_ns)
+        assert ctx.store.credits_text_timed_out_at(identity) is None
 
     def test_a_start_time_probe_that_times_out_waits_a_day_like_a_decode(self, monkeypatch, pool, ctx):
         # The real find_credits: only ffprobe is replaced, stalled on a mount.
