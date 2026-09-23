@@ -370,6 +370,15 @@ def _check_and_record_dedup(source: str, server_id: str | None, canonical_path: 
     return None
 
 
+def _was_recently_dispatched(source: str, server_id: str | None, canonical_path: str) -> bool:
+    """Whether ``_check_and_record_dedup`` saw this ``(source, server_id, path)`` within the TTL, without recording it.
+
+    Caller must hold ``_pending_lock``.
+    """
+    last = _recent_dispatches.get((source, server_id or "", canonical_path))
+    return last is not None and datetime.now(UTC).timestamp() - last < _RECENT_DISPATCH_TTL_SECONDS
+
+
 def _queue_intro_credits_follow_up(
     preview_job_id: str, paths: list[str], source: str, *, item_id_hints: dict[str, dict[str, str]] | None = None
 ) -> None:
@@ -626,21 +635,18 @@ def _extract_sonarr_file_path(payload: dict) -> str:
     return file_path
 
 
-def _extract_sonarr_deleted_paths(payload: dict) -> list[str]:
-    """Extract paths of episode files Sonarr replaced during a Download upgrade.
+def _sonarr_file_list_paths(payload: dict, key: str) -> list[str]:
+    """Paths of the episode files a Sonarr payload lists under ``key``.
 
-    Sonarr's ``Download`` event carries the same ``deletedFiles`` array
-    shape as Radarr — each entry has ``path`` or ``relativePath``
-    (combined with ``series.path``). Returns unique normalised paths in
-    stable order; malformed entries are silently skipped (see
-    :func:`_extract_radarr_deleted_paths` for the rationale).
+    Each entry has ``path`` or ``relativePath`` (combined with ``series.path``). Returns unique normalised paths in
+    stable order; malformed entries are silently skipped (see :func:`_extract_radarr_deleted_paths` for the rationale).
     """
     paths: list[str] = []
     series_path = str(_as_dict(payload.get("series")).get("path", "")).strip()
 
-    raw_deleted = payload.get("deletedFiles") or []
-    if isinstance(raw_deleted, list):
-        for entry in raw_deleted:
+    raw_files = payload.get(key) or []
+    if isinstance(raw_files, list):
+        for entry in raw_files:
             if not isinstance(entry, dict):
                 continue
             absolute = str(entry.get("path") or "").strip()
@@ -651,6 +657,29 @@ def _extract_sonarr_deleted_paths(payload: dict) -> list[str]:
                 paths.append(absolute)
 
     return _dedupe_normalised_paths(paths)
+
+
+def _extract_sonarr_deleted_paths(payload: dict) -> list[str]:
+    """Extract paths of episode files Sonarr replaced during a Download upgrade.
+
+    Sonarr's ``Download`` event carries the same ``deletedFiles`` array
+    shape as Radarr — each entry has ``path`` or ``relativePath``
+    (combined with ``series.path``).
+    """
+    return _sonarr_file_list_paths(payload, "deletedFiles")
+
+
+def _extract_sonarr_import_complete_paths(payload: dict) -> list[str]:
+    """Extract the file paths of Sonarr's "Import Complete" event.
+
+    Sonarr v4 sends it once per import, right after the per-file ``Download`` events (one per episode file). It
+    reuses ``eventType: "Download"`` but has no ``episodeFile``: every imported file is listed under
+    ``episodeFiles[]`` instead, in the same shape as ``deletedFiles``.
+
+    Returns:
+        Unique normalised paths; empty when the payload has no usable ``episodeFiles``.
+    """
+    return _sonarr_file_list_paths(payload, "episodeFiles")
 
 
 _EP_CODE_RE = re.compile(r"\b[Ss](\d{1,3})[Ee](\d{1,3})\b")
@@ -808,7 +837,7 @@ def _schedule_webhook_job(
             "Other webhooks from this source are still being processed. "
             "If this keeps happening, check the sending tool's webhook template includes the file path "
             "(Radarr: 'movieFile.path' or 'movie.folderPath'+'movieFile.relativePath'; "
-            "Sonarr: 'episodeFile.path' or 'series.path'+'episodeFile.relativePath').",
+            "Sonarr: 'episodeFile.path', 'series.path'+'episodeFile.relativePath', or 'episodeFiles[].path').",
             safe_source,
             safe_title,
         )
@@ -1345,6 +1374,10 @@ def _handle_sonarr_compatible_webhook(source: str):
     deleted_paths = _extract_sonarr_deleted_paths(data)
 
     server_id = (request.args.get("server_id") or "").strip() or None
+    if not episode_file_path:
+        import_complete_paths = _extract_sonarr_import_complete_paths(data)
+        if import_complete_paths:
+            return _handle_sonarr_import_complete(source, display_title, import_complete_paths, server_id)
     kwargs = {"server_id": server_id} if server_id else {}
     if deleted_paths:
         kwargs["deleted_paths"] = deleted_paths
@@ -1371,6 +1404,43 @@ def _handle_sonarr_compatible_webhook(source: str):
 
     return (
         jsonify({"success": True, "message": f"Processing queued for '{display_title}'"}),
+        202,
+    )
+
+
+def _handle_sonarr_import_complete(source: str, display_title: str, paths: list[str], server_id: str | None):
+    """Queue the files of a Sonarr "Import Complete" event that no per-file event queued already.
+
+    With "On File Import" on too, Sonarr has just sent one event per file and every file is queued, so this summary
+    is dropped quietly. With only "On Import Complete" on, its files are queued here, through the same
+    ``_schedule_webhook_job`` normalisation and dedup as a per-file event.
+
+    Args:
+        source: ``"sonarr"`` or ``"sportarr"``.
+        display_title: The event's title (series plus every episode code).
+        paths: The event's ``episodeFiles[]`` paths (``_extract_sonarr_import_complete_paths``).
+        server_id: The ``?server_id=`` the webhook URL carries, if any.
+
+    Returns:
+        Flask response tuple.
+    """
+    with _pending_lock:
+        fresh = [path for path in paths if not _was_recently_dispatched(source, server_id, path)]
+    kwargs = {"server_id": server_id} if server_id else {}
+    queued = sum(1 for path in fresh if _schedule_webhook_job(source, display_title, path, **kwargs))
+    if not queued:
+        logger.debug(
+            "Webhook from {}: import-complete event for {!r} ignored — its {} file(s) were already queued by their "
+            "own import events",
+            source,
+            display_title,
+            len(paths),
+        )
+        return jsonify({"success": True, "message": f"'{display_title}': every file was already queued"}), 200
+
+    _add_history_entry(source, "Download", display_title, "queued")
+    return (
+        jsonify({"success": True, "message": f"Processing queued for '{display_title}' ({queued} file(s))"}),
         202,
     )
 

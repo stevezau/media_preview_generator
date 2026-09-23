@@ -1748,7 +1748,9 @@ Automatically generate preview thumbnails when Radarr or Sonarr imports new medi
 2. In Sonarr, go to **Settings → Connect → + → Webhook**
 3. Set **Name**: `Plex Previews`
 4. Set **URL**: paste the Sonarr Webhook URL
-5. Under **Events**, enable **On File Import** and **On File Upgrade**
+5. Under **Events**, enable **On File Import** and **On File Upgrade**. **On Import Complete** can stay on as well: it
+   lists the files of an import again once they're all in, so a file its per-file event already sent is skipped, and
+   a file it's the only one to list is processed.
 6. **Authentication** (use one):
    - **Username/Password** (works in all versions): Leave **Username** empty and set **Password** to your API token or webhook secret. The app treats the password as the token.
    - **Custom headers** (if your webhook form has a Headers section): Add **Key** = `X-Auth-Token`, **Value** = your API token or webhook secret.
@@ -2574,6 +2576,7 @@ Use this table to diagnose common failures quickly.
 | Webhook job sits in **Pending** for a long time | The concurrent-job gate is full — active jobs are running at capacity | Check **Settings → Processing Options → Incoming job priority** is **High** (the default) so webhook jobs take the reserved slot instead of queueing. Otherwise wait for a slot to free up (priority-ordered), raise the cap, or check the global **Pause Processing** toggle isn't on. Pausing ≠ cancelling — paused jobs stay in Pending. |
 | Webhook returns `401` | Invalid or missing authentication | In Sonarr/Radarr webhook settings, leave **Username** empty and set **Password** to your API token or webhook secret. |
 | Webhook test passes but imports do not trigger jobs | Wrong webhook events or webhooks disabled | Enable **On Import** in Radarr/Sonarr and verify `webhook_enabled=true`. |
+| Log warns `Webhook from sonarr: ignored '…' — the payload didn't carry a file path` | The sender's payload has no file path anywhere: no `episodeFile`, no `episodeFiles[]`, no `filePath` (Sonarr's own "On Import Complete" event lists its files, so it never causes this) | Check the sender posts Sonarr's standard webhook body; a custom template or a proxy that rewrites the body must keep `episodeFile.path` (or `series.path` + `episodeFile.relativePath`). |
 | New files are imported but previews are not generated | Plex indexing delay or wrong library mapping | Increase webhook delay and verify Radarr/Sonarr library mapping in Webhooks settings. |
 | Radarr/Sonarr cannot reach webhook URL | Network routing or hostname issue | Use host IP or reachable Docker hostname (not `localhost`), then verify firewall and port `8080`. |
 | New job starts after I paused | Global pause not set or UI not refreshed | Use **Pause Processing** (Current Job or Job Queue header). Pause is global and persisted; in-flight files finish before workers idle. |

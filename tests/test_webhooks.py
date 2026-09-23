@@ -1905,3 +1905,237 @@ class TestWebhookHistoryDiskRoundTrip:
         wh._webhook_history.clear()
         wh._load_history_from_disk()  # must not raise
         assert len(wh._webhook_history) == 0
+
+
+# ---------------------------------------------------------------------------
+# Sonarr v4 "Import Complete" event
+# ---------------------------------------------------------------------------
+
+_SONARR_SERIES = {
+    "id": 412,
+    "title": "Accused: Guilty or Innocent?",
+    "titleSlug": "accused-guilty-or-innocent",
+    "path": "/data_16tb3/TV Shows/Accused Guilty or Innocent (2020) {tvdb-390742}",
+    "tvdbId": 390742,
+    "tvMazeId": 51004,
+    "tmdbId": 112840,
+    "imdbId": "tt13453126",
+    "type": "standard",
+    "year": 2020,
+    "genres": ["Crime", "Documentary"],
+    "images": [],
+    "tags": [],
+    "originalLanguage": {"id": 1, "name": "English"},
+}
+_SONARR_RELEASE = {
+    "quality": "WEBDL-1080p",
+    "qualityVersion": 1,
+    "releaseGroup": "playWEB",
+    "releaseTitle": "Accused.Guilty.or.Innocent.S04.1080p.AMZN.WEB-DL.DDP2.0.H.264-playWEB",
+    "indexer": "Indexer (Prowlarr)",
+    "size": 9876543210,
+    "customFormatScore": 0,
+    "customFormats": [],
+    "indexerFlags": [],
+    "releaseType": "seasonPack",
+}
+
+
+def _sonarr_episode(number: int) -> dict:
+    return {
+        "id": 90000 + number,
+        "episodeNumber": number,
+        "seasonNumber": 4,
+        "title": f"Episode {number}",
+        "airDate": "2026-09-01",
+        "airDateUtc": "2026-09-01T02:00:00Z",
+        "seriesId": 412,
+        "tvdbId": 10500000 + number,
+    }
+
+
+def _sonarr_episode_file(number: int) -> dict:
+    relative = (
+        f"Season 04/Accused Guilty or Innocent (2020) - S04E{number:02d} - Episode {number} "
+        "[AMZN][WEBDL-1080p][EAC3 2.0][h264]-playWEB.mkv"
+    )
+    return {
+        "id": 70000 + number,
+        "relativePath": relative,
+        "path": f"{_SONARR_SERIES['path']}/{relative}",
+        "quality": "WEBDL-1080p",
+        "qualityVersion": 1,
+        "releaseGroup": "playWEB",
+        "sceneName": f"Accused.Guilty.or.Innocent.S04E{number:02d}.1080p.AMZN.WEB-DL.DDP2.0.H.264-playWEB",
+        "size": 1234567890,
+        "dateAdded": "2026-09-23T20:23:05Z",
+        "languages": [{"id": 1, "name": "English"}],
+        "mediaInfo": {"audioChannels": 2.0, "audioCodec": "EAC3", "height": 1080, "videoCodec": "h264", "width": 1920},
+        "sourcePath": f"/downloads/complete/Accused.S04/Accused.S04E{number:02d}.mkv",
+    }
+
+
+def _sonarr_on_import_payload(number: int) -> dict:
+    """Sonarr v4's per-file ``Download`` event ("On File Import"), as ``BuildOnDownloadPayload`` shapes it."""
+    return {
+        "series": dict(_SONARR_SERIES),
+        "episodes": [_sonarr_episode(number)],
+        "episodeFile": _sonarr_episode_file(number),
+        "isUpgrade": False,
+        "downloadClient": "qBittorrent",
+        "downloadClientType": "qBittorrent",
+        "downloadId": "A1B2C3D4E5F6",
+        "customFormatInfo": {"customFormats": [], "customFormatScore": 0},
+        "release": dict(_SONARR_RELEASE),
+        "eventType": "Download",
+        "instanceName": "Sonarr",
+        "applicationUrl": "",
+    }
+
+
+def _sonarr_import_complete_payload(numbers: list[int]) -> dict:
+    """Sonarr v4's "On Import Complete" event, as ``BuildOnImportCompletePayload`` shapes it: the same ``Download``
+    event type, every file under ``episodeFiles[]``, no ``episodeFile``."""
+    return {
+        "series": dict(_SONARR_SERIES),
+        "episodes": [_sonarr_episode(n) for n in numbers],
+        "episodeFiles": [_sonarr_episode_file(n) for n in numbers],
+        "release": dict(_SONARR_RELEASE),
+        "downloadClient": "qBittorrent",
+        "downloadClientType": "qBittorrent",
+        "downloadId": "A1B2C3D4E5F6",
+        "sourcePath": "/downloads/complete/Accused.S04",
+        "destinationPath": f"{_SONARR_SERIES['path']}/Season 04",
+        "isUpgrade": False,
+        "eventType": "Download",
+        "instanceName": "Sonarr",
+        "applicationUrl": "",
+    }
+
+
+@pytest.fixture()
+def _no_timer_threads():
+    """Real batching, without the debounce Timer thread or the early scan-nudge thread."""
+    with (
+        patch("media_preview_generator.web.webhooks.threading.Timer", return_value=MagicMock()),
+        patch("media_preview_generator.web.webhooks._kick_early_scan"),
+    ):
+        yield
+
+
+@pytest.mark.usefixtures("_no_timer_threads")
+class TestSonarrImportComplete:
+    """Sonarr v4 sends a per-file event for each imported file, then one "Import Complete" event listing them all
+    under ``episodeFiles[]``. That second event used to be logged as a payload with no file path (~960 false
+    warnings in 12 h on the owner's server)."""
+
+    @staticmethod
+    def _batch_paths(source: str = "sonarr", server_id: str | None = None) -> set[str]:
+        import media_preview_generator.web.webhooks as wh
+
+        batch = wh._pending_batches.get(wh._debounce_key(source, server_id)) or {}
+        return set(batch.get("file_paths") or set())
+
+    @staticmethod
+    def _statuses() -> list[str]:
+        import media_preview_generator.web.webhooks as wh
+
+        return [entry["status"] for entry in wh._webhook_history]
+
+    def test_import_complete_is_dropped_quietly_when_its_files_were_already_queued(self, client):
+        with patch("media_preview_generator.web.webhooks.logger") as mock_logger:
+            for number in (6, 7):
+                resp = client.post(
+                    "/api/webhooks/sonarr", json=_sonarr_on_import_payload(number), headers=_auth_headers()
+                )
+                assert resp.status_code == 202
+            resp = client.post(
+                "/api/webhooks/sonarr", json=_sonarr_import_complete_payload([6, 7]), headers=_auth_headers()
+            )
+
+        assert resp.status_code == 200
+        assert "already queued" in resp.get_json()["message"]
+        assert self._batch_paths() == {_sonarr_episode_file(6)["path"], _sonarr_episode_file(7)["path"]}
+        assert self._statuses() == ["queued", "queued"], "the summary event must add no history row"
+        warnings = " | ".join(str(call) for call in mock_logger.warning.call_args_list)
+        assert "didn't carry a file path" not in warnings
+        assert any("import-complete" in str(call) for call in mock_logger.debug.call_args_list)
+
+    def test_import_complete_queues_its_files_when_no_per_file_event_did(self, client):
+        """Only "On Import Complete" enabled in Sonarr: its ``episodeFiles[]`` are the only paths we get."""
+        resp = client.post(
+            "/api/webhooks/sonarr", json=_sonarr_import_complete_payload([1, 2, 3]), headers=_auth_headers()
+        )
+
+        assert resp.status_code == 202
+        assert "3 file(s)" in resp.get_json()["message"]
+        assert self._batch_paths() == {_sonarr_episode_file(n)["path"] for n in (1, 2, 3)}
+        assert self._statuses() == ["queued"]
+
+    def test_import_complete_queues_only_the_files_no_per_file_event_queued(self, client):
+        client.post("/api/webhooks/sonarr", json=_sonarr_on_import_payload(1), headers=_auth_headers())
+
+        with patch("media_preview_generator.web.webhooks._schedule_webhook_job", return_value=True) as mock_schedule:
+            resp = client.post(
+                "/api/webhooks/sonarr", json=_sonarr_import_complete_payload([1, 2]), headers=_auth_headers()
+            )
+
+        assert resp.status_code == 202
+        mock_schedule.assert_called_once_with(
+            "sonarr", "Accused: Guilty or Innocent? S04E01, S04E02", _sonarr_episode_file(2)["path"]
+        )
+
+    def test_import_complete_forwards_the_server_pin(self, client):
+        with patch("media_preview_generator.web.webhooks._schedule_webhook_job", return_value=True) as mock_schedule:
+            client.post(
+                "/api/webhooks/sonarr?server_id=plex-b",
+                json=_sonarr_import_complete_payload([2]),
+                headers=_auth_headers(),
+            )
+
+        assert mock_schedule.call_args.kwargs == {"server_id": "plex-b"}
+
+    def test_already_queued_check_is_per_server(self, client):
+        """A per-file event pinned to one server doesn't cover the same file sent for another server."""
+        client.post("/api/webhooks/sonarr?server_id=plex-a", json=_sonarr_on_import_payload(5), headers=_auth_headers())
+
+        resp = client.post(
+            "/api/webhooks/sonarr?server_id=plex-b",
+            json=_sonarr_import_complete_payload([5]),
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 202
+        assert self._batch_paths(server_id="plex-b") == {_sonarr_episode_file(5)["path"]}
+
+    def test_import_complete_uses_series_path_plus_relative_path_when_path_is_missing(self, client):
+        payload = _sonarr_import_complete_payload([4])
+        del payload["episodeFiles"][0]["path"]
+
+        resp = client.post("/api/webhooks/sonarr", json=payload, headers=_auth_headers())
+
+        assert resp.status_code == 202
+        assert self._batch_paths() == {_sonarr_episode_file(4)["path"]}
+
+    def test_import_complete_paths_are_normalised_like_a_per_file_event(self, client):
+        payload = _sonarr_import_complete_payload([3])
+        payload["episodeFiles"][0]["path"] = "/data_16tb3/TV Shows/./Accused//Season 04/../Season 04/E03.mkv"
+
+        client.post("/api/webhooks/sonarr", json=payload, headers=_auth_headers())
+
+        assert self._batch_paths() == {"/data_16tb3/TV Shows/Accused/Season 04/E03.mkv"}
+
+    @pytest.mark.parametrize(
+        "episode_files",
+        [[], ["not-a-dict", 42, None], [{"id": 1}], [{"path": "   ", "relativePath": ""}], "not-a-list"],
+    )
+    def test_payload_without_any_usable_path_still_warns(self, client, episode_files):
+        payload = _sonarr_import_complete_payload([1])
+        payload["episodeFiles"] = episode_files
+        with patch("media_preview_generator.web.webhooks.logger.warning") as mock_warning:
+            resp = client.post("/api/webhooks/sonarr", json=payload, headers=_auth_headers())
+
+        assert resp.status_code == 200
+        assert "no file path" in resp.get_json()["message"].lower()
+        assert "didn't carry a file path" in " | ".join(str(call) for call in mock_warning.call_args_list)
+        assert self._statuses() == ["ignored_no_path"]
