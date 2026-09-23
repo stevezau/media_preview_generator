@@ -2269,9 +2269,9 @@ class TestPlexMarkersReadiness(_MarkerReadinessHarness):
         assert row["severity"] == "critical"
         assert row["ok"] is False
         assert (row["current"], row["recommended"]) == ("another machine", "this machine")
-        assert row["reason"] == (
-            "Run the Plex marker helper next to Plex, or run this app on the same machine as Plex."
-        )
+        assert row["reason"] == ("Run the Plex marker agent next to Plex, or run this app on the same machine as Plex.")
+        # No agent configured for this server, so this app itself must move — not the agent's badge.
+        assert "fix_where" not in row
         assert self._failing_critical(payload) == ["markers_plex_db_local"]
         assert payload["overall_ok"] is False
 
@@ -2627,7 +2627,7 @@ class TestPlexDetectionPerLibrary(_MarkerReadinessHarness):
 
 
 class TestPlexMarkerAgentReadiness(_MarkerReadinessHarness):
-    """The row for the Plex marker helper — the whole write path for a Plex on another machine.
+    """The row for the Plex marker agent — the whole write path for a Plex on another machine.
 
     ``AGENT_UNAVAILABLE`` returns from ``capability()`` before Plex Pass, the marker list, the database and
     detection are read, so without this row a Plex writing no markers at all showed either no Intro & Credits
@@ -2647,25 +2647,25 @@ class TestPlexMarkerAgentReadiness(_MarkerReadinessHarness):
         [
             (
                 {"state": "unreachable"},
-                "The Plex marker helper isn't answering",
+                "The Plex marker agent isn't answering",
                 "can't be reached",
                 "Markers wait here until it answers again. Nothing is lost.",
             ),
             (
                 {"state": "rejected"},
-                "The Plex marker helper refused this app's key",
+                "The Plex marker agent refused this app's key",
                 "key refused",
-                "Set the same shared key on the helper and in the Intro & Credits tab.",
+                "Set the same shared key on the agent and in the Intro & Credits tab.",
             ),
             (
                 {"state": "incompatible"},
-                "The Plex marker helper and this app are different versions",
+                "The Plex marker agent and this app are different versions",
                 "version mismatch",
                 "The Intro & Credits tab says which of the two to update.",
             ),
             (
                 {"state": "connected", "wrong_plex": True},
-                "The Plex marker helper is beside a different Plex",
+                "The Plex marker agent is beside a different Plex",
                 "wrong Plex server",
                 "Check its address in the Intro & Credits tab: markers would have gone into the wrong database.",
             ),
@@ -2674,7 +2674,7 @@ class TestPlexMarkerAgentReadiness(_MarkerReadinessHarness):
             # address, so this cell has to read as "not answering" instead.
             (
                 {"state": "connected"},
-                "The Plex marker helper isn't answering",
+                "The Plex marker agent isn't answering",
                 "can't be reached",
                 "Markers wait here until it answers again. Nothing is lost.",
             ),
@@ -2697,13 +2697,16 @@ class TestPlexMarkerAgentReadiness(_MarkerReadinessHarness):
         assert row["reason"] == reason
         # Nothing this app can toggle for the user → the card shows the read-only badge, not a fix button.
         assert row["actions"] == {}
+        # The fix happens on the agent's own machine, not in Plex's admin UI — servers.js reads this to swap
+        # the badge to "Fix on the agent".
+        assert row["fix_where"] == "agent"
 
     def test_a_working_agent_is_a_passing_row(self):
         capability = self._capability("ready", agent=self._agent(), plex_pass=True, lock_holder=True, fs_type="ext4")
 
         row = self._agent_row(capability)
 
-        assert row["label"] == "The Plex marker helper is connected"
+        assert row["label"] == "The Plex marker agent is connected"
         assert row["ok"] is True
         assert (row["current"], row["recommended"]) == ("connected", "connected")
         assert row["reason"] is None
@@ -2779,28 +2782,30 @@ class TestPlexMarkerAgentReadiness(_MarkerReadinessHarness):
         assert readiness.AGENT_RECOMMENDED == plex_remote.AGENT_CONNECTED
         assert readiness.AGENT_FALLBACK_STATE == plex_remote.AGENT_UNREACHABLE
 
-    def test_the_database_row_names_the_helpers_machine_when_a_helper_did_the_check(self):
-        """The check ran on the helper's machine, so "this machine" would be about the wrong container —
-        and the fix would tell the user to move the app the helper exists to leave where it is."""
+    def test_the_database_row_names_the_agents_machine_when_an_agent_did_the_check(self):
+        """The check ran on the agent's machine, so "this machine" would be about the wrong container —
+        and the fix would tell the user to move the app the agent exists to leave where it is."""
         capability = self._capability("needs_local_db", agent=self._agent(), fs_type="nfs4", db_path="/agent/db")
 
         row = self._marker_checks(self._readiness(self._server_on(), capability))["markers_plex_db_local"]
 
-        assert row["label"] == "The helper isn't on the machine with Plex's database"
-        assert (row["current"], row["recommended"]) == ("another machine", "the helper's machine")
+        assert row["label"] == "The Plex marker agent isn't on the machine with Plex's database"
+        assert (row["current"], row["recommended"]) == ("another machine", "the agent's machine")
         assert row["reason"] == (
-            "Run the helper on the Plex machine, with Plex's config folder mounted from a local disk."
+            "Run the Plex marker agent on the Plex machine, with Plex's config folder mounted from a local disk."
         )
         assert "run this app on the same machine as Plex" not in row["reason"]
-        assert "the helper already does this write for you" in row["explanation"]
+        assert "the Plex marker agent already does this write for you" in row["explanation"]
         # Every piece of the row's copy switches together — a tooltip still saying "this app must run on the
         # Plex machine" would contradict the label right next to it.
         assert row["tooltip"] == (
-            "Markers go straight into Plex's database, so the helper must run on the Plex machine with that "
-            "machine's own copy of Plex's config folder."
+            "Markers go straight into Plex's database, so the Plex marker agent must run on the Plex machine "
+            "with that machine's own copy of Plex's config folder."
         )
+        # The fix happens on the agent's own machine, not in Plex's admin UI.
+        assert row["fix_where"] == "agent"
 
-    def test_the_database_row_keeps_this_machine_without_a_helper(self):
+    def test_the_database_row_keeps_this_machine_without_an_agent(self):
         capability = self._capability("needs_local_db", fs_type="nfs4", db_path="/plex/db")
 
         row = self._marker_checks(self._readiness(self._server_on(), capability))["markers_plex_db_local"]
@@ -2809,14 +2814,17 @@ class TestPlexMarkerAgentReadiness(_MarkerReadinessHarness):
         assert (row["current"], row["recommended"]) == ("another machine", "this machine")
         assert row["tooltip"] == (
             "Markers go straight into Plex's database, so this app must run on the Plex machine, or reach it "
-            "through the helper."
+            "through the agent."
         )
+        # No agent configured, so the fix is on this app's own machine — the shipped "Change in Plex UI" badge.
+        assert "fix_where" not in row
 
-    def test_a_helper_that_can_write_says_so_without_claiming_this_machine(self):
+    def test_an_agent_that_can_write_says_so_without_claiming_this_machine(self):
         capability = self._capability("ready", agent=self._agent(), plex_pass=True, lock_holder=True, fs_type="ext4")
 
         row = self._marker_checks(self._readiness(self._server_on(), capability))["markers_plex_db_local"]
 
-        assert row["label"] == "The helper is on the machine with Plex's database"
+        assert row["label"] == "The Plex marker agent is on the machine with Plex's database"
         assert row["ok"] is True
-        assert (row["current"], row["recommended"]) == ("the helper's machine", "the helper's machine")
+        assert (row["current"], row["recommended"]) == ("the agent's machine", "the agent's machine")
+        assert row["fix_where"] == "agent"

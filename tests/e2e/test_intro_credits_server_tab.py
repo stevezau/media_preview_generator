@@ -531,6 +531,47 @@ class TestPlexTab:
         expect(modal).to_contain_text("Checked: network share ✕ — writes will stay off")
         expect(modal).to_contain_text(SAME_HOST_HINT)
 
+    def test_confirm_modal_same_machine_text_without_an_agent(self, authed_page: Page, app_url: str) -> None:
+        server = _plex_server()
+        _mock_server_page(
+            authed_page,
+            server,
+            _status(server, "ready", "Written into this Plex server's database", _plex_ready_details()),
+        )
+        _open_tab(authed_page, app_url, server)
+
+        _flip_switch_on(authed_page)
+        modal = authed_page.locator("#markersPlexConfirmModal")
+        expect(modal).to_be_visible(timeout=5000)
+        expect(modal).to_contain_text("The app must run on the same machine as Plex.")
+        expect(modal).to_contain_text(SAME_HOST_HINT)
+        expect(authed_page.locator("#markersPlexConfirmSameMachineHint")).to_be_visible()
+        expect(modal).not_to_contain_text("The Plex marker agent writes the markers")
+
+    def test_confirm_modal_drops_the_same_machine_advice_when_the_agent_is_on(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        server = _plex_server()
+        _mock_server_page(
+            authed_page,
+            server,
+            _status(server, "ready", "Written into this Plex server's database", _plex_ready_details()),
+        )
+        _open_tab(authed_page, app_url, server)
+
+        # Switched on live in the form, unsaved — the dialog reads the switch the user just flipped.
+        authed_page.locator("label[for='markersAgentEnabled']").click()
+        _flip_switch_on(authed_page)
+        modal = authed_page.locator("#markersPlexConfirmModal")
+        expect(modal).to_be_visible(timeout=5000)
+        expect(modal).to_contain_text(
+            "The Plex marker agent writes the markers on the Plex machine, so this app can run anywhere."
+        )
+        expect(modal).not_to_contain_text("The app must run on the same machine as Plex.")
+        # The config-folder sub-line's text() is still in the DOM (untouched innerHTML), but the element itself
+        # is display:none — textContent-based assertions above see the text; visibility is what actually matters.
+        expect(authed_page.locator("#markersPlexConfirmSameMachineHint")).to_be_hidden()
+
     @pytest.mark.parametrize(
         ("message", "hint_shown"),
         [
@@ -1294,6 +1335,44 @@ class TestSetupHealthMarkerRows:
         expect(recommended.get_by_text("Dismiss")).to_be_visible()
 
         expect(authed_page.locator("#editReadinessBadge")).to_have_text("action needed")
+
+    def test_agent_row_says_fix_on_the_agent_unlike_plex_pass(self, authed_page: Page, app_url: str) -> None:
+        """One payload, two badges: the agent row's fix lives on the agent, Plex Pass's fix lives in Plex."""
+        from media_preview_generator.markers.readiness import MarkerFacts, plex_section
+
+        facts = MarkerFacts(
+            enabled=True,
+            state="agent_unavailable",
+            details={"agent": {"state": "unreachable"}, "plex_pass": False},
+        )
+        payload = {"vendor": "plex", "overall_ok": False, "sections": [plex_section(facts)]}
+
+        self._open_health(authed_page, app_url, _plex_server(), payload)
+
+        must_fix = authed_page.locator("#editReadinessBody details[data-tier='critical']")
+        expect(must_fix).to_contain_text("The Plex marker agent isn't answering", timeout=5000)
+        expect(must_fix).to_contain_text("Skip buttons need Plex Pass")
+        expect(must_fix).to_contain_text("Fix on the agent")
+        expect(must_fix).to_contain_text("Change in Plex UI")
+
+    def test_database_row_with_an_agent_says_fix_on_the_agent(self, authed_page: Page, app_url: str) -> None:
+        from media_preview_generator.markers.readiness import MarkerFacts, plex_section
+
+        facts = MarkerFacts(
+            enabled=True,
+            state="needs_local_db",
+            details={"agent": {"state": "connected"}, "fs_type": "nfs4", "db_path": "/agent/db"},
+        )
+        payload = {"vendor": "plex", "overall_ok": False, "sections": [plex_section(facts)]}
+
+        self._open_health(authed_page, app_url, _plex_server(), payload)
+
+        must_fix = authed_page.locator("#editReadinessBody details[data-tier='critical']")
+        expect(must_fix).to_contain_text(
+            "The Plex marker agent isn't on the machine with Plex's database", timeout=5000
+        )
+        expect(must_fix).to_contain_text("Fix on the agent")
+        expect(must_fix).not_to_contain_text("Change in Plex UI")
 
     @staticmethod
     def _detection_envelope(library_detection: dict | None, *, keep_plex: bool = False) -> dict:

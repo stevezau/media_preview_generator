@@ -812,8 +812,8 @@
                 <p>Plex has no way for apps to add intro or credits markers, so they are written straight into Plex's database — the same place Plex stores its own.</p>
                 <ul class="mb-0">
                     <li>Tested on Plex 1.43. A future Plex update could change this; we stop writing if the database looks different.</li>
-                    <li>The app must run on the same machine as Plex. <span id="markersPlexConfirmLocal"></span>
-                        <div class="text-muted">Map Plex's config folder into both containers from the identical host path (on unRAID, don't mix /mnt/user and /mnt/cache).</div>
+                    <li><span id="markersPlexConfirmSameMachineText">The app must run on the same machine as Plex.</span> <span id="markersPlexConfirmLocal"></span>
+                        <div class="text-muted" id="markersPlexConfirmSameMachineHint">Map Plex's config folder into both containers from the identical host path (on unRAID, don't mix /mnt/user and /mnt/cache).</div>
                     </li>
                     <li>If Plex re-detects an item itself, it can replace ours. The next job that checks the file puts them back, unless you choose to keep Plex's.</li>
                     <li>Viewers need Plex Pass (or Plex Home) to see skip buttons.</li>
