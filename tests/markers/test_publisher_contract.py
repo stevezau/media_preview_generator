@@ -19,7 +19,7 @@ from unittest.mock import ANY, MagicMock, create_autospec, patch
 import pytest
 
 from media_preview_generator.markers import pipeline, reconcile
-from media_preview_generator.markers.models import Marker, MarkerType
+from media_preview_generator.markers.models import Candidate, Marker, MarkerType, Source
 from media_preview_generator.markers.outcomes import FileOutcome
 from media_preview_generator.markers.probe import Chapter, MediaProbe
 from media_preview_generator.markers.publishers import plex_db
@@ -379,9 +379,11 @@ class PlexItem:
             lambda path, *, ffprobe: MediaProbe(self.durations.get(path, DUR), self.chapters.get(path, ())),
         )
 
-    def run(self, version: str, *, force: bool = False):
+    def run(self, version: str, *, force: bool = False, detectors=()):
         item = ProcessableItem(canonical_path=self.paths[version], server_id="plex-1")
-        return pipeline.check_item(item, ctx=_ctx(self.store, self.registry, settings_raw=NO_ONLINE, force=force))
+        ctx = _ctx(self.store, self.registry, settings_raw=NO_ONLINE, force=force, detectors=detectors)
+        # A registered detector needs a worker; none of these touch the file, so the worker stage runs them here.
+        return (pipeline.process_item if detectors else pipeline.check_item)(item, ctx=ctx)
 
     def touch(self, version: str, ns: int) -> None:
         """A replaced file: same path, new identity."""
@@ -1084,6 +1086,32 @@ def _native_intro(item: PlexItem, start: int = 60_000, end: int = 90_000) -> Non
     )
 
 
+PLEX_CREDITS = ("credits", 1_295_324, DUR - 2_000)  # Plex's own, stored 2 s earlier and not flagged final
+TEXT_CREDITS_SHOWN = ("credits", 1_296_000, DUR - 2_000)  # its end taken from the agreeing Plex marker (rule 7)
+
+
+def _native_credits(item: PlexItem) -> None:
+    """Plex's own credits detection, in its database and in what its API serves for the item."""
+    item._sql(
+        (
+            "INSERT INTO taggings (metadata_item_id, tag_id, [index], text, time_offset, end_time_offset, thumb_url, "
+            "created_at, extra_data) VALUES (7, 563, 0, 'credits', ?, ?, '', 0, '')",
+            (PLEX_CREDITS[1] - 2_000, DUR),
+        ),
+        PLEX_NUMBERING,
+    )
+    item.server.get_markers.return_value = [
+        {"type": "credits", "start_ms": PLEX_CREDITS[1], "end_ms": PLEX_CREDITS[2], "final": False}
+    ]
+    item.server.get_part_durations.return_value = [DUR]
+
+
+def _credit_text() -> tuple[MagicMock, tuple]:
+    """A credit text detector answering 0.7 s after Plex's credits start (they agree), and its registration."""
+    text = MagicMock(return_value=[Candidate(MarkerType.CREDITS, TEXT_CREDITS_SHOWN[1], None, Source.CREDITS_TEXT)])
+    return text, (pipeline.LocalDetectorSpec(Source.CREDITS_TEXT, frozenset({MarkerType.CREDITS}), text),)
+
+
 def _published_then_replaced(plex_item, setting: str, versions=("1080p",)) -> PlexItem:
     item = plex_item(versions=versions)
     item.cfg.markers["plex"]["on_plex_redetect"] = setting
@@ -1395,7 +1423,7 @@ class TestKeepPlexsPerType:
         # its own of, which a type left undecided under Keep Plex's makes on every run (spec §6.2 step 3) and never
         # stores.
         assert plex_evidence() == evidence
-        assert item.server.get_markers.call_count - before <= 1
+        assert item.server.get_markers.call_count - before == 1
 
     @pytest.mark.parametrize("trigger", ["switched-to-use-ours", "plex-dropped-its-rows"])
     def test_a_kept_only_item_with_nothing_decided_any_more_leaves_check_servers_after_one_run(
@@ -1428,6 +1456,62 @@ class TestKeepPlexsPerType:
         assert (item.recorded(), item.kept()) == ([], set())
         assert _writes(statements) == [] and item.commits == 1
         assert item.served() == ([PLEX_INTRO] if trigger == "switched-to-use-ours" else [])
+
+    @pytest.mark.parametrize("trigger", ["switched-to-use-ours", "plex-dropped-its-rows"])
+    def test_a_type_left_to_plexs_own_marker_is_read_back_and_run_again_once_ours_could_show(
+        self, plex_item, monkeypatch, trigger
+    ):
+        # Architecture review MED 1: a type every server keeps its own of is never decided (spec §6.2 step 3), so
+        # nothing of ours is on the item. Check servers still reads Plex's marker back and runs the file once Plex
+        # lost it or the server uses ours, as it did when the type was decided and kept.
+        item = plex_item(versions=("1080p",))
+        path = item.paths["1080p"]
+        item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
+        _native_credits(item)
+        text, detectors = _credit_text()
+        statements = _plex_statements(monkeypatch)
+
+        out = item.run("1080p", detectors=detectors)
+
+        assert text.call_count == 0
+        assert (out.publisher_rows[0]["status"], out.publisher_rows[0]["message"]) == (
+            "markers_up_to_date",
+            "Keeping Plex's credits",
+        )
+        assert _writes(statements) == [] and item.commits == 0
+        assert (item.recorded(), item.kept(), item.served()) == ([], set(), [PLEX_CREDITS])
+        assert _check_servers(item) == []  # Plex still shows its own credits
+        if trigger == "switched-to-use-ours":
+            item.cfg.markers["plex"]["on_plex_redetect"] = "restore"
+        else:
+            item._sql(("DELETE FROM taggings WHERE metadata_item_id=7 AND text='credits'",))
+            item.server.get_markers.return_value = []
+
+        assert _check_servers(item) == [("7", (path,))]
+        item.run("1080p", detectors=detectors)
+        assert _check_servers(item) == []
+
+        assert text.call_count == 1
+        assert item.recorded() == item.served() == [TEXT_CREDITS_SHOWN] and item.commits == 1
+
+    def test_a_version_that_decided_a_type_plex_keeps_isnt_left_waiting_on_one_that_didnt(self, plex_item):
+        # Architecture review MED 2: one cut in two versions, Plex showing its own credits. 2160p decides the credits
+        # from its chapter; 1080p would be left to Plex's marker, and 2160p would wait forever for it to agree. So
+        # 1080p is read as before the skip, and the publisher gets what it always got: both agree, Plex's rows stay.
+        item = plex_item(versions=("1080p", "2160p"))
+        item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
+        _native_credits(item)
+        item.server.get_part_durations.return_value = [DUR, DUR]
+        item.chapters[item.paths["2160p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X)
+        text, detectors = _credit_text()
+
+        outs = [item.run(version, detectors=detectors) for version in ("2160p", "1080p", "2160p")]
+
+        assert text.call_count == 1  # 1080p read its credits
+        assert _outcomes(*outs) == ["waiting", "published", "up_to_date"]
+        assert outs[2].publisher_rows[0]["message"] == "Keeping Plex's credits"
+        assert item.served() == [SHOWN_INTRO, PLEX_CREDITS] and item.kept() == {"credits"}
 
     def test_kept_types_keep_the_parts_own_key(self, plex_item):
         # Plex rebuilds its rows from the part's pv: keys when it re-detects: a kept type's key isn't ours to change.

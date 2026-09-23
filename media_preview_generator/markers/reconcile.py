@@ -135,8 +135,10 @@ def find_drift(
             for first in range(0, len(rows), READ_BACK_BATCH):
                 if cancel_check and cancel_check():
                     break
+                # A type a file left to the server's own marker is read back like a kept one: gone from the server,
+                # or the server set to use ours, and the file runs again.
                 batch = [
-                    (r.item_id, list(r.markers), r.kept_types, r.item_files)
+                    (r.item_id, list(r.markers), r.kept_types | r.own_types, r.item_files)
                     for r in rows[first : first + READ_BACK_BATCH]
                 ]
                 read = publisher.shows_many(batch, cancel_check=cancel_check)
@@ -185,8 +187,9 @@ def _drifted(
         if shown is None:
             unreadable += 1
             continue
-        # A type kept as the server's own goes back to ours once the server is set to use ours: the pipeline writes it.
-        if shown is Shown.OURS and row.kept_types and release_kept:
+        # A type kept as the server's own (or left to it undecided) goes back to ours once the server is set to use
+        # ours: the pipeline reads and writes it.
+        if shown is Shown.OURS and (row.kept_types or row.own_types) and release_kept:
             shown = Shown.REPLACED
         if shown is Shown.OURS:
             continue

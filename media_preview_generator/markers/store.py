@@ -22,6 +22,7 @@ from loguru import logger
 
 from .decide import DecisionStatus, TypeDecision
 from .models import SERVER_SOURCES, Candidate, FileIdentity, Marker, MarkerType, Source
+from .outcomes import is_kept_own
 from .sources.server_markers import importer_database
 
 SCHEMA_VERSION = 2
@@ -322,6 +323,10 @@ class ItemPublishStateRow:
     kept_types: frozenset[MarkerType] = frozenset()
     # The item's version files when this app last wrote it (Plex); None when not recorded.
     item_files: tuple[str, ...] | None = None
+    # Types a file of the item left to the server's own marker without deciding them (the kept status,
+    # ``outcomes.is_kept_own``), read from those files' decisions. Filled by ``published_items`` only, so Check servers
+    # reads them back; kept apart from ``kept_types``, which ``published_to_item`` reads.
+    own_types: frozenset[MarkerType] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -1542,7 +1547,8 @@ class MarkerStore:
         return bool(row and (row.markers or row.kept_types))
 
     def published_items(self, server_id: str) -> list[ItemPublishStateRow]:
-        """Server items where this app's last write succeeded and left markers of ours (or kept the server's own).
+        """Server items where this app's last write succeeded and left markers of ours, kept the server's own, or
+        left a type to the server's own marker without deciding it (``ItemPublishStateRow.own_types``).
 
         Args:
             server_id: The server.
@@ -1557,6 +1563,14 @@ class MarkerStore:
             kept: dict[str, set[MarkerType]] = {}
             for r in self._conn.execute("SELECT item_id, type FROM item_kept_types WHERE server_id=?", (server_id,)):
                 kept.setdefault(r["item_id"], set()).add(MarkerType(r["type"]))
+            own: dict[str, set[MarkerType]] = {}
+            for r in self._conn.execute(
+                "SELECT p.item_id, d.type, d.reason FROM publish_state p JOIN decisions d ON d.file_id = p.file_id "
+                "WHERE p.server_id=? AND p.item_id IS NOT NULL AND d.status=?",
+                (server_id, DecisionStatus.DISABLED.value),
+            ):
+                if is_kept_own(DecisionStatus.DISABLED, r["reason"]):
+                    own.setdefault(r["item_id"], set()).add(MarkerType(r["type"]))
             files = {
                 r["item_id"]: tuple(json.loads(r["files_json"]))
                 for r in self._conn.execute(
@@ -1567,7 +1581,8 @@ class MarkerStore:
         for r in rows:
             markers = self._markers_from_json(r["markers_json"])
             kept_types = frozenset(kept.get(r["item_id"], ()))
-            if markers or kept_types:
+            own_types = frozenset(own.get(r["item_id"], ())) - {m.type for m in markers} - kept_types
+            if markers or kept_types or own_types:
                 out.append(
                     ItemPublishStateRow(
                         r["server_id"],
@@ -1578,6 +1593,7 @@ class MarkerStore:
                         r["updated_at"],
                         kept_types,
                         files.get(r["item_id"]),
+                        own_types,
                     )
                 )
         return out

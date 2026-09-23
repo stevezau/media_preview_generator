@@ -58,6 +58,7 @@ from .outcomes import (
     FileOutcome,
     ServerStatus,
     file_outcome,
+    is_kept_own,
     kept_note,
     kept_own_reason,
     replaced_own_note,
@@ -1208,7 +1209,24 @@ def _own_types_now(
     source, found, _detail = _counted_as(ctx, owner, found)
     if source is not Source.SERVER_MARKERS:
         return frozenset()
-    return frozenset(c.type for c in found) - ours
+    own = frozenset(c.type for c in found) - ours
+    if own and cfg.type is ServerType.PLEX:
+        # Plex shows one set per item and writes a type only once every version decided it alike. Another version
+        # that decided a type would wait on this one forever, so this one is read as before the skip and the publisher
+        # gets what it always got (it then keeps Plex's rows of the type, as before).
+        own -= _decided_on_other_versions(ctx, rec, cfg.id, item_id)
+    return own
+
+
+def _decided_on_other_versions(
+    ctx: PipelineContext, rec: FileRecord, server_id: str, item_id: str
+) -> frozenset[MarkerType]:
+    """Types another local file of the same server item decided (its versions that published there, any status)."""
+    decided: set[MarkerType] = set()
+    for path in ctx.store.files_for_item(server_id, item_id):
+        if path != rec.canonical_path:
+            decided.update(markers_for_path(ctx.store, path) or ())
+    return frozenset(decided)
 
 
 def _kept_by_every_destination(
@@ -1397,8 +1415,9 @@ def _publish_to(
     *,
     kept_own: frozenset[MarkerType] = frozenset(),
 ) -> dict:
-    # kept_own: types left undecided while every server keeps its own and shows one. Only the row's wording names
-    # them; what is sent is exactly what an undecided type sends.
+    # kept_own: types left undecided while every server keeps its own and shows one. The row's wording names them,
+    # and the file is recorded on its item even with nothing to send; what is sent is exactly what an undecided type
+    # sends.
     cfg = owner.config
     path = rec.canonical_path
     store = ctx.store
@@ -1549,11 +1568,11 @@ def _publish_to(
         # A kept type is released by the write alone: Emby's plugin still stores ours for it out of sight, and a Plex
         # record left holding one would be read back as drift on every Check servers run. Plex sends nothing then.
         holds_kept = item_row is not None and bool(item_row.kept_types)
-        if not wanted and previous == [] and own_previous is None and not holds_kept:
+        # A type left to the server's own marker goes through the write too, which sends nothing (no markers, nothing
+        # of ours before) but records the file on its item, so Check servers reads the server's own marker back.
+        if not wanted and previous == [] and own_previous is None and not holds_kept and not kept_own:
             if needs_review:
                 return _row(cfg, publisher.name, ServerStatus.NEEDS_REVIEW, "Sources don't agree yet", path)
-            if kept_own:
-                return _up_to_date(frozenset())  # the server shows its own, as it would with that type decided
             message = "This server can't show the markers found for this file" if markers else "No markers found"
             return _row(cfg, publisher.name, ServerStatus.NONE, message, path)
 
@@ -1656,7 +1675,8 @@ def publish_now(
     This is the Inspector editor's publish, not a job: it takes no worker slot, queues nothing and starts no thread,
     and every server it reaches goes through the same ``_publish_to`` a job uses — the same ``previous``,
     ``duration_ms``, ``canonical_path``, ``own_previous`` and ``kept_types`` arguments, the same ``publish_state`` rows
-    and the same messages, so Check servers can't tell the two apart.
+    and the same messages (types the last run left to the servers' own markers read from its stored decisions), so
+    Check servers can't tell the two apart.
 
     The bound has two halves. Each of a server's own calls is capped by its ``ServerConfig.timeout`` (HTTP), which the
     caller shortens for this path, or by ``PUBLISH_NOW_DB_WAIT_S`` (Plex's database locks) — **per call**, so a Plex
@@ -1707,7 +1727,10 @@ def publish_now(
     owner_ids = {owner.config.id for owner in marker_owners}
     servers = _ItemServers(item, marker_owners)
     markers = store.get_markers(rec.id)
-    needs_review = any(d.status is DecisionStatus.NEEDS_REVIEW for d in store.get_decisions(rec.id).values())
+    decisions = store.get_decisions(rec.id)
+    needs_review = any(d.status is DecisionStatus.NEEDS_REVIEW for d in decisions.values())
+    # The types the file's last run left to the servers' own markers, so the rows say so as that run's did.
+    kept_own = frozenset(mtype for mtype, d in decisions.items() if is_kept_own(d.status, d.reason))
     stop_at = clock() + deadline_s
 
     def _later(cfg: ServerConfig, message: str, status: ServerStatus = ServerStatus.FAILED) -> dict:
@@ -1746,7 +1769,7 @@ def publish_now(
                 rows.append(_later(cfg, PUBLISH_DEADLINE_MESSAGE))
                 continue
             try:
-                rows.append(_publish_to(owner, rec, markers, needs_review, servers, ctx, _no_phase))
+                rows.append(_publish_to(owner, rec, markers, needs_review, servers, ctx, _no_phase, kept_own=kept_own))
             except _FileChangedError:
                 rows.append(_later(cfg, "The file changed while it was being published"))
             except Exception as exc:
@@ -1812,6 +1835,8 @@ def _request_season_chapter_followups(ctx: PipelineContext, sibling_limits: dict
             continue
         types = _enabled_types(ctx.settings, _stored_ids(ctx.store, sibling))
         decision = _decide(ctx, sibling, types, limit)[MarkerType.INTRO]
+        if is_kept_own(stored.status, stored.reason) and decision.status is not DecisionStatus.DECIDED:
+            continue  # still undecided, so still left to the servers' own marker; its own run checks the servers
         if _decisions_changed(ctx.store, sibling.id, {MarkerType.INTRO: decision}, stored.settings_fingerprint):
             stale.append(path)
     if stale:

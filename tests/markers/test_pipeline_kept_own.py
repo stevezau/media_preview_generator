@@ -13,9 +13,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from media_preview_generator.markers import pipeline
 from media_preview_generator.markers.decide import DecisionStatus
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, Source
-from media_preview_generator.markers.outcomes import FileOutcome, ServerStatus
+from media_preview_generator.markers.outcomes import FileOutcome, ServerStatus, kept_own_reason
 from media_preview_generator.markers.pipeline import LocalDetectorSpec
 from media_preview_generator.markers.sources.online import LookupResult
 from media_preview_generator.servers.base import ServerType
@@ -109,6 +110,13 @@ def _job(
     return out
 
 
+def _assert_nothing_to_send(publisher, path, item_id="item-plex-1"):
+    call = publisher.write.call_args
+    assert call.args == (item_id, [])
+    assert (call.kwargs["previous"], call.kwargs["own_previous"], call.kwargs["kept_types"]) == ([], None, frozenset())
+    assert call.kwargs["canonical_path"] == path
+
+
 def _decision(store, path, mtype):
     return store.get_decisions(store.get_file(path).id)[mtype]
 
@@ -148,12 +156,23 @@ class TestNotRead:
 
         assert out is not None  # nothing left to read, so the checking thread finishes it
         detectors.credits.assert_not_called()
-        plex.write.assert_not_called()  # nothing decided, nothing of ours there: nothing to send, as before
+        # Nothing decided and nothing of ours there: the write has nothing to send (a real publisher returns before
+        # touching the server), and records the file on its item so Check servers reads Plex's credits back.
+        _assert_nothing_to_send(plex, movie)
         assert out.outcome_key == FileOutcome.UP_TO_DATE.value
         row = out.publisher_rows[0]
         assert (row["status"], row["message"]) == (ServerStatus.UP_TO_DATE.value, "Keeping Plex's credits")
         assert out.message == "credits: kept Plex's own marker"
-        assert store.get_publish_state(store.get_file(movie).id, "plex-1") is None
+        state = store.get_publish_state(store.get_file(movie).id, "plex-1")
+        assert (state.item_id, state.markers, state.status) == ("item-plex-1", (), "written")
+        assert not store.published_to_item("plex-1", "item-plex-1")  # no evidence gating: nothing of ours there
+        (item,) = store.published_items("plex-1")
+        assert (item.item_id, item.markers, item.kept_types, item.own_types) == (
+            "item-plex-1",
+            (),
+            frozenset(),
+            frozenset({T.CREDITS}),
+        )
 
     def test_every_later_run_asks_plex_again_and_still_doesnt_read(self, store, movie):
         reg = _plex(movie)
@@ -185,7 +204,7 @@ class TestNotRead:
         out = _job(store, reg, movie, detectors, {"emby-1": emby})
 
         detectors.credits.assert_not_called()
-        emby.write.assert_not_called()
+        _assert_nothing_to_send(emby, movie, item_id="item-emby-1")
         assert (out.outcome_key, out.publisher_rows[0]["message"]) == (
             FileOutcome.UP_TO_DATE.value,
             "Keeping Emby's credits",
@@ -277,6 +296,50 @@ class TestReadAsBefore:
         _job(store, reg, movie, detectors, {"emby-1": ready_publisher("emby_bridge")})
         assert detectors.credits.call_count == 1
 
+    @pytest.mark.parametrize(
+        "failure",
+        ["emby-plugins-unreadable", "no-item-id", "settings-unreadable", "plex-markers-raise"],
+    )
+    def test_whatever_can_t_be_read_reads_the_file(self, store, movie, monkeypatch, failure):
+        if failure == "emby-plugins-unreadable":  # its markers may be an importer's copy (PLUGINS_UNKNOWN_DETAIL)
+            reg = _registry(movie, ServerType.EMBY)
+            reg.configs_by_id["emby-1"] = _emby_config(movie, "keep_emby")
+            reg.get("emby-1").get_chapter_markers.return_value = [EMBY_CREDITS]
+            reg.get("emby-1").get_plugin_names.return_value = None
+            pubs = {"emby-1": ready_publisher("emby_bridge")}
+        else:
+            reg = _plex(movie)
+            pubs = {"plex-1": ready_publisher()}
+        if failure == "no-item-id":
+            reg.get("plex-1").resolve_remote_path_to_item_id.return_value = None
+        elif failure == "settings-unreadable":
+
+            def unreadable(ctx, cfg):
+                raise OSError("settings.json")
+
+            monkeypatch.setattr(pipeline, "_live_markers_settings", unreadable)
+        elif failure == "plex-markers-raise":
+            reg.get("plex-1").get_markers.side_effect = RuntimeError("Plex restarting")
+        detectors = _Detectors()
+
+        _job(store, reg, movie, detectors, pubs)
+
+        assert detectors.credits.call_count == 1
+        assert _decision(store, movie, T.CREDITS).status is not DecisionStatus.DISABLED
+
+    def test_ours_of_one_type_on_the_item_leaves_only_plexs_other_type_unread(self, store, media):
+        # Plex can't tell ours from its own: its intro rows are ours (the item's record says so), its credits aren't.
+        our_intro = Marker(T.INTRO, 126_500, 157_500, ("chapters",))
+        store.set_item_publish_state("plex-1", "item-plex-1", [our_intro], "written")
+        reg = _plex(media, rows=(PLEX_INTRO, PLEX_CREDITS))
+        detectors = _Detectors()
+
+        _job(store, reg, media, detectors, {"plex-1": ready_publisher()})
+
+        assert (detectors.intro.call_count, detectors.credits.call_count) == (1, 0)
+        assert _decision(store, media, T.CREDITS).status is DecisionStatus.DISABLED
+        assert _decision(store, media, T.INTRO).status is not DecisionStatus.DISABLED
+
     @pytest.mark.parametrize("setting", ["keep_plex", "restore"])
     def test_a_locked_type_is_read_on_a_forced_run_whatever_the_setting(self, store, movie, setting):
         reg = _plex(movie, setting)
@@ -350,7 +413,7 @@ class TestStoredAnswerInReview:
         detectors.credits.assert_not_called()
         credits = _decision(store, movie, T.CREDITS)
         assert (credits.status, credits.reason) == (DecisionStatus.DISABLED, KEPT_PLEX)
-        plex.write.assert_not_called()
+        _assert_nothing_to_send(plex, movie)
         assert out.outcome_key == FileOutcome.UP_TO_DATE.value
         assert (out.publisher_rows[0]["status"], out.publisher_rows[0]["message"]) == (
             ServerStatus.UP_TO_DATE.value,
@@ -451,7 +514,6 @@ class TestRealPlexDatabase:
     def test_an_answer_left_in_review_writes_the_item_byte_for_byte_as_before(
         self, tmp_path, monkeypatch, request, kind
     ):
-        from media_preview_generator.markers import pipeline
         from media_preview_generator.markers.probe import Chapter
         from media_preview_generator.markers.publishers import plex_db
         from media_preview_generator.markers.store import MarkerStore
@@ -487,21 +549,55 @@ class TestRealPlexDatabase:
             parts = _rows(db, "SELECT id, file, extra_data FROM media_parts ORDER BY id")
             status = _decision(store, path, T.CREDITS).status
             store.close()
-            return out, status, (taggings, parts, item and (item.markers, item.kept_types))
+            return out, status, (taggings, parts), item and (item.markers, item.kept_types)
 
-        kept_out, kept_status, kept_plex = run("kept", kept_status=True)
-        review_out, review_status, review_plex = run("review", kept_status=False)
+        kept_out, kept_status, kept_plex, kept_item = run("kept", kept_status=True)
+        review_out, review_status, review_plex, review_item = run("review", kept_status=False)
 
         assert (kept_status, review_status) == (DecisionStatus.DISABLED, DecisionStatus.NEEDS_REVIEW)
         assert review_out.outcome_key == FileOutcome.NEEDS_REVIEW.value
         assert kept_out.outcome_key == (
             FileOutcome.PUBLISHED.value if kind == "episode" else FileOutcome.UP_TO_DATE.value
         )
-        assert kept_plex == review_plex
-        taggings, parts, item = kept_plex
+        assert kept_plex == review_plex  # Plex's database, byte for byte
+        taggings, parts = kept_plex
         assert (0, "credits", 1_154_521, 1_188_521, CREDITS_ROW_EXTRA) in taggings  # Plex's own row, untouched
         assert plex_db.decode_extra_data(parts[0][2])[0]["pv:credits"] == NATIVE_CREDITS
         if kind == "episode":
-            assert [t[1] for t in taggings] == ["credits", "intro"] and item[1] == frozenset()
+            assert [t[1] for t in taggings] == ["credits", "intro"]
+            assert kept_item == review_item and kept_item[1] == frozenset()
         else:
-            assert [t[1] for t in taggings] == ["credits"] and item is None
+            # Only this app's record differs: the kept file is recorded on its item (nothing of ours, nothing kept),
+            # so Check servers reads Plex's credits back.
+            assert [t[1] for t in taggings] == ["credits"]
+            assert (kept_item, review_item) == (((), frozenset()), None)
+
+
+class TestSeasonChapterFollowUps:
+    """A sibling left to the servers' own intro isn't asked again because a re-decide can't say "kept" (MED 3)."""
+
+    @pytest.mark.parametrize(
+        ("chapter", "asked"), [(False, False), (True, True)], ids=["still-undecided", "now-decided-by-its-chapter"]
+    )
+    def test_a_kept_sibling_is_asked_again_only_when_its_intro_would_be_decided(self, store, media, chapter, asked):
+        from media_preview_generator.markers.decide import TypeDecision
+        from media_preview_generator.markers.sources.chapters import CHAPTER_RULES_VERSION
+
+        st = os.stat(media)
+        sibling = store.upsert_file(
+            FileIdentity(media, st.st_size, st.st_mtime_ns),
+            duration_ms=DUR,
+            season_key=os.path.dirname(media),
+            is_movie=False,
+        )
+        kept = TypeDecision(T.INTRO, DecisionStatus.DISABLED, None, None, kept_own_reason(["Plex"]))
+        store.save_decisions(sibling.id, {T.INTRO: kept}, settings_fingerprint="x")
+        intro_chapter = Candidate(T.INTRO, 126_771, 157_068, Source.CHAPTERS, origin="Intro")
+        store.replace_evidence(
+            sibling.id, Source.CHAPTERS, [intro_chapter] if chapter else [], version=CHAPTER_RULES_VERSION
+        )
+        ctx = _ctx(store, _plex(media), settings_raw=_settings(), detectors=_Detectors().specs)
+
+        pipeline._request_season_chapter_followups(ctx, {media: None})
+
+        assert ctx.take_followups() == ([media] if asked else [])

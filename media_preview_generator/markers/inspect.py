@@ -21,7 +21,7 @@ from .audio.season import folder_videos, season_group, season_size
 from .decide import DecisionStatus, shortened_by
 from .external_ids import ids_from_path, is_season_folder
 from .models import SERVER_SOURCES, Marker, MarkerType, Source
-from .outcomes import kept_note, lock_overrides_note, with_kept_note, with_sentence
+from .outcomes import is_kept_own, kept_note, lock_overrides_note, with_kept_note, with_sentence
 from .ownership import allowed_matches, owning_servers
 from .publishers.base import Capability, versions_agree
 from .publishers.emby import CREDENTIALS_REJECTED, credits_note
@@ -589,11 +589,23 @@ def _plan(
     duration_ms: int,
     keep_own: bool = False,
     recorded_kept: frozenset[MarkerType] = frozenset(),
+    kept_own: frozenset[MarkerType] = frozenset(),
 ) -> tuple[str, str]:
     if off_reason:
         return "not_enabled", off_reason
+    vendor = server_type.value.capitalize()
+    # Types the file's last run left to the server's own marker (the kept status), while the server still keeps its
+    # own and shows one: the next job leaves them as that run did. Otherwise the next job reads the file for them.
+    shown_types = {c["type"] for c in current or []}
+    left_to_server = frozenset(t for t in kept_own if keep_own and t.value in shown_types)
     if not wanted:
-        return ("will_remove", "") if ours else ("nothing_to_publish", "")
+        if ours:
+            return "will_remove", ""
+        if left_to_server:
+            return f"keeps_{server_type.value}", with_kept_note(
+                "", kept_note((), (), vendor, not_decided=left_to_server)
+            )
+        return "nothing_to_publish", ""
     would_keep = (
         _kept_on_server(current, wanted, ours, recorded_kept, duration_ms, server_type)
         if keep_own and current is not None
@@ -603,8 +615,7 @@ def _plan(
     # so the next publish replaces this server's own markers of a locked type instead of leaving them.
     locked = {m.type for m in wanted if m.locked}
     kept = would_keep - locked
-    vendor = server_type.value.capitalize()
-    note = kept_note(kept, wanted, vendor)
+    note = kept_note(kept, wanted, vendor, not_decided=left_to_server)
     override = lock_overrides_note(would_keep & locked, vendor)
     # Emby's credits skip runs to the end of the file, past a scene after credits that end earlier.
     shown_note = (
@@ -684,6 +695,11 @@ def _server_row(
         # Every job leaves the server's own markers alone, type by type ("Keep Plex's", "Keep Emby's").
         keep_own=settings.keeps_server_markers,
         recorded_kept=item_state.kept_types if item_state is not None else frozenset(),
+        kept_own=frozenset(
+            mtype
+            for mtype, d in (store.get_decisions(rec.id) if rec else {}).items()
+            if is_kept_own(d.status, d.reason)
+        ),
     )
     return {
         "server_id": cfg.id,

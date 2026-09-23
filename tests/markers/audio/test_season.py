@@ -24,7 +24,7 @@ from media_preview_generator.markers.audio import POINT_S, fingerprint, matcher,
 from media_preview_generator.markers.decide import LONG_INTRO_CHAPTER_REASON, DecisionStatus, TypeDecision
 from media_preview_generator.markers.external_ids import ids_from_path
 from media_preview_generator.markers.models import Candidate, FileIdentity, Marker, MarkerType, Source
-from media_preview_generator.markers.outcomes import FileOutcome
+from media_preview_generator.markers.outcomes import FileOutcome, kept_own_reason
 from media_preview_generator.markers.probe import Chapter, MediaProbe, ProbeError, ProbeStalledError
 from media_preview_generator.markers.sources.chapters import CHAPTER_RULES_VERSION, chapter_candidates
 from media_preview_generator.markers.sources.online import LookupResult
@@ -2304,6 +2304,8 @@ class TestAnswersRestingOnSeasonAudio:
             ("undecided", True),
             ("decided-by-an-online-source", False),
             ("decided-with-season-audio", True),
+            # Left to every server's own intro: season audio never runs for it, so its answer never catches up.
+            ("kept-own", False),
             ("changed-on-disk", False),
             ("resized-with-the-same-mtime", False),
         ],
@@ -2327,6 +2329,8 @@ class TestAnswersRestingOnSeasonAudio:
         }
         if state in decided_by:
             decision = _decided(MarkerType.INTRO, 10_000, 40_000, decided_by[state])
+        elif state == "kept-own":
+            decision = TypeDecision(MarkerType.INTRO, DecisionStatus.DISABLED, None, None, kept_own_reason(["Plex"]))
         else:
             decision = TypeDecision(
                 MarkerType.INTRO, DecisionStatus.NEEDS_REVIEW, None, None, "sources don't agree yet"
@@ -2338,6 +2342,11 @@ class TestAnswersRestingOnSeasonAudio:
             _write(e2, 999)
             os.utime(e2, ns=(sibling.mtime_ns, sibling.mtime_ns))
         assert season.season_audio_followups(recs[e1], ctx) == ([e2] if listed else [])
+        if state in ("undecided", "kept-own"):
+            # The two other predicates on the same conditions: after a job, and a run re-deciding its siblings.
+            assert season.season_audio_answer_outdated(ctx, e2) is listed
+            season._request_redecide(ctx, recs[e1], {e2: sibling}, "newer")
+            assert ctx.take_followups() == ([e2] if listed else [])
 
 
 FUZZ_SEASONS, FUZZ_CHUNKS = 120, 4

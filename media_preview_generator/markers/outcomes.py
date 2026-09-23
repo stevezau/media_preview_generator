@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from enum import Enum
 
+from .decide import DecisionStatus
 from .models import Marker, MarkerType
 
 
@@ -127,6 +128,22 @@ def kept_own_reason(vendors: Iterable[str]) -> str:
     names = list(dict.fromkeys(vendors))
     owners = " and ".join(f"{name}'s" for name in names)
     return f"kept {owners} own marker{'s' if len(names) > 1 else ''}"
+
+
+def is_kept_own(status: DecisionStatus, reason: str | None) -> bool:
+    """Whether a stored decision is the kept status (``kept_own_reason``), not detection turned off.
+
+    Args:
+        status: The decision's status.
+        reason: Its reason.
+
+    Returns:
+        True for a type a run left to every server's own marker.
+    """
+    text = reason or ""
+    return (
+        status is DecisionStatus.DISABLED and text.startswith("kept ") and text.endswith(("own marker", "own markers"))
+    )
 
 
 def with_kept_note(message: str, note: str) -> str:

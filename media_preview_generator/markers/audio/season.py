@@ -32,6 +32,7 @@ from ...plex_client import VIDEO_EXTENSIONS
 from ..decide import DecisionStatus, intro_chapter_length_ms, intro_chapter_limit_ms
 from ..external_ids import ids_from_path, is_extra
 from ..models import Candidate, FileIdentity, MarkerType, Source
+from ..outcomes import is_kept_own
 from ..probe import ProbeError, ProbeStalledError, probe_media
 from ..sources.chapters import CHAPTER_RULES_VERSION, chapter_candidates
 from . import POINT_S
@@ -718,6 +719,18 @@ def intro_rests_on_season_audio(ctx: PipelineContext, rec: FileRecord) -> bool:
     return marker is not None and not marker.locked and not _SEASON_AUDIO_SOURCES.isdisjoint(marker.decided_by)
 
 
+def _intro_settled(ctx: PipelineContext, rec: FileRecord) -> bool:
+    """Whether a new season audio answer can't change a file's intro: decided by other sources, or left to every
+    server's own marker (the kept status, ``outcomes.is_kept_own``: season audio never runs for it, so its stored
+    answer never catches up, and its own run checks the servers again)."""
+    intro = ctx.store.get_decisions(rec.id).get(MarkerType.INTRO)
+    if intro is None:
+        return False
+    if is_kept_own(intro.status, intro.reason):
+        return True
+    return intro.status is DecisionStatus.DECIDED and not intro_rests_on_season_audio(ctx, rec)
+
+
 def _request_redecide(ctx: PipelineContext, rec: FileRecord, members: dict[str, FileRecord], signature: str) -> None:
     """Ask again for the siblings whose intro is undecided, or decided with a season audio answer, and whose answer
     was based on other season files than this run's. A sibling season audio never answered for is left alone: its own
@@ -730,12 +743,7 @@ def _request_redecide(ctx: PipelineContext, rec: FileRecord, members: dict[str, 
         answer = ctx.store.get_detector_run(member.id, Source.SEASON_AUDIO)
         if answer is None or answer == signature:
             continue
-        intro = ctx.store.get_decisions(member.id).get(MarkerType.INTRO)
-        if (
-            intro is not None
-            and intro.status is DecisionStatus.DECIDED
-            and not intro_rests_on_season_audio(ctx, member)
-        ):
+        if _intro_settled(ctx, member):
             continue
         stale.append(path)
     if stale:
@@ -772,12 +780,7 @@ def season_audio_followups(rec: FileRecord, ctx: PipelineContext) -> list[str]:
         answer = ctx.store.get_detector_run(member.id, Source.SEASON_AUDIO) if member is not None else None
         if answer is None:
             continue
-        intro = ctx.store.get_decisions(member.id).get(MarkerType.INTRO)
-        if (
-            intro is not None
-            and intro.status is DecisionStatus.DECIDED
-            and not intro_rests_on_season_audio(ctx, member)
-        ):
+        if _intro_settled(ctx, member):
             continue
         if path not in view.on_disk:
             view.on_disk[path] = _signature_item(ctx, path)
@@ -937,10 +940,7 @@ def season_audio_answer_outdated(ctx: PipelineContext, canonical_path: str) -> b
     """
     rec = _current_record(ctx, canonical_path)
     answer = ctx.store.get_detector_run(rec.id, Source.SEASON_AUDIO) if rec is not None else None
-    if answer is None:
-        return False
-    intro = ctx.store.get_decisions(rec.id).get(MarkerType.INTRO)
-    if intro is not None and intro.status is DecisionStatus.DECIDED and not intro_rests_on_season_audio(ctx, rec):
+    if answer is None or _intro_settled(ctx, rec):
         return False
     signature = _signature(ctx, _signature_paths(canonical_path, season_group(canonical_path)))
     return answer != signature and ctx.store.get_detector_failure(rec.id, Source.SEASON_AUDIO) != signature

@@ -688,7 +688,8 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
 6. **Reconcile.** After jobs = the read-back before "Up to date" and the delayed verify job (phase 1). On demand =
    **Intro & Credits · Check servers**, a LOW job the user starts from Start New Job or `POST /api/markers/reconcile`,
    or schedules in Automation → Schedules like any other job; nothing is scheduled by default (R5). It bulk-reads every
-   published item and re-runs drifted files (Plex forced detection, Emby FullRefresh without heal, a Plex version
+   published item (and every item a file left a type to the server's own marker on, step 3: read back like a kept
+   type) and re-runs drifted files (Plex forced detection, Emby FullRefresh without heal, a Plex version
    change, an item the server replaced; a drifted Plex item's current version files too), plus files with decided
    credits or preview whose server's stored answer is empty or unusable, on a 1/2/4/8/16-day backoff (at most 5
    re-reads, failed ones included), and the files of items whose last publish failed, on the same backoff (at most 5
@@ -1886,12 +1887,32 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   review — also when no detector was skipped on that run, so the owner's ~31 movies an earlier run left in review
   with Plex's own credits leave the review list on their next run (an undecided type, nothing found included, now
   asks the servers on every run under a keep setting, but only a type every destination's publisher can show:
-  `publishers.factory.supported_types_for`, so a recap under Plex asks none). A decided type stays decided, with the publisher's kept note. Plex's marker gone, or the
-  setting back to Use ours, returns such a file to Needs review, or reads it when its answer is due. What a server
-  shows is unchanged: Plex's publisher already leaves Plex's rows of a type it isn't sent
-  (`test_a_type_left_undecided_for_plexs_own_leaves_the_item_as_deciding_it_would`), and the pipeline sends Plex's
-  database byte for byte what Needs review sent
-  (`test_an_answer_left_in_review_writes_the_item_byte_for_byte_as_before`); only the record no longer lists a
-  never-decided type as kept. On Emby the plugin no longer holds a hidden copy of ours for that type, so a refresh
-  that deletes Emby's own rows leaves the type empty until the next run reads the file, where the plugin used to put
-  ours back at once.
+  `publishers.factory.supported_types_for`, so a recap under Plex asks none). A decided type stays decided, with the
+  publisher's kept note. Plex's marker gone, or the setting back to Use ours, returns such a file to Needs review, or
+  reads it when its answer is due. What a server shows is unchanged: Plex's publisher already leaves Plex's rows of a
+  type it isn't sent (`test_a_type_left_undecided_for_plexs_own_leaves_the_item_as_deciding_it_would`), and the
+  pipeline sends Plex's database byte for byte what Needs review sent
+  (`test_an_answer_left_in_review_writes_the_item_byte_for_byte_as_before`); only the record differs (below). On Emby
+  the plugin no longer holds a hidden copy of ours for that type, so a refresh that deletes Emby's own rows leaves the
+  type empty until Check servers or the next run reads the file, where the plugin used to put ours back at once.
+  Architecture review (no HIGH; three MEDs fixed):
+  - **Check servers still heals it (MED 1).** A decided and kept type was recorded (`item_kept_types`), read back,
+    and run again once the server lost its marker or was set to Use ours; a type left undecided was recorded nowhere.
+    Now such a file goes through the write even with nothing to send (both publishers return before touching the
+    server: no markers, nothing of ours before), which records it on its item (`publish_state`, an
+    `item_publish_state` row with nothing of ours). `published_items` adds the item's `own_types` from its files'
+    stored kept status (`decisions`, `outcomes.is_kept_own`), and Check servers reads them back as it reads kept types
+    (gone → `Shown.MISSING`; Use ours → released). Existing storage, no schema change; `item_kept_types` and so
+    `published_to_item`'s evidence gating are unchanged.
+  - **A Plex version that decided a type isn't left waiting (MED 2).** Plex writes a type only when every version
+    decided it alike, so a version left to Plex's marker would keep another version that decided the type in
+    "Waiting for this item's other versions" forever. A type another local version of the item decided
+    (`store.files_for_item`) is read on a Plex file as before the skip, so the publisher gets exactly the inputs it
+    got before (both agree, Plex's rows kept) rather than a new "don't wait" rule whose result would only be argued
+    identical.
+  - **A kept episode doesn't re-queue its season (MED 3).** Season audio never runs for it, so its stored answer's
+    signature never catches up; the three sibling predicates (`season_audio_followups`, `_request_redecide`,
+    `season_audio_answer_outdated`) treat its intro as settled, and the season chapter step doesn't ask again for a
+    kept sibling whose re-decided intro is still undecided.
+  - LOWs: `publish_now` and the Inspector plan name the stored kept-own types as a job's rows do ("Keeping Plex's
+    credits", plan "Keeps Plex's").
