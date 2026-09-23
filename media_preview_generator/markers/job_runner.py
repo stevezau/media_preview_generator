@@ -641,14 +641,21 @@ def budget_recheck_due(refused_at: datetime) -> datetime:
 
 
 def _waiting_budget_recheck(jm):
-    """The recheck job whose runner hasn't read its files yet, if any (call under ``FOLLOW_UP_LOCK``)."""
+    """The recheck job still counting down to the next reset, if any (call under ``FOLLOW_UP_LOCK``).
+
+    One already due (waiting for a slot) runs before the budget resets again: files refused since then would only be
+    refused again, so they get a new job.
+    """
+    now = _utcnow()
     for job in jm.get_pending_jobs():
         cfg = job.config or {}
-        if (
-            job.kind == JOB_KIND_INTRO_CREDITS
-            and cfg.get("source") == BUDGET_RECHECK_SOURCE
-            and not cfg.get(FILES_SEALED)
-        ):
+        if job.kind != JOB_KIND_INTRO_CREDITS or cfg.get("source") != BUDGET_RECHECK_SOURCE or cfg.get(FILES_SEALED):
+            continue
+        try:
+            due = datetime.fromisoformat(cfg.get("retry_not_before") or "")
+        except (TypeError, ValueError):
+            continue
+        if due > now:
             return job
     return None
 

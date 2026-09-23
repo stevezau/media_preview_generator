@@ -2066,3 +2066,21 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   disagreeing with this season's audio is one source contradicting itself. A season-audio decision rests on its
   answer, so it is decided again when the season grows (`intro_rests_on_season_audio`). The harness gate row
   (`tests/markers_eval/test_decisions.py`) now passes with G3 on: an episode Plex didn't answer is decided by audio.
+- 2026-09-24 · **TheIntroDB's daily lookups: shows it has no entry for are paused, and refused files are checked again
+  after the reset** (§5.3 Limits). On the owner's server the 1,000 daily lookups ran out by 04:42 local time, 790 of
+  them on shows with no entries (Daily Show, Late Night, Tonight Show, Kamen Rider; 0 hits), and the 198 files checked
+  while the budget was out (25 jobs) were never asked again.
+  - **Per-series pause.** Once 3 episodes of a series (keyed by the tmdb/tvdb/imdb id the lookup is sent with,
+    `theintrodb.series_key`) got "no entry" while none has an answer, TheIntroDB isn't asked about it for 7 days
+    (`series_lookups`, `series_pauses` in `markers.db`, both `CREATE TABLE IF NOT EXISTS`). The file's job-log
+    sources line says "TheIntroDB skipped (no data for this show; asked again after <date>)". Review fixes (MED): the
+    7 days run from the pause's start, not the latest "no entry" (an airing show's newest episode is always "no entry"
+    on import day, so the pause never ended and older episodes due their 14-day re-ask were never asked); after a
+    pause it takes 3 new "no entry" answers to pause again; a series counts as having data when any file under the
+    show's folder has a stored TheIntroDB answer with a marker (answers from before the table existed); a forced run
+    (Inspector re-detect) always asks.
+  - **Recheck after the reset.** Files a used-up budget refused that end with a type undecided join one waiting LOW
+    "TheIntroDB recheck" job due 00:05 UTC (`markers/job_runner._queue_budget_recheck`, at most 500 files, sealed
+    under `FOLLOW_UP_LOCK`); a recheck job already due isn't joined. At run time it drops files decided since and runs
+    nothing if TheIntroDB was turned off. Its log is Season-style: one "TheIntroDB recheck, <show> Sxx (N episodes)"
+    line per season for unchanged episodes; movies log their own lines. IntroDB/SkipDB keep "run the library again".

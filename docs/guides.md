@@ -674,10 +674,12 @@ checked again automatically just after 00:00 UTC by one low-priority **TheIntroD
 skips a file another job decided meanwhile, and runs nothing if you've turned TheIntroDB off by then).
 
 To keep the daily lookups for shows TheIntroDB knows, a show it has no entry for (talk shows, for example) is left
-alone for 7 days once 3 of its episodes came back with nothing, and none with an answer. After the 7 days the next
-episode is asked again; if that one has nothing either, the show is left alone for another 7 days. The log says so
-once, at INFO: "TheIntroDB has no entry for 3 or more episodes of <show> …; its episodes aren't looked up there
-until <date>". Forced re-detects follow the same rule.
+alone for 7 days once 3 of its episodes came back with nothing, while no episode of the show has an answer from it
+(one saved by an earlier run counts). The 7 days run from then: a new episode that comes back with nothing meanwhile
+doesn't add to them. After them the show's episodes are asked again, older ones due their re-check included, and it
+takes 3 more with nothing to leave it alone again. The log says so once per pause, at INFO: "TheIntroDB has no entry
+for 3 or more episodes of <show> …; its episodes aren't looked up there until <date>". **Re-detect** in the Inspector
+always asks.
 
 ### Needs review
 
@@ -1116,7 +1118,7 @@ A file's row for one server (the job's Files panel, the Inspector) can also say:
 | Evidence detail: "Markers on this server look imported from …; not a second opinion for that database" | That server's markers came from a plugin that imports a skip database (IntroDB/TheIntroDB, SkipDB or AniSkip), so they don't confirm that database's own answer | Nothing; this is expected |
 | Job warning: "TheIntroDB's daily lookup limit was reached: N files were checked without it. It resets at 00:00 UTC; the files it left undecided are checked again automatically after that (or add a TheIntroDB API key for a higher limit)." | The source's daily budget (or the smaller share full-library backfills may spend) ran out partway through the job | Nothing to fix; a **TheIntroDB recheck** job waits for 00:00 UTC and checks those files again. Add your own TheIntroDB API key for a higher limit. (IntroDB and SkipDB say "run the library again after that" instead: their files aren't rechecked automatically.) |
 | File reason ends with "…; TheIntroDB not checked (daily limit reached)" | This file's result could still change once the source is available again — a file every other source already decided doesn't get this note | Nothing; the TheIntroDB recheck job asks for it after 00:00 UTC, and nothing was stored for this source, so any later run asks it too |
-| Log: "TheIntroDB has no entry for 3 or more episodes of <show> …; its episodes aren't looked up there until <date>" | TheIntroDB had nothing for 3 episodes of the show and an answer for none, so the show's episodes stop using its daily lookups for 7 days | Nothing; after the date the next episode is asked again |
+| Log: "TheIntroDB has no entry for 3 or more episodes of <show> …; its episodes aren't looked up there until <date>" | TheIntroDB had nothing for 3 episodes of the show and an answer for none, so the show's episodes stop using its daily lookups for 7 days | Nothing; after the date its episodes are asked again. **Re-detect** in the Inspector asks at once |
 
 Per-file job outcomes use plainer labels in the job queue and Files panel: **Markers written** (the job changed
 what a server shows), **Up to date** (every server already showed this),

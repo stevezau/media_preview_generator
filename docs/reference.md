@@ -400,8 +400,11 @@ next scheduled or manual run for the same files asks it again on its own. For Th
 a type undecided (`needs_review` / `no_evidence`) join one waiting LOW-priority job (`source: "theintrodb_recheck"`,
 named "TheIntroDB recheck: N files", at most 500 files) due 5 minutes after the next 00:00 UTC (`retry_not_before`);
 when it runs it drops files decided since, and lists nothing if TheIntroDB has been turned off. TheIntroDB also isn't
-asked about a series (keyed by the tmdb/tvdb/imdb id it's sent) for 7 days once 3 of its episodes got "no entry" and
-none an answer (`series_lookups` table in `markers.db`); the next episode after that is asked again.
+asked about a series (keyed by the tmdb/tvdb/imdb id it's sent) for 7 days once 3 of its episodes got "no entry"
+while none has an answer: none recorded in `series_lookups`, and no file under the show's folder with a stored
+TheIntroDB answer holding a marker. The 7 days run from the pause's start (`series_pauses` in `markers.db`); "no
+entry" answers during it don't extend it, the next pause needs 3 new ones after it ends, an answer with a marker ends
+it, and a forced run (`force`, Inspector re-detect) always asks.
 
 When a job's season step finds that other episodes of the same season could now be decided differently (their season
 intro-chapter check or season audio answer is out of date; an episode season audio never answered for, such as one no

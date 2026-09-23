@@ -2784,7 +2784,12 @@ class TestTheIntroDbBudgetRecheck:
         return MagicMock(
             id="w7654321",
             kind=JOB_KIND_INTRO_CREDITS,
-            config={"source": job_runner.BUDGET_RECHECK_SOURCE, "file_paths": list(files), **config},
+            config={
+                "source": job_runner.BUDGET_RECHECK_SOURCE,
+                "file_paths": list(files),
+                "retry_not_before": "2026-09-25T00:05:00+00:00",
+                **config,
+            },
         )
 
     @pytest.mark.parametrize(
@@ -2837,12 +2842,48 @@ class TestTheIntroDbBudgetRecheck:
             MagicMock(
                 id="w1",
                 kind=JOB_KIND_INTRO_CREDITS,
-                config={"source": "theintrodb_recheck", "file_paths": ["/m/x.mkv"], "files_sealed": True},
+                config={
+                    "source": "theintrodb_recheck",
+                    "file_paths": ["/m/x.mkv"],
+                    "files_sealed": True,
+                    "retry_not_before": "2026-09-25T00:05:00+00:00",
+                },
             ),
-            MagicMock(id="w2", kind=JOB_KIND_INTRO_CREDITS, config={"source": "sonarr", "file_paths": ["/m/x.mkv"]}),
-            MagicMock(id="w3", kind="previews", config={"source": "theintrodb_recheck", "file_paths": ["/m/x.mkv"]}),
+            MagicMock(
+                id="w2",
+                kind=JOB_KIND_INTRO_CREDITS,
+                config={
+                    "source": "sonarr",
+                    "file_paths": ["/m/x.mkv"],
+                    "retry_not_before": "2026-09-25T00:05:00+00:00",
+                },
+            ),
+            MagicMock(
+                id="w3",
+                kind="previews",
+                config={
+                    "source": "theintrodb_recheck",
+                    "file_paths": ["/m/x.mkv"],
+                    "retry_not_before": "2026-09-25T00:05:00+00:00",
+                },
+            ),
+            # Due at today's reset and only waiting for a slot: it runs before the budget resets again.
+            MagicMock(
+                id="w4",
+                kind=JOB_KIND_INTRO_CREDITS,
+                config={
+                    "source": "theintrodb_recheck",
+                    "file_paths": ["/m/x.mkv"],
+                    "retry_not_before": "2026-09-24T00:05:00+00:00",
+                },
+            ),
+            MagicMock(
+                id="w5",
+                kind=JOB_KIND_INTRO_CREDITS,
+                config={"source": "theintrodb_recheck", "file_paths": ["/m/x.mkv"]},
+            ),
         ],
-        ids=["sealed", "another-source", "another-kind"],
+        ids=["sealed", "another-source", "another-kind", "already-due", "no-due-time"],
     )
     def test_a_job_that_cant_take_files_gets_a_new_recheck_job(self, jm, create, waiting):
         jm.get_pending_jobs.return_value = [waiting]

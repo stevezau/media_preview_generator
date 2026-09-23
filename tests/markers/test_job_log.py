@@ -335,10 +335,7 @@ class TestSeasonJob:
 
         # The first job's 4 "no entry" answers paused TheIntroDB for the show, so the replaced E02 isn't asked again.
         paused_until = store.series_lookups_paused_until(
-            Source.THEINTRODB,
-            "tvdb:275274",
-            misses=pipeline.SERIES_NO_ENTRY_MISSES,
-            pause=pipeline.SERIES_NO_ENTRY_PAUSE,
+            Source.THEINTRODB, "tvdb:275274", pause=pipeline.SERIES_NO_ENTRY_PAUSE
         )
         assert job_log == [
             _lines(

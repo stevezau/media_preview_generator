@@ -45,7 +45,7 @@ from .decide import (
     credits_limits_ms,
     decide,
 )
-from .external_ids import ids_from_path, ids_from_server_dict, is_extra, merge_ids
+from .external_ids import ids_from_path, ids_from_server_dict, is_extra, is_season_folder, merge_ids
 from .job_log import (
     SEASON_RECHECK_LABEL,
     RunNotes,
@@ -112,8 +112,9 @@ from .store import EvidenceRow, FileRecord, ItemPublishStateRow, MarkerStore, ge
 
 NO_DATA_RETRY = timedelta(days=14)
 # TheIntroDB's daily budget is small (1,000 lookups with a key) and whole shows are missing from it (talk shows, some
-# anime): once this many episodes of a series got "no entry" and none an answer, the series isn't asked about for
-# SERIES_NO_ENTRY_PAUSE, counted from its latest "no entry" (``MarkerStore.series_lookups_paused_until``).
+# anime): once this many episodes of a series got "no entry" and none an answer (nor any file of the show a stored
+# one), the series isn't asked about for SERIES_NO_ENTRY_PAUSE from then; the next pause needs as many new "no entry"
+# answers after it ends. A forced re-detect always asks (``MarkerStore.record_series_lookup``).
 SERIES_NO_ENTRY_MISSES = 3
 SERIES_NO_ENTRY_PAUSE = timedelta(days=7)
 _SERIES_PAUSED_SOURCES = frozenset({Source.THEINTRODB})
@@ -1267,35 +1268,46 @@ def _lookup(
     return result
 
 
-def _series_lookups_paused_until(ctx: PipelineContext, source: Source, ids: MediaIds) -> datetime | None:
+def _show_folder(path: str) -> str:
+    """The folder of an episode's show: its season folder's parent, or its own folder when episodes sit straight in the
+    show folder."""
+    folder = os.path.dirname(path)
+    return os.path.dirname(folder) if is_season_folder(os.path.basename(folder)) else folder
+
+
+def _series_lookups_paused_until(ctx: PipelineContext, source: Source, ids: MediaIds, path: str) -> datetime | None:
     """Until when ``source`` isn't asked about this episode: enough of its series' episodes had no entry there.
+
+    A forced run (a re-detect) always asks.
 
     Returns:
         The end of the pause, or None when the episode may be asked now. The file's job log line names the skip.
     """
     key = theintrodb.series_key(ids) if source in _SERIES_PAUSED_SOURCES else None
-    if key is None:
+    if key is None or ctx.force:
         return None
     return ctx.store.series_lookups_paused_until(
-        source, key, misses=SERIES_NO_ENTRY_MISSES, pause=SERIES_NO_ENTRY_PAUSE
+        source, key, pause=SERIES_NO_ENTRY_PAUSE, show_folder=_show_folder(path)
     )
 
 
 def _note_series_answer(
     ctx: PipelineContext, source: Source, ids: MediaIds, path: str, result: LookupResult | None
 ) -> None:
-    """Remember a stored answer for the episode's series, and say so once the series is paused."""
+    """Remember a stored answer for the episode's series, and say so when it starts a pause."""
     if source not in _SERIES_PAUSED_SOURCES or result is None or result.status not in _STORED_LOOKUPS:
         return
     key = theintrodb.series_key(ids)
     if key is None or ids.season is None or ids.episode is None:
         return
-    found = result.status == "ok"
-    ctx.store.record_series_lookup(source, key, f"S{ids.season:02d}E{ids.episode:02d}", found=found)
-    if found:
-        return
-    until = ctx.store.series_lookups_paused_until(
-        source, key, misses=SERIES_NO_ENTRY_MISSES, pause=SERIES_NO_ENTRY_PAUSE
+    until = ctx.store.record_series_lookup(
+        source,
+        key,
+        f"S{ids.season:02d}E{ids.episode:02d}",
+        found=result.status == "ok",
+        misses=SERIES_NO_ENTRY_MISSES,
+        pause=SERIES_NO_ENTRY_PAUSE,
+        show_folder=_show_folder(path),
     )
     if until is not None:
         logger.info(
@@ -2240,7 +2252,7 @@ def _attempt(
                 notes.not_asked[source] = "not asked (not set up)"
             elif _needs_lookup(ctx, rec, source, refresh):
                 lookup_ids = lookup_ids or _lookup_ids(ids, servers)
-                paused_until = _series_lookups_paused_until(ctx, source, lookup_ids)
+                paused_until = _series_lookups_paused_until(ctx, source, lookup_ids, path)
                 if paused_until is not None:
                     # Shown in place of any older saved answer: this run didn't ask.
                     notes.unanswered[source] = (

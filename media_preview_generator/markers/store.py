@@ -242,7 +242,7 @@ _SCHEMA = (
         PRIMARY KEY (source, day))""",
     # An online source's last answer for each episode of a series ("found" or "no entry"), keyed by the id the lookup
     # was sent with, so a series the source has nothing for stops costing its daily budget
-    # (``series_lookups_paused_until``). Not tied to a file row: a replaced episode keeps its series' answers.
+    # (``record_series_lookup``). Not tied to a file row: a replaced episode keeps its series' answers.
     """CREATE TABLE IF NOT EXISTS series_lookups (
         source TEXT NOT NULL,
         series_key TEXT NOT NULL,
@@ -250,6 +250,14 @@ _SCHEMA = (
         found INTEGER NOT NULL,
         answered_at TEXT NOT NULL,
         PRIMARY KEY (source, series_key, episode))""",
+    # When a source's lookups of a series were paused: the pause runs from here (later "no entry" answers don't extend
+    # it), and only "no entry" answers after it ended can start the next one. A separate table, so a markers.db that
+    # already has ``series_lookups`` only gains it.
+    """CREATE TABLE IF NOT EXISTS series_pauses (
+        source TEXT NOT NULL,
+        series_key TEXT NOT NULL,
+        paused_at TEXT NOT NULL,
+        PRIMARY KEY (source, series_key))""",
 )
 
 # Ordered migrations: _MIGRATIONS[v] holds the statements that take an existing database from schema
@@ -1949,50 +1957,112 @@ class MarkerStore:
             r = self._conn.execute("SELECT * FROM source_usage WHERE source=? AND day=?", (source_id, day)).fetchone()
         return {"used": r["used"], "limit": r["limit_"], "remaining": r["remaining"]} if r else None
 
-    def record_series_lookup(self, source: Source, series_key: str, episode: str, *, found: bool) -> None:
-        """Remember an online source's answer for one episode of a series (replaces that episode's older answer).
+    @staticmethod
+    def _series_has_answers(conn: sqlite3.Connection, source: Source, show_folder: str) -> bool:
+        """Whether any file under the show's folder has a stored answer from ``source`` with a marker in it (answers
+        stored before ``series_lookups`` existed, or by a sibling folder's lookups, count too)."""
+        folder = show_folder.rstrip("/")
+        if not folder:
+            return False
+        # Every path under "<folder>/" sorts between "<folder>/" and "<folder>0" ("0" follows "/"): a range the
+        # canonical_path index answers, unlike a LIKE prefix.
+        row = conn.execute(
+            "SELECT 1 FROM files f JOIN evidence e ON e.file_id = f.id "
+            "WHERE f.canonical_path >= ? AND f.canonical_path < ? AND e.source = ? AND e.origin = '' "
+            "AND e.type IS NOT NULL LIMIT 1",
+            (f"{folder}/", f"{folder}0", source.value),
+        ).fetchone()
+        return row is not None
+
+    def record_series_lookup(
+        self,
+        source: Source,
+        series_key: str,
+        episode: str,
+        *,
+        found: bool,
+        misses: int,
+        pause: timedelta,
+        show_folder: str = "",
+    ) -> datetime | None:
+        """Remember an online source's answer for one episode of a series, and pause the series when it has none.
+
+        The episode's older answer is replaced. An answer with something in it ends any pause. A "no entry" starts a
+        pause once ``misses`` episodes answered "no entry" since the last pause ended (or ever, before the first),
+        while no episode of the series has an answer: none recorded here, and none stored for any file under
+        ``show_folder``. A "no entry" during a pause (a forced run's) doesn't extend it.
 
         Args:
             source: The online source.
             series_key: The series id the lookup was sent with, e.g. ``tmdb:12345``.
             episode: The episode, e.g. ``S01E02``.
             found: Whether the source had anything for it.
+            misses: Episodes with "no entry" that start a pause.
+            pause: How long a pause lasts.
+            show_folder: The show's folder ("" skips the check of its files' stored answers).
+
+        Returns:
+            The end of the pause this answer started, else None.
         """
+        now = self._clock()
         with self._tx() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO series_lookups (source, series_key, episode, found, answered_at) "
                 "VALUES (?,?,?,?,?)",
-                (source.value, series_key, episode, int(found), self._now()),
+                (source.value, series_key, episode, int(found), now.isoformat()),
             )
+            if found:
+                conn.execute("DELETE FROM series_pauses WHERE source=? AND series_key=?", (source.value, series_key))
+                return None
+            paused = conn.execute(
+                "SELECT paused_at FROM series_pauses WHERE source=? AND series_key=?", (source.value, series_key)
+            ).fetchone()
+            counted_from = ""
+            if paused is not None:
+                last_end = datetime.fromisoformat(paused["paused_at"]) + pause
+                if last_end > now:
+                    return None
+                counted_from = last_end.isoformat()
+            r = conn.execute(
+                "SELECT MAX(found) AS any_found, SUM(found = 0 AND answered_at >= ?) AS missed "
+                "FROM series_lookups WHERE source=? AND series_key=?",
+                (counted_from, source.value, series_key),
+            ).fetchone()
+            if r["any_found"] or (r["missed"] or 0) < misses or self._series_has_answers(conn, source, show_folder):
+                return None
+            conn.execute(
+                "INSERT OR REPLACE INTO series_pauses (source, series_key, paused_at) VALUES (?,?,?)",
+                (source.value, series_key, now.isoformat()),
+            )
+        return now + pause
 
     def series_lookups_paused_until(
-        self, source: Source, series_key: str, *, misses: int, pause: timedelta
+        self, source: Source, series_key: str, *, pause: timedelta, show_folder: str = ""
     ) -> datetime | None:
-        """Until when a source isn't asked about a series it has no entries for.
+        """Until when a source isn't asked about a series it has no entries for (``record_series_lookup``).
 
-        A series is paused once at least ``misses`` of its episodes got "no entry" and none got an answer, for
-        ``pause`` counted from its latest "no entry". When the pause ends, the next episode is asked; another
-        "no entry" pauses the series again straight away.
+        A pause lasts ``pause`` from when it started, and ends early once any file under ``show_folder`` has a stored
+        answer from the source with a marker in it.
 
         Args:
             source: The online source.
             series_key: The series id the lookups were sent with.
-            misses: Episodes with "no entry" that pause the series.
             pause: How long a pause lasts.
+            show_folder: The show's folder ("" skips the check of its files' stored answers).
 
         Returns:
             The end of the pause, or None when the series may be asked now.
         """
         with self._lock:
-            r = self._conn.execute(
-                "SELECT MAX(found) AS any_found, COUNT(*) AS answered, MAX(answered_at) AS last_answer "
-                "FROM series_lookups WHERE source=? AND series_key=?",
-                (source.value, series_key),
+            paused = self._conn.execute(
+                "SELECT paused_at FROM series_pauses WHERE source=? AND series_key=?", (source.value, series_key)
             ).fetchone()
-        if not r or r["any_found"] or int(r["answered"]) < misses:
-            return None
-        until = datetime.fromisoformat(r["last_answer"]) + pause
-        return until if until > self._clock() else None
+            if paused is None:
+                return None
+            until = datetime.fromisoformat(paused["paused_at"]) + pause
+            if until <= self._clock() or self._series_has_answers(self._conn, source, show_folder):
+                return None
+        return until
 
     def _count(self, table: str) -> int:
         with self._lock:
