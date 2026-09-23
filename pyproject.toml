@@ -177,7 +177,9 @@ omit = [
     "*/tests/*",
     "*/__pycache__/*",
     "*/venv/*",
-    "*/test_env/*"
+    "*/test_env/*",
+    # Written by setuptools_scm at install time, so CI's coverage-combine job (no install) has no source for it.
+    "*/_version.py",
 ]
 
 [tool.coverage.report]
