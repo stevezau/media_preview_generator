@@ -1874,6 +1874,13 @@ function _renderRetryChip(job) {
         || (status === 'pending' && !!eta);
     if (!activelyRetrying) return '';
     const attempt = typeof cfg.retry_attempt === 'number' ? cfg.retry_attempt : 0;
+    // An Intro & Credits chain retries files a server hadn't added to its library yet; the info templates below
+    // explain preview tiles, so its chip goes without them.
+    if (_isMarkersJob(job)) {
+        return ' <span class="badge bg-warning text-dark ms-1 markers-chain-retry-chip" '
+            + 'title="Checks these files again: a server hadn\'t added them to its library yet">'
+            + '<i class="bi bi-arrow-clockwise me-1"></i>Retry ' + attempt + '/' + max + '</span>';
+    }
     // Trailing info-icon opens the shared #globalInfoModal with the
     // full retry-chain explanation (what's happening, why the wait,
     // backoff schedule, when it gives up). Source of truth lives in
@@ -1891,9 +1898,11 @@ function _renderRetryChip(job) {
         + '</span>';
 }
 
-// "Retry: …" Intro & Credits jobs re-check files a server hadn't added to its library yet. Unlike preview retry
-// chains they are ordinary jobs, so the chip stays after they finish.
+// "Retry: …" Intro & Credits jobs from before retries ran in their job's own row re-check files a server hadn't added
+// to its library yet. They are ordinary jobs, so the chip stays after they finish. A retry chain's row has the chain
+// chip (_renderRetryChip) instead.
 function _renderMarkersRetryChip(job) {
+    if (job.config && job.config.is_retry_chain) return '';
     const attempt = job.config && Number(job.config.retry_attempt);
     if (!attempt || attempt < 1) return '';
     return ' <span class="badge bg-warning text-dark markers-retry-chip" '
@@ -2041,8 +2050,9 @@ function updateJobQueue(force) {
                     <i class="bi bi-lightning-fill"></i>
                 </button>`
                 : '';
-            // Retry now drives the preview retry chains; an Intro & Credits retry job just waits out its delay.
-            const retryNowBtn = isWaitingRetryRow && !isMarkers
+            // Retry now drives retry chains (preview and Intro & Credits); an old "Retry: …" Intro & Credits job
+            // just waits out its delay.
+            const retryNowBtn = isWaitingRetryRow && (!isMarkers || !!(job.config && job.config.is_retry_chain))
                 ? `<button class="btn btn-outline-warning" onclick="retryNowFromRow('${escapeHtml(job.id)}')" title="Skip the retry backoff — attempt now" aria-label="Retry now">
                     <i class="bi bi-arrow-clockwise"></i>
                 </button>`
@@ -2092,7 +2102,7 @@ function updateJobQueue(force) {
                    <i class="bi ${isFilesExpanded ? 'bi-chevron-up' : 'bi-chevron-down'}"></i>
                  </button>`
             : '';
-        const retryLabel = isMarkers ? _renderMarkersRetryChip(job) : _renderRetryChip(job);
+        const retryLabel = _renderRetryChip(job) || (isMarkers ? _renderMarkersRetryChip(job) : '');
         const priorityCell = renderPriorityCell(job);
         const scheduledAt = job.config && job.config.scheduled_at;
         // Two paths land in retry-wait: pending jobs awaiting their first
@@ -2148,7 +2158,7 @@ function updateJobQueue(force) {
             + (isMarkers
                 ? `<span class="fw-medium">${escapeHtml(_markersDisplayName(job.library_name)) || 'All Libraries'}</span>`
                     + (followsId
-                        ? `<span class="badge border text-body-secondary fw-normal job-follows" title="Runs after preview job ${escapeHtmlAttr(followsId.substring(0, 8))} finishes">follows ${escapeHtml(followsId.substring(0, 8))}</span>`
+                        ? `<span class="badge border text-body-secondary fw-normal job-follows" title="Starts after preview job ${escapeHtmlAttr(followsId.substring(0, 8))}'s first try">follows ${escapeHtml(followsId.substring(0, 8))}</span>`
                         : '')
                 : `<span class="fw-medium">${escapeHtml(job.library_name) || 'All Libraries'}</span>`);
         const nameTitle = isMarkers && !libraryTitle && job.library_name

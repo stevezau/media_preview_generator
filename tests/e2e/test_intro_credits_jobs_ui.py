@@ -656,6 +656,72 @@ class TestQueueRows:
         expect(row.locator('button[aria-label="Retry now"]')).to_have_count(0)
         expect(row).to_contain_text("Rick and Morty S01")
 
+    def test_follow_up_waiting_for_the_server_retries_in_its_own_row_like_a_preview_chain(self, dashboard) -> None:
+        # The shape markers/job_runner.py gives the job after its first run (upsert_retry_chain_job "scheduled"); its
+        # hidden retry job never reaches the queue (is_user_visible_job).
+        preview = _preview_job()
+        eta = (datetime.now(UTC) + timedelta(seconds=45)).isoformat()
+        chain = _markers_job(
+            status="pending",
+            completed_at=None,
+            publishers=[],
+            config={
+                "kind": "intro_credits",
+                "source": "sonarr",
+                "libraries": [],
+                "file_paths": ["/data/tv/Rick and Morty/Season 01/e01.mkv"],
+                "follows_job_id": preview["id"],
+                "force": False,
+                "files_sealed": True,
+                "is_retry_chain": True,
+                "is_retry": True,
+                "retry_attempt": 1,
+                "retry_max_attempts": 3,
+                "max_retries": 3,
+                "last_outcome": "scheduled",
+            },
+            progress={"outcome": {"markers_waiting": 1}, "retry_eta": eta, "retry_wait_total": 60, "current_item": ""},
+        )
+        page = dashboard([chain, preview])
+        row = page.locator(f"#job-row-{chain['id']}")
+        expect(row).to_be_visible(timeout=5000)
+
+        assert _row_ids(page) == [preview["id"], chain["id"]]
+        expect(row).to_contain_text("↳")
+        expect(row.locator(".status-dot")).to_have_text("Pending")
+        expect(row.locator(".markers-chain-retry-chip")).to_have_text("Retry 1/3")
+        expect(row.locator(".markers-retry-chip")).to_have_count(0)
+        # The preview chain's explanation is about preview tiles, so this chip has none.
+        expect(row.locator("[data-explain-template]")).to_have_count(0)
+        expect(row.locator("[data-scheduled-at]")).to_have_text(re.compile(r"^Retry starting in 4\d s$"))
+        expect(row.locator('button[aria-label="Retry now"]')).to_have_count(1)
+        follows = row.locator(".job-follows")
+        expect(follows).to_have_text("follows e64567e1")
+        tooltip = follows.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
+        assert tooltip == "Starts after preview job e64567e1's first try"
+
+    def test_a_follow_up_whose_retries_ended_has_no_retry_chip(self, dashboard) -> None:
+        preview = _preview_job()
+        done = _markers_job(
+            config={
+                "kind": "intro_credits",
+                "source": "sonarr",
+                "file_paths": ["/data/tv/e01.mkv"],
+                "follows_job_id": preview["id"],
+                "is_retry_chain": True,
+                "is_retry": True,
+                "retry_attempt": 2,
+                "max_retries": 3,
+                "last_outcome": "completed",
+            },
+        )
+        page = dashboard([done, preview])
+        row = page.locator(f"#job-row-{done['id']}")
+        expect(row).to_be_visible(timeout=5000)
+        expect(row.locator(".status-dot")).to_have_text("Completed")
+        expect(row.locator(".markers-chain-retry-chip")).to_have_count(0)
+        expect(row.locator(".markers-retry-chip")).to_have_count(0)
+
     def test_verify_job_keeps_its_prefix_and_has_no_retry_chip(self, dashboard) -> None:
         eta = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
         verify = _markers_job(

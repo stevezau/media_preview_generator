@@ -1445,6 +1445,9 @@ class TestExecuteScheduledIntroCreditsJob:
             ({"status": "running", "parent_schedule_id": "another-schedule"}, True),
             ({"status": "running", "kind": "previews"}, True),  # the schedule used to scan previews
             ({"status": "running", "config": {"reconcile": True}}, True),  # the schedule used to check servers
+            # Its own run is done; only its retry chain (files a server hadn't added yet) is left.
+            ({"status": "pending", "config": {"is_retry_chain": True, "last_outcome": "scheduled"}}, True),
+            ({"status": "running", "config": {"is_retry_chain": True, "last_outcome": "running"}}, True),
         ],
     )
     def test_other_jobs_do_not_block_a_new_run(self, scheduler_manager, env, other, starts):

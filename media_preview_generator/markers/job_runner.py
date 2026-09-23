@@ -23,8 +23,22 @@ from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig
 from ..utils import redact_secrets, redacted_traceback
 from ..web.job_gate import format_wait_message, get_job_gate
-from ..web.jobs import PAUSED_BY_SCHEDULE, PRIORITY_LOW, PRIORITY_NORMAL, JobStatus, WorkerStatus, get_job_manager
-from ..web.routes.job_runner import _build_selected_gpus, _format_eta, _inflight_jobs, _inflight_lock
+from ..web.jobs import (
+    PAUSED_BY_SCHEDULE,
+    PRIORITY_LOW,
+    PRIORITY_NORMAL,
+    JobStatus,
+    WorkerStatus,
+    get_job_manager,
+    is_live_retry_chain,
+)
+from ..web.routes.job_runner import (
+    _build_selected_gpus,
+    _format_eta,
+    _inflight_jobs,
+    _inflight_lock,
+    _is_force_fire_now_set,
+)
 from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import start_fingerprint_sweep
 from .audio.season import season_audio_answer_outdated
@@ -120,14 +134,85 @@ def _retry_reason(waiting: dict[str, set[str]]) -> str:
     return f"{listed} yet"
 
 
+def _upsert_chain(
+    jm,
+    head_id: str,
+    *,
+    attempt: int,
+    max_attempts: int,
+    outcome: str,
+    next_run_at: str | None = None,
+    wait_seconds: int | None = None,
+    reason: str | None = None,
+) -> None:
+    """Move the chain head's row through the preview retries' chain states (``upsert_retry_chain_job``). Never raises.
+
+    Args:
+        jm: The job manager.
+        head_id: The job whose row the chain is.
+        attempt: The retry this state is about.
+        max_attempts: The retry count in force.
+        outcome: ``scheduled``, ``running``, ``completed`` or ``exhausted``.
+        next_run_at: When the scheduled retry starts.
+        wait_seconds: Its delay (the countdown bar).
+        reason: Why the chain is exhausted.
+    """
+    try:
+        jm.upsert_retry_chain_job(
+            canonical_path="",
+            basename="",
+            attempt=attempt,
+            max_attempts=max_attempts,
+            next_run_at=next_run_at,
+            wait_seconds=wait_seconds,
+            outcome=outcome,
+            originating_job_id=head_id,
+            reason=reason,
+        )
+    except Exception as exc:
+        # As the preview runner: the retry still runs, the row just doesn't show it.
+        logger.warning(
+            "upsert_retry_chain_job({}) failed for Intro & Credits job {}: {}: {}",
+            outcome,
+            head_id,
+            type(exc).__name__,
+            exc,
+        )
+
+
+def _end_chain(jm, cfg: dict, waiting: dict[str, set[str]]) -> None:
+    """Give the chain head of a retry that queued no further retry its final status, as a preview chain ends.
+
+    Completed once no file waits; failed ("exhausted") while some still do.
+    """
+    attempt = int(cfg.get("retry_attempt") or 0)
+    left = {path for files in waiting.values() for path in files}
+    reason = None
+    if left:
+        reason = (
+            f"{len(left)} file(s) still {_retry_reason(waiting).removesuffix(' yet')} after {attempt} "
+            f"retr{'y' if attempt == 1 else 'ies'}. Check the Files panel for the affected paths."
+        )
+    _upsert_chain(
+        jm,
+        cfg["parent_job_id"],
+        attempt=attempt,
+        max_attempts=int(cfg.get("max_retries") or attempt),
+        outcome="exhausted" if left else "completed",
+        reason=reason,
+    )
+
+
 def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dict[str, str]) -> list[str]:
     """Create the delayed retry job for files that weren't on disk yet or that a server could take later.
 
     Up to ``webhook_retry_count`` retries, one job for every reason; a verify job's retries go on counting from the
     retries its chain used before it, and never queue another verify. The retry gets each file as its sender gave it
     (with that path's item id hints), like the preview retries: a file not on disk yet was given the first mapped
-    disk's path, and only the sender's path is resolved again against every disk. Never raises: the job that found
-    the files has already completed.
+    disk's path, and only the sender's path is resolved again against every disk. Never raises.
+
+    The retry is a hidden job of the job's retry chain, as a preview job's retries are: the job that found the files
+    (or the job a retry belongs to) stays the one row, pending with the "Retry N/M" chip and its countdown.
 
     Args:
         job: The job that found the files.
@@ -168,6 +253,8 @@ def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dic
             paths = paths[:MAX_RETRY_FILES]
         delay = retry_delay_s(attempt, delay_setting)
         base_name = (job.library_name or "Intro & Credits").removeprefix("Retry: ").removeprefix("Verify: ")
+        # A retry's own retry joins the same chain; any other job (an old top-level "Retry:" job included) heads one.
+        head_id = cfg.get("parent_job_id") or job.id
         retry = create_intro_credits_job(
             library_name=f"Retry: {base_name}",
             priority=job.priority,
@@ -177,6 +264,17 @@ def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dic
             retry_attempt=attempt,
             retry_delay_s=delay,
             verify_chain=bool(cfg.get("verify") or cfg.get("verify_chain")),
+            parent_job_id=head_id,
+            max_retries=count,
+        )
+        _upsert_chain(
+            jm,
+            head_id,
+            attempt=attempt,
+            max_attempts=count,
+            outcome="scheduled",
+            next_run_at=retry.config.get("retry_not_before"),
+            wait_seconds=delay,
         )
         jm.add_log(
             job.id,
@@ -422,6 +520,10 @@ def _wait_for_retry_time(job_id: str, cfg: dict, cancel_check: Callable[[], bool
     while _utcnow() < due:
         if cancel_check():
             return False
+        # The chain head's "Retry now" (POST /api/jobs/<head>/retry-now) flags this retry, as for preview retries.
+        if _is_force_fire_now_set(jm, job_id):
+            jm.add_log(job_id, "INFO - Retry backoff skipped — operator forced fire-now")
+            break
         time.sleep(_POLL_S)
     jm.update_progress(job_id, retry_eta=None)
     return True
@@ -592,10 +694,11 @@ def _wait_for_preceding_job(job_id: str, follows_job_id: str | None, cancel_chec
     Priority alone can't order them: users can set incoming preview jobs to Normal or Low, and then this job
     (which does less work before the gate) would take the slot first and run before the previews for the same
     files. Runs before the gate, so waiting costs no slot. A preview job counting down to a retry
-    (PENDING with ``progress.retry_eta``) counts as finished: its backoff can run for over an hour; files a server
-    hasn't indexed yet, or not on disk yet, get their own retry job (``_queue_retry``). A PENDING preview job with no
-    thread to run it (too old to be revived after a restart) counts as finished after ``_ORPHAN_GRACE_POLLS``; while
-    processing is paused it doesn't, as resuming starts it.
+    (PENDING with ``progress.retry_eta``) counts as finished, so this job starts after the preview job's first try: its
+    backoff can run for over an hour; files a server hasn't indexed yet, or not on disk yet, are retried in this job's
+    own retry chain (``_queue_retry``). A PENDING preview job with no thread to run it (too old to be revived after a
+    restart) counts as finished after ``_ORPHAN_GRACE_POLLS``; while processing is paused it doesn't, as resuming
+    starts it.
 
     Returns:
         False if the job was cancelled while waiting.
@@ -852,6 +955,11 @@ def run_intro_credits_job(job_id: str) -> None:
     job = jm.get_job(job_id)
     if job is None:
         return
+    if is_live_retry_chain(job.config):
+        # Its hidden retry job runs the files still waiting; a resume that starts every pending job mustn't run the
+        # whole job again.
+        logger.info("Intro & Credits job {} not started — its retry runs the files still waiting", job_id)
+        return
     settings = get_settings_manager()
     if settings.processing_paused:
         logger.info("Intro & Credits job {} not started — processing is paused; job stays pending", job_id)
@@ -913,6 +1021,16 @@ def run_intro_credits_job(job_id: str) -> None:
                     return
                 slot["held"] = True
                 jm.start_job(job_id)
+                # A retry in a chain shows its run on the chain head's row, and records its files there (below).
+                chain_head = cfg.get("parent_job_id")
+                if chain_head:
+                    _upsert_chain(
+                        jm,
+                        chain_head,
+                        attempt=int(cfg.get("retry_attempt") or 0),
+                        max_attempts=int(cfg.get("max_retries") or 0),
+                        outcome="running",
+                    )
                 jm.add_log(job_id, "INFO - Intro & Credits job started")
 
                 def progress_callback(current, total, message, percent_override=None):
@@ -1064,7 +1182,7 @@ def run_intro_credits_job(job_id: str) -> None:
                     if listing is not None and not cancel_check():
                         listing.count_checked(ctx.store, file_path)
                     jm.record_file_result(
-                        job_id, file_path, outcome, reason, worker, servers=servers, server_messages=True
+                        chain_head or job_id, file_path, outcome, reason, worker, servers=servers, server_messages=True
                     )
                     # The pipeline counted the file before handing its result here (``PipelineContext.decided_by``).
                     jm.set_marker_sources(job_id, ctx.decided_by.snapshot())
@@ -1127,14 +1245,17 @@ def run_intro_credits_job(job_id: str) -> None:
                     f"Couldn't check what {len(files)} file(s) show on {name}"
                     for name, files in sorted(unchecked.items())
                 ]
-                _complete(jm, job_id, outcome, [*warnings, *unchecked_warnings, *budget_exhausted_warnings(ctx)])
-                _queue_season_followups_after(job, cfg, ctx, listed)
+                # The retry is queued before completing, as the preview runner does: its chain keeps the chain head's
+                # row pending, so completing the head only settles its run's bookkeeping.
                 # Check servers only waits for files whose old item a server confirmed gone: they get the retry a normal
                 # job queues (once from here, the retry job counts on), and only then leave Check servers. Any other
                 # file still waiting keeps its item and is listed again by a later run.
-                if waiting:
-                    retried = _queue_retry(job, cfg, waiting, sender_paths)
-                    _mark_retried_items_gone(ctx.store, gone_items, retried, sender_paths)
+                retried = _queue_retry(job, cfg, waiting, sender_paths) if waiting else []
+                _mark_retried_items_gone(ctx.store, gone_items, retried, sender_paths)
+                _complete(jm, job_id, outcome, [*warnings, *unchecked_warnings, *budget_exhausted_warnings(ctx)])
+                if chain_head and not retried:
+                    _end_chain(jm, cfg, waiting)
+                _queue_season_followups_after(job, cfg, ctx, listed)
                 if replaced and checks_replaced_later:
                     _queue_verify(job, cfg, replaced, sender_paths)
                 sweep_store = ctx.store

@@ -74,6 +74,22 @@ RETRY_STATE_CONFIG_KEYS: tuple[str, ...] = (
 _CHAIN_LIVE_OUTCOMES: frozenset[str] = frozenset({"scheduled", "queued_for_slot", "running"})
 
 
+def is_live_retry_chain(config: dict | None) -> bool:
+    """Whether a job is a retry-chain head whose chain still owns its lifecycle (a retry is scheduled or running).
+
+    The same test ``complete_job``'s chain-active guard makes. Such a head does no work itself: its hidden retry job
+    runs the files, and the head's status follows that retry.
+
+    Args:
+        config: The job's config.
+
+    Returns:
+        True while the chain is live.
+    """
+    cfg = config or {}
+    return bool(cfg.get("is_retry_chain")) and cfg.get("last_outcome") in _CHAIN_LIVE_OUTCOMES
+
+
 def _synthesize_retry_chain_log_lines(job: "Job") -> list[str]:
     """Render a retry-chain Job's state as readable log-style lines.
 

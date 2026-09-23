@@ -1732,6 +1732,8 @@ class TestLibraryRetry:
             retry_attempt=expected_attempt,
             retry_delay_s=expected_delay,
             verify_chain=False,
+            parent_job_id="j1",
+            max_retries=3,
         )
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
         assert any("retry" in c.args[1].lower() for c in env.jm.add_log.call_args_list)
@@ -1847,6 +1849,8 @@ class TestLibraryRetry:
                 retry_attempt=1,
                 retry_delay_s=60,
                 verify_chain=False,
+                parent_job_id="j1",
+                max_retries=3,
             )
             logs = [c.args[1] for c in env.jm.add_log.call_args_list]
             assert any("not on disk yet" in line and "retry 1 of 3" in line for line in logs), logs
@@ -1968,6 +1972,8 @@ class TestLibraryRetry:
                 retry_attempt=1,
                 retry_delay_s=60,
                 verify_chain=False,
+                parent_job_id="j1",
+                max_retries=3,
             )
         else:
             assert order == []
@@ -1985,7 +1991,8 @@ class TestLibraryRetry:
         elif ending == "retry-not-created":
             retry_env.create.side_effect = RuntimeError("jobs.db locked")
         else:
-            env.jm.complete_job.side_effect = [RuntimeError("jobs.db locked"), None]
+            # The run fails before its retry is queued (the retry comes before completing, as for preview jobs).
+            env.jm.set_job_outcome.side_effect = RuntimeError("jobs.db locked")
         with confirmed_missing:
             self._run(listing=listing)
         env.ctx.store.mark_item_gone.assert_not_called()
@@ -2060,6 +2067,158 @@ class TestLibraryRetry:
         env.jm.record_file_result.assert_called_once_with(
             "j1", "/m/a.mkv", "markers_waiting", "", "Lookup", servers=[NOT_IN_LIBRARY_ROW], server_messages=True
         )
+
+
+class TestRetryChain:
+    """A job with files still waiting heads a retry chain like a preview job: its hidden retry runs, its row shows it."""
+
+    @pytest.fixture
+    def chain_env(self, env, monkeypatch):
+        from media_preview_generator.markers import triggers
+
+        settings = {"log_level": "INFO", "webhook_retry_count": 3, "webhook_retry_delay": 30}
+        env.sm.get.side_effect = lambda key, default=None: settings.get(key, default)
+        env.job.library_name = "Intro & Credits · Pilot"
+        env.job.config = {"libraries": [], "file_paths": ["/m/a.mkv"], "source": "sonarr"}
+        retry = MagicMock(id="retry-1", config={"retry_not_before": "2026-09-23T10:01:00+00:00"})
+        create = MagicMock(return_value=retry)
+        monkeypatch.setattr(triggers, "create_intro_credits_job", create)
+        order = []
+        env.jm.upsert_retry_chain_job.side_effect = lambda **kw: order.append(("chain", kw["outcome"]))
+        env.jm.complete_job.side_effect = lambda job_id, **kw: order.append(("complete", job_id))
+        rows = []
+        set_cb = MagicMock()
+        monkeypatch.setattr(job_runner, "set_file_result_callback", set_cb)
+
+        def during_wait(timeout=None):
+            for path, outcome, servers in rows:
+                set_cb.call_args_list[0].args[0](path, outcome, "", "Lookup", servers=servers)
+            return True
+
+        env.tracker.wait.side_effect = during_wait
+        return SimpleNamespace(settings=settings, create=create, order=order, rows=rows)
+
+    def _run(self):
+        with patch.object(job_runner, "build_items", return_value=([_item("/m/a.mkv")], [], {})):
+            job_runner.run_intro_credits_job("j1")
+
+    def _chain_calls(self, env):
+        return [c.kwargs for c in env.jm.upsert_retry_chain_job.call_args_list]
+
+    def test_a_job_with_a_file_waiting_is_scheduled_as_its_own_chain_head_before_it_completes(self, env, chain_env):
+        chain_env.rows.append(("/m/a.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]))
+        self._run()
+        assert chain_env.create.call_args.kwargs["parent_job_id"] == "j1"
+        assert chain_env.create.call_args.kwargs["max_retries"] == 3
+        assert self._chain_calls(env) == [
+            {
+                "canonical_path": "",
+                "basename": "",
+                "attempt": 1,
+                "max_attempts": 3,
+                "next_run_at": "2026-09-23T10:01:00+00:00",
+                "wait_seconds": 60,
+                "outcome": "scheduled",
+                "originating_job_id": "j1",
+                "reason": None,
+            }
+        ]
+        # complete_job then keeps the row pending ("chain drives lifecycle") and only settles the run.
+        assert chain_env.order == [("chain", "scheduled"), ("complete", "j1")]
+
+    def test_a_job_with_nothing_waiting_starts_no_chain(self, env, chain_env):
+        chain_env.rows.append(("/m/a.mkv", "markers_published", [_row("markers_written", "2 marker(s)")]))
+        self._run()
+        chain_env.create.assert_not_called()
+        env.jm.upsert_retry_chain_job.assert_not_called()
+        env.jm.complete_job.assert_called_once_with("j1", warning=None)
+
+    def _as_retry(self, env, attempt=1):
+        env.job.library_name = "Retry: Intro & Credits · Pilot"
+        env.job.config = {
+            "libraries": [],
+            "file_paths": ["/m/a.mkv"],
+            "source": "sonarr",
+            "retry_attempt": attempt,
+            "is_retry": True,
+            "parent_job_id": "head-1",
+            "max_retries": 3,
+        }
+
+    def test_a_retry_shows_its_run_on_the_head_and_records_its_files_there(self, env, chain_env):
+        self._as_retry(env)
+        chain_env.rows.append(("/m/a.mkv", "markers_published", [_row("markers_written", "2 marker(s)")]))
+        self._run()
+        running, completed = self._chain_calls(env)
+        assert (running["originating_job_id"], running["outcome"], running["attempt"], running["max_attempts"]) == (
+            "head-1",
+            "running",
+            1,
+            3,
+        )
+        env.jm.record_file_result.assert_called_once_with(
+            "head-1",
+            "/m/a.mkv",
+            "markers_published",
+            "",
+            "Lookup",
+            servers=[_row("markers_written", "2 marker(s)")],
+            server_messages=True,
+        )
+        # Nothing left waiting: the chain ends completed, as a preview chain does.
+        assert (completed["originating_job_id"], completed["outcome"], completed["reason"]) == (
+            "head-1",
+            "completed",
+            None,
+        )
+        env.jm.complete_job.assert_called_once_with("j1", warning=None)
+        chain_env.create.assert_not_called()
+
+    def test_a_retry_with_the_file_still_waiting_schedules_the_next_retry_of_the_same_chain(self, env, chain_env):
+        self._as_retry(env)
+        chain_env.rows.append(("/m/a.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]))
+        self._run()
+        kwargs = chain_env.create.call_args.kwargs
+        assert (kwargs["parent_job_id"], kwargs["retry_attempt"], kwargs["retry_delay_s"]) == ("head-1", 2, 120)
+        assert kwargs["library_name"] == "Retry: Intro & Credits · Pilot"
+        scheduled = self._chain_calls(env)[-1]
+        assert (scheduled["originating_job_id"], scheduled["outcome"], scheduled["attempt"]) == (
+            "head-1",
+            "scheduled",
+            2,
+        )
+        assert [c["outcome"] for c in self._chain_calls(env)] == ["running", "scheduled"]
+
+    @pytest.mark.parametrize("count", [3, 0], ids=["past-the-count", "retries-turned-off"])
+    def test_the_last_retry_ends_the_chain_exhausted_with_the_reason(self, env, chain_env, count):
+        # Past the retry count, or retries turned off since the chain started: the head fails like a preview chain.
+        chain_env.settings["webhook_retry_count"] = count
+        self._as_retry(env, attempt=3)
+        chain_env.rows.append(("/m/a.mkv", "markers_waiting", [NOT_IN_LIBRARY_ROW]))
+        self._run()
+        chain_env.create.assert_not_called()
+        exhausted = self._chain_calls(env)[-1]
+        assert (exhausted["originating_job_id"], exhausted["outcome"], exhausted["attempt"]) == (
+            "head-1",
+            "exhausted",
+            3,
+        )
+        assert exhausted["reason"] == (
+            "1 file(s) still not in a server's library after 3 retries. Check the Files panel for the affected paths."
+        )
+
+    def test_a_chain_head_waiting_on_its_retry_is_not_run_again_when_the_queue_resumes(self, env, chain_env):
+        env.job.config = {"file_paths": ["/m/a.mkv"], "is_retry_chain": True, "last_outcome": "scheduled"}
+        self._run()
+        env.gate.acquire.assert_not_called()
+        env.dispatcher.submit_items.assert_not_called()
+        env.jm.start_job.assert_not_called()
+
+    @pytest.mark.parametrize("last_outcome", ["completed", "exhausted"])
+    def test_a_job_whose_chain_ended_runs_when_started(self, env, chain_env, last_outcome):
+        env.job.config = {"file_paths": ["/m/a.mkv"], "is_retry_chain": True, "last_outcome": last_outcome}
+        self._run()
+        env.dispatcher.submit_items.assert_called_once()
 
 
 class TestCheckServersUsesChecksAsFilesRun:
@@ -2333,6 +2492,8 @@ class TestVerifyReplacedFilesLater:
             retry_attempt=attempt,
             retry_delay_s=delay,
             verify_chain=True,
+            parent_job_id="j1",
+            max_retries=3,
         )
 
     def test_a_retry_of_a_retry_in_a_verify_chain_stays_in_the_chain(self, env, verify_env):
@@ -2588,6 +2749,8 @@ class TestRetryCarriesTheSenderPath:
             retry_attempt=1,
             retry_delay_s=60,
             verify_chain=False,
+            parent_job_id="j1",
+            max_retries=3,
         )
 
         # Sonarr's copy lands on the second disk before the retry runs: the retry reads it there.
@@ -2685,6 +2848,30 @@ class TestRetryWait:
             job_runner.run_intro_credits_job("j1")
         env.dispatcher.submit_items.assert_called_once()
         assert not any("retry_eta" in c.kwargs for c in env.jm.update_progress.call_args_list)
+
+    def test_retry_now_on_the_chain_head_skips_the_rest_of_the_wait(self, env, monkeypatch):
+        # POST /api/jobs/<head>/retry-now flags the chain's pending retry, as it does a preview retry.
+        from datetime import datetime, timedelta
+
+        start = datetime(2026, 9, 14, 10, 0, tzinfo=UTC)
+        self._clock(monkeypatch, start)
+        env.job.config = {
+            "file_paths": ["/m/a.mkv"],
+            "retry_attempt": 1,
+            "retry_not_before": (start + timedelta(hours=1)).isoformat(),
+        }
+        sleeps = []
+
+        def fake_sleep(_seconds):
+            sleeps.append(1)
+            env.job.config["force_fire_now"] = True
+
+        monkeypatch.setattr(job_runner, "time", SimpleNamespace(sleep=fake_sleep))
+        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
+            job_runner.run_intro_credits_job("j1")
+        assert sleeps == [1]
+        env.jm.add_log.assert_any_call("j1", "INFO - Retry backoff skipped — operator forced fire-now")
+        env.dispatcher.submit_items.assert_called_once()
 
     def test_cancelled_while_waiting_never_takes_a_slot(self, env, monkeypatch):
         from datetime import datetime, timedelta

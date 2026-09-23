@@ -964,10 +964,15 @@ ahead on a stale setting.
 ### Webhook follow-ups and retries
 
 A Sonarr/Radarr/webhook import queues an Intro & Credits job right after the preview job for the same files. It
-runs at Normal priority, or at Low when the preview job itself runs at Low, and it waits for that preview job to
-finish either way (episodes that join it later, see below, don't wait for their own preview jobs). If a file isn't
-on disk yet, a server hasn't indexed it into its library yet, or Plex didn't answer its Plex Pass check, it's
-retried using the same backoff as preview retries — **Settings → Retry policy → Retry count / Initial retry delay**.
+runs at Normal priority, or at Low when the preview job itself runs at Low, and it starts after that preview job's
+first try (it doesn't wait out the preview job's retries; episodes that join it later, see below, don't wait for their
+own preview jobs). If a file isn't on disk yet, a server hasn't indexed it into its library yet, or Plex didn't answer
+its Plex Pass check, it's retried the way preview jobs are, with the same backoff — **Settings → Retry policy → Retry
+count / Initial retry delay**. The job stays one row in the queue: **Pending**, with a **Retry 1/3** chip and
+"Retry starting in …", then **Running** while the retry checks the files still waiting. Files that were already
+done keep their results. The row turns **Completed** once every file is in, or **Failed** when the retries run out
+with files still waiting (the Files panel lists them). **Retry now** starts the waiting retry at once. A job with no
+preview job before it (markers on with previews off, a manual job, the Inspector) retries the same way.
 A retry resolves the path Sonarr/Radarr sent again, so a file that lands on a
 different disk than the first mapped one is still found. A retry batch holds at most 500 files at a time — a bigger backlog (e.g. a brand new library)
 is picked up on the next run instead.

@@ -27,7 +27,7 @@ from loguru import logger
 from ..job_kinds import JOB_KIND_INTRO_CREDITS
 from ..processing.types import ProcessableItem
 from ..servers.base import ServerConfig
-from ..web.jobs import PRIORITY_LOW, Job, get_job_manager
+from ..web.jobs import PRIORITY_LOW, Job, get_job_manager, is_live_retry_chain
 from .outcomes import NOT_IN_LIBRARY, ServerStatus
 from .ownership import marker_matches
 from .pipeline import RECHECK_AFTER, markers_for_path
@@ -601,10 +601,15 @@ def _take_drifts(store: MarkerStore, drifts: list[Drift], max_files: int) -> tup
 
 
 def unfinished_reconcile_job() -> Job | None:
-    """The Check servers job that is queued or running, if any."""
+    """The Check servers job that is queued or running, if any.
+
+    A run whose own work is done and only its retry chain is left (``is_live_retry_chain``) doesn't count: its retry
+    lists only the files it retries.
+    """
     jm = get_job_manager()
     for job in [*jm.get_pending_jobs(), *jm.get_running_jobs()]:
-        if job.kind == JOB_KIND_INTRO_CREDITS and (job.config or {}).get("reconcile"):
+        cfg = job.config or {}
+        if job.kind == JOB_KIND_INTRO_CREDITS and cfg.get("reconcile") and not is_live_retry_chain(cfg):
             return job
     return None
 

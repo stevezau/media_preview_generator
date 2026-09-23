@@ -910,7 +910,9 @@ Show a mockup and confirm wording before building each screen.
    <show> · Season N` (or `· Specials`); an identical pending or running job is reused (R4). Review opens that
    episode, and every row's **Edit** opens that episode in the marker editor.
 5. **Dashboard → job queue:** Intro & Credits jobs linked under the preview job; per-server "Markers written × N /
-   reused / needs review / skipped (reason)"; source counts.
+   reused / needs review / skipped (reason)"; source counts. A job with files a server hasn't added yet stays one row,
+   retried like a preview job: pending with the "Retry N/M" chip and "Retry starting in …" while its hidden retries
+   run (§14 2026-09-23).
 6. **Setup Health:** plugin missing/outdated, Plex Pass missing, Plex marker tag row absent, Plex DB not local, Plex
    detection overwrite risk, and — when a Plex marker agent is set up — the agent's connection (unreachable, key
    refused, version mismatch, beside a different Plex). Built (phase 4): a `markers` section of the previews-readiness
@@ -1246,7 +1248,7 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   Credits job hands its active slot back until resume. Intro & Credits holds at most a quarter of the checking threads
   (online lookups can sleep on rate limits). Plex writes re-read the item inside the write transaction so Plex's own
   fresh `extra_data` keys survive; the library-wide marker-version sample runs once per job (refreshed every 5 min), each write
-  validates the item's own parts. A follow-up doesn't wait while its preview job counts down to a retry. Per-file outcomes gain `markers_waiting` and `markers_skipped`; any server failure makes the file
+  validates the item's own parts. A follow-up doesn't wait while its preview job counts down to a retry: it starts after the preview job's first try. Per-file outcomes gain `markers_waiting` and `markers_skipped`; any server failure makes the file
   count as failed unless another server was written.
 - 2026-09-13 · Decision rules tightened during Task 3 review (§5.5): sanity checks apply to chapters too; an intro or
   recap may not run to the end of the file; at "Medium" a single source is refused when another independent source
@@ -1295,7 +1297,8 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   markers until it is decided (precision first).
 - 2026-09-14 · Job triggers (§6.4), from Task 12 deep review: a webhook follow-up takes the preview job's priority when
   that is lower than Normal (Low incoming jobs still let previews drain first); files the server hasn't indexed yet get
-  delayed retry follow-ups on the webhook retry schedule (this also covers servers with markers on and previews off);
+  delayed retry follow-ups on the webhook retry schedule (this also covers servers with markers on and previews off;
+  since 2026-09-23 they retry in the job's own row, as preview jobs do);
   Intro & Credits jobs interrupted by a restart and not resumed are marked failed so schedules and follow-ups aren't
   blocked.
 - 2026-09-14 · Milestone audit B (§5.5 rules 3–8, §6.2), reproduced on the owner's files: rule 7 lets an agreeing server
@@ -1946,3 +1949,18 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   unrelated pref (`enableAdMarkerGeneration`) is untouched throughout (`evidence/lab/plex_detection_turnoff_proof.py`,
   `.md`). The per-library reads also no longer retry a hung Plex (`retry_plex_call(..., max_retries=0)`): a Setup
   Health probe used to wait ~4x per library on a stalled connection before this.
+- 2026-09-23 · **An Intro & Credits job waiting for a server retries in its own row, like a preview job** (owner; §7
+  item 5, §6.2). On the owner's server a Sonarr follow-up went green "Completed" while a file wasn't in Plex's library
+  yet (a waiting file counted as done), then queued an unlinked top-level "Retry: Intro & Credits · …" job on its own
+  timer, beside the preview job's one-row retry chain, so the queue filled with loose retry rows. Now the job reuses
+  the preview retries' chain as it is (owner: "don't complicate it; the preview jobs already do this"): a job whose
+  run leaves files waiting (not in a server's library, not on disk yet, Plex Pass unanswered) becomes the chain head
+  (`upsert_retry_chain_job`: pending, `retry_eta`, "Retry N/M", "Retry starting in …"), and its retry is a hidden
+  `is_retry` job with `parent_job_id` (`is_user_visible_job`), on the same schedule and count. The retry records its
+  files on the head's Files panel, shows its run on the head, and queues the next retry of the same chain; the chain
+  ends as a preview chain does — completed once nothing waits, failed ("exhausted", with how many files still wait)
+  when the retries run out. Files that settled keep their results. A follow-up still starts after its preview job's
+  first try (the "follows" tooltip now says so), and the two chains don't wait for each other. The head's "Retry now"
+  works (the retry reads `force_fire_now`), and a live head isn't run again when the queue resumes; a Check servers
+  run or a schedule's job whose only work left is its retry chain doesn't hold back the next run. An old top-level
+  "Retry:" job still runs; if its files still wait, it heads a chain of its own.

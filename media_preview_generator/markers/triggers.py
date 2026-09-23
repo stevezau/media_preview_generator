@@ -98,6 +98,8 @@ def create_intro_credits_job(
     verify_chain: bool = False,
     chain_attempt: int = 0,
     reconcile: bool = False,
+    parent_job_id: str | None = None,
+    max_retries: int = 0,
 ) -> Job:
     """Create and start an Intro & Credits job.
 
@@ -120,6 +122,9 @@ def create_intro_credits_job(
         chain_attempt: For a verify job: the retries its chain already used, so a retry it queues goes on counting.
         reconcile: Check servers: list the files of drifted published items instead of libraries or paths
             (``reconcile.find_drift``).
+        parent_job_id: For a retry: the job whose retry chain it belongs to. The retry is hidden from the queue like
+            a preview retry (``is_retry``); that job's row shows it.
+        max_retries: For a retry: the retry count in force (the row's "Retry N/M").
 
     Returns:
         The created job.
@@ -147,6 +152,8 @@ def create_intro_credits_job(
         # The due time (not just the delay) is stored so a job revived after a restart doesn't wait again in full.
         config["retry_delay"] = int(retry_delay_s)
         config["retry_not_before"] = (_utcnow() + timedelta(seconds=int(retry_delay_s))).isoformat()
+    if parent_job_id:
+        config.update(is_retry=True, parent_job_id=parent_job_id, max_retries=int(max_retries))
     jm = get_job_manager()
     job = jm.create_job(
         library_name=library_name,

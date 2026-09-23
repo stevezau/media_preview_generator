@@ -360,9 +360,10 @@ def _start_scheduled_intro_credits_job(
             from ..markers.ownership import marker_libraries
             from ..markers.triggers import create_intro_credits_job
             from ..servers.registry import UnsupportedServerTypeError, server_config_from_dict
-            from .jobs import PRIORITY_LOW, JobStatus, get_job_manager, parse_priority
+            from .jobs import PRIORITY_LOW, JobStatus, get_job_manager, is_live_retry_chain, parse_priority
             from .settings_manager import get_settings_manager
 
+            # A job whose own run is done and only its retry chain is left doesn't hold the schedule back.
             unfinished = next(
                 (
                     job
@@ -370,6 +371,7 @@ def _start_scheduled_intro_credits_job(
                     if job.parent_schedule_id == schedule_id
                     and job.kind == JOB_KIND_INTRO_CREDITS
                     and not (job.config or {}).get("reconcile")
+                    and not is_live_retry_chain(job.config)
                     and job.status in (JobStatus.PENDING, JobStatus.RUNNING)
                 ),
                 None,

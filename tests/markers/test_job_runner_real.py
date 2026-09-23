@@ -21,7 +21,7 @@ from media_preview_generator.markers.store import MarkerStore
 from media_preview_generator.processing.types import ProcessableItem
 from media_preview_generator.servers.base import ServerType
 from media_preview_generator.web.job_gate import JobGate
-from media_preview_generator.web.jobs import JobManager, JobStatus
+from media_preview_generator.web.jobs import JobManager, JobStatus, is_user_visible_job
 from tests.markers.fakes import FakeRegistry, ready_publisher, server_config
 from tests.markers.test_external_ids import EXTRA_SUFFIXES, EXTRAS_FOLDERS
 
@@ -129,15 +129,45 @@ class TestRetryThroughThePipeline:
         )
 
     def _retries(self, jm):
-        return [j for j in jm.get_all_jobs() if j.config.get("retry_attempt")]
+        return [j for j in jm.get_all_jobs() if j.config.get("parent_job_id")]
 
     def _run_retry(self, monkeypatch, retry):
         due = datetime.fromisoformat(retry.config["retry_not_before"])
         monkeypatch.setattr(job_runner, "_utcnow", lambda: due + timedelta(seconds=1))
         job_runner.run_intro_credits_job(retry.id)
 
+    @staticmethod
+    def _assert_chain_head_waits_for(jm, head_id, retry, attempt, count=3):
+        """The job's own row is the preview retries' chain head: pending, "Retry attempt/count", counting down."""
+        head = jm.get_job(head_id)
+        assert head.status is JobStatus.PENDING and head.completed_at is None
+        assert (head.config["is_retry_chain"], head.config["retry_attempt"], head.config["max_retries"]) == (
+            True,
+            attempt,
+            count,
+        )
+        assert head.config["last_outcome"] == "scheduled"
+        assert head.progress.retry_eta == retry.config["retry_not_before"]
+        assert head.progress.retry_wait_total == retry.config["retry_delay"]
+        # The retry is a hidden job of that chain, like a preview retry: the queue shows one row.
+        assert (retry.config["is_retry"], retry.config["parent_job_id"], retry.config["max_retries"]) == (
+            True,
+            head_id,
+            count,
+        )
+        assert retry.config.get("follows_job_id") is None
+        assert not is_user_visible_job(retry)
+        assert [j.id for j in jm.get_all_jobs() if is_user_visible_job(j)] == [head_id]
+
     @pytest.mark.parametrize("cause", ["no_item_id", "item_not_found"])
-    def test_file_the_server_adds_later_is_published_by_the_retry(self, engine, setup, monkeypatch, cause):
+    @pytest.mark.parametrize(
+        ("source", "follows"), [("sonarr", "preview-1"), ("jellyfin", None), ("manual", None), ("inspector", None)]
+    )
+    def test_file_the_server_adds_later_is_published_by_the_retry_in_the_jobs_own_row(
+        self, engine, setup, monkeypatch, cause, source, follows
+    ):
+        # A webhook follow-up, and a job with no preview job before it (markers on with previews off, manual,
+        # Inspector), all retry in their own row on the preview retries' schedule.
         registry, publishers = setup.make([("jf-1", ServerType.JELLYFIN)])
         server, publisher = registry.get("jf-1"), publishers["jf-1"]
         if cause == "no_item_id":
@@ -147,11 +177,14 @@ class TestRetryThroughThePipeline:
         first_patch, second_patch = self._run_pipeline(publishers)
         with first_patch, second_patch:
             first = triggers.create_intro_credits_job(
-                library_name="Intro & Credits · Pilot", priority=2, source="sonarr", file_paths=[setup.path]
+                library_name="Intro & Credits · Pilot",
+                priority=2,
+                source=source,
+                file_paths=[setup.path],
+                follows_job_id=follows,  # the preview job is gone, so the follow-up doesn't wait for it
             ).id
             job_runner.run_intro_credits_job(first)
 
-            assert engine.jm.get_job(first).status is JobStatus.COMPLETED
             assert _outcome(engine.jm, first) == {"markers_waiting": 1}
             retries = self._retries(engine.jm)
             assert len(retries) == 1
@@ -160,6 +193,7 @@ class TestRetryThroughThePipeline:
             assert retry.config["file_paths"] == [setup.path]
             assert (retry.config["retry_attempt"], retry.config["retry_delay"]) == (1, 60)
             assert retry.priority == engine.jm.get_job(first).priority
+            self._assert_chain_head_waits_for(engine.jm, first, retry, attempt=1)
 
             # Jellyfin has scanned the file now.
             server.resolve_remote_path_to_item_id.return_value = "item-jf-1"
@@ -170,6 +204,106 @@ class TestRetryThroughThePipeline:
         assert _outcome(engine.jm, retry.id) == {"markers_published": 1}
         assert publisher.write.call_args.args[0] == "item-jf-1"
         assert [j.id for j in self._retries(engine.jm)] == [retry.id]
+        # The chain ends as a preview chain does: its row completed, with the file's latest result in its Files panel.
+        head = engine.jm.get_job(first)
+        assert (head.status, head.error, head.progress.retry_eta) == (JobStatus.COMPLETED, None, None)
+        assert head.config["last_outcome"] == "completed"
+        assert [(r["file"], r["outcome"]) for r in engine.jm.get_file_results(first)] == [
+            (setup.path, "markers_published")
+        ]
+        assert engine.jm.get_file_results(retry.id) == []
+
+    def test_files_that_settled_keep_their_results_while_the_waiting_one_retries(self, engine, setup, monkeypatch):
+        registry, publishers = setup.make([("jf-1", ServerType.JELLYFIN)])
+        second = os.path.join(os.path.dirname(setup.path), "Rick and Morty (2013) - S01E02 - Lawnmower Dog.mkv")
+        with open(second, "wb") as f:
+            f.write(b"x" * 100)
+        server = registry.get("jf-1")
+        server.resolve_remote_path_to_item_id.side_effect = lambda path, **kw: "item-jf-2" if path == second else None
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            first = triggers.create_intro_credits_job(
+                library_name="x", priority=2, source="sonarr", file_paths=[setup.path, second]
+            ).id
+            job_runner.run_intro_credits_job(first)
+            (retry,) = self._retries(engine.jm)
+
+            assert retry.config["file_paths"] == [setup.path]
+            self._assert_chain_head_waits_for(engine.jm, first, retry, attempt=1)
+            assert _outcome(engine.jm, first) == {"markers_published": 1, "markers_waiting": 1}
+            server.resolve_remote_path_to_item_id.side_effect = lambda path, **kw: (
+                "item-jf-2" if path == second else "item-jf-1"
+            )
+            self._run_retry(monkeypatch, retry)
+
+        rows = {r["file"]: r["outcome"] for r in engine.jm.get_file_results(first)}
+        assert rows == {second: "markers_published", setup.path: "markers_published"}
+        assert [c.args[0] for c in publishers["jf-1"].write.call_args_list] == ["item-jf-2", "item-jf-1"]
+        assert engine.jm.get_job(first).status is JobStatus.COMPLETED
+
+    @pytest.mark.parametrize("count", [1, 2])
+    def test_a_file_the_server_never_adds_fails_the_row_when_retries_run_out_as_a_preview_chain_does(
+        self, engine, setup, monkeypatch, count
+    ):
+        engine.settings["webhook_retry_count"] = count
+        registry, publishers = setup.make([("jf-1", ServerType.JELLYFIN)])
+        registry.get("jf-1").resolve_remote_path_to_item_id.return_value = None
+        first_patch, second_patch = self._run_pipeline(publishers)
+        with first_patch, second_patch:
+            first = triggers.create_intro_credits_job(
+                library_name="x", priority=2, source="sonarr", file_paths=[setup.path]
+            ).id
+            job_runner.run_intro_credits_job(first)
+            for attempt in range(1, count + 1):
+                retry = next(r for r in self._retries(engine.jm) if r.config["retry_attempt"] == attempt)
+                self._assert_chain_head_waits_for(engine.jm, first, retry, attempt=attempt, count=count)
+                self._run_retry(monkeypatch, retry)
+                assert engine.jm.get_job(retry.id).status is JobStatus.COMPLETED
+
+        assert len(self._retries(engine.jm)) == count
+        head = engine.jm.get_job(first)
+        # upsert_retry_chain_job's "exhausted": the preview chain's final status (failed, with the reason).
+        assert (head.status, head.config["last_outcome"], head.progress.retry_eta) == (
+            JobStatus.FAILED,
+            "exhausted",
+            None,
+        )
+        assert head.error == (
+            f"1 file(s) still not in a server's library after {count} retr{'y' if count == 1 else 'ies'}. "
+            "Check the Files panel for the affected paths."
+        )
+        assert [j.id for j in engine.jm.get_all_jobs() if is_user_visible_job(j)] == [first]
+
+    def test_an_old_top_level_retry_job_still_runs(self, engine, setup, monkeypatch):
+        # A "Retry: …" job from before retries ran in their job's row (retry_attempt, no chain) runs as it did.
+        registry, publishers = setup.make([("jf-1", ServerType.JELLYFIN)])
+        first_patch, second_patch = self._run_pipeline(publishers)
+        not_before = "2026-09-22T10:00:00+00:00"
+        old = engine.jm.create_job(
+            library_name="Retry: Intro & Credits · Pilot",
+            kind=JOB_KIND_INTRO_CREDITS,
+            priority=2,
+            config={
+                "kind": JOB_KIND_INTRO_CREDITS,
+                "source": "sonarr",
+                "libraries": [],
+                "file_paths": [setup.path],
+                "follows_job_id": None,
+                "force": False,
+                "webhook_item_id_hints": {},
+                "retry_attempt": 1,
+                "retry_delay": 60,
+                "retry_not_before": not_before,
+            },
+        )
+        assert is_user_visible_job(old)
+        with first_patch, second_patch:
+            job_runner.run_intro_credits_job(old.id)
+        job = engine.jm.get_job(old.id)
+        assert (job.status, job.error) == (JobStatus.COMPLETED, None)
+        assert _outcome(engine.jm, old.id) == {"markers_published": 1}
+        assert publishers["jf-1"].write.call_args.args[0] == "item-jf-1"
+        assert engine.jm.get_all_jobs() == [job]
 
     def test_retry_for_one_server_does_not_write_the_server_that_already_has_the_markers(
         self, engine, setup, monkeypatch
@@ -296,7 +430,10 @@ class TestCheckServersThroughThePipeline(TestRetryThroughThePipeline):
     """Check servers on the real runner and pipeline: only a server that dropped our markers is written again."""
 
     # The retry tests aren't run again under this class.
-    test_file_the_server_adds_later_is_published_by_the_retry = None
+    test_file_the_server_adds_later_is_published_by_the_retry_in_the_jobs_own_row = None
+    test_files_that_settled_keep_their_results_while_the_waiting_one_retries = None
+    test_a_file_the_server_never_adds_fails_the_row_when_retries_run_out_as_a_preview_chain_does = None
+    test_an_old_top_level_retry_job_still_runs = None
     test_retry_for_one_server_does_not_write_the_server_that_already_has_the_markers = None
     test_a_failed_server_on_the_file_still_retries_the_server_that_hasnt_indexed_it = None
     test_a_folder_job_skips_its_extras_and_queues_no_retry_for_them = None
@@ -390,7 +527,15 @@ class TestCheckServersThroughThePipeline(TestRetryThroughThePipeline):
                 "jf-1": ("markers_waiting", "not_in_library"),
             }
             publishers["jf-1"].item_missing.assert_called_once_with("item-jf-1")
-            assert job.status is (JobStatus.CANCELLED if case == "cancelled-after-confirming" else JobStatus.COMPLETED)
+            # The confirmed file's retry keeps the run's row pending in its retry chain.
+            assert (
+                job.status
+                is {
+                    "server-confirms-it-is-gone": JobStatus.PENDING,
+                    "lookup-failed": JobStatus.COMPLETED,
+                    "cancelled-after-confirming": JobStatus.CANCELLED,
+                }[case]
+            )
             status = setup.store.get_item_publish_state("jf-1", "item-jf-1").status
             # Marked gone only once its retry was queued: a cancelled run leaves it to be confirmed again.
             assert status == ("gone" if case == "server-confirms-it-is-gone" else "written")
@@ -401,6 +546,8 @@ class TestCheckServersThroughThePipeline(TestRetryThroughThePipeline):
                 (retry,) = others
                 assert (retry.config["retry_attempt"], retry.config["file_paths"]) == (1, [setup.path])
                 assert (retry.config["source"], retry.config.get("reconcile")) == ("reconcile", None)
+                assert retry.config["parent_job_id"] == job.id
+                # Only its retry is left, so it doesn't hold the next Check servers run back.
             else:
                 assert others == []
             publishers["jf-1"].item_missing.side_effect = None
