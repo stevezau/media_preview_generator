@@ -95,9 +95,20 @@ E. Metadata: README badges (CI, release, image size, Ko-fi), Docker Hub `short-d
 
 ## Needs the owner
 
-- Domain purchase + DNS (later). GitHub social preview upload (no API).
-- Search Console: URL-prefix property on site_url (HTML-tag token in `mkdocs.yml`), then submit `sitemap.xml`.
-- AlternativeTo listing, awesome-selfhosted PR, subreddit posts (respect each channel's rules).
+Done 2026-09-23: GitHub social preview uploaded; Search Console URL-prefix property verified
+(token in `mkdocs.yml`), sitemap submitted, indexing requested for home + comparison; retired
+Docker Hub image's short description set to "RETIRED — moved to …".
+
+Still open:
+- Outreach posts — drafts and per-channel rules in `docs/design/discoverability-outreach.md`
+  (awesome-selfhosted-data rejects AI-written entries; r/PleX bans self-promotion).
+- Current image's Docker Hub short description fills in on the next release tag (ci.yml syncs it
+  from `pyproject.toml`), or paste it by hand.
+- Re-run the baseline queries below around 2026-10-21, once Google has indexed the site.
+- Domain purchase + the switch checklist above (later).
+- Settings label "Initial retry delay" reads 30 s while the first retry waits 1 min (copy under
+  the slider explains it); renaming is the owner's call.
+- Dolby Vision Profile 5 "dim without Vulkan" has never been checked on a real P5 clip.
 
 ## Baseline (2026-09-23, WebSearch + Exa)
 
