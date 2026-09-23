@@ -516,6 +516,17 @@
             : 'Checked: local disk ✓';
     }
 
+    const CONFIRM_SAME_MACHINE_TEXT = 'The app must run on the same machine as Plex.';
+    const CONFIRM_AGENT_TEXT = 'The Plex marker agent writes the markers on the Plex machine, so this app can run anywhere.';
+
+    // The dialog is only ever opened while its own server's Edit form is on screen (both callers pass tab.server),
+    // so the live switch is the freshest answer; storedAgent is only the fallback for a caller that doesn't.
+    function agentEnabledForConfirm(server) {
+        const toggle = $('#markersAgentEnabled');
+        if (toggle && tab.server && server && tab.server.id === server.id) return !!toggle.checked;
+        return !!storedAgent(server).enabled;
+    }
+
     function confirmPlexMarkers(server) {
         const target = server || tab.server;
         if (tab.pendingConfirmation) return tab.pendingConfirmation;
@@ -527,6 +538,11 @@
             syncLibraryColumn();
             return Promise.resolve(false);
         }
+        const agentOn = agentEnabledForConfirm(target);
+        const sameMachineText = $('#markersPlexConfirmSameMachineText');
+        if (sameMachineText) sameMachineText.textContent = agentOn ? CONFIRM_AGENT_TEXT : CONFIRM_SAME_MACHINE_TEXT;
+        const sameMachineHint = $('#markersPlexConfirmSameMachineHint');
+        if (sameMachineHint) sameMachineHint.classList.toggle('d-none', agentOn);
         const local = $('#markersPlexConfirmLocal');
         if (local) local.textContent = confirmLocalText();
 

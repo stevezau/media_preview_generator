@@ -354,13 +354,14 @@ Only Plex's detection row has buttons, one **Turn off** per library. Every other
 - **Plex's library database isn't on this machine** (critical) / **…is on this machine**. Markers are written into
   Plex's database, which is only safe from the machine the file is on. Run this app on the Plex machine, or run the
   [Plex marker agent](../guides.md#plex-on-another-machine-the-plex-marker-agent) next to Plex. With an agent
-  switched on the row reads **The helper isn't on the machine with Plex's database** and means the agent's
-  container: mount Plex's config folder into it from one of that machine's own disks.
-- **The Plex marker agent** (critical), shown only when an agent is switched on for this server. Setup Health calls
-  it "the Plex marker helper". **…is connected**, or one of: **isn't answering** (markers wait, nothing is lost),
-  **refused this app's key** (set the same shared key on both sides), **and this app are different versions** (the
-  Intro & Credits tab says which to update), **is beside a different Plex** (check the address: markers would have
-  gone into the wrong database). While it is red, no marker reaches this server.
+  switched on the row reads **The Plex marker agent isn't on the machine with Plex's database**, means the agent's
+  container, and its badge reads **Fix on the agent**: mount Plex's config folder into it from one of that machine's
+  own disks.
+- **The Plex marker agent** (critical), shown only when an agent is switched on for this server. **…is connected**,
+  or one of: **isn't answering** (markers wait, nothing is lost), **refused this app's key** (set the same shared key
+  on both sides), **and this app are different versions** (the Intro & Credits tab says which to update), **is
+  beside a different Plex** (check the address: markers would have gone into the wrong database). While it is red,
+  no marker reaches this server, and its badge reads **Fix on the agent** instead of **Change in Plex UI**.
 - **Plex's own detection can replace your markers** (recommended). When Plex analyses a file again it replaces the
   markers on it with its own, ours included. The next Intro & Credits run puts ours back, but the file shows Plex's
   times until then. Plex detects in a library only when both of its settings are on: the server's *Generate intro
