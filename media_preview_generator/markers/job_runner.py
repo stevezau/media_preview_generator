@@ -53,7 +53,7 @@ from .outcomes import (
     ServerStatus,
 )
 from .ownership import marker_libraries
-from .pipeline import budget_exhausted_warnings, build_context, cached_capability, kind_handlers
+from .pipeline import PipelineContext, budget_exhausted_warnings, build_context, cached_capability, kind_handlers
 from .reconcile import LISTING_CONFIG_KEY, RECONCILE_SOURCE, CheckServersListing
 from .settings import load_server
 from .source_counts import DecidedByTally, stored_groups
@@ -880,8 +880,25 @@ def _start_fingerprint_sweep(cfg: dict, store: MarkerStore) -> None:
         logger.warning("Couldn't start clearing old audio fingerprints: {}", exc)
 
 
-def _complete(jm, job_id: str, outcome: dict[str, int], warnings: list[str]) -> None:
-    """Complete the job: failed (red) when every counted file failed, a warning (amber) when some did or on warnings."""
+def _log_summary(jm, job_id: str, outcome: dict[str, int], ctx: PipelineContext) -> None:
+    """End the job's log with a Season job's one line per season and the totals line. Never raises."""
+    try:
+        for line in ctx.summary_lines(outcome):
+            jm.add_log(job_id, f"INFO - {line}")
+    except Exception as exc:
+        # The job's work is done: a summary that can't be written mustn't fail it.
+        logger.warning("Couldn't write the summary of Intro & Credits job {}: {}", job_id, type(exc).__name__)
+
+
+def _complete(
+    jm, job_id: str, outcome: dict[str, int], warnings: list[str], ctx: PipelineContext | None = None
+) -> None:
+    """Complete the job: failed (red) when every counted file failed, a warning (amber) when some did or on warnings.
+
+    Given the job's pipeline context, the job's log gets its closing lines first (``PipelineContext.summary_lines``).
+    """
+    if ctx is not None:
+        _log_summary(jm, job_id, outcome, ctx)
     failed = outcome.get(FileOutcome.FAILED.value, 0)
     succeeded = sum(count for key, count in outcome.items() if key != FileOutcome.FAILED.value)
     if failed and not succeeded:
@@ -1109,6 +1126,7 @@ def run_intro_credits_job(job_id: str) -> None:
                     priority=live_priority,
                     force=bool(cfg.get("force")),
                     recheck_empty_server_markers=bool(cfg.get("reconcile")),
+                    season_recheck=cfg.get("source") == SEASON_SOURCE,
                 )
                 listing = None
                 if cfg.get("reconcile"):
@@ -1180,7 +1198,7 @@ def run_intro_credits_job(job_id: str) -> None:
                     jm.set_marker_sources(job_id, ctx.decided_by.snapshot())
                 if not items:
                     jm.set_job_outcome(job_id, carried)
-                    _complete(jm, job_id, carried, warnings)
+                    _complete(jm, job_id, carried, warnings, ctx)
                     if chain_head:
                         # A retry revived after a restart that had settled all its files: nothing is left to wait.
                         _recount_chain_head(jm, chain_head, ctx.store)
@@ -1287,7 +1305,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 # file still waiting keeps its item and is listed again by a later run.
                 retried = _queue_retry(job, cfg, waiting, sender_paths) if waiting else []
                 _mark_retried_items_gone(ctx.store, gone_items, retried, sender_paths)
-                _complete(jm, job_id, outcome, [*warnings, *unchecked_warnings, *budget_exhausted_warnings(ctx)])
+                _complete(jm, job_id, outcome, [*warnings, *unchecked_warnings, *budget_exhausted_warnings(ctx)], ctx)
                 if chain_head and not retried:
                     _end_chain(jm, cfg, waiting)
                 _queue_season_followups_after(job, cfg, ctx, listed)

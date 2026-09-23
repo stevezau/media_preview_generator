@@ -441,10 +441,10 @@ Per-file outcomes (`markers.outcomes.FileOutcome`, shown in the job's Files pane
 
 | Key | Label | Meaning |
 |---|---|---|
-| `markers_published` | Markers written | The job changed what at least one server shows (a forced restore included) |
+| `markers_published` | Markers written | The job changed what at least one server shows (a forced restore included); another marker type may still need review, and the reason names it |
 | `markers_up_to_date` | Up to date | Every enabled server already showed these markers (read back before saying so) |
 | `markers_waiting` | Waiting | A server hasn't indexed the file yet, Plex didn't answer its Plex Pass check, or a Plex item's versions don't yet agree |
-| `markers_needs_review` | Needs review | Sources don't agree on at least one marker yet, so that marker wasn't sent (others may have been) |
+| `markers_needs_review` | Needs review | Sources don't agree on at least one marker yet, so that marker wasn't sent, and the job wrote nothing else for the file |
 | `markers_none` | No markers found | No source found an intro or credits for this file |
 | `markers_no_owners` | No server with Intro & Credits on | No enabled server with Intro & Credits on holds this file |
 | `skipped_file_not_found` | Not Found | File not found on disk |
@@ -454,8 +454,10 @@ Per-file outcomes (`markers.outcomes.FileOutcome`, shown in the job's Files pane
 Per-server row statuses (`markers.outcomes.ServerStatus`) use the same `markers_written` / `markers_up_to_date` /
 `markers_needs_review` / `markers_skipped` / `markers_waiting` / `failed` keys, plus `markers_none` (nothing to
 publish on that server). A file's overall outcome shows what still needs something, first match wins: any server
-failed → failed; any marker in review → needs review; any server waiting → waiting; any written → published; any up
-to date → up to date; any with nothing to publish → no markers; otherwise skipped. So one server that is still
+failed → failed; any server waiting with a retry queued (not indexed yet, Plex Pass unconfirmed) → waiting; any
+written → published (or waiting while another server waits for the item's versions); any marker in review → needs
+review; any server waiting → waiting; any up to date → up to date; any with nothing to publish → no markers; otherwise
+skipped. So one server that is still
 waiting (or failed) is never hidden behind another server that was written or is up to date. Retries and verify jobs
 read the per-server rows, not this outcome.
 

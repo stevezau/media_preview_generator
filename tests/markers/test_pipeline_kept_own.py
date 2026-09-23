@@ -559,7 +559,10 @@ class TestRealPlexDatabase:
         review_out, review_status, review_plex, review_item = run("review", kept_status=False)
 
         assert (kept_status, review_status) == (DecisionStatus.DISABLED, DecisionStatus.NEEDS_REVIEW)
-        assert review_out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        # An episode's intro is written either way, so the file counts as written; a movie has nothing else to write.
+        assert review_out.outcome_key == (
+            FileOutcome.PUBLISHED.value if kind == "episode" else FileOutcome.NEEDS_REVIEW.value
+        )
         assert kept_out.outcome_key == (
             FileOutcome.PUBLISHED.value if kind == "episode" else FileOutcome.UP_TO_DATE.value
         )

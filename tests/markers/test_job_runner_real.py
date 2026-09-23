@@ -100,7 +100,9 @@ class TestRetryThroughThePipeline:
                 for sid, stype in servers
             }
 
-            def build_context(*, registry, config, priority, force=False, recheck_empty_server_markers=False):
+            def build_context(
+                *, registry, config, priority, force=False, recheck_empty_server_markers=False, season_recheck=False
+            ):
                 return PipelineContext(
                     registry=registry,
                     config=config,
@@ -112,6 +114,7 @@ class TestRetryThroughThePipeline:
                     clients={},
                     live_config=registry.get_config,  # the fake registry stands in for the saved servers
                     recheck_empty_server_markers=recheck_empty_server_markers,
+                    season_recheck=season_recheck,
                 )
 
             monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda config: registry)
@@ -712,7 +715,9 @@ class TestCreditTextOnTheWorkers:
         monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda cfg: registry)
         monkeypatch.setattr(triggers, "start_intro_credits_job_async", lambda job_id: None)
 
-        def build_context(*, registry, config, priority, force=False, recheck_empty_server_markers=False):
+        def build_context(
+            *, registry, config, priority, force=False, recheck_empty_server_markers=False, season_recheck=False
+        ):
             return PipelineContext(
                 registry=registry,
                 config=config,

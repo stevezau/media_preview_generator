@@ -38,34 +38,40 @@ class ServerStatus(str, Enum):
     FAILED = "failed"
 
 
-def file_outcome(statuses: set[str], *, needs_review: bool) -> FileOutcome:
+def file_outcome(statuses: set[str], *, needs_review: bool, waiting_to_retry: bool = False) -> FileOutcome:
     """Fold one file's per-server statuses into its job outcome.
 
     The file shows what still needs something, most urgent first, so a finished server never hides an unfinished one.
     First match wins:
 
     1. Any server failed → failed: a broken write or check, even when another server took the markers.
-    2. The sources don't agree on an enabled marker type → needs review: only the user settles it, even when the
-       agreed types were written or are up to date.
-    3. Any server waiting (it hasn't indexed the file yet, Plex Pass is unconfirmed, or the item's other versions
-       don't agree yet) → waiting, even when another server was written or is up to date.
-    4. Any server written → published.
-    5. Any server up to date → up to date.
-    6. Any server with nothing to publish, or no rows → no markers.
-    7. Every server skipped (no publisher, plugin missing, turned off) → skipped.
+    2. A server waiting with a retry queued (it hasn't indexed the file yet, or Plex Pass is unconfirmed) → waiting,
+       even when a marker type needs review: the job runs the file again.
+    3. Any server written → published (or waiting while another server waits for the item's other versions): the job
+       changed what a server shows. A type still in review is named in the file's summary.
+    4. The sources don't agree on an enabled marker type → needs review: nothing was written, and only the user settles
+       it, even when the agreed types are up to date.
+    5. Any server waiting (the item's other versions don't agree yet) → waiting, even when another server is up to
+       date.
+    6. Any server up to date → up to date.
+    7. Any server with nothing to publish, or no rows → no markers.
+    8. Every server skipped (no publisher, plugin missing, turned off) → skipped.
 
     Retry and verify jobs are queued from the per-server rows, not from this outcome.
 
     Args:
         statuses: ``ServerStatus`` values of the file's rows.
         needs_review: Whether any enabled marker type is waiting for agreement.
+        waiting_to_retry: Whether a waiting row has a reason the job retries (``RETRY_REASON_CODES``).
 
     Returns:
         The file outcome counted on the job.
     """
     if ServerStatus.FAILED.value in statuses:
         return FileOutcome.FAILED
-    if needs_review:
+    if waiting_to_retry and ServerStatus.WAITING.value in statuses:
+        return FileOutcome.WAITING
+    if needs_review and ServerStatus.WRITTEN.value not in statuses:
         return FileOutcome.NEEDS_REVIEW
     for status, outcome in (
         (ServerStatus.WAITING, FileOutcome.WAITING),

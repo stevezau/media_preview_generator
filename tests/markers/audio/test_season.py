@@ -886,7 +886,9 @@ class TestFailures:
         with _Audio():
             out, _ = _run(ctx, target, {"plex-1": ready_publisher()})
         rec = store.get_file(target)
-        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        # The write took our intro off Plex, so the file counts as written; the intro in review is in its reason.
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert "intro needs review" in out.message
         assert store.get_decisions(rec.id)[MarkerType.INTRO].status is DecisionStatus.NEEDS_REVIEW
         assert MarkerType.INTRO not in store.get_markers(rec.id)
         assert _evidence(store, target, answer)  # kept for when chromaprint is back
@@ -1232,8 +1234,11 @@ class TestSeasonIntroChapters:
         ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=HIGH)
         with _Chapters(self.RESERVATION_DOGS) as chapters:
             outs = {i + 1: _check(ctx, p, chapters) for i, p in enumerate(paths)}
+        # Every episode here resolves to the same Plex item, so E05's publish takes E04's intro off it: that write
+        # counts the file as written. E06 then has nothing of ours there and nothing to send.
+        assert [outs[e].outcome_key for e in (5, 6)] == [FileOutcome.PUBLISHED.value, FileOutcome.NEEDS_REVIEW.value]
         for e in (5, 6):
-            assert outs[e].outcome_key == FileOutcome.NEEDS_REVIEW.value
+            assert f"intro needs review ({LONG_INTRO_CHAPTER_REASON})" in outs[e].message
             assert _intro_decision(store, paths[e - 1])[:2] == (DecisionStatus.NEEDS_REVIEW, LONG_INTRO_CHAPTER_REASON)
         for e in (1, 2, 3, 4):
             assert outs[e].outcome_key == FileOutcome.PUBLISHED.value

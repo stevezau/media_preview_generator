@@ -44,6 +44,19 @@ from .decide import (
     decide,
 )
 from .external_ids import ids_from_path, ids_from_server_dict, is_extra, merge_ids
+from .job_log import (
+    RunNotes,
+    SeasonEpisode,
+    ServerResult,
+    clock,
+    file_lines,
+    kept_types,
+    review_note,
+    season_line,
+    season_of,
+    source_answers,
+    totals_line,
+)
 from .locks import KeyedLocks as _KeyedLocks
 from .models import SERVER_SOURCES, Candidate, FileIdentity, Marker, MarkerType, MediaIds, Source
 from .outcomes import (
@@ -53,6 +66,7 @@ from .outcomes import (
     PLEX_PASS_UNKNOWN,
     READ_BACK_FAILED,
     REPLACED_OWN,
+    RETRY_REASON_CODES,
     STATE_BY_STATUS,
     VERIFY_LATER,
     FileOutcome,
@@ -259,6 +273,8 @@ class PipelineContext:
         db_timeout_s: The longest Plex's publisher waits for the database locks in one check or write; None leaves it
             at ``plex_db.BUSY_TIMEOUT_S``. ``publish_now`` shortens it, since that wait alone outlasts the deadline a
             web request may take (ruling P-R1).
+        season_recheck: A Season job: a file whose decisions didn't change logs no lines of its own; the job ends with
+            one line per season instead (``summary_lines``).
     """
 
     registry: Any
@@ -277,6 +293,7 @@ class PipelineContext:
     chromaprint: ChromaprintState = ChromaprintState.AVAILABLE
     credits_text: TextDetState = TextDetState.AVAILABLE
     db_timeout_s: float | None = None
+    season_recheck: bool = False
     decided_by: DecidedByTally = field(default_factory=DecidedByTally, repr=False)
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
@@ -313,6 +330,13 @@ class PipelineContext:
     # Per file being run: the thread running it and what that run computes once (``run_memo``).
     _run_memos: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict, repr=False)
     _run_memos_guard: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # Per file handed on before it finished, like ``_pending_skips``: what its earlier stages did with each source, so
+    # the stage that finishes it logs a source the checking thread asked as asked by this job.
+    _run_notes: dict[str, RunNotes] = field(default_factory=dict, repr=False)
+    # For the job's last lines: files written per server name, and a Season job's unchanged episodes per season.
+    _sent: dict[str, int] = field(default_factory=dict, repr=False)
+    _seasons: dict[str, list[SeasonEpisode]] = field(default_factory=dict, repr=False)
+    _summary_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def run_memo(self, canonical_path: str) -> dict[str, Any]:
         """Values the current run of a file reads once and reuses (a detector's folder listing and due answer).
@@ -377,6 +401,37 @@ class PipelineContext:
             taken = sorted(self._left_out_changed)
             self._left_out_changed.clear()
         return taken
+
+    def _note_finished(self, rows: list[dict], season: tuple[str, SeasonEpisode] | None) -> None:
+        """Count one file's rows for the job's totals line, and a Season job's episode for its season's line."""
+        with self._summary_lock:
+            for row in rows:
+                name = str(row.get("server_name") or row.get("server_id") or "")
+                written = row.get("status") == ServerStatus.WRITTEN.value
+                self._sent[name] = self._sent.get(name, 0) + int(written)
+            if season is not None:
+                self._seasons.setdefault(season[0], []).append(season[1])
+
+    def summary_lines(self, outcome: dict[str, int]) -> list[str]:
+        """The lines a job ends its log with: a Season job's one line per season, then the totals.
+
+        Args:
+            outcome: The job's file counts per outcome (files finished before a restart included).
+
+        Returns:
+            The lines, e.g. ``Done: 3 files · 2 sent to Plex · 1 needs review · 0 nothing found``.
+        """
+        with self._summary_lock:
+            sent = dict(self._sent)
+            seasons = {season: list(episodes) for season, episodes in self._seasons.items()}
+        with self._budget_lock:
+            skipped: dict[str, int] = {}
+            for source, count in self._budget_exhausted.items():
+                skipped[_ONLINE_LABELS[source]] = skipped.get(_ONLINE_LABELS[source], 0) + count
+            for source, (_detail, count) in self._key_refused.items():
+                skipped[_ONLINE_LABELS[source]] = skipped.get(_ONLINE_LABELS[source], 0) + count
+        lines = [season_line(season, episodes) for season, episodes in sorted(seasons.items())]
+        return [*lines, totals_line(outcome, sent, skipped)]
 
 
 @dataclass(frozen=True)
@@ -568,6 +623,7 @@ def build_context(
     priority: int | Callable[[], int],
     force: bool = False,
     recheck_empty_server_markers: bool = False,
+    season_recheck: bool = False,
 ) -> PipelineContext:
     """Context from live settings (used by the job runner).
 
@@ -583,6 +639,7 @@ def build_context(
         priority: The job's priority, or a callable returning its current value.
         force: Re-detect.
         recheck_empty_server_markers: Check servers (``PipelineContext.recheck_empty_server_markers``).
+        season_recheck: A Season job (``PipelineContext.season_recheck``).
 
     Returns:
         A context for one job.
@@ -612,6 +669,7 @@ def build_context(
         recheck_empty_server_markers=recheck_empty_server_markers,
         chromaprint=chromaprint,
         credits_text=credits_text,
+        season_recheck=season_recheck,
     )
 
 
@@ -949,11 +1007,14 @@ def _run_detector(
     phase: Callable[[str], None],
     cancel_check: Callable[[], bool] | None,
     pause_check: Callable[[], bool] | None,
-) -> None:
+) -> str | None:
     """Run one detector and store its answer under each of its sources with its version, and its basis when it gave one,
     in one transaction.
 
     Anything but ``DetectorUnavailableError`` propagates, so a GPU error reaches the worker's CPU fallback.
+
+    Returns:
+        None once the answer is stored; why there was none when the detector couldn't answer this time.
     """
     try:
         answer = spec.detect(
@@ -970,7 +1031,7 @@ def _run_detector(
         logger.info(
             "{} had no answer for {} this time: {}", spec.source.value, os.path.basename(rec.canonical_path), exc
         )
-        return
+        return str(exc) or type(exc).__name__
     stray = [c for c in found if c.source not in spec.stored_sources]
     if stray:
         logger.warning("{} returned candidates for sources it doesn't store: {}", spec.source.value, stray)
@@ -980,6 +1041,7 @@ def _run_detector(
         version=spec.answer_version(rec, ctx),
         run=(spec.source, answer.signature) if isinstance(answer, DetectorAnswer) else None,
     )
+    return None
 
 
 def _warn_budget_exhausted(ctx: PipelineContext, source: Source) -> None:
@@ -1124,7 +1186,7 @@ def _counted_as(ctx: PipelineContext, owner: _Owning, found: list[Candidate]) ->
 
 def _read_server_markers(
     ctx: PipelineContext, rec: FileRecord, servers: _ItemServers, refresh: bool, *, first_read_only: bool
-) -> None:
+) -> set[str]:
     """Store each owning server's current markers for the file as evidence, when they are due.
 
     Args:
@@ -1136,7 +1198,11 @@ def _read_server_markers(
             an older reader) is read -- its own markers can still shorten decided credits (spec §5.5 rule 7). An empty
             or unusable answer isn't asked again on such a run, unless the job checks servers
             (``ctx.recheck_empty_server_markers``): then it is on its backoff (``MarkerStore.server_recheck_due``).
+
+    Returns:
+        The ids of the servers whose answer was stored.
     """
+    read: set[str] = set()
     for owner in servers.owning:
         cfg = owner.config
         published = ctx.store.get_publish_state(rec.id, cfg.id)
@@ -1162,6 +1228,7 @@ def _read_server_markers(
                     detail=UNUSABLE_SERVER_MARKERS_DETAIL,
                     version=READER_VERSION,
                 )
+                read.add(cfg.id)
             elif ctx.recheck_empty_server_markers:
                 # The stored answer stays, but the re-read counts: a read that always fails (another cut on a Plex
                 # item, a server that can't serve markers) stops being asked after the last backoff step too.
@@ -1179,6 +1246,8 @@ def _read_server_markers(
             version=READER_VERSION,
             also_replaces=SERVER_SOURCES - {source},
         )
+        read.add(cfg.id)
+    return read
 
 
 def _server_rows(ctx: PipelineContext, rec: FileRecord, server_id: str) -> list[EvidenceRow]:
@@ -1809,11 +1878,6 @@ def publish_now(
     return rows
 
 
-def _clock(ms: int) -> str:
-    s = ms // 1000
-    return f"{s // 60}:{s % 60:02d}"
-
-
 def _summary(
     decisions: dict[MarkerType, TypeDecision], types: frozenset[MarkerType], budget_exhausted: tuple[str, ...] = ()
 ) -> str:
@@ -1824,9 +1888,13 @@ def _summary(
             continue
         if d.status is DecisionStatus.DECIDED and d.marker:
             by = ", ".join(d.marker.decided_by)
-            parts.append(f"{mtype.value} {_clock(d.marker.start_ms)}–{_clock(d.marker.end_ms)} ({by})")
+            parts.append(f"{mtype.value} {clock(d.marker.start_ms)}–{clock(d.marker.end_ms)} ({by})")
         elif d.status is DecisionStatus.NEEDS_REVIEW:
-            parts.append(f"{mtype.value} needs review")
+            proposed = ""
+            if d.proposed is not None:
+                by = ", ".join(d.proposed.decided_by)
+                proposed = f": {clock(d.proposed.start_ms)}–{clock(d.proposed.end_ms)} from {by}"
+            parts.append(f"{mtype.value} needs review ({d.reason}){proposed}")
         elif d.status is DecisionStatus.DISABLED:
             # Only a type every server keeps its own of is off among the enabled types (``kept_own_reason``).
             parts.append(f"{mtype.value}: {d.reason}")
@@ -1885,9 +1953,11 @@ def _attempt(
     cancel_check: Callable[[], bool] | None,
     pause_check: Callable[[], bool] | None,
     skipped: dict[Source, str],
+    notes: RunNotes,
 ) -> ItemOutcome | None:
     """One run of a file; ``skipped`` (updated in place) holds the sources it was checked without for the whole job's
-    reason, carried over from the file's earlier stages (``_run`` counts them once the file has its outcome)."""
+    reason, carried over from the file's earlier stages (``_run`` counts them once the file has its outcome), and
+    ``notes`` (updated in place) what the file's stages did with each source, for its job log lines."""
     path = item.canonical_path
 
     def cancelled() -> bool:
@@ -1943,6 +2013,7 @@ def _attempt(
             chapter_candidates(probe, is_episode=path_ids.is_episode),
             version=CHAPTER_RULES_VERSION,
         )
+        notes.answered(Source.CHAPTERS)
     _mark_refreshed(ctx, path, Source.CHAPTERS)
     if not rec.duration_ms:
         return ItemOutcome(FileOutcome.FAILED.value, "Couldn't read the file's duration")
@@ -1980,6 +2051,7 @@ def _attempt(
             and not _stale_evidence(ctx, rec, source)
             and not _decided_with_a_due_answer(ctx, rec, source, decisions, types)
         ):
+            notes.not_asked[source] = "not needed (already decided)"
             continue
         if cancelled():
             return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
@@ -1991,8 +2063,14 @@ def _attempt(
                 and ctx.priority() >= PRIORITY_LOW
                 and _only_confirming_chapters(decisions, types)
             ):
-                continue  # the only daily-budgeted source is kept for files it could still decide
-            if lookups_allowed and client is not None and _needs_lookup(ctx, rec, source, refresh):
+                # the only daily-budgeted source is kept for files it could still decide
+                notes.not_asked[source] = "not asked (daily lookups kept for files it could still decide)"
+                continue
+            if not lookups_allowed:
+                notes.not_asked[source] = "not asked (no server confirmed whether it's a movie or an episode)"
+            elif client is None:
+                notes.not_asked[source] = "not asked (not set up)"
+            elif _needs_lookup(ctx, rec, source, refresh):
                 lookup_ids = lookup_ids or _lookup_ids(ids, servers)
                 phase(f"Looking up {_ONLINE_LABELS[source]}…")
                 result = _lookup(client, source, lookup_ids, rec, ctx, cancel_check)
@@ -2001,16 +2079,24 @@ def _attempt(
                     skipped[source] = refusal
                 elif result is not None and result.status in _STORED_LOOKUPS:
                     skipped.pop(source, None)  # an earlier stage's refusal no longer holds (the budget reset)
+                    notes.answered(source)
+                else:
+                    notes.unanswered[source] = _unstored_lookup(source, result)
         elif source is Source.SERVER_MARKERS:
             phase("Reading markers already on servers…")
             first_read_only = not gather_all and _all_decided(decisions, types)
-            _read_server_markers(ctx, rec, servers, refresh, first_read_only=first_read_only)
+            for server_id in _read_server_markers(ctx, rec, servers, refresh, first_read_only=first_read_only):
+                notes.answered(Source.SERVER_MARKERS, server_id)
         else:
-            pending = [
-                spec
-                for spec in ctx.local_detectors
-                if spec.source is source and _detector_pending(ctx, rec, spec, decisions, types, refresh=refresh)
-            ]
+            here = [spec for spec in ctx.local_detectors if spec.source is source]
+            pending = [spec for spec in here if _detector_pending(ctx, rec, spec, decisions, types, refresh=refresh)]
+            # Shown only when the file has no saved answer from this source.
+            if not here:
+                notes.not_asked[source] = "not available here"
+            elif not any(spec.types & types for spec in here):
+                notes.not_asked[source] = "doesn't apply to this file"
+            elif not pending:
+                notes.not_asked[source] = "not needed (already decided)"
             if pending and kept_everywhere is None:
                 kept_everywhere = _kept_by_every_destination(ctx, rec, servers, owners, types)
             if pending and kept_everywhere:
@@ -2020,17 +2106,19 @@ def _attempt(
                     if _detector_pending(ctx, rec, spec, decisions, types - kept_everywhere, refresh=refresh)
                 ]
                 if len(reading) < len(pending):
+                    kept_names = " and ".join(t.value for t in MarkerType if t in kept_everywhere)
                     logger.debug(
                         "Not reading {} at {}: every server keeps its own {}",
                         os.path.basename(path),
                         source.value,
-                        " and ".join(t.value for t in MarkerType if t in kept_everywhere),
+                        kept_names,
                     )
+                    notes.not_asked[source] = f"not read (every server keeps its own {kept_names})"
                 pending = reading
             if not local and any(_needs_worker(ctx, rec, spec) for spec in pending):
                 return None  # sources already refreshed stay marked; the worker refreshes the rest
             for spec in pending:
-                _run_detector(
+                unanswered = _run_detector(
                     ctx,
                     rec,
                     spec,
@@ -2040,6 +2128,11 @@ def _attempt(
                     cancel_check=cancel_check,
                     pause_check=pause_check,
                 )
+                if unanswered is None:
+                    for stored in spec.stored_sources:
+                        notes.answered(stored)
+                else:
+                    notes.unanswered[spec.source] = f"no answer this time ({unanswered})"
             if pending:
                 ctx.run_memo(path).clear()  # what the detectors' hooks read before they ran is out of date now
         _mark_refreshed(ctx, path, source)
@@ -2061,7 +2154,8 @@ def _attempt(
             **{t: TypeDecision(t, DecisionStatus.DISABLED, None, None, reason) for t in kept_own},
         }
     fingerprint = ctx.settings.detection_fingerprint()
-    if _decisions_changed(ctx.store, rec.id, decisions, fingerprint):
+    changed = _decisions_changed(ctx.store, rec.id, decisions, fingerprint)
+    if changed:
         ctx.store.save_decisions(rec.id, decisions, settings_fingerprint=fingerprint)
     if ctx.store.get_intro_chapter_limit(rec.id) != (True, intro_limit):
         ctx.store.set_intro_chapter_limit(rec.id, intro_limit)
@@ -2079,11 +2173,98 @@ def _attempt(
         if replaced and row["status"] in (ServerStatus.WRITTEN.value, ServerStatus.UP_TO_DATE.value):
             row[VERIFY_LATER] = True
         rows.append(row)
-    outcome = file_outcome({r["status"] for r in rows}, needs_review=needs_review)
+    waiting_to_retry = any(
+        r["status"] == ServerStatus.WAITING.value and r.get("reason_code") in RETRY_REASON_CODES for r in rows
+    )
+    outcome = file_outcome({r["status"] for r in rows}, needs_review=needs_review, waiting_to_retry=waiting_to_retry)
     if outcome is not FileOutcome.FAILED:
         ctx.decided_by.add(decided_groups(decisions))
+    try:
+        _log_file(ctx, rec, owning, decisions, types, rows, notes, skipped, changed=changed)
+    except Exception as exc:
+        # The file is done: a problem describing it mustn't fail it.
+        logger.warning("Couldn't write the job log lines for {}: {}", path, type(exc).__name__)
     labels = tuple(sorted(_ONLINE_LABELS[source] for source, answer in skipped.items() if is_budget_exhausted(answer)))
     return ItemOutcome(outcome.value, _summary(decisions, types, labels), rows)
+
+
+# Plain words for a server's stored markers answer that says they weren't used.
+_UNUSED_SERVER_MARKERS = {
+    UNUSABLE_SERVER_MARKERS_DETAIL: "couldn't be used (unreadable, or another cut)",
+    PLUGINS_UNKNOWN_DETAIL: "not used (couldn't read its plugins)",
+}
+
+
+def _unstored_lookup(source: Source, result: LookupResult | None) -> str:
+    """What the job log says about an online lookup whose answer wasn't stored (the next run asks again)."""
+    if result is None:
+        return "lookup failed"
+    detail = result.detail.removeprefix(f"{_ONLINE_LABELS[source]} ")
+    if result.status == "not_applicable":
+        return f"not asked ({detail})" if detail else "not asked"
+    return f"unavailable ({detail})" if detail else "unavailable"
+
+
+def _server_result(
+    ctx: PipelineContext, rec: FileRecord, row: dict, decisions: dict[MarkerType, TypeDecision]
+) -> ServerResult:
+    """A server's row with the types of ours it has now and the types it keeps as its own."""
+    ours: frozenset[MarkerType] = frozenset()
+    item_kept: frozenset[MarkerType] = frozenset()
+    shown = (ServerStatus.WRITTEN.value, ServerStatus.UP_TO_DATE.value, ServerStatus.WAITING.value)
+    state = ctx.store.get_publish_state(rec.id, row["server_id"]) if row["status"] in shown else None
+    if state is not None:
+        ours = frozenset(m.type for m in state.markers)
+        if state.item_id:
+            # Another version of the item may be publishing: its row is read under the item's lock (see _ITEM_LOCKS).
+            with _ITEM_LOCKS.hold((row["server_id"], state.item_id)):
+                item_row = ctx.store.get_item_publish_state(row["server_id"], state.item_id)
+            item_kept = item_row.kept_types if item_row is not None else frozenset()
+    kept = kept_types(decisions, item_kept)
+    withheld = frozenset(t for t in kept if decisions[t].status is DecisionStatus.DECIDED)
+    return ServerResult(row, ours, kept, withheld)
+
+
+def _log_file(
+    ctx: PipelineContext,
+    rec: FileRecord,
+    owning: list[_Owning],
+    decisions: dict[MarkerType, TypeDecision],
+    types: frozenset[MarkerType],
+    rows: list[dict],
+    notes: RunNotes,
+    skipped: dict[Source, str],
+    *,
+    changed: bool,
+) -> None:
+    """Log what each source answered, what was decided and what was sent where (the job log's lines for this file).
+
+    A Season job logs only files whose decisions changed; the rest go into its season's summary line.
+    """
+    season = None
+    if ctx.season_recheck:
+        name, episode = season_of(rec.canonical_path)
+        season = (name, SeasonEpisode(episode, changed, review_note(decisions, types)))
+    ctx._note_finished(rows, season)
+    if season is not None and not changed:
+        return
+    sources = source_answers(
+        ctx.settings.ordered_enabled_sources(),
+        ctx.store.evidence_rows(rec.id),
+        [(owner.config.id, owner.config.name) for owner in owning],
+        notes,
+        skipped,
+        _UNUSED_SERVER_MARKERS,
+    )
+    text = file_lines(
+        rec.canonical_path,
+        decisions=decisions,
+        types=types,
+        publish_when=ctx.settings.publish_when,
+        servers=[_server_result(ctx, rec, row, decisions) for row in rows],
+        sources=sources,
+    )
+    logger.info("{}", text)
 
 
 def _run(
@@ -2108,6 +2289,7 @@ def _run(
         try:
             with _PATH_LOCKS.hold(path), ctx._running(path):
                 skipped = ctx._pending_skips.pop(path, {})
+                notes = ctx._run_notes.pop(path, None) or RunNotes()
                 try:
                     outcome = _attempt(
                         item,
@@ -2119,16 +2301,19 @@ def _run(
                         cancel_check=cancel_check,
                         pause_check=pause_check,
                         skipped=skipped,
+                        notes=notes,
                     )
                 except BaseException:
                     # A rerun goes on from here: the retry below after the file changed, or the worker's CPU rerun
                     # after a GPU error; a forced run doesn't ask the sources it already asked again.
                     if skipped:
                         ctx._pending_skips[path] = skipped
+                    ctx._run_notes[path] = notes
                     raise
                 if outcome is None:  # handed to a worker
                     if skipped:
                         ctx._pending_skips[path] = skipped
+                    ctx._run_notes[path] = notes
                     return None
                 ctx._refreshed.pop(path, None)
                 _count_skipped(ctx, skipped)
@@ -2137,6 +2322,7 @@ def _run(
             logger.info("{} changed while its markers were detected; detecting again", path)
     ctx._refreshed.pop(path, None)
     ctx._pending_skips.pop(path, None)
+    ctx._run_notes.pop(path, None)
     return ItemOutcome(
         FileOutcome.FAILED.value, "The file kept changing while it was analysed; it will be tried again on the next run"
     )

@@ -659,7 +659,9 @@ when this happens mid-run.
 ### Needs review
 
 When the sources don't clear the bar above for a marker — nothing agrees, or two credible answers disagree — that
-marker isn't sent to any server and the file shows **Needs review**, even when its other markers were sent. Nothing
+marker isn't sent to any server and the file shows **Needs review**. When the job sent the file's other markers, the
+file shows **Markers written** instead, and its reason in the Files panel names the marker still in review, the times
+proposed and why (e.g. "credits needs review (sources don't agree yet): 47:36–48:38 from credits_text"). Nothing
 is guessed. **Re-detect** in the Inspector asks every source again, and **Adjust** lets you put the marker where it
 really is by hand — including for a type nothing was found for at all, where **Add intro** / **Add credits** puts one
 on the timeline at a starting time for you to drag. Saving it locks it, so later checks leave it alone.
@@ -994,6 +996,35 @@ the same markers whatever order the episodes arrived in, as if they had all been
 at most 500 episodes; any beyond that, and any request lost to a restart before the job finished, are picked up the
 next time an episode of that season is checked.
 
+### Reading an Intro & Credits job's log
+
+Each file gets two lines in the job's log: what was sent to each server and what was decided per marker type, then
+what every source you turned on answered, in your source order. For example:
+
+```
+[10:14:03] INFO - Brave New World S01E05: nothing sent to Plex · intro not found · credits 47:36–48:38 found by credit text → needs review (sources don't agree yet; at Publish when: High one source isn't enough)
+  sources: chapters none · TheIntroDB skipped (daily limit reached, resets 00:00 UTC) · credit text credits from 47:36 · Plex's own none
+[10:14:09] INFO - The Fall (2013) S03E05: sent intro to Plex; Plex keeps its own credits ("Keep Plex's") · intro 1:02–1:33 (from chapters) · credits: kept Plex's own marker
+  sources: chapters intro 1:02–1:33 · TheIntroDB no entry · credit text not read (every server keeps its own credits) · Plex's own credits from 58:23
+```
+
+- A decided marker names the sources it came from: "(from chapters)", or "(TheIntroDB + credit text agree)". A marker
+  in review names who found it, the proposed times and why it wasn't sent. Times are `m:ss`, or `h:mm:ss` past an hour.
+- Per server: "sent intro and credits to Plex", "Plex already has our intro", "nothing sent to Plex", "waiting for Plex
+  to add the file to its library" (the job tries it again), and the types that server keeps as its own.
+- Per source: its answer ("no entry", "none", "credits from 47:36"), or why it wasn't asked: "not needed (already
+  decided)", "skipped (daily limit reached, …)", "not read (every server keeps its own credits)". **(saved earlier)**
+  means the answer was stored before (by an earlier run, or while the job checked another episode of the season) and
+  was used without asking again.
+
+A **Season: …** job logs these lines only for episodes whose result changed, and one line per season for the rest:
+"Season re-check, Brave New World S01 (3 episodes): no change, E01/E03/E04 still need review (credits from credit
+text only)". Every job ends with a totals line, e.g. "Done: 12 files · 9 sent to Plex · 2 need review · 1 nothing found
+· TheIntroDB skipped for 3 files".
+
+Job log times are the container's local time (its `TZ`, or the `/etc/localtime` you mounted), the same clock as the
+app's own log.
+
 ### Troubleshooting Intro & Credits
 
 Each server's Edit → Intro & Credits tab checks whether that server can actually receive markers right now. This
@@ -1065,9 +1096,11 @@ what a server shows), **Up to date** (every server already showed this),
 item's versions don't agree yet), **Skipped** (the server can't take markers right now, or a setting changed while
 the job ran — see the tables above for why — or the file is a trailer or other extra: "Extras aren't checked for
 markers"), **No markers found**, and **No server with Intro & Credits on**. When a file's servers end differently,
-the file shows the one that still needs something: **Failed**, then **Needs review**, then **Waiting**, then
-**Markers written**, then **Up to date**. A file written to Plex but still waiting on Jellyfin shows **Waiting**;
-each server's own result is on the file's row.
+the file shows the one that still needs something: **Failed**, then **Waiting** for a server the job tries again
+(it hasn't indexed the file yet, or Plex didn't answer its Plex Pass check), then **Markers written**, then **Needs
+review**, then **Waiting** for the item's other versions, then **Up to date**. So a file whose intro was written while
+its credits need review counts as **Markers written** (its reason names the credits), and a file written to Plex but
+still waiting on Jellyfin shows **Waiting**; each server's own result is on the file's row.
 
 Under a job's per-server results, **Decided by** counts how many files each source decided, per marker type — for
 example "Credits: chapters 40 · credit text 9 · TheIntroDB + server markers 3". It fills in while the job runs. A file

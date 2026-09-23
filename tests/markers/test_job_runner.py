@@ -1496,11 +1496,15 @@ class TestRestart:
 
     def test_resumed_job_with_every_file_finished_completes_without_submitting(self, env, finished):
         item = finished("a.mkv", "markers_needs_review")
+        env.ctx.summary_lines.return_value = ["Done: 1 file · 0 need review · 0 nothing found"]
         with patch.object(job_runner, "build_items", return_value=([item], [], {})):
             job_runner.run_intro_credits_job("j1")
         env.dispatcher.submit_items.assert_not_called()
         env.jm.set_job_outcome.assert_called_once_with("j1", {"markers_needs_review": 1})
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
+        # Its totals count the files finished before the restart.
+        env.ctx.summary_lines.assert_called_once_with({"markers_needs_review": 1})
+        env.jm.add_log.assert_any_call("j1", "INFO - Done: 1 file · 0 need review · 0 nothing found")
 
     @pytest.mark.parametrize("results", [OSError("disk gone"), None])
     def test_unreadable_file_results_checks_every_file_again(self, env, monkeypatch, results):
@@ -2665,6 +2669,40 @@ class TestBudgetExhaustedCompletionWarning:
         with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
             job_runner.run_intro_credits_job("j1")
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
+
+
+class TestClosingLogLines:
+    """The job's log ends with the pipeline's closing lines (a Season job's per-season lines, then the totals)."""
+
+    LINES = [
+        "Season re-check, Show (2020) S01 (3 episodes): no change",
+        "Done: 3 files · 0 sent to Plex · 0 need review · 3 nothing found",
+    ]
+
+    def test_they_are_logged_from_the_jobs_counts_before_the_job_completes(self, env):
+        order = []
+        env.ctx.summary_lines.return_value = self.LINES
+        env.jm.add_log.side_effect = lambda job_id, line: order.append((job_id, line))
+        env.jm.complete_job.side_effect = lambda job_id, **kwargs: order.append((job_id, "completed"))
+        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
+            job_runner.run_intro_credits_job("j1")
+        env.ctx.summary_lines.assert_called_once_with({"markers_published": 1})
+        assert order[-3:] == [("j1", f"INFO - {line}") for line in self.LINES] + [("j1", "completed")]
+
+    def test_lines_that_cant_be_made_leave_the_job_completed(self, env):
+        env.ctx.summary_lines.side_effect = RuntimeError("boom")
+        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
+            job_runner.run_intro_credits_job("j1")
+        env.jm.complete_job.assert_called_once_with("j1", warning=None)
+
+    @pytest.mark.parametrize(
+        ("source", "season_recheck"), [("season", True), ("sonarr", False), ("manual", False), (None, False)]
+    )
+    def test_only_a_season_job_logs_one_line_per_season(self, env, source, season_recheck):
+        env.job.config = {"libraries": [], "source": source}
+        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
+            job_runner.run_intro_credits_job("j1")
+        assert env.build_context.call_args.kwargs["season_recheck"] is season_recheck
 
 
 class TestRetryCarriesTheSenderPath:

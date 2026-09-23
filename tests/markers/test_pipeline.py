@@ -926,10 +926,11 @@ class TestEvidenceAndDecisions:
         expected = [m for m, cell in ((INTRO_CH, intro), (CREDITS_CH, credits)) if cell == "decided"]
         needs_review = "review" in (intro, credits)
         if expected:
-            # A type the sources don't agree on outranks the one written: only the user settles it.
+            # The job wrote the agreed type, so the file counts as written; the type in review is in its summary.
             status = ServerStatus.WRITTEN
-            outcome = FileOutcome.NEEDS_REVIEW if needs_review else FileOutcome.PUBLISHED
+            outcome = FileOutcome.PUBLISHED
             assert plex.write.call_args.args == ("item-plex-1", expected)
+            assert ("needs review" in out.message) is needs_review
         else:
             plex.write.assert_not_called()
             status = ServerStatus.NEEDS_REVIEW if needs_review else ServerStatus.NONE
@@ -4305,12 +4306,12 @@ class TestPlexItems:
         out_a = self._check(store, reg, items, a, CHAPTERS_CREDITS_ONLY, clients=review)
         assert items.calls[-1]["previous"] == [INTRO_CH]
         assert items.served("42") == []  # our intro is gone; B still disagrees on credits
-        # The intros in review outrank the Plex row on each file.
+        # The intros in review outrank a Plex row that wrote nothing (waiting for the versions, no retry queued).
         assert out_a.publisher_rows[0]["status"] == ServerStatus.WAITING.value
         assert out_a.outcome_key == FileOutcome.NEEDS_REVIEW.value
         out_b = self._check(store, reg, items, b, CHAPTERS_CREDITS_ONLY, clients=review)
         assert out_b.publisher_rows[0]["status"] == ServerStatus.WRITTEN.value
-        assert out_b.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        assert out_b.outcome_key == FileOutcome.PUBLISHED.value  # the write changed what Plex shows
         out_a = self._check(store, reg, items, a, clients=review)
         # B's publish already shows A's credits.
         assert out_a.publisher_rows[0]["status"] == ServerStatus.UP_TO_DATE.value
@@ -5014,26 +5015,50 @@ W, U, R, S, A, F, N = (
         ({W, U, A}, False, FileOutcome.WAITING),
         ({W, A, F}, False, FileOutcome.FAILED),
         ({U, S, N}, False, FileOutcome.UP_TO_DATE),
-        # A marker type the sources don't agree on: every status alone and with a needs-review row.
+        # A marker type the sources don't agree on: every status alone and with a needs-review row. A write on any
+        # server still counts the file as written; nothing written leaves it in review. The waiting rows here wait for
+        # the item's other versions: no retry is queued for them.
         ({R}, True, FileOutcome.NEEDS_REVIEW),
-        ({R, W}, True, FileOutcome.NEEDS_REVIEW),
+        ({R, W}, True, FileOutcome.PUBLISHED),
         ({R, U}, True, FileOutcome.NEEDS_REVIEW),
         ({R, S}, True, FileOutcome.NEEDS_REVIEW),
         ({R, A}, True, FileOutcome.NEEDS_REVIEW),
         ({R, F}, True, FileOutcome.FAILED),
         ({R, N}, True, FileOutcome.NEEDS_REVIEW),
-        ({W}, True, FileOutcome.NEEDS_REVIEW),  # intro written, credits need review
+        ({W}, True, FileOutcome.PUBLISHED),  # intro written, credits need review
         ({U}, True, FileOutcome.NEEDS_REVIEW),
         ({S}, True, FileOutcome.NEEDS_REVIEW),
         ({A}, True, FileOutcome.NEEDS_REVIEW),
         ({F}, True, FileOutcome.FAILED),
         ({N}, True, FileOutcome.NEEDS_REVIEW),
         (set(), True, FileOutcome.NEEDS_REVIEW),
-        ({W, A}, True, FileOutcome.NEEDS_REVIEW),
+        ({W, A}, True, FileOutcome.WAITING),  # as without a type in review: written here, waiting on the versions
+        ({W, U}, True, FileOutcome.PUBLISHED),
     ],
 )
 def test_file_outcome_precedence(statuses, needs_review, expected):
     assert file_outcome({s.value for s in statuses}, needs_review=needs_review) is expected
+
+
+@pytest.mark.parametrize(
+    ("statuses", "needs_review", "expected"),
+    [
+        # A server that hasn't indexed the file (or couldn't confirm Plex Pass) is retried by the job: waiting, whatever
+        # else the file's types or servers say, short of a failure.
+        ({A}, False, FileOutcome.WAITING),
+        ({A}, True, FileOutcome.WAITING),
+        ({R, A}, True, FileOutcome.WAITING),
+        ({W, A}, True, FileOutcome.WAITING),
+        ({U, A}, True, FileOutcome.WAITING),
+        ({A, F}, True, FileOutcome.FAILED),
+        # The flag says a waiting row has a retry reason; without a waiting row it changes nothing.
+        ({W}, True, FileOutcome.PUBLISHED),
+        ({R}, True, FileOutcome.NEEDS_REVIEW),
+    ],
+)
+def test_file_outcome_when_a_server_waits_with_a_retry_queued(statuses, needs_review, expected):
+    outcome = file_outcome({s.value for s in statuses}, needs_review=needs_review, waiting_to_retry=True)
+    assert outcome is expected
 
 
 def test_outcome_keys_are_every_file_outcome_in_order():

@@ -8,6 +8,7 @@ or cleared.
 """
 
 import os
+import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -38,6 +39,16 @@ def _reset_job_manager():
 def config_dir(tmp_path):
     """Temporary config directory for job logs."""
     return str(tmp_path / "config")
+
+
+@pytest.fixture
+def utc_plus_10(monkeypatch):
+    """The process's local time zone is UTC+10 (a POSIX rule, so no zoneinfo files are needed)."""
+    monkeypatch.setenv("TZ", "AEST-10")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
 
 
 class TestJobProgressSchemaTolerance:
@@ -78,6 +89,32 @@ class TestJobLogPersistence:
         assert "first line" in content
         assert "second line" in content
         assert content.count("\n") == 2
+
+    def test_a_log_line_carries_the_containers_local_time_like_app_log(self, config_dir, utc_plus_10):
+        import media_preview_generator.web.jobs as jobs_mod
+
+        class FixedClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                moment = datetime(2026, 9, 24, 0, 5, 7, tzinfo=UTC)
+                return moment if tz is not None else moment.astimezone().replace(tzinfo=None)
+
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test")
+        with patch.object(jobs_mod, "datetime", FixedClock):
+            jm.add_log(job.id, "INFO - Intro & Credits job started")
+        assert jm.get_logs(job.id) == ["[10:05:07] INFO - Intro & Credits job started"]
+
+    @pytest.mark.parametrize(
+        "moment",
+        [datetime(2026, 9, 24, 23, 59, 59, tzinfo=UTC), datetime(2026, 9, 24, 23, 59, 59)],
+        ids=["aware", "naive-read-as-utc"],
+    )
+    def test_log_clock_turns_a_stored_utc_time_into_local_time(self, utc_plus_10, moment):
+        from media_preview_generator.web.jobs import log_clock
+
+        assert log_clock(moment) == "09:59:59"
 
     def test_get_logs_reads_from_file_after_restart(self, config_dir):
         """get_logs returns file content when in-memory cache is empty (e.g. after restart)."""

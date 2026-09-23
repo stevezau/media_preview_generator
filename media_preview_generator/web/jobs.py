@@ -31,6 +31,22 @@ from ..utils import redact_secrets
 # Message shown in UI when a job's log file was removed by retention policy.
 LOG_RETENTION_CLEARED_MESSAGE = "Log file was cleared due to log retention policy."
 
+
+def log_clock(moment: datetime | None = None) -> str:
+    """A job log line's time of day in local time (the container's ``TZ``), as app.log writes it.
+
+    Args:
+        moment: The time (now when None); a naive value is read as UTC, the zone every stored time is written in.
+
+    Returns:
+        ``HH:MM:SS``.
+    """
+    value = moment or datetime.now(UTC)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone().strftime("%H:%M:%S")
+
+
 # Job config key set while a job's pause came from its schedule's stop time. Only such a pause is resumed by that
 # schedule's next start (or Run now); a pause by hand, or Pause all, overwrites it, and any resume or the job's end
 # clears it.
@@ -110,7 +126,7 @@ def _synthesize_retry_chain_log_lines(job: "Job") -> list[str]:
         if not iso_value:
             return "--:--:--"
         try:
-            return datetime.fromisoformat(iso_value).strftime("%H:%M:%S")
+            return log_clock(datetime.fromisoformat(iso_value))
         except (TypeError, ValueError):
             return "--:--:--"
 
@@ -2195,8 +2211,7 @@ class JobManager:
         with self._lock:
             if job_id not in self._job_logs:
                 self._job_logs[job_id] = deque(maxlen=self._max_log_lines)
-            timestamp = datetime.now(UTC).strftime("%H:%M:%S")
-            line = f"[{timestamp}] {message}"
+            line = f"[{log_clock()}] {message}"
             self._job_logs[job_id].append(line)
             log_path = os.path.join(self._job_logs_dir, f"{job_id}.log")
             try:

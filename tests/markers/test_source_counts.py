@@ -183,7 +183,7 @@ class TestWhichFilesCount:
 
         out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe((CHAPTERS_BOTH[0], CHAPTERS_BOTH[3])))
 
-        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        assert out.outcome_key == FileOutcome.PUBLISHED.value  # the credits were written
         assert ctx.decided_by.snapshot() == {"credits": {"chapters": 1}}
 
     def test_a_file_needing_review_for_every_type_counts_nothing(self, store, media):

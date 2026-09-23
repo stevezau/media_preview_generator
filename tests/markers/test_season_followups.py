@@ -836,10 +836,9 @@ class TestSeasonJobThroughTheRealEngine:
         registry = FakeRegistry({"plex-1": server_config("plex-1", ServerType.PLEX, root=str(tmp_path / "media"))})
         publisher = ready_publisher()
         monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda config: registry)
-        monkeypatch.setattr(
-            job_runner,
-            "build_context",
-            lambda *, registry, config, priority, force=False, recheck_empty_server_markers=False: PipelineContext(
+
+        def build_context(*, registry, config, priority, force=False, **kwargs):
+            return PipelineContext(
                 registry=registry,
                 config=config,
                 settings=marker_settings,
@@ -849,9 +848,10 @@ class TestSeasonJobThroughTheRealEngine:
                 force=force,
                 clients={},
                 live_config=registry.get_config,
-                recheck_empty_server_markers=recheck_empty_server_markers,
-            ),
-        )
+                **kwargs,
+            )
+
+        monkeypatch.setattr(job_runner, "build_context", build_context)
         monkeypatch.setattr(triggers, "start_intro_credits_job_async", lambda job_id: None)
         chapters = _Chapters({1: 10_000, 2: 126_000, 3: 12_000})
         jm = engine.jm
