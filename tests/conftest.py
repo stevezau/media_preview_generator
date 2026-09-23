@@ -495,6 +495,20 @@ def _neutralize_prewarm_caches(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _neutralize_weekly_online_recheck(monkeypatch):
+    """Replace ``_schedule_weekly_online_recheck`` with a no-op for every test.
+
+    The real function opens the markers store singleton and arms a timer thread on every ``create_app()`` call, which
+    would leave the store open on whichever config folder the first app used. Its own tests call it directly.
+    """
+    try:
+        import media_preview_generator.web.app as app_mod
+    except ImportError:
+        return
+    monkeypatch.setattr(app_mod, "_schedule_weekly_online_recheck", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_setup_logging(request, monkeypatch):
     """Replace ``setup_logging`` with a no-op for every test by default.
 

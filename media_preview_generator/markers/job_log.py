@@ -9,8 +9,9 @@ answer, e.g. (each line wrapped here)::
         Plex's own none
 
 A Season job logs one line per season instead of one per unchanged episode (``season_line``), a job deciding files
-again after the update one line instead of one per unchanged file (``decide_again_line``), and every job ends with a
-totals line (``totals_line``).
+again after the update one line instead of one per unchanged file (``decide_again_line``), the weekly online re-check
+one line instead of one per file nothing new was found for (``online_recheck_line``), and every job ends with a totals
+line (``totals_line``).
 """
 
 from __future__ import annotations
@@ -498,6 +499,27 @@ def decide_again_line(files: Iterable[tuple[bool, bool]]) -> str:
             text += f", still {verb} review" if review == same else f", {review} still {verb} review"
         parts.append(text)
     return f"Decided again after the update ({_files(len(results))}): {'; '.join(parts) or 'nothing to decide'}"
+
+
+def online_recheck_line(files: Iterable[tuple[bool, bool]]) -> str:
+    """The one line of the weekly job asking the online databases again about files they had no entry for; the files
+    newly found or whose decisions changed were logged file by file.
+
+    Args:
+        files: Per file it ran: whether an online database it asked now has an entry for it, and whether its decisions
+            changed.
+
+    Returns:
+        E.g. ``Weekly online re-check (5 files): 2 newly found online, 3 unchanged``.
+    """
+    results = list(files)
+    found = sum(1 for newly_found, _ in results if newly_found)
+    changed = sum(1 for newly_found, was_changed in results if was_changed and not newly_found)
+    parts = [f"{found} newly found online"]
+    if changed:
+        parts.append(f"{changed} changed otherwise")
+    parts.append(f"{len(results) - found - changed} unchanged")
+    return f"Weekly online re-check ({_files(len(results))}): {', '.join(parts)}"
 
 
 # File outcomes the totals line names only when some file had them, in this order.

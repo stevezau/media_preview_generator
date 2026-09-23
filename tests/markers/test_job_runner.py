@@ -3531,3 +3531,93 @@ class TestInReviewJob:
             parent_job_id="j1",
             max_retries=3,
         )
+
+
+class TestOnlineRecheckJob:
+    """The weekly job (``triggers.submit_online_recheck``): an ordinary Intro & Credits job over the files whose "no
+    entry" from an online database is due again, listed when it runs."""
+
+    CONFIG = {
+        "kind": JOB_KIND_INTRO_CREDITS,
+        "source": job_runner.ONLINE_RECHECK_SOURCE,
+        "libraries": [],
+        "file_paths": [],
+        job_runner.ONLINE_RECHECK: True,
+    }
+
+    def test_it_lists_the_due_files_and_runs_them_as_any_job(self, env, monkeypatch):
+        env.job.config = dict(self.CONFIG)
+        listed = MagicMock(return_value=["/tv/B/S01/e2.mkv", "/movies/A/a.mkv", "/tv/B/S01/e1.mkv"])
+        monkeypatch.setattr(job_runner, "online_recheck_files", listed)
+        with patch.object(job_runner, "build_items") as build:
+            job_runner.run_intro_credits_job("j1")
+        build.assert_not_called()
+        # Listed with the job's own settings and clock, when it runs.
+        listed.assert_called_once_with(env.ctx.store, env.ctx.settings, env.ctx.now.return_value)
+        ctx_kwargs = env.build_context.call_args.kwargs
+        # Only its log is grouped: it asks and reads only what is due, as any job does.
+        assert (ctx_kwargs["online_recheck"], ctx_kwargs["force"], ctx_kwargs["decide_again"]) == (True, False, False)
+        assert ctx_kwargs["season_recheck"] is False
+        items = env.dispatcher.submit_items.call_args.kwargs["items"]
+        assert [(i.canonical_path, i.item_id_by_server) for i in items] == [
+            ("/movies/A/a.mkv", {}),
+            ("/tv/B/S01/e1.mkv", {}),
+            ("/tv/B/S01/e2.mkv", {}),
+        ]
+        env.jm.complete_job.assert_called_once_with("j1", warning=None)
+
+    def test_with_nothing_due_it_completes_without_a_warning(self, env, monkeypatch):
+        env.job.config = dict(self.CONFIG)
+        monkeypatch.setattr(job_runner, "online_recheck_files", MagicMock(return_value=[]))
+        job_runner.run_intro_credits_job("j1")
+        env.dispatcher.submit_items.assert_not_called()
+        env.jm.add_log.assert_any_call("j1", "INFO - No file is due to be asked again online")
+        env.jm.complete_job.assert_called_once_with("j1")
+
+    def test_any_other_job_lists_its_own_files(self, env, monkeypatch):
+        listed = MagicMock()
+        monkeypatch.setattr(job_runner, "online_recheck_files", listed)
+        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
+            job_runner.run_intro_credits_job("j1")
+        assert env.build_context.call_args.kwargs["online_recheck"] is False
+        listed.assert_not_called()
+
+    def test_a_file_theintrodbs_budget_refused_goes_to_the_theintrodb_recheck(self, env, monkeypatch):
+        from media_preview_generator.markers import triggers
+
+        env.job.config = dict(self.CONFIG)
+        monkeypatch.setattr(job_runner, "online_recheck_files", MagicMock(return_value=["/m/a.mkv", "/m/b.mkv"]))
+        refused_at = datetime(2026, 9, 24, 4, 42, tzinfo=UTC)
+        env.ctx.take_budget_rechecks.return_value = (["/m/b.mkv"], refused_at)
+        env.jm.get_pending_jobs.return_value = []
+        create = MagicMock(return_value=MagicMock(id="r1234567"))
+        monkeypatch.setattr(triggers, "create_intro_credits_job", create)
+        monkeypatch.setattr(job_runner, "_utcnow", lambda: refused_at)
+        job_runner.run_intro_credits_job("j1")
+        create.assert_called_once_with(
+            library_name="TheIntroDB recheck: 1 files",
+            priority=job_runner.PRIORITY_LOW,
+            source=job_runner.BUDGET_RECHECK_SOURCE,
+            file_paths=["/m/b.mkv"],
+            retry_delay_s=int((job_runner.budget_recheck_due(refused_at) - refused_at).total_seconds()),
+        )
+
+    def test_a_file_off_disk_gets_no_retry(self, env, monkeypatch):
+        from media_preview_generator.markers import triggers
+
+        settings = {"log_level": "INFO", "webhook_retry_count": 3, "webhook_retry_delay": 30}
+        env.sm.get.side_effect = lambda key, default=None: settings.get(key, default)
+        env.job.config = dict(self.CONFIG)
+        monkeypatch.setattr(job_runner, "online_recheck_files", MagicMock(return_value=["/m/a.mkv"]))
+        create = MagicMock()
+        monkeypatch.setattr(triggers, "create_intro_credits_job", create)
+        set_cb = MagicMock()
+        monkeypatch.setattr(job_runner, "set_file_result_callback", set_cb)
+
+        def during_wait(timeout=None):
+            set_cb.call_args_list[0].args[0]("/m/a.mkv", "skipped_file_not_found", "", "Lookup", servers=[])
+            return True
+
+        env.tracker.wait.side_effect = during_wait
+        job_runner.run_intro_credits_job("j1")
+        create.assert_not_called()

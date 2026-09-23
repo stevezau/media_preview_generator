@@ -16,6 +16,7 @@ from media_preview_generator.web.app import (
     _derive_secret,
     _requeue_interrupted_on_startup,
     _resume_interrupted_retry_chains_on_startup,
+    _schedule_weekly_online_recheck,
     get_cors_origins,
     get_or_create_flask_secret,
     run_scheduled_job,
@@ -981,3 +982,31 @@ class TestRedecideInReviewAfterUpgrade:
         with patch.dict(os.environ, env), patch(self.ENABLED, return_value=True), patch(self.SUBMIT) as submit_again:
             create_app(config_dir=config_dir)
         submit_again.assert_not_called()
+
+
+class TestWeeklyOnlineRecheckOnStart:
+    """Every start arms the weekly Intro & Credits online re-check from the due time kept in markers.db
+    (``markers.triggers.schedule_online_recheck``), after the restart requeue so a revived one is found."""
+
+    SCHEDULE = "media_preview_generator.markers.triggers.schedule_online_recheck"
+
+    def test_create_app_arms_it_after_the_restart_requeue(self, tmp_path, monkeypatch):
+        import media_preview_generator.web.app as app_mod
+
+        order = []
+        monkeypatch.setattr(app_mod, "_requeue_interrupted_on_startup", lambda config_dir: order.append("requeue"))
+        monkeypatch.setattr(app_mod, "_schedule_weekly_online_recheck", lambda: order.append("schedule"))
+        config_dir = str(tmp_path / "config")
+        os.makedirs(config_dir, exist_ok=True)
+        with patch.dict(os.environ, {"CONFIG_DIR": config_dir, "WEB_AUTH_TOKEN": "test-token-12345678"}):
+            app_mod.create_app(config_dir=config_dir)
+        assert order == ["requeue", "schedule"]
+
+    def test_it_arms_the_timer(self):
+        with patch(self.SCHEDULE) as schedule:
+            _schedule_weekly_online_recheck()
+        schedule.assert_called_once_with()
+
+    def test_a_failure_never_stops_the_start(self):
+        with patch(self.SCHEDULE, side_effect=OSError("markers.db is locked")):
+            _schedule_weekly_online_recheck()  # never raises

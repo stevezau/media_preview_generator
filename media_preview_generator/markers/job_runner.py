@@ -63,6 +63,7 @@ from .pipeline import (
     build_context,
     cached_capability,
     kind_handlers,
+    online_recheck_files,
     sequence_number,
 )
 from .reconcile import LISTING_CONFIG_KEY, RECONCILE_SOURCE, CheckServersListing
@@ -93,6 +94,11 @@ BUDGET_RECHECK_AFTER_RESET = timedelta(minutes=5)
 # source, and the config key that lists those files when it runs (``_items_to_decide_again``).
 DECIDE_AGAIN_SOURCE = "decide_again"
 DECIDE_AGAIN = "decide_again"
+# The weekly job that asks the online databases again about files they had no entry for
+# (``triggers.submit_online_recheck``): its source, and the config key that lists those files when it runs
+# (``pipeline.online_recheck_files``).
+ONLINE_RECHECK_SOURCE = "online_recheck"
+ONLINE_RECHECK = "online_recheck"
 # A follow-up's config key once its runner has read its files: nothing joins it after that.
 FILES_SEALED = "files_sealed"
 # A running Season job's config keys: the episodes other jobs asked for while it ran, each with the
@@ -111,6 +117,7 @@ _NO_RETRY_SOURCES = _USER_PICKED_SOURCES | {
     RECONCILE_SOURCE,
     BUDGET_RECHECK_SOURCE,
     DECIDE_AGAIN_SOURCE,
+    ONLINE_RECHECK_SOURCE,
 }
 
 
@@ -821,14 +828,25 @@ def _wait_for_retry_time(job_id: str, cfg: dict, cancel_check: Callable[[], bool
     return True
 
 
-def _items_to_decide_again(store: MarkerStore) -> list[ProcessableItem]:
-    """The files in Needs review now and those whose last publish waits for their item's other versions, sorted by
-    season folder then path, as ``build_items`` lists a job's files."""
-    files = {*store.files_in_review(), *store.files_waiting_for_other_versions()}
-    paths = sorted(files, key=lambda p: (os.path.dirname(p), p))
+def _stored_file_items(paths: set[str]) -> list[ProcessableItem]:
+    """Items for files the markers store listed, sorted by season folder then path, as ``build_items`` lists a job's
+    files (no item id hints: each is looked up again)."""
+    ordered = sorted(paths, key=lambda p: (os.path.dirname(p), p))
     return [
-        ProcessableItem(canonical_path=p, server_id="", item_id_by_server={}, title=os.path.basename(p)) for p in paths
+        ProcessableItem(canonical_path=p, server_id="", item_id_by_server={}, title=os.path.basename(p))
+        for p in ordered
     ]
+
+
+def _items_to_decide_again(store: MarkerStore) -> list[ProcessableItem]:
+    """The files in Needs review now and those whose last publish waits for their item's other versions."""
+    return _stored_file_items({*store.files_in_review(), *store.files_waiting_for_other_versions()})
+
+
+def _items_for_online_recheck(ctx: PipelineContext) -> list[ProcessableItem]:
+    """The files whose "no entry" from an enabled online source is due again and whose decision it could still change
+    (``online_recheck_files``)."""
+    return _stored_file_items(set(online_recheck_files(ctx.store, ctx.settings, ctx.now())))
 
 
 def _all_libraries_listed(cfg: ServerConfig) -> ServerConfig:
@@ -1428,6 +1446,7 @@ def run_intro_credits_job(job_id: str) -> None:
                         BUDGET_RECHECK_LABEL if cfg.get("source") == BUDGET_RECHECK_SOURCE else SEASON_RECHECK_LABEL
                     ),
                     decide_again=bool(cfg.get(DECIDE_AGAIN)),
+                    online_recheck=bool(cfg.get(ONLINE_RECHECK)),
                 )
                 listing = None
                 if cfg.get("reconcile"):
@@ -1462,6 +1481,8 @@ def run_intro_credits_job(job_id: str) -> None:
                     items, warnings, sender_paths = listing.items, listing.warnings, {}
                 elif cfg.get(DECIDE_AGAIN):
                     items, warnings, sender_paths = _items_to_decide_again(ctx.store), [], {}
+                elif cfg.get(ONLINE_RECHECK):
+                    items, warnings, sender_paths = _items_for_online_recheck(ctx), [], {}
                 else:
                     items, warnings, sender_paths = build_items(
                         cfg, registry=registry, cancel_check=cancel_check, progress_callback=progress_callback
@@ -1480,6 +1501,9 @@ def run_intro_credits_job(job_id: str) -> None:
                         jm.add_log(job_id, "INFO - No file is in Needs review or waiting for its item's other versions")
                         jm.complete_job(job_id)
                         _settle_decide_again(jm, job_id, cfg)
+                    elif cfg.get(ONLINE_RECHECK):
+                        jm.add_log(job_id, "INFO - No file is due to be asked again online")
+                        jm.complete_job(job_id)
                     else:
                         jm.complete_job(job_id, warning=" ".join(["No files to check.", *warnings]))
                     if cfg.get("source") == SEASON_SOURCE:
