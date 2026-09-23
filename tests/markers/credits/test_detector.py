@@ -1106,7 +1106,6 @@ class TestCheckStage:
             test_pipeline._registry(media, ServerType.PLEX),
             settings_raw={
                 "detect": {"intro": False, "credits": True},
-                "publish_when": "medium",
                 "sources": [{"id": "credits_text", "enabled": True}],
             },
             detectors=(detector.credits_text_spec(),),

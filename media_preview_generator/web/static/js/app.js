@@ -1543,7 +1543,7 @@ const STATUS_META = {
     markers_published:      { label: 'Markers written', cls: 'bg-success', tip: 'The job changed what at least one server shows; the reason names any other marker that still needs review' },
     markers_written:        { label: 'Markers written', cls: 'bg-success', tip: 'Markers were written to this server' },
     markers_up_to_date:     { label: 'Up to date', cls: 'bg-secondary', tip: 'The server already shows these markers' },
-    markers_needs_review:   { label: 'Needs review', cls: 'bg-warning text-dark', tip: 'The sources don\'t agree on a marker yet, so it wasn\'t sent, and the job wrote nothing else for this file' },
+    markers_needs_review:   { label: 'Needs review', cls: 'bg-warning text-dark', tip: 'A marker wasn\'t sent (the sources disagree, or the only answer can\'t decide on its own), and the job wrote nothing else for this file' },
     markers_none:           { label: 'No markers found', cls: 'bg-secondary', tip: 'No source found an intro or credits for this file' },
     markers_no_owners:      { label: 'No server with Intro & Credits on', cls: 'bg-secondary', tip: 'No server with Intro & Credits turned on has this file' },
     markers_skipped:        { label: 'Skipped', cls: 'bg-secondary', tip: 'The server can\'t take markers right now (for example, a plugin is missing), or the file is a trailer or other extra' },
@@ -1555,6 +1555,7 @@ const JOB_KIND_INTRO_CREDITS = 'intro_credits';
 const MARKERS_NOT_IN_LIBRARY = 'not_in_library';
 const MARKERS_NOT_IN_LIBRARY_LABEL = 'Not in the server\'s library yet — will retry';
 // Server messages that only repeat the pill or the file's reason (markers/pipeline.py); the Files panel lists the rest.
+// "Sources don't agree yet" is what rows recorded before a Needs review row said why (2026-09-24).
 const MARKERS_ROUTINE_MESSAGE = /^(Up to date|No markers found|Sources don't agree yet|\d+ marker\(s\))$/;
 
 function _isMarkersJob(job) {

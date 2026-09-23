@@ -417,33 +417,45 @@ class TestChapters:
 
 class TestAgreement:
     @pytest.mark.parametrize(
-        ("a", "b", "expected", "start_ms"),
+        ("a", "b", "expected", "detail"),
         [
             # "a" always precedes "b" in ORDER, so a's own end (checked edge) wins; start (unchecked
-            # edge) is the later/safer of the two, a server marker's included: it may shorten the skip.
+            # edge) is the later/safer of the two, a server marker's included: it may shorten the skip. `detail` is
+            # that start when decided, the start of the Needs review reason otherwise.
             (S.THEINTRODB, S.SKIPDB, DecisionStatus.DECIDED, 128_000),
             (S.THEINTRODB, S.SEASON_AUDIO, DecisionStatus.DECIDED, 128_000),
             (S.SKIPDB, S.SERVER_MARKERS, DecisionStatus.DECIDED, 128_000),
-            (S.THEINTRODB, S.INTRODB, DecisionStatus.NEEDS_REVIEW, None),  # dependent pair = one source
+            # dependent pair = one source
+            (S.THEINTRODB, S.INTRODB, DecisionStatus.NEEDS_REVIEW, "only TheIntroDB and IntroDB have the intro"),
             # an importer plugin's copy on a server is the crowd answer again
-            (S.INTRODB, S.SERVER_MARKERS_IMPORTED, DecisionStatus.NEEDS_REVIEW, None),
-            (S.THEINTRODB, S.SERVER_MARKERS_IMPORTED, DecisionStatus.NEEDS_REVIEW, None),
+            (
+                S.INTRODB,
+                S.SERVER_MARKERS_IMPORTED,
+                DecisionStatus.NEEDS_REVIEW,
+                "only IntroDB and a server's imported marker have the intro",
+            ),
+            (
+                S.THEINTRODB,
+                S.SERVER_MARKERS_IMPORTED,
+                DecisionStatus.NEEDS_REVIEW,
+                "only TheIntroDB and a server's imported marker have the intro",
+            ),
             (S.SKIPDB, S.SERVER_MARKERS_IMPORTED, DecisionStatus.DECIDED, 128_000),
         ],
     )
-    def test_intro_pairs(self, a, b, expected, start_ms):
+    def test_intro_pairs(self, a, b, expected, detail):
         cands = [intro(a, 127_000, 157_000), intro(b, 128_000, 160_000)]
         d = decide(cands, ctx(), {})[T.INTRO]
         assert d.status is expected
         if expected is DecisionStatus.DECIDED:
-            assert (d.marker.start_ms, d.marker.end_ms) == (start_ms, 157_000)
+            assert (d.marker.start_ms, d.marker.end_ms) == (detail, 157_000)
             assert set(d.marker.decided_by) == {a.value, b.value}
             assert d.proposed is None
         else:
             assert d.marker is None
             assert d.proposed is not None
             assert d.proposed.start_ms == 127_000  # "a" outranks "b"
-            assert d.reason == "sources don't agree yet"
+            assert d.reason == f"{detail}; an online answer needs a check against the file"
 
     def test_dependent_pair_plus_local_source_decides(self):
         cands = [
@@ -880,7 +892,10 @@ class TestAgreement:
             assert d.status is DecisionStatus.NEEDS_REVIEW
             assert d.marker is None
             assert d.proposed == Marker(T.INTRO, 62_000, 95_000, ("server_markers",))
-            assert d.reason == "sources don't agree yet"
+            assert d.reason == (
+                "only a server's own marker and a server's imported marker have the intro; a server's marker needs "
+                "another source to agree"
+            )
 
     def test_an_imported_server_copy_does_not_confirm_its_crowd_source_but_plex_does(self):
         cands = [
@@ -906,35 +921,75 @@ class TestAgreement:
 
 class TestSingleSource:
     @pytest.mark.parametrize(
-        ("cands", "medium"),
+        ("cands", "medium", "reason"),
         [
             # the source checks this file's cut itself: SkipDB answers only a duration match, credit text reads
-            # the file
-            ([intro(S.SKIPDB, 127_000, 157_000)], DecisionStatus.DECIDED),
-            ([intro(S.CREDITS_TEXT, 127_000, 157_000)], DecisionStatus.DECIDED),
+            # the file. Only "high" (the evaluation harness; the app decides at "medium") holds them back.
+            (
+                [intro(S.SKIPDB, 127_000, 157_000)],
+                DecisionStatus.DECIDED,
+                'only SkipDB found the intro; at "high" a second source must agree',
+            ),
+            (
+                [intro(S.CREDITS_TEXT, 127_000, 157_000)],
+                DecisionStatus.DECIDED,
+                'only on-screen text found the intro; at "high" a second source must agree',
+            ),
             # season audio (same season or the previous season's hint) only agrees in phase 2 (owner, 2026-09-14)
-            ([intro(S.SEASON_AUDIO, 127_000, 157_000)], DecisionStatus.NEEDS_REVIEW),
-            ([intro(S.SEASON_AUDIO_PREVIOUS, 127_000, 157_000)], DecisionStatus.NEEDS_REVIEW),
+            (
+                [intro(S.SEASON_AUDIO, 127_000, 157_000)],
+                DecisionStatus.NEEDS_REVIEW,
+                "only season audio found the intro; matching audio needs another source to agree",
+            ),
+            (
+                [intro(S.SEASON_AUDIO_PREVIOUS, 127_000, 157_000)],
+                DecisionStatus.NEEDS_REVIEW,
+                "only the previous season's audio found the intro; matching audio needs another source to agree",
+            ),
             (
                 [intro(S.SEASON_AUDIO, 127_000, 157_000), intro(S.SEASON_AUDIO_PREVIOUS, 127_500, 157_200)],
                 DecisionStatus.NEEDS_REVIEW,
+                "only season audio and the previous season's audio found the intro; matching audio needs another "
+                "source to agree",
             ),
             # chapters are rule 3, the same at both levels
-            ([intro(S.CHAPTERS, 127_000, 157_000)], DecisionStatus.DECIDED),
+            ([intro(S.CHAPTERS, 127_000, 157_000)], DecisionStatus.DECIDED, None),
             # IntroDB takes no duration and TheIntroDB answers its closest stored cut: agreement only
-            ([intro(S.THEINTRODB, 127_000, 157_000)], DecisionStatus.NEEDS_REVIEW),
-            ([intro(S.INTRODB, 127_000, 157_000)], DecisionStatus.NEEDS_REVIEW),
-            ([intro(S.THEINTRODB, 127_000, 157_000), intro(S.INTRODB, 127_500, 157_200)], DecisionStatus.NEEDS_REVIEW),
+            (
+                [intro(S.THEINTRODB, 127_000, 157_000)],
+                DecisionStatus.NEEDS_REVIEW,
+                "only TheIntroDB has the intro; an online answer needs a check against the file",
+            ),
+            (
+                [intro(S.INTRODB, 127_000, 157_000)],
+                DecisionStatus.NEEDS_REVIEW,
+                "only IntroDB has the intro; an online answer needs a check against the file",
+            ),
+            (
+                [intro(S.THEINTRODB, 127_000, 157_000), intro(S.INTRODB, 127_500, 157_200)],
+                DecisionStatus.NEEDS_REVIEW,
+                "only TheIntroDB and IntroDB have the intro; an online answer needs a check against the file",
+            ),
             # markers already on servers never decide alone
-            ([intro(S.SERVER_MARKERS, 127_000, 157_000, "plex-1")], DecisionStatus.NEEDS_REVIEW),
-            ([intro(S.SERVER_MARKERS_IMPORTED, 127_000, 157_000, "jf-1")], DecisionStatus.NEEDS_REVIEW),
+            (
+                [intro(S.SERVER_MARKERS, 127_000, 157_000, "plex-1")],
+                DecisionStatus.NEEDS_REVIEW,
+                "only a server's own marker has the intro; a server's marker needs another source to agree",
+            ),
+            (
+                [intro(S.SERVER_MARKERS_IMPORTED, 127_000, 157_000, "jf-1")],
+                DecisionStatus.NEEDS_REVIEW,
+                "only a server's imported marker has the intro; a server's marker needs another source to agree",
+            ),
             (
                 [intro(S.INTRODB, 127_000, 157_000), intro(S.SERVER_MARKERS_IMPORTED, 127_000, 157_000, "jf-1")],
                 DecisionStatus.NEEDS_REVIEW,
+                "only IntroDB and a server's imported marker have the intro; an online answer needs a check against "
+                "the file",
             ),
         ],
     )
-    def test_single_source_matrix(self, cands, medium):
+    def test_single_source_matrix(self, cands, medium, reason):
         high = DecisionStatus.DECIDED if cands[0].source is S.CHAPTERS else DecisionStatus.NEEDS_REVIEW
         for publish_when, expected in (("high", high), ("medium", medium)):
             for order in (cands, cands[::-1]):
@@ -943,7 +998,7 @@ class TestSingleSource:
                 shown = d.marker if expected is DecisionStatus.DECIDED else d.proposed
                 assert (shown.start_ms, shown.end_ms, shown.decided_by) == (127_000, 157_000, (cands[0].source.value,))
                 if expected is DecisionStatus.NEEDS_REVIEW:
-                    assert (d.marker, d.reason) == (None, "sources don't agree yet")
+                    assert (d.marker, d.reason) == (None, reason)
 
     def test_no_candidates(self):
         d = decide([], ctx(), {})[T.CREDITS]
@@ -1034,7 +1089,10 @@ class TestMediumContradiction:
         assert d.status is DecisionStatus.NEEDS_REVIEW
         assert d.marker is None
         assert d.proposed == Marker(shorter.type, shorter.start_ms, shorter.end_ms, ("skipdb",))
-        assert d.reason == "sources don't agree yet"
+        if longer.type is T.INTRO:  # SkipDB may decide an intro alone at "medium", never credits (rule 6)
+            assert d.reason == 'only SkipDB found the intro; at "high" a second source must agree'
+        else:
+            assert d.reason == "only SkipDB has the credits; an online answer needs a check against the file"
 
     @pytest.mark.parametrize(
         ("cands", "marker"),
@@ -1103,8 +1161,12 @@ class TestMediumSkipDbAlone:
             assert d.status is expected, publish_when
             if expected is DecisionStatus.DECIDED:
                 assert (d.marker, d.proposed, d.reason) == (own, None, "single source (skipdb)")
+            elif cand.type in (T.INTRO, T.RECAP):
+                why = f'only SkipDB found the {cand.type.value}; at "high" a second source must agree'
+                assert (d.marker, d.proposed, d.reason) == (None, own, why)
             else:
-                assert (d.marker, d.proposed, d.reason) == (None, own, "sources don't agree yet")
+                why = f"only SkipDB has the {cand.type.value}; an online answer needs a check against the file"
+                assert (d.marker, d.proposed, d.reason) == (None, own, why)
 
     def test_skipdb_credits_still_decide_with_an_agreeing_independent_source_at_medium(self):
         cands = [credits(S.SKIPDB, 1_239_000), credits(S.CREDITS_TEXT, 1_243_000, 1_300_000)]
@@ -1715,6 +1777,43 @@ _REF_AUDIO = (S.SEASON_AUDIO, S.SEASON_AUDIO_PREVIOUS)
 _REF_AUDIO_WITH_SERVER = (
     "Season audio and a server's own marker agree, but both come from matching audio; needs another source"
 )
+# A type only one source (or copies of one) answered, with nothing against it, says which and why (2026-09-24).
+_REF_LABEL = {
+    S.CHAPTERS: "chapters",
+    S.THEINTRODB: "TheIntroDB",
+    S.INTRODB: "IntroDB",
+    S.SKIPDB: "SkipDB",
+    S.SEASON_AUDIO: "season audio",
+    S.SEASON_AUDIO_PREVIOUS: "the previous season's audio",
+    S.CREDITS_TEXT: "on-screen text",
+    S.SERVER_MARKERS: "a server's own marker",
+    S.SERVER_MARKERS_IMPORTED: "a server's imported marker",
+}
+_REF_ONLINE_WHY = "; an online answer needs a check against the file"
+_REF_AUDIO_WHY = "; matching audio needs another source to agree"
+_REF_SERVER_WHY = "; a server's marker needs another source to agree"
+_REF_HIGH_WHY = '; at "high" a second source must agree'
+
+
+def _ref_lone_reason(mtype, sources, best, *, high_held_it):
+    """The reason for a lone answer: every source in it by name, then why it waits (the best-ranked one's kind)."""
+    ordered = sorted(set(sources), key=list(S).index)
+    names = " and ".join(_REF_LABEL[s] for s in ordered)
+    if high_held_it:
+        return f"only {names} found the {mtype.value}{_REF_HIGH_WHY}"
+    if set(ordered) <= {S.CHAPTERS, *_REF_AUDIO, S.CREDITS_TEXT}:
+        verb = "found"
+    else:
+        verb = "has" if len(ordered) == 1 else "have"
+    if best in (S.INTRODB, S.THEINTRODB, S.SKIPDB):
+        why = _REF_ONLINE_WHY
+    elif best in _REF_AUDIO:
+        why = _REF_AUDIO_WHY
+    elif best in _REF_SERVER:
+        why = _REF_SERVER_WHY
+    else:
+        why = "; it needs another source to agree"
+    return f"only {names} {verb} the {mtype.value}{why}"
 
 
 def _ref_group(c):
@@ -1914,8 +2013,11 @@ def _ref_decide_type(mtype, cands, x):
             )
             if disagree:
                 reason = f"sources disagree: {', '.join(groups)}"
+            elif audio_with_server:
+                reason = _REF_AUDIO_WITH_SERVER
             else:
-                reason = _REF_AUDIO_WITH_SERVER if audio_with_server else "sources don't agree yet"
+                held = x.publish_when != "medium" and proposal is not None
+                reason = _ref_lone_reason(mtype, kinds, ranked[0].source, high_held_it=held)
             return review(_ref_own_marker(ranked[0], x), reason)
         if not all(_ref_agree(a, b, d) for a, b in itertools.combinations(sane, 2)):
             return review(_ref_own_marker(proposal, x), "source disagrees with itself")
@@ -2017,7 +2119,10 @@ _EVERY_REASON = (
     "single source",
     "source disagrees with itself",
     "sources disagree",
-    "sources don't agree yet",
+    _REF_ONLINE_WHY,
+    _REF_AUDIO_WHY,
+    _REF_SERVER_WHY,
+    _REF_HIGH_WHY,
     "shortened to the server's own marker",
     "intro and recap overlap",
     "preview overlaps credits",
@@ -2280,7 +2385,9 @@ class TestSeasonAudioSources:
     def test_season_audio_alone_never_decides(self, publish_when, source, origin):
         c = [Candidate(MarkerType.INTRO, 126_000, 157_000, source, 1.0, origin)]
         d = decide(c, self._ctx(publish_when), {})[MarkerType.INTRO]
-        assert (d.status, d.reason) == (DecisionStatus.NEEDS_REVIEW, "sources don't agree yet")
+        label = "season audio" if source is S.SEASON_AUDIO else "the previous season's audio"
+        why = f"only {label} found the intro; matching audio needs another source to agree"
+        assert (d.status, d.reason) == (DecisionStatus.NEEDS_REVIEW, why)
         assert d.proposed == Marker(MarkerType.INTRO, 126_000, 157_000, (source.value,))
 
     @pytest.mark.parametrize("publish_when", ["high", "medium"])
@@ -2320,7 +2427,7 @@ class TestSeasonAudioSources:
         ]
         d = decide(c, self._ctx(publish_when), {})[MarkerType.INTRO]
         assert (d.status, d.marker) == (DecisionStatus.NEEDS_REVIEW, None)
-        # Said plainly: "sources don't agree yet" would be wrong, they do agree.
+        # Said plainly: "only season audio found the intro" would be wrong, a server's marker agrees.
         assert d.reason == (
             "Season audio and a server's own marker agree, but both come from matching audio; needs another source"
         )
@@ -2328,8 +2435,14 @@ class TestSeasonAudioSources:
     @pytest.mark.parametrize(
         ("others", "reason"),
         [
-            ([], "sources don't agree yet"),  # season audio alone (ruling R2)
-            ([(S.SEASON_AUDIO_PREVIOUS, 126_500)], "sources don't agree yet"),  # this season's audio and the hint
+            # season audio alone (ruling R2)
+            ([], "only season audio found the intro; matching audio needs another source to agree"),
+            # this season's audio and the hint
+            (
+                [(S.SEASON_AUDIO_PREVIOUS, 126_500)],
+                "only season audio and the previous season's audio found the intro; matching audio needs another "
+                "source to agree",
+            ),
             ([(S.SERVER_MARKERS, 140_000)], "sources disagree: season_audio, server_markers"),
         ],
         ids=["alone", "with-the-hint", "server-disagrees"],
@@ -2511,7 +2624,19 @@ def _agreed(start, end, decided_by, reason):
     return (DecisionStatus.DECIDED, start, end, decided_by, reason)
 
 
-_NOT_YET = (DecisionStatus.NEEDS_REVIEW, None, None, None, "sources don't agree yet")
+def _only(names, mtype, why="an online answer needs a check against the file"):
+    """A lone answer's review: nothing decided, nothing agreed, and the reason names who answered."""
+    verb = "found" if why.startswith("at ") else "have"
+    return (DecisionStatus.NEEDS_REVIEW, None, None, None, f"only {names} {verb} the {mtype}; {why}")
+
+
+_COPY = "a server's imported marker"
+_IDB_AND_COPY_INTRO = _only(f"IntroDB and {_COPY}", "intro")
+_TIDB_AND_COPY_INTRO = _only(f"TheIntroDB and {_COPY}", "intro")
+_SKIPDB_AND_COPY_INTRO_AT_HIGH = _only(f"SkipDB and {_COPY}", "intro", 'at "high" a second source must agree')
+_IDB_AND_COPY_CREDITS = _only(f"IntroDB and {_COPY}", "credits")
+_TIDB_AND_COPY_CREDITS = _only(f"TheIntroDB and {_COPY}", "credits")
+_SKIPDB_AND_COPY_CREDITS = _only(f"SkipDB and {_COPY}", "credits")
 _SKIPDB_COPY_INTRO = _agreed(
     128_000, 157_000, ("skipdb", "server_markers_imported"), "sources agree: skipdb, server_markers_imported"
 )
@@ -2535,16 +2660,16 @@ class TestImportedCopiesJoinTheDatabaseTheyImport:
     @pytest.mark.parametrize(
         ("crowd", "copied_from", "high", "medium"),
         [
-            (S.SKIPDB, "skipdb", _NOT_YET, _SKIPDB_ALONE_INTRO),
+            (S.SKIPDB, "skipdb", _SKIPDB_AND_COPY_INTRO_AT_HIGH, _SKIPDB_ALONE_INTRO),
             (S.SKIPDB, "introdb", _SKIPDB_COPY_INTRO, _SKIPDB_COPY_INTRO),
             (S.SKIPDB, "aniskip", _SKIPDB_COPY_INTRO, _SKIPDB_COPY_INTRO),
             (S.SKIPDB, "", _SKIPDB_COPY_INTRO, _SKIPDB_COPY_INTRO),
-            (S.INTRODB, "introdb", _NOT_YET, _NOT_YET),
-            (S.THEINTRODB, "introdb", _NOT_YET, _NOT_YET),
+            (S.INTRODB, "introdb", _IDB_AND_COPY_INTRO, _IDB_AND_COPY_INTRO),
+            (S.THEINTRODB, "introdb", _TIDB_AND_COPY_INTRO, _TIDB_AND_COPY_INTRO),
             (S.INTRODB, "skipdb", _INTRODB_COPY_INTRO, _INTRODB_COPY_INTRO),
             # AniSkip copies stay with the crowd group until phase 4 measures what they copy
-            (S.INTRODB, "aniskip", _NOT_YET, _NOT_YET),
-            (S.INTRODB, "", _NOT_YET, _NOT_YET),
+            (S.INTRODB, "aniskip", _IDB_AND_COPY_INTRO, _IDB_AND_COPY_INTRO),
+            (S.INTRODB, "", _IDB_AND_COPY_INTRO, _IDB_AND_COPY_INTRO),
         ],
         ids=[
             "skipdb+skipdb-copy",
@@ -2569,15 +2694,15 @@ class TestImportedCopiesJoinTheDatabaseTheyImport:
         ("crowd", "copied_from", "high", "medium"),
         [
             # SkipDB and its copy are one source, and SkipDB alone never decides credits, at Medium either (rule 6)
-            (S.SKIPDB, "skipdb", _NOT_YET, _NOT_YET),
+            (S.SKIPDB, "skipdb", _SKIPDB_AND_COPY_CREDITS, _SKIPDB_AND_COPY_CREDITS),
             (S.SKIPDB, "introdb", _SKIPDB_COPY_CREDITS, _SKIPDB_COPY_CREDITS),
             (S.SKIPDB, "aniskip", _SKIPDB_COPY_CREDITS, _SKIPDB_COPY_CREDITS),
             (S.SKIPDB, "", _SKIPDB_COPY_CREDITS, _SKIPDB_COPY_CREDITS),
-            (S.INTRODB, "introdb", _NOT_YET, _NOT_YET),
-            (S.THEINTRODB, "introdb", _NOT_YET, _NOT_YET),
+            (S.INTRODB, "introdb", _IDB_AND_COPY_CREDITS, _IDB_AND_COPY_CREDITS),
+            (S.THEINTRODB, "introdb", _TIDB_AND_COPY_CREDITS, _TIDB_AND_COPY_CREDITS),
             (S.INTRODB, "skipdb", _INTRODB_COPY_CREDITS, _INTRODB_COPY_CREDITS),
-            (S.INTRODB, "aniskip", _NOT_YET, _NOT_YET),
-            (S.INTRODB, "", _NOT_YET, _NOT_YET),
+            (S.INTRODB, "aniskip", _IDB_AND_COPY_CREDITS, _IDB_AND_COPY_CREDITS),
+            (S.INTRODB, "", _IDB_AND_COPY_CREDITS, _IDB_AND_COPY_CREDITS),
         ],
         ids=[
             "skipdb+skipdb-copy",
@@ -2665,12 +2790,19 @@ def _own(c):
     return (c.start_ms, DUR if c.end_ms is None else c.end_ms)
 
 
+def _lone(level, *cands):
+    """The lone-answer reason the matrix expects for these candidates of one type."""
+    sources = {c.source for c in cands}
+    held = level == "high" and any(_alone_at_medium(c.source, c.type) for c in cands)
+    return _ref_lone_reason(cands[0].type, sources, S(_credited(*sources)[0]), high_held_it=held)
+
+
 def _expected_alone(c, level):
     if c.source is S.CHAPTERS:
         return DecisionStatus.DECIDED, _own(c), ("chapters",), "chapters"
     if level == "medium" and _alone_at_medium(c.source, c.type):
         return DecisionStatus.DECIDED, _own(c), (c.source.value,), f"single source ({c.source.value})"
-    return DecisionStatus.NEEDS_REVIEW, None, None, "sources don't agree yet"
+    return DecisionStatus.NEEDS_REVIEW, None, None, _lone(level, c)
 
 
 def _expected_agreeing(kinds, a, b, level):
@@ -2681,11 +2813,11 @@ def _expected_agreeing(kinds, a, b, level):
         deciders = [c.source for c in (a, b) if _alone_at_medium(c.source, c.type)]
         if level == "medium" and deciders:
             return DecisionStatus.DECIDED, _own(a), _credited(*sources), f"single source ({deciders[0].value})"
-        return DecisionStatus.NEEDS_REVIEW, None, None, "sources don't agree yet"
+        return DecisionStatus.NEEDS_REVIEW, None, None, _lone(level, a, b)
     if sources <= _MATRIX_ONLY_AGREE:  # R2, G3, rule 7: nothing here may supply the times
         if sources & set(_REF_SERVER) and sources - set(_REF_SERVER):
             return DecisionStatus.NEEDS_REVIEW, None, None, _REF_AUDIO_WITH_SERVER
-        return DecisionStatus.NEEDS_REVIEW, None, None, "sources don't agree yet"
+        return DecisionStatus.NEEDS_REVIEW, None, None, _lone(level, a, b)
     return DecisionStatus.DECIDED, _own(a), _credited(*sources), "sources agree: " + ", ".join(_credited(*sources))
 
 
@@ -2704,7 +2836,7 @@ def _expected_disagreeing(kinds, near, far, level):
     if _plain_group(kinds[0]) == _plain_group(kinds[1]):
         if level == "medium" and any(_alone_at_medium(c.source, c.type) for c in (near, far)):
             return DecisionStatus.NEEDS_REVIEW, None, None, "source disagrees with itself"
-        return DecisionStatus.NEEDS_REVIEW, None, None, "sources don't agree yet"
+        return DecisionStatus.NEEDS_REVIEW, None, None, _lone(level, near, far)
     return DecisionStatus.NEEDS_REVIEW, None, None, "sources disagree: "
 
 

@@ -28,7 +28,6 @@ def _complete_setup(complete_setup) -> None:
 def _default_markers() -> dict:
     return {
         "detect": {"intro": True, "credits": True, "recap": False},
-        "publish_when": "high",
         "credits_window": {"tv_s": None, "movie_s": None},
         "sources": [
             {"id": "chapters", "enabled": True},
@@ -186,8 +185,7 @@ class TestIntroCreditsSettings:
         expect(authed_page.locator("#markersDetectIntro")).to_be_checked()
         expect(authed_page.locator("#markersDetectCredits")).to_be_checked()
         expect(authed_page.locator("#markersDetectRecap")).not_to_be_checked()
-        expect(authed_page.locator("#markersPublishHigh")).to_be_checked()
-        expect(authed_page.locator("#markersPublishMedium")).not_to_be_checked()
+        expect(authed_page.locator("#markersHowItDecides")).to_be_visible()
         expect(authed_page.locator("#markersCreditsWindowTv")).to_have_value("", timeout=5000)
         assert _source_ids(authed_page) == SOURCE_ORDER
         theintrodb = authed_page.locator("#markersSourceList .markers-source[data-id='theintrodb']")
@@ -243,7 +241,7 @@ class TestIntroCreditsSettings:
         assert tooltip == (
             "Finds where the credit roll starts from text on screen near the end of the file, and stops the skip at "
             "the last credit when a scene follows. Tested alone on 80 files, on a GPU: within 10 s on 64, more than 30 s early "
-            'on 1, missed 3. At "High" another source has to agree; at "Medium" it can publish alone.'
+            "on 1, missed 3. It can publish credits on its own."
         )
         row.locator(".markers-source-enabled").click()
         sent = _wait_for_post(
@@ -377,22 +375,23 @@ class TestIntroCreditsSettings:
         expect(row.locator(".markers-source-enabled")).to_be_enabled()
         expect(row.locator(".markers-source-unavailable")).to_be_hidden()
 
-    def test_publish_when_tooltip_describes_high_and_medium(self, authed_page: Page, app_url: str) -> None:
+    def test_how_it_decides_sits_under_the_sources(self, authed_page: Page, app_url: str) -> None:
+        # The "Publish when" High/Medium choice was removed (2026-09-24); this note says what the rules do instead.
         _open_settings(authed_page, app_url, _default_markers())
-        icon = authed_page.locator("#markersPublishWhenLabel + .info-icon")
-        # Bootstrap moves ``title`` into ``data-bs-original-title`` once the tooltip is initialised.
-        tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
-        assert tooltip == (
-            "High: chapters publish on their own unless two other independent sources agree on something different; "
-            "otherwise two independent sources must agree. Medium: also accepts a single source that checks your own "
-            "file — chapters, on-screen credit text (credits), or SkipDB matched to your file's length (intros and "
-            "recaps only). A single IntroDB or TheIntroDB answer never publishes on its own, because those don't know "
-            "which cut you have. Anything else shows as Needs review."
+        note = authed_page.locator("#markersSourceList + #markersHowItDecides")
+        expect(note).to_be_visible()
+        expect(note).to_have_text(
+            "How it decides: sources are asked in the order above. "
+            "Chapters in the file decide on their own, unless two other sources agree on something different or an "
+            "intro chapter is far longer than the rest of its season's. "
+            "An online database's answer is published once an independent source agrees with it: on-screen credits, "
+            "season audio, another database, or a server's own marker (IntroDB and TheIntroDB count as one). "
+            "A single answer decides alone only when it checks your own file: on-screen credit text for credits, or "
+            "SkipDB matched to your file's length for intros and recaps. "
+            "If sources disagree, or the only answer can't decide alone, the file goes to Needs review so you can pick."
         )
 
-    def test_publish_when_tooltip_names_the_sources_that_decide_alone_at_medium(
-        self, authed_page: Page, app_url: str
-    ) -> None:
+    def test_how_it_decides_names_the_sources_that_decide_alone(self, authed_page: Page, app_url: str) -> None:
         # Checked against the decision rules over every source × marker type, not a copy of the string: the list
         # drifted once (credit text left out). A new source fails here until it is mapped below.
         from media_preview_generator.markers.decide import _may_decide_alone
@@ -416,16 +415,14 @@ class TestIntroCreditsSettings:
         # The types a source can answer at all, where that's fewer than every type (spec §5.4: credit text).
         answers = {Source.CREDITS_TEXT: {MarkerType.CREDITS}}
         qualifiers = {
-            frozenset({MarkerType.CREDITS}): "(credits)",
-            frozenset({MarkerType.INTRO, MarkerType.RECAP}): "(intros and recaps only)",
+            frozenset({MarkerType.CREDITS}): "for credits",
+            frozenset({MarkerType.INTRO, MarkerType.RECAP}): "for intros and recaps",
         }
 
         _open_settings(authed_page, app_url, _default_markers())
-        icon = authed_page.locator("#markersPublishWhenLabel + .info-icon")
-        tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
-        medium = tooltip.split("Medium:", 1)[1]
-        # "also accepts a single source that checks your own file — A, B (x), or C (y). A single … never publishes …"
-        accepted = medium.split(" — ", 1)[1].split(". ", 1)[0]
+        note = authed_page.locator("#markersHowItDecides").inner_text()
+        # "A single answer decides alone only when it checks your own file: A for x, or B for y. If sources …"
+        accepted = note.split("A single answer decides alone only when it checks your own file: ", 1)[1].split(". ")[0]
         items = [item.removeprefix("or ") for item in accepted.split(", ")]
 
         for source, phrase in phrases.items():
@@ -434,13 +431,13 @@ class TestIntroCreditsSettings:
                 for mtype in answers.get(source, set(MarkerType))
                 if _may_decide_alone(Candidate(type=mtype, start_ms=0, end_ms=None, source=source))
             }
+            if source is Source.CHAPTERS:  # a sentence of their own
+                assert decides == set(MarkerType) and "Chapters in the file decide on their own" in note
+                continue
             named = [item for item in items if phrase in item]
             assert bool(named) is bool(decides), (source, accepted)
-            if decides and decides != set(MarkerType):
+            if decides:
                 assert qualifiers[frozenset(decides)] in named[0], (source, named)
-            elif decides:
-                assert "(" not in named[0], (source, named)
-        assert "never publishes on its own" in medium
 
     def test_intros_toggle_tooltip_names_season_audio_as_live(self, authed_page: Page, app_url: str) -> None:
         # Season audio shipped before this feature; the tooltip must not still call it "(soon)".
@@ -458,13 +455,11 @@ class TestIntroCreditsSettings:
 
     def test_stored_order_and_values_render(self, authed_page: Page, app_url: str) -> None:
         markers = _default_markers()
-        markers["publish_when"] = "medium"
         markers["credits_window"] = {"tv_s": 600, "movie_s": 1800}
         markers["detect"]["intro"] = False
         markers["sources"] = [markers["sources"][3], *markers["sources"][:3], *markers["sources"][4:]]
         _open_settings(authed_page, app_url, markers)
-        expect(authed_page.locator("#markersPublishMedium")).to_be_checked(timeout=5000)
-        expect(authed_page.locator("#markersCreditsWindowTv")).to_have_value("600")
+        expect(authed_page.locator("#markersCreditsWindowTv")).to_have_value("600", timeout=5000)
         expect(authed_page.locator("#markersCreditsWindowMovie")).to_have_value("1800")
         expect(authed_page.locator("#markersDetectIntro")).not_to_be_checked()
         assert _source_ids(authed_page) == ["skipdb", "chapters", "theintrodb", "introdb", *SOURCE_ORDER[4:]]
@@ -479,12 +474,18 @@ class TestIntroCreditsSettings:
         expected["detect"]["recap"] = True
         assert sent == expected
 
-    def test_publish_when_is_sent(self, authed_page: Page, app_url: str) -> None:
-        captured = _open_settings(authed_page, app_url, _default_markers())
-        expect(authed_page.locator("#markersPublishHigh")).to_be_checked(timeout=5000)
-        authed_page.locator("label[for='markersPublishMedium']").click()
-        sent = _wait_for_post(authed_page, captured, lambda m: m["publish_when"] == "medium")
-        assert sent["credits_window"] == {"tv_s": None, "movie_s": None}
+    def test_the_publish_rule_is_gone_and_a_save_sends_none(self, authed_page: Page, app_url: str) -> None:
+        # A block an older build stored still carries "high"; the page neither shows nor sends it.
+        captured = _open_settings(authed_page, app_url, {**_default_markers(), "publish_when": "high"})
+        expect(authed_page.locator("input[name='markersPublishWhen']")).to_have_count(0)
+        expect(authed_page.locator("#markersPublishWhenLabel")).to_have_count(0)
+        expect(authed_page.locator("#section-markers")).not_to_contain_text("Publish when")
+        with authed_page.expect_response(lambda r: "/api/settings" in r.url and r.request.method == "POST") as saved:
+            authed_page.locator("label[for='markersDetectRecap']").click()
+        assert saved.value.ok
+        sent = captured[-1]["markers"]
+        assert "publish_when" not in sent
+        assert sent == {**_default_markers(), "detect": {"intro": True, "credits": True, "recap": True}}
 
     def test_the_never_overwrite_switch_is_gone(self, authed_page: Page, app_url: str) -> None:
         _open_settings(authed_page, app_url, _default_markers())
@@ -683,5 +684,5 @@ class TestIntroCreditsSettings:
         authed_page.goto(f"{app_url}/settings")
         expect(authed_page.locator("#jobHistoryDays")).to_have_value("31", timeout=5000)
         expect(authed_page.locator("#markersDetectIntro")).to_be_checked()
-        expect(authed_page.locator("#markersPublishHigh")).to_be_checked()
+        expect(authed_page.locator("#markersHowItDecides")).to_be_visible()
         assert _source_ids(authed_page) == SOURCE_ORDER

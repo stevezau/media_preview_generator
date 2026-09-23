@@ -16,6 +16,7 @@ from typing import Any
 
 from loguru import logger
 
+from .decide import APP_PUBLISH_WHEN
 from .sources.theintrodb import sendable_api_key
 
 SOURCE_IDS: tuple[str, ...] = (
@@ -27,7 +28,6 @@ SOURCE_IDS: tuple[str, ...] = (
     "credits_text",
     "server_markers",
 )
-PUBLISH_WHEN_VALUES: tuple[str, ...] = ("high", "medium")
 ON_PLEX_REDETECT_VALUES: tuple[str, ...] = ("restore", "keep_plex")
 ON_EMBY_REDETECT_VALUES: tuple[str, ...] = ("restore", "keep_emby")
 # The credit text search windows Settings offers (seconds from the end of the file); None is Automatic.
@@ -42,7 +42,6 @@ _SPORTS_NAME_RE = re.compile(r"\bsports?\b", re.IGNORECASE)
 
 DEFAULT_GLOBAL_MARKERS: dict[str, Any] = {
     "detect": {"intro": True, "credits": True, "recap": False},
-    "publish_when": "high",
     "credits_window": {"tv_s": None, "movie_s": None},
     "sources": [
         {"id": "chapters", "enabled": True},
@@ -100,7 +99,6 @@ class GlobalMarkersSettings:
     detect_intro: bool
     detect_credits: bool
     detect_recap: bool
-    publish_when: str
     sources: tuple[SourceSetting, ...]
     # How far from the end of a file credit text detection looks, in seconds; None = Automatic (the detector's own
     # 450 s for a TV episode, 900 s for a movie or a file of unknown kind).
@@ -143,7 +141,9 @@ class GlobalMarkersSettings:
         """
         payload = {
             "detect": [self.detect_intro, self.detect_credits, self.detect_recap],
-            "publish_when": self.publish_when,
+            # The level every decision is made at now. Still hashed, so an install that was at "medium" keeps the hash
+            # it had, and one that was at "high" (the removed setting) decides its files again.
+            "publish_when": APP_PUBLISH_WHEN,
             "sources": [[s.id, s.enabled, bool(s.api_key)] for s in self.sources],
         }
         if self.credits_tv_s is not None or self.credits_movie_s is not None:
@@ -249,6 +249,9 @@ def _normalise_sources(raw_sources: Any, existing_sources: Any) -> tuple[list[di
 def validate_global(raw: object, existing: object) -> tuple[dict | None, str]:
     """Validate and normalise a posted global ``markers`` block.
 
+    Keys it doesn't know are dropped, including ``publish_when``: an older settings.json (or client) still has it, and
+    every decision is now made at :data:`~.decide.APP_PUBLISH_WHEN` whatever it says.
+
     Args:
         raw: The posted block.
         existing: The stored block (used to keep the TheIntroDB key when ``****`` is posted back).
@@ -262,9 +265,6 @@ def validate_global(raw: object, existing: object) -> tuple[dict | None, str]:
     if not isinstance(detect_raw, dict):
         return None, "markers.detect must be an object"
     detect = {k: bool(detect_raw.get(k, v)) for k, v in DEFAULT_GLOBAL_MARKERS["detect"].items()}
-    publish_when = raw.get("publish_when", "high")
-    if publish_when not in PUBLISH_WHEN_VALUES:
-        return None, "markers.publish_when must be 'high' or 'medium'"
     existing_sources = existing.get("sources") if isinstance(existing, dict) else None
     sources, err = _normalise_sources(raw.get("sources"), existing_sources)
     if err:
@@ -274,7 +274,6 @@ def validate_global(raw: object, existing: object) -> tuple[dict | None, str]:
         return None, err
     return {
         "detect": detect,
-        "publish_when": publish_when,
         "credits_window": credits_window,
         "sources": sources,
     }, ""
@@ -470,7 +469,6 @@ def load_global(raw: object) -> GlobalMarkersSettings:
         detect_intro=block["detect"]["intro"],
         detect_credits=block["detect"]["credits"],
         detect_recap=block["detect"]["recap"],
-        publish_when=block["publish_when"],
         sources=tuple(SourceSetting(s["id"], s["enabled"], s.get("api_key", "")) for s in block["sources"]),
         credits_tv_s=window["tv_s"],
         credits_movie_s=window["movie_s"],

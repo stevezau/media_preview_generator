@@ -3,13 +3,14 @@
 One file's run logs one entry of two lines (``file_lines``): what was sent where and decided, then every source's
 answer, e.g. (each line wrapped here)::
 
-    Rick and Morty (2013) S01E01: nothing sent to Plex · intro not found · credits 21:31–22:01 found by credit text →
-        needs review (sources don't agree yet; at Publish when: High one source isn't enough)
-      sources: chapters none · TheIntroDB skipped (daily limit reached, resets 00:00 UTC) · credit text credits from
-        21:31 · Plex's own none
+    Rick and Morty (2013) S01E01: nothing sent to Plex · intro 2:07–2:36 found by IntroDB → needs review (only IntroDB
+        has the intro; an online answer needs a check against the file) · credits not found
+      sources: chapters none · TheIntroDB skipped (daily limit reached, resets 00:00 UTC) · IntroDB intro 2:07–2:36 ·
+        Plex's own none
 
-A Season job logs one line per season instead of one per unchanged episode (``season_line``), and every job ends with
-a totals line (``totals_line``).
+A Season job logs one line per season instead of one per unchanged episode (``season_line``), a job deciding files
+again from saved answers one line instead of one per unchanged file (``decide_again_line``), and every job ends with a
+totals line (``totals_line``).
 """
 
 from __future__ import annotations
@@ -56,7 +57,6 @@ SOURCES_PREFIX = "  sources: "
 _SEP = " · "
 # Release tags and ids in a folder or file name ("{tvdb-275274}", "[imdbid-tt0944947]", "[1080p]").
 _TAG_RE = re.compile(r"\s*[\{\[][^\}\]]*[\}\]]")
-_NO_SECOND_SOURCE = "sources don't agree yet"
 # How a job that logs one line per season names itself there: a Season job, or the job that checks files TheIntroDB's
 # used-up daily budget refused again after the reset.
 SEASON_RECHECK_LABEL = "Season re-check"
@@ -185,18 +185,11 @@ def _labels(sources: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(names))
 
 
-def _review_reason(decision: TypeDecision, publish_when: str) -> str:
-    if decision.reason == _NO_SECOND_SOURCE and publish_when == "high":
-        return f"{decision.reason}; at Publish when: High one source isn't enough"
-    return decision.reason
-
-
-def type_phrase(decision: TypeDecision, publish_when: str) -> str:
+def type_phrase(decision: TypeDecision) -> str:
     """One marker type's result in plain words.
 
     Args:
         decision: The type's decision.
-        publish_when: The ``publish_when`` setting ("high" or "medium").
 
     Returns:
         E.g. ``credits 58:23–59:04 (TheIntroDB + credit text agree)``, ``intro not found`` or ``credits 47:36–48:38
@@ -216,7 +209,7 @@ def type_phrase(decision: TypeDecision, publish_when: str) -> str:
             why += ", start moved to the server's own marker"
         return f"{mtype} {_span(marker.start_ms, marker.end_ms)} ({why})"
     if decision.status is DecisionStatus.NEEDS_REVIEW:
-        reason = _review_reason(decision, publish_when)
+        reason = decision.reason
         if decision.proposed is None:
             return f"{mtype} → needs review ({reason})"
         found = " + ".join(_labels(decision.proposed.decided_by))
@@ -385,7 +378,6 @@ def file_lines(
     *,
     decisions: Mapping[MarkerType, TypeDecision],
     types: Collection[MarkerType],
-    publish_when: str,
     servers: Iterable[ServerResult],
     sources: Iterable[str],
 ) -> str:
@@ -395,7 +387,6 @@ def file_lines(
         canonical_path: The file's local path.
         decisions: The file's decisions.
         types: The types detected for the file (a locked type is shown whatever this says).
-        publish_when: The ``publish_when`` setting.
         servers: Each server's result for the file, in registry order.
         sources: Every source's answer (``source_answers``).
 
@@ -409,7 +400,7 @@ def file_lines(
         and (mtype in types or (decisions[mtype].marker is not None and decisions[mtype].marker.locked))
     ]
     results = [server_phrase(server) for server in servers]
-    decided = [type_phrase(decision, publish_when) for decision in shown] or ["nothing to detect for this file"]
+    decided = [type_phrase(decision) for decision in shown] or ["nothing to detect for this file"]
     first = f"{display_name(canonical_path)}: {_SEP.join([*results, *decided])}"
     return f"{first}\n{SOURCES_PREFIX}{_SEP.join(sources) or 'none enabled'}"
 
@@ -483,6 +474,30 @@ def season_line(season: str, episodes: list[SeasonEpisode], label: str = SEASON_
 
 def _files(count: int) -> str:
     return f"{count} file" if count == 1 else f"{count} files"
+
+
+def decide_again_line(files: Iterable[tuple[bool, bool]]) -> str:
+    """The one line of a job deciding files again from saved answers (after the upgrade that removed "Publish when"),
+    for the files whose decisions didn't change; the ones that did were logged file by file.
+
+    Args:
+        files: Per file it ran: whether its decisions changed, and whether a type is still in review.
+
+    Returns:
+        E.g. ``Decided again from saved answers (3 files): 2 changed (logged above); 1 unchanged, still needs review``.
+    """
+    results = list(files)
+    changed = sum(1 for was_changed, _ in results if was_changed)
+    same = len(results) - changed
+    review = sum(1 for was_changed, in_review in results if not was_changed and in_review)
+    parts = [f"{changed} changed (logged above)"] if changed else []
+    if same:
+        text = f"{same} unchanged"
+        if review:
+            verb = "needs" if review == 1 else "need"
+            text += f", still {verb} review" if review == same else f", {review} still {verb} review"
+        parts.append(text)
+    return f"Decided again from saved answers ({_files(len(results))}): {'; '.join(parts) or 'nothing to decide'}"
 
 
 # File outcomes the totals line names only when some file had them, in this order.

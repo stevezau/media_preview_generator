@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from enum import Enum
+from typing import Any
 
 from .decide import DecisionStatus
 from .models import Marker, MarkerType
@@ -50,8 +51,8 @@ def file_outcome(statuses: set[str], *, needs_review: bool, waiting_to_retry: bo
        the job runs the file again.
     3. Any server written → published (or waiting while another server waits for the item's other versions): the job
        changed what a server shows. A type still in review is named in the file's summary.
-    4. The sources don't agree on an enabled marker type → needs review: nothing was written, and only the user settles
-       it, even when the agreed types are up to date.
+    4. An enabled marker type is in Needs review (the sources disagree, or the only answer can't decide alone) → needs
+       review: nothing was written, and only the user settles it, even when the decided types are up to date.
     5. Any server waiting (the item's other versions were checked and don't agree) → waiting, even when another server
        is up to date.
     6. Any server up to date → up to date.
@@ -97,8 +98,35 @@ VERSIONS_UNCHECKED = "versions_unchecked"
 RETRY_REASON_CODES = frozenset({NOT_IN_LIBRARY, PLEX_PASS_UNKNOWN, VERSIONS_UNCHECKED})
 
 
+# Start of a waiting row's message: Plex shows a type only once every version of the item is decided and agrees on
+# it (``MarkerStore.files_waiting_for_other_versions`` finds these rows by it).
+VERSIONS_WAITING = "Waiting for this item's other versions to agree on"
+
 # Skipped-file message for trailers and other extras (``external_ids.is_extra``).
 EXTRAS_NOT_CHECKED = "Extras aren't checked for markers"
+
+
+def review_message(decisions: Mapping[MarkerType, Any], types: Iterable[MarkerType]) -> str:
+    """Row wording for a file with marker types in Needs review: why each one is there, in type order.
+
+    Args:
+        decisions: The file's decisions by type, fresh (``TypeDecision``) or stored (``DecisionRow``); both carry
+            ``status`` and ``reason``.
+        types: The types that count (the enabled ones, or every stored one).
+
+    Returns:
+        Each reason as a sentence, e.g. ``Only IntroDB has the intro; an online answer needs a check against the
+        file``; "" when none of ``types`` is in review.
+    """
+    wanted = set(types)
+    reasons = [
+        decision.reason or "Needs review"
+        for mtype in MarkerType
+        if mtype in wanted
+        and (decision := decisions.get(mtype)) is not None
+        and decision.status is DecisionStatus.NEEDS_REVIEW
+    ]
+    return ". ".join(dict.fromkeys(reason[0].upper() + reason[1:] for reason in reasons))
 
 
 def kept_note(

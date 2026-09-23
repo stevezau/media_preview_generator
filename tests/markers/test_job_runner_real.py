@@ -110,6 +110,7 @@ class TestRetryThroughThePipeline:
                 recheck_empty_server_markers=False,
                 season_recheck=False,
                 recheck_label=SEASON_RECHECK_LABEL,
+                stored_answers_only=False,
             ):
                 return PipelineContext(
                     registry=registry,
@@ -119,6 +120,7 @@ class TestRetryThroughThePipeline:
                     priority=priority,
                     ffprobe="ffprobe",
                     force=force,
+                    stored_answers_only=stored_answers_only,
                     clients={},
                     live_config=registry.get_config,  # the fake registry stands in for the saved servers
                     recheck_empty_server_markers=recheck_empty_server_markers,
@@ -710,7 +712,6 @@ class TestCreditTextOnTheWorkers:
         store = MarkerStore(str(tmp_path / "markers.db"))
         raw = {
             "detect": {"intro": False, "credits": True},
-            "publish_when": "medium",
             "sources": [{"id": source, "enabled": source == "credits_text"} for source in (
                 "chapters", "theintrodb", "introdb", "skipdb", "season_audio", "credits_text", "server_markers")],
         }  # fmt: skip
@@ -733,6 +734,7 @@ class TestCreditTextOnTheWorkers:
             recheck_empty_server_markers=False,
             season_recheck=False,
             recheck_label=SEASON_RECHECK_LABEL,
+            stored_answers_only=False,
         ):
             return PipelineContext(
                 registry=registry,
@@ -742,6 +744,7 @@ class TestCreditTextOnTheWorkers:
                 priority=priority,
                 ffprobe="ffprobe",
                 force=force,
+                stored_answers_only=stored_answers_only,
                 clients={},
                 local_detectors=default_local_detectors(settings, config, credits_text=TextDetState.AVAILABLE),
                 credits_text=TextDetState.AVAILABLE,

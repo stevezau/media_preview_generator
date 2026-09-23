@@ -18,14 +18,11 @@ class TestValidateGlobal:
         assert block is None
         assert "object" in err
 
-    @pytest.mark.parametrize("value", ["high", "medium"])
-    def test_accepts_publish_when(self, value):
+    @pytest.mark.parametrize("value", ["high", "medium", "low", None, 5])
+    def test_drops_the_removed_publish_when_whatever_it_says(self, value):
+        # An older settings.json or client still sends it; every decision is made at "medium" now (2026-09-24).
         block, err = ms.validate_global({"publish_when": value}, None)
-        assert err == "" and block["publish_when"] == value
-
-    def test_rejects_unknown_publish_when(self):
-        block, err = ms.validate_global({"publish_when": "low"}, None)
-        assert block is None and "publish_when" in err
+        assert (block, err) == (ms.DEFAULT_GLOBAL_MARKERS, "")
 
     def test_rejects_unknown_source_id(self):
         block, err = ms.validate_global({"sources": [{"id": "bogus", "enabled": True}]}, None)
@@ -103,13 +100,16 @@ class TestValidateGlobal:
     def test_a_stored_key_the_client_would_refuse_never_resets_the_other_settings(self):
         # Saved before this check existed: loading it (and saving with the masked key) keeps everything else.
         stored = {
-            "publish_when": "medium",
+            "detect": {"recap": True},
             "sources": [{"id": "theintrodb", "enabled": True, "api_key": f"abc{ZERO_WIDTH_SPACE}def"}],
         }
-        assert ms.load_global(stored).publish_when == "medium"
-        posted = {"publish_when": "high", "sources": [{"id": "theintrodb", "enabled": True, "api_key": ms.SECRET_MASK}]}
+        assert ms.load_global(stored).detect_recap is True
+        posted = {
+            "detect": {"recap": False},
+            "sources": [{"id": "theintrodb", "enabled": True, "api_key": ms.SECRET_MASK}],
+        }
         block, err = ms.validate_global(posted, stored)
-        assert err == "" and block["publish_when"] == "high"
+        assert err == "" and block["detect"]["recap"] is False
 
     def test_api_key_only_on_theintrodb(self):
         raw = {"sources": [{"id": "introdb", "enabled": True, "api_key": "x"}]}
@@ -426,7 +426,7 @@ class TestLibraryAllowed:
 class TestLoadGlobal:
     def test_garbage_falls_back_to_defaults(self):
         g = ms.load_global(["x"])
-        assert g.publish_when == "high" and g.detect_intro and not g.detect_recap
+        assert g.detect_intro and not g.detect_recap
         assert g.ordered_enabled_sources() == (
             "chapters",
             "introdb",
@@ -469,14 +469,16 @@ class TestLoadGlobal:
         assert "real-key-999" not in repr(g)
 
     def test_invalid_dict_logs_warning_and_falls_back_to_defaults(self, loguru_caplog):
-        g = ms.load_global({"publish_when": "sometimes"})
-        assert g.publish_when == "high"
+        g = ms.load_global({"detect": "sometimes", "credits_window": {"tv_s": 600}})
+        assert g == ms.load_global({"credits_window": {"tv_s": 600}})
         assert "Ignoring invalid Intro & Credits settings" in loguru_caplog.text
 
 
-# The default block's detection fingerprint as the build before `credits_window` (and with `respect_locks`) made it:
-# an install that never touches the window must keep it, or every stored decision is restamped on upgrade.
-FINGERPRINT_BEFORE_CREDITS_WINDOW = "06fa6eaf506e60d492ae5a862514be2ac35a3ce0"
+# The default block's detection fingerprint as the build before `credits_window` (and with `respect_locks`) made it,
+# at "medium": an install that never touches the window must keep it, or every stored decision is restamped on upgrade.
+FINGERPRINT_BEFORE_CREDITS_WINDOW = "733d535f44b29c37f3d39708ef2867ae53089845"
+# The same block at "high", the default until 2026-09-24: such an install's decisions were made under other rules.
+FINGERPRINT_AT_HIGH_BEFORE_IT_WAS_REMOVED = "06fa6eaf506e60d492ae5a862514be2ac35a3ce0"
 
 
 class TestCreditsWindow:
@@ -486,7 +488,7 @@ class TestCreditsWindow:
         assert err == "" and block["credits_window"] == {"tv_s": None, "movie_s": None}
 
     def test_a_block_without_the_key_is_automatic(self):
-        block, err = ms.validate_global({"publish_when": "medium"}, None)
+        block, err = ms.validate_global({"detect": {"recap": True}}, None)
         assert err == "" and block["credits_window"] == {"tv_s": None, "movie_s": None}
 
     @pytest.mark.parametrize("seconds", [300, 600, 900, 1200, 1800])
@@ -526,17 +528,17 @@ class TestCreditsWindow:
         assert (g.credits_tv_s, g.credits_movie_s) == (None, None)
 
     def test_a_stored_bad_window_falls_back_to_automatic_and_keeps_the_rest(self, loguru_caplog):
-        stored = {"publish_when": "medium", "credits_window": {"tv_s": 450, "movie_s": 900}}
+        stored = {"detect": {"recap": True}, "credits_window": {"tv_s": 450, "movie_s": 900}}
         g = ms.load_global(stored)
         assert (g.credits_tv_s, g.credits_movie_s) == (None, None)
-        assert g.publish_when == "medium"
+        assert g.detect_recap is True
         assert "Ignoring invalid credits search window" in loguru_caplog.text
         assert "markers.credits_window.tv_s" in loguru_caplog.text
 
     @pytest.mark.parametrize("stored", ["x", 5, ["a"], {"unknown": 1}])
     def test_a_stored_window_of_the_wrong_shape_falls_back_to_automatic(self, stored):
-        g = ms.load_global({"publish_when": "medium", "credits_window": stored})
-        assert (g.credits_tv_s, g.credits_movie_s, g.publish_when) == (None, None, "medium")
+        g = ms.load_global({"detect": {"recap": True}, "credits_window": stored})
+        assert (g.credits_tv_s, g.credits_movie_s, g.detect_recap) == (None, None, True)
 
     def test_default_block_is_automatic(self):
         assert ms.DEFAULT_GLOBAL_MARKERS["credits_window"] == {"tv_s": None, "movie_s": None}
@@ -562,6 +564,28 @@ class TestCreditsWindow:
         a = ms.load_global({"credits_window": {"tv_s": 600}}).detection_fingerprint()
         b = ms.load_global({"credits_window": {"tv_s": 1200}}).detection_fingerprint()
         assert a != b
+
+
+class TestPublishWhenIsGone:
+    """The High/Medium choice was removed (owner, 2026-09-24): every decision is made at "medium"."""
+
+    @pytest.mark.parametrize("old", ["high", "medium", "sometimes"])
+    def test_an_old_settings_json_that_still_has_it_loads_as_the_defaults_without_a_warning(self, old, loguru_caplog):
+        g = ms.load_global({"publish_when": old})
+        assert g == ms.load_global({})
+        assert g.detection_fingerprint() == ms.load_global({}).detection_fingerprint()
+        assert "Ignoring invalid" not in loguru_caplog.text
+
+    def test_it_is_not_in_the_defaults_the_validated_block_nor_the_typed_settings(self):
+        assert "publish_when" not in ms.DEFAULT_GLOBAL_MARKERS
+        assert "publish_when" not in ms.validate_global({"publish_when": "high"}, None)[0]
+        assert not hasattr(ms.load_global({}), "publish_when")
+
+    def test_a_high_install_gets_a_new_fingerprint_and_a_medium_one_keeps_its_own(self):
+        # A changed fingerprint is what has a file's stored decision made again, and only "high" changed its rules.
+        now = ms.load_global({"publish_when": "high"}).detection_fingerprint()
+        assert now == FINGERPRINT_BEFORE_CREDITS_WINDOW
+        assert now != FINGERPRINT_AT_HIGH_BEFORE_IT_WAS_REMOVED
 
 
 class TestRespectLocksIsGone:

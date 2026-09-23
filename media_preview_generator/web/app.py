@@ -509,6 +509,34 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
         )
 
 
+def _decide_again_after_upgrade(config_dir: str) -> None:
+    """Queue the one job that decides the files in Intro & Credits' Needs review (and those waiting for their item's
+    other versions) again, when the settings upgrade asked for it (``upgrade.DECIDE_AGAIN_KEY``), then clear the
+    request.
+
+    Runs after the restart requeue, once the job manager can start jobs. Never raises: a failure leaves the request for
+    the next start.
+    """
+    from ..upgrade import DECIDE_AGAIN_KEY
+    from .settings_manager import get_settings_manager
+
+    try:
+        settings = get_settings_manager(config_dir)
+        if not settings.get(DECIDE_AGAIN_KEY):
+            return
+        from ..markers.triggers import submit_decide_again
+
+        submit_decide_again()
+        settings.delete(DECIDE_AGAIN_KEY)
+    except Exception as exc:
+        logger.warning(
+            "Couldn't queue the Intro & Credits job that decides the files in Needs review again ({}: {}); the "
+            "next start tries again",
+            type(exc).__name__,
+            exc,
+        )
+
+
 def _log_build_provenance() -> None:
     """Log the running build's branch / SHA / build date at INFO.
 
@@ -913,6 +941,8 @@ def create_app(config_dir: str | None = None) -> Flask:
     # Auto-requeue jobs that were interrupted by the server restart. Kept ahead of schedule ticks; leftover Intro &
     # Credits jobs that aren't revived are settled by fail_unrevived_interrupted_jobs, so no tick skips on them.
     _requeue_interrupted_on_startup(config_dir)
+    # After it, so a revived one is found instead of queueing a second.
+    _decide_again_after_upgrade(config_dir)
 
     # Start scheduler
     schedule_manager.start()

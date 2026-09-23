@@ -89,6 +89,12 @@ SEASON_SOURCE = "season"
 BUDGET_RECHECK_SOURCE = "theintrodb_recheck"
 # How long after the UTC day roll that job starts, so the limiter and TheIntroDB have both started the new day.
 BUDGET_RECHECK_AFTER_RESET = timedelta(minutes=5)
+# The one-off job that decides files again after an upgrade changed the rules (``triggers.submit_decide_again``): its
+# source, the config key that lists those files when it runs (``_items_to_decide_again``), and the key that has it (and
+# its retries) decide from stored answers only (``PipelineContext.stored_answers_only``).
+DECIDE_AGAIN_SOURCE = "decide_again"
+DECIDE_AGAIN = "decide_again"
+STORED_ANSWERS_ONLY = "stored_answers_only"
 # A follow-up's config key once its runner has read its files: nothing joins it after that.
 FILES_SEALED = "files_sealed"
 # A running Season job's config keys: the episodes other jobs asked for while it ran, each with the
@@ -102,7 +108,12 @@ FOLLOW_UP_LOCK = threading.Lock()
 _JOINED_KEYS = ("file_paths", "webhook_item_id_hints", FILES_SEALED, LATE_REQUESTS, LATE_SEALED)
 # Job sources whose files no sender just reported: a file missing from disk won't appear by waiting (and nothing was
 # just replaced). A retry Check servers queued is one of them; its not-in-library retries still chain.
-_NO_RETRY_SOURCES = _USER_PICKED_SOURCES | {SEASON_SOURCE, RECONCILE_SOURCE, BUDGET_RECHECK_SOURCE}
+_NO_RETRY_SOURCES = _USER_PICKED_SOURCES | {
+    SEASON_SOURCE,
+    RECONCILE_SOURCE,
+    BUDGET_RECHECK_SOURCE,
+    DECIDE_AGAIN_SOURCE,
+}
 
 
 def _utcnow() -> datetime:
@@ -315,6 +326,7 @@ def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dic
             verify_chain=bool(cfg.get("verify") or cfg.get("verify_chain")),
             parent_job_id=head_id,
             max_retries=count,
+            stored_answers_only=bool(cfg.get(STORED_ANSWERS_ONLY)),
         )
         _upsert_chain(
             jm,
@@ -584,10 +596,13 @@ def _queue_season_followups_after(job, cfg: dict, ctx, listed: set[str]) -> None
     A Season job queues none of its own: a sibling whose answer is still out of date is asked for again by the season's
     next run, so nothing loops. It only passes on what other jobs asked it for while it ran (``_pass_on_late_requests``).
     A retry whose runs changed nothing stored (``PipelineContext.answers_changed``) queues none either: whatever its
-    season steps found out of date was so before it ran, and the job that made it so queued it then.
+    season steps found out of date was so before it ran, and the job that made it so queued it then. Nor does a job
+    deciding from stored answers only: it read nothing new, and a Season job would.
     """
     if cfg.get("source") == SEASON_SOURCE:
         _pass_on_late_requests(job, ctx)
+        return
+    if cfg.get(STORED_ANSWERS_ONLY):
         return
     paths = [path for path in ctx.take_followups() if path not in listed]
     for path in ctx.take_changed_siblings_left_out():
@@ -779,6 +794,16 @@ def _wait_for_retry_time(job_id: str, cfg: dict, cancel_check: Callable[[], bool
         time.sleep(_POLL_S)
     jm.update_progress(job_id, retry_eta=None)
     return True
+
+
+def _items_to_decide_again(store: MarkerStore) -> list[ProcessableItem]:
+    """The files in Needs review now and those whose last publish waits for their item's other versions, sorted by
+    season folder then path, as ``build_items`` lists a job's files."""
+    files = {*store.files_in_review(), *store.files_waiting_for_other_versions()}
+    paths = sorted(files, key=lambda p: (os.path.dirname(p), p))
+    return [
+        ProcessableItem(canonical_path=p, server_id="", item_id_by_server={}, title=os.path.basename(p)) for p in paths
+    ]
 
 
 def _all_libraries_listed(cfg: ServerConfig) -> ServerConfig:
@@ -1355,6 +1380,7 @@ def run_intro_credits_job(job_id: str) -> None:
                     recheck_label=(
                         BUDGET_RECHECK_LABEL if cfg.get("source") == BUDGET_RECHECK_SOURCE else SEASON_RECHECK_LABEL
                     ),
+                    stored_answers_only=bool(cfg.get(STORED_ANSWERS_ONLY)),
                 )
                 listing = None
                 if cfg.get("reconcile"):
@@ -1387,6 +1413,8 @@ def run_intro_credits_job(job_id: str) -> None:
                         ):
                             listing_on_job = True
                     items, warnings, sender_paths = listing.items, listing.warnings, {}
+                elif cfg.get(DECIDE_AGAIN):
+                    items, warnings, sender_paths = _items_to_decide_again(ctx.store), [], {}
                 else:
                     items, warnings, sender_paths = build_items(
                         cfg, registry=registry, cancel_check=cancel_check, progress_callback=progress_callback
@@ -1401,6 +1429,9 @@ def run_intro_credits_job(job_id: str) -> None:
                     if listing is not None:
                         jm.add_log(job_id, "INFO - Every server checked still shows what this app published")
                         jm.complete_job(job_id, warning=" | ".join(warnings) or None)
+                    elif cfg.get(DECIDE_AGAIN):
+                        jm.add_log(job_id, "INFO - No file is in Needs review")
+                        jm.complete_job(job_id)
                     else:
                         jm.complete_job(job_id, warning=" ".join(["No files to check.", *warnings]))
                     if cfg.get("source") == SEASON_SOURCE:

@@ -428,7 +428,7 @@ def _merge_sources_update(stored: list[dict], posted: list) -> list:
 def _merge_global_markers_update(stored: object, posted: object) -> object:
     """Deep-merge a posted global ``markers`` block over the stored one, like the per-server block on PUT.
 
-    Without it a partial save (``{"publish_when": "medium"}``) resets detection, locks and the sources (their order
+    Without it a partial save (``{"credits_window": {"tv_s": 600}}``) resets detection, locks and the sources (their order
     and switches) to the defaults, which also changes the detection fingerprint, so files are decided again.
 
     Args:

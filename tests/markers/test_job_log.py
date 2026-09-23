@@ -15,6 +15,7 @@ from media_preview_generator.markers import pipeline
 from media_preview_generator.markers.job_log import (
     SeasonEpisode,
     clock,
+    decide_again_line,
     display_name,
     season_line,
     totals_line,
@@ -42,10 +43,15 @@ INTRO_CHAPTERS = (
     Chapter(157_068, None, "Chapter 2"),
 )
 BUDGET = LookupResult("unavailable", detail="TheIntroDB budget_exhausted")
-REVIEW_AT_HIGH = "needs review (sources don't agree yet; at Publish when: High one source isn't enough)"
+TIDB = LookupResult("ok", (TIDB_CREDITS,))
+# TheIntroDB never decides alone (rule 6): its lone answer is the review case these lines are checked with.
+ONLINE_ONLY = "needs review (only TheIntroDB has the credits; an online answer needs a check against the file)"
+FILES_PANEL_ONLINE_ONLY = (
+    "credits needs review (only TheIntroDB has the credits; an online answer needs a check against the file): "
+    "21:36–22:00 from theintrodb"
+)
 SETTINGS = {
     "detect": {"intro": True, "credits": True, "recap": False},
-    "publish_when": "high",
     "sources": [
         {"id": "chapters", "enabled": True},
         {"id": "theintrodb", "enabled": True},
@@ -119,22 +125,32 @@ def _lines(first: str, sources: str) -> str:
 class TestFileLines:
     """One cell per kind of result; every line is asserted as the job log shows it."""
 
-    def test_credit_text_alone_needs_review_and_nothing_is_sent(self, store, media, job_log):
+    def test_an_online_answer_alone_needs_review_and_nothing_is_sent(self, store, media, job_log):
+        ctx = _job(store, media, _plex(media), theintrodb=TIDB, found=())
+        out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
+
+        assert job_log == [
+            _lines(
+                f"{EPISODE}: nothing sent to Plex · intro not found · credits 21:36–22:00 found by TheIntroDB → "
+                f"{ONLINE_ONLY}",
+                "chapters none · TheIntroDB credits 21:36–22:00 · credit text none found · Plex's own none",
+            )
+        ]
+        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        # The Files panel's reason names the proposal and why it needs review.
+        assert out.message == f"intro: none; {FILES_PANEL_ONLINE_ONLY}"
+
+    def test_credit_text_alone_is_sent(self, store, media, job_log):
         ctx = _job(store, media, _plex(media))
         out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
 
         assert job_log == [
             _lines(
-                f"{EPISODE}: nothing sent to Plex · intro not found · credits 21:31–22:01 found by credit text → "
-                f"{REVIEW_AT_HIGH}",
+                f"{EPISODE}: sent credits to Plex · intro not found · credits 21:31–22:01 (from credit text)",
                 "chapters none · TheIntroDB no entry · credit text credits from 21:31 · Plex's own none",
             )
         ]
-        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
-        # The Files panel's reason names the proposal and why it needs review.
-        assert (
-            out.message == "intro: none; credits needs review (sources don't agree yet): 21:31–22:01 from credits_text"
-        )
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
 
     def test_two_sources_that_agree_publish_and_both_are_named(self, store, media, job_log):
         ctx = _job(store, media, _plex(media), theintrodb=LookupResult("ok", (TIDB_CREDITS,)))
@@ -185,13 +201,13 @@ class TestFileLines:
         assert out.outcome_key == FileOutcome.PUBLISHED.value
 
     def test_a_server_that_hasnt_indexed_the_file_is_waited_for_even_with_a_type_in_review(self, store, media, job_log):
-        ctx = _job(store, media, _plex(media, indexed=False), theintrodb=LookupResult("ok", (TIDB_CREDITS,)), found=())
+        ctx = _job(store, media, _plex(media, indexed=False), theintrodb=TIDB, found=())
         out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe(INTRO_CHAPTERS))
 
         assert job_log == [
             _lines(
                 f"{EPISODE}: waiting for Plex to add the file to its library · intro 2:06–2:37 (from chapters) · "
-                f"credits 21:36–22:00 found by TheIntroDB → {REVIEW_AT_HIGH}",
+                f"credits 21:36–22:00 found by TheIntroDB → {ONLINE_ONLY}",
                 "chapters intro 2:06–2:37 · TheIntroDB credits 21:36–22:00 · credit text none found · Plex's own not "
                 "read",
             )
@@ -207,30 +223,29 @@ class TestFileLines:
 
         assert job_log == [
             _lines(
-                f"{EPISODE}: nothing sent to Plex · intro not found · credits 21:31–22:01 found by credit text → "
-                f"{REVIEW_AT_HIGH}",
+                f"{EPISODE}: sent credits to Plex · intro not found · credits 21:31–22:01 (from credit text)",
                 "chapters none · TheIntroDB skipped (daily limit reached, resets 00:00 UTC) · credit text credits from "
                 "21:31 · Plex's own none",
             )
         ]
-        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
-        assert ctx.summary_lines({FileOutcome.NEEDS_REVIEW.value: 1}) == [
-            "Done: 1 file · 0 sent to Plex · 1 needs review · 0 nothing found · TheIntroDB skipped for 1 file"
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert ctx.summary_lines({FileOutcome.PUBLISHED.value: 1}) == [
+            "Done: 1 file · 1 sent to Plex · 0 need review · 0 nothing found · TheIntroDB skipped for 1 file"
         ]
 
     def test_a_written_type_counts_the_file_as_written_with_the_other_type_in_review(self, store, media, job_log):
-        ctx = _job(store, media, _plex(media))
+        ctx = _job(store, media, _plex(media), theintrodb=TIDB, found=())
         out, _ = _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe(INTRO_CHAPTERS))
 
         assert job_log == [
             _lines(
-                f"{EPISODE}: sent intro to Plex · intro 2:06–2:37 (from chapters) · credits 21:31–22:01 found by "
-                f"credit text → {REVIEW_AT_HIGH}",
-                "chapters intro 2:06–2:37 · TheIntroDB no entry · credit text credits from 21:31 · Plex's own none",
+                f"{EPISODE}: sent intro to Plex · intro 2:06–2:37 (from chapters) · credits 21:36–22:00 found by "
+                f"TheIntroDB → {ONLINE_ONLY}",
+                "chapters intro 2:06–2:37 · TheIntroDB credits 21:36–22:00 · credit text none found · Plex's own none",
             )
         ]
         assert out.outcome_key == FileOutcome.PUBLISHED.value
-        assert "credits needs review (sources don't agree yet): 21:31–22:01 from credits_text" in out.message
+        assert FILES_PANEL_ONLINE_ONLY in out.message
 
     def test_nothing_found_and_a_second_run_names_the_saved_answers(self, store, media, job_log):
         reg = _plex(media)
@@ -286,8 +301,7 @@ class TestFileLines:
 
         assert job_log == [
             _lines(
-                f"{EPISODE}: nothing sent to Plex · intro not found · credits 21:31–22:01 found by credit text → "
-                f"{REVIEW_AT_HIGH}",
+                f"{EPISODE}: sent credits to Plex · intro not found · credits 21:31–22:01 (from credit text)",
                 "chapters none · TheIntroDB no entry · credit text credits from 21:31 · Plex's own none",
             )
         ]
@@ -308,9 +322,10 @@ class TestSeasonJob:
             hints = {"plex-1": f"item-{paths.index(path)}"}  # each episode its own Plex item
             return _run(ctx, path, {"plex-1": ready_publisher()}, probe=_probe(chapters), hints=hints)[0]
 
+        # Credit text decides every episode's credits alone; TheIntroDB has no entry for any of them.
         first = _job(store, paths[0], reg)
         for path in paths:
-            assert run(first, path).outcome_key == FileOutcome.NEEDS_REVIEW.value
+            assert run(first, path).outcome_key == FileOutcome.PUBLISHED.value
         os.utime(paths[1], ns=(5, 5))  # E02 was replaced by a file with an intro chapter
         job_log.clear()
 
@@ -327,18 +342,18 @@ class TestSeasonJob:
         )
         assert job_log == [
             _lines(
-                "Rick and Morty (2013) S01E02: sent intro to Plex · intro 2:06–2:37 (from chapters) · credits "
-                f"21:31–22:01 found by credit text → {REVIEW_AT_HIGH}",
+                "Rick and Morty (2013) S01E02: sent intro and credits to Plex · intro 2:06–2:37 (from chapters) · "
+                "credits 21:31–22:01 (from credit text)",
                 "chapters intro 2:06–2:37 · TheIntroDB skipped (no data for this show; asked again after "
-                f"{paused_until:%Y-%m-%d}) · credit text credits from 21:31 · Plex's own none",
+                f"{paused_until:%Y-%m-%d}) · credit text credits from 21:31 · Plex's own not read",
             )
         ]
         counts = {key: outcomes.count(key) for key in set(outcomes)}
-        assert counts == {FileOutcome.NEEDS_REVIEW.value: 3, FileOutcome.PUBLISHED.value: 1}
+        assert counts == {FileOutcome.UP_TO_DATE.value: 3, FileOutcome.PUBLISHED.value: 1}
         assert season.summary_lines(counts) == [
             "Season re-check, Rick and Morty (2013) S01 (4 episodes): E02 changed (logged above); no change for "
-            "E01/E03/E04, still need review (credits from credit text only)",
-            "Done: 4 files · 1 sent to Plex · 3 need review · 0 nothing found",
+            "E01/E03/E04",
+            "Done: 4 files · 1 sent to Plex · 0 need review · 0 nothing found · 3 already up to date",
         ]
 
     @pytest.mark.parametrize(
@@ -368,6 +383,59 @@ class TestSeasonJob:
     )
     def test_season_line_wording(self, episodes, expected):
         assert season_line("Show S01", episodes) == expected
+
+
+class TestDecideAgainJob:
+    """The one job after settings v16 decides files again from saved answers: like a Season job, it logs the files whose
+    decisions changed and one line for the rest."""
+
+    def test_changed_files_get_their_lines_and_the_rest_one_line(self, store, media, job_log, monkeypatch):
+        monkeypatch.setattr(pipeline, "APP_PUBLISH_WHEN", "high")  # how an older build left credit text alone
+        out, _ = _run(_job(store, media, _plex(media)), media, {"plex-1": ready_publisher()}, probe=_probe())
+        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        monkeypatch.undo()
+        job_log.clear()
+
+        again = _job(store, media, _plex(media))
+        again.stored_answers_only = True
+        out, _ = _run(again, media, {"plex-1": ready_publisher()})
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert job_log == [
+            _lines(
+                f"{EPISODE}: sent credits to Plex · intro not found · credits 21:31–22:01 (from credit text)",
+                "chapters none (saved earlier) · TheIntroDB no entry (saved earlier) · credit text credits from 21:31 "
+                "(saved earlier) · Plex's own none (saved earlier)",
+            )
+        ]
+        assert again.summary_lines({FileOutcome.PUBLISHED.value: 1}) == [
+            "Decided again from saved answers (1 file): 1 changed (logged above)",
+            "Done: 1 file · 1 sent to Plex · 0 need review · 0 nothing found",
+        ]
+
+        job_log.clear()
+        quiet = _job(store, media, _plex(media))
+        quiet.stored_answers_only = True
+        _run(quiet, media, {"plex-1": ready_publisher()})
+        assert job_log == []
+        assert quiet.summary_lines({FileOutcome.UP_TO_DATE.value: 1})[0] == (
+            "Decided again from saved answers (1 file): 1 unchanged"
+        )
+
+    @pytest.mark.parametrize(
+        ("files", "expected"),
+        [
+            (
+                [(True, False), (False, True), (False, False)],
+                "3 files): 1 changed (logged above); 2 unchanged, 1 still needs review",
+            ),
+            ([(False, True), (False, True)], "2 files): 2 unchanged, still need review"),
+            ([(True, True)], "1 file): 1 changed (logged above)"),
+            ([], "0 files): nothing to decide"),
+        ],
+        ids=["mixed", "all-still-in-review", "only-changed", "none"],
+    )
+    def test_decide_again_line_wording(self, files, expected):
+        assert decide_again_line(files) == f"Decided again from saved answers ({expected}"
 
 
 class TestTotalsLine:

@@ -63,6 +63,36 @@ _AUDIO_OR_SERVER = SERVER_SOURCES | {Source.SEASON_AUDIO, Source.SEASON_AUDIO_PR
 SEASON_AUDIO_WITH_SERVER_REASON = (
     "Season audio and a server's own marker agree, but both come from matching audio; needs another source"
 )
+# The level the app decides at: one source that checks the file itself may decide alone (rule 6). The stricter "high"
+# (always two agreeing sources) left most of a library in Needs review and was removed from Settings (owner ruling
+# 2026-09-24); ``DecisionContext`` still takes it for the evaluation harness.
+APP_PUBLISH_WHEN = "medium"
+# How a Needs review reason names a source (the words Settings uses for it).
+_SOURCE_LABELS = {
+    Source.CHAPTERS: "chapters",
+    Source.THEINTRODB: "TheIntroDB",
+    Source.INTRODB: "IntroDB",
+    Source.SKIPDB: "SkipDB",
+    Source.SEASON_AUDIO: "season audio",
+    Source.SEASON_AUDIO_PREVIOUS: "the previous season's audio",
+    Source.CREDITS_TEXT: "on-screen text",
+    Source.SERVER_MARKERS: "a server's own marker",
+    Source.SERVER_MARKERS_IMPORTED: "a server's imported marker",
+}
+_READS_THE_FILE = frozenset({Source.CHAPTERS, Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS, Source.CREDITS_TEXT})
+_NEEDS_ANOTHER_SOURCE = "it needs another source to agree"
+_ONLINE_ALONE = "an online answer needs a check against the file"
+_SERVER_ALONE = "a server's marker needs another source to agree"
+# Why a lone answer from a source that never decides alone (rules 6 and 7) waits for a second one.
+_WHY_NOT_ALONE = {
+    Source.INTRODB: _ONLINE_ALONE,
+    Source.THEINTRODB: _ONLINE_ALONE,
+    Source.SKIPDB: _ONLINE_ALONE,
+    Source.SEASON_AUDIO: "matching audio needs another source to agree",
+    Source.SEASON_AUDIO_PREVIOUS: "matching audio needs another source to agree",
+    Source.SERVER_MARKERS: _SERVER_ALONE,
+    Source.SERVER_MARKERS_IMPORTED: _SERVER_ALONE,
+}
 _START_SEGMENTS = (MarkerType.INTRO, MarkerType.RECAP)
 SHORTENED_NOTE = "shortened to the server's own marker"
 _SHORTENED_RE = re.compile(r"; start shortened to the server's own marker(?: \(([^)]*)\))?$")
@@ -567,8 +597,34 @@ def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: De
     elif _only_audio_and_server_markers({c.source for c in sane}):
         reason = SEASON_AUDIO_WITH_SERVER_REASON
     else:
-        reason = "sources don't agree yet"
+        alone_allowed = proposal is not None and ctx.publish_when != "medium"
+        reason = _lone_answer_reason(mtype, sane, ranked[0], alone_allowed=alone_allowed)
     return _review(mtype, _own_marker(ranked[0], ctx), reason)
+
+
+def _lone_answer_reason(mtype: MarkerType, sane: list[Candidate], best: Candidate, *, alone_allowed: bool) -> str:
+    """Why a type nothing disagrees about still needs review: only one source (or only copies of one) answered.
+
+    Args:
+        mtype: The marker type.
+        sane: Its candidates that passed the sanity checks.
+        best: The best-ranked of them.
+        alone_allowed: One of them could decide alone, so only ``publish_when`` "high" held it back (the evaluation
+            harness; the app decides at :data:`APP_PUBLISH_WHEN`).
+
+    Returns:
+        E.g. ``only IntroDB has the intro; an online answer needs a check against the file``, or
+        ``only season audio found the intro; matching audio needs another source to agree``.
+    """
+    sources = sorted({c.source for c in sane}, key=_ENUM_ORDER.__getitem__)
+    names = " and ".join(dict.fromkeys(_SOURCE_LABELS.get(s, s.value) for s in sources))
+    if alone_allowed:
+        return f'only {names} found the {mtype.value}; at "high" a second source must agree'
+    if set(sources) <= _READS_THE_FILE:
+        found = "found"
+    else:
+        found = "has" if len(sources) == 1 else "have"
+    return f"only {names} {found} the {mtype.value}; {_WHY_NOT_ALONE.get(best.source, _NEEDS_ANOTHER_SOURCE)}"
 
 
 def _only_audio_and_server_markers(sources: set[Source]) -> bool:

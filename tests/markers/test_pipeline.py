@@ -1010,17 +1010,84 @@ class TestEvidenceAndDecisions:
         assert out.publisher_rows[0]["status"] == ServerStatus.NEEDS_REVIEW.value
         assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
 
-    def test_settings_change_applies_to_stored_evidence_without_new_lookups(self, store, media):
+    def test_a_file_an_older_build_held_at_high_is_published_from_its_stored_answers(self, store, media, monkeypatch):
+        # Until 2026-09-24 the default rules ("high") held a lone SkipDB intro in Needs review; the row said why.
         reg = _registry(media, ServerType.PLEX)
         plex = ready_publisher()
         clients = _clients(skipdb=LookupResult("ok", (Candidate(T.INTRO, 127_894, 156_824, Source.SKIPDB),)))
+        monkeypatch.setattr(pipeline, "APP_PUBLISH_WHEN", "high")
         out, _ = _run(_ctx(store, reg, clients=clients, settings_raw=INTRO_ONLY), media, {"plex-1": plex})
         assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
-        medium = {**INTRO_ONLY, "publish_when": "medium"}
-        out, _ = _run(_ctx(store, reg, clients=clients, settings_raw=medium), media, {"plex-1": plex})
+        assert _rows(out)["plex-1"]["status"] == ServerStatus.NEEDS_REVIEW.value
+        assert _rows(out)["plex-1"]["message"] == 'Only SkipDB found the intro; at "high" a second source must agree'
+        monkeypatch.undo()
+        out, _ = _run(_ctx(store, reg, clients=clients, settings_raw=INTRO_ONLY), media, {"plex-1": plex})
         assert out.outcome_key == FileOutcome.PUBLISHED.value
         assert [len(c.calls) for c in clients.values()] == [1, 1, 1]
         assert plex.write.call_args.args[1] == [Marker(T.INTRO, 127_894, 156_824, ("skipdb",))]
+
+    def test_a_needs_review_row_says_why_for_each_type_in_review(self, store, media):
+        # IntroDB alone can't decide the intro, and two sources disagree on the credits: one sentence per type.
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+        clients = _clients(
+            introdb=LookupResult("ok", (Candidate(T.INTRO, 127_894, 156_824, Source.INTRODB),)),
+            skipdb=LookupResult("ok", (Candidate(T.CREDITS, 1_200_000, None, Source.SKIPDB),)),
+            theintrodb=LookupResult("ok", (Candidate(T.CREDITS, 1_290_000, None, Source.THEINTRODB),)),
+        )
+        out, _ = _run(_ctx(store, reg, clients=clients), media, {"plex-1": plex})
+        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        assert _rows(out)["plex-1"]["message"] == (
+            "Only IntroDB has the intro; an online answer needs a check against the file. "
+            "Sources disagree: introdb/theintrodb, skipdb"
+        )
+        plex.write.assert_not_called()
+
+    def test_stored_answers_only_publishes_a_file_in_review_without_reading_or_asking_anything(
+        self, store, media, monkeypatch
+    ):
+        # The one job after the upgrade that removed "high": no lookup, no detector, no probe, no server read. A month
+        # later a normal run would ask the online sources that had nothing again and run the credits detector again
+        # (its answer is due), since the credits are still undecided.
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+        clients = _clients(skipdb=LookupResult("ok", (Candidate(T.INTRO, 127_894, 156_824, Source.SKIPDB),)))
+        audio, text = MagicMock(return_value=[]), MagicMock(return_value=[])
+        specs = (
+            LocalDetectorSpec(Source.SEASON_AUDIO, frozenset({T.INTRO}), audio),
+            LocalDetectorSpec(Source.CREDITS_TEXT, frozenset({T.CREDITS}), text, due=lambda rec, ctx: True),
+        )
+        raw = {**INTRO_ONLY, "detect": {"intro": True, "credits": True}}
+        monkeypatch.setattr(pipeline, "APP_PUBLISH_WHEN", "high")
+        out, _ = _run(_ctx(store, reg, clients=clients, detectors=specs, settings_raw=raw), media, {"plex-1": plex},
+                      stage="process")  # fmt: skip
+        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        monkeypatch.undo()
+        reads = reg.servers_by_id["plex-1"].get_markers.call_count
+        later = datetime(2026, 10, 20, tzinfo=UTC)
+        ctx = _ctx(store, reg, clients=clients, detectors=specs, settings_raw=raw, now=lambda: later)
+        ctx.stored_answers_only = True
+        out, probe = _run(ctx, media, {"plex-1": plex}, probe_effect=AssertionError("the file was read"))
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert plex.write.call_args.args[1] == [Marker(T.INTRO, 127_894, 156_824, ("skipdb",))]
+        probe.assert_not_called()
+        assert [len(c.calls) for c in clients.values()] == [1, 1, 1]
+        assert (audio.call_count, text.call_count) == (1, 1)
+        assert reg.servers_by_id["plex-1"].get_markers.call_count == reads
+
+    @pytest.mark.parametrize("change", ["replaced", "never-checked"])
+    def test_stored_answers_only_skips_a_file_whose_answers_are_not_this_files(self, store, media, change):
+        reg = _registry(media, ServerType.PLEX)
+        plex = ready_publisher()
+        ctx = _ctx(store, reg, settings_raw=INTRO_ONLY)
+        if change == "replaced":
+            _run(ctx, media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
+            os.utime(media, ns=(5, 5))
+        ctx.stored_answers_only = True
+        out, probe = _run(ctx, media, {"plex-1": plex}, probe_effect=AssertionError("the file was read"))
+        assert (out.outcome_key, out.message) == (FileOutcome.SKIPPED.value, pipeline.CHANGED_SINCE_ANSWERS)
+        probe.assert_not_called()
+        assert plex.write.call_count == (1 if change == "replaced" else 0)
 
     def test_theintrodb_alone_never_publishes_even_at_medium(self, store, media):
         # TheIntroDB answers the closest cut it has, whatever this file's duration (audit B S2: 81 s of cold open).
@@ -1028,7 +1095,7 @@ class TestEvidenceAndDecisions:
         plex = ready_publisher()
         clients = _clients(theintrodb=LookupResult("ok", (TIDB_INTRO,)))
         out, _ = _run(
-            _ctx(store, reg, clients=clients, settings_raw={**INTRO_ONLY, "publish_when": "medium"}),
+            _ctx(store, reg, clients=clients, settings_raw=INTRO_ONLY),
             media,
             {"plex-1": plex},
         )
@@ -1065,7 +1132,6 @@ class TestEvidenceAndDecisions:
         raw = {
             "sources": [{"id": "skipdb", "enabled": True}, {"id": "theintrodb", "enabled": True}],
             "detect": {"intro": True, "credits": False},
-            "publish_when": "medium",
         }
         plex = ready_publisher()
         _run(_ctx(store, reg, clients=clients, settings_raw=raw), media, {"plex-1": plex})
@@ -1738,8 +1804,7 @@ class TestServerMarkers:
         reg = _registry(media, ServerType.PLEX)
         _serve_intro(reg, "plex-1", 127_000, 158_000)
         plex = ready_publisher()
-        raw = {**INTRO_ONLY, "publish_when": "medium"}
-        out, _ = _run(_ctx(store, reg, settings_raw=raw), media, {"plex-1": plex})
+        out, _ = _run(_ctx(store, reg, settings_raw=INTRO_ONLY), media, {"plex-1": plex})
         plex.write.assert_not_called()
         assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value  # a second opinion with nothing to confirm
 
@@ -2407,7 +2472,7 @@ class TestServerMarkersFromVendors:
             assert stored == []
             rows_stored = [r for r in store.evidence_rows(rec.id) if r.origin == "emby-1"]
             assert [(r.type, r.detail) for r in rows_stored] == [(None, pipeline.UNUSABLE_SERVER_MARKERS_DETAIL)]
-            assert decision.reason == "sources don't agree yet"
+            assert decision.reason == "only IntroDB has the intro; an online answer needs a check against the file"
 
     @pytest.mark.parametrize(
         ("stype", "plugins", "source", "expected"),
@@ -2494,17 +2559,18 @@ class TestServerMarkersFromVendors:
         reg.get("plex-1").get_plugin_names.assert_not_called()  # Plex detects its own markers
 
     @pytest.mark.parametrize(
-        ("plugins", "published"),
+        ("plugins", "reason"),
         [
-            (["SkipDB"], None),
-            (["TheIntroDB"], Marker(T.INTRO, 24_046, 114_105, ("skipdb", "server_markers_imported"))),
-            (["AniSkip"], Marker(T.INTRO, 24_046, 114_105, ("skipdb", "server_markers_imported"))),
+            # SkipDB may decide an intro alone (rule 6), so both publish; only the reason tells a second vote apart.
+            (["SkipDB"], "single source (skipdb)"),
+            (["TheIntroDB"], "sources agree: skipdb, server_markers_imported"),
+            (["AniSkip"], "sources agree: skipdb, server_markers_imported"),
             # importers of two databases: which one wrote the markers can't be told, so they count as IntroDB's copy
-            (["SkipDB", "TheIntroDB"], Marker(T.INTRO, 24_046, 114_105, ("skipdb", "server_markers_imported"))),
+            (["SkipDB", "TheIntroDB"], "sources agree: skipdb, server_markers_imported"),
         ],
         ids=["skipdb-importer", "theintrodb-importer", "aniskip-importer", "two-databases"],
     )
-    def test_a_skipdb_importers_copy_is_skipdb_again(self, store, media, plugins, published):
+    def test_a_skipdb_importers_copy_is_skipdb_again(self, store, media, plugins, reason):
         # Ruling 2026-09-16 (rule 8): an imported copy belongs to the group of the database it was imported from.
         reg = _registry(media, ServerType.PLEX, ServerType.JELLYFIN)
         reg.configs_by_id["jellyfin-1"].markers["enabled"] = False
@@ -2524,12 +2590,9 @@ class TestServerMarkersFromVendors:
         rec = store.get_file(media)
         copies = [c for c in store.get_evidence(rec.id) if c.source is Source.SERVER_MARKERS_IMPORTED]
         assert [c.origin for c in copies] == ["jellyfin-1"]
-        if published is None:
-            plex.write.assert_not_called()
-            assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
-            assert store.get_decisions(rec.id)[T.INTRO].reason == "sources don't agree yet"
-        else:
-            assert plex.write.call_args.args[1] == [published]
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        assert plex.write.call_args.args[1] == [Marker(T.INTRO, 24_046, 114_105, ("skipdb", "server_markers_imported"))]
+        assert store.get_decisions(rec.id)[T.INTRO].reason == reason
 
     def test_a_row_naming_one_of_two_importers_is_read_again_and_its_database_becomes_unknown(self, store, media):
         # Reader version 1 stored only the first importer plugin: ["SkipDB", "TheIntroDB"] read as a SkipDB copy, which
@@ -2580,7 +2643,9 @@ class TestServerMarkersFromVendors:
         assert [(c.start_ms, c.end_ms, c.copied_from) for c in copies] == [(24_046, 114_105, "")]
         plex.write.assert_not_called()
         assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
-        assert store.get_decisions(rec.id)[T.INTRO].reason == "sources don't agree yet"
+        assert store.get_decisions(rec.id)[T.INTRO].reason == (
+            "only IntroDB and a server's imported marker have the intro; an online answer needs a check against the file"
+        )
 
     def test_markers_stored_before_the_plugin_check_are_dropped_when_the_plugins_cant_be_read(self, store, media):
         # A store from before this check holds the copy as independent server markers; they must not keep counting.
@@ -2634,13 +2699,10 @@ class TestServerMarkersFromVendors:
             {"plex-1": plex},
             probe=_probe(duration=S03E05_BLURAY_MS),
         )
-        if server_markers_on:
-            assert plex.write.call_args.args[1] == [
-                Marker(T.INTRO, 25_000, 113_000, ("skipdb", "server_markers_imported"))
-            ]
-        else:
-            plex.write.assert_not_called()
-            assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        # SkipDB decides an intro alone either way (rule 6); the copy only joins it, and moves nothing, while it counts.
+        decided_by = ("skipdb", "server_markers_imported") if server_markers_on else ("skipdb",)
+        assert plex.write.call_args.args[1] == [Marker(T.INTRO, 25_000, 113_000, decided_by)]
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
 
     def test_a_server_with_no_markers_is_not_asked_for_its_plugins(self, store, media):
         reg = _registry(media, ServerType.JELLYFIN)
@@ -3301,7 +3363,8 @@ class TestPublishFanOut:
         _run(_ctx(store, reg), media, {"plex-1": plex})
         assert decided_at() == first
         clock["t"] += timedelta(hours=1)
-        _run(_ctx(store, reg, settings_raw={"publish_when": "medium"}), media, {"plex-1": plex})
+        recap_on = {"sources": [{"id": "theintrodb", "enabled": True}], "detect": {"recap": True}}
+        _run(_ctx(store, reg, settings_raw=recap_on), media, {"plex-1": plex})
         assert all(at == clock["t"].isoformat() for at in decided_at().values())  # settings changed: saved again
         store.close()
 
@@ -4675,7 +4738,7 @@ class TestConcurrentJobs:
         old_duration, new_duration = 1_321_000, 1_380_000
         reg = _registry(media, ServerType.PLEX)
         plex = ready_publisher()
-        raw = {**INTRO_ONLY, "publish_when": "medium"}
+        raw = INTRO_ONLY
         entered = []
         n_queued = threading.Event()
 

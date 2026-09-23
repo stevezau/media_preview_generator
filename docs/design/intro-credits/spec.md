@@ -592,7 +592,8 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    sources that are both outside the tolerance of the published time send it to "Needs review" — a third source that
    agrees with both sides can't hide a contradiction. Another chapter of the same type counts as one side of such a
    pair; a chapter within tolerance of two groups that disagree with each other is still accepted.
-6. A single source is accepted only at the **"Medium"** publish setting, only when that source checks the file's
+6. A single source is accepted only at the **"Medium"** rules (the app's only rules since 2026-09-24, §14:
+   `decide.APP_PUBLISH_WHEN`; "High" stays in `DecisionContext` for the evaluation harness), only when that source checks the file's
    cut itself — chapters, credits text (it reads this file's own frames), or SkipDB `exact`/`shifted` matches for an
    intro or recap (IntroDB and TheIntroDB return an answer whatever the file's length, so alone they never decide;
    SkipDB alone never decides credits or a preview, which need an agreeing independent source as at High) — and only
@@ -899,10 +900,11 @@ Show a mockup and confirm wording before building each screen.
      `db_write_confirmed_at`): no API exists; tested on Plex 1.43, stops if the DB looks different; must be same
      machine; Plex re-detection replaces ours and we put them back; viewers need Plex Pass or Plex Home.
    - Servers page cards themselves are unchanged.
-2. **Settings → Intro & Credits** (shared detection only): detect Intros / Credits / Recaps; "Publish when"
-   High / Medium; ordered sources (chapters, TheIntroDB + optional key + today's usage
+2. **Settings → Intro & Credits** (shared detection only): detect Intros / Credits / Recaps; ordered sources
+   (chapters, TheIntroDB + optional key + today's usage
    from its headers, IntroDB.app, SkipDB, season audio, credit text, markers already on servers) with measured numbers
-   in ⓘ copy. The credit text row is live and its switch works (no longer a disabled placeholder): it shows the
+   in ⓘ copy, and under them a "How it decides" note restating §5.5 at the Medium rules (no publish setting since
+   2026-09-24, §14). The credit text row is live and its switch works (no longer a disabled placeholder): it shows the
    same "Not available" badge and reason as season audio's row when this container can't run it (Task 10's copy).
 3. **Preview Inspector → "Intro & Credits" tab:** decision lane + evidence lanes (Chapters, Season audio, Credit
    text, online sources, each server's current markers) in two zoom windows (first / last 3 min); per-server "will
@@ -930,7 +932,6 @@ Show a mockup and confirm wording before building each screen.
 ```json
 "markers": {
   "detect": {"intro": true, "credits": true, "recap": false},
-  "publish_when": "high",
   "credits_window": {"tv_s": null, "movie_s": null},
   "sources": [
     {"id": "chapters", "enabled": true},
@@ -943,6 +944,19 @@ Show a mockup and confirm wording before building each screen.
   ]
 }
 ```
+v15 also seeded `"publish_when": "high"`. Schema **16** (2026-09-24, §14) removes it: `validate_global` drops the key
+whatever it says, `_migrate_to_v16` deletes it (a user-facing note only when it was `"high"`) and sets
+`_markers_decide_again`, and the next start (`web.app._decide_again_after_upgrade`, after revived jobs are
+started) queues one NORMAL job, **Intro & Credits: Needs review and waiting files, decided again**
+(`triggers.submit_decide_again`, source `decide_again`), then clears the key. The job lists, when it runs, the files
+with a type in Needs review (`MarkerStore.files_in_review`) and the files whose last row on a server is "Waiting for
+this item's other versions to agree on: …" (`MarkerStore.files_waiting_for_other_versions`, `outcomes.VERSIONS_WAITING`;
+12 were stuck on the owner's server), and decides them from stored answers only (`PipelineContext.stored_answers_only`:
+no online lookup, no detector, no read of the markers on servers, no Season job; a file changed on disk is skipped);
+publishing runs as in any job, and its retries keep stored-answers-only. With Intro & Credits off everywhere, or no
+such file, only the key is cleared. The detection fingerprint still hashes `publish_when` as `"medium"`, so a Medium
+install keeps its hash.
+
 `credits_window` (added after v15, no schema bump: a block without it reads as Automatic) is `null` (Automatic: 450 s
 TV, 900 s movie and unknown kind) or one of 300, 600, 900, 1200, 1800 seconds per kind. It is part of the detection
 fingerprint only when not Automatic, and a chosen window stores its credit text answers under a version of its own
@@ -2016,3 +2030,23 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     decisions); otherwise it logs that it queued none. A first run is not held to this.
   The fuzz of the queue (`test_queued_season_jobs_end_with_the_all_at_once_decisions`) still ends every season with the
   all-at-once decisions, now with running Season jobs taking requests.
+- 2026-09-24 · **The strict mode was removed: every file is decided at the Medium rules** (owner; §5.5 rule 6, §7
+  item 2, §8). On the owner's server the online databases cover only 1–3 % of the library, so at the default "High"
+  1,006 of 1,250 files sat in Needs review and 58 were published; Plex's own detection has no such option. A first
+  draft moved High behind an Advanced switch ("Only publish when two sources agree"); the owner dropped the switch
+  too. "Publish when" is gone from Settings and the API (a posted or stored `publish_when` is ignored; schema 16
+  deletes it), and the pipeline always passes `decide.APP_PUBLISH_WHEN` ("medium"). The rules engine is unchanged:
+  `DecisionContext` still takes "high" for the evaluation harness, and on-screen credit text alone stays within the
+  phase-3 gate at Medium (80 files: 65 useful / 3 wrong alone). Settings shows a "How it decides" note under the
+  sources, each sentence checked against `decide.py`; the proposed copy said sources are tried "cheapest first" (the
+  order is the user's, and the default puts the cheap server markers last), that an online answer is confirmed only
+  by a check of the file (another database or a server's own marker counts too), and that "the file check alone
+  decides" (season audio never does; SkipDB matched to the file's length may, for intros and recaps), so the note
+  says what the code does instead. The files High left in Needs review are decided again once, on the first start of
+  this build, by one job that reads nothing again (§8); the same job takes the files whose last row waits for their
+  item's other versions (the 12 above). Its job log names only the files whose decisions changed and ends with one
+  "Decided again from saved answers (N files): …" line, like a Season job's. Needs review now says why: a lone answer
+  that can't decide alone reads "only IntroDB has the intro; an online answer needs a check against the file" (or "only season audio
+  found the intro; matching audio needs another source to agree", "only a server's own marker has …"), a
+  disagreement keeps "sources disagree: …", and a server row's message is those reasons (it said "Sources don't
+  agree yet" for both). No reason code changed; the Files panel still hides the old row text as routine.

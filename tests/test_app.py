@@ -874,3 +874,73 @@ class TestPrewarmCaches:
 
         mock_gpu.assert_called_once()
         mock_version.assert_called_once()
+
+
+class TestRedecideInReviewAfterUpgrade:
+    """Settings v16 removed "Publish when: High"; the next start queues the one job that decides the files it held in
+    Needs review again (``triggers.submit_decide_again``), once."""
+
+    SUBMIT = "media_preview_generator.markers.triggers.submit_decide_again"
+
+    def _settings(self, tmp_path, **values):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        sm = get_settings_manager(str(tmp_path))
+        sm.apply_changes(updates=values)
+        return sm
+
+    def test_a_pending_request_queues_the_job_and_is_cleared(self, tmp_path):
+        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
+        from media_preview_generator.web.app import _decide_again_after_upgrade
+
+        sm = self._settings(tmp_path, **{DECIDE_AGAIN_KEY: True})
+        with patch(self.SUBMIT, return_value="job-1") as submit:
+            _decide_again_after_upgrade(str(tmp_path))
+        submit.assert_called_once_with()
+        assert sm.get(DECIDE_AGAIN_KEY) is None
+
+    def test_without_a_request_nothing_is_queued(self, tmp_path):
+        from media_preview_generator.web.app import _decide_again_after_upgrade
+
+        self._settings(tmp_path, setup_complete=True)
+        with patch(self.SUBMIT) as submit:
+            _decide_again_after_upgrade(str(tmp_path))
+        submit.assert_not_called()
+
+    def test_a_failure_keeps_the_request_for_the_next_start(self, tmp_path):
+        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
+        from media_preview_generator.web.app import _decide_again_after_upgrade
+
+        sm = self._settings(tmp_path, **{DECIDE_AGAIN_KEY: True})
+        with patch(self.SUBMIT, side_effect=OSError("markers.db is locked")):
+            _decide_again_after_upgrade(str(tmp_path))  # never raises
+        assert sm.get(DECIDE_AGAIN_KEY) is True
+
+    def test_the_first_start_after_the_upgrade_queues_it_and_later_starts_do_not(self, tmp_path):
+        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
+        from media_preview_generator.web.app import create_app
+
+        config_dir = str(tmp_path / "config")
+        os.makedirs(config_dir, exist_ok=True)
+        with open(os.path.join(config_dir, "settings.json"), "w") as f:
+            json.dump(
+                {
+                    "setup_complete": True,
+                    "_schema_version": 15,
+                    "markers": {"detect": {"intro": True, "credits": True, "recap": False}, "publish_when": "high"},
+                },
+                f,
+            )
+        env = {"CONFIG_DIR": config_dir, "WEB_AUTH_TOKEN": "test-token-12345678"}
+        with patch.dict(os.environ, env), patch(self.SUBMIT, return_value="job-1") as submit:
+            create_app(config_dir=config_dir)
+        submit.assert_called_once_with()
+        with open(os.path.join(config_dir, "settings.json")) as f:
+            saved = json.load(f)
+        assert saved["_schema_version"] == 16
+        assert "publish_when" not in saved["markers"] and DECIDE_AGAIN_KEY not in saved
+
+        reset_settings_manager()
+        with patch.dict(os.environ, env), patch(self.SUBMIT) as submit_again:
+            create_app(config_dir=config_dir)
+        submit_again.assert_not_called()

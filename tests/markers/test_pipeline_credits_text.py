@@ -31,10 +31,10 @@ T = MarkerType
 START_S = 1_290.25
 
 
-def settings(level="high", credits_window=None, **sources):
+def settings(credits_window=None, **sources):
     enabled = {"chapters": True, "theintrodb": False, "introdb": False, "skipdb": False, "season_audio": False,
                "credits_text": True, "server_markers": False, **sources}  # fmt: skip
-    block = {"detect": {"intro": False, "credits": True}, "publish_when": level,
+    block = {"detect": {"intro": False, "credits": True},
              "sources": [{"id": k, "enabled": v} for k, v in enabled.items()]}  # fmt: skip
     if credits_window is not None:
         block["credits_window"] = credits_window
@@ -61,8 +61,8 @@ def find(monkeypatch):
     return fake
 
 
-def ctx_for(store, media, level="high", *, force=False, clients=None, credits_window=None, **sources):
-    return _ctx(store, _registry(media, ServerType.PLEX), settings_raw=settings(level, credits_window, **sources),
+def ctx_for(store, media, *, force=False, clients=None, credits_window=None, **sources):
+    return _ctx(store, _registry(media, ServerType.PLEX), settings_raw=settings(credits_window, **sources),
                 detectors=(detector.credits_text_spec(),), force=force, clients=clients)  # fmt: skip
 
 
@@ -85,18 +85,18 @@ class TestWorkerHandOff:
         rec = store.get_file(media)
         assert store.get_evidence(rec.id) == [Candidate(T.CREDITS, 1_290_250, None, Source.CREDITS_TEXT)]
         assert store.evidence_version(rec.id, Source.CREDITS_TEXT) == detector.CREDITS_TEXT_VERSION
-        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value  # one source at High
+        assert out.outcome_key == FileOutcome.PUBLISHED.value  # credit text decides credits alone (rule 6)
 
-    def test_medium_publishes_it_alone_q1(self, store, media, find):
+    def test_it_publishes_the_credits_alone_q1(self, store, media, find):
         plex = ready_publisher()
-        out, _ = _run(ctx_for(store, media, "medium"), media, {"plex-1": plex}, stage="process")
+        out, _ = _run(ctx_for(store, media), media, {"plex-1": plex}, stage="process")
         assert out.outcome_key == FileOutcome.PUBLISHED.value
         assert plex.write.call_args.args == ("item-plex-1", [Marker(T.CREDITS, 1_290_250, DUR, ("credits_text",))])
 
     def test_a_scene_after_the_credits_is_kept_q3(self, store, media, find):
         find.answer = (1_200.0, 1_260.0)  # the roll ends 61 s before the end of the file
         plex = ready_publisher()
-        out, _ = _run(ctx_for(store, media, "medium"), media, {"plex-1": plex}, stage="process")
+        out, _ = _run(ctx_for(store, media), media, {"plex-1": plex}, stage="process")
         assert store.get_evidence(store.get_file(media).id) == [
             Candidate(T.CREDITS, 1_200_000, 1_260_000, Source.CREDITS_TEXT)
         ]
@@ -112,7 +112,7 @@ class TestWorkerHandOff:
 
         find.answer = (1_200.0, 1_260.0)
         plex = ready_publisher()
-        _run(ctx_for(store, media, "medium"), media, {"plex-1": plex}, stage="process")
+        _run(ctx_for(store, media), media, {"plex-1": plex}, stage="process")
         (decided,) = plex.write.call_args.args[1]
         emby = FakeEmby(str(media))
         emby.publisher = _publisher(emby)
@@ -123,7 +123,7 @@ class TestWorkerHandOff:
         )
         assert emby.publisher.projection_note([decided], duration_ms=DUR) == CREDITS_BEFORE_END_NOTE
 
-    def test_high_publishes_it_with_a_servers_own_agreeing_marker_q2(self, store, media, find):
+    def test_it_publishes_with_a_servers_own_agreeing_marker_q2(self, store, media, find):
         # End to end: a second server (Intro & Credits off there, so evidence only) serves its own Outro 1.75 s after
         # the text's start; the two agree, and the published start is the text's own (rule 7: never the server's).
         ctx = ctx_for(store, media, server_markers=True)
@@ -143,7 +143,7 @@ class TestWorkerHandOff:
         assert plex.write.call_args.args == ("item-plex-1", [decided])
         assert list(_rows_by_server(out)) == ["plex-1"]  # nothing is written to the evidence-only server
 
-    def test_high_publishes_it_with_an_agreeing_online_source(self, store, media, find):
+    def test_it_publishes_with_an_agreeing_online_source(self, store, media, find):
         clients = _clients(skipdb=LookupResult("ok", (Candidate(T.CREDITS, 1_295_000, None, Source.SKIPDB),)))
         # SkipDB alone never decides credits (rule 6); with the text agreeing it does, and as the first of the two in
         # the source order its start is published.
@@ -284,12 +284,12 @@ class TestStoredAnswers:
             _run(ctx_for(store, media), media, pubs(), stage="process", gpu="NVIDIA", gpu_device_path="cuda:0")
         find.answer = START_S
         out, _ = _run(ctx_for(store, media), media, pubs(), stage="process", gpu=None, gpu_device_path=None)
-        assert find.calls[-1]["gpu"] is None and out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        assert find.calls[-1]["gpu"] is None and out.outcome_key == FileOutcome.PUBLISHED.value
 
 
 class TestAvailability:
     def _stored(self, store, media, find):
-        _run(ctx_for(store, media, "medium"), media, pubs(), stage="process")
+        _run(ctx_for(store, media), media, pubs(), stage="process")
         return store.get_file(media)
 
     @pytest.mark.parametrize(
@@ -301,7 +301,7 @@ class TestAvailability:
         self, store, media, find, state, expected
     ):
         rec = self._stored(store, media, find)
-        ctx = _ctx(store, _registry(media, ServerType.PLEX), settings_raw=settings("medium"),
+        ctx = _ctx(store, _registry(media, ServerType.PLEX), settings_raw=settings(),
                    detectors=(detector.credits_text_spec(),) if state is TextDetState.AVAILABLE else ())  # fmt: skip
         ctx.credits_text = state
         assert pipeline._decide(ctx, rec, frozenset({T.CREDITS}))[T.CREDITS].status is expected
@@ -486,7 +486,7 @@ class TestMovieWindowReachesTheDecision:
     ):
         find.answer = self.START_S
         plex = ready_publisher()
-        ctx = ctx_for(store, movie, "medium", credits_window=window)
+        ctx = ctx_for(store, movie, credits_window=window)
         out, _ = _run(ctx, movie, {"plex-1": plex}, probe=_probe(duration=self.LONG_MOVIE_MS), stage="process")
         assert (out.outcome_key == FileOutcome.PUBLISHED.value) is published
         if published:
@@ -500,7 +500,7 @@ class TestMovieWindowReachesTheDecision:
         # another source) would be refused although nothing changed for someone who narrowed the window.
         find.answer = 10_000.0  # 800 s before the end of a 3 h movie
         plex = ready_publisher()
-        ctx = ctx_for(store, movie, "medium", credits_window={"movie_s": 300})
+        ctx = ctx_for(store, movie, credits_window={"movie_s": 300})
         out, _ = _run(ctx, movie, {"plex-1": plex}, probe=_probe(duration=self.LONG_MOVIE_MS), stage="process")
         assert out.outcome_key == FileOutcome.PUBLISHED.value
 
@@ -517,7 +517,7 @@ class TestTvWindowReachesTheDecision:
     ):
         find.answer = self.START_S
         plex = ready_publisher()
-        ctx = ctx_for(store, media, "medium", credits_window=window)
+        ctx = ctx_for(store, media, credits_window=window)
         out, _ = _run(ctx, media, {"plex-1": plex}, probe=_probe(duration=DUR), stage="process")
         assert (out.outcome_key == FileOutcome.PUBLISHED.value) is published
         if published:

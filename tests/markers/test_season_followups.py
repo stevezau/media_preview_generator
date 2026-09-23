@@ -25,8 +25,8 @@ from tests.markers import test_job_runner, test_job_runner_real, test_triggers
 from tests.markers.audio import test_season
 from tests.markers.audio.test_season import (
     COLD_OPEN_AT,
-    HIGH,
     SEASON_INTRO_AT,
+    SEASON_RAW,
     _Audio,
     _chapter_probe,
     _chapter_season,
@@ -935,7 +935,7 @@ class TestSeasonJobThroughTheRealEngine:
         e1, e2, e3 = (str(folder / f"Show (2020) - S01E{e:02d}.mkv") for e in (1, 2, 3))
         store = MarkerStore(str(tmp_path / "markers.db"))
         offline = [{"id": sid, "enabled": False} for sid in ("theintrodb", "introdb", "skipdb")]
-        raw = {**HIGH, "sources": [{"id": "chapters", "enabled": True}, *offline]}
+        raw = {**SEASON_RAW, "sources": [{"id": "chapters", "enabled": True}, *offline]}
         marker_settings = load_global(validate_global(raw, None)[0])
         registry = FakeRegistry({"plex-1": server_config("plex-1", ServerType.PLEX, root=str(tmp_path / "media"))})
         publisher = ready_publisher()
@@ -1080,7 +1080,7 @@ def _queued_season(root, settings, rng, mode, inputs, order, reruns):
                     jm.start_job(job.id)
                     cfg = job_runner._seal_files(jm, job.id, job, dict(job.config or {}))
                     items = sorted(set(cfg["file_paths"]))
-                    ctx = _ctx(store, registry, settings_raw=HIGH, detectors=detectors, clients=clients)
+                    ctx = _ctx(store, registry, settings_raw=SEASON_RAW, detectors=detectors, clients=clients)
                     running.append([job, cfg, ctx, items, 0])
                     counts["jobs"] += 1
                     if cfg.get("source") == job_runner.SEASON_SOURCE:

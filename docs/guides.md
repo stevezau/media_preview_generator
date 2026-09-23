@@ -598,19 +598,28 @@ drag-to-reorder:
 | TheIntroDB | Optional **API key** (masked once saved). Works without one (500 lookups/day); your own free key raises that. Off by default — see the note below. |
 | IntroDB.app | No key needed, TV only. |
 | SkipDB | Free, only counts an answer matched to your file's own length. |
-| Matching audio across a season | TV intros. Finds the theme tune a season's episodes share and **confirms** an intro another source found. On its own it was 91 right, 13 wrong and 14 missed on 118 test episodes — too many wrong to decide alone — so it never publishes an intro by itself at either setting. Season audio (or the previous-season hint, below) plus a server's own marker isn't enough either, since a server's intro detection matches audio too: that episode goes to **Needs review**. Needs an ffmpeg with chromaprint, which the amd64 Docker image has; elsewhere Settings shows **Not available** and why. CPU, about 2 s per episode, at most 2 at once. See [Season audio and weekly releases](#season-audio-and-weekly-releases). |
-| On-screen credit text | Finds where the credit roll starts from text on screen in the last 15 minutes of a movie (7.5 of an episode, or the window you set under Advanced), and stops the skip at the last credit when a scene follows the roll (Emby skips to the end of the file). Tested alone on 80 files: within 10 s on 66 (61 when decoded on the CPU), more than 30 s early on 1. Text that stays in one place through the story (a channel logo, a score bug, a ticker) is ignored, and a file with text on screen through most of its ending (a burnt-in timecode, say) still gets no answer. Credits already running when those last minutes begin are still found, by reading 2 more minutes back. Credits that start in the first 30 seconds of those minutes right after a scene, or more than 1½ minutes before them, get no answer. At **High** another source has to agree; at **Medium** it can publish alone. On TV recordings with a channel logo or other on-screen graphics it is about as accurate as Plex's own credits detection, not better. At **Medium** it skipped into the story on 4–5 of the 39 episodes we checked and put credits on 4–5 of 12 sports broadcasts, which have none. **High** is the safer setting for those libraries: it skipped into the story on 2 and put credits on at most 1 sports broadcast, but found the credits on only 3–4 episodes. Uses your GPU when a quick self-test shows it is faster than the CPU and finds the same text; otherwise the CPU (about 10–30 s per file; 4K without a GPU up to about 2 min). A file where every frame is a keyframe (ProRes, DNxHD, MJPEG, all-intra H.264) is checked for text one frame every 2 seconds at the end; its whole ending is still read from disk, so a very high-bitrate one on a slow network share can still time out. It is then left alone for a day unless it changes or you Re-detect it. |
+| Matching audio across a season | TV intros. Finds the theme tune a season's episodes share and **confirms** an intro another source found. On its own it was 91 right, 13 wrong and 14 missed on 118 test episodes — too many wrong to decide alone — so it never publishes an intro by itself. Season audio (or the previous-season hint, below) plus a server's own marker isn't enough either, since a server's intro detection matches audio too: that episode goes to **Needs review**. Needs an ffmpeg with chromaprint, which the amd64 Docker image has; elsewhere Settings shows **Not available** and why. CPU, about 2 s per episode, at most 2 at once. See [Season audio and weekly releases](#season-audio-and-weekly-releases). |
+| On-screen credit text | Finds where the credit roll starts from text on screen in the last 15 minutes of a movie (7.5 of an episode, or the window you set under Advanced), and stops the skip at the last credit when a scene follows the roll (Emby skips to the end of the file). Tested alone on 80 files: within 10 s on 66 (61 when decoded on the CPU), more than 30 s early on 1. Text that stays in one place through the story (a channel logo, a score bug, a ticker) is ignored, and a file with text on screen through most of its ending (a burnt-in timecode, say) still gets no answer. Credits already running when those last minutes begin are still found, by reading 2 more minutes back. Credits that start in the first 30 seconds of those minutes right after a scene, or more than 1½ minutes before them, get no answer. It publishes credits on its own. On TV recordings with a channel logo or other on-screen graphics it is about as accurate as Plex's own credits detection, not better: on its own it skipped into the story on 4–5 of the 39 episodes we checked and put credits on 4–5 of 12 sports broadcasts, which have none (sports libraries are left out of Intro & Credits unless you tick them). Uses your GPU when a quick self-test shows it is faster than the CPU and finds the same text; otherwise the CPU (about 10–30 s per file; 4K without a GPU up to about 2 min). A file where every frame is a keyframe (ProRes, DNxHD, MJPEG, all-intra H.264) is checked for text one frame every 2 seconds at the end; its whole ending is still read from disk, so a very high-bitrate one on a slow network share can still time out. It is then left alone for a day unless it changes or you Re-detect it. |
 | Markers already on your servers | Second opinion only — see below. |
 
-**"Publish when"** decides how sure the app must be before it writes anything:
+**How it decides** (the note under the list says the same):
 
-- **High** (default) — chapters publish on their own unless two other independent sources agree on something
-  different (then the file goes to **Needs review**); without chapters, two independent sources must agree.
-- **Medium** — also accepts a single source, but only one that checks *your* file's own cut: chapters, on-screen
-  credit text (for credits), or a SkipDB exact/shifted match. A single IntroDB or TheIntroDB answer never publishes
-  alone, because neither knows which cut of the file you have. A lone SkipDB answer publishes intros and recaps only
-  — its credits often start minutes before the real credit roll, so they still need a second source to agree.
-  Season audio never publishes alone at either setting.
+- **Chapters** in the file decide on their own, unless two other independent sources agree on something different
+  (then the file goes to **Needs review**), or an intro chapter is much longer than the rest of its season's (then one
+  other source has to agree).
+- **An online database's answer** is published once an independent source agrees with it: on-screen credit text,
+  season audio, another database, or a server's own marker. IntroDB and TheIntroDB count as one, because IntroDB's data
+  looks partly copied.
+- **A single answer** decides alone only when it checks *your* file's own cut: on-screen credit text (credits), or a
+  SkipDB exact/shifted match (intros and recaps). A lone IntroDB or TheIntroDB answer never publishes, because neither
+  knows which cut of the file you have; SkipDB's credits often start minutes before the real credit roll, so they need
+  a second source too. Season audio never publishes alone.
+- **Anything else** — sources that disagree, or an only answer that can't decide alone — goes to **Needs review** with
+  the reason, e.g. "Only IntroDB has the intro; an online answer needs a check against the file".
+
+There is no stricter mode. An earlier "Publish when: High" setting (always two agreeing sources) left most of a library
+in Needs review and was removed; upgrading decides the files it held there again once, from what was already found
+(no lookups, nothing read from the files), along with any file still waiting for its item's other versions.
 
 Markers already on a Plex/Jellyfin/Emby server only ever *confirm* another source — they never publish on their own,
 and they can only **shorten** a skip (a later intro start, an earlier credits end), never lengthen one. That's
@@ -670,11 +679,13 @@ until <date>". Forced re-detects follow the same rule.
 
 ### Needs review
 
-When the sources don't clear the bar above for a marker — nothing agrees, or two credible answers disagree — that
-marker isn't sent to any server and the file shows **Needs review**. When the job sent the file's other markers, the
-file shows **Markers written** instead, and its reason in the Files panel names the marker still in review, the times
-proposed and why (e.g. "credits needs review (sources don't agree yet): 47:36–48:38 from credits_text"). Nothing
-is guessed. **Re-detect** in the Inspector asks every source again, and **Adjust** lets you put the marker where it
+When the sources don't clear the bar above for a marker — the only answer can't decide alone, or two credible answers
+disagree — that marker isn't sent to any server and the file shows **Needs review**. When the job sent the file's
+other markers, the file shows **Markers written** instead, and its reason in the Files panel names the marker still in
+review, the times proposed and why (e.g. "intro needs review (only IntroDB has the intro; an online answer needs a
+check against the file): 2:07–2:36 from introdb"). A server's row where nothing was sent says why the same way, or
+e.g. "Sources disagree: credits_text, skipdb". Nothing is guessed. **Re-detect** in the Inspector asks every source
+again, and **Adjust** lets you put the marker where it
 really is by hand — including for a type nothing was found for at all, where **Add intro** / **Add credits** puts one
 on the timeline at a starting time for you to drag. Saving it locks it, so later checks leave it alone.
 

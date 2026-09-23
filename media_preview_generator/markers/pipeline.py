@@ -38,6 +38,7 @@ from .audio.season import season_audio_spec, season_intro_chapter_limits
 from .credits.detector import credits_text_spec
 from .credits.textdet_helper import TextDetState, text_detection_state
 from .decide import (
+    APP_PUBLISH_WHEN,
     DecisionContext,
     DecisionStatus,
     TypeDecision,
@@ -51,6 +52,7 @@ from .job_log import (
     SeasonEpisode,
     ServerResult,
     clock,
+    decide_again_line,
     file_lines,
     kept_types,
     review_note,
@@ -73,6 +75,7 @@ from .outcomes import (
     STATE_BY_STATUS,
     VERIFY_LATER,
     VERSIONS_UNCHECKED,
+    VERSIONS_WAITING,
     FileOutcome,
     ServerStatus,
     file_outcome,
@@ -80,6 +83,7 @@ from .outcomes import (
     kept_note,
     kept_own_reason,
     replaced_own_note,
+    review_message,
     with_kept_note,
     with_sentence,
 )
@@ -177,6 +181,8 @@ PUBLISH_DEADLINE_MESSAGE = "Couldn't publish to this server in time; the next In
 # it puts the user's marker there (the file's publish basis no longer matches, so it is written again).
 PUBLISH_BUSY_MESSAGE = "Intro & Credits is running for this file; the next run publishes your marker"
 SERVER_MARKERS_OFF = "Intro & Credits is off for this server"
+# A file skipped by a job deciding from stored answers only (``PipelineContext.stored_answers_only``).
+CHANGED_SINCE_ANSWERS = "Changed on disk since it was checked; the next job that lists it reads it again"
 
 LocalDetector = Callable[..., "list[Candidate] | DetectorAnswer"]
 
@@ -278,6 +284,11 @@ class PipelineContext:
         force: Re-detect: read chapters, every online source and the markers on servers we never published to again,
             and run every local detector, without stopping early. Publishing still skips servers that already show
             the result.
+        stored_answers_only: Decide again from the answers already stored and publish: no online lookup, no detector,
+            no read of the markers on servers (the job it runs in queues no Season job either). A file changed on disk
+            since its answers were stored is skipped (they are the old file's). Used once when an upgrade changed the
+            rules (settings v16), so files waiting in Needs review are published without reading them again. Like a
+            Season job, it logs only the files whose decisions changed and ends with one line for the rest.
         clients: Online client per source id (``build_clients``).
         local_detectors: Detectors that read the file itself (on a worker unless their ``needs_worker`` says not).
         now: Current UTC time (tests use a fake clock).
@@ -311,6 +322,7 @@ class PipelineContext:
     priority: Callable[[], int]
     ffprobe: str
     force: bool = False
+    stored_answers_only: bool = False
     clients: dict[str, Any] = field(default_factory=dict)
     local_detectors: tuple[LocalDetectorSpec, ...] = ()
     now: Callable[[], datetime] = _utcnow
@@ -365,9 +377,11 @@ class PipelineContext:
     # Per file handed on before it finished, like ``_pending_skips``: what its earlier stages did with each source, so
     # the stage that finishes it logs a source the checking thread asked as asked by this job.
     _run_notes: dict[str, RunNotes] = field(default_factory=dict, repr=False)
-    # For the job's last lines: files written per server name, and a Season job's unchanged episodes per season.
+    # For the job's last lines: files written per server name, a Season job's unchanged episodes per season, and per
+    # file a stored-answers-only job ran, whether its decisions changed and whether a type is still in review.
     _sent: dict[str, int] = field(default_factory=dict, repr=False)
     _seasons: dict[str, list[SeasonEpisode]] = field(default_factory=dict, repr=False)
+    _decided_again: list[tuple[bool, bool]] = field(default_factory=list, repr=False)
     _summary_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # Per file: the ``sequence_number`` its latest run of this job started at (``ran_since``).
     _run_started: dict[str, int] = field(default_factory=dict, repr=False)
@@ -482,8 +496,11 @@ class PipelineContext:
             self._left_out_changed.clear()
         return taken
 
-    def _note_finished(self, rows: list[dict], season: tuple[str, SeasonEpisode] | None) -> None:
-        """Count one file's rows for the job's totals line, and a Season job's episode for its season's line."""
+    def _note_finished(
+        self, rows: list[dict], season: tuple[str, SeasonEpisode] | None, decided_again: tuple[bool, bool] | None
+    ) -> None:
+        """Count one file's rows for the job's totals line, a Season job's episode for its season's line, and a
+        stored-answers-only job's file for its line."""
         with self._summary_lock:
             for row in rows:
                 name = str(row.get("server_name") or row.get("server_id") or "")
@@ -491,9 +508,12 @@ class PipelineContext:
                 self._sent[name] = self._sent.get(name, 0) + int(written)
             if season is not None:
                 self._seasons.setdefault(season[0], []).append(season[1])
+            if decided_again is not None:
+                self._decided_again.append(decided_again)
 
     def summary_lines(self, outcome: dict[str, int]) -> list[str]:
-        """The lines a job ends its log with: a Season job's one line per season, then the totals.
+        """The lines a job ends its log with: a Season job's one line per season (a stored-answers-only job's one line),
+        then the totals.
 
         Args:
             outcome: The job's file counts per outcome (files finished before a restart included).
@@ -504,6 +524,7 @@ class PipelineContext:
         with self._summary_lock:
             sent = dict(self._sent)
             seasons = {season: list(episodes) for season, episodes in self._seasons.items()}
+            decided_again = list(self._decided_again)
         with self._budget_lock:
             skipped: dict[str, int] = {}
             for source, count in self._budget_exhausted.items():
@@ -511,6 +532,8 @@ class PipelineContext:
             for source, (_detail, count) in self._key_refused.items():
                 skipped[_ONLINE_LABELS[source]] = skipped.get(_ONLINE_LABELS[source], 0) + count
         lines = [season_line(season, episodes, self.recheck_label) for season, episodes in sorted(seasons.items())]
+        if self.stored_answers_only:
+            lines.append(decide_again_line(decided_again))
         return [*lines, totals_line(outcome, sent, skipped)]
 
 
@@ -705,6 +728,7 @@ def build_context(
     recheck_empty_server_markers: bool = False,
     season_recheck: bool = False,
     recheck_label: str = SEASON_RECHECK_LABEL,
+    stored_answers_only: bool = False,
 ) -> PipelineContext:
     """Context from live settings (used by the job runner).
 
@@ -722,6 +746,7 @@ def build_context(
         recheck_empty_server_markers: Check servers (``PipelineContext.recheck_empty_server_markers``).
         season_recheck: A Season job or a TheIntroDB recheck (``PipelineContext.season_recheck``).
         recheck_label: Which of the two (``PipelineContext.recheck_label``).
+        stored_answers_only: Decide from stored answers only (``PipelineContext.stored_answers_only``).
 
     Returns:
         A context for one job.
@@ -746,6 +771,7 @@ def build_context(
         priority=priority if callable(priority) else (lambda: priority),
         ffprobe=ffprobe_path_for(ffmpeg_path),
         force=force,
+        stored_answers_only=stored_answers_only,
         clients=build_clients(settings),
         local_detectors=default_local_detectors(settings, config, chromaprint, credits_text),
         recheck_empty_server_markers=recheck_empty_server_markers,
@@ -906,7 +932,7 @@ def _decide(
         dctx = DecisionContext(
             rec.duration_ms or 0,
             rec.is_movie,
-            ctx.settings.publish_when,
+            APP_PUBLISH_WHEN,
             types,
             sources,
             intro_chapter_limit,
@@ -1631,16 +1657,16 @@ def _publish_to(
     owner: _Owning,
     rec: FileRecord,
     markers: dict[MarkerType, Marker],
-    needs_review: bool,
+    in_review: str,
     servers: _ItemServers,
     ctx: PipelineContext,
     phase: Callable[[str], None],
     *,
     kept_own: frozenset[MarkerType] = frozenset(),
 ) -> dict:
-    # kept_own: types left undecided while every server keeps its own and shows one. The row's wording names them,
-    # and the file is recorded on its item even with nothing to send; what is sent is exactly what an undecided type
-    # sends.
+    # in_review: why the file's types in Needs review are there (``review_message``), "" when none is. kept_own: types
+    # left undecided while every server keeps its own and shows one. The row's wording names them, and the file is
+    # recorded on its item even with nothing to send; what is sent is exactly what an undecided type sends.
     cfg = owner.config
     path = rec.canonical_path
     store = ctx.store
@@ -1732,8 +1758,8 @@ def _publish_to(
         return publisher.projection_note(ours, duration_ms=rec.duration_ms)
 
     def _up_to_date(kept_types: frozenset[MarkerType]) -> dict:
-        if needs_review and not wanted:
-            return _row(cfg, publisher.name, ServerStatus.NEEDS_REVIEW, "Sources don't agree yet", path)
+        if in_review and not wanted:
+            return _row(cfg, publisher.name, ServerStatus.NEEDS_REVIEW, in_review, path)
         message = with_kept_note("", kept_note(kept_types, wanted, vendor, not_decided=kept_own)) or "Up to date"
         message = with_kept_note(message, _shown_differently([m for m in wanted if m.type not in kept_types]))
         return _row(cfg, publisher.name, ServerStatus.UP_TO_DATE, message, path)
@@ -1795,8 +1821,8 @@ def _publish_to(
         # of ours before) but records the file on its item, so Check servers reads the server's own marker back.
         nothing_to_send = not wanted and previous == [] and own_previous is None and not holds_kept
         if nothing_to_send and not kept_own:
-            if needs_review:
-                return _row(cfg, publisher.name, ServerStatus.NEEDS_REVIEW, "Sources don't agree yet", path)
+            if in_review:
+                return _row(cfg, publisher.name, ServerStatus.NEEDS_REVIEW, in_review, path)
             message = "This server can't show the markers found for this file" if markers else "No markers found"
             return _row(cfg, publisher.name, ServerStatus.NONE, message, path)
 
@@ -1866,9 +1892,7 @@ def _publish_to(
         if waiting_for:
             # Plex shows a type only when every version of the item is decided and agrees on it. A version not checked
             # yet may be checked (or deleted) later, so the job tries this file again; versions that disagree don't.
-            message = with_kept_note(
-                f"Waiting for this item's other versions to agree on: {', '.join(waiting_for)}", note
-            )
+            message = with_kept_note(f"{VERSIONS_WAITING}: {', '.join(waiting_for)}", note)
             message = with_sentence(message, override)
             return _says_override(
                 _finish(
@@ -1965,7 +1989,7 @@ def publish_now(
     servers = _ItemServers(item, marker_owners)
     markers = store.get_markers(rec.id)
     decisions = store.get_decisions(rec.id)
-    needs_review = any(d.status is DecisionStatus.NEEDS_REVIEW for d in decisions.values())
+    in_review = review_message(decisions, decisions.keys())
     # The types the file's last run left to the servers' own markers, so the rows say so as that run's did.
     kept_own = frozenset(mtype for mtype, d in decisions.items() if is_kept_own(d.status, d.reason))
     stop_at = clock() + deadline_s
@@ -2009,7 +2033,7 @@ def publish_now(
                 # Only a server that still keeps its own and took the last run's rows: one switched to Use ours or
                 # added since gets what an undecided type gets.
                 left = kept_own if _kept_own_applies(ctx, cfg, rec, store) else frozenset()
-                rows.append(_publish_to(owner, rec, markers, needs_review, servers, ctx, _no_phase, kept_own=left))
+                rows.append(_publish_to(owner, rec, markers, in_review, servers, ctx, _no_phase, kept_own=left))
             except _FileChangedError:
                 rows.append(_later(cfg, "The file changed while it was being published"))
             except Exception as exc:
@@ -2119,6 +2143,8 @@ def _attempt(
     refresh_probe = _refreshing(ctx, path, Source.CHAPTERS)
     existing = ctx.store.get_file(path)
     unchanged = existing is not None and (existing.size, existing.mtime_ns) == (st.st_size, st.st_mtime_ns)
+    if ctx.stored_answers_only and not unchanged:
+        return ItemOutcome(FileOutcome.SKIPPED.value, CHANGED_SINCE_ANSWERS)
     probe = None
     stale_rules = unchanged and ctx.store.evidence_version(existing.id, Source.CHAPTERS) != CHAPTER_RULES_VERSION
     if refresh_probe or not unchanged or not existing.duration_ms or stale_rules:
@@ -2183,7 +2209,7 @@ def _attempt(
     # no local detector reads the file for them. Asked once a detector would run or a type ends undecided, at most once
     # per run.
     kept_everywhere: frozenset[MarkerType] | None = None
-    for source_id in ctx.settings.ordered_enabled_sources():
+    for source_id in () if ctx.stored_answers_only else ctx.settings.ordered_enabled_sources():
         source = Source(source_id)
         refresh = _refreshing(ctx, path, source)
         if (
@@ -2311,7 +2337,7 @@ def _attempt(
     if ctx.store.get_intro_chapter_limit(rec.id) != (True, intro_limit):
         ctx.store.set_intro_chapter_limit(rec.id, intro_limit)
     markers = ctx.store.get_markers(rec.id)
-    needs_review = any(decisions[t].status is DecisionStatus.NEEDS_REVIEW for t in types)
+    in_review = review_message(decisions, types)
     if identity_changed(rec):
         raise _FileChangedError(path)
     replaced = existing is not None and not unchanged
@@ -2320,14 +2346,14 @@ def _attempt(
         # Per-server publish state already tolerates a partial fan-out; a busy Plex DB can hold a write for 30 s.
         if cancelled():
             return ItemOutcome(FileOutcome.FAILED.value, _CANCELLED)
-        row = _publish_to(owner, rec, markers, needs_review, servers, ctx, phase, kept_own=kept_own)
+        row = _publish_to(owner, rec, markers, in_review, servers, ctx, phase, kept_own=kept_own)
         if replaced and row["status"] in (ServerStatus.WRITTEN.value, ServerStatus.UP_TO_DATE.value):
             row[VERIFY_LATER] = True
         rows.append(row)
     waiting_to_retry = any(
         r["status"] == ServerStatus.WAITING.value and r.get("reason_code") in RETRY_REASON_CODES for r in rows
     )
-    outcome = file_outcome({r["status"] for r in rows}, needs_review=needs_review, waiting_to_retry=waiting_to_retry)
+    outcome = file_outcome({r["status"] for r in rows}, needs_review=bool(in_review), waiting_to_retry=waiting_to_retry)
     if outcome is not FileOutcome.FAILED:
         ctx.decided_by.add(decided_groups(decisions))
     try:
@@ -2397,14 +2423,18 @@ def _log_file(
     """Log what each source answered, what was decided and what was sent where (the job log's lines for this file).
 
     A Season job (and a TheIntroDB recheck) logs only files whose decisions changed; the rest go into their season's
-    summary line. A recheck can also list movies: a file that isn't an episode logs its own lines there.
+    summary line. A recheck can also list movies: a file that isn't an episode logs its own lines there. A
+    stored-answers-only job logs only files whose decisions changed too; the rest go into its one summary line.
     """
-    season = None
+    season = decided_again = None
     if ctx.season_recheck and (rec.season_key is not None or ctx.recheck_label == SEASON_RECHECK_LABEL):
         name, episode = season_of(rec.canonical_path)
         season = (name, SeasonEpisode(episode, changed, review_note(decisions, types)))
-    ctx._note_finished(rows, season)
-    if season is not None and not changed:
+    if ctx.stored_answers_only:
+        in_review = any(decisions[t].status is DecisionStatus.NEEDS_REVIEW for t in types if t in decisions)
+        decided_again = (changed, in_review)
+    ctx._note_finished(rows, season, decided_again)
+    if (season is not None or decided_again is not None) and not changed:
         return
     sources = source_answers(
         ctx.settings.ordered_enabled_sources(),
@@ -2418,7 +2448,6 @@ def _log_file(
         rec.canonical_path,
         decisions=decisions,
         types=types,
-        publish_when=ctx.settings.publish_when,
         servers=[_server_result(ctx, rec, row, decisions) for row in rows],
         sources=sources,
     )

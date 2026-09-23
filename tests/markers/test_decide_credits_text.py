@@ -55,8 +55,10 @@ def credits(candidates, *, level="high", duration=MOVIE_MS, is_movie=True, order
 
 class TestAlone:
     def test_high_needs_a_second_source(self):
+        # "high" is the evaluation harness's level only: the app decides at "medium" (2026-09-24).
         d = credits([text(5_700_000)])[T.CREDITS]
-        assert (d.status, d.reason, d.marker) == (DecisionStatus.NEEDS_REVIEW, "sources don't agree yet", None)
+        why = 'only on-screen text found the credits; at "high" a second source must agree'
+        assert (d.status, d.reason, d.marker) == (DecisionStatus.NEEDS_REVIEW, why, None)
         assert (d.proposed.start_ms, d.proposed.end_ms, d.proposed.decided_by) == (
             5_700_000,
             MOVIE_MS,

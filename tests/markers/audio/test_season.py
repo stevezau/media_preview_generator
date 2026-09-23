@@ -37,9 +37,7 @@ DUR = 1_321_472
 N_POINTS = int(fingerprint.window_s(DUR) / POINT_S)
 INTRO = np.random.default_rng(42).integers(0, 2**32, size=240, dtype=np.uint64).astype("<u4")
 OFFSETS = {"S01E01": 300, "S01E02": 520, "S01E03": 710, "S01E04": 90, "S02E01": 400, "S02E02": 900, "S02E03": 150}
-MEDIUM = {"sources": [{"id": "theintrodb", "enabled": False}], "detect": {"intro": True, "credits": False},
-          "publish_when": "medium"}  # fmt: skip
-HIGH = {**MEDIUM, "publish_when": "high"}
+SEASON_RAW = {"sources": [{"id": "theintrodb", "enabled": False}], "detect": {"intro": True, "credits": False}}
 SIL = season.SILENCE_POINT
 
 
@@ -119,7 +117,7 @@ def _spec():
         return season.season_audio_spec("/usr/lib/jellyfin-ffmpeg/ffmpeg")
 
 
-def _season_ctx(store, path, raw=MEDIUM, clients=None):
+def _season_ctx(store, path, raw=SEASON_RAW, clients=None):
     return _ctx(store, _registry(path, ServerType.PLEX), detectors=(_spec(),), settings_raw=raw, clients=clients)
 
 
@@ -231,20 +229,27 @@ class TestSeasonAudio:
         assert cand.origin == "2/2"
         assert ctx.take_followups() == []  # e1 already ran with this season's fingerprints; e3 never had an answer
 
-    @pytest.mark.parametrize("raw", [HIGH, MEDIUM], ids=["high", "medium"])
-    def test_a_lone_audio_match_needs_review(self, store, show, raw):
+    def test_a_lone_audio_match_needs_review(self, store, show):
         e1, _, _ = show(1, 3)
         with _Audio():
-            out, _ = _run(_season_ctx(store, e1, raw), e1, {"plex-1": ready_publisher()}, stage="process")
+            out, _ = _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process")
         assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
         decision = store.get_decisions(store.get_file(e1).id)[MarkerType.INTRO]
-        assert (decision.status, decision.reason) == (DecisionStatus.NEEDS_REVIEW, "sources don't agree yet")
+        assert (decision.status, decision.reason) == (
+            DecisionStatus.NEEDS_REVIEW,
+            "only season audio found the intro; matching audio needs another source to agree",
+        )
+        rows = {r["server_id"]: r for r in out.publisher_rows}
+        assert (
+            rows["plex-1"]["message"]
+            == "Only season audio found the intro; matching audio needs another source to agree"
+        )
 
     def test_an_agreeing_online_source_publishes_the_audio_intro(self, store, show):
         e1, _, _ = show(1, 3)
         start, end = planted_ms(e1)
         pub = ready_publisher()
-        ctx = _season_ctx(store, e1, HIGH, clients=_introdb_answer(start - 2_000, end + 3_000))
+        ctx = _season_ctx(store, e1, SEASON_RAW, clients=_introdb_answer(start - 2_000, end + 3_000))
         with _Audio():
             out, _ = _run(ctx, e1, {"plex-1": pub}, stage="process")
         assert out.outcome_key == FileOutcome.PUBLISHED.value
@@ -256,7 +261,7 @@ class TestSeasonAudio:
 
     def test_a_current_answer_is_not_matched_again(self, store, show):
         e1, _, _ = show(1, 3)
-        ctx = _season_ctx(store, e1, HIGH)
+        ctx = _season_ctx(store, e1, SEASON_RAW)
         with _Audio(), patch.object(season, "pair_runs", wraps=season.pair_runs) as runs:
             _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process")
             first = runs.call_count
@@ -265,7 +270,7 @@ class TestSeasonAudio:
 
     def test_pairs_are_cached_the_same_way_round(self, store, show):
         e1, e2 = show(1, 2)
-        ctx = _season_ctx(store, e1, HIGH)
+        ctx = _season_ctx(store, e1, SEASON_RAW)
         with _Audio():
             _run(ctx, e1, {"plex-1": ready_publisher()}, stage="process")
             with patch.object(season, "pair_runs", side_effect=AssertionError("recomputed")):
@@ -309,7 +314,7 @@ class TestSeasonAudio:
         registry.configs_by_id["plex-1"].exclude_paths.append({"value": r"S01E03", "type": "regex"})
 
         def job(items):
-            ctx = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),))
+            ctx = _ctx(store, registry, settings_raw=SEASON_RAW, detectors=(_spec(),))
             for path in items:
                 if _run(ctx, path, {"plex-1": ready_publisher()})[0] is None:
                     _run(ctx, path, {"plex-1": ready_publisher()}, stage="process")
@@ -326,7 +331,7 @@ class TestSeasonAudio:
     def test_a_run_reads_its_season_once(self, store, show):
         e1, e2, e3 = show(1, 3)
         start, end = planted_ms(e1)
-        ctx = _season_ctx(store, e1, HIGH, clients=_introdb_answer(start - 2_000, end + 3_000))
+        ctx = _season_ctx(store, e1, SEASON_RAW, clients=_introdb_answer(start - 2_000, end + 3_000))
         with _Audio():
             for path, stage in ((e1, "process"), (e2, "check"), (e3, "check")):
                 assert _run(ctx, path, {"plex-1": ready_publisher()}, stage=stage)[0] is not None
@@ -441,7 +446,7 @@ class TestWeeklyReleases:
         self._cache_previous(store, show(1, 4))
         (s2e1,) = show(2, 1)
         start, end = planted_ms(s2e1)
-        ctx = _season_ctx(store, s2e1, HIGH, clients=_introdb_answer(start, end - 1_000))
+        ctx = _season_ctx(store, s2e1, SEASON_RAW, clients=_introdb_answer(start, end - 1_000))
         with _Audio():
             out, _ = _run(ctx, s2e1, {"plex-1": ready_publisher()}, stage="process")
         assert out.outcome_key == FileOutcome.PUBLISHED.value
@@ -543,11 +548,11 @@ class TestFailures:
                 _run(ctx, path, {"plex-1": ready_publisher()}, stage="process")
 
         def job(items):
-            ctx = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),))
+            ctx = _ctx(store, registry, settings_raw=SEASON_RAW, detectors=(_spec(),))
             for path in items:
                 run(ctx, path)
             requested = ctx.take_followups()
-            season_job = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),))
+            season_job = _ctx(store, registry, settings_raw=SEASON_RAW, detectors=(_spec(),))
             for path in requested:
                 if path not in items:
                     run(season_job, path)  # E4 fails again
@@ -574,10 +579,10 @@ class TestFailures:
         def job(items):
             """A job over ``items`` and its Season job; returns how many times ffmpeg ran on the broken file."""
             audio.computed.clear()
-            ctx = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),), now=lambda: clock["now"])
+            ctx = _ctx(store, registry, settings_raw=SEASON_RAW, detectors=(_spec(),), now=lambda: clock["now"])
             for path in items:
                 run(ctx, path)
-            season_job = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),), now=lambda: clock["now"])
+            season_job = _ctx(store, registry, settings_raw=SEASON_RAW, detectors=(_spec(),), now=lambda: clock["now"])
             for path in ctx.take_followups():
                 if path not in items:
                     run(season_job, path)
@@ -614,7 +619,7 @@ class TestFailures:
         ctx = _ctx(
             store,
             _registry(e1, ServerType.PLEX),
-            settings_raw=MEDIUM,
+            settings_raw=SEASON_RAW,
             detectors=(_spec(),),
             force=force,
             now=lambda: now,
@@ -846,7 +851,9 @@ class TestFailures:
             return body
 
         clients = _introdb_answer(round(200 * POINT_S * 1000), round(439 * POINT_S * 1000))
-        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=HIGH, detectors=(_spec(),), clients=clients)
+        ctx = _ctx(
+            store, _registry(e1, ServerType.PLEX), settings_raw=SEASON_RAW, detectors=(_spec(),), clients=clients
+        )
         with _Audio(points=points):
             for path in (e1, e2):
                 _run(ctx, path, {"plex-1": ready_publisher()}, stage="process")
@@ -860,7 +867,9 @@ class TestFailures:
         (s2e1,) = show(2, 1)
         start, end = planted_ms(s2e1)
         clients = _introdb_answer(start, end - 1_000)
-        ctx = _ctx(store, _registry(s2e1, ServerType.PLEX), settings_raw=HIGH, detectors=(_spec(),), clients=clients)
+        ctx = _ctx(
+            store, _registry(s2e1, ServerType.PLEX), settings_raw=SEASON_RAW, detectors=(_spec(),), clients=clients
+        )
         with _Audio():
             _run(ctx, s2e1, {"plex-1": ready_publisher()}, stage="process")
         show(2, 3)
@@ -879,9 +888,11 @@ class TestFailures:
         registry = _registry(target, ServerType.PLEX)
         assert store.get_markers(store.get_file(target).id)[MarkerType.INTRO].decided_by == ("introdb", answer.value)
         with patch.object(season, "chromaprint_ffmpeg", return_value=None):
-            detectors = pipeline.default_local_detectors(_ctx(store, registry, settings_raw=HIGH).settings, MagicMock())
+            detectors = pipeline.default_local_detectors(
+                _ctx(store, registry, settings_raw=SEASON_RAW).settings, MagicMock()
+            )
         assert detectors == ()
-        ctx = _ctx(store, registry, settings_raw=HIGH, detectors=detectors, clients=clients)
+        ctx = _ctx(store, registry, settings_raw=SEASON_RAW, detectors=detectors, clients=clients)
         ctx.chromaprint = fingerprint.ChromaprintState.ABSENT  # what build_context records for this container
         with _Audio():
             out, _ = _run(ctx, target, {"plex-1": ready_publisher()})
@@ -901,7 +912,7 @@ class TestFailures:
         ffmpeg = tmp_path / "ffmpeg"
         ffmpeg.write_text("")
         ffmpeg.chmod(0o755)
-        settings = _ctx(store, registry, settings_raw=HIGH).settings
+        settings = _ctx(store, registry, settings_raw=SEASON_RAW).settings
         fingerprint.forget_chromaprint_answers()
         try:
             with (
@@ -914,7 +925,7 @@ class TestFailures:
         finally:
             fingerprint.forget_chromaprint_answers()
         assert (state, detectors) == (fingerprint.ChromaprintState.UNKNOWN, ())
-        ctx = _ctx(store, registry, settings_raw=HIGH, detectors=detectors, clients=clients)
+        ctx = _ctx(store, registry, settings_raw=SEASON_RAW, detectors=detectors, clients=clients)
         ctx.chromaprint = state
         with _Audio():
             _run(ctx, target, {"plex-1": ready_publisher()})
@@ -938,7 +949,7 @@ class TestFailures:
         ctx = _ctx(
             store,
             _registry(path, ServerType.PLEX),
-            settings_raw=HIGH,
+            settings_raw=SEASON_RAW,
             detectors=(_spec(),) if detectors == "registered" else (),
         )
         ctx.chromaprint = fingerprint.ChromaprintState(chromaprint)
@@ -1231,7 +1242,7 @@ class TestSeasonIntroChapters:
 
     def test_the_story_chapters_need_review_and_the_others_publish(self, store, show):
         paths = show(1, 7)
-        ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=HIGH)
+        ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=SEASON_RAW)
         with _Chapters(self.RESERVATION_DOGS) as chapters:
             outs = {i + 1: _check(ctx, p, chapters) for i, p in enumerate(paths)}
         # Every episode here resolves to the same Plex item, so E05's publish takes E04's intro off it: that write
@@ -1247,7 +1258,7 @@ class TestSeasonIntroChapters:
     def test_the_first_episode_checked_already_sees_the_whole_folder(self, store, show):
         # Mr. Robot S04E01 (88 s against 14 s) comes first in a library backfill: its siblings aren't known yet.
         paths = show(4, 4)
-        ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=HIGH)
+        ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=SEASON_RAW)
         with _Chapters({1: 88_000, 2: 14_000, 3: 13_000, 4: 15_000}) as chapters:
             out = _check(ctx, paths[0], chapters)
             assert sorted(chapters.probed) == sorted(paths)
@@ -1258,7 +1269,7 @@ class TestSeasonIntroChapters:
 
     def test_fewer_than_two_other_intro_chapters_is_no_check(self, store, show):
         paths = show(1, 3)
-        ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=HIGH)
+        ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=SEASON_RAW)
         with _Chapters({1: 10_000, 2: 126_000, 3: None}) as chapters:
             for p in paths:
                 _check(ctx, p, chapters)
@@ -1271,7 +1282,7 @@ class TestSeasonIntroChapters:
     def test_a_flagged_episode_with_an_agreeing_online_source_publishes(self, store, show):
         paths = show(1, 6)
         clients = _introdb_answer(140_000, 153_000)  # the season's usual short intro, at the end of the long chapter
-        ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=HIGH, clients=clients)
+        ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=SEASON_RAW, clients=clients)
         with _Chapters(self.RESERVATION_DOGS) as chapters:
             out = _check(ctx, paths[4], chapters)
         assert out.outcome_key == FileOutcome.PUBLISHED.value
@@ -1283,7 +1294,7 @@ class TestSeasonIntroChapters:
 
     def test_intro_detection_off_reads_no_siblings(self, store, show):
         paths = show(1, 4)
-        raw = {**HIGH, "detect": {"intro": False, "credits": True}}
+        raw = {**SEASON_RAW, "detect": {"intro": False, "credits": True}}
         ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=raw)
         with _Chapters({1: 88_000, 2: 14_000, 3: 13_000, 4: 15_000}) as chapters:
             _check(ctx, paths[0], chapters)
@@ -1292,7 +1303,7 @@ class TestSeasonIntroChapters:
     def test_a_sibling_changed_on_disk_is_left_out(self, store, show):
         paths = show(1, 3)
         stale = store.upsert_file(FileIdentity(paths[2], 1, 1), duration_ms=DUR, season_key=None, is_movie=False)
-        ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=HIGH)
+        ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=SEASON_RAW)
         with _Chapters({1: 88_000, 2: 14_000, 3: 13_000}) as chapters:
             _check(ctx, paths[0], chapters)
         assert paths[2] not in chapters.probed and store.get_file(paths[2]) == stale
@@ -1300,7 +1311,7 @@ class TestSeasonIntroChapters:
 
     def test_a_new_episode_asks_again_for_the_siblings_whose_decision_it_changes(self, store, show):
         e1, e2 = show(1, 2)
-        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=HIGH)
+        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=SEASON_RAW)
         lengths = {1: 10_000, 2: 126_000, 3: 12_000}
         with _Chapters(lengths) as chapters:
             _check(ctx, e1, chapters)
@@ -1329,10 +1340,10 @@ class TestSeasonIntroChapters:
                     for e in batch:
                         with open(paths[e], "wb") as f:
                             f.write(b"x" * (100 + e))
-                    job = _ctx(store, registry, settings_raw=HIGH)
+                    job = _ctx(store, registry, settings_raw=SEASON_RAW)
                     for e in batch:
                         _check(job, paths[e], chapters)
-                    season_job = _ctx(store, registry, settings_raw=HIGH)
+                    season_job = _ctx(store, registry, settings_raw=SEASON_RAW)
                     for path in job.take_followups():
                         if path not in {paths[e] for e in batch}:
                             _check(season_job, path, chapters)
@@ -1378,12 +1389,12 @@ def _job(store, registry, items, chapters, *, detectors=(), season_job=True):
         if _check(ctx, path, chapters) is None:
             _run(ctx, path, {"plex-1": ready_publisher()}, stage="process", probe_effect=chapters.probe)
 
-    job = _ctx(store, registry, settings_raw=HIGH, detectors=detectors)
+    job = _ctx(store, registry, settings_raw=SEASON_RAW, detectors=detectors)
     for path in items:
         run(job, path)
     requested = job.take_followups()
     if season_job:
-        follow = _ctx(store, registry, settings_raw=HIGH, detectors=detectors)
+        follow = _ctx(store, registry, settings_raw=SEASON_RAW, detectors=detectors)
         for path in requested:
             if path not in items:
                 run(follow, path)
@@ -1420,7 +1431,7 @@ class TestSeasonChapterState:
             assert _intro_decision(store, paths[3])[0] is DecisionStatus.DECIDED  # 126 s against a median of 106 s
             lengths[4] = None  # E4 replaced by a release without an intro chapter: E3's others are 10/12/210 s now
             _write(paths[4], 999)
-            ctx = _ctx(store, registry, settings_raw=HIGH, detectors=detectors)
+            ctx = _ctx(store, registry, settings_raw=SEASON_RAW, detectors=detectors)
             handed_over = _check(ctx, paths[4], chapters) is None
             requested = ctx.take_followups()
             assert handed_over is with_audio
@@ -1536,7 +1547,7 @@ class TestSeasonChapterState:
         old = store.upsert_file(FileIdentity(paths[2], *_identity(paths[2])), duration_ms=DUR, season_key=None,
                                 is_movie=False)  # fmt: skip
         store.replace_evidence(old.id, Source.CHAPTERS, [], version=CHAPTER_RULES_VERSION - 1)
-        ctx = _ctx(store, _registry(paths[1], ServerType.PLEX), settings_raw=HIGH)
+        ctx = _ctx(store, _registry(paths[1], ServerType.PLEX), settings_raw=SEASON_RAW)
         with _Chapters({1: 10_000, 2: 12_000}) as chapters:
             season.season_intro_chapter_limits(ctx, paths[1])
         assert paths[2] in chapters.probed
@@ -1547,7 +1558,7 @@ class TestSeasonChapterState:
         paths = self._paths(season_folder, (1, 2))
         for e, path in paths.items():
             _write(path, 100 + e)
-        ctx = _ctx(store, _registry(paths[1], ServerType.PLEX), settings_raw=HIGH)
+        ctx = _ctx(store, _registry(paths[1], ServerType.PLEX), settings_raw=SEASON_RAW)
         with _Chapters({1: 10_000, 2: 12_000}) as chapters:
 
             def probe(path, **kwargs):
@@ -1597,7 +1608,7 @@ class TestConcurrentChanges:
                     b_go.wait(10)
             return found
 
-        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=HIGH)
+        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=SEASON_RAW)
         results = {}
         pubs = {"plex-1": ready_publisher()}
         with (
@@ -1637,7 +1648,7 @@ class TestConcurrentChanges:
 
         a_pts, old_b, new_b, c_pts = planted(1, 300), planted(2, 400), planted(22, 1_400), planted(3, 700)
         current = {paths[0]: a_pts, paths[1]: old_b, paths[2]: c_pts}
-        ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=HIGH, detectors=(_spec(),))
+        ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=SEASON_RAW, detectors=(_spec(),))
         for path in paths[:2]:
             store.upsert_file(FileIdentity(path, *_identity(path)), duration_ms=DUR, season_key=str(folder),
                               is_movie=False)  # fmt: skip
@@ -1797,7 +1808,7 @@ class TestFlatFolder:
             probed.append(path)
             return _chapter_probe(None)
 
-        ctx = _ctx(store, _registry(target, ServerType.PLEX), settings_raw=HIGH, detectors=(_spec(),))
+        ctx = _ctx(store, _registry(target, ServerType.PLEX), settings_raw=SEASON_RAW, detectors=(_spec(),))
         with _Audio(points=_episode_noise) as audio, patch.object(season, "probe_media", side_effect=probe):
             started = time.perf_counter()
             _run(ctx, target, {"plex-1": ready_publisher()}, stage="process", probe_effect=probe)
@@ -1856,12 +1867,12 @@ class TestFlatFolder:
         registry = _registry(paths[1], ServerType.PLEX)
 
         def job(items):
-            ctx = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),), clients=clients)
+            ctx = _ctx(store, registry, settings_raw=SEASON_RAW, detectors=(_spec(),), clients=clients)
             for path in items:
                 if _run(ctx, path, {"plex-1": ready_publisher()})[0] is None:
                     _run(ctx, path, {"plex-1": ready_publisher()}, stage="process")
             requested = ctx.take_followups()
-            season_job = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),), clients=clients)
+            season_job = _ctx(store, registry, settings_raw=SEASON_RAW, detectors=(_spec(),), clients=clients)
             for path in requested:
                 if path not in items and _run(season_job, path, {"plex-1": ready_publisher()})[0] is None:
                     _run(season_job, path, {"plex-1": ready_publisher()}, stage="process")
@@ -1943,7 +1954,7 @@ class TestSiblingLimits:
         assert season.season_group(flat[40]).episodes == tuple(flat[e] for e in range(20, 60))
         for e, path in flat.items():
             _record_intro_chapter(store, path, 100_000 if e <= 20 else 30_000 if e == 40 else 10_000)
-        ctx = _ctx(store, _registry(flat[1], ServerType.PLEX), settings_raw=HIGH)
+        ctx = _ctx(store, _registry(flat[1], ServerType.PLEX), settings_raw=SEASON_RAW)
         with _Chapters({}) as chapters:
             _, siblings = season.season_intro_chapter_limits(ctx, flat[1])
         assert chapters.probed == []
@@ -1958,7 +1969,7 @@ class TestSiblingLimits:
             old = 41 <= e <= 59
             length = 200_000 if old or e == 20 else 30_000 if e == 40 else 10_000
             _record_intro_chapter(store, path, length, CHAPTER_RULES_VERSION - 1 if old else CHAPTER_RULES_VERSION)
-        ctx = _ctx(store, _registry(flat[1], ServerType.PLEX), settings_raw=HIGH)
+        ctx = _ctx(store, _registry(flat[1], ServerType.PLEX), settings_raw=SEASON_RAW)
         with _Chapters({}) as chapters:
             _, siblings = season.season_intro_chapter_limits(ctx, flat[1])
         assert chapters.probed == []  # members outside this episode's group are read from the store only
@@ -2004,7 +2015,7 @@ class TestServerKindOfSiblings:
             return _chapter_probe(lengths[os.path.basename(path)[7:10]])
 
         def job(names):
-            ctx = _ctx(store, registry, settings_raw=HIGH)
+            ctx = _ctx(store, registry, settings_raw=SEASON_RAW)
             for name in names:
                 _run(ctx, paths[name], {"plex-1": ready_publisher()}, probe_effect=probe)
             return ctx.take_followups()
@@ -2042,7 +2053,7 @@ class TestMemberEpisodeOnlyChapterNames:
         paths = [str(folder / name) for name in names]
         for i, path in enumerate(paths):
             _write(path, 100 + i)
-        ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=HIGH)
+        ctx = _ctx(store, _registry(paths[0], ServerType.PLEX), settings_raw=SEASON_RAW)
         with patch.object(season, "probe_media", side_effect=lambda path, **kw: self.ENDING):
             season.season_intro_chapter_limits(ctx, paths[0])
         return paths
@@ -2077,7 +2088,7 @@ class TestUnreadableMembers:
     def test_it_is_probed_again_after_a_day_or_once_it_changes(self, store, show, failure):
         e1, e2, e3 = show(1, 3)
         clock = [datetime(2026, 9, 13, 12, 0, tzinfo=UTC)]
-        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=HIGH, now=lambda: clock[0])
+        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=SEASON_RAW, now=lambda: clock[0])
         probed = []
 
         def probe(path, **kwargs):
@@ -2108,7 +2119,7 @@ class TestUnreadableMembers:
     def test_the_entry_of_a_member_deleted_since_is_forgotten_once_it_stops_counting(self, store, show):
         e1, e2 = show(1, 2)
         clock = [datetime(2026, 9, 13, 12, 0, tzinfo=UTC)]
-        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=HIGH, now=lambda: clock[0])
+        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=SEASON_RAW, now=lambda: clock[0])
 
         def probe(path, **kwargs):
             if path != e1:
@@ -2139,17 +2150,17 @@ class TestUnreadableMembers:
             return _chapter_probe(10_000)
 
         with patch.object(season, "probe_media", side_effect=probe):
-            season.season_intro_chapter_limits(_ctx(store, registry, settings_raw=HIGH), e1)
+            season.season_intro_chapter_limits(_ctx(store, registry, settings_raw=SEASON_RAW), e1)
             network_down[0] = False
             probed.clear()
-            season.season_intro_chapter_limits(_ctx(store, registry, settings_raw=HIGH), e1)
+            season.season_intro_chapter_limits(_ctx(store, registry, settings_raw=SEASON_RAW), e1)
             assert e2 not in probed
-            season.season_intro_chapter_limits(_ctx(store, registry, settings_raw=HIGH, force=True), e1)
+            season.season_intro_chapter_limits(_ctx(store, registry, settings_raw=SEASON_RAW, force=True), e1)
         assert probed == [e2] and store.get_file(e2) is not None
 
     def test_a_member_its_own_run_recorded_is_read_by_a_siblings_step_within_the_day(self, store, show):
         e1, e2, e3 = show(1, 3)
-        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=HIGH)
+        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=SEASON_RAW)
         lengths = {e1: 10_000, e2: 12_000, e3: 14_000}
 
         def season_probe(path, **kwargs):  # the season step can't read E2 (a network blip)
@@ -2166,7 +2177,7 @@ class TestUnreadableMembers:
 
     def test_a_member_replaced_while_it_is_probed_is_not_remembered_as_unreadable(self, store, show):
         e1, e2 = show(1, 2)
-        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=HIGH)
+        ctx = _ctx(store, _registry(e1, ServerType.PLEX), settings_raw=SEASON_RAW)
         answers = iter([ProbeError("the file was being written"), _chapter_probe(10_000)])
 
         def probe(path, **kwargs):
@@ -2236,12 +2247,12 @@ def _cold_open_season(root, episodes, arrivals, reruns=None):
             _run(ctx, path, {"plex-1": ready_publisher()}, stage="process", probe_effect=probe)
 
     def job(items):
-        ctx = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),), clients=clients)
+        ctx = _ctx(store, registry, settings_raw=SEASON_RAW, detectors=(_spec(),), clients=clients)
         for path in items:
             run(ctx, path)
         requested = ctx.take_followups()
         requests.append(requested)
-        follow = _ctx(store, registry, settings_raw=HIGH, detectors=(_spec(),), clients=clients)
+        follow = _ctx(store, registry, settings_raw=SEASON_RAW, detectors=(_spec(),), clients=clients)
         for path in requested:
             if path not in items:
                 run(follow, path)
@@ -2281,7 +2292,8 @@ class TestAnswersRestingOnSeasonAudio:
         assert early[1] == (DecisionStatus.DECIDED, "sources agree: introdb, season_audio", self.COLD_OPEN_MARKER)
         weekly, requests, _ = _cold_open_season(tmp_path / "weekly", episodes, [[1], [2], [3, 4]])
         at_once, _, _ = _cold_open_season(tmp_path / "at-once", episodes, [[1, 2, 3, 4]])
-        assert weekly[1] == at_once[1] == (DecisionStatus.NEEDS_REVIEW, "sources don't agree yet", None)
+        idb_alone = "only IntroDB has the intro; an online answer needs a check against the file"
+        assert weekly[1] == at_once[1] == (DecisionStatus.NEEDS_REVIEW, idb_alone, None)
         assert weekly == at_once
         assert "Show (2020) - S01E01.mkv" in {os.path.basename(p) for p in requests[-1]}
 

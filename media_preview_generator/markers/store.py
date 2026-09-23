@@ -22,7 +22,7 @@ from loguru import logger
 
 from .decide import DecisionStatus, TypeDecision
 from .models import SERVER_SOURCES, Candidate, FileIdentity, Marker, MarkerType, Source
-from .outcomes import is_kept_own
+from .outcomes import VERSIONS_WAITING, is_kept_own
 from .sources.server_markers import importer_database
 
 SCHEMA_VERSION = 2
@@ -627,6 +627,27 @@ class MarkerStore:
                 "SELECT * FROM files WHERE season_key=? ORDER BY canonical_path", (season_key,)
             ).fetchall()
         return [self._file(r) for r in rows]
+
+    def files_in_review(self) -> list[str]:
+        """Canonical paths of the files with at least one marker type in Needs review, sorted."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT f.canonical_path FROM decisions d JOIN files f ON f.id = d.file_id "
+                "WHERE d.status=? ORDER BY f.canonical_path",
+                (DecisionStatus.NEEDS_REVIEW.value,),
+            ).fetchall()
+        return [r["canonical_path"] for r in rows]
+
+    def files_waiting_for_other_versions(self) -> list[str]:
+        """Canonical paths of the files whose last publish to a server waits for its item's other versions to agree
+        (``outcomes.VERSIONS_WAITING``), sorted."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT f.canonical_path FROM publish_state p JOIN files f ON f.id = p.file_id "
+                "WHERE p.status='waiting' AND substr(p.message, 1, ?) = ? ORDER BY f.canonical_path",
+                (len(VERSIONS_WAITING), VERSIONS_WAITING),
+            ).fetchall()
+        return [r["canonical_path"] for r in rows]
 
     def record_member(
         self,

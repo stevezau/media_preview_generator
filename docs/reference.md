@@ -271,7 +271,6 @@ Shared detection settings — one file is detected once, whatever the publish ru
 ```json
 {
   "detect": {"intro": true, "credits": true, "recap": false},
-  "publish_when": "high",
   "credits_window": {"tv_s": null, "movie_s": null},
   "sources": [
     {"id": "chapters", "enabled": true},
@@ -290,12 +289,22 @@ Shared detection settings — one file is detected once, whatever the publish ru
 | `detect.intro` | bool | `true` | TV episodes only. |
 | `detect.credits` | bool | `true` | TV episodes and movies. |
 | `detect.recap` | bool | `false` | Jellyfin's player is the only one with a Skip Recap button. |
-| `publish_when` | `"high"` \| `"medium"` | `"high"` | **High:** chapters publish on their own unless two other independent sources agree on something different (then Needs review); without chapters, two independent sources must agree. **Medium:** also accepts a single source that checks the file's own cut — chapters, on-screen credit text (credits), or a SkipDB `exact`/`shifted` match (intros and recaps only). IntroDB, TheIntroDB, season audio and markers already on servers never decide alone at either level, and season audio (or `season_audio_previous`) with markers already on servers isn't an agreeing pair on its own. |
 | `credits_window` | object | `{"tv_s": null, "movie_s": null}` | Settings → Intro & Credits → Advanced → "Where to look for credits". How far from the end of a file on-screen credit text is searched for; credits already rolling where it begins are followed back 120 s at a time, only as far as a start the last-quarter rule and the movie cap would still keep. `tv_s` applies to TV episodes, `movie_s` to movies and files of unknown kind. Each is `null` (Automatic: last 450 s of an episode, 900 s of a movie) or one of `300`, `600`, `900`, `1200`, `1800` seconds; anything else is refused with a 400 naming the key. A key left out means Automatic, and a partial post merges over the stored value. A longer window decodes longer for every file. A window you choose also lets credits start that far before the end even where the last-quarter-of-the-file rule would refuse them, and a movie window above 15 minutes raises the 900 s cap on how far before the end a movie's credits may start. Automatic keeps both rules exactly as before. Changing it decides files again, and files already read on another window are read again. A stored value that isn't valid is treated as Automatic (logged). |
 | `sources` | array | see above | Evidence sources, in checking/precedence order. Reordering in the UI reorders this array. |
-| `sources[].id` | one of `chapters`, `theintrodb`, `introdb`, `skipdb`, `season_audio`, `credits_text`, `server_markers` | — | `credits_text` runs where text detection is available (see `GET /api/markers/sources/local`); it decides credits alone only at `"medium"`. `season_audio` runs where ffmpeg has chromaprint (see `GET /api/markers/sources/local`); it only confirms intros another source found. Its previous-season hint is stored as `season_audio_previous` evidence (not a settings id). |
+| `sources[].id` | one of `chapters`, `theintrodb`, `introdb`, `skipdb`, `season_audio`, `credits_text`, `server_markers` | — | `credits_text` runs where text detection is available (see `GET /api/markers/sources/local`); it decides credits alone. `season_audio` runs where ffmpeg has chromaprint (see `GET /api/markers/sources/local`); it only confirms intros another source found. Its previous-season hint is stored as `season_audio_previous` evidence (not a settings id). |
 | `sources[].enabled` | bool | varies | `theintrodb` defaults to `false` (used without the vendor's written permission); the rest default to `true`. |
 | `sources[].api_key` | string | `""` | `theintrodb` only. Optional. `GET`/`POST /api/settings` mask a set key as `****`; posting `****` back keeps the stored key unchanged. Never logged. |
+
+There is no publish rule setting. Every file is decided the same way: chapters decide alone unless two other
+independent sources agree on something different; any other source needs an independent source to agree, except that
+on-screen credit text (credits) and a SkipDB `exact`/`shifted` match (intros and recaps) may decide alone. IntroDB,
+TheIntroDB, season audio and markers already on servers never decide alone, and season audio (or
+`season_audio_previous`) with markers already on servers isn't an agreeing pair on its own. The removed
+`publish_when` key (`"high"` / `"medium"`) is ignored when an older `settings.json` or client sends it, and schema
+version 16 deletes it and has the next start queue one job, **Intro & Credits: Needs review and waiting files, decided
+again**, that decides every file in Needs review, and every file whose last row waits for its item's other versions,
+again from its stored answers (no online lookups, no detectors, no reading the markers on servers; a file changed on
+disk since is skipped), then publishes as any job does.
 
 ### Per-server settings (`media_servers[].markers`)
 
@@ -449,7 +458,7 @@ Per-file outcomes (`markers.outcomes.FileOutcome`, shown in the job's Files pane
 | `markers_published` | Markers written | The job changed what at least one server shows (a forced restore included); another marker type may still need review, and the reason names it |
 | `markers_up_to_date` | Up to date | Every enabled server already showed these markers (read back before saying so) |
 | `markers_waiting` | Waiting | A server hasn't indexed the file yet, Plex didn't answer its Plex Pass check, or a Plex item's versions don't yet agree |
-| `markers_needs_review` | Needs review | Sources don't agree on at least one marker yet, so that marker wasn't sent, and the job wrote nothing else for the file |
+| `markers_needs_review` | Needs review | At least one marker wasn't sent (the sources disagree, or the only answer can't decide alone), and the job wrote nothing else for the file. The server row's message gives each such marker's reason |
 | `markers_none` | No markers found | No source found an intro or credits for this file |
 | `markers_no_owners` | No server with Intro & Credits on | No enabled server with Intro & Credits on holds this file |
 | `skipped_file_not_found` | Not Found | File not found on disk |

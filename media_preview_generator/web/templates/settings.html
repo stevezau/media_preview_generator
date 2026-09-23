@@ -498,20 +498,6 @@
                                 <input class="form-check-input" type="checkbox" role="switch" id="markersDetectRecap">
                             </div>
                         </div>
-                        <hr>
-                        <div class="markers-opt mb-3">
-                            <div>
-                                <span id="markersPublishWhenLabel">Publish when</span>
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="High: chapters publish on their own unless two other independent sources agree on something different; otherwise two independent sources must agree. Medium: also accepts a single source that checks your own file — chapters, on-screen credit text (credits), or SkipDB matched to your file&#39;s length (intros and recaps only). A single IntroDB or TheIntroDB answer never publishes on its own, because those don&#39;t know which cut you have. Anything else shows as Needs review."><i class="bi bi-info-circle"></i></button>
-                                <div class="small text-muted">Stricter means fewer, safer markers</div>
-                            </div>
-                            <div class="btn-group btn-group-sm" role="group" aria-labelledby="markersPublishWhenLabel">
-                                <input type="radio" class="btn-check" name="markersPublishWhen" id="markersPublishHigh" value="high" autocomplete="off" checked>
-                                <label class="btn btn-outline-secondary" for="markersPublishHigh">High</label>
-                                <input type="radio" class="btn-check" name="markersPublishWhen" id="markersPublishMedium" value="medium" autocomplete="off">
-                                <label class="btn btn-outline-secondary" for="markersPublishMedium">Medium</label>
-                            </div>
-                        </div>
                     </div>
 
                     <div>
@@ -609,7 +595,7 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">On-screen credit text</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds where the credit roll starts from text on screen near the end of the file, and stops the skip at the last credit when a scene follows. Tested alone on 80 files, on a GPU: within 10 s on 64, more than 30 s early on 1, missed 3. At &quot;High&quot; another source has to agree; at &quot;Medium&quot; it can publish alone."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds where the credit roll starts from text on screen near the end of the file, and stops the skip at the last credit when a scene follows. Tested alone on 80 files, on a GPU: within 10 s on 64, more than 30 s early on 1, missed 3. It can publish credits on its own."><i class="bi bi-info-circle"></i></button>
                                     <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1 markers-source-unavailable" hidden>Not available</span>
                                     <div class="small text-muted">Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file; 4K without a GPU up to about 2 min</div>
                                     <div class="small text-warning-emphasis markers-source-reason" hidden></div>
@@ -638,6 +624,17 @@
                                 </div>
                             </li>
                         </ol>
+                        <!-- Each sentence mirrors markers/decide.py at APP_PUBLISH_WHEN ("medium"); change both together. -->
+                        <p class="small text-muted mt-3 mb-0" id="markersHowItDecides">
+                            <strong>How it decides:</strong> sources are asked in the order above. Chapters in the file
+                            decide on their own, unless two other sources agree on something different or an intro
+                            chapter is far longer than the rest of its season's. An online database's answer is
+                            published once an independent source agrees with it: on-screen credits, season audio,
+                            another database, or a server's own marker (IntroDB and TheIntroDB count as one). A single
+                            answer decides alone only when it checks your own file: on-screen credit text for credits,
+                            or SkipDB matched to your file's length for intros and recaps. If sources disagree, or the
+                            only answer can't decide alone, the file goes to Needs review so you can pick.
+                        </p>
                     </div>
                 </div>
 
@@ -1156,9 +1153,6 @@ function _applyMarkersSettings(markers) {
     document.getElementById('markersDetectIntro').checked = detect.intro !== false;
     document.getElementById('markersDetectCredits').checked = detect.credits !== false;
     document.getElementById('markersDetectRecap').checked = detect.recap === true;
-    const medium = block.publish_when === 'medium';
-    document.getElementById('markersPublishHigh').checked = !medium;
-    document.getElementById('markersPublishMedium').checked = medium;
     const creditsWindow = block.credits_window || {};
     document.getElementById('markersCreditsWindowTv').value = creditsWindow.tv_s == null ? '' : String(creditsWindow.tv_s);
     document.getElementById('markersCreditsWindowMovie').value = creditsWindow.movie_s == null ? '' : String(creditsWindow.movie_s);
@@ -1196,7 +1190,6 @@ function _collectMarkersSettings() {
             credits: document.getElementById('markersDetectCredits').checked,
             recap: document.getElementById('markersDetectRecap').checked,
         },
-        publish_when: document.querySelector('input[name="markersPublishWhen"]:checked')?.value || 'high',
         credits_window: {
             tv_s: _creditsWindowValue('markersCreditsWindowTv'),
             movie_s: _creditsWindowValue('markersCreditsWindowMovie'),

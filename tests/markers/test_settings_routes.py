@@ -30,14 +30,14 @@ def test_settings_post_masked_key_keeps_stored_key(client):
         "/api/settings",
         json={
             "markers": {
-                "publish_when": "medium",
+                "detect": {"recap": True},
                 "sources": [{"id": "theintrodb", "enabled": True, "api_key": SECRET_MASK}],
             }
         },
     )
     assert resp.status_code == 200
     stored = get_settings_manager().get("markers")
-    assert stored["publish_when"] == "medium"
+    assert stored["detect"]["recap"] is True
     assert next(s for s in stored["sources"] if s["id"] == "theintrodb")["api_key"] == "k1"
 
 
@@ -46,16 +46,15 @@ def test_settings_post_without_sources_keeps_stored_key(client):
     from media_preview_generator.web.settings_manager import get_settings_manager
 
     get_settings_manager().set("markers", {"sources": [{"id": "theintrodb", "enabled": True, "api_key": "k1"}]})
-    resp = client.post("/api/settings", json={"markers": {"publish_when": "medium"}})
+    resp = client.post("/api/settings", json={"markers": {"detect": {"recap": True}}})
     assert resp.status_code == 200
     stored = get_settings_manager().get("markers")
-    assert stored["publish_when"] == "medium"
+    assert stored["detect"]["recap"] is True
     assert next(s for s in stored["sources"] if s["id"] == "theintrodb")["api_key"] == "k1"
 
 
 STORED_GLOBAL = {
     "detect": {"intro": True, "credits": False, "recap": True},
-    "publish_when": "high",
     "credits_window": {"tv_s": 600, "movie_s": None},
     "sources": [
         {"id": "skipdb", "enabled": False},
@@ -82,7 +81,17 @@ def _post_markers(client, posted, stored=STORED_GLOBAL):
 
 def test_settings_post_partial_markers_block_keeps_everything_it_doesnt_name(client):
     # A partial save must not reset detection, locks and the source order (which would also re-decide every file).
-    assert _post_markers(client, {"publish_when": "medium"}) == {**STORED_GLOBAL, "publish_when": "medium"}
+    no_recap = {**STORED_GLOBAL["detect"], "recap": False}
+    assert _post_markers(client, {"detect": {"recap": False}}) == {**STORED_GLOBAL, "detect": no_recap}
+
+
+@pytest.mark.parametrize("posted", ["high", "medium", "sometimes"])
+def test_a_posted_or_stored_publish_when_is_dropped_on_save(client, posted):
+    # The High/Medium choice was removed (2026-09-24): an older client's value is ignored and an older settings.json's
+    # is dropped by the next save, with everything else kept.
+    stored = _post_markers(client, {"publish_when": posted}, stored={**STORED_GLOBAL, "publish_when": "high"})
+    assert stored == STORED_GLOBAL
+    assert "publish_when" not in client.get("/api/settings").get_json()["markers"]
 
 
 def test_settings_post_partial_detect_keeps_the_other_types(client):
@@ -128,9 +137,9 @@ def test_settings_post_partial_block_over_nothing_usable_stored_fills_in_default
     # An invalid stored block reads as the defaults (load_global), so the save merges over those and heals it.
     from media_preview_generator.markers.settings import DEFAULT_GLOBAL_MARKERS
 
-    assert _post_markers(client, {"publish_when": "medium"}, stored=stored) == {
+    assert _post_markers(client, {"detect": {"recap": True}}, stored=stored) == {
         **DEFAULT_GLOBAL_MARKERS,
-        "publish_when": "medium",
+        "detect": {**DEFAULT_GLOBAL_MARKERS["detect"], "recap": True},
     }
 
 
@@ -154,9 +163,9 @@ def test_settings_post_malformed_partial_block_is_still_400(client, posted):
 
 
 def test_settings_post_invalid_markers_is_400(client):
-    resp = client.post("/api/settings", json={"markers": {"publish_when": "sometimes"}})
+    resp = client.post("/api/settings", json={"markers": {"detect": "sometimes"}})
     assert resp.status_code == 400
-    assert "publish_when" in resp.get_json()["error"]
+    assert resp.get_json()["error"] == "markers.detect must be an object"
 
 
 def _add_server(client, server_type, **extra):
@@ -646,7 +655,7 @@ def test_settings_post_one_kind_of_window_keeps_the_other(client):
 
 
 def test_settings_post_without_a_window_keeps_the_stored_one(client):
-    assert _post_markers(client, {"publish_when": "medium"})["credits_window"] == {"tv_s": 600, "movie_s": None}
+    assert _post_markers(client, {"detect": {"recap": False}})["credits_window"] == {"tv_s": 600, "movie_s": None}
 
 
 @pytest.mark.parametrize(
@@ -678,10 +687,10 @@ def test_a_stored_markers_block_with_respect_locks_still_loads_and_saves_without
 
     get_settings_manager().set("markers", {**copy.deepcopy(STORED_GLOBAL), "respect_locks": False})
     assert client.get("/api/settings").status_code == 200
-    resp = client.post("/api/settings", json={"markers": {"publish_when": "medium", "respect_locks": True}})
+    resp = client.post("/api/settings", json={"markers": {"detect": {"recap": False}, "respect_locks": True}})
     assert resp.status_code == 200
     stored = get_settings_manager().get("markers")
-    assert "respect_locks" not in stored and stored["publish_when"] == "medium"
+    assert "respect_locks" not in stored and stored["detect"]["recap"] is False
 
 
 def test_settings_post_partial_block_over_a_bad_stored_window_keeps_the_sources_beside_it(client):
@@ -689,8 +698,7 @@ def test_settings_post_partial_block_over_a_bad_stored_window_keeps_the_sources_
     # must not throw the stored sources and switches away with it, which would change the fingerprint and re-decide
     # every file.
     stored = {**STORED_GLOBAL, "credits_window": {"tv_s": 450, "movie_s": None}}
-    result = _post_markers(client, {"publish_when": "medium"}, stored=stored)
+    result = _post_markers(client, {"detect": {"recap": False}}, stored=stored)
     assert result["sources"] == STORED_GLOBAL["sources"]
-    assert result["detect"] == STORED_GLOBAL["detect"]
-    assert result["publish_when"] == "medium"
+    assert result["detect"] == {**STORED_GLOBAL["detect"], "recap": False}
     assert result["credits_window"] == {"tv_s": None, "movie_s": None}

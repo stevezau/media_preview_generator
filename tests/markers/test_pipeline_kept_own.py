@@ -34,7 +34,8 @@ PLEX_INTRO = {"type": "intro", "start_ms": 126_500, "end_ms": 157_500, "final": 
 EMBY_CREDITS = {"marker_type": "CreditsStart", "start_ms": 1_290_000}
 JELLYFIN_OUTRO = {"Type": "Outro", "StartTicks": 1_290_000 * 10_000, "EndTicks": DUR * 10_000}
 AUDIO_INTRO = Candidate(T.INTRO, 126_000, 158_000, Source.SEASON_AUDIO, 1.0, "2/2")
-SKIPDB_INTRO = Candidate(T.INTRO, 126_500, 157_000, Source.SKIPDB)
+# IntroDB never decides alone (rule 6), so the intro waits for season audio to agree.
+INTRODB_INTRO = Candidate(T.INTRO, 126_500, 157_000, Source.INTRODB)
 TEXT_CREDITS = Candidate(T.CREDITS, 1_291_000, None, Source.CREDITS_TEXT)
 OUR_CREDITS = Marker(T.CREDITS, 1_291_000, DUR, ("credits_text", "server_markers"))
 KEPT_PLEX = "kept Plex's own marker"
@@ -49,15 +50,14 @@ def movie(tmp_path):
     return str(f)
 
 
-def _settings(*, skipdb=False, recap=False):
+def _settings(*, introdb=False, recap=False):
     return {
         "detect": {"intro": True, "credits": True, "recap": recap},
-        "publish_when": "high",
         "sources": [
             {"id": "chapters", "enabled": True},
             {"id": "theintrodb", "enabled": False},
-            {"id": "introdb", "enabled": False},
-            {"id": "skipdb", "enabled": skipdb},
+            {"id": "introdb", "enabled": introdb},
+            {"id": "skipdb", "enabled": False},
             {"id": "season_audio", "enabled": True},
             {"id": "credits_text", "enabled": True},
             {"id": "server_markers", "enabled": True},
@@ -99,13 +99,13 @@ def _job(
     *,
     stage="process",
     force=False,
-    skipdb=False,
+    introdb=False,
     recap=False,
     probe=None,
     hints=None,
 ):
-    clients = _clients(skipdb=LookupResult("ok", (SKIPDB_INTRO,))) if skipdb else _clients()
-    settings = _settings(skipdb=skipdb, recap=recap)
+    clients = _clients(introdb=LookupResult("ok", (INTRODB_INTRO,))) if introdb else _clients()
+    settings = _settings(introdb=introdb, recap=recap)
     ctx = _ctx(store, reg, settings_raw=settings, clients=clients, detectors=detectors.specs, force=force)
     out, _ = _run(ctx, path, publishers, stage=stage, probe=probe, hints=hints)
     return out
@@ -128,7 +128,7 @@ class TestNotRead:
         detectors = _Detectors()
         plex = ready_publisher()
 
-        out = _job(store, reg, media, detectors, {"plex-1": plex}, skipdb=True)
+        out = _job(store, reg, media, detectors, {"plex-1": plex}, introdb=True)
 
         detectors.credits.assert_not_called()
         assert detectors.intro.call_count == 1

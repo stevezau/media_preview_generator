@@ -23,7 +23,12 @@ from loguru import logger
 # -------------------------------------------------------------------------
 # Schema version — bump when adding new migrations
 # -------------------------------------------------------------------------
-_CURRENT_SCHEMA_VERSION = 15
+_CURRENT_SCHEMA_VERSION = 16
+
+#: Set by v16 for the next start: once the job manager runs, the app queues the one job that decides the files in
+#: Intro & Credits' Needs review (and those waiting for their item's other versions) again from their stored answers,
+#: then clears it (``web.app``). Left set when that fails, so a later start tries again.
+DECIDE_AGAIN_KEY = "_markers_decide_again"
 
 #: Count of consecutive v14 attempts that failed on IO. The version gate
 #: alone would forfeit the migration forever after one transient error,
@@ -122,6 +127,12 @@ _USER_FACING_NOTES: dict[int, str] = {
         "default', so it couldn't be told apart from a deliberate choice. If you "
         "did mean Normal, re-pin it under Automation → Schedules. Anything you set "
         "to High or Low was left alone."
+    ),
+    16: (
+        "Intro & Credits no longer waits for two sources to agree when one source that checks your own file found a "
+        "marker (on-screen credit text, chapters, or SkipDB matched to your file's length), so far fewer files wait "
+        "in Needs review. The files already waiting there are decided again from what was found, without reading "
+        "them again."
     ),
     13: (
         "Your Thumbnail Interval setting now applies to every server consistently. "
@@ -366,6 +377,8 @@ def _migrate_schema(sm) -> None:
                unconditional ``priority: 2`` seed so they inherit the new
                ``incoming_job_priority`` setting. Issue #285.
         v15 -- Seeds Intro & Credits (markers) defaults, disabled per server.
+        v16 -- Drops the removed ``markers.publish_when`` and asks the next start to decide the files in Needs
+               review again from their stored answers.
     """
     current = sm.get("_schema_version", 1)
     if current > _CURRENT_SCHEMA_VERSION:
@@ -428,6 +441,8 @@ def _migrate_schema(sm) -> None:
         _run(14, _migrate_to_v14)
     if current < 15:
         _run(15, _migrate_to_v15)
+    if current < 16:
+        _run(16, _migrate_to_v16)
 
     sm.set("_schema_version", _CURRENT_SCHEMA_VERSION)
 
@@ -1461,6 +1476,38 @@ def _migrate_to_v15(sm) -> list:
         sm.update({"media_servers": updated})
         notes.append(f"v15: added a disabled Intro & Credits block to {added} server(s)")
     return notes
+
+
+def _migrate_to_v16(sm) -> list:
+    """Drop ``markers.publish_when`` and have the files in Needs review decided again (owner ruling 2026-09-24).
+
+    The "Publish when" High/Medium choice is gone: every decision is made at Medium's rules
+    (``markers.decide.APP_PUBLISH_WHEN``), where one source that checks the file itself may decide alone. High was the
+    default and almost nobody chose it, and it left most of a library in Needs review, so the stored key carries no
+    choice worth keeping. A settings.json that still has it reads fine without this step (``validate_global`` drops
+    it); the step only tidies it away.
+
+    The files High held in Needs review would otherwise wait until some later job lists them, so this also sets
+    :data:`DECIDE_AGAIN_KEY`, whatever the stored value was (deciding again also brings the Needs review wording
+    of files already at Medium up to date, and publishes the files left waiting for their item's other versions). The
+    app queues that job once its job manager runs (``markers.triggers.submit_decide_again``); with Intro & Credits off
+    everywhere it only clears the key.
+
+    Runs once, gated on ``_schema_version``.
+
+    Returns:
+        A note when the stored rule was High: only then do decisions change. (Every block v15 seeded or a save wrote
+        before this step has the key; one v15 seeds in the same boot doesn't, and gets no note.)
+    """
+    markers = sm.get("markers")
+    if not isinstance(markers, dict) or "publish_when" not in markers:
+        sm.set(DECIDE_AGAIN_KEY, True)
+        return []
+    kept = {key: value for key, value in markers.items() if key != "publish_when"}
+    sm.apply_changes(updates={"markers": kept, DECIDE_AGAIN_KEY: True})
+    if markers["publish_when"] != "high":
+        return []
+    return ["v16: removed the Intro & Credits publish rule High; every file is decided at Medium's rules now"]
 
 
 # =========================================================================

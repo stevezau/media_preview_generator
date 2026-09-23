@@ -2578,12 +2578,12 @@ class TestMigrationNoticeRetryBoot:
             # always produces a (dev-facing) log note with no _USER_FACING_NOTES[15] entry to gate
             # on, so this fired on every v14 upgrader the moment v15 shipped. v14 itself already
             # ran in an earlier release here, so this boot adds no new user-facing note.
-            (14, False, 15, False),
+            (14, False, _CURRENT_SCHEMA_VERSION, False),
             # A real upgrader who is behind on BOTH v14 and v15: this boot has to merge an
             # existing unread note AND append a genuinely new one in the same pass — the case a
             # single-note test can't distinguish from "replace" (a regression that appends without
             # preserving `existing["notes"]` first would still pass a test with only one note).
-            (13, False, 15, True),
+            (13, False, _CURRENT_SCHEMA_VERSION, True),
             # Retry-only boot: the version gate was already closed (schema at current) and only a
             # pending v14 retry ran. Kept as its own row — this was already correct.
             (None, True, 14, True),
@@ -2673,7 +2673,7 @@ class TestMigrateToV15:
 
         # Customise both blocks so the second run can prove it leaves user changes alone, not
         # just that it happens to return no notes.
-        customised_markers = {**settings_manager.get("markers"), "publish_when": "medium"}
+        customised_markers = {**settings_manager.get("markers"), "detect": {"intro": False, "credits": True}}
         settings_manager.set("markers", customised_markers)
         servers_before = settings_manager.get("media_servers")
 
@@ -2693,12 +2693,78 @@ class TestMigrateToV15:
         assert len(notes) == 1
         assert _migrate_to_v15(settings_manager) == []
 
-    def test_schema_chain_reaches_15_without_user_note(self, settings_manager):
+    def test_schema_chain_from_14_leaves_no_user_note(self, settings_manager):
+        # v15 seeds the block without the removed publish rule, so v16 has nothing to tell a new Intro & Credits user.
         from media_preview_generator.upgrade import _CURRENT_SCHEMA_VERSION, _migrate_schema
 
         settings_manager.apply_changes(updates={"_schema_version": 14})
         _migrate_schema(settings_manager)
-        assert _CURRENT_SCHEMA_VERSION == 15
-        assert settings_manager.get("_schema_version") == 15
+        assert _CURRENT_SCHEMA_VERSION == 16
+        assert settings_manager.get("_schema_version") == 16
+        assert "publish_when" not in settings_manager.get("markers")
         notice = settings_manager.get("_pending_migration_notice") or {}
         assert notice.get("notes", []) == []
+
+
+class TestMigrateToV16:
+    """The "Publish when" High/Medium choice was removed (owner, 2026-09-24): its key goes, and the next start decides
+    the files in Needs review again (``DECIDE_AGAIN_KEY``)."""
+
+    BLOCK = {
+        "detect": {"intro": True, "credits": True, "recap": False},
+        "credits_window": {"tv_s": 600, "movie_s": None},
+        "sources": [{"id": "chapters", "enabled": True}, {"id": "theintrodb", "enabled": True, "api_key": "k1"}],
+    }
+
+    @pytest.mark.parametrize(
+        ("stored", "notes"),
+        [
+            (
+                "high",
+                ["v16: removed the Intro & Credits publish rule High; every file is decided at Medium's rules now"],
+            ),
+            ("medium", []),  # the rules didn't change for this install: no note
+        ],
+    )
+    def test_the_stored_rule_is_dropped_and_everything_else_kept(self, settings_manager, stored, notes):
+        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY, _migrate_to_v16
+
+        settings_manager.apply_changes(updates={"markers": {**self.BLOCK, "publish_when": stored}})
+        assert _migrate_to_v16(settings_manager) == notes
+        assert settings_manager.get("markers") == self.BLOCK
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+
+    @pytest.mark.parametrize("markers", [None, BLOCK], ids=["no-block", "block-without-the-key"])
+    def test_nothing_to_drop_still_asks_for_the_files_in_review_once(self, settings_manager, markers):
+        # Deciding again also brings the Needs review wording of files already at Medium up to date.
+        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY, _migrate_to_v16
+
+        if markers is not None:
+            settings_manager.apply_changes(updates={"markers": dict(markers)})
+        assert _migrate_to_v16(settings_manager) == []
+        assert settings_manager.get("markers") == markers
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+
+    def test_the_schema_step_runs_once_and_tells_a_high_install_why(self, settings_manager):
+        from media_preview_generator.upgrade import (
+            _CURRENT_SCHEMA_VERSION,
+            _USER_FACING_NOTES,
+            DECIDE_AGAIN_KEY,
+            _migrate_schema,
+        )
+
+        settings_manager.apply_changes(
+            updates={"_schema_version": 15, "markers": {**self.BLOCK, "publish_when": "high"}}
+        )
+        _migrate_schema(settings_manager)
+        assert settings_manager.get("_schema_version") == _CURRENT_SCHEMA_VERSION == 16
+        assert settings_manager.get("markers") == self.BLOCK
+        assert settings_manager.get("_pending_migration_notice")["notes"] == [_USER_FACING_NOTES[16]]
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is True
+
+        # The app clears the request once it queued the job; a later start doesn't ask again (the version gate).
+        settings_manager.delete(DECIDE_AGAIN_KEY)
+        settings_manager.apply_changes(updates={"markers": {**self.BLOCK, "publish_when": "high"}})
+        _migrate_schema(settings_manager)
+        assert settings_manager.get(DECIDE_AGAIN_KEY) is None
+        assert settings_manager.get("markers")["publish_when"] == "high"  # untouched now; validate_global ignores it

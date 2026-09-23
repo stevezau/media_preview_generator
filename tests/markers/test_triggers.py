@@ -9,6 +9,7 @@ import pytest
 
 from media_preview_generator.job_kinds import JOB_KIND_INTRO_CREDITS, JOB_KIND_PREVIEWS
 from media_preview_generator.markers import triggers
+from media_preview_generator.markers.decide import DecisionStatus
 from media_preview_generator.web.jobs import JobStatus
 
 PLEX_CONFIRMED = {"enabled": True, "plex": {"db_write_confirmed_at": "2026-09-13T00:00:00+00:00"}}
@@ -759,3 +760,114 @@ class TestSeasonPublish:
         second = triggers.submit_season_publish(season[0])
         assert second != first
         assert jm.get_job(second).config["file_paths"] == season
+
+
+class TestInReviewRedecide:
+    """The one job queued after settings v16 removed "Publish when: High": every file in Needs review, decided again
+    from its stored answers (no lookup, no detector, no probe)."""
+
+    @pytest.fixture
+    def store(self, tmp_path, monkeypatch):
+        from media_preview_generator.markers.store import MarkerStore
+
+        store = MarkerStore(str(tmp_path / "markers.db"))
+        monkeypatch.setattr(triggers, "get_marker_store", lambda: store)
+        yield store
+        store.close()
+
+    @pytest.fixture
+    def jm(self, tmp_path, monkeypatch, settings):
+        from media_preview_generator.web.jobs import JobManager
+
+        settings["media_servers"] = [_server("jf-1", "jellyfin")]
+        jm = JobManager(config_dir=str(tmp_path))
+        monkeypatch.setattr(triggers, "get_job_manager", lambda: jm)
+        with patch.object(triggers, "start_intro_credits_job_async"):
+            yield jm
+
+    @staticmethod
+    def _decided(store, path, status):
+        from media_preview_generator.markers.decide import TypeDecision
+        from media_preview_generator.markers.models import FileIdentity, Marker, MarkerType
+
+        rec = store.upsert_file(FileIdentity(path, 1, 1), duration_ms=1_000_000, season_key=None, is_movie=True)
+        marker = Marker(MarkerType.CREDITS, 900_000, 1_000_000, ("credits_text",))
+        shown = (
+            {"marker": marker, "proposed": None}
+            if status is DecisionStatus.DECIDED
+            else {"marker": None, "proposed": marker}
+        )
+        decision = TypeDecision(MarkerType.CREDITS, status, reason="x", **shown)
+        store.save_decisions(rec.id, {MarkerType.CREDITS: decision}, settings_fingerprint="old")
+        return rec
+
+    @classmethod
+    def _last_row(cls, store, path, status, message):
+        rec = cls._decided(store, path, DecisionStatus.DECIDED)
+        store.set_publish_state(rec.id, "plex-1", item_id="7", markers=None, status=status, message=message)
+
+    def _ic_jobs(self, jm):
+        return [j for j in jm.get_all_jobs() if j.kind == JOB_KIND_INTRO_CREDITS]
+
+    def test_it_queues_one_job_for_exactly_the_files_in_review_or_waiting_for_other_versions(self, jm, store):
+        from media_preview_generator.markers import job_runner
+
+        self._decided(store, "/media/tv/B/S01/e2.mkv", DecisionStatus.NEEDS_REVIEW)
+        self._decided(store, "/media/movies/A/a.mkv", DecisionStatus.NEEDS_REVIEW)
+        self._decided(store, "/media/tv/B/S01/e1.mkv", DecisionStatus.DECIDED)
+        self._decided(store, "/media/tv/B/S01/e3.mkv", DecisionStatus.NO_EVIDENCE)
+        versions = "Waiting for this item's other versions to agree on: credits"
+        self._last_row(store, "/media/movies/C/c - 4K.mkv", "waiting", versions)
+        self._last_row(store, "/media/movies/D/d.mkv", "waiting", "Not in this server's library yet")  # retried
+        self._last_row(store, "/media/movies/E/e.mkv", "written", "1 marker(s)")
+
+        job_id = triggers.submit_decide_again()
+
+        (job,) = self._ic_jobs(jm)
+        assert job.id == job_id
+        assert (job.library_name, job.priority) == ("Intro & Credits: Needs review and waiting files, decided again", 2)
+        assert job.config == {
+            "kind": JOB_KIND_INTRO_CREDITS,
+            "source": "decide_again",
+            "libraries": [],
+            "file_paths": [],
+            "follows_job_id": None,
+            "force": False,
+            "webhook_item_id_hints": {},
+            "decide_again": True,
+            "stored_answers_only": True,
+        }
+        # The job lists them when it runs: exactly the files with a type in Needs review, and the files whose last
+        # row waits for their item's other versions.
+        assert [i.canonical_path for i in job_runner._items_to_decide_again(store)] == [
+            "/media/movies/A/a.mkv",
+            "/media/movies/C/c - 4K.mkv",
+            "/media/tv/B/S01/e2.mkv",
+        ]
+
+    def test_files_waiting_for_their_items_other_versions_alone_are_enough(self, jm, store):
+        self._last_row(
+            store, "/media/movies/C/c - 4K.mkv", "waiting", "Waiting for this item's other versions to agree on: intro"
+        )
+        assert triggers.submit_decide_again() == self._ic_jobs(jm)[0].id
+
+    @pytest.mark.parametrize("state", ["pending", "running"])
+    def test_a_second_request_while_it_is_queued_or_running_reuses_it(self, jm, store, state):
+        self._decided(store, "/media/movies/A/a.mkv", DecisionStatus.NEEDS_REVIEW)
+        first = triggers.submit_decide_again()
+        if state == "running":
+            jm.start_job(first)
+        assert triggers.submit_decide_again() == first
+        assert len(self._ic_jobs(jm)) == 1
+
+    def test_nothing_is_queued_when_no_file_is_in_review_or_waiting_for_other_versions(self, jm, store):
+        self._decided(store, "/media/movies/A/a.mkv", DecisionStatus.DECIDED)
+        self._last_row(store, "/media/movies/D/d.mkv", "waiting", "Not in this server's library yet")
+        assert triggers.submit_decide_again() is None
+        assert self._ic_jobs(jm) == []
+
+    def test_nothing_is_queued_when_intro_and_credits_is_off_everywhere(self, jm, store, settings):
+        settings["media_servers"] = [_server("jf-1", "jellyfin", markers={"enabled": False})]
+        self._decided(store, "/media/movies/A/a.mkv", DecisionStatus.NEEDS_REVIEW)
+        assert triggers.submit_decide_again() is None
+        assert self._ic_jobs(jm) == []
