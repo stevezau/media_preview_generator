@@ -2424,25 +2424,19 @@ html[data-bs-theme="light"] #logsContent {
         margin-top: 0.5rem;
     }
 }
-.markers-lib-pill {
-    border-radius: 0.375rem;
-    font-weight: 600;
-    background-color: var(--bs-secondary-bg);
-    color: var(--bs-secondary-color);
-    border: 1px solid var(--bs-border-color);
+/* Servers → Edit → Libraries: one switch per column, centred under its header with no label beside it (the row
+ * names the library). Switch columns stay as narrow as their one-line header; the library name takes the rest. */
+.edit-lib-switch-col {
+    width: 1%;
+    white-space: nowrap;
 }
-.markers-lib-pill::before {
-    content: "✕";
-    margin-right: 0.35em;
+.edit-lib-switch {
+    display: inline-block;
+    min-height: 0;
+    margin: 0;
+    padding-left: 0;
 }
-.btn-check:checked + .markers-lib-pill {
-    background-color: var(--bs-success-bg-subtle);
-    color: var(--bs-success-text-emphasis);
-    border-color: var(--bs-success-border-subtle);
-}
-.btn-check:checked + .markers-lib-pill::before {
-    content: "✓";
-}
-.btn-check:focus-visible + .markers-lib-pill {
-    box-shadow: 0 0 0 0.2rem rgba(var(--bs-primary-rgb), 0.35);
+.edit-lib-switch .form-check-input {
+    float: none;
+    margin-left: 0;
 }

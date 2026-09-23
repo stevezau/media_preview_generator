@@ -1,12 +1,13 @@
-// Servers → Edit → "Intro & Credits" tab: this server's switch, library selection, capability status, the Plex
-// database-write confirmation and what happens when Plex or Emby has markers of its own. servers.js calls the window globals exported at the bottom.
+// Servers → Edit → "Intro & Credits" tab: this server's switch, capability status, the Plex database-write
+// confirmation and what happens when Plex or Emby has markers of its own. Also the Libraries tab's Intro & Credits
+// column (markers.library_ids), shown while the switch is on. servers.js calls the window globals exported at the bottom.
 
 (function () {
     'use strict';
 
     // Jellyfin and Emby restart after a plugin install, so the status is checked again once it's likely back.
     const INSTALL_RECHECK_MS = 20000;
-    // Mirrors markers.settings.is_sports_library so the pills show before the status check returns; the status
+    // Mirrors markers.settings.is_sports_library so the column shows before the status check returns; the status
     // response's default_selected replaces it when it arrives.
     const SPORTS_NAME_RE = /\bsports?\b/i;
     const EMBY_MANUAL_GUIDE_URL = 'https://github.com/stevezau/media_preview_generator/blob/main/docs/guides.md#emby-the-media-preview-bridge-for-emby-plugin';
@@ -20,7 +21,10 @@
         server: null,
         status: null,
         loadSeq: 0,
-        librariesTouched: false,
+        // Library id → the Intro & Credits switch as the user last left it; empty until they flip one.
+        libraryChoices: new Map(),
+        // Library id → default_selected from the status check (null until it answers).
+        statusDefaults: null,
         pendingConfirmation: null,
     };
 
@@ -308,7 +312,12 @@
         tab.status = data;
         renderStatus(server, data);
         if (isPlex(server)) renderAgentState(data);
-        if (!tab.librariesTouched && Array.isArray(data.libraries)) renderLibraries(data.libraries, storedMarkers(server));
+        if (Array.isArray(data.libraries)) {
+            tab.statusDefaults = new Map(data.libraries
+                .filter((lib) => typeof lib.default_selected === 'boolean')
+                .map((lib) => [String(lib.id), lib.default_selected]));
+            if (!librariesTouched()) renderLibraryColumn();
+        }
     }
 
     async function installPlugin(button) {
@@ -365,32 +374,48 @@
         return `markersLib-${String(libraryId).replace(/[^A-Za-z0-9_-]/g, '_')}`;
     }
 
-    function renderLibraries(libraries, markers) {
-        const list = $('#markersLibraryList');
-        if (!list) return;
-        if (!libraries.length) {
-            list.innerHTML = '<span class="small text-muted">No libraries yet — use Refresh libraries on the Libraries tab.</span>';
-            return;
-        }
-        const chosen = Array.isArray(markers.library_ids) ? markers.library_ids.map(String) : null;
-        list.innerHTML = libraries.map((lib) => {
-            const id = String(lib.id);
-            const byDefault = typeof lib.default_selected === 'boolean'
-                ? lib.default_selected
-                : !(SPORTS_NAME_RE.test(lib.name || '') || ['sport', 'sports'].includes(String(lib.kind || '').toLowerCase()));
-            const checked = chosen === null ? byDefault : chosen.includes(id);
-            const domId = libraryDomId(id);
-            return `<input type="checkbox" class="btn-check markers-lib-toggle" id="${esc(domId)}" data-id="${esc(id)}" data-default="${byDefault ? '1' : '0'}" autocomplete="off"${checked ? ' checked' : ''}>`
-                + `<label class="btn btn-sm markers-lib-pill" for="${esc(domId)}">${esc(lib.name || id)}</label>`;
-        }).join('');
+    function librariesTouched() {
+        return tab.libraryChoices.size > 0;
+    }
+
+    function selectedByDefault(id, name, kind) {
+        if (tab.statusDefaults && tab.statusDefaults.has(id)) return tab.statusDefaults.get(id);
+        return !(SPORTS_NAME_RE.test(name || '') || ['sport', 'sports'].includes(String(kind || '').toLowerCase()));
+    }
+
+    // Shows the Libraries tab's Intro & Credits column only while this server's switch is on.
+    function syncLibraryColumn() {
+        const on = !!tab.server && !!($('#markersEnabled') || {}).checked;
+        $$('#editLibraryTable .markers-lib-col').forEach((el) => el.classList.toggle('d-none', !on));
+    }
+
+    // Fills the Intro & Credits cell of every row servers.js rendered. A switch the user flipped keeps its state
+    // across a re-render (Refresh libraries); every other one shows the stored choice, or the default when none.
+    function renderLibraryColumn() {
+        const stored = storedMarkers(tab.server).library_ids;
+        const chosen = Array.isArray(stored) ? stored.map(String) : null;
+        $$('#editLibraryList tr[data-lib-id]').forEach((row) => {
+            const cell = row.querySelector('.markers-lib-cell');
+            if (!cell) return;
+            const id = String(row.dataset.libId);
+            const byDefault = selectedByDefault(id, row.dataset.libName, row.dataset.libKind);
+            const checked = tab.libraryChoices.has(id)
+                ? tab.libraryChoices.get(id)
+                : (chosen === null ? byDefault : chosen.includes(id));
+            const label = `Intro & Credits for ${row.dataset.libName || id}`;
+            cell.innerHTML = `<div class="form-check form-switch edit-lib-switch">`
+                + `<input type="checkbox" role="switch" class="form-check-input markers-lib-toggle" id="${esc(libraryDomId(id))}" data-id="${esc(id)}" data-default="${byDefault ? '1' : '0'}" aria-label="${esc(label)}"${checked ? ' checked' : ''}>`
+                + '</div>';
+        });
+        syncLibraryColumn();
     }
 
     function readLibraryIds(server) {
         const stored = storedMarkers(server).library_ids;
         const storedIds = Array.isArray(stored) ? stored.map(String) : null;
-        const toggles = $$('#markersLibraryList .markers-lib-toggle');
-        // Untouched pills keep the stored choice exactly (an explicit list equal to the defaults stays a list).
-        if (!tab.librariesTouched || !toggles.length) return storedIds;
+        const toggles = $$('#editLibraryList .markers-lib-toggle');
+        // Untouched switches keep the stored choice exactly (an explicit list equal to the defaults stays a list).
+        if (!librariesTouched() || !toggles.length) return storedIds;
         const ticked = toggles.filter((el) => el.checked).map((el) => el.dataset.id);
         const defaults = toggles.filter((el) => el.dataset.default === '1').map((el) => el.dataset.id);
         const sameAsDefault = ticked.length === defaults.length && ticked.every((id) => defaults.includes(id));
@@ -402,7 +427,8 @@
     function loadMarkersTab(server) {
         tab.server = server;
         tab.status = null;
-        tab.librariesTouched = false;
+        tab.libraryChoices = new Map();
+        tab.statusDefaults = null;
         tab.loadSeq += 1;
         const markers = storedMarkers(server);
         const toggle = $('#markersEnabled');
@@ -439,7 +465,7 @@
         if (embyRestoreRadio) embyRestoreRadio.checked = !keepEmby;
         if (embyKeepRadio) embyKeepRadio.checked = keepEmby;
 
-        renderLibraries(server.libraries || [], markers);
+        renderLibraryColumn();
         fetchStatus(server);
     }
 
@@ -498,6 +524,7 @@
         if (!modalEl || !window.bootstrap || !window.bootstrap.Modal) {
             // No way to ask, so no database writes.
             if (toggle) toggle.checked = false;
+            syncLibraryColumn();
             return Promise.resolve(false);
         }
         const local = $('#markersPlexConfirmLocal');
@@ -528,6 +555,7 @@
                 modalEl.removeEventListener('hidden.bs.modal', onHidden);
                 modalEl.style.zIndex = '';
                 if (toggle) toggle.checked = accepted;
+                syncLibraryColumn();
                 // Bootstrap drops body.modal-open when any modal closes; the Edit dialog is still open.
                 if ($('#editServerModal.show')) {
                     document.body.classList.add('modal-open');
@@ -572,13 +600,24 @@
         if (toggle) {
             // Ask as soon as the switch is flipped on (Save asks again if that was bypassed).
             toggle.addEventListener('change', () => {
+                syncLibraryColumn();
                 if (tab.server && markersNeedsPlexConfirmation(tab.server)) confirmPlexMarkers(tab.server);
             });
         }
-        const list = $('#markersLibraryList');
+        const list = $('#editLibraryList');
         if (list) {
             list.addEventListener('change', (event) => {
-                if (event.target.classList.contains('markers-lib-toggle')) tab.librariesTouched = true;
+                const el = event.target;
+                if (el.classList.contains('markers-lib-toggle')) tab.libraryChoices.set(el.dataset.id, el.checked);
+            });
+        }
+        const pointer = $('#markersLibrariesPointer');
+        if (pointer) {
+            pointer.addEventListener('click', (event) => {
+                if (!event.target.closest('.markers-libraries-link')) return;
+                event.preventDefault();
+                const trigger = $('#editServerModal [data-bs-target="#edit-tab-libraries"]');
+                if (trigger && window.bootstrap && window.bootstrap.Tab) window.bootstrap.Tab.getOrCreateInstance(trigger).show();
             });
         }
         const block = $('#markersStatusBlock');
@@ -603,4 +642,5 @@
     window.readMarkersFromForm = readMarkersFromForm;
     window.markersNeedsPlexConfirmation = markersNeedsPlexConfirmation;
     window.confirmPlexMarkers = confirmPlexMarkers;
+    window.renderMarkersLibraryColumn = renderLibraryColumn;
 })();

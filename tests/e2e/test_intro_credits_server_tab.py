@@ -1,4 +1,5 @@
-"""E2E: Servers → Edit → "Intro & Credits" tab and the Plex database-write confirmation.
+"""E2E: Servers → Edit → "Intro & Credits" tab, the Plex database-write confirmation, and the Libraries tab's
+Intro & Credits column (where ``markers.library_ids`` is chosen).
 
 Every API the tab touches is mocked with ``page.route``: the server list and the single-server GET, the PUT the
 Save button sends (captured), ``GET /api/markers/servers/<id>/status`` (the capability matrix) and the shared
@@ -16,8 +17,9 @@ from datetime import datetime
 import pytest
 from playwright.sync_api import Page, Route, expect
 
-from ._mocks import mock_server_connection_probe, mock_server_previews_readiness
+from ._mocks import mock_server_connection_probe, mock_server_previews_readiness, mock_servers_refresh_libraries
 
+CONFIRMED_AT = "2026-09-01T10:00:00+00:00"
 PLEX_DB = "/plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
 PLEX_DB_DIR = "/plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases"
 SAME_HOST_HINT = (
@@ -59,6 +61,14 @@ def _plex_server(markers: dict | None = None) -> dict:
             "library_ids": None,
             "plex": {"db_write_confirmed_at": None, "on_plex_redetect": "restore"},
         },
+    }
+
+
+def _plex_markers_on(library_ids: list[str] | None = None, redetect: str = "restore") -> dict:
+    return {
+        "enabled": True,
+        "library_ids": library_ids,
+        "plex": {"db_write_confirmed_at": CONFIRMED_AT, "on_plex_redetect": redetect},
     }
 
 
@@ -160,19 +170,47 @@ def _mock_server_page(page: Page, server: dict, status: dict | None, *, status_c
     return captured
 
 
-def _open_tab(page: Page, app_url: str, server: dict) -> None:
+def _open_tab(page: Page, app_url: str, server: dict, tab: str = "markers") -> None:
     page.goto(f"{app_url}/servers")
     page.wait_for_load_state("domcontentloaded")
     edit_btn = page.locator(f".edit-server-btn[data-id='{server['id']}']")
     edit_btn.wait_for(state="visible", timeout=10000)
     edit_btn.click()
     expect(page.locator("#editServerModal")).to_be_visible(timeout=5000)
-    page.locator('#editServerModal [data-bs-target="#edit-tab-markers"]').click()
-    expect(page.locator("#edit-tab-markers")).to_be_visible(timeout=5000)
+    _switch_tab(page, tab)
+
+
+def _switch_tab(page: Page, tab: str) -> None:
+    page.locator(f'#editServerModal [data-bs-target="#edit-tab-{tab}"]').click()
+    expect(page.locator(f"#edit-tab-{tab}")).to_be_visible(timeout=5000)
 
 
 def _lib_toggle(page: Page, lib_id: str):
-    return page.locator(f"#markersLibraryList .markers-lib-toggle[data-id='{lib_id}']")
+    """A library's Intro & Credits switch on the Libraries tab."""
+    return page.locator(f"#editLibraryList .markers-lib-toggle[data-id='{lib_id}']")
+
+
+def _previews_toggle(page: Page, lib_id: str):
+    return page.locator(f"#editLibraryList .edit-lib-toggle[data-id='{lib_id}']")
+
+
+def _markers_column_header(page: Page):
+    return page.locator("#editLibraryTable th.markers-lib-col")
+
+
+def _wait_for_status(page: Page) -> None:
+    # The status answer re-renders an untouched Intro & Credits column; wait for it so a click can't race it.
+    expect(page.locator("#markersStatusBlock")).to_contain_text("How markers get here", timeout=5000)
+
+
+def _save_and_read_put(page: Page, server_id: str) -> dict:
+    """Click Save and return the body of the PUT the page sent, read off its answered request."""
+    with page.expect_response(
+        lambda r: r.url.endswith(f"/api/servers/{server_id}") and r.request.method == "PUT"
+    ) as answered:
+        page.locator("#editServerSave").click()
+    expect(page.locator("#editServerModal")).to_be_hidden(timeout=10000)
+    return answered.value.request.post_data_json
 
 
 def _flip_switch_on(page: Page) -> None:
@@ -189,7 +227,7 @@ def _save_and_get_put(page: Page, captured: dict) -> dict:
 
 @pytest.mark.e2e
 class TestPlexTab:
-    def test_ready_status_and_default_libraries_render(self, authed_page: Page, app_url: str) -> None:
+    def test_ready_status_renders(self, authed_page: Page, app_url: str) -> None:
         server = _plex_server()
         status = _status(server, "ready", "Written into this Plex server's database", _plex_ready_details())
         _mock_server_page(authed_page, server, status)
@@ -205,15 +243,30 @@ class TestPlexTab:
         expect(block).to_contain_text("it can replace ours; we put them back")
         expect(block.locator(".alert-warning")).to_have_count(0)
 
-        expect(_lib_toggle(authed_page, "1")).to_be_checked()
-        expect(_lib_toggle(authed_page, "2")).to_be_checked()
-        expect(_lib_toggle(authed_page, "3")).not_to_be_checked()
-        # The pills are one named group for screen readers ("Libraries" above them is plain text).
-        expect(authed_page.get_by_role("group", name="Libraries that get markers on this server")).to_have_count(1)
         expect(authed_page.locator("#markersPlexRedetectGroup")).to_be_visible()
         expect(authed_page.locator("#markersRedetectRestore")).to_be_checked()
         expect(authed_page.locator("#markersEmbyRedetectGroup")).to_be_hidden()
         expect(authed_page.locator("#markersEnabled")).not_to_be_checked()
+
+    def test_tab_points_to_the_libraries_tab_instead_of_listing_libraries(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        server = _plex_server(_plex_markers_on())
+        _mock_server_page(authed_page, server, _status(server, "ready", "", _plex_ready_details()))
+        _open_tab(authed_page, app_url, server)
+
+        tab = authed_page.locator("#edit-tab-markers")
+        expect(tab.locator("input[type='checkbox'][data-id]")).to_have_count(0)
+        pointer = authed_page.locator("#markersLibrariesPointer")
+        expect(pointer).to_have_text("Choose which libraries get markers on the Libraries tab once this is on.")
+
+        pointer.get_by_role("link", name="Libraries").click()
+        expect(authed_page.locator("#edit-tab-libraries")).to_be_visible(timeout=5000)
+        expect(tab).to_be_hidden()
+        expect(authed_page.locator('#editServerModal [data-bs-target="#edit-tab-libraries"]')).to_have_class(
+            re.compile(r"\bactive\b")
+        )
+        expect(_lib_toggle(authed_page, "1")).to_be_visible()
 
     def test_detection_on_with_keep_plex_says_plexs_markers_are_kept(self, authed_page: Page, app_url: str) -> None:
         server = _plex_server(
@@ -407,24 +460,26 @@ class TestPlexTab:
         expect(authed_page.locator("#editServerSave")).to_be_enabled()
 
     def test_untick_library_and_keep_plex_are_sent(self, authed_page: Page, app_url: str) -> None:
-        server = _plex_server()
-        captured = _mock_server_page(
+        server = _plex_server(_plex_markers_on())
+        _mock_server_page(
             authed_page,
             server,
             _status(server, "ready", "Written into this Plex server's database", _plex_ready_details()),
         )
-        _open_tab(authed_page, app_url, server)
-        expect(_lib_toggle(authed_page, "2")).to_be_checked(timeout=5000)
+        _open_tab(authed_page, app_url, server, tab="libraries")
+        _wait_for_status(authed_page)
+        expect(_lib_toggle(authed_page, "2")).to_be_checked()
 
-        authed_page.locator("#markersLibraryList label[for='markersLib-2']").click()
+        _lib_toggle(authed_page, "2").click()
         expect(_lib_toggle(authed_page, "2")).not_to_be_checked()
+        _switch_tab(authed_page, "markers")
         authed_page.locator("label[for='markersRedetectKeep']").click()
 
-        body = _save_and_get_put(authed_page, captured)
+        body = _save_and_read_put(authed_page, "plex-1")
         assert body["markers"] == {
-            "enabled": False,
+            "enabled": True,
             "library_ids": ["1"],
-            "plex": {"db_write_confirmed_at": None, "on_plex_redetect": "keep_plex"},
+            "plex": {"db_write_confirmed_at": CONFIRMED_AT, "on_plex_redetect": "keep_plex"},
         }
 
     def test_already_confirmed_server_skips_modal(self, authed_page: Page, app_url: str) -> None:
@@ -709,14 +764,16 @@ class TestJellyfinTab:
 
     def test_jellyfin_save_sends_libraries_without_plex_block(self, authed_page: Page, app_url: str) -> None:
         server = _vendor_server("jellyfin", "jf-1")
-        captured = _mock_server_page(
+        _mock_server_page(
             authed_page, server, _status(server, "ready", "Media Preview Bridge plugin", {"plugin_version": "1.5.0.0"})
         )
         _open_tab(authed_page, app_url, server)
-        expect(_lib_toggle(authed_page, "3")).not_to_be_checked(timeout=5000)
-        authed_page.locator("#markersLibraryList label[for='markersLib-3']").click()
+        _wait_for_status(authed_page)
         _flip_switch_on(authed_page)
-        body = _save_and_get_put(authed_page, captured)
+        _switch_tab(authed_page, "libraries")
+        expect(_lib_toggle(authed_page, "3")).not_to_be_checked()
+        _lib_toggle(authed_page, "3").click()
+        body = _save_and_read_put(authed_page, "jf-1")
         assert body["markers"] == {"enabled": True, "library_ids": ["1", "2", "3"]}
 
 
@@ -896,17 +953,19 @@ class TestEmbyTab:
 
     def test_emby_save_sends_switch_and_libraries(self, authed_page: Page, app_url: str) -> None:
         server = _vendor_server("emby", "emby-1")
-        captured = _mock_server_page(
+        _mock_server_page(
             authed_page,
             server,
             _status(server, "ready", "Media Preview Bridge for Emby plugin", {"plugin_version": "1.0.0.0"}),
         )
         _open_tab(authed_page, app_url, server)
-        expect(_lib_toggle(authed_page, "3")).not_to_be_checked(timeout=5000)  # Sports is unticked by default
-        authed_page.locator("#markersLibraryList label[for='markersLib-3']").click()
+        _wait_for_status(authed_page)
         _flip_switch_on(authed_page)
         expect(authed_page.locator("#markersPlexConfirmModal")).to_be_hidden()
-        body = _save_and_get_put(authed_page, captured)
+        _switch_tab(authed_page, "libraries")
+        expect(_lib_toggle(authed_page, "3")).not_to_be_checked()  # Sports is off by default
+        _lib_toggle(authed_page, "3").click()
+        body = _save_and_read_put(authed_page, "emby-1")
         assert body["markers"] == {
             "enabled": True,
             "library_ids": ["1", "2", "3"],
@@ -961,6 +1020,199 @@ class TestEmbyTab:
         block = authed_page.locator("#markersStatusBlock")
         expect(block.locator(".alert-warning")).to_contain_text("Couldn't check this server (ValueError)", timeout=5000)
         expect(block).not_to_contain_text("Not installed")
+
+
+@pytest.mark.e2e
+class TestLibrariesTabIntroCreditsColumn:
+    """Servers → Edit → Libraries: the Previews switch per library and, while Intro & Credits is on, its own column.
+
+    The two columns write different keys of one PUT: Previews → ``libraries[].enabled``, Intro & Credits →
+    ``markers.library_ids``. Save tests assert both, so a switch that leaked into the other key would fail.
+    """
+
+    def test_column_is_hidden_while_intro_and_credits_is_off(self, authed_page: Page, app_url: str) -> None:
+        server = _plex_server()
+        _mock_server_page(authed_page, server, _status(server, "ready", "", _plex_ready_details()))
+        _open_tab(authed_page, app_url, server, tab="libraries")
+        _wait_for_status(authed_page)
+
+        expect(authed_page.locator("#editLibraryTable thead th")).to_have_text(
+            ["Library", "Previews", "Intro & Credits"]
+        )
+        expect(_previews_toggle(authed_page, "1")).to_be_visible()
+        expect(_markers_column_header(authed_page)).to_be_hidden()
+        for lib_id in ("1", "2", "3"):
+            expect(_lib_toggle(authed_page, lib_id)).to_be_hidden()
+
+    def test_column_shows_with_its_explanation_when_intro_and_credits_is_on(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        server = _plex_server(_plex_markers_on())
+        _mock_server_page(authed_page, server, _status(server, "ready", "", _plex_ready_details()))
+        _open_tab(authed_page, app_url, server, tab="libraries")
+
+        header = _markers_column_header(authed_page)
+        expect(header).to_be_visible()
+        expect(header).to_have_text("Intro & Credits")
+        icon = header.locator(".info-icon")
+        tooltip = icon.evaluate("el => el.getAttribute('data-bs-original-title') || el.getAttribute('title')")
+        assert tooltip == (
+            "Which libraries get intro and credits markers on this server, whatever their Previews switch says. "
+            "Sports libraries start off: no online source covers sports and detection isn't reliable there."
+        )
+        for lib_id in ("1", "2", "3"):
+            expect(_lib_toggle(authed_page, lib_id)).to_be_visible()
+        expect(_lib_toggle(authed_page, "1")).to_have_attribute("aria-label", "Intro & Credits for Movies")
+        expect(_previews_toggle(authed_page, "1")).to_have_attribute("aria-label", "Previews for Movies")
+
+    def test_column_follows_the_switch_without_a_reload(self, authed_page: Page, app_url: str) -> None:
+        server = _vendor_server("jellyfin", "jf-1")
+        _mock_server_page(authed_page, server, _status(server, "ready", "", {"plugin_version": "1.5.0.0"}))
+        _open_tab(authed_page, app_url, server, tab="libraries")
+        expect(_markers_column_header(authed_page)).to_be_hidden()
+
+        _switch_tab(authed_page, "markers")
+        _flip_switch_on(authed_page)
+        _switch_tab(authed_page, "libraries")
+        expect(_markers_column_header(authed_page)).to_be_visible()
+        expect(_lib_toggle(authed_page, "2")).to_be_visible()
+
+        _switch_tab(authed_page, "markers")
+        authed_page.locator("label[for='markersEnabled']").click()
+        expect(authed_page.locator("#markersEnabled")).not_to_be_checked()
+        _switch_tab(authed_page, "libraries")
+        expect(_markers_column_header(authed_page)).to_be_hidden()
+        expect(_lib_toggle(authed_page, "2")).to_be_hidden()
+
+    def test_cancelled_plex_confirmation_leaves_the_column_hidden(self, authed_page: Page, app_url: str) -> None:
+        server = _plex_server()
+        _mock_server_page(authed_page, server, _status(server, "ready", "", _plex_ready_details()))
+        _open_tab(authed_page, app_url, server)
+        _flip_switch_on(authed_page)
+        modal = authed_page.locator("#markersPlexConfirmModal")
+        expect(modal).to_be_visible(timeout=5000)
+        authed_page.locator("#markersPlexConfirmCancel").click()
+        expect(modal).to_be_hidden(timeout=5000)
+
+        _switch_tab(authed_page, "libraries")
+        expect(_markers_column_header(authed_page)).to_be_hidden()
+
+    @pytest.mark.parametrize(
+        ("library_ids", "checked"),
+        [
+            # null = the default set: every library but sports.
+            (None, {"1": True, "2": True, "3": False}),
+            # An explicit list is taken literally, a sports library included.
+            (["3"], {"1": False, "2": False, "3": True}),
+        ],
+        ids=["null-default", "explicit-list"],
+    )
+    def test_column_shows_the_stored_choice(
+        self, authed_page: Page, app_url: str, library_ids: list[str] | None, checked: dict[str, bool]
+    ) -> None:
+        server = _plex_server(_plex_markers_on(library_ids))
+        _mock_server_page(authed_page, server, _status(server, "ready", "", _plex_ready_details()))
+        _open_tab(authed_page, app_url, server, tab="libraries")
+        _wait_for_status(authed_page)
+        for lib_id, on in checked.items():
+            if on:
+                expect(_lib_toggle(authed_page, lib_id)).to_be_checked()
+            else:
+                expect(_lib_toggle(authed_page, lib_id)).not_to_be_checked()
+
+    @pytest.mark.parametrize(
+        ("stored", "flip", "sent"),
+        [
+            # The first change from the default set writes an explicit list.
+            (None, "1", ["2"]),
+            (None, "3", ["1", "2", "3"]),
+            # A change that lands back on exactly the default set is sent as null, as the old tab did.
+            (["1"], "2", None),
+        ],
+        ids=["untick-from-default", "tick-sports", "back-to-default"],
+    )
+    def test_flipping_a_library_sends_library_ids_and_leaves_previews_alone(
+        self, authed_page: Page, app_url: str, stored: list[str] | None, flip: str, sent: list[str] | None
+    ) -> None:
+        server = _plex_server(_plex_markers_on(stored))
+        server["libraries"][1]["enabled"] = False  # TV Shows has previews off; the save must keep it off
+        _mock_server_page(authed_page, server, _status(server, "ready", "", _plex_ready_details()))
+        _open_tab(authed_page, app_url, server, tab="libraries")
+        _wait_for_status(authed_page)
+
+        _lib_toggle(authed_page, flip).click()
+        body = _save_and_read_put(authed_page, "plex-1")
+
+        assert body["markers"]["library_ids"] == sent
+        assert body["markers"]["enabled"] is True
+        assert [(lib["id"], lib["enabled"]) for lib in body["libraries"]] == [
+            ("1", True),
+            ("2", False),
+            ("3", True),
+        ]
+
+    @pytest.mark.parametrize(
+        "stored",
+        # An explicit list equal to the default set must stay a list, not collapse to null.
+        [None, ["1", "2"]],
+        ids=["null-default", "explicit-list"],
+    )
+    def test_flipping_previews_leaves_library_ids_alone(
+        self, authed_page: Page, app_url: str, stored: list[str] | None
+    ) -> None:
+        server = _plex_server(_plex_markers_on(stored))
+        _mock_server_page(authed_page, server, _status(server, "ready", "", _plex_ready_details()))
+        _open_tab(authed_page, app_url, server, tab="libraries")
+        _wait_for_status(authed_page)
+
+        _previews_toggle(authed_page, "1").click()
+        expect(_previews_toggle(authed_page, "1")).not_to_be_checked()
+        expect(_lib_toggle(authed_page, "1")).to_be_checked()
+        body = _save_and_read_put(authed_page, "plex-1")
+
+        assert [(lib["id"], lib["enabled"]) for lib in body["libraries"]] == [
+            ("1", False),
+            ("2", True),
+            ("3", True),
+        ]
+        assert body["markers"]["library_ids"] == stored
+
+    def test_a_flipped_library_survives_refresh_libraries(self, authed_page: Page, app_url: str) -> None:
+        server = _plex_server(_plex_markers_on())
+        _mock_server_page(authed_page, server, _status(server, "ready", "", _plex_ready_details()))
+        refreshed = mock_servers_refresh_libraries(authed_page, count=4)
+        _open_tab(authed_page, app_url, server, tab="libraries")
+        _wait_for_status(authed_page)
+
+        _lib_toggle(authed_page, "1").click()
+        # The server now reports a fourth library: the single-server GET after the refresh returns it.
+        server["libraries"].append({"id": "4", "name": "Kids", "kind": "movie", "enabled": True, "remote_paths": []})
+        authed_page.locator("#editRefreshLibrariesBtn").click()
+        expect(_lib_toggle(authed_page, "4")).to_be_visible(timeout=5000)
+        assert refreshed == [f"{app_url}/api/servers/plex-1/refresh-libraries"]
+
+        expect(_lib_toggle(authed_page, "1")).not_to_be_checked()
+        expect(_lib_toggle(authed_page, "4")).to_be_checked()
+        body = _save_and_read_put(authed_page, "plex-1")
+        assert body["markers"]["library_ids"] == ["2", "4"]
+
+    def test_fits_a_phone_screen(self, authed_page: Page, app_url: str) -> None:
+        authed_page.set_viewport_size({"width": 390, "height": 844})
+        server = _plex_server(_plex_markers_on())
+        server["libraries"][0]["name"] = "Movies — Ultra HD Remux Collection"
+        _mock_server_page(authed_page, server, _status(server, "ready", "", _plex_ready_details()))
+        _open_tab(authed_page, app_url, server, tab="libraries")
+        expect(_markers_column_header(authed_page)).to_be_visible()
+
+        assert authed_page.evaluate("document.documentElement.scrollWidth") <= 390
+        wrapper = authed_page.locator("#edit-tab-libraries .table-responsive")
+        assert wrapper.evaluate("el => el.scrollWidth <= el.clientWidth"), "the table scrolls sideways at 390 px"
+        box = authed_page.locator("#editLibraryTable").bounding_box()
+        assert box is not None
+        assert box["x"] >= 16 and box["x"] + box["width"] <= 390 - 16, box
+        for lib_id in ("1", "2", "3"):
+            expect(_lib_toggle(authed_page, lib_id)).to_be_in_viewport()
+            expect(_previews_toggle(authed_page, lib_id)).to_be_in_viewport()
 
 
 @pytest.mark.e2e

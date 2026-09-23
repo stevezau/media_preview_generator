@@ -296,7 +296,8 @@ Shared detection settings — one file is detected once, whatever the publish ru
 ### Per-server settings (`media_servers[].markers`)
 
 Whether — and where — a server actually receives markers. Managed from **Servers → (server) → Edit → Intro &
-Credits tab**.
+Credits tab**; `library_ids` from the **Libraries tab's Intro & Credits column** (shown while `enabled` is on), which
+is separate from the Previews column's `libraries[].enabled`.
 
 ```json
 {

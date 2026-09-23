@@ -570,9 +570,10 @@ Detection settings are shared by every server: **Settings → Intro & Credits**.
 is controlled per server: **Servers → (server) → Edit → Intro & Credits tab → "Send intro & credits markers to this
 server"**. A server is off by default even after you turn the shared settings on.
 
-Under the switch, tick which libraries get markers on that server. **Sports libraries start unticked** — no online
-source covers sports and local detection isn't reliable there either. You can still tick one by hand if you want to
-try it.
+Once the switch is on, the same server's **Libraries** tab gets an **Intro & Credits** column beside **Previews**:
+switch on the libraries that get markers on that server. The two columns are independent — a library can get markers
+with previews off, or previews without markers. **Sports libraries start off** — no online source covers sports and
+local detection isn't reliable there either. You can still switch one on by hand if you want to try it.
 
 ### Sources and the publish rule
 
@@ -1016,7 +1017,7 @@ A file's row for one server (the job's Files panel, the Inspector) can also say:
 | **Skipped**: "This server was removed" | The server was deleted while the job ran | Nothing |
 | **Skipped**: "This server is turned off on the Servers page" | The server was disabled while the job ran | Turn it back on, then run the library or Re-detect the file |
 | **Skipped**: "Intro & Credits is off for this server" | The switch was turned off (or the Plex confirmation revoked) while the job ran | Turn it back on; the job's next file already checks again |
-| **Skipped**: "This library isn't selected for Intro & Credits on this server" | The library was unticked, or removed from the server, while the job ran | Tick it again in Edit → Intro & Credits |
+| **Skipped**: "This library isn't selected for Intro & Credits on this server" | The library was switched off for Intro & Credits, or removed from the server, while the job ran | Switch it back on in Edit → Libraries → Intro & Credits column |
 | **Skipped**: "This file is excluded on this server" | The file matches one of that server's exclude paths | Remove the exclusion if it's wrong |
 | **Up to date**: "Keeping Emby's intro" (or credits; also added to other rows, e.g. "1 marker(s); keeping Emby's intro") | This Emby server is set to **Keep Emby's**, and Emby shows its own markers of that type | Switch it to **Use ours** if you want ours |
 | **Written**: "… Replaced Plex's own marker. This server is set to keep Plex's, but a marker you adjust always wins." (Emby says the same about Emby's) | You adjusted or locked that marker in the Inspector, so it was written over the server's own although the server is set to keep its own | Nothing; unlock the marker if you want the server's own back |

@@ -449,7 +449,23 @@
                                 <i class="bi bi-arrow-clockwise me-1"></i>Refresh libraries
                             </button>
                         </div>
-                        <div id="editLibraryList" class="list-group small"></div>
+                        <!-- Previews switches come from servers.js; the Intro & Credits column (markers.library_ids)
+                             is filled and shown by markers_server_tab.js while that tab's switch is on. -->
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle small mb-0" id="editLibraryTable">
+                                <thead>
+                                    <tr>
+                                        <th scope="col">Library</th>
+                                        <th scope="col" class="text-center edit-lib-switch-col">Previews</th>
+                                        <th scope="col" class="text-center edit-lib-switch-col markers-lib-col d-none">Intro &amp; Credits
+                                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                                    title="Which libraries get intro and credits markers on this server, whatever their Previews switch says. Sports libraries start off: no online source covers sports and detection isn't reliable there."><i class="bi bi-info-circle"></i></button>
+                                        </th>
+                                    </tr>
+                                </thead>
+                                <tbody id="editLibraryList"></tbody>
+                            </table>
+                        </div>
                     </div>
 
                     <!-- Path mappings — restructured Apr 2026: leads with a 1-line
@@ -685,8 +701,9 @@
                         </div>
                     </div>
 
-                    <!-- Intro & Credits: this server's switch, libraries and status. Filled by
-                         markers_server_tab.js; detection settings shared by every server live in Settings. -->
+                    <!-- Intro & Credits: this server's switch and status. Filled by markers_server_tab.js; its library
+                         choice is the Libraries tab's Intro & Credits column; detection settings shared by every
+                         server live in Settings. -->
                     <div class="tab-pane fade" id="edit-tab-markers">
                         <div class="markers-opt mb-2">
                             <div>
@@ -706,13 +723,9 @@
                         </div>
                         <hr class="my-3">
 
-                        <div class="mb-3">
-                            <div class="fw-semibold small mb-2">Libraries
-                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                        title="Which libraries get markers on this server. Sports libraries start unticked: no online source covers sports and detection isn't reliable there."><i class="bi bi-info-circle"></i></button>
-                            </div>
-                            <div id="markersLibraryList" class="d-flex flex-wrap gap-2" role="group" aria-label="Libraries that get markers on this server"></div>
-                        </div>
+                        <p class="small text-muted mb-3" id="markersLibrariesPointer">
+                            Choose which libraries get markers on the <a href="#" class="markers-libraries-link">Libraries</a> tab once this is on.
+                        </p>
 
                         <div class="markers-opt d-none" id="markersPlexRedetectGroup">
                             <div class="fw-semibold small">When Plex has its own markers

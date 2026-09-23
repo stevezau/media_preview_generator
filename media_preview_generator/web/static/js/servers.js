@@ -1363,23 +1363,37 @@
         modal.show();
     }
 
+    // Each row's Intro & Credits cell is left empty and hidden: markers_server_tab.js fills it
+    // (window.renderMarkersLibraryColumn) and shows the column while that tab's switch is on.
     function renderEditLibraries(libraries) {
         const list = $('#editLibraryList');
         if (!libraries.length) {
-            list.innerHTML = '<div class="text-muted small">No cached libraries — click "Refresh libraries" on the server card to fetch them from the server.</div>';
+            list.innerHTML = '<tr><td colspan="3" class="text-muted">No cached libraries — click "Refresh libraries" on the server card to fetch them from the server.</td></tr>';
             return;
         }
-        list.innerHTML = libraries.map((lib, idx) => `
-            <label class="list-group-item d-flex align-items-center gap-2">
-                <input type="checkbox" class="form-check-input edit-lib-toggle"
-                       data-idx="${idx}"
-                       data-id="${escapeHtml(lib.id || '')}"
-                       data-name="${escapeHtml(lib.name || lib.id || '')}"
-                       ${lib.enabled ? 'checked' : ''}>
-                <span>${escapeHtml(lib.name || lib.id || 'unnamed')}</span>
-                <span class="badge bg-secondary ms-auto">${escapeHtml(lib.kind || 'unknown')}</span>
-            </label>
-        `).join('');
+        list.innerHTML = libraries.map((lib, idx) => {
+            const label = lib.name || lib.id || 'unnamed';
+            return `
+            <tr data-lib-id="${escapeHtml(lib.id || '')}"
+                data-lib-name="${escapeHtml(lib.name || '')}"
+                data-lib-kind="${escapeHtml(lib.kind || '')}">
+                <td class="text-break">
+                    ${escapeHtml(label)}
+                    <span class="badge bg-secondary ms-1">${escapeHtml(lib.kind || 'unknown')}</span>
+                </td>
+                <td class="text-center">
+                    <div class="form-check form-switch edit-lib-switch">
+                        <input type="checkbox" role="switch" class="form-check-input edit-lib-toggle"
+                               data-idx="${idx}"
+                               data-id="${escapeHtml(lib.id || '')}"
+                               data-name="${escapeHtml(lib.name || lib.id || '')}"
+                               aria-label="Previews for ${escapeHtml(label)}"
+                               ${lib.enabled ? 'checked' : ''}>
+                    </div>
+                </td>
+                <td class="text-center markers-lib-col markers-lib-cell d-none"></td>
+            </tr>`;
+        }).join('');
     }
 
     function renderEditPathMappings(mappings) {
@@ -3329,6 +3343,7 @@
             const fresh = await api('GET', `/api/servers/${encodeURIComponent(id)}`);
             if (fresh.ok && fresh.data) {
                 renderEditLibraries(fresh.data.libraries || []);
+                if (window.renderMarkersLibraryColumn) window.renderMarkersLibraryColumn();
                 // D23 — sync the cached server payload so saveEditedServer
                 // sees the freshly-fetched libraries, not the stale [] it
                 // captured at modal open. Without this, ticking checkboxes
