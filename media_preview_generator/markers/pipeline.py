@@ -1218,7 +1218,8 @@ def _kept_by_every_destination(
     owners: list[_Owning],
     types: frozenset[MarkerType],
 ) -> frozenset[MarkerType]:
-    """The types no answer of ours would be shown for, so no local detector reads the file for them.
+    """The types no answer of ours would be shown for: no local detector reads the file for them, and one left
+    undecided isn't in review.
 
     A type qualifies when every server the file's markers go to keeps its own markers ("Keep Plex's", "Keep Emby's")
     and shows its own of that type now; a locked type never does (a lock wins, spec §5.5 rule 1). Worked out on every
@@ -1393,8 +1394,8 @@ def _publish_to(
     *,
     kept_own: frozenset[MarkerType] = frozenset(),
 ) -> dict:
-    # kept_own: types this run left undecided because every server keeps its own and the file wasn't read for them.
-    # Only the row's wording names them; what is sent is exactly what an undecided type sends.
+    # kept_own: types left undecided while every server keeps its own and shows one. Only the row's wording names
+    # them; what is sent is exactly what an undecided type sends.
     cfg = owner.config
     path = rec.canonical_path
     store = ctx.store
@@ -1907,10 +1908,9 @@ def _attempt(
     decisions = _decide(ctx, rec, types, intro_limit)
     lookup_ids: MediaIds | None = None
     # Types every server the markers go to keeps its own of and shows now: an answer of ours would never be shown, so
-    # no local detector reads the file for them. Asked once a detector would run, at most once per run.
+    # no local detector reads the file for them. Asked once a detector would run or a type ends undecided, at most once
+    # per run.
     kept_everywhere: frozenset[MarkerType] | None = None
-    not_read: set[MarkerType] = set()
-    read: set[MarkerType] = set()  # types a detector that still ran answers too
     for source_id in ctx.settings.ordered_enabled_sources():
         source = Source(source_id)
         refresh = _refreshing(ctx, path, source)
@@ -1955,19 +1955,17 @@ def _attempt(
             if pending and kept_everywhere is None:
                 kept_everywhere = _kept_by_every_destination(ctx, rec, servers, owners, types)
             if pending and kept_everywhere:
-                reading = []
-                for spec in pending:
-                    if _detector_pending(ctx, rec, spec, decisions, types - kept_everywhere, refresh=refresh):
-                        reading.append(spec)
-                        read.update(spec.types)
-                    else:
-                        not_read.update(spec.types & kept_everywhere)
+                reading = [
+                    spec
+                    for spec in pending
+                    if _detector_pending(ctx, rec, spec, decisions, types - kept_everywhere, refresh=refresh)
+                ]
                 if len(reading) < len(pending):
                     logger.debug(
                         "Not reading {} at {}: every server keeps its own {}",
                         os.path.basename(path),
                         source.value,
-                        " and ".join(t.value for t in MarkerType if t in not_read),
+                        " and ".join(t.value for t in MarkerType if t in kept_everywhere),
                     )
                 pending = reading
             if not local and any(_needs_worker(ctx, rec, spec) for spec in pending):
@@ -1990,9 +1988,13 @@ def _attempt(
             decisions = _decide(ctx, rec, types, intro_limit)
 
     decisions = _decide(ctx, rec, types, intro_limit)
-    # A type left undecided only because the file wasn't read for it is nothing for the user to review: the servers'
-    # own markers stay whatever it would decide. A type other sources decided anyway stays decided.
-    kept_own = frozenset(t for t in not_read - read if decisions[t].status is not DecisionStatus.DECIDED)
+    # A type that ends undecided while every server keeps its own and shows one is nothing for the user to review: the
+    # servers' own markers stay whatever it would decide. That holds whether the file was skipped for it or an answer
+    # stored earlier left it in review. A decided type stays decided (the publisher's own kept note names it).
+    undecided = frozenset(t for t in types if decisions[t].status is not DecisionStatus.DECIDED)
+    if undecided and kept_everywhere is None:
+        kept_everywhere = _kept_by_every_destination(ctx, rec, servers, owners, undecided)
+    kept_own = undecided & (kept_everywhere or frozenset())
     if kept_own:
         reason = kept_own_reason(owner.config.type.value.capitalize() for owner in owners)
         decisions = {

@@ -1383,9 +1383,19 @@ class TestKeepPlexsPerType:
         _native_intro(item)
         item.run("1080p")
         assert (item.recorded(), item.kept()) == ([], {"intro"})
+        rec = item.store.get_file(item.paths["1080p"])
+
+        def plex_evidence():
+            return [r for r in item.store.evidence_rows(rec.id) if r.origin == "plex-1"]
+
+        evidence = plex_evidence()
         before = item.server.get_markers.call_count
         item.run("1080p", force=True)
-        assert item.server.get_markers.call_count == before
+        # Nothing Plex shows on the item became evidence. The one read allowed is the check of which types Plex keeps
+        # its own of, which a type left undecided under Keep Plex's makes on every run (spec §6.2 step 3) and never
+        # stores.
+        assert plex_evidence() == evidence
+        assert item.server.get_markers.call_count - before <= 1
 
     @pytest.mark.parametrize("trigger", ["switched-to-use-ours", "plex-dropped-its-rows"])
     def test_a_kept_only_item_with_nothing_decided_any_more_leaves_check_servers_after_one_run(

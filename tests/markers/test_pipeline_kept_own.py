@@ -2,7 +2,8 @@
 
 "Keep Plex's" / "Keep Emby's" leave the server's own markers of a type in place, so an answer of ours for that type is
 never shown. When every server the file's markers go to keeps its own and shows one of the type now, no local
-detector (credit text, season audio) reads the file for it; anything else reads it exactly as before.
+detector (credit text, season audio) reads the file for it, and a type that ends undecided is "kept Plex's own marker"
+instead of Needs review; anything else reads and decides it exactly as before.
 """
 
 from __future__ import annotations
@@ -66,12 +67,12 @@ def _settings(*, skipdb=False):
 class _Detectors:
     """Season audio (intros) and credit text (credits), each a mock that reads the file when called."""
 
-    def __init__(self):
+    def __init__(self, version=1):
         self.intro = MagicMock(return_value=[AUDIO_INTRO])
         self.credits = MagicMock(return_value=[TEXT_CREDITS])
         self.specs = (
-            LocalDetectorSpec(Source.SEASON_AUDIO, frozenset({T.INTRO}), self.intro),
-            LocalDetectorSpec(Source.CREDITS_TEXT, frozenset({T.CREDITS}), self.credits),
+            LocalDetectorSpec(Source.SEASON_AUDIO, frozenset({T.INTRO}), self.intro, version=version),
+            LocalDetectorSpec(Source.CREDITS_TEXT, frozenset({T.CREDITS}), self.credits, version=version),
         )
 
 
@@ -87,12 +88,14 @@ def _emby_config(path, setting):
     return server_config("emby-1", ServerType.EMBY, root=_media_root(path), markers=markers)
 
 
-def _job(store, reg, path, detectors, publishers, *, stage="process", force=False, skipdb=False):
+def _job(
+    store, reg, path, detectors, publishers, *, stage="process", force=False, skipdb=False, probe=None, hints=None
+):
     clients = _clients(skipdb=LookupResult("ok", (SKIPDB_INTRO,))) if skipdb else _clients()
     ctx = _ctx(
         store, reg, settings_raw=_settings(skipdb=skipdb), clients=clients, detectors=detectors.specs, force=force
     )
-    out, _ = _run(ctx, path, publishers, stage=stage)
+    out, _ = _run(ctx, path, publishers, stage=stage, probe=probe, hints=hints)
     return out
 
 
@@ -303,3 +306,158 @@ class TestLaterRuns:
         assert detectors.credits.call_count == 1
         assert _decision(store, movie, T.CREDITS).status is not DecisionStatus.DISABLED
         assert "kept" not in out.message
+
+
+# A credit text answer stored before (a run before this fix): 33 s after Plex's credits start, so the two disagree.
+TEXT_CREDITS_APART = Candidate(T.CREDITS, 1_190_000, None, Source.CREDITS_TEXT)
+# Plex serving the credits row NATIVE_CREDITS stores (served start = stored + 2 s, a non-final end 2 s earlier).
+PLEX_SERVED_CREDITS = {"type": "credits", "start_ms": 1_156_521, "end_ms": 1_186_521, "final": False}
+
+
+def _stored_text_answer(store, path, candidate=TEXT_CREDITS_APART, *, episode=False):
+    st = os.stat(path)
+    rec = store.upsert_file(
+        FileIdentity(path, st.st_size, st.st_mtime_ns),
+        duration_ms=DUR,
+        season_key=os.path.dirname(path) if episode else None,
+        is_movie=not episode,
+    )
+    store.replace_detector_answer(rec.id, {Source.CREDITS_TEXT: [candidate]}, version=1)
+    return rec
+
+
+class TestStoredAnswerInReview:
+    """An answer stored earlier left the type in review, so no detector is due: the kept status applies all the same."""
+
+    def test_keep_plexs_with_its_own_marker_is_kept_not_in_review(self, store, movie):
+        _stored_text_answer(store, movie)
+        reg = _plex(movie, rows=(PLEX_SERVED_CREDITS,))
+        detectors = _Detectors()
+        plex = ready_publisher()
+
+        out = _job(store, reg, movie, detectors, {"plex-1": plex})
+
+        detectors.credits.assert_not_called()
+        credits = _decision(store, movie, T.CREDITS)
+        assert (credits.status, credits.reason) == (DecisionStatus.DISABLED, KEPT_PLEX)
+        plex.write.assert_not_called()
+        assert out.outcome_key == FileOutcome.UP_TO_DATE.value
+        assert (out.publisher_rows[0]["status"], out.publisher_rows[0]["message"]) == (
+            ServerStatus.UP_TO_DATE.value,
+            "Keeping Plex's credits",
+        )
+        assert out.message == "credits: kept Plex's own marker"
+
+    def test_use_ours_leaves_it_in_review(self, store, movie):
+        _stored_text_answer(store, movie)
+        detectors = _Detectors()
+        out = _job(
+            store, _plex(movie, "restore", rows=(PLEX_SERVED_CREDITS,)), movie, detectors, {"plex-1": ready_publisher()}
+        )
+        detectors.credits.assert_not_called()
+        assert _decision(store, movie, T.CREDITS).status is DecisionStatus.NEEDS_REVIEW
+        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+
+    @pytest.mark.parametrize(("version", "read"), [(1, 0), (2, 1)], ids=["answer-current", "answer-due"])
+    def test_a_marker_plex_since_lost_puts_it_back_in_review_or_reads_a_due_answer(self, store, movie, version, read):
+        _stored_text_answer(store, movie)
+        reg = _plex(movie, rows=(PLEX_SERVED_CREDITS,))
+        first = _job(store, reg, movie, _Detectors(), {"plex-1": ready_publisher()})
+        assert first.outcome_key == FileOutcome.UP_TO_DATE.value
+
+        reg.get("plex-1").get_markers.return_value = []
+        detectors = _Detectors(version=version)
+        out = _job(store, reg, movie, detectors, {"plex-1": ready_publisher()})
+
+        assert detectors.credits.call_count == read
+        credits = _decision(store, movie, T.CREDITS)
+        assert credits.status is not DecisionStatus.DISABLED
+        if not read:
+            # The stored answer and Plex's credits as stored still disagree, as they did before the marker went.
+            assert (credits.status, out.outcome_key) == (DecisionStatus.NEEDS_REVIEW, FileOutcome.NEEDS_REVIEW.value)
+
+    def test_a_decided_type_stays_decided_with_the_publishers_kept_note(self, store, movie):
+        _stored_text_answer(store, movie, TEXT_CREDITS)  # agrees with Plex's credits: decided, as before
+        reg = _plex(movie)
+        plex = ready_publisher()
+
+        def keeps_plexs(item_id, markers, **kwargs):
+            plex.last_write_changed, plex.last_kept_types = False, frozenset({T.CREDITS})
+            return []
+
+        plex.write.side_effect = keeps_plexs
+        detectors = _Detectors()
+
+        out = _job(store, reg, movie, detectors, {"plex-1": plex})
+
+        detectors.credits.assert_not_called()
+        credits = _decision(store, movie, T.CREDITS)
+        assert credits.status is DecisionStatus.DECIDED and credits.reason != KEPT_PLEX
+        assert [(m.type, m.start_ms, m.end_ms) for m in plex.write.call_args.args[1]] == [(T.CREDITS, 1_291_000, DUR)]
+        assert (out.outcome_key, out.publisher_rows[0]["message"]) == (
+            FileOutcome.UP_TO_DATE.value,
+            "Keeping Plex's credits",
+        )
+
+
+class TestRealPlexDatabase:
+    """End to end on Plex's database: the kept status sends Plex exactly what Needs review sent."""
+
+    @pytest.mark.parametrize("kind", ["movie", "episode"])
+    def test_an_answer_left_in_review_writes_the_item_byte_for_byte_as_before(
+        self, tmp_path, monkeypatch, request, kind
+    ):
+        from media_preview_generator.markers import pipeline
+        from media_preview_generator.markers.probe import Chapter
+        from media_preview_generator.markers.publishers import plex_db
+        from media_preview_generator.markers.store import MarkerStore
+        from tests.markers.test_plex_db_publisher import (
+            CREDITS_ROW_EXTRA,
+            NATIVE_CREDITS,
+            _insert_taggings,
+            _make_db,
+            _publisher,
+            _rows,
+        )
+
+        monkeypatch.setattr(plex_db, "shm_lock_held_elsewhere", lambda _db, **_kw: True)  # Plex has its DB open
+        path = request.getfixturevalue("media" if kind == "episode" else "movie")
+        # An episode's intro is decided by its chapter and written; the credits are left to Plex either way.
+        chapters = (Chapter(0, 126_771, "Chapter 1"), Chapter(126_771, 157_068, "Intro"), Chapter(157_068, None, "B"))
+        probe = test_pipeline._probe(chapters if kind == "episode" else ())
+
+        def run(name, *, kept_status):
+            store = MarkerStore(str(tmp_path / f"{name}.db"))
+            _stored_text_answer(store, path, episode=kind == "episode")
+            folder = tmp_path / name / "Plex Media Server"
+            db = _make_db(folder, parts=((path, plex_db.encode_extra_data({"pv:credits": NATIVE_CREDITS})),))
+            _insert_taggings(db, (7, 563, 0, "credits", 1_154_521, 1_188_521, CREDITS_ROW_EXTRA))
+            publisher = _publisher(tmp_path / name, folder, redetect="keep_plex")
+            reg = _plex(path, rows=(PLEX_SERVED_CREDITS,))
+            with monkeypatch.context() as m:
+                if not kept_status:  # this cell as it ran before the kept status: Needs review
+                    m.setattr(pipeline, "_kept_by_every_destination", lambda *a, **k: frozenset())
+                out = _job(store, reg, path, _Detectors(), {"plex-1": publisher}, probe=probe, hints={"plex-1": "7"})
+            item = store.get_item_publish_state("plex-1", "7")
+            taggings = sorted(_rows(db, "SELECT [index], text, time_offset, end_time_offset, extra_data FROM taggings"))
+            parts = _rows(db, "SELECT id, file, extra_data FROM media_parts ORDER BY id")
+            status = _decision(store, path, T.CREDITS).status
+            store.close()
+            return out, status, (taggings, parts, item and (item.markers, item.kept_types))
+
+        kept_out, kept_status, kept_plex = run("kept", kept_status=True)
+        review_out, review_status, review_plex = run("review", kept_status=False)
+
+        assert (kept_status, review_status) == (DecisionStatus.DISABLED, DecisionStatus.NEEDS_REVIEW)
+        assert review_out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        assert kept_out.outcome_key == (
+            FileOutcome.PUBLISHED.value if kind == "episode" else FileOutcome.UP_TO_DATE.value
+        )
+        assert kept_plex == review_plex
+        taggings, parts, item = kept_plex
+        assert (0, "credits", 1_154_521, 1_188_521, CREDITS_ROW_EXTRA) in taggings  # Plex's own row, untouched
+        assert plex_db.decode_extra_data(parts[0][2])[0]["pv:credits"] == NATIVE_CREDITS
+        if kind == "episode":
+            assert [t[1] for t in taggings] == ["credits", "intro"] and item[1] == frozenset()
+        else:
+            assert [t[1] for t in taggings] == ["credits"] and item is None

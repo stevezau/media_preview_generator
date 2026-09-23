@@ -103,8 +103,8 @@ def kept_note(
         kept_types: The types kept as the server's own.
         wanted: The decided markers.
         vendor: The server's brand as users know it (``Plex``, ``Emby``).
-        not_decided: Types left undecided because every server keeps its own and shows one, so the file wasn't read
-            for them (``kept_own_reason``); named whether or not they are in ``wanted``.
+        not_decided: Types left undecided while every server keeps its own and shows one (``kept_own_reason``);
+            named whether or not they are in ``wanted``.
 
     Returns:
         "keeping Plex's credits" (or "intro and credits"); "" when none of ``wanted`` is kept and nothing was left
@@ -116,7 +116,7 @@ def kept_note(
 
 
 def kept_own_reason(vendors: Iterable[str]) -> str:
-    """Decision reason for a type the file wasn't read for: every server its markers go to keeps its own and shows one.
+    """Decision reason for a type left undecided while every server its markers go to keeps its own and shows one.
 
     Args:
         vendors: The brands of those servers as users know them (``Plex``, ``Emby``), repeats allowed.

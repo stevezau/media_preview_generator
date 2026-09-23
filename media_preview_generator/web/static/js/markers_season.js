@@ -94,8 +94,8 @@
         const d = decision || {};
         if (d.status === 'decided' && d.marker) td.textContent = range(d.marker, duration);
         else if (d.status === 'needs_review') td.appendChild(el('span', 'badge text-bg-warning', 'Needs review'));
-        // "detection off" is the rules' own reason; a job that didn't read the file for a type every server keeps its
-        // own of records why instead ("kept Plex's own marker", markers.outcomes.kept_own_reason).
+        // "detection off" is the rules' own reason; a type left undecided while every server keeps its own and shows
+        // one records why instead ("kept Plex's own marker", markers.outcomes.kept_own_reason).
         else if (d.status === 'disabled') {
             const keptOwn = d.reason && d.reason !== 'detection off' ? d.reason[0].toUpperCase() + d.reason.slice(1) : '';
             td.appendChild(el('span', 'text-muted', keptOwn || 'Off'));

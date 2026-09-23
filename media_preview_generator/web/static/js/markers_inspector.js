@@ -451,7 +451,7 @@
                 chips.appendChild(el('span', 'badge text-bg-secondary', `${label}: No markers found`));
             } else if (d.status === 'disabled') {
                 // The rules record "detection off", also for intros and recaps, which are never looked for in movies.
-                // A job that didn't read the file for a type every server keeps its own of says so instead ("kept
+                // A type left undecided while every server keeps its own and shows one says so instead ("kept
                 // Plex's own marker", markers.outcomes.kept_own_reason).
                 const notForMovies = payload.is_movie && START_SEGMENTS.indexOf(type) !== -1;
                 const keptOwn = d.reason && d.reason !== 'detection off' ? capitalise(d.reason) : '';

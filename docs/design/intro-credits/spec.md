@@ -664,9 +664,11 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    the file for a type no answer of ours would be shown for**, on any run, forced included: every server the file's
    markers go to keeps its own (`keep_plex`, `keep_emby`) and shows its own of that type now — rule 7's own markers
    (never ours, an importer plugin's or another cut's), read from each server on that run in one read the evidence
-   read shares — and the type isn't locked. Left undecided that way, the type is stored `disabled` with the reason
-   "kept Plex's own marker" instead of Needs review, and the rows say "Keeping Plex's credits"; what is sent to a
-   server is exactly what an undecided type sends. Worked out again on every run and never stored as an answer, so
+   read shares — and the type isn't locked. A type that ends undecided while that holds, whether it was skipped or
+   an answer stored earlier left it in review, is stored `disabled` with the reason "kept Plex's own marker" instead
+   of Needs review, and the rows say "Keeping Plex's credits"; a decided type stays decided (the publisher keeps
+   Plex's rows and says so, as before), and what is sent to a server is exactly what an undecided type sends. Worked
+   out again on every run and never stored as an answer, so
    "Use ours", a server losing its marker or a new destination without one reads the file on the next run (§14
    2026-09-23). Decide, store. Stored chapter and online evidence carries its rules or parser version; a file whose
    stored version is older is probed or asked again on the next run.
@@ -1859,11 +1861,17 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   a stored answer with markers is never read again, and the server's markers come after the detectors in the default
   order, so a stored answer would miss a server that lost its marker and a first run would have none. That read is
   shared with the evidence read (a first run still asks each server once) and costs one read per later run of such a
-  file, as a decided and kept type's read-back did. The stored evidence and its read schedule
-  are unchanged, so no other type's decision moves. The type is stored `disabled`, reason "kept Plex's own marker"
-  (the chip and the Season view show it), the job row "Keeping Plex's credits" with Up to date, not Needs review. What
-  a server shows is unchanged: Plex's publisher already leaves Plex's rows of a type it isn't sent
-  (`test_a_type_left_undecided_for_plexs_own_leaves_the_item_as_deciding_it_would`); only the record no longer lists
-  a never-decided type as kept. On Emby the plugin no longer holds a hidden copy of ours for that type, so a refresh
+  file, as a decided and kept type's read-back did. The stored evidence and its read schedule are unchanged, so no
+  other type's decision moves. A type that ends undecided while that holds is stored `disabled`, reason "kept Plex's
+  own marker" (the chip and the Season view show it), the job row "Keeping Plex's credits" with Up to date, not Needs
+  review — also when no detector was skipped on that run, so the owner's ~31 movies an earlier run left in review
+  with Plex's own credits leave the review list on their next run (an undecided type now asks the servers on every
+  run under a keep setting). A decided type stays decided, with the publisher's kept note. Plex's marker gone, or the
+  setting back to Use ours, returns such a file to Needs review, or reads it when its answer is due. What a server
+  shows is unchanged: Plex's publisher already leaves Plex's rows of a type it isn't sent
+  (`test_a_type_left_undecided_for_plexs_own_leaves_the_item_as_deciding_it_would`), and the pipeline sends Plex's
+  database byte for byte what Needs review sent
+  (`test_an_answer_left_in_review_writes_the_item_byte_for_byte_as_before`); only the record no longer lists a
+  never-decided type as kept. On Emby the plugin no longer holds a hidden copy of ours for that type, so a refresh
   that deletes Emby's own rows leaves the type empty until the next run reads the file, where the plugin used to put
   ours back at once.
