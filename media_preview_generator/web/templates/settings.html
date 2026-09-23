@@ -139,11 +139,11 @@
                     <div class="col-md-6 mb-3">
                         <label for="webhookRetryDelay" class="form-label">
                             Initial retry delay: <strong><span id="retryDelayValue">30</span>s</strong>
-                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Wait before the first retry. Each later retry waits twice as long as the one before it, capped at the slider maximum."><i class="bi bi-info-circle"></i></button>
+                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Sets the pace of the retry schedule rather than one fixed wait. Every wait is multiplied by this value ÷ 30. Values under 15 s act as 15 s. Retries after the fifth wait 1 h each (at 30 s)."><i class="bi bi-info-circle"></i></button>
                         </label>
                         <input type="range" class="form-range" id="webhookRetryDelay" min="10" max="300" step="5" value="30">
                         <div class="form-text">
-                            Subsequent retries double the wait each time (capped at the maximum).
+                            At 30 s, retries wait 1 min, 2 min, 5 min, 15 min, then 1 h. 60 s doubles every wait.
                         </div>
                     </div>
                 </div>

@@ -14,6 +14,7 @@ canonical media path plus the configured width and interval.
 
 from __future__ import annotations
 
+import errno
 from pathlib import Path
 
 from loguru import logger
@@ -69,29 +70,44 @@ class EmbyBifAdapter(OutputAdapter):
         if not output_paths:
             raise ValueError("EmbyBifAdapter.publish requires at least one output path")
 
-        sidecar = output_paths[0]
-        try:
-            sidecar.parent.mkdir(parents=True, exist_ok=True)
-        except PermissionError as exc:
-            logger.error(
-                "Cannot save Emby preview file next to media at {}: permission denied. "
-                "The Emby BIF format requires writing the .bif file alongside the source video. "
-                "Verify the media folder is mounted read-write (not :ro in Docker) and that "
-                "the user running this tool has write permission. "
-                "Original error: {}",
-                sidecar.parent,
-                exc,
-            )
-            raise
-
         from ..processing.generator import generate_bif
         from .plex_bundle import BifIntervalConfig
 
-        generate_bif(
-            str(sidecar),
-            str(bundle.frame_dir),
-            BifIntervalConfig(self._frame_interval, server_display_name=bundle.server_display_name),
-        )
+        sidecar = output_paths[0]
+        # The media folder normally exists, so mkdir succeeds even on a
+        # read-only mount; the write error surfaces when the .bif is opened.
+        try:
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            generate_bif(
+                str(sidecar),
+                str(bundle.frame_dir),
+                BifIntervalConfig(self._frame_interval, server_display_name=bundle.server_display_name),
+            )
+        except OSError as exc:
+            # Only the sidecar (or a folder above it) gets media-mount advice;
+            # a failure reading the frames folder is a different problem.
+            if exc.filename is None or Path(exc.filename) not in (sidecar, *sidecar.parents):
+                raise
+            if exc.errno == errno.EROFS:
+                logger.error(
+                    "Cannot save Emby preview file next to media at {}: the media folder is mounted "
+                    "read-only. Emby reads .bif previews from beside the video, so this tool needs the "
+                    "media folder mounted read-write (remove :ro from the Docker volume). "
+                    "Original error: {}",
+                    sidecar.parent,
+                    exc,
+                )
+            elif exc.errno in (errno.EACCES, errno.EPERM):
+                logger.error(
+                    "Cannot save Emby preview file next to media at {}: permission denied. "
+                    "The Emby BIF format requires writing the .bif file alongside the source video. "
+                    "Verify the media folder is mounted read-write (not :ro in Docker) and that "
+                    "the user running this tool has write permission. "
+                    "Original error: {}",
+                    sidecar.parent,
+                    exc,
+                )
+            raise
 
         # Sanity: filename must follow Emby's <basename>-<w>-<i>.bif pattern.
         # If a future caller misuses compute_output_paths and passes a

@@ -2295,6 +2295,135 @@ class TestScheduledTrickplayTaskReadiness:
         )
 
 
+class TestVendorExtractionAgreesWithPluginRule:
+    """The "Vendor-side preview generation" row must agree with the per-library rule.
+
+    ``_recommended_settings`` makes scan-time extraction plugin-aware: OFF when
+    the Media Preview Bridge plugin registers our tiles, ON when it doesn't
+    (Jellyfin's scan is then how our tiles get adopted). The vendor row used
+    to recommend "stopped" unconditionally and offer a Disable that switched
+    scan-time extraction off even without the plugin — so previews never got
+    adopted. Matrix: plugin present × absent, scan-time extraction on × off.
+    """
+
+    MATRIX = [
+        pytest.param(True, True, id="plugin-scan_on"),
+        pytest.param(True, False, id="plugin-scan_off"),
+        pytest.param(False, True, id="no_plugin-scan_on"),
+        pytest.param(False, False, id="no_plugin-scan_off"),
+    ]
+
+    def _wire(self, *, plugin_installed: bool, scan_on: bool, posts: list[dict] | None = None):
+        options = {
+            "EnableTrickplayImageExtraction": True,
+            "SaveTrickplayWithMedia": True,
+            "ExtractTrickplayImagesDuringLibraryScan": scan_on,
+            "EnableRealtimeMonitor": True,
+        }
+        good_trickplay = {"TileWidth": 10, "TileHeight": 10, "Interval": 10000, "WidthResolutions": [320]}
+
+        def fake_request(method, url, **kwargs):
+            if url == "/MediaPreviewBridge/Ping":
+                if not plugin_installed:
+                    return MagicMock(status_code=404, json=MagicMock(return_value={}))
+                return MagicMock(status_code=200, json=MagicMock(return_value={"ok": True, "version": "10.11.0.2"}))
+            if url == "/System/Info":
+                return MagicMock(
+                    status_code=200, json=MagicMock(return_value={"Version": "10.11.8"}), raise_for_status=MagicMock()
+                )
+            if url == "/System/Configuration":
+                return MagicMock(
+                    status_code=200,
+                    json=MagicMock(return_value={"TrickplayOptions": good_trickplay}),
+                    raise_for_status=MagicMock(),
+                )
+            if url == "/Library/VirtualFolders":
+                return MagicMock(
+                    status_code=200,
+                    json=MagicMock(return_value=[{"Name": "Movies", "ItemId": "m", "LibraryOptions": dict(options)}]),
+                    raise_for_status=MagicMock(),
+                )
+            if url == "/ScheduledTasks":
+                return MagicMock(status_code=200, json=MagicMock(return_value=[]), raise_for_status=MagicMock())
+            if method == "POST" and url == "/Library/VirtualFolders/LibraryOptions":
+                if posts is not None:
+                    posts.append(kwargs["json_body"])
+                return MagicMock(status_code=204, raise_for_status=MagicMock())
+            raise AssertionError(f"unexpected {method} {url}")
+
+        return fake_request
+
+    def _rows(self, jelly, *, plugin_installed: bool, scan_on: bool) -> tuple[dict, dict]:
+        """Return (library scan-extraction row, vendor-extraction row)."""
+        with patch.object(
+            JellyfinServer, "_request", side_effect=self._wire(plugin_installed=plugin_installed, scan_on=scan_on)
+        ):
+            payload = jelly.previews_readiness()
+        library = next(s for s in payload["sections"] if s["id"] == "library_settings")
+        library_row = next(
+            c for c in library["checks"] if c["meta"].get("flag") == "ExtractTrickplayImagesDuringLibraryScan"
+        )
+        vendor = next(s for s in payload["sections"] if s["id"] == "vendor_extraction")
+        return library_row, vendor["checks"][0]
+
+    @pytest.mark.parametrize(("plugin_installed", "scan_on"), MATRIX)
+    def test_library_row_recommends_scan_extraction_only_when_plugin_absent(
+        self, jelly, plugin_installed: bool, scan_on: bool
+    ) -> None:
+        library_row, _ = self._rows(jelly, plugin_installed=plugin_installed, scan_on=scan_on)
+
+        assert library_row["recommended"] is (not plugin_installed)
+        assert library_row["current"] is scan_on
+        assert library_row["ok"] is (scan_on is not plugin_installed)
+        assert library_row["severity"] == ("recommended" if plugin_installed else "critical")
+
+    @pytest.mark.parametrize(("plugin_installed", "scan_on"), MATRIX)
+    def test_vendor_row_fix_matches_library_row_when_readiness_probed(
+        self, jelly, plugin_installed: bool, scan_on: bool
+    ) -> None:
+        library_row, vendor_row = self._rows(jelly, plugin_installed=plugin_installed, scan_on=scan_on)
+
+        fix_key = vendor_row.get("fix_action")
+        assert fix_key in vendor_row["actions"], f"vendor row names no usable fix action: {fix_key!r}"
+        fix = vendor_row["actions"][fix_key]
+        assert fix["action"] == "set_vendor_extraction"
+        assert fix["args"]["scan_extraction"] is library_row["recommended"], (
+            "vendor row's fix contradicts the per-library scan-extraction recommendation"
+        )
+        assert vendor_row["recommended"].startswith("stopped" if plugin_installed else "running")
+
+    @pytest.mark.parametrize(("plugin_installed", "scan_on"), MATRIX)
+    def test_vendor_row_offers_disable_only_when_plugin_installed(
+        self, jelly, plugin_installed: bool, scan_on: bool
+    ) -> None:
+        _, vendor_row = self._rows(jelly, plugin_installed=plugin_installed, scan_on=scan_on)
+
+        disables = [a for a in vendor_row["actions"].values() if a["args"].get("scan_extraction") is False]
+        assert bool(disables) is plugin_installed
+
+    @pytest.mark.parametrize(("plugin_installed", "scan_on"), MATRIX)
+    def test_vendor_fix_action_writes_library_row_recommendation_when_applied(
+        self, jelly, plugin_installed: bool, scan_on: bool
+    ) -> None:
+        library_row, vendor_row = self._rows(jelly, plugin_installed=plugin_installed, scan_on=scan_on)
+        fix = vendor_row["actions"][vendor_row["fix_action"]]
+        posts: list[dict] = []
+
+        with patch.object(
+            JellyfinServer,
+            "_request",
+            side_effect=self._wire(plugin_installed=plugin_installed, scan_on=scan_on, posts=posts),
+        ):
+            results = jelly.set_vendor_extraction(**fix["args"])
+
+        assert results == {"m": "ok"}
+        assert len(posts) == 1
+        written = posts[0]["LibraryOptions"]
+        assert written["ExtractTrickplayImagesDuringLibraryScan"] is library_row["recommended"]
+        assert written["EnableTrickplayImageExtraction"] is True
+        assert written["SaveTrickplayWithMedia"] is True
+
+
 class TestRegistryWiring:
     def test_registry_can_construct_jellyfin_server(self):
         """Audit fix — was instantiation-only smoke. Now also asserts

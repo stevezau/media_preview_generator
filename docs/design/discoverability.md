@@ -1,6 +1,8 @@
 # Discoverability, docs site and SEO pass
 
-Status: in progress (branch `stevezau/discover`). Excluded from the docs build (`docs/design/`).
+Status: shipped 2026-09-23 (#291 docs site; app-code fixes below in a follow-up PR). Live at
+https://stevezau.github.io/media_preview_generator/. Owner follow-ups and outreach drafts:
+`docs/design/discoverability-outreach.md`. Excluded from the docs build (`docs/design/`).
 
 Method source: the sibling-project playbook (audit → crawl plumbing → llms.txt → structured
 data → intent pages → images → repo metadata → verify with real retrieval).
@@ -76,7 +78,7 @@ E. Metadata: README badges (CI, release, image size, Ko-fi), Docker Hub `short-d
 5. New Search Console property for the domain (the github.io property's history doesn't carry over);
    robots.txt starts working at that point.
 
-## Code issues found during the docs audit (not fixed here — app code, separate change)
+## Code issues found during the docs audit (fixed on branch `stevezau/docs-audit-code-fixes`)
 
 - Settings page retry copy is wrong (`web/templates/settings.html:141-147` says 30 s doubling; real
   schedule is 60 s/2 m/5 m/15 m/60 m scaled by "Initial retry delay" ÷ 30).

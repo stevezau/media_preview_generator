@@ -287,9 +287,11 @@ section. Emby: `ExtractTrickplayImagesDuringLibraryScan` +
 `ExtractChapterImagesDuringLibraryScan` per library. Jellyfin:
 `ExtractTrickplayImagesDuringLibraryScan`, while
 `EnableTrickplayImageExtraction` stays on (destructive when off — see
-above). **Jellyfin without the plugin:** don't stop it here. This row
-always recommends "stopped", but without the plugin scan-time extraction
-must stay on (see [scan-time extraction](#scan-extraction)).
+above). For Jellyfin this row follows the same plugin rule as
+[scan-time extraction](#scan-extraction): with the plugin installed it
+recommends "stopped" and offers Disable; without the plugin it recommends
+"running" and offers only Enable, because Jellyfin then picks up this
+app's tiles through that scan.
 
 **Enable / disable:** toggles with the current aggregate state
 reported (e.g. "stopped on 3/5 libraries"). Non-destructive.
