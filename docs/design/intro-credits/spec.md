@@ -1865,8 +1865,9 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   other type's decision moves. A type that ends undecided while that holds is stored `disabled`, reason "kept Plex's
   own marker" (the chip and the Season view show it), the job row "Keeping Plex's credits" with Up to date, not Needs
   review — also when no detector was skipped on that run, so the owner's ~31 movies an earlier run left in review
-  with Plex's own credits leave the review list on their next run (an undecided type now asks the servers on every
-  run under a keep setting). A decided type stays decided, with the publisher's kept note. Plex's marker gone, or the
+  with Plex's own credits leave the review list on their next run (an undecided type, nothing found included, now
+  asks the servers on every run under a keep setting, but only a type every destination's publisher can show:
+  `publishers.factory.supported_types_for`, so a recap under Plex asks none). A decided type stays decided, with the publisher's kept note. Plex's marker gone, or the
   setting back to Use ours, returns such a file to Needs review, or reads it when its answer is due. What a server
   shows is unchanged: Plex's publisher already leaves Plex's rows of a type it isn't sent
   (`test_a_type_left_undecided_for_plexs_own_leaves_the_item_as_deciding_it_would`), and the pipeline sends Plex's

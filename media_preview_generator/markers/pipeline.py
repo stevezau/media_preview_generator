@@ -74,7 +74,7 @@ from .publishers.base import (
     PublishError,
     Shown,
 )
-from .publishers.factory import publisher_for
+from .publishers.factory import publisher_for, supported_types_for
 from .settings import GlobalMarkersSettings, ServerMarkersSettings, get_global_settings, load_server
 from .source_counts import DecidedByTally, decided_groups
 from .sources import introdb, skipdb, theintrodb
@@ -1231,6 +1231,9 @@ def _kept_by_every_destination(
         Those types; empty when any server's settings or markers can't be read.
     """
     candidates = types - frozenset(ctx.store.get_locked(rec.id))
+    for owner in owners:
+        # Only a type a server can show can be its own: a recap under Plex asks no server.
+        candidates &= supported_types_for(owner.config.type)
     if not candidates or not owners:
         return frozenset()
     try:

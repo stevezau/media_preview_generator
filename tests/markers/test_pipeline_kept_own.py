@@ -48,9 +48,9 @@ def movie(tmp_path):
     return str(f)
 
 
-def _settings(*, skipdb=False):
+def _settings(*, skipdb=False, recap=False):
     return {
-        "detect": {"intro": True, "credits": True, "recap": False},
+        "detect": {"intro": True, "credits": True, "recap": recap},
         "publish_when": "high",
         "sources": [
             {"id": "chapters", "enabled": True},
@@ -89,12 +89,22 @@ def _emby_config(path, setting):
 
 
 def _job(
-    store, reg, path, detectors, publishers, *, stage="process", force=False, skipdb=False, probe=None, hints=None
+    store,
+    reg,
+    path,
+    detectors,
+    publishers,
+    *,
+    stage="process",
+    force=False,
+    skipdb=False,
+    recap=False,
+    probe=None,
+    hints=None,
 ):
     clients = _clients(skipdb=LookupResult("ok", (SKIPDB_INTRO,))) if skipdb else _clients()
-    ctx = _ctx(
-        store, reg, settings_raw=_settings(skipdb=skipdb), clients=clients, detectors=detectors.specs, force=force
-    )
+    settings = _settings(skipdb=skipdb, recap=recap)
+    ctx = _ctx(store, reg, settings_raw=settings, clients=clients, detectors=detectors.specs, force=force)
     out, _ = _run(ctx, path, publishers, stage=stage, probe=probe, hints=hints)
     return out
 
@@ -314,7 +324,7 @@ TEXT_CREDITS_APART = Candidate(T.CREDITS, 1_190_000, None, Source.CREDITS_TEXT)
 PLEX_SERVED_CREDITS = {"type": "credits", "start_ms": 1_156_521, "end_ms": 1_186_521, "final": False}
 
 
-def _stored_text_answer(store, path, candidate=TEXT_CREDITS_APART, *, episode=False):
+def _stored_text_answer(store, path, candidates=(TEXT_CREDITS_APART,), *, episode=False):
     st = os.stat(path)
     rec = store.upsert_file(
         FileIdentity(path, st.st_size, st.st_mtime_ns),
@@ -322,7 +332,7 @@ def _stored_text_answer(store, path, candidate=TEXT_CREDITS_APART, *, episode=Fa
         season_key=os.path.dirname(path) if episode else None,
         is_movie=not episode,
     )
-    store.replace_detector_answer(rec.id, {Source.CREDITS_TEXT: [candidate]}, version=1)
+    store.replace_detector_answer(rec.id, {Source.CREDITS_TEXT: list(candidates)}, version=1)
     return rec
 
 
@@ -377,7 +387,7 @@ class TestStoredAnswerInReview:
             assert (credits.status, out.outcome_key) == (DecisionStatus.NEEDS_REVIEW, FileOutcome.NEEDS_REVIEW.value)
 
     def test_a_decided_type_stays_decided_with_the_publishers_kept_note(self, store, movie):
-        _stored_text_answer(store, movie, TEXT_CREDITS)  # agrees with Plex's credits: decided, as before
+        _stored_text_answer(store, movie, (TEXT_CREDITS,))  # agrees with Plex's credits: decided, as before
         reg = _plex(movie)
         plex = ready_publisher()
 
@@ -398,6 +408,40 @@ class TestStoredAnswerInReview:
             FileOutcome.UP_TO_DATE.value,
             "Keeping Plex's credits",
         )
+
+    @pytest.mark.parametrize(
+        ("setting", "status", "row"),
+        [
+            ("keep_plex", DecisionStatus.DISABLED, "Keeping Plex's credits"),
+            ("restore", DecisionStatus.NO_EVIDENCE, "No markers found"),
+        ],
+    )
+    def test_nothing_found_beside_plexs_own_marker_is_kept_too(self, store, movie, setting, status, row):
+        # The credit text found nothing, and Plex's own credits start too early to pass the sanity checks: the type
+        # ends with nothing found (Use ours shows it), not in review, and Plex's marker stays whatever we decide.
+        _stored_text_answer(store, movie, ())
+        reg = _plex(movie, setting, rows=({"type": "credits", "start_ms": 600_000, "end_ms": 650_000, "final": False},))
+        detectors = _Detectors()
+
+        out = _job(store, reg, movie, detectors, {"plex-1": ready_publisher()})
+
+        detectors.credits.assert_not_called()
+        assert _decision(store, movie, T.CREDITS).status is status
+        assert out.publisher_rows[0]["message"] == row
+
+    def test_an_undecided_recap_asks_no_server(self, store, media):
+        # Intro and credits are decided by chapters and the recap has nothing: Plex can't show a recap, so the check
+        # of which types it keeps its own of isn't made for it.
+        reg = _plex(media)
+        probe = test_pipeline._probe(test_pipeline.CHAPTERS_BOTH)
+        _job(store, reg, media, _Detectors(), {"plex-1": ready_publisher()}, recap=True, probe=probe)
+        before = reg.get("plex-1").get_markers.call_count
+
+        out = _job(store, reg, media, _Detectors(), {"plex-1": ready_publisher()}, recap=True, probe=probe)
+
+        assert reg.get("plex-1").get_markers.call_count == before
+        assert _decision(store, media, T.RECAP).status is DecisionStatus.NO_EVIDENCE
+        assert "recap: none" in out.message
 
 
 class TestRealPlexDatabase:

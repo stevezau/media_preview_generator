@@ -77,3 +77,29 @@ def publisher_for(
 
         return EmbyMarkerPublisher(server, config, settings, settings_provider=settings_provider)
     return None
+
+
+def supported_types_for(server_type: ServerType) -> frozenset[MarkerType]:
+    """The marker types a server of this type can show at all (its publisher's ``supported_types``).
+
+    A server has markers of its own only of these types too, so it can only keep its own of them.
+
+    Args:
+        server_type: The server's type.
+
+    Returns:
+        Those types; empty for a server type without a publisher.
+    """
+    if server_type is ServerType.PLEX:
+        from .plex_db import PlexMarkerPublisher
+
+        return PlexMarkerPublisher.supported_types
+    if server_type is ServerType.JELLYFIN:
+        from .jellyfin import JellyfinMarkerPublisher
+
+        return JellyfinMarkerPublisher.supported_types
+    if server_type is ServerType.EMBY:
+        from .emby import EmbyMarkerPublisher
+
+        return EmbyMarkerPublisher.supported_types
+    return frozenset()
