@@ -2697,6 +2697,25 @@ class TestClosingLogLines:
         env.ctx.summary_lines.assert_called_once_with({"markers_published": 1})
         assert order[-3:] == [("j1", f"INFO - {line}") for line in self.LINES] + [("j1", "completed")]
 
+    def test_a_season_job_that_took_requests_while_running_still_logs_them_then_passes_the_requests_on(self, env):
+        order = []
+        env.job.config = {"file_paths": ["/m/a.mkv"], "source": "season", job_runner.LATE_REQUESTS: {"/m/b.mkv": 7}}
+        env.ctx.summary_lines.return_value = self.LINES
+        env.ctx.ran_since.return_value = False  # its own run of b came before the request, or there was none
+        env.jm.add_log.side_effect = lambda job_id, line: order.append((job_id, line))
+        env.jm.complete_job.side_effect = lambda job_id, **kwargs: order.append((job_id, "completed"))
+        with (
+            patch.object(job_runner, "build_items", return_value=([_item()], [], {})),
+            patch("media_preview_generator.markers.triggers.create_intro_credits_job") as create,
+        ):
+            job_runner.run_intro_credits_job("j1")
+        done = order.index(("j1", "completed"))
+        assert order[done - 2 : done + 1] == [("j1", f"INFO - {line}") for line in self.LINES] + [("j1", "completed")]
+        assert any("checked again with this job's results" in line for _, line in order[done + 1 :])
+        env.ctx.ran_since.assert_called_once_with("/m/b.mkv", 7)
+        assert create.call_args.kwargs["file_paths"] == ["/m/b.mkv"]
+        assert (create.call_args.kwargs["source"], create.call_args.kwargs["priority"]) == ("season", env.job.priority)
+
     def test_lines_that_cant_be_made_leave_the_job_completed(self, env):
         env.ctx.summary_lines.side_effect = RuntimeError("boom")
         with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):

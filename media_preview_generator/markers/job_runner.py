@@ -54,7 +54,14 @@ from .outcomes import (
     ServerStatus,
 )
 from .ownership import marker_libraries
-from .pipeline import PipelineContext, budget_exhausted_warnings, build_context, cached_capability, kind_handlers
+from .pipeline import (
+    PipelineContext,
+    budget_exhausted_warnings,
+    build_context,
+    cached_capability,
+    kind_handlers,
+    sequence_number,
+)
 from .reconcile import LISTING_CONFIG_KEY, RECONCILE_SOURCE, CheckServersListing
 from .settings import load_server
 from .source_counts import DecidedByTally, stored_groups
@@ -76,11 +83,15 @@ _USER_PICKED_SOURCES = frozenset({"manual", "inspector", "inspector_season"})
 SEASON_SOURCE = "season"
 # A follow-up's config key once its runner has read its files: nothing joins it after that.
 FILES_SEALED = "files_sealed"
+# A running Season job's config keys: the episodes other jobs asked for while it ran, each with the
+# ``pipeline.sequence_number`` of the request, and, once it has passed them on, the seal that stops more joining.
+LATE_REQUESTS = "late_requests"
+LATE_SEALED = "late_requests_sealed"
 # Serialises adding files to a waiting follow-up (webhook episodes in triggers.py, Season requests here) with its runner
 # reading them, so a file joins exactly one job.
 FOLLOW_UP_LOCK = threading.Lock()
-# Config keys files join a waiting job through (``_queue_season_followups``, ``triggers._join``) or its seal writes.
-_JOINED_KEYS = ("file_paths", "webhook_item_id_hints", FILES_SEALED)
+# Config keys files join a job through (``_queue_season_followups``, ``triggers._join``) or its seals write.
+_JOINED_KEYS = ("file_paths", "webhook_item_id_hints", FILES_SEALED, LATE_REQUESTS, LATE_SEALED)
 # Job sources whose files no sender just reported: a file missing from disk won't appear by waiting (and nothing was
 # just replaced). A retry Check servers queued is one of them; its not-in-library retries still chain.
 _NO_RETRY_SOURCES = _USER_PICKED_SOURCES | {SEASON_SOURCE, RECONCILE_SOURCE}
@@ -397,40 +408,95 @@ def _season_job_name(paths: list[str]) -> str:
     return f"Season: {name}"
 
 
+def _is_season_job_taking_files(job) -> bool:
+    cfg = job.config or {}
+    if job.kind != JOB_KIND_INTRO_CREDITS or cfg.get("source") != SEASON_SOURCE:
+        return False
+    return not (cfg.get("retry_attempt") or cfg.get("verify"))
+
+
 def _waiting_season_jobs(jm) -> list:
     """Season jobs whose runner hasn't read their files yet (call under ``FOLLOW_UP_LOCK``).
 
     A file they list is decided with everything known when they run, so asking for it again adds nothing.
     """
-    waiting = []
-    for job in jm.get_pending_jobs():
-        cfg = job.config or {}
-        if job.kind != JOB_KIND_INTRO_CREDITS or cfg.get("source") != SEASON_SOURCE:
+    return [
+        job
+        for job in jm.get_pending_jobs()
+        if _is_season_job_taking_files(job) and not (job.config or {}).get(FILES_SEALED)
+    ]
+
+
+def _running_season_jobs(jm, priority: int) -> list:
+    """Running Season jobs at ``priority`` that still take requests (call under ``FOLLOW_UP_LOCK``).
+
+    Season jobs start within milliseconds of being queued, so a request that only joined waiting ones would queue a new
+    Season job for every job that finishes while one runs (spec §14, 2026-09-24).
+    """
+    return [
+        job
+        for job in jm.get_running_jobs()
+        if _is_season_job_taking_files(job) and job.priority == priority and not (job.config or {}).get(LATE_SEALED)
+    ]
+
+
+def _leave_to_running_season_jobs(jm, job, paths: list[str], priority: int) -> list[str]:
+    """Hand each file to a running Season job at ``priority`` that lists an episode of its folder (call under
+    ``FOLLOW_UP_LOCK``). The Season job runs it again once it has finished, in one follow-up, only when its own run of
+    the file started before this request (``_pass_on_late_requests``).
+
+    Returns:
+        The files no running Season job took.
+    """
+    left = list(paths)
+    for season_job in _running_season_jobs(jm, priority):
+        cfg = season_job.config or {}
+        late = dict(cfg.get(LATE_REQUESTS) or {})
+        folders = {os.path.dirname(path) for path in [*(cfg.get("file_paths") or []), *late]}
+        room = MAX_RETRY_FILES - len(late)
+        taken = [path for path in left if os.path.dirname(path) in folders][: max(0, room)]
+        if not taken:
             continue
-        if not (cfg.get(FILES_SEALED) or cfg.get("retry_attempt") or cfg.get("verify")):
-            waiting.append(job)
-    return waiting
+        number = sequence_number()
+        late.update(dict.fromkeys(taken, number))
+        if not jm.merge_job_config(season_job.id, {LATE_REQUESTS: late}):
+            continue
+        jm.add_log(
+            job.id,
+            f"INFO - {len(taken)} episode(s) of the same season are left to the running Season job "
+            f"{season_job.id[:8]}, which checks them with this job's results",
+        )
+        taken_set = set(taken)
+        left = [path for path in left if path not in taken_set]
+        if not left:
+            break
+    return left
 
 
-def _queue_season_followups(job, paths: list[str]) -> None:
+def _queue_season_followups(job, paths: list[str], *, priority: int | None = None) -> None:
     """Queue episodes of this job's seasons to be decided again (spec §5.3). Never raises.
 
-    One waiting Season job at the job's Season priority takes them when they fit; a file a waiting Season job (at any
-    priority) or a webhook follow-up that has never started already lists isn't queued again: it reads the file after
-    this job's work. Season jobs run at LOW, or at NORMAL for a webhook follow-up (the webhook rule), never ahead of the
-    job that asked; a webhook follow-up's retry or verify job queues its Season job at LOW.
+    A running Season job at the job's Season priority that lists an episode of a file's folder takes the file (it runs
+    the file again after it finishes when its own run came first: ``_pass_on_late_requests``); one waiting Season job at
+    that priority takes the rest when they fit; a file a waiting Season job (at any priority) or a webhook follow-up
+    that has never started already lists isn't queued again: it reads the file after this job's work. Season jobs run
+    at LOW, or at NORMAL for a webhook follow-up (the webhook rule), never ahead of the job that asked; a webhook
+    follow-up's retry or verify job queues its Season job at LOW.
 
     Args:
         job: The job that just finished.
         paths: Files its season steps asked about that weren't its own items, and its own items whose season audio
             answer left out a sibling it read again later (``_queue_season_followups_after``).
+        priority: The Season priority; None works it out from ``job`` as above (a Season job passing on requests
+            gives its own).
     """
     jm = get_job_manager()
     try:
         from .triggers import _queued_in_waiting_follow_ups, create_intro_credits_job
 
         cfg = job.config or {}
-        priority = max(PRIORITY_NORMAL, job.priority) if cfg.get("follows_job_id") else PRIORITY_LOW
+        if priority is None:
+            priority = max(PRIORITY_NORMAL, job.priority) if cfg.get("follows_job_id") else PRIORITY_LOW
         with FOLLOW_UP_LOCK:
             waiting = _waiting_season_jobs(jm)
             queued = {path for season_job in waiting for path in season_job.config.get("file_paths") or []}
@@ -438,6 +504,9 @@ def _queue_season_followups(job, paths: list[str]) -> None:
             fresh = sorted(set(paths) - queued)
             if not fresh:
                 jm.add_log(job.id, f"INFO - {len(paths)} episode(s) of the same season are already queued")
+                return
+            fresh = _leave_to_running_season_jobs(jm, job, fresh, priority)
+            if not fresh:
                 return
             chosen = fresh[:MAX_RETRY_FILES]
             if len(fresh) > len(chosen):
@@ -473,14 +542,44 @@ def _queue_season_followups(job, paths: list[str]) -> None:
         logger.exception("Could not queue the season follow-up for Intro & Credits job {}", job.id)
 
 
+def _pass_on_late_requests(job, ctx) -> None:
+    """A finished Season job: stop taking requests, and queue one follow-up for the files other jobs asked for while it
+    ran that its own run of them didn't read (the run started before the request, or there was none). Never raises.
+
+    Args:
+        job: The Season job.
+        ctx: Its context (``PipelineContext.ran_since``).
+    """
+    jm = get_job_manager()
+    try:
+        with FOLLOW_UP_LOCK:
+            jm.merge_job_config(job.id, {LATE_SEALED: True})
+            latest = jm.get_job(job.id)
+            late = (latest.config or {}).get(LATE_REQUESTS) if latest is not None else None
+        if not isinstance(late, dict) or not late:
+            return
+        again = sorted(path for path, number in late.items() if not ctx.ran_since(path, int(number)))
+        if again:
+            _queue_season_followups(job, again, priority=job.priority)
+        else:
+            jm.add_log(
+                job.id, f"INFO - The {len(late)} episode(s) other jobs asked for while this job ran were checked after"
+            )
+    except Exception:
+        logger.exception("Could not pass on what other jobs asked Season job {} for", job.id)
+
+
 def _queue_season_followups_after(job, cfg: dict, ctx, listed: set[str]) -> None:
     """Queue the Season job for the files this job's season steps asked about that weren't its items, and for its own
     items whose season audio answer left out a sibling changed on disk that the job read again after them.
 
-    A Season job queues none: a sibling whose answer is still out of date is asked for again by the season's next run,
-    so nothing loops.
+    A Season job queues none of its own: a sibling whose answer is still out of date is asked for again by the season's
+    next run, so nothing loops. It only passes on what other jobs asked it for while it ran (``_pass_on_late_requests``).
+    A retry whose runs changed nothing stored (``PipelineContext.answers_changed``) queues none either: whatever its
+    season steps found out of date was so before it ran, and the job that made it so queued it then.
     """
     if cfg.get("source") == SEASON_SOURCE:
+        _pass_on_late_requests(job, ctx)
         return
     paths = [path for path in ctx.take_followups() if path not in listed]
     for path in ctx.take_changed_siblings_left_out():
@@ -494,8 +593,15 @@ def _queue_season_followups_after(job, cfg: dict, ctx, listed: set[str]) -> None
             continue
         if outdated:
             paths.append(path)
-    if paths:
-        _queue_season_followups(job, paths)
+    if not paths:
+        return
+    if cfg.get("retry_attempt") and not ctx.answers_changed():
+        get_job_manager().add_log(
+            job.id,
+            f"INFO - {len(paths)} episode(s) of the same season aren't checked again: this retry changed nothing",
+        )
+        return
+    _queue_season_followups(job, paths)
 
 
 def _seal_files(jm, job_id: str, job, cfg: dict) -> dict:
@@ -1175,6 +1281,8 @@ def run_intro_credits_job(job_id: str) -> None:
                         jm.complete_job(job_id, warning=" | ".join(warnings) or None)
                     else:
                         jm.complete_job(job_id, warning=" ".join(["No files to check.", *warnings]))
+                    if cfg.get("source") == SEASON_SOURCE:
+                        _pass_on_late_requests(job, ctx)
                     sweep_store = ctx.store
                     return
                 # Webhook paths (and their retries) can arrive before the file is visible here (an import still
@@ -1207,6 +1315,8 @@ def run_intro_credits_job(job_id: str) -> None:
                         _end_chain(jm, cfg, {})
                     if replaced_before_restart and checks_replaced_later:
                         _queue_verify(job, cfg, replaced_before_restart, sender_paths)
+                    if cfg.get("source") == SEASON_SOURCE:
+                        _pass_on_late_requests(job, ctx)
                     sweep_store = ctx.store
                     return
                 waiting: dict[str, set[str]] = {}

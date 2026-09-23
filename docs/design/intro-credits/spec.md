@@ -683,8 +683,11 @@ publish_state(file_id, server_id, item_id, markers_hash, status, message, verifi
    matches cached fingerprints inline, and queues a Season job for same-season episodes outside the job whose inputs
    changed (R3). An episode alone in its season group uses up to 4 cached fingerprints of the previous season (§5.3).
    Season jobs (`Season: <show> · <season>`) run at LOW, or NORMAL when queued by a webhook follow-up (its retries and
-   verify job queue LOW); at most 500 files; new requests join a waiting Season job of the same priority; a Season job
-   never queues another. Requests live in memory: a restart only delays them until the season's next run.
+   verify job queue LOW); at most 500 files; new requests join a running Season job of the same priority holding an
+   episode of that folder, or else a waiting one; a Season job never queues another of its own, only one follow-up for
+   the requests it took while running that its own run of the file came before (§14, 2026-09-24). A retry whose runs
+   changed nothing stored queues none. Requests live in memory: a restart only delays them until the season's next
+   run.
 5. **Publish.** For each enabled owner, its `MarkerPublisher` writes the decided set; unchanged `markers_hash` → skip.
 6. **Reconcile.** After jobs = the read-back before "Up to date" and the delayed verify job (phase 1). On demand =
    **Intro & Credits · Check servers**, a LOW job the user starts from Start New Job or `POST /api/markers/reconcile`,
@@ -1987,3 +1990,29 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   replaced on disk and not checked again yet); versions that disagree leave a type in review ranked first.
   Every other case writes the item as before (the real-database tests in `test_publisher_contract.py` and
   `test_plex_db_publisher.py` are unchanged). The 12 items already waiting are published by their file's next run.
+- 2026-09-24 · **Season re-checks: one Season job per season at a time, and none for nothing** (§6.2 step 4). On the
+  owner's server, in 12 h, 63 Season jobs (a third of all Intro & Credits rows) re-decided 242 files 836 times and
+  published nothing: CSI S01 was re-checked 14 times and Daily Show S31 11 times, two pairs of Season jobs were created
+  in the same second for the same files, and every retry of a file waiting for a server queued the same 12 episodes
+  again. Three causes, three fixes:
+  - **A request only joined a Season job that hadn't started, and Season jobs start about 10 ms after they are
+    queued**, so every job that finished while one ran queued another. Now a running Season job at the request's
+    priority that lists an episode of the file's folder takes it (`LATE_REQUESTS`, each file with the
+    `pipeline.sequence_number` of its latest request). When it finishes it stops taking requests (`LATE_SEALED`, under
+    `FOLLOW_UP_LOCK`) and queues one follow-up, at its own priority, for the files whose run in it started before
+    their request, or that it didn't run (`PipelineContext.ran_since`: a worker stage reads everything again, so it
+    counts); a file it ran after the request already read that job's results. A Season job that is cancelled drops
+    what it took, as it drops its own files.
+  - **Past 40 episodes a season's files each have their own group** (the 40 nearest), and the season step compared
+    every matched sibling's answer with the new episode's own signature, which never equals it: a new Daily Show
+    episode asked again for all 39 siblings it matched, of which only the 19 whose group holds it could change
+    (`test_a_new_episode_of_a_long_season_asks_again_only_for_siblings_it_changed`). `_request_redecide` now compares
+    a sibling whose group differs with the signature its own group has with the files this run matched, as
+    `season_audio_followups` and `season_audio_answer_outdated` already did. A season of 40 episodes or fewer is
+    compared exactly as before.
+  - **A retry re-ran its file and its season steps asked again** for whatever was out of date, which its first run had
+    already queued. A retry now queues a Season job only when one of its runs changed something stored
+    (`PipelineContext.answers_changed`: a new or replaced file or re-read chapters, a local detector's answer, changed
+    decisions); otherwise it logs that it queued none. A first run is not held to this.
+  The fuzz of the queue (`test_queued_season_jobs_end_with_the_all_at_once_decisions`) still ends every season with the
+  all-at-once decisions, now with running Season jobs taking requests.

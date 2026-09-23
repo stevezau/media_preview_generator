@@ -731,11 +731,26 @@ def _intro_settled(ctx: PipelineContext, rec: FileRecord) -> bool:
     return intro.status is DecisionStatus.DECIDED and not intro_rests_on_season_audio(ctx, rec)
 
 
-def _request_redecide(ctx: PipelineContext, rec: FileRecord, members: dict[str, FileRecord], signature: str) -> None:
+def _request_redecide(
+    ctx: PipelineContext,
+    rec: FileRecord,
+    members: dict[str, FileRecord],
+    signature: str,
+    *,
+    matched: Mapping[str, FileRecord],
+) -> None:
     """Ask again for the siblings whose intro is undecided, or decided with a season audio answer, and whose answer
     was based on other season files than this run's. A sibling season audio never answered for is left alone: its own
-    run matches the whole group, and one no server takes for Intro & Credits never runs."""
+    run matches the whole group, and one no server takes for Intro & Credits never runs.
+
+    ``signature`` is this run's answer's; a sibling whose own group is another (a season of more than 40 episodes gives
+    each file its 40 nearest) is compared with the signature its own group has with the files this run ``matched``,
+    since its answer never equals this run's even when nothing it used changed.
+    """
     folder = os.path.dirname(rec.canonical_path)
+    videos: tuple[FolderVideo, ...] | None = None
+    own_group: SeasonGroup | None = None
+    on_disk: dict[str, list] = {}
     stale = []
     for path, member in members.items():
         if member.id == rec.id or os.path.dirname(path) != folder:
@@ -744,6 +759,14 @@ def _request_redecide(ctx: PipelineContext, rec: FileRecord, members: dict[str, 
         if answer is None or answer == signature:
             continue
         if _intro_settled(ctx, member):
+            continue
+        if videos is None:
+            videos = folder_videos(folder)
+            own_group = season_group(rec.canonical_path, videos)
+        group = season_group(path, videos)
+        if group.episodes != own_group.episodes and answer == _signature(
+            ctx, _signature_paths(path, group), matched, on_disk
+        ):
             continue
         stale.append(path)
     if stale:
@@ -915,7 +938,7 @@ def detect_season_audio(
 
     matched = {path: records[path] for path in points.keys() | previous_used}
     signature = _signature(ctx, _signature_paths(rec.canonical_path, group), matched)
-    _request_redecide(ctx, rec, records, signature)
+    _request_redecide(ctx, rec, records, signature, matched=matched)
     if left_out_changed:
         # The sibling's own run in this job reads it again, and its request for this file would be dropped as one of
         # the job's own items: the job asks for this file after it finishes (season_audio_answer_outdated).

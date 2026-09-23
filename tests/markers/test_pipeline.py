@@ -454,6 +454,34 @@ class TestIdentityAndProbe:
         plex.write.assert_not_called()
         assert store.get_file(media) is None
 
+    def test_only_a_run_that_stores_something_new_changes_an_answer(self, store, media):
+        # A retry that changed nothing queues no Season job (spec §14, 2026-09-24).
+        reg = _registry(media, ServerType.PLEX)
+        runs = []
+        for replace in (False, False, True):
+            if replace:
+                os.utime(media, ns=(5, 5))
+            ctx = _ctx(store, reg)
+            _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe(CHAPTERS_BOTH))
+            runs.append(ctx.answers_changed())
+        assert runs == [True, False, True]  # first run, the same file again, the file replaced
+
+    @pytest.mark.parametrize("answered", [True, False], ids=["answer-stored", "no-answer-this-time"])
+    def test_a_local_detectors_stored_answer_changes_an_answer(self, store, media, answered):
+        rec = store.upsert_file(FileIdentity(media, 100, 1), duration_ms=DUR, season_key=None, is_movie=False)
+
+        def detect(rec, **kwargs):
+            if not answered:
+                raise pipeline.DetectorUnavailableError("an earlier ffmpeg is still stuck")
+            return [Candidate(T.INTRO, 1_000, 30_000, Source.SEASON_AUDIO)]
+
+        spec = LocalDetectorSpec(source=Source.SEASON_AUDIO, types=frozenset({T.INTRO}), detect=detect)
+        ctx = _ctx(store, _registry(media, ServerType.PLEX), detectors=(spec,))
+        pipeline._run_detector(
+            ctx, rec, spec, gpu=None, gpu_device_path=None, phase=lambda _t: None, cancel_check=None, pause_check=None
+        )
+        assert ctx.answers_changed() is answered
+
     def test_probe_uses_the_context_ffprobe(self, store, media):
         reg = _registry(media, ServerType.PLEX)
         ctx = _ctx(store, reg)

@@ -13,6 +13,7 @@ another detector that has to run at the same source needs one: detectors at one 
 
 from __future__ import annotations
 
+import itertools
 import os
 import stat
 import threading
@@ -133,6 +134,20 @@ _CANCELLED = "cancelled by user"
 PLEX_PASS_UNKNOWN_TTL_S = 5.0
 # Answers read from the saved settings alone: cheap, and wrong the moment the user saves, so never reused.
 _SETTINGS_ANSWERS = frozenset({Capability.DISABLED, Capability.NEEDS_CONFIRMATION})
+_SEQUENCE = itertools.count(1)
+_SEQUENCE_LOCK = threading.Lock()
+
+
+def sequence_number() -> int:
+    """A number larger than every one handed out before in this process: which of two events came first (a file's run
+    starting, another job asking for that file to be run again).
+
+    Returns:
+        The next number.
+    """
+    with _SEQUENCE_LOCK:
+        return next(_SEQUENCE)
+
 
 # The Inspector editor's publish (``publish_now``) runs inside a web request on one of eight gunicorn threads, so it is
 # bounded (ruling P-R1). Each server's own HTTP calls are capped by ``ServerConfig.timeout``, which the route shortens
@@ -338,6 +353,11 @@ class PipelineContext:
     _sent: dict[str, int] = field(default_factory=dict, repr=False)
     _seasons: dict[str, list[SeasonEpisode]] = field(default_factory=dict, repr=False)
     _summary_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # Per file: the ``sequence_number`` its latest run of this job started at (``ran_since``).
+    _run_started: dict[str, int] = field(default_factory=dict, repr=False)
+    # Whether any run of this job stored an answer, decision or file identity that differs from before
+    # (``answers_changed``).
+    _answers_changed: bool = field(default=False, repr=False)
 
     def run_memo(self, canonical_path: str) -> dict[str, Any]:
         """Values the current run of a file reads once and reuses (a detector's folder listing and due answer).
@@ -353,10 +373,39 @@ class PipelineContext:
             owner = self._run_memos.get(canonical_path)
         return owner[1] if owner is not None and owner[0] == threading.get_ident() else {}
 
+    def ran_since(self, canonical_path: str, number: int) -> bool:
+        """Whether this job's latest run of a file started after ``number`` was handed out, so it read everything stored
+        before then (a worker stage reads everything again, so it counts as a run).
+
+        Args:
+            canonical_path: The file.
+            number: A ``sequence_number``.
+
+        Returns:
+            False when the file wasn't run since, or not at all.
+        """
+        with self._run_memos_guard:
+            return self._run_started.get(canonical_path, 0) > number
+
+    def note_answer_changed(self) -> None:
+        """Remember that a run of this job stored something new about its file (``answers_changed``)."""
+        self._answers_changed = True
+
+    def answers_changed(self) -> bool:
+        """Whether a run of this job changed what is stored about its file: its identity or chapters, a local
+        detector's answer, or its decisions. A job that changed none of them can't have left a sibling's answer out of
+        date.
+
+        Returns:
+            True once any run did.
+        """
+        return self._answers_changed
+
     @contextmanager
     def _running(self, canonical_path: str) -> Iterator[None]:
         with self._run_memos_guard:
             self._run_memos[canonical_path] = (threading.get_ident(), {})
+            self._run_started[canonical_path] = sequence_number()
         try:
             yield
         finally:
@@ -1042,6 +1091,7 @@ def _run_detector(
         version=spec.answer_version(rec, ctx),
         run=(spec.source, answer.signature) if isinstance(answer, DetectorAnswer) else None,
     )
+    ctx.note_answer_changed()
     return None
 
 
@@ -2012,6 +2062,8 @@ def _attempt(
     )
     if confirmed_kind is not None:
         ctx.store.set_server_kind(rec.id, confirmed_kind)
+    if not unchanged or probe is not None:
+        ctx.note_answer_changed()
     if probe is not None:
         # The episode-only chapter names read the kind from the PATH, not the resolved kind: the path is
         # part of the file's identity, so stored candidates can never disagree with it, while a resolved
@@ -2167,6 +2219,7 @@ def _attempt(
     changed = _decisions_changed(ctx.store, rec.id, decisions, fingerprint)
     if changed:
         ctx.store.save_decisions(rec.id, decisions, settings_fingerprint=fingerprint)
+        ctx.note_answer_changed()
     if ctx.store.get_intro_chapter_limit(rec.id) != (True, intro_limit):
         ctx.store.set_intro_chapter_limit(rec.id, intro_limit)
     markers = ctx.store.get_markers(rec.id)

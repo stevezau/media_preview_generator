@@ -2350,8 +2350,31 @@ class TestAnswersRestingOnSeasonAudio:
         if state in ("undecided", "kept-own"):
             # The two other predicates on the same conditions: after a job, and a run re-deciding its siblings.
             assert season.season_audio_answer_outdated(ctx, e2) is listed
-            season._request_redecide(ctx, recs[e1], {e2: sibling}, "newer")
+            season._request_redecide(ctx, recs[e1], {e2: sibling}, "newer", matched={})
             assert ctx.take_followups() == ([e2] if listed else [])
+
+    def test_a_new_episode_of_a_long_season_asks_again_only_for_siblings_it_changed(self, store, show):
+        # Found on the owner's server (Daily Show S31, re-checked 11 times in 12 h, publishing nothing): past 40
+        # episodes each file's group is its own 40 nearest, so a sibling's answer never equals the new episode's and
+        # every sibling it matched was asked again, including the 20 whose group doesn't hold it.
+        def points(path):
+            key = re.search(r"S\d\dE\d\d", path).group(0)
+            body = noise(zlib.crc32(key.encode()), N_POINTS)
+            body[300:540] = INTRO
+            return body
+
+        paths = show(1, 45)
+        with _Audio(points=points):
+            for path in paths:
+                _run(_season_ctx(store, path), path, {"plex-1": ready_publisher()}, stage="process")
+            assert not any(season.season_audio_answer_outdated(_season_ctx(store, p), p) for p in paths)
+            new = show(1, 46)[-1]
+            ctx = _season_ctx(store, new)
+            _run(ctx, new, {"plex-1": ready_publisher()}, stage="process")
+        requested = ctx.take_followups()
+        outdated = [p for p in paths if season.season_audio_answer_outdated(_season_ctx(store, p), p)]
+        assert len(outdated) == 19  # E27..E45 hold E46 in their group; E07..E26, also in E46's, don't
+        assert requested == outdated
 
 
 FUZZ_SEASONS, FUZZ_CHUNKS = 120, 4

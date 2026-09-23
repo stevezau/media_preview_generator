@@ -10,7 +10,7 @@ import threading
 import time
 from random import Random
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -157,6 +157,28 @@ class TestSeasonFollowUpJob:
         env.job.config = {"file_paths": [ep(S1, 1)], "source": "season"}
         create = self._run(env, [_item(ep(S1, 1))], [ep(S1, 2)])
         create.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("config", "changed", "queued"),
+        [
+            ({"source": "sonarr", "retry_attempt": 1}, False, False),
+            ({"source": "sonarr", "retry_attempt": 2}, True, True),
+            ({"source": "sonarr"}, False, True),  # only a retry is held to it: the first run asked on real grounds
+        ],
+        ids=["retry-changed-nothing", "retry-changed-an-answer", "first-run"],
+    )
+    def test_a_retry_queues_a_season_job_only_when_its_run_changed_an_answer(self, env, config, changed, queued):
+        # Found on the owner's server: each retry of a file waiting for a server queued the same 12 episodes again.
+        env.job.config = {"file_paths": [ep(S1, 3)], **config}
+        env.ctx.answers_changed.return_value = changed
+        create = self._run(env, [_item(ep(S1, 3))], [ep(S1, 1), ep(S1, 2)])
+        logs = [c.args[1] for c in env.jm.add_log.call_args_list]
+        if queued:
+            create.assert_called_once()
+            assert create.call_args.kwargs["file_paths"] == [ep(S1, 1), ep(S1, 2)]
+        else:
+            create.assert_not_called()
+            assert "INFO - 2 episode(s) of the same season aren't checked again: this retry changed nothing" in logs
 
     def test_a_cancelled_job_queues_nothing(self, env):
         env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "cancelled": True}
@@ -403,6 +425,28 @@ def _season_jobs(jm):
     return [j for j in jm.get_all_jobs() if (j.config or {}).get("source") == "season"]
 
 
+@pytest.fixture
+def starting_queue(queue, monkeypatch):
+    """``queue`` with every created job started at once, as a free slot starts a Season job within milliseconds."""
+    monkeypatch.setattr(triggers, "start_intro_credits_job_async", queue.start_job)
+    return queue
+
+
+def _runs(*paths, ctx=None):
+    """A Season job's context that ran ``paths`` (in order, now)."""
+    ctx = ctx or _ctx(None, MagicMock())
+    for path in paths:
+        with ctx._running(path):
+            pass
+    return ctx
+
+
+def _season_job_ends(jm, season_job, ctx, *, complete=True):
+    if complete:
+        jm.complete_job(season_job.id)
+    job_runner._queue_season_followups_after(season_job, season_job.config, ctx, set(season_job.config["file_paths"]))
+
+
 class TestNoDuplicateSeasonJobs:
     def test_two_jobs_in_a_row_over_one_season_queue_one_season_job_holding_the_union(self, queue):
         job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 1), ep(S1, 3)])
@@ -411,16 +455,76 @@ class TestNoDuplicateSeasonJobs:
         assert season_job.config["file_paths"] == [ep(S1, 1), ep(S1, 2), ep(S1, 3)]
         assert season_job.priority == 3 and season_job.status is JobStatus.PENDING
 
-    def test_a_file_a_running_season_job_already_read_waits_for_the_next_season_job(self, queue):
+    def test_a_file_a_running_season_job_already_ran_is_run_again_by_one_follow_up_after_it(self, queue):
         job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 1), ep(S1, 2)])
         (running,) = _season_jobs(queue)
         queue.start_job(running.id)
         job_runner._seal_files(queue, running.id, running, running.config)
+        ctx = _runs(ep(S1, 1), ep(S1, 2))  # it runs both before the next two requests
         job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 2)])
         job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 2), ep(S1, 3)])
+        assert [j.id for j in _season_jobs(queue)] == [running.id]  # left to the running job
         assert running.config["file_paths"] == [ep(S1, 1), ep(S1, 2)]
+        _season_job_ends(queue, running, ctx)
         (_, following) = _season_jobs(queue)
         assert following.config["file_paths"] == [ep(S1, 2), ep(S1, 3)]
+        assert (following.priority, following.status) == (3, JobStatus.PENDING)
+
+    def test_duplicate_requests_in_the_same_second_queue_one_season_job(self, starting_queue):
+        # Found on the owner's server: pairs of Season jobs created in the same second for the same files.
+        paths = [ep(S1, 1), ep(S1, 2)]
+        job_runner._queue_season_followups(_finished_job(starting_queue), paths)
+        job_runner._queue_season_followups(_finished_job(starting_queue), paths)  # the first already started
+        (season_job,) = _season_jobs(starting_queue)
+        assert season_job.status is JobStatus.RUNNING
+        ctx = _runs(*paths)  # it runs them after both requests
+        _season_job_ends(starting_queue, season_job, ctx)
+        assert [j.id for j in _season_jobs(starting_queue)] == [season_job.id]
+
+    def test_episodes_arriving_one_after_another_while_a_season_job_runs_queue_at_most_one_follow_up(
+        self, starting_queue
+    ):
+        job_runner._queue_season_followups(_finished_job(starting_queue), [ep(S1, e) for e in range(2, 6)])
+        (season_job,) = _season_jobs(starting_queue)
+        ctx = _runs(ep(S1, 2), ep(S1, 3))
+        for arrived in (6, 7, 8):  # each new episode's job asks for the episodes before it
+            job_runner._queue_season_followups(_finished_job(starting_queue), [ep(S1, e) for e in range(2, arrived)])
+        assert [j.id for j in _season_jobs(starting_queue)] == [season_job.id]
+        _runs(ep(S1, 4), ep(S1, 5), ctx=ctx)  # read after every request: not run again
+        _season_job_ends(starting_queue, season_job, ctx)
+        (_, following) = _season_jobs(starting_queue)
+        assert following.config["file_paths"] == [ep(S1, 2), ep(S1, 3), ep(S1, 6), ep(S1, 7)]
+        assert following.status is JobStatus.RUNNING
+        # The follow-up takes what arrives while it runs in turn; nothing joins the finished job.
+        job_runner._queue_season_followups(_finished_job(starting_queue), [ep(S1, 8)])
+        assert len(_season_jobs(starting_queue)) == 2
+        assert following.config[job_runner.LATE_REQUESTS].keys() == {ep(S1, 8)}
+        assert ep(S1, 8) not in season_job.config[job_runner.LATE_REQUESTS]
+
+    def test_a_running_season_job_takes_only_episodes_of_its_own_seasons_at_its_priority(self, starting_queue):
+        job_runner._queue_season_followups(_finished_job(starting_queue), [ep(S1, 1)])
+        (running,) = _season_jobs(starting_queue)
+        job_runner._queue_season_followups(_finished_job(starting_queue), [ep(S1, 2), ep(S2, 1)])
+        job_runner._queue_season_followups(
+            _finished_job(starting_queue, priority=2, follows="prev-1"), [ep(S1, 3)]
+        )  # a webhook follow-up's Season job runs at NORMAL
+        assert running.config[job_runner.LATE_REQUESTS].keys() == {ep(S1, 2)}
+        others = sorted((j.priority, tuple(j.config["file_paths"])) for j in _season_jobs(starting_queue))
+        assert others == [(2, (ep(S1, 3),)), (3, (ep(S1, 1),)), (3, (ep(S2, 1),))]
+        # The NORMAL one passes a NORMAL request on at NORMAL.
+        (normal,) = [j for j in _season_jobs(starting_queue) if j.priority == 2]
+        job_runner._queue_season_followups(_finished_job(starting_queue, priority=2, follows="prev-4"), [ep(S1, 4)])
+        _season_job_ends(starting_queue, normal, _runs())
+        (follow_up,) = [j for j in _season_jobs(starting_queue) if j.config["file_paths"] == [ep(S1, 4)]]
+        assert follow_up.priority == 2
+
+    def test_a_season_job_that_passed_its_requests_on_takes_no_more(self, starting_queue):
+        job_runner._queue_season_followups(_finished_job(starting_queue), [ep(S1, 1)])
+        (first,) = _season_jobs(starting_queue)
+        _season_job_ends(starting_queue, first, _runs(ep(S1, 1)), complete=False)  # sealed before it shows completed
+        job_runner._queue_season_followups(_finished_job(starting_queue), [ep(S1, 1)])
+        assert job_runner.LATE_REQUESTS not in first.config
+        assert len(_season_jobs(starting_queue)) == 2
 
     def test_a_file_already_waiting_at_another_priority_is_not_queued_twice(self, queue):
         job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 1)])
