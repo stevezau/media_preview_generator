@@ -2091,6 +2091,64 @@ class PlexServer(MediaServer):
                 results.append((bundle_hash, file_path))
         return results
 
+    def get_item_chapters(self, item_id: str) -> list[tuple[int, int]]:
+        """Return ``(chapter_index, start_offset_ms)`` for every chapter on an item.
+
+        Plex-specific helper used by :class:`PlexBundleAdapter` to generate
+        chapter thumbnail images. Chapter data is only present on the *full*
+        item metadata (``/library/metadata/{id}``) — the batch listing
+        ``section.search()`` uses for full-library enumeration does not
+        include ``<Chapter>`` elements (confirmed empirically: a live
+        library's full ``/library/sections/{id}/all`` response had zero
+        ``<Chapter>`` tags despite several items having Plex-generated
+        chapter thumbnails on disk). So unlike ``get_bundle_metadata``,
+        which can be served from prefetched enumeration data, this always
+        costs one network round-trip per item — acceptable because it's
+        only paid for items that actually have chapters (most TV episodes
+        have none and this fetch is skipped upstream).
+
+        ``item_id`` accepts either a bare ratingKey or a full
+        ``/library/metadata/<id>`` path, normalised the same way as
+        ``get_bundle_metadata`` (see D31).
+
+        Returns an empty list when the item has no chapters or the lookup
+        fails — callers treat both cases identically (nothing to publish).
+        """
+        from ..plex_client import retry_plex_call
+
+        item_id_str = str(item_id or "").strip()
+        bare_id = item_id_str.rsplit("/", 1)[-1] if item_id_str else ""
+        if not bare_id:
+            logger.warning("Plex chapter lookup called with empty item_id; skipping")
+            return []
+
+        try:
+            data = retry_plex_call(self._connect().query, f"/library/metadata/{bare_id}")
+        except Exception as exc:
+            logger.warning(
+                "Plex metadata query failed while fetching chapters for item {!r} ({}: {}). "
+                "Chapter thumbnails will be skipped for this item this run.",
+                bare_id,
+                type(exc).__name__,
+                exc,
+            )
+            return []
+
+        results: list[tuple[int, int]] = []
+        for chapter in data.findall(".//Chapter"):
+            index_raw = chapter.attrib.get("index")
+            start_raw = chapter.attrib.get("startTimeOffset")
+            if index_raw is None or start_raw is None:
+                continue
+            try:
+                index = int(index_raw)
+                start_ms = int(start_raw)
+            except ValueError:
+                continue
+            results.append((index, start_ms))
+        results.sort(key=lambda pair: pair[0])
+        return results
+
     def parse_webhook(self, payload: dict[str, Any] | bytes, headers: dict[str, str]) -> WebhookEvent | None:
         """Normalise a Plex webhook payload to a :class:`WebhookEvent`.
 

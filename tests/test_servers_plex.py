@@ -504,7 +504,10 @@ class TestListItems:
         movie.key = "/library/metadata/99"
         movie.ratingKey = 99
         movie.title = "Foo (2024)"
-        movie.locations = ["/data/Foo (2024)/Foo-1080p.mkv", "/data/Foo (2024)/Foo-2160p.mkv"]
+        movie.locations = [
+            "/data/Foo (2024)/Foo-1080p.mkv",
+            "/data/Foo (2024)/Foo-2160p.mkv",
+        ]
         movie.media = [
             _media("hash1080", "/data/Foo (2024)/Foo-1080p.mkv"),
             _media("hash4k", "/data/Foo (2024)/Foo-2160p.mkv"),
@@ -530,7 +533,16 @@ class TestListItems:
         """#268, episode side: multi-version episodes must also fan out per version."""
         wrapper = PlexServer(mock_config)
         ep = MagicMock(
-            spec=["key", "ratingKey", "title", "grandparentTitle", "parentIndex", "index", "locations", "media"]
+            spec=[
+                "key",
+                "ratingKey",
+                "title",
+                "grandparentTitle",
+                "parentIndex",
+                "index",
+                "locations",
+                "media",
+            ]
         )
         ep.key = "/library/metadata/7"
         ep.ratingKey = 7
@@ -917,6 +929,93 @@ class TestGetBundleMetadata:
         plex.query.assert_not_called()
 
 
+class TestGetItemChapters:
+    """get_item_chapters is the chapter-thumbnails feature's path to Plex's
+    per-item chapter list. Uses /library/metadata/{id} (the full item), NOT
+    /tree — confirmed empirically that Plex's batch library listing omits
+    <Chapter> entirely, so this is always a per-item round-trip."""
+
+    def _xml_with_chapters(self, chapters: list[tuple[int, int]]):
+        from xml.etree import ElementTree as ET
+
+        chapter_tags = "".join(
+            f'<Chapter index="{index}" startTimeOffset="{start_ms}" />' for index, start_ms in chapters
+        )
+        return ET.fromstring(f"<MediaContainer><Video>{chapter_tags}</Video></MediaContainer>")
+
+    def test_bare_rating_key_builds_correct_url(self, plex_wrapper):
+        plex = MagicMock()
+        plex.query.return_value = self._xml_with_chapters([(1, 0), (2, 120000)])
+        plex_wrapper._plex = plex
+
+        result = plex_wrapper.get_item_chapters("557676")
+
+        plex.query.assert_called_once_with("/library/metadata/557676")
+        assert result == [(1, 0), (2, 120000)]
+
+    def test_full_path_form_does_not_double_the_prefix(self, plex_wrapper):
+        plex = MagicMock()
+        plex.query.return_value = self._xml_with_chapters([(1, 0)])
+        plex_wrapper._plex = plex
+
+        plex_wrapper.get_item_chapters("/library/metadata/557676")
+
+        plex.query.assert_called_once_with("/library/metadata/557676")
+        called_url = plex.query.call_args.args[0]
+        assert "//library/metadata" not in called_url
+        assert called_url.count("/library/metadata/") == 1
+
+    def test_returns_chapters_sorted_by_index(self, plex_wrapper):
+        plex = MagicMock()
+        # Deliberately out of order in the XML.
+        plex.query.return_value = self._xml_with_chapters([(3, 300000), (1, 0), (2, 120000)])
+        plex_wrapper._plex = plex
+
+        result = plex_wrapper.get_item_chapters("12345")
+
+        assert result == [(1, 0), (2, 120000), (3, 300000)]
+
+    def test_no_chapters_returns_empty_list(self, plex_wrapper):
+        from xml.etree import ElementTree as ET
+
+        plex = MagicMock()
+        plex.query.return_value = ET.fromstring("<MediaContainer><Video /></MediaContainer>")
+        plex_wrapper._plex = plex
+
+        assert plex_wrapper.get_item_chapters("12345") == []
+
+    def test_skips_chapters_missing_required_attributes(self, plex_wrapper):
+        from xml.etree import ElementTree as ET
+
+        plex = MagicMock()
+        plex.query.return_value = ET.fromstring(
+            "<MediaContainer><Video>"
+            '<Chapter index="1" />'  # missing startTimeOffset
+            '<Chapter startTimeOffset="5000" />'  # missing index
+            '<Chapter index="not-a-number" startTimeOffset="5000" />'  # unparsable
+            '<Chapter index="2" startTimeOffset="5000" />'
+            "</Video></MediaContainer>"
+        )
+        plex_wrapper._plex = plex
+
+        assert plex_wrapper.get_item_chapters("12345") == [(2, 5000)]
+
+    def test_query_failure_returns_empty_list(self, plex_wrapper):
+        plex = MagicMock()
+        plex.query.side_effect = Exception("(404) not_found")
+        plex_wrapper._plex = plex
+
+        assert plex_wrapper.get_item_chapters("12345") == []
+
+    def test_empty_item_id_returns_empty_without_query(self, plex_wrapper):
+        plex = MagicMock()
+        plex_wrapper._plex = plex
+
+        assert plex_wrapper.get_item_chapters("") == []
+        assert plex_wrapper.get_item_chapters(None) == []  # type: ignore[arg-type]
+        plex.query.assert_not_called()
+
+
 class TestTriggerRefresh:
     def test_dispatches_to_partial_scan(self, plex_wrapper):
         with patch("media_preview_generator.plex_client.trigger_plex_partial_scan") as scan:
@@ -1030,7 +1129,10 @@ class TestPlexSettingsHealth:
 
     def test_empty_on_request_failure(self, plex_wrapper):
         # Plex unreachable → empty list (UI renders "unavailable", not "all good").
-        with patch("media_preview_generator.servers.plex.requests.get", side_effect=RuntimeError("offline")):
+        with patch(
+            "media_preview_generator.servers.plex.requests.get",
+            side_effect=RuntimeError("offline"),
+        ):
             assert plex_wrapper.check_settings_health() == []
 
 
@@ -1104,7 +1206,13 @@ class TestPlexApplyFlagValues:
         literal — not just 'toward recommended'."""
         with patch("media_preview_generator.servers.plex.requests.put") as put:
             put.return_value = MagicMock(raise_for_status=MagicMock())
-            targets = [{"flag": "FSEventLibraryUpdatesEnabled", "value": False, "library_ids": None}]
+            targets = [
+                {
+                    "flag": "FSEventLibraryUpdatesEnabled",
+                    "value": False,
+                    "library_ids": None,
+                }
+            ]
             results = plex_wrapper.apply_flag_values(targets)
 
         assert results == {":FSEventLibraryUpdatesEnabled": "ok"}
@@ -1301,14 +1409,23 @@ class TestPlexPreviewsReadiness:
             patch.object(PlexServer, "get_vendor_extraction_status") as vs,
         ):
             tc.return_value = ConnectionResult(
-                ok=True, server_id="m", server_name="Plex", version="1.40.0.0", message="Connected"
+                ok=True,
+                server_id="m",
+                server_name="Plex",
+                version="1.40.0.0",
+                message="Connected",
             )
             prefs_get.return_value = self._prefs_response(
                 FSEventLibraryUpdatesEnabled=True,
                 FSEventLibraryPartialScanEnabled=True,
                 ScheduledLibraryUpdatesEnabled=True,
             )
-            vs.return_value = {"extracting_count": 0, "stopped_count": 2, "skipped_count": 0, "total": 2}
+            vs.return_value = {
+                "extracting_count": 0,
+                "stopped_count": 2,
+                "skipped_count": 0,
+                "total": 2,
+            }
 
             payload = plex_wrapper.previews_readiness()
 
@@ -1343,9 +1460,18 @@ class TestPlexPreviewsReadiness:
         with (
             patch("builtins.open", side_effect=AssertionError("probe must not open files")),
             patch("os.makedirs", side_effect=AssertionError("probe must not create dirs")),
-            patch("tempfile.TemporaryFile", side_effect=AssertionError("probe must not use tempfile")),
-            patch("tempfile.NamedTemporaryFile", side_effect=AssertionError("probe must not use NamedTemporaryFile")),
-            patch("tempfile.mkstemp", side_effect=AssertionError("probe must not use mkstemp")),
+            patch(
+                "tempfile.TemporaryFile",
+                side_effect=AssertionError("probe must not use tempfile"),
+            ),
+            patch(
+                "tempfile.NamedTemporaryFile",
+                side_effect=AssertionError("probe must not use NamedTemporaryFile"),
+            ),
+            patch(
+                "tempfile.mkstemp",
+                side_effect=AssertionError("probe must not use mkstemp"),
+            ),
             patch("os.chmod", side_effect=AssertionError("probe must not chmod")),
             patch.object(PlexServer, "test_connection") as tc,
             patch("media_preview_generator.servers.plex.requests.get") as prefs_get,
@@ -1353,7 +1479,12 @@ class TestPlexPreviewsReadiness:
         ):
             tc.return_value = ConnectionResult(ok=True, message="Connected")
             prefs_get.return_value = self._prefs_response()
-            vs.return_value = {"extracting_count": 0, "stopped_count": 0, "skipped_count": 0, "total": 0}
+            vs.return_value = {
+                "extracting_count": 0,
+                "stopped_count": 0,
+                "skipped_count": 0,
+                "total": 0,
+            }
 
             payload = plex_wrapper.previews_readiness()
 
@@ -1372,7 +1503,12 @@ class TestPlexPreviewsReadiness:
         ):
             tc.return_value = ConnectionResult(ok=True, message="Connected")
             prefs_get.return_value = self._prefs_response()
-            vs.return_value = {"extracting_count": 0, "stopped_count": 0, "skipped_count": 0, "total": 0}
+            vs.return_value = {
+                "extracting_count": 0,
+                "stopped_count": 0,
+                "skipped_count": 0,
+                "total": 0,
+            }
 
             payload = plex_wrapper.previews_readiness()
 
@@ -1403,7 +1539,12 @@ class TestPlexPreviewsReadiness:
                 FSEventLibraryPartialScanEnabled=True,
                 ScheduledLibraryUpdatesEnabled=True,
             )
-            vs.return_value = {"extracting_count": 0, "stopped_count": 0, "skipped_count": 0, "total": 0}
+            vs.return_value = {
+                "extracting_count": 0,
+                "stopped_count": 0,
+                "skipped_count": 0,
+                "total": 0,
+            }
 
             payload = plex_wrapper.previews_readiness()
 
@@ -1491,14 +1632,23 @@ class TestPlexPreviewsReadiness:
         # Per-library scope on both actions — server-wide here would
         # silently mass-toggle siblings, which is exactly the bug the
         # promotion is meant to fix.
-        assert movies["actions"]["disable"]["args"] == {"scan_extraction": False, "library_ids": ["1"]}
-        assert movies["actions"]["enable"]["args"] == {"scan_extraction": True, "library_ids": ["1"]}
+        assert movies["actions"]["disable"]["args"] == {
+            "scan_extraction": False,
+            "library_ids": ["1"],
+        }
+        assert movies["actions"]["enable"]["args"] == {
+            "scan_extraction": True,
+            "library_ids": ["1"],
+        }
 
         tv = next(c for c in vendor["checks"] if c["label"].startswith("TV"))
         assert tv["ok"] is True
         assert tv["current"] is False
         assert tv["recommended"] is False
-        assert tv["actions"]["disable"]["args"] == {"scan_extraction": False, "library_ids": ["2"]}
+        assert tv["actions"]["disable"]["args"] == {
+            "scan_extraction": False,
+            "library_ids": ["2"],
+        }
 
         skipped = next(c for c in vendor["checks"] if c["id"].startswith("vendor_extraction_skipped"))
         # Custom-agent libraries surface as one Recommended row per
