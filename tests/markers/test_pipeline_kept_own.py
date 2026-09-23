@@ -608,3 +608,41 @@ class TestSeasonChapterFollowUps:
         pipeline._request_season_chapter_followups(ctx, {media: None})
 
         assert ctx.take_followups() == ([media] if asked else [])
+
+
+class TestSeasonAudioBesidePlexsOwnIntro:
+    """Season audio and Plex's own intro are never two agreeing sources (ruling G3: Plex's detection matches audio too).
+    An agreeing one doesn't hold season audio back (2026-09-24, "use the file check if nothing else"), a disagreeing
+    one sends the intro to review, and "Keep Plex's" still leaves the intro to Plex without reading the file."""
+
+    AUDIO_ONLY = Marker(T.INTRO, AUDIO_INTRO.start_ms, AUDIO_INTRO.end_ms, ("season_audio",))
+
+    def test_an_agreeing_plex_intro_lets_season_audio_decide_as_if_alone(self, store, media):
+        plex = ready_publisher()
+        _job(store, _plex(media, setting="restore", rows=(PLEX_INTRO,)), media, _Detectors(), {"plex-1": plex})
+
+        intro = _decision(store, media, T.INTRO)
+        assert (intro.status, intro.reason) == (DecisionStatus.DECIDED, "single source (season_audio)")
+        assert store.get_markers(store.get_file(media).id)[T.INTRO] == self.AUDIO_ONLY
+        assert [m for m in plex.write.call_args.args[1] if m.type is T.INTRO] == [self.AUDIO_ONLY]
+
+    def test_a_disagreeing_plex_intro_needs_review(self, store, media):
+        plex = ready_publisher()
+        late_end = {**PLEX_INTRO, "end_ms": 170_000}
+        _job(store, _plex(media, setting="restore", rows=(late_end,)), media, _Detectors(), {"plex-1": plex})
+
+        intro = _decision(store, media, T.INTRO)
+        assert (intro.status, intro.reason) == (
+            DecisionStatus.NEEDS_REVIEW,
+            "sources disagree: season_audio, server_markers",
+        )
+        assert [m for m in plex.write.call_args.args[1] if m.type is T.INTRO] == []
+
+    def test_keep_plexs_still_leaves_the_intro_to_plex_unread(self, store, media):
+        detectors = _Detectors()
+        plex = ready_publisher()
+        _job(store, _plex(media, rows=(PLEX_INTRO,)), media, detectors, {"plex-1": plex})
+
+        detectors.intro.assert_not_called()
+        intro = _decision(store, media, T.INTRO)
+        assert (intro.status, intro.reason) == (DecisionStatus.DISABLED, KEPT_PLEX)

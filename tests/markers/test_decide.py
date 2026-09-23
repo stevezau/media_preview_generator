@@ -2004,7 +2004,14 @@ def _ref_decide_type(mtype, cands, x):
             return c.source not in _REF_AGREEMENT_ONLY and (mtype in _REF_START_TYPES or c.source is not S.SKIPDB)
 
         proposal = next((c for c in ranked if may_decide_alone(c)), None)
-        if x.publish_when != "medium" or proposal is None or len(groups) > 1:
+        own = [c for c in sane if proposal is not None and _ref_group(c) == _ref_group(proposal)]
+        rest = [c for c in sane if proposal is None or _ref_group(c) != _ref_group(proposal)]
+        # G3 with the owner's rule of 2026-09-24: servers' own markers agreeing with season audio are no second source,
+        # but they don't hold it back either.
+        only_agreeing_servers = all(c.source in _REF_SERVER for c in rest) and all(
+            _ref_agree(o, c, d) for o in rest for c in own
+        )
+        if x.publish_when != "medium" or proposal is None or not only_agreeing_servers:
             disagree = any(
                 _ref_group(a) != _ref_group(b) and not _ref_agree(a, b, d) for a, b in itertools.combinations(sane, 2)
             )
@@ -2021,9 +2028,9 @@ def _ref_decide_type(mtype, cands, x):
                 held = x.publish_when != "medium" and proposal is not None
                 reason = _ref_lone_reason(mtype, kinds, ranked[0].source, high_held_it=held)
             return review(_ref_own_marker(ranked[0], x), reason)
-        if not all(_ref_agree(a, b, d) for a, b in itertools.combinations(sane, 2)):
+        if not all(_ref_agree(a, b, d) for a, b in itertools.combinations(own, 2)):
             return review(_ref_own_marker(proposal, x), "source disagrees with itself")
-        result, _ = _ref_shorter(mtype, _ref_value(proposal, d), sane, x, {proposal.source})
+        result, _ = _ref_shorter(mtype, _ref_value(proposal, d), own, x, {proposal.source})
         if not _ref_is_sane(Candidate(mtype, result.start_ms, result.end_ms, proposal.source), x):
             return review(_ref_own_marker(proposal, x), "sources disagree on the other edge")
         reason = f"single source ({proposal.source.value})"
@@ -2459,18 +2466,52 @@ class TestSeasonAudioSources:
         # The agreed end comes from the first agreeing source in the user's order (SkipDB), the start is the later one.
         assert (d.marker.start_ms, d.marker.end_ms) == (127_000, 158_800)
 
-    @pytest.mark.parametrize("publish_when", ["high", "medium"])
+    @pytest.mark.parametrize("server", [S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED])
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_season_audio_with_an_agreeing_server_marker_decides_as_if_alone(self, server, reverse):
+        # G3: a server's own intro detection matches audio too, so it is no second source, but it doesn't hold season
+        # audio back either (2026-09-24): the intro is season audio's own, credited to it alone, and not "agreed".
+        c = [
+            Candidate(MarkerType.INTRO, 126_000, 157_000, S.SEASON_AUDIO, 1.0, "9/9"),
+            Candidate(MarkerType.INTRO, 130_000, 158_000, server, 1.0, "plex-1"),
+        ]
+        d = decide(c[::-1] if reverse else c, self._ctx("medium"), {})[MarkerType.INTRO]
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "single source (season_audio)")
+        assert d.marker == Marker(MarkerType.INTRO, 126_000, 157_000, ("season_audio",))
+
+    def test_the_single_source_rule_lets_only_markers_on_servers_stand_beside_it(self):
+        # decide() takes an agreeing IntroDB to the agreement rule first; the single-source rule must not count it.
+        from media_preview_generator.markers.decide import _decide_from_single_source
+
+        c = [
+            Candidate(MarkerType.INTRO, 126_000, 157_000, S.SEASON_AUDIO, 1.0, "9/9"),
+            Candidate(MarkerType.INTRO, 125_000, 158_000, S.INTRODB),
+        ]
+        d = _decide_from_single_source(MarkerType.INTRO, c, self._ctx("medium"))
+        assert (d.status, d.marker) == (DecisionStatus.NEEDS_REVIEW, None)
+
+    def test_season_audio_with_a_disagreeing_server_marker_needs_review(self):
+        c = [
+            Candidate(MarkerType.INTRO, 126_000, 157_000, S.SEASON_AUDIO, 1.0, "9/9"),
+            Candidate(MarkerType.INTRO, 126_000, 170_000, S.SERVER_MARKERS, 1.0, "plex-1"),
+        ]
+        d = decide(c, self._ctx("medium"), {})[MarkerType.INTRO]
+        assert (d.status, d.marker) == (DecisionStatus.NEEDS_REVIEW, None)
+        assert d.reason == "sources disagree: season_audio, server_markers"
+
     @pytest.mark.parametrize(
-        ("audio", "server"),
+        ("publish_when", "audio", "server"),
         [
-            (S.SEASON_AUDIO, S.SERVER_MARKERS),
-            (S.SEASON_AUDIO_PREVIOUS, S.SERVER_MARKERS),
-            (S.SEASON_AUDIO, S.SERVER_MARKERS_IMPORTED),
+            ("high", S.SEASON_AUDIO, S.SERVER_MARKERS),
+            ("high", S.SEASON_AUDIO, S.SERVER_MARKERS_IMPORTED),
+            ("high", S.SEASON_AUDIO_PREVIOUS, S.SERVER_MARKERS),
+            ("medium", S.SEASON_AUDIO_PREVIOUS, S.SERVER_MARKERS),
         ],
-        ids=["audio-and-server", "hint-and-server", "audio-and-importer-copy"],
+        ids=["audio-and-server-high", "audio-and-importer-copy-high", "hint-and-server-high", "hint-and-server-medium"],
     )
     def test_season_audio_and_markers_on_servers_alone_need_review(self, publish_when, audio, server):
-        # Ruling G3: a server's own intro detection matches audio across episodes too, so they aren't independent.
+        # Ruling G3: a server's own intro detection matches audio across episodes too, so they aren't independent;
+        # the previous season's hint never decides alone, and "high" (the harness) needs two sources.
         c = [
             Candidate(MarkerType.INTRO, 126_000, 157_000, audio, 1.0, "9/9"),
             Candidate(MarkerType.INTRO, 125_000, 158_000, server, 1.0, "plex-1"),
@@ -2863,7 +2904,11 @@ def _expected_agreeing(kinds, a, b, level):
         if level == "medium" and deciders:
             return DecisionStatus.DECIDED, _own(a), _credited(*sources), f"single source ({deciders[0].value})"
         return DecisionStatus.NEEDS_REVIEW, None, None, _lone(level, a, b)
-    if sources <= _MATRIX_ONLY_AGREE:  # R2, G3, rule 7: nothing here may supply the times
+    if sources <= _MATRIX_ONLY_AGREE:  # G3, rule 7: nothing here makes an agreeing pair
+        audio = next((c for c in (a, b) if c.source is S.SEASON_AUDIO), None)
+        if level == "medium" and audio is not None and _alone_at_medium(audio.source, audio.type):
+            # A server's own marker agreeing with season audio doesn't hold it back (2026-09-24), nor is it credited.
+            return DecisionStatus.DECIDED, _own(audio), ("season_audio",), "single source (season_audio)"
         if sources & set(_REF_SERVER) and sources - set(_REF_SERVER):
             return DecisionStatus.NEEDS_REVIEW, None, None, _REF_AUDIO_WITH_SERVER
         return DecisionStatus.NEEDS_REVIEW, None, None, _lone(level, a, b)

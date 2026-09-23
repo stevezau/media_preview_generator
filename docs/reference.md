@@ -300,7 +300,8 @@ independent sources agree on something different; any other source needs an inde
 on-screen credit text (credits), season audio (intros) and a SkipDB `exact`/`shifted` match (intros and recaps) may
 decide alone. IntroDB, TheIntroDB, the previous-season hint (`season_audio_previous`) and markers already on servers
 never decide alone, and season audio (or `season_audio_previous`) with markers already on servers isn't an agreeing
-pair on its own: that episode stays in Needs review. The removed
+pair on its own. An agreeing server marker doesn't hold season audio back (it decides as if alone, credited to
+`season_audio` only); the hint with only a server's marker stays in Needs review. The removed
 `publish_when` key (`"high"` / `"medium"`) is ignored when an older `settings.json` or client sends it, and schema
 version 16 deletes it and has the next start queue one job, **Intro & Credits: Needs review and waiting files, decided
 again**, that decides every file in Needs review, and every file whose last row waits for its item's other versions,

@@ -67,17 +67,19 @@ def test_run_online_leaves_out_sources_the_setting_has_off():
     assert on["intro"] == Counter(useful=1)
 
 
-def test_extra_evidence_decides_only_with_g3_off_when_it_is_season_audio_and_a_servers_own_marker():
+def test_extra_evidence_that_is_season_audio_and_a_servers_own_marker_agrees_only_with_g3_off():
     extra = {
         case_key(CASE): [
             Candidate(MarkerType.INTRO, 60_000, 90_000, Source.SEASON_AUDIO, 1.0, "3/3"),
             Candidate(MarkerType.INTRO, 61_000, 91_000, Source.SERVER_MARKERS, origin="plex"),
         ]
     }
-    on = run_online([_result()], [], order=ORDER, level="medium", extra=extra)
-    off = run_online([_result()], [], order=ORDER, level="medium", extra=extra, g3=False)
-    assert on["intro"] == Counter(missed=1)  # ruling G3: they never decide together
+    on = run_online([_result()], [], order=ORDER, level="high", extra=extra)
+    off = run_online([_result()], [], order=ORDER, level="high", extra=extra, g3=False)
+    assert on["intro"] == Counter(missed=1)  # ruling G3: they are never two agreeing sources
     assert off["intro"] == Counter(useful=1)
+    # At Medium season audio decides alone, and the agreeing server marker doesn't hold it back (2026-09-24).
+    assert run_online([_result()], [], order=ORDER, level="medium", extra=extra)["intro"] == Counter(useful=1)
 
 
 def test_extra_server_credits_agree_with_skipdb_at_high():

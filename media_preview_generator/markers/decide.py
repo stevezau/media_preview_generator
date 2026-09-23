@@ -578,19 +578,27 @@ def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: De
     checks this file's cut itself (not IntroDB/TheIntroDB, not the previous season's audio, not markers already on
     servers; SkipDB only for an intro or recap, season audio only for an intro).
 
-    Any second independent group here (server markers included) stops "medium": it either disagrees, or it
-    agrees without being able to form a cluster (a server's own markers and an importer plugin's copy; or season
-    audio and markers on a server, which gets the G3 reason). A group whose own candidates don't all agree
-    pairwise contradicts itself. The checked edge comes from the best-ranked candidate, the unchecked edge is the
-    safer value across the group's candidates, and decided_by names the sources that supplied either edge.
+    Any second independent group here stops "medium" when it disagrees, or when it agrees without being able to
+    form a cluster (a server's own markers and an importer plugin's copy). The one exception is G3's: markers already
+    on a server that agree with season audio are no second source (a server's intro detection matches audio too), but
+    they don't hold it back either (owner's rule 2026-09-24, "use the file check if nothing else"), so season audio
+    decides exactly as it would alone and decided_by doesn't name them. Only season audio gets here that way: any
+    other source that may decide alone forms a cluster with an agreeing server marker. A group whose own candidates
+    don't all agree pairwise contradicts itself. The checked edge comes from the best-ranked candidate, the unchecked
+    edge is the safer value across the group's candidates, and decided_by names the sources that supplied either edge.
     """
     ranked = sorted(sane, key=_sort_key(ctx))
     groups = sorted({_group(c) for c in sane})
     proposal = next((c for c in ranked if _may_decide_alone(c)), None)
-    if ctx.publish_when == "medium" and proposal is not None and len(groups) == 1:
-        if not all(_agree(a, b, ctx.duration_ms) for a, b in combinations(sane, 2)):
+    own = [c for c in sane if proposal is not None and _group(c) == _group(proposal)]
+    others = [c for c in sane if proposal is None or _group(c) != _group(proposal)]
+    servers_only_agree = all(c.source in SERVER_SOURCES for c in others) and all(
+        _agree(o, c, ctx.duration_ms) for o in others for c in own
+    )
+    if ctx.publish_when == "medium" and proposal is not None and servers_only_agree:
+        if not all(_agree(a, b, ctx.duration_ms) for a, b in combinations(own, 2)):
             return _review(mtype, _own_marker(proposal, ctx), "source disagrees with itself")
-        other_edge, edge_suppliers = _safer_other_edge(mtype, sane, ctx)
+        other_edge, edge_suppliers = _safer_other_edge(mtype, own, ctx)
         sources = {proposal.source, *(c.source for c in edge_suppliers)}
         marker = _composed_marker(mtype, _agree_value(proposal, ctx.duration_ms), other_edge, sources, ctx)
         if not _marker_is_sane(marker, ctx):

@@ -280,7 +280,8 @@ Season audio decides an intro alone at Medium when nothing else answers (owner, 
 alone at High or Medium": alone 91 useful / 13 wrong / 14 missed on the 118, against Plex's own 23 right / 15 wrong).
 The previous-season hint still never decides alone (48 / 10 / 24 above; owner 2026-09-13: it needs a second source).
 Neither season audio nor the hint makes an agreeing pair with markers already on a server (G3, §5.5 rule 4): both come
-from matching audio, so an episode where only those two answer stays in Needs review.
+from matching audio. A server marker that agrees doesn't hold season audio back either: it decides as it would alone
+(§14 2026-09-24); the hint with only a server's marker stays in Needs review.
 
 Remaining failures: variable couch gag (The Simpsons), a repeated segment ahead of the real intro (Carême), title card
 10–20 s longer than the chapter (Daredevil, Outlander). Credits via audio matching: 54% precision — **rejected**.
@@ -582,7 +583,8 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    rest of the season's"); the agreeing candidates may then shorten it the same way.
 4. Otherwise accept when two independent sources agree: intro/recap **end** within 5 s; credits/preview **start**
    within 10 s. An agreeing set needs a candidate that is neither markers already on a server nor season audio (or its
-   previous-season hint): season audio and a server's own detection never decide together (G3; "Needs review", reason
+   previous-season hint): season audio and a server's own detection never decide together (G3; with season audio
+   alone at Medium an agreeing server marker doesn't block it, rule 6; otherwise "Needs review", reason
    "Season audio and a server's own marker agree, but both come from matching audio; needs another source").
    Every maximal set of mutually agreeing candidates is considered (a sliding window over the compared
    times). Only candidates that agree with a different independent source may supply times: the agreed edge comes
@@ -2106,3 +2108,15 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     `plex_db.GONE_CHECK_TIMEOUT_S` (5 s): the version is waited for and the file retried.
   - Not done (optional LOW): a `versions_unchecked` retry is still queued when the unchecked version is one of the same
     job's own files; that file's own publish fixes the item, and the retry costs one cheap re-run.
+- 2026-09-24 · **An agreeing server marker no longer holds season audio back** (publishing lane, in line with the
+  owner's "use the file check if nothing else"; §5.3, §5.5 rules 4 and 6). With the season-audio entry above, season audio
+  plus a server's own intro that agreed stayed in Needs review with the G3 reason, while season audio alone published: Plex
+  users with Plex's intro detection on would have hit that on most episodes. G3 still holds (the pair is never two
+  agreeing sources, so "high" in the harness still decides nothing), but at Medium `_decide_from_single_source` now
+  lets the lone group decide when every other candidate is a server marker (own or an importer's copy) that agrees
+  with all of the group's: season audio's own edges, `decided_by` season audio alone, reason "single source
+  (season_audio)". Only season audio gets there: any other source that may decide alone forms an agreeing cluster with
+  a server marker. A disagreeing server marker still sends the intro to review; the previous-season hint stays
+  agreement-only; rule 7 is unchanged (it never moves an intro); "Keep Plex's" still leaves the intro to Plex without
+  reading the file. The harness: on the 3-episode fixtures an episode Plex answers the same way is now useful at
+  Medium with G3 on.
