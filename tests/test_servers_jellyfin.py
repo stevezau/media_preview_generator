@@ -1395,6 +1395,57 @@ class TestApplyRecommendedSettings:
         assert sent_options["ExtractTrickplayImagesDuringLibraryScan"] is True
 
 
+class TestInstallPluginRepositoryUrl:
+    """install_plugin registers the manifest URL once, whichever address the user already has.
+
+    The docs site moved from stevezau.github.io to mediapreviewgenerator.dev; the old URL
+    301s to the new one. Users who registered the old address must not get a second
+    repository entry, and the install must come from the repository that's registered.
+    """
+
+    OLD_URL = "https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json"
+    NEW_URL = "https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json"
+
+    def _run_install(self, jelly, existing_repos):
+        posted = {}
+
+        def fake_request(method, url, **kwargs):
+            if (method, url) == ("GET", "/Repositories"):
+                return MagicMock(status_code=200, raise_for_status=MagicMock(), json=lambda: existing_repos)
+            if (method, url) == ("POST", "/Repositories"):
+                posted["repositories"] = kwargs["json_body"]
+            if method == "POST" and url.startswith("/Packages/Installed/"):
+                posted["install_params"] = kwargs["params"]
+            return MagicMock(status_code=204, raise_for_status=MagicMock())
+
+        with patch.object(JellyfinServer, "_request", side_effect=fake_request):
+            result = jelly.install_plugin()
+        return result, posted
+
+    def test_registers_new_url_when_no_repository_is_present(self, jelly):
+        result, posted = self._run_install(jelly, [{"Name": "Jellyfin Stable", "Url": "https://repo.jellyfin.org/x"}])
+
+        assert result["ok"] is True
+        assert [r["Url"] for r in posted["repositories"]] == ["https://repo.jellyfin.org/x", self.NEW_URL]
+        assert posted["install_params"]["repositoryUrl"] == self.NEW_URL
+
+    def test_reuses_old_url_when_user_registered_it_before_the_move(self, jelly):
+        result, posted = self._run_install(jelly, [{"Name": "Media Preview Bridge", "Url": self.OLD_URL}])
+
+        assert result["ok"] is True
+        assert "repositories" not in posted
+        assert posted["install_params"]["repositoryUrl"] == self.OLD_URL
+        add_step = next(s for s in result["steps"] if s["step"] == "add_repository")
+        assert add_step["detail"] == "already present"
+
+    def test_reuses_new_url_when_already_registered(self, jelly):
+        result, posted = self._run_install(jelly, [{"Name": "Media Preview Bridge", "Url": self.NEW_URL}])
+
+        assert result["ok"] is True
+        assert "repositories" not in posted
+        assert posted["install_params"]["repositoryUrl"] == self.NEW_URL
+
+
 class TestUninstallPlugin:
     """uninstall_plugin: DELETE /Plugins/{guid} + restart Jellyfin.
 

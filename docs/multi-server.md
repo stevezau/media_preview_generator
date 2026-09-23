@@ -191,7 +191,7 @@ Because Emby and default-layout Jellyfin write next to the media file, this cont
 To install the plugin by hand instead, add this repository URL in Jellyfin → **Dashboard → Plugins → Repositories**, then install **Media Preview Bridge** from the Catalogue and restart Jellyfin. Updates then arrive through Jellyfin's normal plugin updates.
 
 ```text
-https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json
+https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json
 ```
 
 ---

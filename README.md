@@ -26,7 +26,7 @@
   <p align="center">
     GPU-accelerated video preview thumbnail generation for <strong>Plex, Emby, and Jellyfin</strong>
     <br />
-    <a href="https://stevezau.github.io/media_preview_generator/"><strong>Explore the docs</strong></a>
+    <a href="https://mediapreviewgenerator.dev/"><strong>Explore the docs</strong></a>
     <br />
     <br />
     <a href="#quick-start">Quick Start</a>
@@ -49,7 +49,7 @@ Generates video preview thumbnails for **Plex, Emby, and Jellyfin**. These are t
 - **Emby** has no GPU option for thumbnail extraction.
 - **Jellyfin** can use hardware decoding for trickplay, but it's off by default, and by default the job runs at below-normal priority with one thread.
 
-See the [dated, sourced comparison](https://stevezau.github.io/media_preview_generator/comparison/) for details and for when the built-ins are the better choice.
+See the [dated, sourced comparison](https://mediapreviewgenerator.dev/comparison/) for details and for when the built-ins are the better choice.
 
 **The Solution:** This tool runs preview generation **off the media server** on a machine of your choosing, uses every GPU it finds, and processes files in parallel. When two or more servers contain the same file, FFmpeg runs only once — the result is then written out in each server's own expected format, automatically.
 

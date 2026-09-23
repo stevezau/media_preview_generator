@@ -71,21 +71,21 @@ docker run -d \
 
 ## Docs
 
-- [Home](https://stevezau.github.io/media_preview_generator/)
-- [Comparison with Plex, Jellyfin and Emby built-in generation](https://stevezau.github.io/media_preview_generator/comparison/): a dated table, and when to use each
-- [Getting started](https://stevezau.github.io/media_preview_generator/getting-started/): Docker, GPU setup, volume mounts, Unraid, networking
-- [Guides and troubleshooting](https://stevezau.github.io/media_preview_generator/guides/): web UI, webhooks, schedules, HDR and Dolby Vision, CPU fallback
-- [Previews Readiness](https://stevezau.github.io/media_preview_generator/guides/previews-readiness/): every server setting that affects whether previews show up
-- [Multi-server guide](https://stevezau.github.io/media_preview_generator/multi-server/): output formats, webhook routing, retries, the Jellyfin plugin
-- [Configuration and API reference](https://stevezau.github.io/media_preview_generator/reference/): settings, environment variables, path mappings, REST API
-- [FAQ](https://stevezau.github.io/media_preview_generator/faq/)
-- [Why Plex preview thumbnails take so long](https://stevezau.github.io/media_preview_generator/plex-preview-thumbnails-slow/)
-- [Generate Plex preview thumbnails with a GPU](https://stevezau.github.io/media_preview_generator/plex-preview-thumbnails-gpu/)
-- [Faster Jellyfin trickplay generation](https://stevezau.github.io/media_preview_generator/jellyfin-trickplay-gpu/)
-- [Emby preview thumbnails (BIF) with GPU acceleration](https://stevezau.github.io/media_preview_generator/emby-bif-thumbnails-gpu/)
-- [Previews as soon as Sonarr or Radarr imports a file](https://stevezau.github.io/media_preview_generator/sonarr-radarr-preview-thumbnails/)
-- [HDR and Dolby Vision preview thumbnails](https://stevezau.github.io/media_preview_generator/hdr-dolby-vision-thumbnails/)
-- [llms-full.txt](https://stevezau.github.io/media_preview_generator/llms-full.txt): every docs page in one file
+- [Home](https://mediapreviewgenerator.dev/)
+- [Comparison with Plex, Jellyfin and Emby built-in generation](https://mediapreviewgenerator.dev/comparison/): a dated table, and when to use each
+- [Getting started](https://mediapreviewgenerator.dev/getting-started/): Docker, GPU setup, volume mounts, Unraid, networking
+- [Guides and troubleshooting](https://mediapreviewgenerator.dev/guides/): web UI, webhooks, schedules, HDR and Dolby Vision, CPU fallback
+- [Previews Readiness](https://mediapreviewgenerator.dev/guides/previews-readiness/): every server setting that affects whether previews show up
+- [Multi-server guide](https://mediapreviewgenerator.dev/multi-server/): output formats, webhook routing, retries, the Jellyfin plugin
+- [Configuration and API reference](https://mediapreviewgenerator.dev/reference/): settings, environment variables, path mappings, REST API
+- [FAQ](https://mediapreviewgenerator.dev/faq/)
+- [Why Plex preview thumbnails take so long](https://mediapreviewgenerator.dev/plex-preview-thumbnails-slow/)
+- [Generate Plex preview thumbnails with a GPU](https://mediapreviewgenerator.dev/plex-preview-thumbnails-gpu/)
+- [Faster Jellyfin trickplay generation](https://mediapreviewgenerator.dev/jellyfin-trickplay-gpu/)
+- [Emby preview thumbnails (BIF) with GPU acceleration](https://mediapreviewgenerator.dev/emby-bif-thumbnails-gpu/)
+- [Previews as soon as Sonarr or Radarr imports a file](https://mediapreviewgenerator.dev/sonarr-radarr-preview-thumbnails/)
+- [HDR and Dolby Vision preview thumbnails](https://mediapreviewgenerator.dev/hdr-dolby-vision-thumbnails/)
+- [llms-full.txt](https://mediapreviewgenerator.dev/llms-full.txt): every docs page in one file
 
 ## Source
 

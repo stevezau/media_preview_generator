@@ -11,7 +11,7 @@ Jellyfin's built-in way to register new trickplay is gated by the per-library "E
 In Jellyfin admin → Dashboard → Plugins → Repositories → **+** add:
 
 ```
-https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json
+https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json
 ```
 
 Then go to Catalogue → install **Media Preview Bridge**. Restart Jellyfin.

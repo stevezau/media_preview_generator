@@ -102,7 +102,7 @@ jobs:
             Jellyfin plugin DLL — install via Jellyfin admin → Plugins → Repositories.
 
             Repository URL (paste this once):
-            `https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json`
+            `https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json`
 
             Once the repo is added, **Media Preview Bridge** appears in
             the catalogue and updates automatically.
@@ -131,7 +131,7 @@ jobs:
           # history. Only a genuine 404 (never published) seeds from the
           # template; any other failure aborts, because publishing the bare
           # template would wipe every earlier version from users' catalogs.
-          PREV_URL="https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json"
+          PREV_URL="https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json"
           status=$(curl -sSL --retry 3 -o existing.json -w '%{http_code}' "$PREV_URL" || true)
           case "$status" in
             200)
@@ -200,7 +200,7 @@ jobs:
             echo "## Media Preview Bridge ${{ needs.build-release.outputs.version }} published"
             echo ""
             echo "- Release: https://github.com/${{ github.repository }}/releases/tag/plugin-v${{ needs.build-release.outputs.version }}"
-            echo "- Manifest: https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json (deployed by the publish-site job)"
+            echo "- Manifest: https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json (deployed by the publish-site job)"
             echo "- MD5: \`${{ needs.build-release.outputs.sha }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
