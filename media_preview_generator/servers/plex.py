@@ -1034,8 +1034,9 @@ class PlexServer(MediaServer):
         )
 
         # --- Intro & Credits (spec §7 item 6) -----------------------
-        # Built from the facts the Intro & Credits tab already asked for, never a second probe; a server with
-        # the feature off gets the one row that says so and nothing else (plan P-R6).
+        # Built from the facts the Intro & Credits tab already asked for, never a second probe — except Plex's
+        # per-library detection switches, read fresh (see markers_readiness.marker_facts); a server with the
+        # feature off gets the one row that says so and nothing else (plan P-R6).
         from ..markers import readiness as markers_readiness
 
         marker_facts = markers_readiness.marker_facts(self, self._server_config)
@@ -2259,7 +2260,9 @@ class PlexServer(MediaServer):
         if not wanted:
             return {}
         try:
-            sections = retry_plex_call(self._connect().library.sections)
+            # Readiness-only reads: no retries. A hung Plex would otherwise stall the whole Setup Health
+            # probe by ~4x per library (retry_plex_call's default max_retries=3, one call per section).
+            sections = retry_plex_call(self._connect().library.sections, max_retries=0)
         except Exception as exc:
             logger.debug("Plex library detection prefs unavailable for {}: {}", self.name, exc)
             return None
@@ -2272,7 +2275,7 @@ class PlexServer(MediaServer):
             entry: dict[str, Any] = {"type": section_type, "intro": None, "credits": None}
             out[section_key] = entry
             try:
-                settings = retry_plex_call(section.settings)
+                settings = retry_plex_call(section.settings, max_retries=0)
             except Exception as exc:
                 logger.debug("Plex library {} detection prefs unavailable on {}: {}", section_key, self.name, exc)
                 continue

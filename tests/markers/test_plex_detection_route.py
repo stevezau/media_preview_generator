@@ -137,23 +137,38 @@ def test_rejects_a_library_the_row_could_not_list(client, seed, conn, server, li
     conn.query.assert_not_called()
 
 
-def test_rejects_a_server_that_isnt_plex(client, seed, conn):
-    seed(
-        {
-            "id": "plex-1",
-            "type": "jellyfin",
-            "name": "Jellyfin",
-            "enabled": True,
-            "url": "http://127.0.0.1:9",
-            "auth": {"method": "api_key", "api_key": "k"},
-            "libraries": [{"id": "2", "name": "TV Shows", "remote_paths": []}],
-            "markers": {"enabled": True, "library_ids": None},
-        }
-    )
+@pytest.mark.parametrize(
+    ("server", "status", "error"),
+    [
+        (
+            {
+                "id": "plex-1",
+                "type": "jellyfin",
+                "name": "Jellyfin",
+                "enabled": True,
+                "url": "http://127.0.0.1:9",
+                "auth": {"method": "api_key", "api_key": "k"},
+                "libraries": [{"id": "2", "name": "TV Shows", "remote_paths": []}],
+                "markers": {"enabled": True, "library_ids": None},
+            },
+            400,
+            "Plex's own marker detection is a Plex setting",
+        ),
+        (
+            {**_plex(), "enabled": False},
+            409,
+            "is disabled",
+        ),
+    ],
+    ids=["not-plex", "disabled-server"],
+)
+def test_rejects_a_server_that_isnt_plex_or_is_disabled(client, seed, conn, server, status, error):
+    seed(server)
 
     resp = client.post(URL, json={"library_id": "2", "prefs": [CREDITS]})
 
-    assert resp.status_code == 400
+    assert resp.status_code == status
+    assert error in resp.get_json()["error"]
     conn.query.assert_not_called()
 
 

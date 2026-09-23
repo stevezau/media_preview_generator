@@ -751,9 +751,11 @@ class MediaServer(ABC):
 
         Intro & Credits rows follow the same envelope and are built in
         :mod:`media_preview_generator.markers.readiness` from the facts
-        the server Edit tab already computed — never a second probe, and
-        never at all for a server with the feature switched off (which
-        gets one row saying so).
+        the server Edit tab already computed — never a second probe,
+        except Plex's per-library detection switches (read fresh so the
+        row reflects a switch flipped after the Edit tab last asked) —
+        and never at all for a server with the feature switched off
+        (which gets one row saying so).
 
         Default raises ``NotImplementedError``. Concrete subclasses
         override.

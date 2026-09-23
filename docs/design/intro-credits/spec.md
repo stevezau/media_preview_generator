@@ -1941,4 +1941,8 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   can't be read (older Plex, a failed request) falls back to the server-wide wording with `current: unknown` and no
   buttons. The library prefs are the one fact the row reads itself (`readiness.marker_facts`), only when the
   server-wide detection is on and "Use ours" is chosen, and fresh, so the row refreshes after Turn off. The row keeps
-  its id, so an earlier Dismiss still applies.
+  its id, so an earlier Dismiss still applies. Lab-proven against the throwaway lab Plex: Turn off flips exactly the
+  listed library prefs (confirmed by reading `/prefs` back), restore lands them at their prior values, and an
+  unrelated pref (`enableAdMarkerGeneration`) is untouched throughout (`evidence/lab/plex_detection_turnoff_proof.py`,
+  `.md`). The per-library reads also no longer retry a hung Plex (`retry_plex_call(..., max_retries=0)`): a Setup
+  Health probe used to wait ~4x per library on a stalled connection before this.

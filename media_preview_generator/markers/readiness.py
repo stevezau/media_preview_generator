@@ -347,7 +347,9 @@ def marker_facts(server: Any, config: ServerConfig | None) -> MarkerFacts:
     """This server's Intro & Credits facts, from the payload the Edit tab already asks for.
 
     Nothing is contacted when the feature is off for this server: the switch is read from the stored settings
-    first, so a user who never turned Intro & Credits on pays no probe for these rows.
+    first, so a user who never turned Intro & Credits on pays no probe for these rows. The one exception is
+    Plex's per-library detection switches, read fresh below (never a second probe otherwise) so the row
+    reflects a switch flipped after the Edit tab last asked.
 
     Args:
         server: Live client for ``config``.
