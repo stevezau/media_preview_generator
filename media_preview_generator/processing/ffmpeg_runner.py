@@ -25,7 +25,6 @@ call sites in ``generate_images``' retry cascade don't need to change
 from __future__ import annotations
 
 import os
-import re
 import signal
 import subprocess
 import tempfile
@@ -35,44 +34,12 @@ from collections.abc import Callable
 
 from loguru import logger
 
-from ..shutdown import is_shutting_down, wait_for_shutdown
 from .filter_chain import (
     DV5_PATH_INTEL_OPENCL,
     DV5_PATH_LIBPLACEBO,
     DV5_PATH_VAAPI_VULKAN,
 )
 from .hwaccel import hwaccel_decode_args
-
-# FFmpeg's own last line when SIGINT/SIGTERM stops it; it then exits 255 rather than dying by the signal.
-_STOPPED_BY_SIGNAL_RE = re.compile(r"received signal (?:2|15)\b")
-_STOP_SIGNAL_EXIT_CODES = frozenset({-signal.SIGTERM, -signal.SIGINT, 128 + signal.SIGTERM, 128 + signal.SIGINT})
-# A container stop signals the app and FFmpeg at about the same time, so a signalled FFmpeg can exit before the app's
-# handler has marked the shutdown. It waits this long for the mark before calling the exit a crash.
-SHUTDOWN_SIGNAL_GRACE_S = 2.0
-
-
-def stop_reason(returncode: int, stderr_lines: list[str], cancel_check: Callable | None) -> str | None:
-    """Why a failed FFmpeg run was stopped on purpose, if it was.
-
-    Args:
-        returncode: FFmpeg's exit code (non-zero).
-        stderr_lines: Its stderr lines.
-        cancel_check: The job's cancel check, if any.
-
-    Returns:
-        ``"cancelled"`` when the job was cancelled, ``"shutdown"`` when the app is shutting down, or None for a real
-        failure. Only an FFmpeg stopped by SIGTERM/SIGINT waits (``SHUTDOWN_SIGNAL_GRACE_S``) for the shutdown mark.
-    """
-    if cancel_check is not None and cancel_check():
-        return "cancelled"
-    if is_shutting_down():
-        return "shutdown"
-    signalled = returncode in _STOP_SIGNAL_EXIT_CODES or any(
-        _STOPPED_BY_SIGNAL_RE.search(line) for line in stderr_lines[-10:]
-    )
-    if signalled and wait_for_shutdown(SHUTDOWN_SIGNAL_GRACE_S):
-        return "shutdown"
-    return None
 
 
 def create_ffmpeg_runner(
@@ -587,21 +554,6 @@ def create_ffmpeg_runner(
                 os.remove(output_file)
             except OSError:
                 pass
-
-        # A stop the app or the user asked for is no crash: no ERROR, no failure log, and CancellationError keeps the
-        # caller's retry cascade (full-frame decode, DV-safe filter, CPU fallback) from starting.
-        stopped = (
-            None if proc.returncode == 0 or stalled else stop_reason(proc.returncode, ffmpeg_output_lines, cancel_check)
-        )
-        if stopped is not None:
-            why = "the app is shutting down" if stopped == "shutdown" else "the job was cancelled"
-            logger.info(
-                "FFmpeg stopped for {} while processing {} (exit code {}); not a crash, so it isn't retried now",
-                "shutdown" if stopped == "shutdown" else "cancellation",
-                video_file,
-                proc.returncode,
-            )
-            raise CancellationError(f"FFmpeg stopped because {why}: {video_file}")
 
         # Error logging (skip generic failure log when we killed due to stall; already logged above)
         if proc.returncode != 0 and not stalled:
