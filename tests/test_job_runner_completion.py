@@ -343,6 +343,38 @@ class TestRetryCompletionMessage:
         assert msg == "Retry job completed successfully"
 
 
+class TestItemCompleteLogLevel:
+    """The checking stage finishes every already-done file of a scheduled scan; its "Library scan completed: …
+    (success)" line per file was a quarter of 557k INFO lines in 12 h. It's DEBUG now; the job's "Processing complete:
+    N already existed" line counts those files. Failures and worker completions stay INFO."""
+
+    @pytest.mark.parametrize(
+        ("display_name", "success", "level"),
+        [
+            ("Library scan", True, "DEBUG"),
+            ("Library scan", False, "INFO"),
+            ("GPU Worker 3 (NVIDIA TITAN RTX)", True, "INFO"),
+            ("CPU Worker 1", False, "INFO"),
+        ],
+        ids=["check-stage-done", "check-stage-failed", "worker-done", "worker-failed"],
+    )
+    def test_level(self, display_name, success, level):
+        from loguru import logger
+
+        from media_preview_generator.jobs.dispatcher import CHECK_STAGE_WORKER_NAME
+        from media_preview_generator.web.routes.job_runner import _log_item_complete
+
+        assert CHECK_STAGE_WORKER_NAME == "Library scan"
+        records: list[tuple[str, str]] = []
+        sink = logger.add(lambda m: records.append((m.record["level"].name, m.record["message"])), level="DEBUG")
+        try:
+            _log_item_complete(display_name, "CSI S05E06", success)
+        finally:
+            logger.remove(sink)
+        outcome = "success" if success else "failed"
+        assert records == [(level, f"{display_name} completed: 'CSI S05E06' ({outcome})")]
+
+
 class TestNotIndexedMessage:
     """The completion text for files still not indexed when this job queued no retry for them.
 

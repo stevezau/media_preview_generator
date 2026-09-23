@@ -1267,8 +1267,13 @@ def process_canonical_path(
     # Single line that ties every downstream log entry back to this dispatch.
     # On a server with N webhooks/min, this is the breadcrumb that lets ops
     # answer "what happened to this file?" without grep-searching for
-    # disconnected log lines.
-    logger.info(
+    # disconnected log lines. The checking stage runs this for every file of a
+    # scan, most of them already done (4 INFO lines each were 92% of a 12 h
+    # log), so its breadcrumbs are DEBUG; a file it hands to a worker is
+    # dispatched again there at INFO.
+    breadcrumb_level = "DEBUG" if check_only else "INFO"
+    logger.log(
+        breadcrumb_level,
         "Dispatch: path={} regenerate={} retry_attempt={}",
         canonical_path,
         regenerate,
@@ -1310,7 +1315,8 @@ def process_canonical_path(
             message="No enabled library covers this path on any configured server",
         )
 
-    logger.info(
+    logger.log(
+        breadcrumb_level,
         "Owners resolved: {} server(s) for {} → [{}]",
         len(publishers),
         canonical_path,
@@ -1494,7 +1500,8 @@ def process_canonical_path(
                 all_fresh = False
                 break
         if all_fresh:
-            logger.info(
+            # DEBUG: the job's "Processing complete: … already existed" line counts these.
+            logger.debug(
                 "All publishers' outputs already fresh for {} — skipping FFmpeg",
                 canonical_path,
             )

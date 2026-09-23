@@ -323,3 +323,47 @@ class TestCancellationDuringGeneration:
                 config=mock_config_for_processing,
                 check_only=False,
             )
+
+
+class TestAlreadyDoneFilesLogAtDebug:
+    """A scheduled scan's checking stage visits every file, most of them already done: 3 of the 4 INFO lines per such
+    file came from here (92% of 557k INFO lines in 12 h on the owner's server). The checking stage's breadcrumbs and
+    the "already fresh" line are DEBUG; a worker's dispatch (a file being generated) keeps its INFO breadcrumbs."""
+
+    _LINES = ("Dispatch: path=", "Owners resolved:", "All publishers' outputs already fresh")
+
+    def _levels(self, mock_config_for_processing, tmp_path, *, check_only):
+        from loguru import logger
+
+        registry = _emby_registry(tmp_path)
+        media_file = _seed_media(tmp_path)
+        records: list[tuple[str, str]] = []
+        sink = logger.add(lambda m: records.append((m.record["level"].name, m.record["message"])), level="DEBUG")
+        try:
+            with (
+                patch("media_preview_generator.processing.multi_server.outputs_fresh_for_source", return_value=True),
+                patch("media_preview_generator.processing.multi_server.generate_images") as mock_gen,
+            ):
+                result = process_canonical_path(
+                    canonical_path=str(media_file),
+                    registry=registry,
+                    config=mock_config_for_processing,
+                    check_only=check_only,
+                )
+        finally:
+            logger.remove(sink)
+        assert result.status is MultiServerStatus.SKIPPED
+        mock_gen.assert_not_called()
+        return {prefix: [lvl for lvl, msg in records if msg.startswith(prefix)] for prefix in self._LINES}
+
+    def test_checking_stage_logs_an_already_done_file_at_debug_only(self, mock_config_for_processing, tmp_path):
+        levels = self._levels(mock_config_for_processing, tmp_path, check_only=True)
+        assert levels == {prefix: ["DEBUG"] for prefix in self._LINES}
+
+    def test_worker_dispatch_keeps_its_info_breadcrumbs(self, mock_config_for_processing, tmp_path):
+        levels = self._levels(mock_config_for_processing, tmp_path, check_only=False)
+        assert levels == {
+            "Dispatch: path=": ["INFO"],
+            "Owners resolved:": ["INFO"],
+            "All publishers' outputs already fresh": ["DEBUG"],
+        }

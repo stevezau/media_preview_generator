@@ -109,6 +109,23 @@ def _retry_completion_message(
     return "INFO", "Retry job completed successfully"
 
 
+def _log_item_complete(display_name: str, title: str, success: bool) -> None:
+    """Log one finished file of a preview job.
+
+    The checking stage finishes every already-done file of a scan (4 INFO lines per such file were 92% of a 12 h log),
+    so its successes are DEBUG: the job's "Processing complete: …" line counts them.
+
+    Args:
+        display_name: The worker that finished it, or the checking stage's ``CHECK_STAGE_WORKER_NAME``.
+        title: The file's title.
+        success: Whether it succeeded.
+    """
+    from ...jobs.dispatcher import CHECK_STAGE_WORKER_NAME
+
+    level = "DEBUG" if success and display_name == CHECK_STAGE_WORKER_NAME else "INFO"
+    logger.log(level, "{} completed: {!r} ({})", display_name, title, "success" if success else "failed")
+
+
 def _retries_text(count: int) -> str:
     return f"{count} {'retry' if count == 1 else 'retries'}"
 
@@ -893,10 +910,6 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     # JSONL stopped growing after 6 seconds of a ~13min run.
                     set_file_result_callback(_file_result_cb, job_id=job_id)
 
-                    def _on_item_complete(display_name, title, success):
-                        outcome = "success" if success else "failed"
-                        logger.info("{} completed: {!r} ({})", display_name, title, outcome)
-
                     def _on_dispatch_start():
                         """Transition PENDING -> RUNNING when items are dispatched."""
                         job_manager.start_job(job_id)
@@ -929,7 +942,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         selected_gpus,
                         progress_callback=progress_callback,
                         worker_callback=worker_callback,
-                        item_complete_callback=_on_item_complete,
+                        item_complete_callback=_log_item_complete,
                         cancel_check=lambda: job_manager.is_cancellation_requested(job_id),
                         pause_check=lambda: (
                             job_manager.is_pause_requested(job_id) or get_settings_manager().processing_paused

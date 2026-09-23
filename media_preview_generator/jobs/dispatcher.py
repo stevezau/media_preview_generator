@@ -23,6 +23,8 @@ from .worker import Worker, WorkerPool
 
 _submission_counter_lock = threading.Lock()
 _submission_counter = 0
+# The "worker" a preview file finished by the checking stage (no FFmpeg) is credited to.
+CHECK_STAGE_WORKER_NAME = "Library scan"
 
 
 def _next_submission_order() -> int:
@@ -338,14 +340,14 @@ class JobTracker:
                 getattr(result, "canonical_path", "") or item.canonical_path,
                 outcome,
                 (getattr(result, "message", "") or "").strip(),
-                "Library scan",
+                CHECK_STAGE_WORKER_NAME,
                 servers=rows,
             )
         except Exception as exc:
             logger.debug("Could not notify checked file result for {}: {}", item.canonical_path, exc)
 
         title = getattr(item, "title", "") or item.canonical_path
-        self.record_completion(success, "Library scan", title)
+        self.record_completion(success, CHECK_STAGE_WORKER_NAME, title)
 
     def record_custom_check_result(self, item, outcome: ItemOutcome) -> None:
         """Record an item a kind's ``check_fn`` finished without a worker.
@@ -362,7 +364,7 @@ class JobTracker:
         from ..processing.generator import _notify_file_result
         from .orchestrator import fold_publisher_rows_into_aggregate
 
-        label = self.handlers.check_worker_label if self.handlers else "Library scan"
+        label = self.handlers.check_worker_label if self.handlers else CHECK_STAGE_WORKER_NAME
         title = getattr(item, "title", "") or item.canonical_path
         valid = normalize_outcome(outcome, self.handlers.outcome_keys if self.handlers else ())
         if valid is not outcome:
