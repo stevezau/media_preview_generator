@@ -309,6 +309,15 @@ class DecisionRow:
     decided_by: tuple[str, ...] = ()
 
 
+def _same_identity_on_disk(path: str, size: int, mtime_ns: int) -> bool:
+    """Whether the file on disk is still the one a record describes (path + size + mtime, spec §6.1)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return (st.st_size, st.st_mtime_ns) == (size, mtime_ns)
+
+
 @dataclass(frozen=True)
 class ItemPublishStateRow:
     """What this app last left on one server item (from any file)."""
@@ -1564,13 +1573,22 @@ class MarkerStore:
             for r in self._conn.execute("SELECT item_id, type FROM item_kept_types WHERE server_id=?", (server_id,)):
                 kept.setdefault(r["item_id"], set()).add(MarkerType(r["type"]))
             own: dict[str, set[MarkerType]] = {}
-            for r in self._conn.execute(
-                "SELECT p.item_id, d.type, d.reason FROM publish_state p JOIN decisions d ON d.file_id = p.file_id "
-                "WHERE p.server_id=? AND p.item_id IS NOT NULL AND d.status=?",
-                (server_id, DecisionStatus.DISABLED.value),
-            ):
-                if is_kept_own(DecisionStatus.DISABLED, r["reason"]):
-                    own.setdefault(r["item_id"], set()).add(MarkerType(r["type"]))
+            kept_own_rows = [
+                r
+                for r in self._conn.execute(
+                    "SELECT p.item_id, d.type, d.reason, f.canonical_path, f.size, f.mtime_ns FROM publish_state p "
+                    "JOIN decisions d ON d.file_id = p.file_id JOIN files f ON f.id = p.file_id "
+                    "WHERE p.server_id=? AND p.item_id IS NOT NULL AND d.status=?",
+                    (server_id, DecisionStatus.DISABLED.value),
+                )
+                if is_kept_own(DecisionStatus.DISABLED, r["reason"])
+            ]
+        for r in kept_own_rows:
+            # A file gone or replaced since its run says nothing about the item now (a deleted version's kept status
+            # would list the item as missing on every run).
+            if _same_identity_on_disk(r["canonical_path"], r["size"], r["mtime_ns"]):
+                own.setdefault(r["item_id"], set()).add(MarkerType(r["type"]))
+        with self._lock:
             files = {
                 r["item_id"]: tuple(json.loads(r["files_json"]))
                 for r in self._conn.execute(

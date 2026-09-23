@@ -14,8 +14,9 @@ from unittest.mock import patch
 import pytest
 
 from media_preview_generator.markers import pipeline
+from media_preview_generator.markers.decide import DecisionStatus, TypeDecision
 from media_preview_generator.markers.models import FileIdentity, Marker, MarkerType, Source
-from media_preview_generator.markers.outcomes import PLEX_PASS_UNKNOWN, ServerStatus
+from media_preview_generator.markers.outcomes import PLEX_PASS_UNKNOWN, ServerStatus, kept_own_reason
 from media_preview_generator.markers.publishers.base import Capability, CapabilityReport, PublishError
 from media_preview_generator.markers.publishers.emby import CREDITS_BEFORE_END_NOTE
 from media_preview_generator.markers.settings import load_global, validate_global
@@ -379,3 +380,48 @@ class TestTheBound:
         rows = _rows(_publish(monkeypatch, store, media, reg, {"plex-1": plex, "jellyfin-1": jf}))
         assert rows["plex-1"]["status"] == ServerStatus.FAILED.value
         assert rows["jellyfin-1"]["status"] == ServerStatus.WRITTEN.value  # one server's failure stops nothing else
+
+
+class TestKeptOwnTypes:
+    """A type the file's last run left to the servers' own marker (focused review LOW 2)."""
+
+    @staticmethod
+    def _kept_credits(store, media, *, locked_intro):
+        rec = _known(store, media, [INTRO] if locked_intro else [])
+        kept = TypeDecision(T.CREDITS, DecisionStatus.DISABLED, None, None, kept_own_reason(["Plex"]))
+        store.save_decisions(rec.id, {T.CREDITS: kept}, settings_fingerprint="fp")
+        return rec
+
+    @pytest.mark.parametrize(
+        ("setting", "ran_there", "message"),
+        [
+            ("keep_plex", True, "1 marker(s); keeping Plex's credits"),
+            ("restore", True, "1 marker(s)"),  # switched to Use ours since
+            ("keep_plex", False, "1 marker(s)"),  # a server the last run didn't publish to (added since)
+        ],
+        ids=["keeps", "switched-to-use-ours", "added-since"],
+    )
+    def test_only_a_server_that_still_keeps_its_own_says_so(
+        self, store, media, monkeypatch, setting, ran_there, message
+    ):
+        rec = self._kept_credits(store, media, locked_intro=True)
+        reg = _registry(media, ServerType.PLEX)
+        reg.configs_by_id["plex-1"].markers["plex"]["on_plex_redetect"] = setting
+        if ran_there:
+            store.set_publish_state(rec.id, "plex-1", item_id="item-plex-1", markers=[], status="written")
+        rows = _rows(_publish(monkeypatch, store, media, reg, {"plex-1": ready_publisher()}))
+        assert rows["plex-1"]["message"] == message
+
+    def test_a_write_with_nothing_to_send_leaves_a_failed_item_to_its_retry(self, store, media, monkeypatch):
+        rec = self._kept_credits(store, media, locked_intro=False)
+        store.set_publish_state(rec.id, "plex-1", item_id="item-plex-1", markers=[], status="written")
+        store.set_item_publish_state("plex-1", "item-plex-1", [], "failed")  # another version's write failed
+        reg = _registry(media, ServerType.PLEX)
+        reg.configs_by_id["plex-1"].markers["plex"]["on_plex_redetect"] = "keep_plex"
+        plex = ready_publisher()
+
+        rows = _rows(_publish(monkeypatch, store, media, reg, {"plex-1": plex}))
+
+        assert plex.write.call_args.args == ("item-plex-1", [])
+        assert rows["plex-1"]["message"] == "Keeping Plex's credits"
+        assert store.get_item_publish_state("plex-1", "item-plex-1").status == "failed"

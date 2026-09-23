@@ -382,6 +382,7 @@ class PlexItem:
     def run(self, version: str, *, force: bool = False, detectors=()):
         item = ProcessableItem(canonical_path=self.paths[version], server_id="plex-1")
         ctx = _ctx(self.store, self.registry, settings_raw=NO_ONLINE, force=force, detectors=detectors)
+        self.ctx = ctx  # the last run's context: the files it asked the job to run again
         # A registered detector needs a worker; none of these touch the file, so the worker stage runs them here.
         return (pipeline.process_item if detectors else pipeline.check_item)(item, ctx=ctx)
 
@@ -1512,6 +1513,69 @@ class TestKeepPlexsPerType:
         assert _outcomes(*outs) == ["waiting", "published", "up_to_date"]
         assert outs[2].publisher_rows[0]["message"] == "Keeping Plex's credits"
         assert item.served() == [SHOWN_INTRO, PLEX_CREDITS] and item.kept() == {"credits"}
+
+    def test_a_version_that_decided_a_type_asks_again_for_the_one_left_to_plex_that_ran_first(self, plex_item):
+        # Focused review MED B: the reverse order, which a job sorting by path gives. 1080p runs first and is left to
+        # Plex's credits; 2160p then decides them from its chapter and waits on 1080p, so it asks the job to run 1080p
+        # again, which now reads its credits (2160p decided them) and the versions agree.
+        item = plex_item(versions=("1080p", "2160p"))
+        item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
+        _native_credits(item)
+        item.server.get_part_durations.return_value = [DUR, DUR]
+        item.chapters[item.paths["2160p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+        item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X)
+        text, detectors = _credit_text()
+
+        item.run("1080p", detectors=detectors)
+        waiting = item.run("2160p", detectors=detectors)
+        followups = item.ctx.take_followups()
+        outs = [item.run(version, detectors=detectors) for version in ("1080p", "2160p")]
+
+        message = waiting.publisher_rows[0]["message"]
+        assert message.startswith("Waiting for this item's other versions to agree on: credits")
+        assert followups == [item.paths["1080p"]]
+        assert text.call_count == 1  # 1080p read its credits once asked again
+        assert _outcomes(*outs) == ["up_to_date", "up_to_date"]
+        assert outs[1].publisher_rows[0]["message"] == "Keeping Plex's credits"
+        assert item.served() == [SHOWN_INTRO, PLEX_CREDITS] and item.kept() == {"credits"}
+
+    def test_an_item_with_nothing_of_ours_isnt_listed_for_versions_forever(self, plex_item):
+        # Focused review MED A: an item row with nothing of ours and nothing kept keeps the version files of its last
+        # write, and a write with nothing to send never reads the item, so a version added since read as "versions
+        # changed" on every Check servers run. Such a row has no versions to agree on and isn't compared.
+        item = plex_item(versions=("1080p", "2160p"), in_item=("1080p",))
+        first = item.paths["1080p"]
+        item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
+        _native_credits(item)
+        text, detectors = _credit_text()
+        item.chapters[first] = chapters(intro=INTRO_X)
+        item.run("1080p", detectors=detectors)  # our intro written, Plex's credits left to it
+        item.chapters[first] = chapters()  # re-encoded without its intro chapter: ours goes, the versions stay recorded
+        item.touch("1080p", 9)
+        item.run("1080p", detectors=detectors)
+        assert (item.recorded(), item.kept(), item.served()) == ([], set(), [PLEX_CREDITS])
+        item.add_part("2160p")  # a new version, left to Plex's credits too
+        item.run("2160p", detectors=detectors)
+
+        for _ in range(2):
+            assert _check_servers(item) == []
+            for version in ("1080p", "2160p"):
+                item.run(version, detectors=detectors)
+        assert text.call_count == 0
+
+    def test_a_deleted_version_left_to_plex_doesnt_list_its_item_forever(self, plex_item):
+        # Focused review LOW 1: the kept status of a file gone from disk says nothing about the item now.
+        item = plex_item(versions=("1080p", "2160p"), in_item=("1080p",))
+        item.cfg.markers["plex"]["on_plex_redetect"] = "keep_plex"
+        _native_credits(item)
+        text, detectors = _credit_text()
+        item.run("1080p", detectors=detectors)
+        item.add_part("2160p")
+        item.delete_part("1080p")
+        item._sql(("DELETE FROM taggings WHERE metadata_item_id=7 AND text='credits'",))
+        item.server.get_markers.return_value = []
+
+        assert _check_servers(item) == []
 
     def test_kept_types_keep_the_parts_own_key(self, plex_item):
         # Plex rebuilds its rows from the part's pv: keys when it re-detects: a kept type's key isn't ours to change.

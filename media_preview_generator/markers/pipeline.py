@@ -1218,6 +1218,34 @@ def _own_types_now(
     return own
 
 
+def _request_versions_left_to_the_server(
+    ctx: PipelineContext, rec: FileRecord, server_id: str, item_id: str, types: set[MarkerType]
+) -> None:
+    """Ask again for the item's other versions whose last run left one of ``types`` to the server's own marker.
+
+    Their next run reads the type (``_decided_on_other_versions``), so the item's versions can agree; without it the
+    version that decided it waits until they run for another reason.
+    """
+    paths = []
+    for path in ctx.store.files_for_item(server_id, item_id):
+        other = ctx.store.get_file(path) if path != rec.canonical_path else None
+        decisions = ctx.store.get_decisions(other.id) if other is not None else {}
+        if any(t in decisions and is_kept_own(decisions[t].status, decisions[t].reason) for t in types):
+            paths.append(path)
+    if paths:
+        ctx.request_followups(paths)
+
+
+def _kept_own_applies(ctx: PipelineContext, cfg: ServerConfig, rec: FileRecord, store: MarkerStore) -> bool:
+    """Whether a stored kept status still names this server: it keeps its own now and the last run published there."""
+    try:
+        keeps = _live_markers_settings(ctx, cfg).keeps_server_markers
+    except Exception as exc:
+        logger.warning("Couldn't read the saved settings of {}: {}", cfg.name, type(exc).__name__)
+        return False
+    return keeps and store.get_publish_state(rec.id, cfg.id) is not None
+
+
 def _decided_on_other_versions(
     ctx: PipelineContext, rec: FileRecord, server_id: str, item_id: str
 ) -> frozenset[MarkerType]:
@@ -1570,7 +1598,8 @@ def _publish_to(
         holds_kept = item_row is not None and bool(item_row.kept_types)
         # A type left to the server's own marker goes through the write too, which sends nothing (no markers, nothing
         # of ours before) but records the file on its item, so Check servers reads the server's own marker back.
-        if not wanted and previous == [] and own_previous is None and not holds_kept and not kept_own:
+        nothing_to_send = not wanted and previous == [] and own_previous is None and not holds_kept
+        if nothing_to_send and not kept_own:
             if needs_review:
                 return _row(cfg, publisher.name, ServerStatus.NEEDS_REVIEW, "Sources don't agree yet", path)
             message = "This server can't show the markers found for this file" if markers else "No markers found"
@@ -1616,9 +1645,13 @@ def _publish_to(
         changed = publisher.last_write_changed
         kept = publisher.last_kept_types
         replaced_own = publisher.last_replaced_own_types
-        version = store.set_item_publish_state(
-            cfg.id, item_id, ours, "written", kept_types=kept, item_files=publisher.last_item_files
-        )
+        if nothing_to_send and item_row is not None and item_row.status != "written":
+            # Nothing was sent: another version's failed write stays on record for its retry (files_of_failed_items).
+            version = item_row.version
+        else:
+            version = store.set_item_publish_state(
+                cfg.id, item_id, ours, "written", kept_types=kept, item_files=publisher.last_item_files
+            )
         if not changed and _unchanged(version):
             return _up_to_date(kept)  # a forced run whose write changed nothing
         store.set_publish_basis(rec.id, cfg.id, decided_hash=decided_hash, item_version=version)
@@ -1635,7 +1668,9 @@ def _publish_to(
         shown_types = {m.type for m in ours} | kept
         waiting_for = [m.type.value for m in wanted if m.type not in shown_types]
         if waiting_for:
-            # Plex shows a type only when every version of the item is decided and agrees on it.
+            # Plex shows a type only when every version of the item is decided and agrees on it. A version that left
+            # a type to Plex's own marker reads it on its next run now that this one decided it: ask for that run.
+            _request_versions_left_to_the_server(ctx, rec, cfg.id, item_id, {MarkerType(t) for t in waiting_for})
             message = with_kept_note(
                 f"Waiting for this item's other versions to agree on: {', '.join(waiting_for)}", note
             )
@@ -1769,7 +1804,10 @@ def publish_now(
                 rows.append(_later(cfg, PUBLISH_DEADLINE_MESSAGE))
                 continue
             try:
-                rows.append(_publish_to(owner, rec, markers, needs_review, servers, ctx, _no_phase, kept_own=kept_own))
+                # Only a server that still keeps its own and took the last run's rows: one switched to Use ours or
+                # added since gets what an undecided type gets.
+                left = kept_own if _kept_own_applies(ctx, cfg, rec, store) else frozenset()
+                rows.append(_publish_to(owner, rec, markers, needs_review, servers, ctx, _no_phase, kept_own=left))
             except _FileChangedError:
                 rows.append(_later(cfg, "The file changed while it was being published"))
             except Exception as exc:

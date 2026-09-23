@@ -137,8 +137,15 @@ def find_drift(
                     break
                 # A type a file left to the server's own marker is read back like a kept one: gone from the server,
                 # or the server set to use ours, and the file runs again.
+                # An item with nothing of ours and nothing kept has no versions to agree on: its recorded version files
+                # may be from before (a write with nothing to send doesn't read the item), so they aren't compared.
                 batch = [
-                    (r.item_id, list(r.markers), r.kept_types | r.own_types, r.item_files)
+                    (
+                        r.item_id,
+                        list(r.markers),
+                        r.kept_types | r.own_types,
+                        r.item_files if r.markers or r.kept_types else None,
+                    )
                     for r in rows[first : first + READ_BACK_BATCH]
                 ]
                 read = publisher.shows_many(batch, cancel_check=cancel_check)

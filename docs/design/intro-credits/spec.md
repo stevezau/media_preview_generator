@@ -1916,3 +1916,14 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     kept sibling whose re-decided intro is still undecided.
   - LOWs: `publish_now` and the Inspector plan name the stored kept-own types as a job's rows do ("Keeping Plex's
     credits", plan "Keeps Plex's").
+  Focused review (two MEDs, two LOWs, reproduced on the real-database harness):
+  - **An item with nothing of ours isn't listed for its versions forever (MED A).** Its recorded version files can be
+    from an earlier write (a write with nothing to send doesn't read the item), so a version added since read as
+    "versions changed" on every Check servers run. Such a row has nothing to agree on across versions, so its read-back
+    doesn't compare them.
+  - **The order of a Plex item's versions doesn't matter (MED B).** When a version waits on a type another version
+    left to Plex's marker, it asks the job to run that version again, which now reads the type (MED 2) — a job sorting
+    by path otherwise left the deciding version waiting.
+  - LOWs: a kept status from a file gone from disk or replaced says nothing about its item; `publish_now` names kept
+    types only on a server that still keeps its own and got the last run's rows, and a write with nothing to send
+    leaves a failed item row failed, for its retry.
