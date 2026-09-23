@@ -147,6 +147,8 @@ jobs:
           # A manual run creates the tag; without this GitHub puts it on the default branch's head, not on the
           # commit these DLLs were built from.
           target_commitish: ${{ github.sha }}
+          # The app's update check reads /releases/latest; a plugin release must never become "latest".
+          make_latest: false
           name: "Media Preview Bridge ${{ steps.ver.outputs.release_version }}"
           body: |
             Jellyfin plugin DLLs — install via Jellyfin admin → Plugins → Repositories.

@@ -74,6 +74,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
+          # The app's update check reads /releases/latest; a plugin release must never become "latest".
+          make_latest: false
           name: "Media Preview Bridge for Emby ${{ steps.ver.outputs.version }}"
           body: |
             Emby plugin DLLs: `MediaPreviewBridge.Emby-4.10.dll` for Emby 4.10, `MediaPreviewBridge.Emby-4.9.dll` for Emby 4.9.
