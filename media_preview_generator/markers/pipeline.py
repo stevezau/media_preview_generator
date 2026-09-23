@@ -900,7 +900,7 @@ def _needs_lookup(ctx: PipelineContext, rec: FileRecord, source: Source, refresh
     return all(r.type is None for r in rows) and ctx.now() - fetched > NO_DATA_RETRY
 
 
-def online_recheck_files(store: MarkerStore, settings: GlobalMarkersSettings, now: datetime) -> list[str]:
+def online_recheck_files(store: MarkerStore, settings: GlobalMarkersSettings, now: datetime) -> Iterator[str]:
     """The files the weekly online re-check lists: an enabled online source's stored "no entry" is due again (older
     than ``NO_DATA_RETRY``, as ``_needs_lookup`` asks it again), and its answer could still change a decision.
 
@@ -913,14 +913,16 @@ def online_recheck_files(store: MarkerStore, settings: GlobalMarkersSettings, no
         settings: Global detection settings.
         now: The current time (UTC).
 
-    Returns:
-        The local paths, sorted; empty when every online source is off.
+    Yields:
+        The local paths, sorted, each checked as it is reached (so a caller can stop early); none when every online
+        source is off.
     """
     sources = [source for source in ONLINE_SOURCES if settings.source_enabled(source.value)]
     if not sources:
-        return []
-    due = store.files_with_old_empty_lookups(sources, now - NO_DATA_RETRY)
-    return [path for path in due if _online_answer_could_decide(store, path) and os.path.isfile(path)]
+        return
+    for path in store.files_with_old_empty_lookups(sources, now - NO_DATA_RETRY):
+        if _online_answer_could_decide(store, path) and os.path.isfile(path):
+            yield path
 
 
 def _online_answer_could_decide(store: MarkerStore, path: str) -> bool:

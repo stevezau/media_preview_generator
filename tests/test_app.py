@@ -995,18 +995,29 @@ class TestWeeklyOnlineRecheckOnStart:
 
         order = []
         monkeypatch.setattr(app_mod, "_requeue_interrupted_on_startup", lambda config_dir: order.append("requeue"))
-        monkeypatch.setattr(app_mod, "_schedule_weekly_online_recheck", lambda: order.append("schedule"))
+        monkeypatch.setattr(
+            app_mod, "_schedule_weekly_online_recheck", lambda config_dir: order.append(("schedule", config_dir))
+        )
         config_dir = str(tmp_path / "config")
         os.makedirs(config_dir, exist_ok=True)
         with patch.dict(os.environ, {"CONFIG_DIR": config_dir, "WEB_AUTH_TOKEN": "test-token-12345678"}):
             app_mod.create_app(config_dir=config_dir)
-        assert order == ["requeue", "schedule"]
+        assert order == ["requeue", ("schedule", config_dir)]
 
-    def test_it_arms_the_timer(self):
+    @pytest.mark.parametrize("enabled", [True, False], ids=["on-somewhere", "off-everywhere"])
+    def test_it_arms_the_timer_only_while_intro_and_credits_is_on_somewhere(self, tmp_path, enabled):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        servers = [{"id": "jf-1", "type": "jellyfin", "enabled": True, "markers": {"enabled": enabled}}]
+        get_settings_manager(str(tmp_path)).apply_changes(updates={"media_servers": servers})
         with patch(self.SCHEDULE) as schedule:
-            _schedule_weekly_online_recheck()
-        schedule.assert_called_once_with()
+            _schedule_weekly_online_recheck(str(tmp_path))
+        # Off everywhere: the scheduler, the only thing here that opens markers.db, isn't called.
+        assert schedule.call_count == int(enabled)
 
-    def test_a_failure_never_stops_the_start(self):
-        with patch(self.SCHEDULE, side_effect=OSError("markers.db is locked")):
-            _schedule_weekly_online_recheck()  # never raises
+    def test_a_failure_never_stops_the_start(self, tmp_path):
+        with (
+            patch("media_preview_generator.markers.triggers.markers_enabled_anywhere", return_value=True),
+            patch(self.SCHEDULE, side_effect=OSError("markers.db is locked")),
+        ):
+            _schedule_weekly_online_recheck(str(tmp_path))  # never raises

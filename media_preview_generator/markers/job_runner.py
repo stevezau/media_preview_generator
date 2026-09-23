@@ -843,10 +843,15 @@ def _items_to_decide_again(store: MarkerStore) -> list[ProcessableItem]:
     return _stored_file_items({*store.files_in_review(), *store.files_waiting_for_other_versions()})
 
 
-def _items_for_online_recheck(ctx: PipelineContext) -> list[ProcessableItem]:
+def _items_for_online_recheck(ctx: PipelineContext, cancel_check: Callable[[], bool]) -> list[ProcessableItem]:
     """The files whose "no entry" from an enabled online source is due again and whose decision it could still change
-    (``online_recheck_files``)."""
-    return _stored_file_items(set(online_recheck_files(ctx.store, ctx.settings, ctx.now())))
+    (``online_recheck_files``: a disk check per file). A cancel stops the listing; the caller then cancels the job."""
+    paths: set[str] = set()
+    for path in online_recheck_files(ctx.store, ctx.settings, ctx.now()):
+        if cancel_check():
+            break
+        paths.add(path)
+    return _stored_file_items(paths)
 
 
 def _all_libraries_listed(cfg: ServerConfig) -> ServerConfig:
@@ -1482,7 +1487,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 elif cfg.get(DECIDE_AGAIN):
                     items, warnings, sender_paths = _items_to_decide_again(ctx.store), [], {}
                 elif cfg.get(ONLINE_RECHECK):
-                    items, warnings, sender_paths = _items_for_online_recheck(ctx), [], {}
+                    items, warnings, sender_paths = _items_for_online_recheck(ctx, cancel_check), [], {}
                 else:
                     items, warnings, sender_paths = build_items(
                         cfg, registry=registry, cancel_check=cancel_check, progress_callback=progress_callback

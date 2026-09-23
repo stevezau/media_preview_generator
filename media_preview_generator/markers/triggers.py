@@ -477,9 +477,9 @@ def submit_decide_again() -> str | None:
     return job.id
 
 
-def _pending_online_recheck(jm) -> Job | None:
-    """The weekly online re-check still waiting to run, if any (call under ``FOLLOW_UP_LOCK``)."""
-    for job in jm.get_pending_jobs():
+def _queued_online_recheck(jm) -> Job | None:
+    """The weekly online re-check waiting to run or running, if any (call under ``FOLLOW_UP_LOCK``)."""
+    for job in [*jm.get_pending_jobs(), *jm.get_running_jobs()]:
         if job.kind == JOB_KIND_INTRO_CREDITS and (job.config or {}).get(ONLINE_RECHECK):
             return job
     return None
@@ -493,7 +493,7 @@ def submit_online_recheck() -> str | None:
     priority: stored answers that aren't due are reused, so only the due lookups happen, and a file is read again only
     when a detector answer of its own is due. TheIntroDB's daily budget and its per-show pause apply as on any run; a
     file its budget refused goes to the TheIntroDB recheck. The job lists the files when it runs; while one waits to
-    run, that job is returned instead.
+    run or runs, that job is returned instead.
 
     Returns:
         The job's id; None when Intro & Credits is off on every server, every online source is off, or no file is due.
@@ -505,24 +505,24 @@ def submit_online_recheck() -> str | None:
     if not any(settings.source_enabled(source.value) for source in ONLINE_SOURCES):
         logger.info("Every online database is turned off; the weekly online re-check is skipped")
         return None
-    files = online_recheck_files(get_marker_store(), settings, _utcnow())
-    if not files:
+    # Stops at the first file due: the job lists them all when it runs.
+    if not any(True for _path in online_recheck_files(get_marker_store(), settings, _utcnow())):
         logger.info("No file is due to be asked again online; the weekly online re-check is skipped")
         return None
     jm = get_job_manager()
-    # The TheIntroDB recheck's lock: at most one waiting re-check, like it.
+    # The TheIntroDB recheck's lock: at most one re-check queued, like it.
     with FOLLOW_UP_LOCK:
-        waiting = _pending_online_recheck(jm)
-        if waiting is not None:
-            logger.info("The weekly online re-check is already queued as job {}", waiting.id[:8])
-            return waiting.id
+        queued = _queued_online_recheck(jm)
+        if queued is not None:
+            logger.info("The weekly online re-check is already queued or running as job {}", queued.id[:8])
+            return queued.id
         job = create_intro_credits_job(
             library_name=ONLINE_RECHECK_JOB_NAME,
             priority=PRIORITY_LOW,
             source=ONLINE_RECHECK_SOURCE,
             online_recheck=True,
         )
-    logger.info("{} file(s) are asked again online (job {})", len(files), job.id[:8])
+    logger.info("The weekly online re-check is queued (job {})", job.id[:8])
     return job.id
 
 
@@ -530,15 +530,24 @@ def schedule_online_recheck() -> None:
     """Arm the timer that queues the weekly online re-check when it is due. Never raises.
 
     The due time is kept in markers.db, so a restart doesn't put it off; the first start sets it a week ahead. One that
-    passed while the app was down fires at once.
+    passed while the app was down, or that can't be read (not a time, or one without a time zone), fires at once; one
+    further off than a week (a clock set back) is brought to a week from now.
     """
     global _online_recheck_timer
     try:
         store = get_marker_store()
-        due = store.online_recheck_due()
+        now = _utcnow()
+        try:
+            due = store.online_recheck_due()
+        except ValueError:
+            due = now
         if due is None:
-            due = _utcnow() + ONLINE_RECHECK_EVERY
+            due = now + ONLINE_RECHECK_EVERY
             store.set_online_recheck_due(due)
+        elif due.tzinfo is None:
+            due = now
+        due = min(due, now + ONLINE_RECHECK_EVERY)
+        delay = max(0.0, (due - now).total_seconds())
     except Exception as exc:
         logger.warning(
             "Couldn't schedule the weekly Intro & Credits online re-check ({}: {}); the next start tries again",
@@ -546,7 +555,7 @@ def schedule_online_recheck() -> None:
             exc,
         )
         return
-    timer = threading.Timer(max(0.0, (due - _utcnow()).total_seconds()), _run_online_recheck)
+    timer = threading.Timer(delay, _run_online_recheck)
     timer.daemon = True
     timer.name = "markers-online-recheck"
     with _online_recheck_timer_lock:
@@ -558,19 +567,23 @@ def schedule_online_recheck() -> None:
 
 
 def _run_online_recheck() -> None:
-    """The timer's run: queue the weekly online re-check, set the next one a week later and arm it. Never raises."""
-    try:
-        submit_online_recheck()
-    except Exception:
-        logger.exception("Couldn't queue the weekly Intro & Credits online re-check")
+    """The timer's run: set the next re-check a week later, queue this one, and arm the next. Never raises.
+
+    The next due time is stored first, so a ``schedule_online_recheck`` while this run queues the job arms the next
+    week's, not this one again.
+    """
     try:
         get_marker_store().set_online_recheck_due(_utcnow() + ONLINE_RECHECK_EVERY)
     except Exception as exc:
-        # Armed again, the old due time would fire at once, and again: the next start schedules it instead.
+        # Queued and armed again, the old due time would fire at once, and again: the next start schedules it instead.
         logger.warning(
             "Couldn't store when the next weekly online re-check is due ({}: {}); the next start schedules it",
             type(exc).__name__,
             exc,
         )
         return
+    try:
+        submit_online_recheck()
+    except Exception:
+        logger.exception("Couldn't queue the weekly Intro & Credits online re-check")
     schedule_online_recheck()

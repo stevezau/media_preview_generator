@@ -691,8 +691,8 @@ in Needs review or not found, or an intro found by season audio alone, where a d
 entry" more than 14 days ago. It asks only those databases again, reuses every other saved answer, and reads a file
 only when one of its own saved answers is due; TheIntroDB's daily limit and its 7-day pause for a show apply as on
 any job. Its log ends with a line like "Weekly online re-check (12 files): 2 newly found online, 10 unchanged". The
-week counts from the first start and carries over restarts; nothing is queued while Intro & Credits is off on every
-server or every online database is off.
+week counts from the first start with Intro & Credits on and carries over restarts; nothing is queued while Intro &
+Credits is off on every server, every online database is off, or the last re-check is still queued or running.
 
 ### Needs review
 

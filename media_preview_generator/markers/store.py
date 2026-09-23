@@ -684,13 +684,17 @@ class MarkerStore:
         return [r["canonical_path"] for r in rows]
 
     def online_recheck_due(self) -> datetime | None:
-        """When the weekly online re-check is due next (None = never set, or unreadable)."""
+        """When the weekly online re-check is due next.
+
+        Returns:
+            The stored time (None = never set).
+
+        Raises:
+            ValueError: The stored value isn't a time.
+        """
         with self._lock:
             row = self._conn.execute("SELECT value FROM meta WHERE key=?", (_ONLINE_RECHECK_DUE,)).fetchone()
-        try:
-            return datetime.fromisoformat(row["value"]) if row else None
-        except ValueError:
-            return None
+        return datetime.fromisoformat(row["value"]) if row else None
 
     def set_online_recheck_due(self, due: datetime) -> None:
         """Store when the weekly online re-check is due next.

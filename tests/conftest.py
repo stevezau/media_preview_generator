@@ -505,7 +505,7 @@ def _neutralize_weekly_online_recheck(monkeypatch):
         import media_preview_generator.web.app as app_mod
     except ImportError:
         return
-    monkeypatch.setattr(app_mod, "_schedule_weekly_online_recheck", lambda: None)
+    monkeypatch.setattr(app_mod, "_schedule_weekly_online_recheck", lambda config_dir: None)
 
 
 @pytest.fixture(autouse=True)

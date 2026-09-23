@@ -152,7 +152,7 @@ class TestOnlineRecheckFiles:
         self, store, clock, tmp_path, status, decided_by, locked, listed
     ):
         path = _add(store, clock, tmp_path, "a", status=status, decided_by=decided_by, locked=locked)
-        assert pipeline.online_recheck_files(store, _settings(*ALL_ONLINE), NOW) == ([path] if listed else [])
+        assert list(pipeline.online_recheck_files(store, _settings(*ALL_ONLINE), NOW)) == ([path] if listed else [])
 
     @pytest.mark.parametrize(
         ("lookups", "listed"),
@@ -167,7 +167,7 @@ class TestOnlineRecheckFiles:
     )
     def test_only_a_no_entry_older_than_the_retry_is_due(self, store, clock, tmp_path, lookups, listed):
         path = _add(store, clock, tmp_path, "a", lookups=lookups)
-        assert pipeline.online_recheck_files(store, _settings(*ALL_ONLINE), NOW) == ([path] if listed else [])
+        assert list(pipeline.online_recheck_files(store, _settings(*ALL_ONLINE), NOW)) == ([path] if listed else [])
 
     @pytest.mark.parametrize(
         ("online", "listed"),
@@ -176,12 +176,12 @@ class TestOnlineRecheckFiles:
     )
     def test_only_an_enabled_sources_no_entry_counts(self, store, clock, tmp_path, online, listed):
         path = _add(store, clock, tmp_path, "a", lookups=((Source.INTRODB, False, 20), (Source.THEINTRODB, False, 2)))
-        assert pipeline.online_recheck_files(store, _settings(*online), NOW) == ([path] if listed else [])
+        assert list(pipeline.online_recheck_files(store, _settings(*online), NOW)) == ([path] if listed else [])
 
     def test_a_file_gone_from_disk_is_not_listed(self, store, clock, tmp_path):
         kept = _add(store, clock, tmp_path, "kept")
         _add(store, clock, tmp_path, "gone", on_disk=False)
-        assert pipeline.online_recheck_files(store, _settings(*ALL_ONLINE), NOW) == [kept]
+        assert list(pipeline.online_recheck_files(store, _settings(*ALL_ONLINE), NOW)) == [kept]
 
 
 class TestSubmit:
@@ -228,7 +228,7 @@ class TestSubmit:
         }
         env.start.assert_called_once_with(job_id)
         ctx = SimpleNamespace(store=env.store, settings=env.online["settings"], now=lambda: NOW)
-        assert [item.canonical_path for item in job_runner._items_for_online_recheck(ctx)] == [due]
+        assert [item.canonical_path for item in job_runner._items_for_online_recheck(ctx, lambda: False)] == [due]
 
     def test_nothing_is_queued_when_no_file_is_due(self, env, tmp_path):
         _add(env.store, env.clock, tmp_path, "not-due", lookups=((Source.THEINTRODB, False, 3),))
@@ -247,16 +247,43 @@ class TestSubmit:
         assert triggers.submit_online_recheck() is None
         assert self._jobs(env.jm) == []
 
-    def test_a_waiting_one_is_reused_and_one_that_started_is_not(self, env, tmp_path):
+    @pytest.mark.parametrize("state", ["pending", "running"])
+    def test_one_waiting_or_running_is_returned_and_nothing_else_queued(self, env, tmp_path, state):
         _add(env.store, env.clock, tmp_path, "due")
         first = triggers.submit_online_recheck()
+        if state == "running":
+            env.jm.start_job(first)
         assert triggers.submit_online_recheck() == first
-        assert len(self._jobs(env.jm)) == 1
+        assert [job.id for job in self._jobs(env.jm)] == [first]
 
-        env.jm.start_job(first)  # it has listed its files: a later week's files need a job of their own
+    @pytest.mark.parametrize("end", ["complete", "cancel", "fail"])
+    def test_one_that_ended_doesnt_stop_the_next(self, env, tmp_path, end):
+        _add(env.store, env.clock, tmp_path, "due")
+        first = triggers.submit_online_recheck()
+        env.jm.start_job(first)
+        if end == "complete":
+            env.jm.complete_job(first)
+        elif end == "cancel":
+            env.jm.cancel_job(first)
+        else:
+            env.jm.complete_job(first, error="boom")
         second = triggers.submit_online_recheck()
-        assert second != first
+        assert second not in (None, first)
         assert [job.id for job in env.jm.get_pending_jobs()] == [second]
+
+    def test_listing_stops_at_the_first_due_file(self, env, tmp_path, monkeypatch):
+        _add(env.store, env.clock, tmp_path, "a")
+        _add(env.store, env.clock, tmp_path, "b")
+        reached = []
+
+        def listed(store, settings, now):
+            for path in ("/a.mkv", "/b.mkv"):
+                reached.append(path)
+                yield path
+
+        monkeypatch.setattr(triggers, "online_recheck_files", listed)
+        assert triggers.submit_online_recheck() is not None
+        assert reached == ["/a.mkv"]
 
     def test_other_waiting_jobs_are_not_reused(self, env, tmp_path):
         _add(env.store, env.clock, tmp_path, "due")
@@ -358,6 +385,22 @@ class TestSchedule:
         triggers.schedule_online_recheck()
         assert [timer.interval for timer in timers] == [0.0]
 
+    @pytest.mark.parametrize(
+        "stored",
+        ["not a time", "2026-09-30T12:00:00"],  # the second has no time zone: comparing it with now would raise
+        ids=["unreadable", "no-time-zone"],
+    )
+    def test_a_stored_time_that_cant_be_used_fires_at_once(self, timers, store, stored):
+        with store._tx() as conn:
+            conn.execute("INSERT INTO meta(key, value) VALUES ('online_recheck_due', ?)", (stored,))
+        triggers.schedule_online_recheck()  # never raises
+        assert [timer.interval for timer in timers] == [0.0]
+
+    def test_one_further_off_than_a_week_is_brought_to_a_week(self, timers, store):
+        store.set_online_recheck_due(NOW + timedelta(days=400))  # the clock was set back since it was stored
+        triggers.schedule_online_recheck()
+        assert [timer.interval for timer in timers] == [WEEK.total_seconds()]
+
     def test_arming_again_cancels_the_previous_timer(self, timers):
         triggers.schedule_online_recheck()
         triggers.schedule_online_recheck()
@@ -380,10 +423,27 @@ class TestSchedule:
         assert store.online_recheck_due() == NOW + WEEK
         assert [timer.interval for timer in timers] == [WEEK.total_seconds()]
 
-    def test_a_next_due_time_that_cant_be_stored_arms_nothing(self, timers, store, monkeypatch):
+    def test_the_next_due_time_is_stored_before_the_job_is_queued(self, timers, store, monkeypatch):
+        store.set_online_recheck_due(NOW - timedelta(minutes=1))
+        seen = []
+
+        def submit():
+            seen.append(store.online_recheck_due())
+            # Another start arming it meanwhile gets next week's time, not this run's again.
+            triggers.schedule_online_recheck()
+            return "job-1"
+
+        monkeypatch.setattr(triggers, "submit_online_recheck", submit)
+        triggers._run_online_recheck()
+        assert seen == [NOW + WEEK]
+        assert [timer.interval for timer in timers] == [WEEK.total_seconds(), WEEK.total_seconds()]
+
+    def test_a_next_due_time_that_cant_be_stored_queues_and_arms_nothing(self, timers, store, monkeypatch):
         # Armed again, the old (past) due time would fire at once, over and over.
         store.set_online_recheck_due(NOW - timedelta(minutes=1))
-        monkeypatch.setattr(triggers, "submit_online_recheck", MagicMock(return_value=None))
+        submit = MagicMock(return_value=None)
+        monkeypatch.setattr(triggers, "submit_online_recheck", submit)
         monkeypatch.setattr(store, "set_online_recheck_due", MagicMock(side_effect=OSError("disk full")))
         triggers._run_online_recheck()
+        submit.assert_not_called()
         assert timers == []

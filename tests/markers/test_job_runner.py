@@ -3566,6 +3566,20 @@ class TestOnlineRecheckJob:
         ]
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
 
+    def test_a_cancel_stops_the_listing_and_the_job(self, env, monkeypatch):
+        env.job.config = dict(self.CONFIG)
+
+        def listed(store, settings, now):
+            yield "/m/a.mkv"
+            env.jm.is_cancellation_requested.return_value = True
+            yield "/m/b.mkv"
+            raise AssertionError("listed on after the cancel")
+
+        monkeypatch.setattr(job_runner, "online_recheck_files", listed)
+        job_runner.run_intro_credits_job("j1")
+        env.dispatcher.submit_items.assert_not_called()
+        env.jm.cancel_job.assert_called_once_with("j1")
+
     def test_with_nothing_due_it_completes_without_a_warning(self, env, monkeypatch):
         env.job.config = dict(self.CONFIG)
         monkeypatch.setattr(job_runner, "online_recheck_files", MagicMock(return_value=[]))
