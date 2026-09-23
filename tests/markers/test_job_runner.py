@@ -1745,7 +1745,6 @@ class TestLibraryRetry:
             verify_chain=False,
             parent_job_id="j1",
             max_retries=3,
-            stored_answers_only=False,
         )
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
         assert any("retry" in c.args[1].lower() for c in env.jm.add_log.call_args_list)
@@ -1863,7 +1862,6 @@ class TestLibraryRetry:
                 verify_chain=False,
                 parent_job_id="j1",
                 max_retries=3,
-                stored_answers_only=False,
             )
             logs = [c.args[1] for c in env.jm.add_log.call_args_list]
             assert any("not on disk yet" in line and "retry 1 of 3" in line for line in logs), logs
@@ -1989,7 +1987,6 @@ class TestLibraryRetry:
                 verify_chain=False,
                 parent_job_id="j1",
                 max_retries=3,
-                stored_answers_only=False,
             )
         else:
             assert order == []
@@ -2510,7 +2507,6 @@ class TestVerifyReplacedFilesLater:
             verify_chain=True,
             parent_job_id="j1",
             max_retries=3,
-            stored_answers_only=False,
         )
 
     def test_a_retry_of_a_retry_in_a_verify_chain_stays_in_the_chain(self, env, verify_env):
@@ -3061,7 +3057,6 @@ class TestRetryCarriesTheSenderPath:
             verify_chain=False,
             parent_job_id="j1",
             max_retries=3,
-            stored_answers_only=False,
         )
 
         # Sonarr's copy lands on the second disk before the retry runs: the retry reads it there.
@@ -3437,8 +3432,8 @@ def test_start_job_async_falls_back_to_the_preview_thread_when_the_job_cant_be_r
 
 
 class TestInReviewJob:
-    """The one job after settings v16 (``triggers.submit_decide_again``): the files in Needs review when it runs,
-    decided from their stored answers only."""
+    """The one job after settings v16 (``triggers.submit_decide_again``): an ordinary Intro & Credits job over the files
+    in Needs review, and those waiting for their item's other versions, when it runs."""
 
     CONFIG = {
         "kind": JOB_KIND_INTRO_CREDITS,
@@ -3446,17 +3441,24 @@ class TestInReviewJob:
         "libraries": [],
         "file_paths": [],
         job_runner.DECIDE_AGAIN: True,
-        job_runner.STORED_ANSWERS_ONLY: True,
     }
 
-    def test_it_lists_the_files_in_review_and_decides_them_from_stored_answers_only(self, env):
+    @staticmethod
+    def _ends(env, status):
+        from media_preview_generator.web.jobs import JobStatus
+
+        env.jm.complete_job.side_effect = lambda *args, **kwargs: setattr(env.job, "status", JobStatus[status])
+
+    def test_it_lists_the_files_in_review_and_waiting_and_runs_them_as_any_job(self, env):
         env.job.config = dict(self.CONFIG)
         env.ctx.store.files_in_review.return_value = ["/tv/B/S01/e2.mkv", "/movies/A/a.mkv", "/tv/B/S01/e1.mkv"]
         env.ctx.store.files_waiting_for_other_versions.return_value = ["/tv/B/S01/e1.mkv", "/movies/C/c - 4K.mkv"]
         with patch.object(job_runner, "build_items") as build:
             job_runner.run_intro_credits_job("j1")
         build.assert_not_called()
-        assert env.build_context.call_args.kwargs["stored_answers_only"] is True
+        ctx_kwargs = env.build_context.call_args.kwargs
+        # Only its log is grouped; it asks and reads what is due, as any job does.
+        assert (ctx_kwargs["decide_again"], ctx_kwargs["force"]) == (True, False)
         items = env.dispatcher.submit_items.call_args.kwargs["items"]
         # Season folder, then path, as build_items orders a job's files; no item id hints (each is looked up again).
         assert [(i.canonical_path, i.item_id_by_server) for i in items] == [
@@ -3467,30 +3469,36 @@ class TestInReviewJob:
         ]
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
 
-    def test_it_queues_no_season_job(self, env, monkeypatch):
-        # A Season job reads files again; this one read nothing new, so no sibling's answer changed.
-        env.job.config = dict(self.CONFIG)
-        env.ctx.store.files_in_review.return_value = ["/tv/B/S01/e1.mkv"]
-        env.ctx.take_followups.return_value = ["/tv/B/S01/e2.mkv"]
-        queue = MagicMock()
-        monkeypatch.setattr(job_runner, "_queue_season_followups", queue)
-        job_runner.run_intro_credits_job("j1")
-        queue.assert_not_called()
+    @pytest.mark.parametrize(("status", "cleared"), [("COMPLETED", True), ("FAILED", False)])
+    def test_the_upgrades_request_is_cleared_only_once_the_job_completes(self, env, status, cleared):
+        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
 
-    def test_with_nothing_in_review_it_completes_without_a_warning(self, env):
+        env.job.config = dict(self.CONFIG)
+        env.ctx.store.files_in_review.return_value = ["/m/a.mkv"]
+        self._ends(env, status)
+        job_runner.run_intro_credits_job("j1")
+        assert env.sm.delete.call_args_list == ([call(DECIDE_AGAIN_KEY)] if cleared else [])
+
+    def test_with_nothing_in_review_it_completes_without_a_warning_and_clears_the_request(self, env):
+        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
+
         env.job.config = dict(self.CONFIG)
         env.ctx.store.files_in_review.return_value = []
+        self._ends(env, "COMPLETED")
         job_runner.run_intro_credits_job("j1")
         env.dispatcher.submit_items.assert_not_called()
         env.jm.complete_job.assert_called_once_with("j1")
+        env.sm.delete.assert_called_once_with(DECIDE_AGAIN_KEY)
 
-    def test_any_other_job_reads_and_asks_as_before(self, env):
+    def test_any_other_job_lists_its_own_files_and_leaves_the_request(self, env):
+        self._ends(env, "COMPLETED")
         with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
             job_runner.run_intro_credits_job("j1")
-        assert env.build_context.call_args.kwargs["stored_answers_only"] is False
+        assert env.build_context.call_args.kwargs["decide_again"] is False
         env.ctx.store.files_in_review.assert_not_called()
+        env.sm.delete.assert_not_called()
 
-    def test_its_retry_decides_from_stored_answers_too_and_a_file_off_disk_gets_none(self, env, monkeypatch):
+    def test_its_retry_is_an_ordinary_retry_and_a_file_off_disk_gets_none(self, env, monkeypatch):
         from media_preview_generator.markers import triggers
 
         settings = {"log_level": "INFO", "webhook_retry_count": 3, "webhook_retry_delay": 30}
@@ -3522,5 +3530,4 @@ class TestInReviewJob:
             verify_chain=False,
             parent_job_id="j1",
             max_retries=3,
-            stored_answers_only=True,
         )

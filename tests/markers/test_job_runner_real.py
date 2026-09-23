@@ -110,7 +110,7 @@ class TestRetryThroughThePipeline:
                 recheck_empty_server_markers=False,
                 season_recheck=False,
                 recheck_label=SEASON_RECHECK_LABEL,
-                stored_answers_only=False,
+                decide_again=False,
             ):
                 return PipelineContext(
                     registry=registry,
@@ -120,7 +120,7 @@ class TestRetryThroughThePipeline:
                     priority=priority,
                     ffprobe="ffprobe",
                     force=force,
-                    stored_answers_only=stored_answers_only,
+                    decide_again=decide_again,
                     clients={},
                     live_config=registry.get_config,  # the fake registry stands in for the saved servers
                     recheck_empty_server_markers=recheck_empty_server_markers,
@@ -734,7 +734,7 @@ class TestCreditTextOnTheWorkers:
             recheck_empty_server_markers=False,
             season_recheck=False,
             recheck_label=SEASON_RECHECK_LABEL,
-            stored_answers_only=False,
+            decide_again=False,
         ):
             return PipelineContext(
                 registry=registry,
@@ -744,7 +744,7 @@ class TestCreditTextOnTheWorkers:
                 priority=priority,
                 ffprobe="ffprobe",
                 force=force,
-                stored_answers_only=stored_answers_only,
+                decide_again=decide_again,
                 clients={},
                 local_detectors=default_local_detectors(settings, config, credits_text=TextDetState.AVAILABLE),
                 credits_text=TextDetState.AVAILABLE,

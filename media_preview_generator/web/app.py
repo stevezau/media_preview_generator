@@ -514,11 +514,13 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
 
 def _decide_again_after_upgrade(config_dir: str) -> None:
     """Queue the one job that decides the files in Intro & Credits' Needs review (and those waiting for their item's
-    other versions) again, when the settings upgrade asked for it (``upgrade.DECIDE_AGAIN_KEY``), then clear the
-    request.
+    other versions) again, while the settings upgrade's request for it is open (``upgrade.DECIDE_AGAIN_KEY``).
 
-    Runs after the restart requeue, once the job manager can start jobs. Never raises: a failure leaves the request for
-    the next start.
+    Runs after the restart requeue, once the job manager can start jobs, so a revived job is found and not queued twice
+    (``triggers.submit_decide_again`` returns it). The request is cleared when the job completes
+    (``job_runner._settle_decide_again``), or here when nothing is in review or waiting. With Intro & Credits off on
+    every server it stays open, so a start after it is turned on queues the job. Never raises: a failure leaves the
+    request for the next start.
     """
     from ..upgrade import DECIDE_AGAIN_KEY
     from .settings_manager import get_settings_manager
@@ -527,10 +529,12 @@ def _decide_again_after_upgrade(config_dir: str) -> None:
         settings = get_settings_manager(config_dir)
         if not settings.get(DECIDE_AGAIN_KEY):
             return
-        from ..markers.triggers import submit_decide_again
+        from ..markers.triggers import markers_enabled_anywhere, submit_decide_again
 
-        submit_decide_again()
-        settings.delete(DECIDE_AGAIN_KEY)
+        if not markers_enabled_anywhere():
+            return
+        if submit_decide_again() is None:
+            settings.delete(DECIDE_AGAIN_KEY)
     except Exception as exc:
         logger.warning(
             "Couldn't queue the Intro & Credits job that decides the files in Needs review again ({}: {}); the "

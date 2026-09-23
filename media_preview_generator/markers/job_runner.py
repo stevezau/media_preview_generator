@@ -90,11 +90,9 @@ BUDGET_RECHECK_SOURCE = "theintrodb_recheck"
 # How long after the UTC day roll that job starts, so the limiter and TheIntroDB have both started the new day.
 BUDGET_RECHECK_AFTER_RESET = timedelta(minutes=5)
 # The one-off job that decides files again after an upgrade changed the rules (``triggers.submit_decide_again``): its
-# source, the config key that lists those files when it runs (``_items_to_decide_again``), and the key that has it (and
-# its retries) decide from stored answers only (``PipelineContext.stored_answers_only``).
+# source, and the config key that lists those files when it runs (``_items_to_decide_again``).
 DECIDE_AGAIN_SOURCE = "decide_again"
 DECIDE_AGAIN = "decide_again"
-STORED_ANSWERS_ONLY = "stored_answers_only"
 # A follow-up's config key once its runner has read its files: nothing joins it after that.
 FILES_SEALED = "files_sealed"
 # A running Season job's config keys: the episodes other jobs asked for while it ran, each with the
@@ -326,7 +324,6 @@ def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dic
             verify_chain=bool(cfg.get("verify") or cfg.get("verify_chain")),
             parent_job_id=head_id,
             max_retries=count,
-            stored_answers_only=bool(cfg.get(STORED_ANSWERS_ONLY)),
         )
         _upsert_chain(
             jm,
@@ -620,13 +617,10 @@ def _queue_season_followups_after(job, cfg: dict, ctx, listed: set[str]) -> None
     A Season job queues none of its own: a sibling whose answer is still out of date is asked for again by the season's
     next run, so nothing loops. It only passes on what other jobs asked it for while it ran (``_pass_on_late_requests``).
     A retry whose runs changed nothing stored (``PipelineContext.answers_changed``) queues none either: whatever its
-    season steps found out of date was so before it ran, and the job that made it so queued it then. Nor does a job
-    deciding from stored answers only: it read nothing new, and a Season job would.
+    season steps found out of date was so before it ran, and the job that made it so queued it then.
     """
     if cfg.get("source") == SEASON_SOURCE:
         _pass_on_late_requests(job, ctx)
-        return
-    if cfg.get(STORED_ANSWERS_ONLY):
         return
     paths = [path for path in ctx.take_followups() if path not in listed]
     for path in ctx.take_changed_siblings_left_out():
@@ -1188,6 +1182,25 @@ def _complete(
     jm.complete_job(job_id, warning=" | ".join(parts) or None)
 
 
+def _settle_decide_again(jm, job_id: str, cfg: dict) -> None:
+    """Once the decide-again job has completed, clear the upgrade's request for it (``upgrade.DECIDE_AGAIN_KEY``).
+
+    Only a completed job clears it: one cancelled, failed or cut short by a restart leaves it, so the next start queues
+    the job again (``web.app._decide_again_after_upgrade``). Never raises.
+    """
+    if not cfg.get(DECIDE_AGAIN):
+        return
+    try:
+        finished = jm.get_job(job_id)
+        if finished is None or finished.status is not JobStatus.COMPLETED:
+            return
+        from ..upgrade import DECIDE_AGAIN_KEY
+
+        get_settings_manager().delete(DECIDE_AGAIN_KEY)
+    except Exception as exc:
+        logger.warning("Couldn't record that the decide-again job finished: {}; the next start queues it again", exc)
+
+
 def _wait_releasing_slot_while_paused(
     tracker,
     *,
@@ -1414,7 +1427,7 @@ def run_intro_credits_job(job_id: str) -> None:
                     recheck_label=(
                         BUDGET_RECHECK_LABEL if cfg.get("source") == BUDGET_RECHECK_SOURCE else SEASON_RECHECK_LABEL
                     ),
-                    stored_answers_only=bool(cfg.get(STORED_ANSWERS_ONLY)),
+                    decide_again=bool(cfg.get(DECIDE_AGAIN)),
                 )
                 listing = None
                 if cfg.get("reconcile"):
@@ -1464,8 +1477,9 @@ def run_intro_credits_job(job_id: str) -> None:
                         jm.add_log(job_id, "INFO - Every server checked still shows what this app published")
                         jm.complete_job(job_id, warning=" | ".join(warnings) or None)
                     elif cfg.get(DECIDE_AGAIN):
-                        jm.add_log(job_id, "INFO - No file is in Needs review")
+                        jm.add_log(job_id, "INFO - No file is in Needs review or waiting for its item's other versions")
                         jm.complete_job(job_id)
+                        _settle_decide_again(jm, job_id, cfg)
                     else:
                         jm.complete_job(job_id, warning=" ".join(["No files to check.", *warnings]))
                     if cfg.get("source") == SEASON_SOURCE:
@@ -1497,6 +1511,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 if not items:
                     jm.set_job_outcome(job_id, carried)
                     _complete(jm, job_id, carried, warnings, ctx)
+                    _settle_decide_again(jm, job_id, cfg)
                     if chain_head:
                         # A retry revived after a restart that had settled all its files: nothing is left to wait.
                         _recount_chain_head(jm, chain_head, ctx.store)
@@ -1607,6 +1622,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 retried = _queue_retry(job, cfg, waiting, sender_paths) if waiting else []
                 _mark_retried_items_gone(ctx.store, gone_items, retried, sender_paths)
                 _complete(jm, job_id, outcome, [*warnings, *unchecked_warnings, *budget_exhausted_warnings(ctx)], ctx)
+                _settle_decide_again(jm, job_id, cfg)
                 if chain_head and not retried:
                     _end_chain(jm, cfg, waiting)
                 _queue_season_followups_after(job, cfg, ctx, listed)

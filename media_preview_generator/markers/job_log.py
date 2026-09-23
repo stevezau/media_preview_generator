@@ -9,7 +9,7 @@ answer, e.g. (each line wrapped here)::
         Plex's own none
 
 A Season job logs one line per season instead of one per unchanged episode (``season_line``), a job deciding files
-again from saved answers one line instead of one per unchanged file (``decide_again_line``), and every job ends with a
+again after the update one line instead of one per unchanged file (``decide_again_line``), and every job ends with a
 totals line (``totals_line``).
 """
 
@@ -477,14 +477,14 @@ def _files(count: int) -> str:
 
 
 def decide_again_line(files: Iterable[tuple[bool, bool]]) -> str:
-    """The one line of a job deciding files again from saved answers (after the upgrade that removed "Publish when"),
+    """The one line of the job deciding files again after the upgrade that removed "Publish when",
     for the files whose decisions didn't change; the ones that did were logged file by file.
 
     Args:
         files: Per file it ran: whether its decisions changed, and whether a type is still in review.
 
     Returns:
-        E.g. ``Decided again from saved answers (3 files): 2 changed (logged above); 1 unchanged, still needs review``.
+        E.g. ``Decided again after the update (3 files): 2 changed (logged above); 1 unchanged, still needs review``.
     """
     results = list(files)
     changed = sum(1 for was_changed, _ in results if was_changed)
@@ -497,7 +497,7 @@ def decide_again_line(files: Iterable[tuple[bool, bool]]) -> str:
             verb = "needs" if review == 1 else "need"
             text += f", still {verb} review" if review == same else f", {review} still {verb} review"
         parts.append(text)
-    return f"Decided again from saved answers ({_files(len(results))}): {'; '.join(parts) or 'nothing to decide'}"
+    return f"Decided again after the update ({_files(len(results))}): {'; '.join(parts) or 'nothing to decide'}"
 
 
 # File outcomes the totals line names only when some file had them, in this order.

@@ -383,7 +383,7 @@ class TestSeasonJob:
 
 
 class TestDecideAgainJob:
-    """The one job after settings v16 decides files again from saved answers: like a Season job, it logs the files whose
+    """The one job after settings v16 decides files again, reusing answers that aren't due: like a Season job, it logs the files whose
     decisions changed and one line for the rest."""
 
     def test_changed_files_get_their_lines_and_the_rest_one_line(self, store, media, job_log, monkeypatch):
@@ -394,7 +394,7 @@ class TestDecideAgainJob:
         job_log.clear()
 
         again = _job(store, media, _plex(media))
-        again.stored_answers_only = True
+        again.decide_again = True
         out, _ = _run(again, media, {"plex-1": ready_publisher()})
         assert out.outcome_key == FileOutcome.PUBLISHED.value
         assert job_log == [
@@ -405,17 +405,17 @@ class TestDecideAgainJob:
             )
         ]
         assert again.summary_lines({FileOutcome.PUBLISHED.value: 1}) == [
-            "Decided again from saved answers (1 file): 1 changed (logged above)",
+            "Decided again after the update (1 file): 1 changed (logged above)",
             "Done: 1 file · 1 sent to Plex · 0 need review · 0 nothing found",
         ]
 
         job_log.clear()
         quiet = _job(store, media, _plex(media))
-        quiet.stored_answers_only = True
+        quiet.decide_again = True
         _run(quiet, media, {"plex-1": ready_publisher()})
         assert job_log == []
         assert quiet.summary_lines({FileOutcome.UP_TO_DATE.value: 1})[0] == (
-            "Decided again from saved answers (1 file): 1 unchanged"
+            "Decided again after the update (1 file): 1 unchanged"
         )
 
     @pytest.mark.parametrize(
@@ -432,7 +432,7 @@ class TestDecideAgainJob:
         ids=["mixed", "all-still-in-review", "only-changed", "none"],
     )
     def test_decide_again_line_wording(self, files, expected):
-        assert decide_again_line(files) == f"Decided again from saved answers ({expected}"
+        assert decide_again_line(files) == f"Decided again after the update ({expected}"
 
 
 class TestTotalsLine:

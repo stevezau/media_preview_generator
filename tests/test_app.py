@@ -895,10 +895,12 @@ class TestPrewarmCaches:
 
 
 class TestRedecideInReviewAfterUpgrade:
-    """Settings v16 removed "Publish when: High"; the next start queues the one job that decides the files it held in
-    Needs review again (``triggers.submit_decide_again``), once."""
+    """Settings v16 removed "Publish when: High"; while its request is open, a start queues the one job that decides the
+    files it held in Needs review again (``triggers.submit_decide_again``, which reuses one already queued or running).
+    The request is cleared when that job completes (``job_runner._settle_decide_again``)."""
 
     SUBMIT = "media_preview_generator.markers.triggers.submit_decide_again"
+    ENABLED = "media_preview_generator.markers.triggers.markers_enabled_anywhere"
 
     def _settings(self, tmp_path, **values):
         from media_preview_generator.web.settings_manager import get_settings_manager
@@ -907,21 +909,30 @@ class TestRedecideInReviewAfterUpgrade:
         sm.apply_changes(updates=values)
         return sm
 
-    def test_a_pending_request_queues_the_job_and_is_cleared(self, tmp_path):
+    @pytest.mark.parametrize(
+        ("enabled", "queued", "request_left"),
+        [
+            (True, "job-1", True),  # cleared once the job completes, not when it is queued
+            (True, None, False),  # nothing in review or waiting: nothing left to do
+            (False, None, True),  # Intro & Credits off everywhere: a start after it is turned on queues the job
+        ],
+        ids=["queued", "nothing-to-do", "intro-and-credits-off"],
+    )
+    def test_an_open_request_queues_the_job(self, tmp_path, enabled, queued, request_left):
         from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
         from media_preview_generator.web.app import _decide_again_after_upgrade
 
         sm = self._settings(tmp_path, **{DECIDE_AGAIN_KEY: True})
-        with patch(self.SUBMIT, return_value="job-1") as submit:
+        with patch(self.ENABLED, return_value=enabled), patch(self.SUBMIT, return_value=queued) as submit:
             _decide_again_after_upgrade(str(tmp_path))
-        submit.assert_called_once_with()
-        assert sm.get(DECIDE_AGAIN_KEY) is None
+        assert submit.call_count == int(enabled)
+        assert (sm.get(DECIDE_AGAIN_KEY) is True) is request_left
 
     def test_without_a_request_nothing_is_queued(self, tmp_path):
         from media_preview_generator.web.app import _decide_again_after_upgrade
 
         self._settings(tmp_path, setup_complete=True)
-        with patch(self.SUBMIT) as submit:
+        with patch(self.ENABLED, return_value=True), patch(self.SUBMIT) as submit:
             _decide_again_after_upgrade(str(tmp_path))
         submit.assert_not_called()
 
@@ -930,13 +941,14 @@ class TestRedecideInReviewAfterUpgrade:
         from media_preview_generator.web.app import _decide_again_after_upgrade
 
         sm = self._settings(tmp_path, **{DECIDE_AGAIN_KEY: True})
-        with patch(self.SUBMIT, side_effect=OSError("markers.db is locked")):
+        with patch(self.ENABLED, return_value=True), patch(self.SUBMIT, side_effect=OSError("markers.db is locked")):
             _decide_again_after_upgrade(str(tmp_path))  # never raises
         assert sm.get(DECIDE_AGAIN_KEY) is True
 
-    def test_the_first_start_after_the_upgrade_queues_it_and_later_starts_do_not(self, tmp_path):
+    def test_every_start_until_the_job_completes_asks_for_it_and_none_after(self, tmp_path):
         from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
         from media_preview_generator.web.app import create_app
+        from media_preview_generator.web.settings_manager import get_settings_manager
 
         config_dir = str(tmp_path / "config")
         os.makedirs(config_dir, exist_ok=True)
@@ -950,15 +962,22 @@ class TestRedecideInReviewAfterUpgrade:
                 f,
             )
         env = {"CONFIG_DIR": config_dir, "WEB_AUTH_TOKEN": "test-token-12345678"}
-        with patch.dict(os.environ, env), patch(self.SUBMIT, return_value="job-1") as submit:
-            create_app(config_dir=config_dir)
-        submit.assert_called_once_with()
+        for _ in range(2):  # the job didn't complete before the restart: asked again (and reused if still queued)
+            reset_settings_manager()
+            with (
+                patch.dict(os.environ, env),
+                patch(self.ENABLED, return_value=True),
+                patch(self.SUBMIT, return_value="job-1") as submit,
+            ):
+                create_app(config_dir=config_dir)
+            submit.assert_called_once_with()
         with open(os.path.join(config_dir, "settings.json")) as f:
             saved = json.load(f)
         assert saved["_schema_version"] == 16
-        assert "publish_when" not in saved["markers"] and DECIDE_AGAIN_KEY not in saved
+        assert "publish_when" not in saved["markers"] and saved[DECIDE_AGAIN_KEY] is True
 
+        get_settings_manager(config_dir).delete(DECIDE_AGAIN_KEY)  # what the completed job does
         reset_settings_manager()
-        with patch.dict(os.environ, env), patch(self.SUBMIT) as submit_again:
+        with patch.dict(os.environ, env), patch(self.ENABLED, return_value=True), patch(self.SUBMIT) as submit_again:
             create_app(config_dir=config_dir)
         submit_again.assert_not_called()

@@ -304,9 +304,11 @@ pair on its own. An agreeing server marker doesn't hold season audio back (it de
 `season_audio` only); the hint with only a server's marker stays in Needs review. The removed
 `publish_when` key (`"high"` / `"medium"`) is ignored when an older `settings.json` or client sends it, and schema
 version 16 deletes it and has the next start queue one job, **Intro & Credits: Needs review and waiting files, decided
-again**, that decides every file in Needs review, and every file whose last row waits for its item's other versions,
-again from its stored answers (no online lookups, no detectors, no reading the markers on servers; a file changed on
-disk since is skipped), then publishes as any job does.
+again** (Low priority, source `decide_again`), an ordinary Intro & Credits job over every file in Needs review and
+every file whose last row waits for its item's other versions, listed when it runs. The request (settings key
+`_markers_decide_again`) is cleared when that job completes; until then every start queues it again (or finds it
+queued), and with Intro & Credits off on every server it waits. An intro season audio decided alone keeps asking the
+online sources on their schedule: one that later disagrees sends it to Needs review.
 
 ### Per-server settings (`media_servers[].markers`)
 

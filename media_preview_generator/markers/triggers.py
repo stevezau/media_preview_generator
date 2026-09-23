@@ -13,7 +13,7 @@ from ..job_kinds import JOB_KIND_INTRO_CREDITS
 from ..servers.base import ServerConfig
 from ..servers.ownership import webhook_path_candidates
 from ..servers.registry import UnsupportedServerTypeError, server_config_from_dict
-from ..web.jobs import PRIORITY_HIGH, PRIORITY_NORMAL, Job, get_job_manager, is_live_retry_chain
+from ..web.jobs import PRIORITY_HIGH, PRIORITY_LOW, PRIORITY_NORMAL, Job, get_job_manager, is_live_retry_chain
 from ..web.settings_manager import get_settings_manager
 from .audio.season import season_group
 from .external_ids import ids_from_path, is_season_folder
@@ -23,7 +23,6 @@ from .job_runner import (
     FILES_SEALED,
     FOLLOW_UP_LOCK,
     MAX_RETRY_FILES,
-    STORED_ANSWERS_ONLY,
     start_intro_credits_job_async,
 )
 from .ownership import marker_matches
@@ -111,7 +110,6 @@ def create_intro_credits_job(
     parent_job_id: str | None = None,
     max_retries: int = 0,
     decide_again: bool = False,
-    stored_answers_only: bool = False,
 ) -> Job:
     """Create and start an Intro & Credits job.
 
@@ -139,7 +137,6 @@ def create_intro_credits_job(
         max_retries: For a retry: the retry count in force (the row's "Retry N/M").
         decide_again: List the files to decide again when the job runs (``job_runner._items_to_decide_again``)
             instead of libraries or paths.
-        stored_answers_only: Decide from stored answers only (``PipelineContext.stored_answers_only``).
 
     Returns:
         The created job.
@@ -159,8 +156,6 @@ def create_intro_credits_job(
         config["reconcile"] = True
     if decide_again:
         config[DECIDE_AGAIN] = True
-    if stored_answers_only:
-        config[STORED_ANSWERS_ONLY] = True
     if chain_attempt:
         config["chain_attempt"] = int(chain_attempt)
     if verify_chain:
@@ -427,13 +422,14 @@ def submit_season_publish(episode: str) -> str:
 
 def submit_decide_again() -> str | None:
     """Queue the one job that decides the files in Needs review, and those waiting for their item's other versions,
-    again from their stored answers.
+    again.
 
-    Queued once after the settings upgrade that removed the stricter publish rule (``upgrade._migrate_to_v16``), so the
-    files it held in Needs review are published now, not only when a later job happens to list them; a file whose last
-    publish waits for its item's other versions is published again with them. Nothing is read again: no online lookup,
-    no detector, no read of the markers on servers (``PipelineContext.stored_answers_only``). The job lists the files
-    when it runs (``job_runner._items_to_decide_again``); while one is queued or running, that job is returned instead.
+    Queued after the settings upgrade that removed the stricter publish rule (``upgrade._migrate_to_v16``), so the files
+    it held in Needs review are published now, not only when a later job happens to list them; a file whose last
+    publish waits for its item's other versions is published again with them. It is an ordinary Intro & Credits job at
+    LOW priority: stored answers that aren't due are reused, and only what is due or from an older version is asked or
+    read again, as on any run. The job lists the files when it runs (``job_runner._items_to_decide_again``); while one
+    is queued or running, that job is returned instead.
 
     Returns:
         The job's id; None when Intro & Credits is off on every server or no file is in Needs review or waiting.
@@ -455,14 +451,12 @@ def submit_decide_again() -> str | None:
                 return job.id
         job = create_intro_credits_job(
             library_name=DECIDE_AGAIN_JOB_NAME,
-            priority=PRIORITY_NORMAL,
+            priority=PRIORITY_LOW,
             source=DECIDE_AGAIN_SOURCE,
             decide_again=True,
-            stored_answers_only=True,
         )
     logger.info(
-        "{} file(s) in Needs review and {} waiting for their item's other versions are decided again from what was "
-        "already found (job {})",
+        "{} file(s) in Needs review and {} waiting for their item's other versions are decided again (job {})",
         len(in_review),
         len(waiting - in_review),
         job.id[:8],

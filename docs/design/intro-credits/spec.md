@@ -953,15 +953,17 @@ Show a mockup and confirm wording before building each screen.
 v15 also seeded `"publish_when": "high"`. Schema **16** (2026-09-24, §14) removes it: `validate_global` drops the key
 whatever it says, `_migrate_to_v16` deletes it (a user-facing note only when it was `"high"`) and sets
 `_markers_decide_again`, and the next start (`web.app._decide_again_after_upgrade`, after revived jobs are
-started) queues one NORMAL job, **Intro & Credits: Needs review and waiting files, decided again**
-(`triggers.submit_decide_again`, source `decide_again`), then clears the key. The job lists, when it runs, the files
-with a type in Needs review (`MarkerStore.files_in_review`) and the files whose last row on a server is "Waiting for
-this item's other versions to agree on: …" (`MarkerStore.files_waiting_for_other_versions`, `outcomes.VERSIONS_WAITING`;
-12 were stuck on the owner's server), and decides them from stored answers only (`PipelineContext.stored_answers_only`:
-no online lookup, no detector, no read of the markers on servers, no Season job; a file changed on disk is skipped);
-publishing runs as in any job, and its retries keep stored-answers-only. With Intro & Credits off everywhere, or no
-such file, only the key is cleared. The detection fingerprint still hashes `publish_when` as `"medium"`, so a Medium
-install keeps its hash.
+started) queues one LOW job, **Intro & Credits: Needs review and waiting files, decided again**
+(`triggers.submit_decide_again`, source `decide_again`; one already queued or running is reused). The job lists, when
+it runs, the files with a type in Needs review (`MarkerStore.files_in_review`) and the files whose last row on a
+server is "Waiting for this item's other versions to agree on: …" (`MarkerStore.files_waiting_for_other_versions`,
+`outcomes.VERSIONS_WAITING`; 12 were stuck on the owner's server), and runs them as any job does: answers that aren't
+due are reused, and what is due or from an older version is asked or read again. Its log names only files whose
+decisions changed and ends with one "Decided again after the update" line. The key is cleared when that job completes
+(`job_runner._settle_decide_again`), or at start when no file is in review or waiting; a cancelled, failed or
+interrupted job leaves it, so the next start queues the job again, and with Intro & Credits off everywhere the key
+waits for a start after it is turned on. The detection fingerprint still hashes `publish_when` as `"medium"`, so a
+Medium install keeps its hash.
 
 `credits_window` (added after v15, no schema bump: a block without it reads as Automatic) is `null` (Automatic: 450 s
 TV, 900 s movie and unknown kind) or one of 300, 600, 900, 1200, 1800 seconds per kind. It is part of the detection
@@ -2049,9 +2051,10 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   by a check of the file (another database or a server's own marker counts too), and that "the file check alone
   decides" (season audio never does; SkipDB matched to the file's length may, for intros and recaps), so the note
   says what the code does instead. The files High left in Needs review are decided again once, on the first start of
-  this build, by one job that reads nothing again (§8); the same job takes the files whose last row waits for their
+  this build, by one job (§8; it first decided from stored answers only, dropped the same day, §14 below); the same
+  job takes the files whose last row waits for their
   item's other versions (the 12 above). Its job log names only the files whose decisions changed and ends with one
-  "Decided again from saved answers (N files): …" line, like a Season job's. Needs review now says why: a lone answer
+  "Decided again after the update (N files): …" line, like a Season job's. Needs review now says why: a lone answer
   that can't decide alone reads "only IntroDB has the intro; an online answer needs a check against the file" (or "only season audio
   found the intro; matching audio needs another source to agree", "only a server's own marker has …"), a
   disagreement keeps "sources disagree: …", and a server row's message is those reasons (it said "Sources don't
@@ -2120,3 +2123,18 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   agreement-only; rule 7 is unchanged (it never moves an intro); "Keep Plex's" still leaves the intro to Plex without
   reading the file. The harness: on the 3-episode fixtures an episode Plex answers the same way is now useful at
   Medium with G3 on.
+- 2026-09-24 · **The decide-again job is an ordinary job, and season audio's lone intros keep meeting online answers**
+  (review of the strict-mode removal, one MED and two LOWs; §5.3, §8). The first build decided those files from stored
+  answers only (`PipelineContext.stored_answers_only`: no lookup, no detector, no server read). The review reproduced
+  it publishing what a normal run would redo first: a season-audio answer that was due (matched when the season had 2
+  episodes) and a credit text answer from before `CREDITS_TEXT_VERSION` 3 (a normal run found nothing; stored-only
+  published an intro at 60–90 s), and by not reading a server with no saved answer it could step around G3. The mode is
+  gone: the job runs its files as any job does, which already reuses answers that aren't due and redoes the rest, reads
+  servers and applies G3; it runs at LOW, since it may read or ask again for a thousand files. Only its log keeps the
+  Season-style grouping (`PipelineContext.decide_again`). LOW: the upgrade's request is cleared when the job completes,
+  not when it is queued, so a restart before then queues it again, and it waits while Intro & Credits is off
+  everywhere. Owner-model follow-up: an intro season audio decided alone no longer counts as settled for the early stop
+  (`pipeline._decided_beyond_chapters`, like chapters alone), so the online sources are still asked on their schedule
+  (a "no entry" again after `NO_DATA_RETRY`, 14 days); one that agrees confirms it, one that disagrees sends it to
+  review. TheIntroDB's Low-priority saving for chapters-only files (`_only_confirming_chapters`) doesn't apply to it.
+  Chapters and credit-text decisions behave as before.

@@ -825,7 +825,8 @@ class TestInReviewRedecide:
 
         (job,) = self._ic_jobs(jm)
         assert job.id == job_id
-        assert (job.library_name, job.priority) == ("Intro & Credits: Needs review and waiting files, decided again", 2)
+        # LOW: it runs files as any job does, and may read or ask what is due for a thousand of them.
+        assert (job.library_name, job.priority) == ("Intro & Credits: Needs review and waiting files, decided again", 3)
         assert job.config == {
             "kind": JOB_KIND_INTRO_CREDITS,
             "source": "decide_again",
@@ -835,7 +836,6 @@ class TestInReviewRedecide:
             "force": False,
             "webhook_item_id_hints": {},
             "decide_again": True,
-            "stored_answers_only": True,
         }
         # The job lists them when it runs: exactly the files with a type in Needs review, and the files whose last
         # row waits for their item's other versions.

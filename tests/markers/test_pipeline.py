@@ -1043,51 +1043,55 @@ class TestEvidenceAndDecisions:
         )
         plex.write.assert_not_called()
 
-    def test_stored_answers_only_publishes_a_file_in_review_without_reading_or_asking_anything(
-        self, store, media, monkeypatch
+    @pytest.mark.parametrize(
+        ("source", "priority"), [(Source.INTRODB, 2), (Source.THEINTRODB, 3)], ids=["introdb", "theintrodb-at-low"]
+    )
+    @pytest.mark.parametrize(
+        ("start", "end", "expected"),
+        [
+            (125_000, 157_500, (126_000, 157_500)),  # the online end (it ranks first), season audio's later start
+            (60_000, 100_000, None),
+        ],
+        ids=["agrees", "disagrees"],
+    )
+    def test_an_intro_season_audio_decided_alone_meets_online_answers_on_their_schedule(
+        self, store, media, source, priority, start, end, expected
     ):
-        # The one job after the upgrade that removed "high": no lookup, no detector, no probe, no server read. A month
-        # later a normal run would ask the online sources that had nothing again and run the credits detector again
-        # (its answer is due), since the credits are still undecided.
+        # Owner 2026-09-24: season audio decides an intro alone when nothing else answers, but the online sources are
+        # still asked on their schedule (a "no entry" again after NO_DATA_RETRY): one that later agrees confirms it, one
+        # that disagrees sends it to review. TheIntroDB isn't kept for chapters-only files here, even at Low.
         reg = _registry(media, ServerType.PLEX)
         plex = ready_publisher()
-        clients = _clients(skipdb=LookupResult("ok", (Candidate(T.INTRO, 127_894, 156_824, Source.SKIPDB),)))
-        audio, text = MagicMock(return_value=[]), MagicMock(return_value=[])
-        specs = (
-            LocalDetectorSpec(Source.SEASON_AUDIO, frozenset({T.INTRO}), audio),
-            LocalDetectorSpec(Source.CREDITS_TEXT, frozenset({T.CREDITS}), text, due=lambda rec, ctx: True),
-        )
-        raw = {**INTRO_ONLY, "detect": {"intro": True, "credits": True}}
-        monkeypatch.setattr(pipeline, "APP_PUBLISH_WHEN", "high")
-        out, _ = _run(_ctx(store, reg, clients=clients, detectors=specs, settings_raw=raw), media, {"plex-1": plex},
-                      stage="process")  # fmt: skip
-        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
-        monkeypatch.undo()
-        reads = reg.servers_by_id["plex-1"].get_markers.call_count
-        later = datetime(2026, 10, 20, tzinfo=UTC)
-        ctx = _ctx(store, reg, clients=clients, detectors=specs, settings_raw=raw, now=lambda: later)
-        ctx.stored_answers_only = True
-        out, probe = _run(ctx, media, {"plex-1": plex}, probe_effect=AssertionError("the file was read"))
-        assert out.outcome_key == FileOutcome.PUBLISHED.value
-        assert plex.write.call_args.args[1] == [Marker(T.INTRO, 127_894, 156_824, ("skipdb",))]
-        probe.assert_not_called()
-        assert [len(c.calls) for c in clients.values()] == [1, 1, 1]
-        assert (audio.call_count, text.call_count) == (1, 1)
-        assert reg.servers_by_id["plex-1"].get_markers.call_count == reads
+        clients = _clients()
+        audio = Candidate(T.INTRO, 126_000, 157_000, Source.SEASON_AUDIO, 1.0, "3/3")
+        spec = LocalDetectorSpec(Source.SEASON_AUDIO, frozenset({T.INTRO}), MagicMock(return_value=[audio]))
+        first = datetime.now(UTC)  # the store stamps answers with the real clock
 
-    @pytest.mark.parametrize("change", ["replaced", "never-checked"])
-    def test_stored_answers_only_skips_a_file_whose_answers_are_not_this_files(self, store, media, change):
-        reg = _registry(media, ServerType.PLEX)
-        plex = ready_publisher()
-        ctx = _ctx(store, reg, settings_raw=INTRO_ONLY)
-        if change == "replaced":
-            _run(ctx, media, {"plex-1": plex}, probe=_probe(CHAPTERS_BOTH))
-            os.utime(media, ns=(5, 5))
-        ctx.stored_answers_only = True
-        out, probe = _run(ctx, media, {"plex-1": plex}, probe_effect=AssertionError("the file was read"))
-        assert (out.outcome_key, out.message) == (FileOutcome.SKIPPED.value, pipeline.CHANGED_SINCE_ANSWERS)
-        probe.assert_not_called()
-        assert plex.write.call_count == (1 if change == "replaced" else 0)
+        def run(when):
+            ctx = _ctx(store, reg, clients=clients, detectors=(spec,), settings_raw=INTRO_ONLY, now=lambda: when)
+            ctx.priority = lambda: priority
+            return _run(ctx, media, {"plex-1": plex}, stage="process")[0]
+
+        assert run(first).outcome_key == FileOutcome.PUBLISHED.value
+        assert plex.write.call_args.args[1] == [Marker(T.INTRO, 126_000, 157_000, ("season_audio",))]
+        run(first + pipeline.NO_DATA_RETRY - timedelta(days=1))
+        assert [len(c.calls) for c in clients.values()] == [1, 1, 1]  # not due yet: nothing asked again
+
+        clients[source.value].result = LookupResult("ok", (Candidate(T.INTRO, start, end, source),))
+        run(first + pipeline.NO_DATA_RETRY + timedelta(days=1))
+
+        assert len(clients[source.value].calls) == 2
+        decision = store.get_decisions(store.get_file(media).id)[T.INTRO]
+        if expected is None:
+            group = "introdb/theintrodb"
+            assert (decision.status, decision.reason) == (
+                DecisionStatus.NEEDS_REVIEW,
+                f"sources disagree: {group}, season_audio",
+            )
+        else:
+            marker = Marker(T.INTRO, *expected, (source.value, "season_audio"))
+            assert decision.status is DecisionStatus.DECIDED
+            assert store.get_markers(store.get_file(media).id)[T.INTRO] == marker
 
     def test_theintrodb_alone_never_publishes_even_at_medium(self, store, media):
         # TheIntroDB answers the closest cut it has, whatever this file's duration (audit B S2: 81 s of cold open).

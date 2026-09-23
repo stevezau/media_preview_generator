@@ -136,6 +136,11 @@ PARSER_VERSIONS = {
 }
 _STORED_LOOKUPS = ("ok", "no_data")
 _CHAPTERS_AND_SERVERS = frozenset({Source.CHAPTERS.value, *(s.value for s in SERVER_SOURCES)})
+# An intro season audio decided alone (with the previous season's hint, or beside agreeing server markers): an online
+# answer may still disagree and send it to review, so the sources keep being asked on their schedule (owner, 2026-09-24).
+_SEASON_AUDIO_AND_SERVERS = frozenset(
+    {Source.SEASON_AUDIO.value, Source.SEASON_AUDIO_PREVIOUS.value, *(s.value for s in SERVER_SOURCES)}
+)
 # Plex and Emby can't tell our markers from their own, and Plex shows one marker set per item across its versions, so
 # their markers are never read back from an item we published to. Jellyfin's reader leaves ours out itself.
 _ITEM_WIDE_MARKERS = frozenset({ServerType.PLEX, ServerType.EMBY})
@@ -182,8 +187,6 @@ PUBLISH_DEADLINE_MESSAGE = "Couldn't publish to this server in time; the next In
 # it puts the user's marker there (the file's publish basis no longer matches, so it is written again).
 PUBLISH_BUSY_MESSAGE = "Intro & Credits is running for this file; the next run publishes your marker"
 SERVER_MARKERS_OFF = "Intro & Credits is off for this server"
-# A file skipped by a job deciding from stored answers only (``PipelineContext.stored_answers_only``).
-CHANGED_SINCE_ANSWERS = "Changed on disk since it was checked; the next job that lists it reads it again"
 
 LocalDetector = Callable[..., "list[Candidate] | DetectorAnswer"]
 
@@ -285,11 +288,6 @@ class PipelineContext:
         force: Re-detect: read chapters, every online source and the markers on servers we never published to again,
             and run every local detector, without stopping early. Publishing still skips servers that already show
             the result.
-        stored_answers_only: Decide again from the answers already stored and publish: no online lookup, no detector,
-            no read of the markers on servers (the job it runs in queues no Season job either). A file changed on disk
-            since its answers were stored is skipped (they are the old file's). Used once when an upgrade changed the
-            rules (settings v16), so files waiting in Needs review are published without reading them again. Like a
-            Season job, it logs only the files whose decisions changed and ends with one line for the rest.
         clients: Online client per source id (``build_clients``).
         local_detectors: Detectors that read the file itself (on a worker unless their ``needs_worker`` says not).
         now: Current UTC time (tests use a fake clock).
@@ -314,6 +312,9 @@ class PipelineContext:
         season_recheck: A Season job: a file whose decisions didn't change logs no lines of its own; the job ends with
             one line per season instead (``summary_lines``).
         recheck_label: How those per-season lines name the job (a TheIntroDB recheck logs them too).
+        decide_again: The one-off job after settings v16 that decides the files in Needs review (and those waiting for
+            their item's other versions) again: like a Season job, a file whose decisions didn't change logs no lines
+            of its own, and the job ends with one line for them (``summary_lines``). It runs files as any job does.
     """
 
     registry: Any
@@ -323,7 +324,6 @@ class PipelineContext:
     priority: Callable[[], int]
     ffprobe: str
     force: bool = False
-    stored_answers_only: bool = False
     clients: dict[str, Any] = field(default_factory=dict)
     local_detectors: tuple[LocalDetectorSpec, ...] = ()
     now: Callable[[], datetime] = _utcnow
@@ -335,6 +335,7 @@ class PipelineContext:
     db_timeout_s: float | None = None
     season_recheck: bool = False
     recheck_label: str = SEASON_RECHECK_LABEL
+    decide_again: bool = False
     decided_by: DecidedByTally = field(default_factory=DecidedByTally, repr=False)
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
@@ -379,7 +380,7 @@ class PipelineContext:
     # the stage that finishes it logs a source the checking thread asked as asked by this job.
     _run_notes: dict[str, RunNotes] = field(default_factory=dict, repr=False)
     # For the job's last lines: files written per server name, a Season job's unchanged episodes per season, and per
-    # file a stored-answers-only job ran, whether its decisions changed and whether a type is still in review.
+    # file a decide-again job ran, whether its decisions changed and whether a type is still in review.
     _sent: dict[str, int] = field(default_factory=dict, repr=False)
     _seasons: dict[str, list[SeasonEpisode]] = field(default_factory=dict, repr=False)
     _decided_again: list[tuple[bool, bool]] = field(default_factory=list, repr=False)
@@ -501,7 +502,7 @@ class PipelineContext:
         self, rows: list[dict], season: tuple[str, SeasonEpisode] | None, decided_again: tuple[bool, bool] | None
     ) -> None:
         """Count one file's rows for the job's totals line, a Season job's episode for its season's line, and a
-        stored-answers-only job's file for its line."""
+        decide-again job's file for its line."""
         with self._summary_lock:
             for row in rows:
                 name = str(row.get("server_name") or row.get("server_id") or "")
@@ -513,8 +514,8 @@ class PipelineContext:
                 self._decided_again.append(decided_again)
 
     def summary_lines(self, outcome: dict[str, int]) -> list[str]:
-        """The lines a job ends its log with: a Season job's one line per season (a stored-answers-only job's one line),
-        then the totals.
+        """The lines a job ends its log with: a Season job's one line per season (a decide-again job's one line), then
+        the totals.
 
         Args:
             outcome: The job's file counts per outcome (files finished before a restart included).
@@ -533,7 +534,7 @@ class PipelineContext:
             for source, (_detail, count) in self._key_refused.items():
                 skipped[_ONLINE_LABELS[source]] = skipped.get(_ONLINE_LABELS[source], 0) + count
         lines = [season_line(season, episodes, self.recheck_label) for season, episodes in sorted(seasons.items())]
-        if self.stored_answers_only:
+        if self.decide_again:
             lines.append(decide_again_line(decided_again))
         return [*lines, totals_line(outcome, sent, skipped)]
 
@@ -729,7 +730,7 @@ def build_context(
     recheck_empty_server_markers: bool = False,
     season_recheck: bool = False,
     recheck_label: str = SEASON_RECHECK_LABEL,
-    stored_answers_only: bool = False,
+    decide_again: bool = False,
 ) -> PipelineContext:
     """Context from live settings (used by the job runner).
 
@@ -747,7 +748,7 @@ def build_context(
         recheck_empty_server_markers: Check servers (``PipelineContext.recheck_empty_server_markers``).
         season_recheck: A Season job or a TheIntroDB recheck (``PipelineContext.season_recheck``).
         recheck_label: Which of the two (``PipelineContext.recheck_label``).
-        stored_answers_only: Decide from stored answers only (``PipelineContext.stored_answers_only``).
+        decide_again: The decide-again job after settings v16 (``PipelineContext.decide_again``).
 
     Returns:
         A context for one job.
@@ -772,7 +773,6 @@ def build_context(
         priority=priority if callable(priority) else (lambda: priority),
         ffprobe=ffprobe_path_for(ffmpeg_path),
         force=force,
-        stored_answers_only=stored_answers_only,
         clients=build_clients(settings),
         local_detectors=default_local_detectors(settings, config, chromaprint, credits_text),
         recheck_empty_server_markers=recheck_empty_server_markers,
@@ -780,6 +780,7 @@ def build_context(
         credits_text=credits_text,
         season_recheck=season_recheck,
         recheck_label=recheck_label,
+        decide_again=decide_again,
     )
 
 
@@ -983,15 +984,23 @@ def _decisions_changed(
     return False
 
 
-def _decided_beyond_chapters(decision: TypeDecision) -> bool:
-    """Decided, and not by chapters alone: two agreeing sources may still veto a chapter (spec §5.5 rule 3).
+def _rests_only_on(decision: TypeDecision, sources: frozenset[str]) -> bool:
+    """Whether a decided type's marker was decided by these sources alone."""
+    if decision.status is not DecisionStatus.DECIDED or decision.marker is None:
+        return False
+    return set(decision.marker.decided_by) <= sources
 
-    A chapter that markers already on servers shortened or confirmed is still chapters alone: server markers never
-    decide on their own (rule 7).
+
+def _decided_beyond_chapters(decision: TypeDecision) -> bool:
+    """Decided, and not by chapters alone nor by season audio alone: two agreeing sources may still veto a chapter
+    (spec §5.5 rule 3), and one disagreeing source sends a season-audio intro to review (owner, 2026-09-24).
+
+    A chapter or season audio answer that markers already on servers shortened or confirmed still stands alone: server
+    markers never decide on their own (rule 7).
     """
     if decision.status is not DecisionStatus.DECIDED:
         return False
-    return not set(decision.marker.decided_by) <= _CHAPTERS_AND_SERVERS
+    return not (_rests_only_on(decision, _CHAPTERS_AND_SERVERS) or _rests_only_on(decision, _SEASON_AUDIO_AND_SERVERS))
 
 
 def _all_decided(decisions: dict[MarkerType, TypeDecision], types: frozenset[MarkerType]) -> bool:
@@ -999,8 +1008,15 @@ def _all_decided(decisions: dict[MarkerType, TypeDecision], types: frozenset[Mar
 
 
 def _only_confirming_chapters(decisions: dict[MarkerType, TypeDecision], types: frozenset[MarkerType]) -> bool:
-    """Every type is decided and some only by chapters, so the search goes on only to let sources contradict them."""
-    return all(decisions[t].status is DecisionStatus.DECIDED for t in types) and not _all_decided(decisions, types)
+    """Every type is decided and some only by chapters, so the search goes on only to let sources contradict them.
+
+    A type season audio decided alone isn't: TheIntroDB is asked for it on its usual schedule, like every online source.
+    """
+    return (
+        all(decisions[t].status is DecisionStatus.DECIDED for t in types)
+        and not _all_decided(decisions, types)
+        and not any(_rests_only_on(decisions[t], _SEASON_AUDIO_AND_SERVERS) for t in types)
+    )
 
 
 def _stale_evidence(ctx: PipelineContext, rec: FileRecord, source: Source) -> bool:
@@ -2155,8 +2171,6 @@ def _attempt(
     refresh_probe = _refreshing(ctx, path, Source.CHAPTERS)
     existing = ctx.store.get_file(path)
     unchanged = existing is not None and (existing.size, existing.mtime_ns) == (st.st_size, st.st_mtime_ns)
-    if ctx.stored_answers_only and not unchanged:
-        return ItemOutcome(FileOutcome.SKIPPED.value, CHANGED_SINCE_ANSWERS)
     probe = None
     stale_rules = unchanged and ctx.store.evidence_version(existing.id, Source.CHAPTERS) != CHAPTER_RULES_VERSION
     if refresh_probe or not unchanged or not existing.duration_ms or stale_rules:
@@ -2221,7 +2235,7 @@ def _attempt(
     # no local detector reads the file for them. Asked once a detector would run or a type ends undecided, at most once
     # per run.
     kept_everywhere: frozenset[MarkerType] | None = None
-    for source_id in () if ctx.stored_answers_only else ctx.settings.ordered_enabled_sources():
+    for source_id in ctx.settings.ordered_enabled_sources():
         source = Source(source_id)
         refresh = _refreshing(ctx, path, source)
         if (
@@ -2436,13 +2450,13 @@ def _log_file(
 
     A Season job (and a TheIntroDB recheck) logs only files whose decisions changed; the rest go into their season's
     summary line. A recheck can also list movies: a file that isn't an episode logs its own lines there. A
-    stored-answers-only job logs only files whose decisions changed too; the rest go into its one summary line.
+    decide-again job logs only files whose decisions changed too; the rest go into its one summary line.
     """
     season = decided_again = None
     if ctx.season_recheck and (rec.season_key is not None or ctx.recheck_label == SEASON_RECHECK_LABEL):
         name, episode = season_of(rec.canonical_path)
         season = (name, SeasonEpisode(episode, changed, review_note(decisions, types)))
-    if ctx.stored_answers_only:
+    if ctx.decide_again:
         in_review = any(decisions[t].status is DecisionStatus.NEEDS_REVIEW for t in types if t in decisions)
         decided_again = (changed, in_review)
     ctx._note_finished(rows, season, decided_again)

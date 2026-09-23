@@ -25,9 +25,10 @@ from loguru import logger
 # -------------------------------------------------------------------------
 _CURRENT_SCHEMA_VERSION = 16
 
-#: Set by v16 for the next start: once the job manager runs, the app queues the one job that decides the files in
-#: Intro & Credits' Needs review (and those waiting for their item's other versions) again from their stored answers,
-#: then clears it (``web.app``). Left set when that fails, so a later start tries again.
+#: Set by v16: once the job manager runs, the app queues the one job that decides the files in Intro & Credits' Needs
+#: review (and those waiting for their item's other versions) again (``web.app``). Cleared when that job completes
+#: (``markers.job_runner``), so a start after a failed, cancelled or interrupted one queues it again, and a start with
+#: Intro & Credits off everywhere leaves it for later.
 DECIDE_AGAIN_KEY = "_markers_decide_again"
 
 #: Count of consecutive v14 attempts that failed on IO. The version gate
@@ -131,8 +132,8 @@ _USER_FACING_NOTES: dict[int, str] = {
     16: (
         "Intro & Credits no longer waits for two sources to agree when one source that checks your own file found a "
         "marker (on-screen credit text, chapters, or SkipDB matched to your file's length), so far fewer files wait "
-        "in Needs review. The files already waiting there are decided again from what was found, without reading "
-        "them again."
+        "in Needs review. The files already waiting there are checked again by one Intro & Credits job, which "
+        "reuses what was already found."
     ),
     13: (
         "Your Thumbnail Interval setting now applies to every server consistently. "
@@ -1490,8 +1491,8 @@ def _migrate_to_v16(sm) -> list:
     The files High held in Needs review would otherwise wait until some later job lists them, so this also sets
     :data:`DECIDE_AGAIN_KEY`, whatever the stored value was (deciding again also brings the Needs review wording
     of files already at Medium up to date, and publishes the files left waiting for their item's other versions). The
-    app queues that job once its job manager runs (``markers.triggers.submit_decide_again``); with Intro & Credits off
-    everywhere it only clears the key.
+    app queues that job once its job manager runs (``markers.triggers.submit_decide_again``) and the key is cleared
+    when the job completes; with Intro & Credits off everywhere the key waits for a start after it is turned on.
 
     Runs once, gated on ``_schema_version``.
 
