@@ -969,7 +969,10 @@ def run_server(host: str = "0.0.0.0", port: int = 8080, debug: bool = False):  #
         debug: Enable debug mode
 
     """
+    from ..shutdown import install_signal_handlers
+
     app = create_app()
+    install_signal_handlers()
 
     logger.info("Starting web server on {}:{}", host, port)
     logger.info("Access the dashboard at: http://{}:{}", host, port)
