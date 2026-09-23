@@ -19,6 +19,7 @@ Media Preview Generator is a free, MIT-licensed Docker app that makes the video 
     - A "Recently Added" poll, cron or interval schedules, or a manual pick by title.
 
     If a server hasn't indexed a new file yet, the app retries after 1, 2 and 5 minutes by default.
+
 - **Handles HDR.** HDR10, HLG, HDR10+ and Dolby Vision are tone-mapped to SDR, so previews aren't washed out or green.
 - **Checks server settings.** A **Previews Readiness** panel audits each server's settings that affect whether previews show up, and can fix them in one click.
 

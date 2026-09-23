@@ -152,6 +152,12 @@ class TestBuildOutput:
         for path in site.rglob("*.html"):
             assert not re.search(r"\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]", path.read_text(encoding="utf-8")), path
 
+    def test_no_list_item_is_swallowed_into_a_paragraph_when_built(self, site: Path) -> None:
+        # A "- **Bold.**" line with no blank line after an indented paragraph renders as literal
+        # "- <strong>" text instead of a list item (the landing page shipped like that once).
+        for path in site.rglob("*.html"):
+            assert "\n- <strong>" not in path.read_text(encoding="utf-8"), path
+
     def test_docs_build_never_emits_jellyfin_manifest(self, site: Path) -> None:
         # The live manifest is added by docs.yml at deploy time; a copy in docs/ would shadow it.
         assert not (site / "jellyfin-plugin" / "manifest.json").exists()

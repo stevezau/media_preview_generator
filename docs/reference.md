@@ -835,6 +835,7 @@ Register the Plex direct webhook (`/api/webhooks/plex`) with the user's plex.tv 
 **Response (200):** `{"success": true, "registered_in_plex": true, "public_url": "..."}`
 
 **Errors:**
+
 - `400` — token missing
 - `403` — Plex Pass required (`reason: "plex_pass_required"`)
 - `502` — registration call to plex.tv failed
