@@ -1,4 +1,5 @@
 ---
+title: "Preview thumbnails for Plex, Emby and Jellyfin from one instance"
 description: "Run one Media Preview Generator for Plex, Emby and Jellyfin at once: adding servers, output formats, webhook routing, retries and the Jellyfin plugin."
 ---
 
@@ -91,6 +92,7 @@ Failures on one server don't take down the others — if Jellyfin's write fails 
 
 > [!NOTE]
 > Two terms used throughout the rest of this doc:
+>
 > - **Dispatcher** — the routing engine inside the app that decides which servers a file goes to and in what order.
 > - **Publisher** — the per-vendor writer that produces the on-disk output (Plex BIF, Emby BIF sidecar, Jellyfin trickplay tiles).
 

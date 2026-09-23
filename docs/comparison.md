@@ -1,4 +1,5 @@
 ---
+title: "Plex, Jellyfin and Emby preview thumbnail generation compared"
 description: "Built-in generators need no setup. Media Preview Generator adds GPU decoding, per-file triggers and one decode for several servers, but needs Docker."
 facts_checked: 2026-09-23
 hide:

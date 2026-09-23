@@ -1,4 +1,5 @@
 ---
+title: "Emby preview thumbnails (BIF) with GPU acceleration"
 description: "Emby's thumbnail extraction has no GPU option. Media Preview Generator makes Emby BIF files on a GPU and saves them next to each video."
 ---
 
