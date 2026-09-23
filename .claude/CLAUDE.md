@@ -11,8 +11,8 @@ pip install -e ".[dev]"
 # Run (web UI)
 gunicorn media_preview_generator.web.wsgi:app --bind 0.0.0.0:8080 --worker-class gthread --workers 1
 
-# Test — default runs parallel (xdist), excludes gpu + e2e, keeps coverage
-pytest                                          # ~5s, 1321 tests, ~79% cov
+# Test — default runs parallel (xdist, worksteal), excludes gpu + e2e, keeps coverage
+pytest                                          # ~100s, 12604 tests, ~89% cov
 pytest --no-cov tests/test_config.py            # Single file, skip coverage
 pytest -m e2e -n 8 --no-cov                     # E2E: cap at 8 workers, NOT -n auto (see below)
 pytest -m e2e -n 0 --no-cov                     # E2E serial (also fine)
@@ -22,6 +22,14 @@ pytest -n 0                                     # Serial mode (for debugging)
 python scripts/generate_llms_full.py            # writes llms-full.txt
 python scripts/generate_llms_full.py --check    # CI-style: non-zero exit if stale
 ```
+
+**Tests run under `/dev/shm`:** `tests/conftest.py` points pytest's temp root (`tmp_path`,
+`PYTEST_DEBUG_TEMPROOT`) at `/dev/shm` when there's ~4GB+ free, since `/tmp` on this box is
+ext4 on a loop device (~11.7ms/fsync) and the suite's sqlite-heavy fixtures fsync thousands of
+times — that alone was 84% of wall time (11m23s -> ~100s once moved to tmpfs, plus
+`--dist worksteal` instead of `load` so one xdist worker doesn't get stuck with a slow tail).
+Falls back to `/tmp` automatically (slower, still correct) when `/dev/shm` is small or missing,
+e.g. Docker's default 64MB `/dev/shm` — or set `PYTEST_DEBUG_TEMPROOT` yourself to opt out.
 
 **E2E parallelism cap:** Do NOT run `pytest -m e2e -n auto` on a multi-core box.
 Each xdist worker spawns ~5 chromium processes; each chrome process reserves
@@ -34,8 +42,16 @@ xdist failures. Verified via journalctl kernel logs during diagnostic runs
 in commit f856944 follow-up.
 
 The CI ships a different pattern: pytest-shard splits the e2e suite across
-4 GitHub Actions runners, each running `-n 0` (serial) on its own ~30-test
-slice. Locally, `-n 8` is empirically stable (verified 33/33 pass).
+4 GitHub Actions runners, each running `-n 0` (serial) on its own slice —
+411 e2e tests today, so ~100-107 per shard (measured 103/107/100/101; the
+largest takes 110s serially on this box). Locally, `-n 8` is empirically
+stable (verified 33/33 pass).
+
+CI's unit-test job is also sharded: the `unit` matrix job runs 3 shards (each still
+`-n auto --dist worksteal`, pytest-shard splits by test count), uploading one
+`.coverage.unit-<n>` data file per shard. The required `test` check (its id/name has to
+stay `test` for the repo ruleset) then `needs: unit`, downloads the 3 artifacts,
+`coverage combine`s them and enforces the 70% floor once over the combined total.
 
 ```bash
 
@@ -91,7 +107,27 @@ media_preview_generator/
 - **Configuration**: `settings.json` is the sole source of truth. Env vars are one-time seed values migrated on first start. Infrastructure vars (`CONFIG_DIR`, `WEB_PORT`, `PUID`, `PGID`, `TZ`, `CORS_ORIGINS`) remain active.
 - **GPU config**: Per-GPU in settings (`gpu_config`: enabled, workers, ffmpeg_threads per device).
 - **Error handling**: Custom exceptions + `retry_plex_call()` with backoff for Plex API. `CodecNotSupportedError` for FFmpeg fallback.
-- **Commits**: Follow Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `chore:`). **Before creating any commit, dispatch the `Architecture Review` agent** (`.claude/agents/architecture-review.md`) against the staged diff. Block on HIGH severity findings; discuss MED before committing; LOW is informational. This catches the eight production-bug shapes that have shipped before — bug-blind tests, un-wrapped failure_scope, lazy-init races, vestigial blocking work, comments-vs-code drift.
+- **Commits**: Follow Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `chore:`).
+- **Architecture Review — by risk, not by habit.** The agent
+  (`.claude/agents/architecture-review.md`) runs on the strong model and costs ~100k tokens a run,
+  so spend it where bugs are expensive. Dispatch it, and block on HIGH findings, when the diff:
+  - **writes anything to a Plex config directory** (BIF output paths, `Media/localhost/**`,
+    index files) — a wrong path corrupts someone's library;
+  - touches **FFmpeg command construction, codec fallback, or HDR detection**;
+  - touches **GPU detection, the worker pool, or anything concurrent** — lazy-init races are
+    bug shape 3 and have shipped before;
+  - changes the **`settings.json` schema or `upgrade.py` migrations**;
+  - touches **auth, tokens, or the `@login_required` / `@api_token_required` decorators**;
+  - changes **path sanitization** (`sanitize_path`, `_safe_resolve_within`) or **webhook handlers**,
+    both of which take untrusted input;
+  - is a **release commit or a Dockerfile change**, whatever it contains.
+
+  Skip it for docs, comments, logging, test-only, template/CSS-only, and dependency-bump commits —
+  `ruff`, the 1321-test suite and CI already cover those, and a review there finds style, not bugs.
+
+  Block on HIGH severity findings; discuss MED before committing; LOW is informational. This catches
+  the eight production-bug shapes that have shipped before — bug-blind tests, un-wrapped
+  failure_scope, lazy-init races, vestigial blocking work, comments-vs-code drift.
 - **Docker awareness**: Check `utils.is_docker_environment()` for container-specific behavior.
 
 ## Security
@@ -118,7 +154,7 @@ Output: `{plex_config}/Media/localhost/{hash}/Indexes/index-sd.bif`
 
 ## Key Dependencies
 
-Python >=3.10 | Flask 3.x | Flask-SocketIO | plexapi | loguru | APScheduler 3.x | SQLAlchemy 2.x | gunicorn | pymediainfo | requests
+Python >=3.11 | Flask 3.x | Flask-SocketIO | plexapi | loguru | APScheduler 3.x | SQLAlchemy 2.x | gunicorn | pymediainfo | requests
 
 ## Test Fixtures
 

@@ -2,12 +2,14 @@
 
 import os
 import uuid
+from datetime import UTC
 from urllib.parse import urlparse
 
 from flask import jsonify, request
 from loguru import logger
 
 from ...config import validate_processing_thread_totals
+from ...markers.settings import mask_global
 from ...utils import is_docker_environment
 from ..auth import api_token_required, setup_or_auth_required
 from ..jobs import PRIORITY_FROM_LABEL, PRIORITY_HIGH, PRIORITY_LABELS, parse_priority
@@ -337,6 +339,9 @@ def get_settings():
             # POST below silently drops user changes.
             "frame_reuse": settings.get("frame_reuse")
             or {"enabled": True, "ttl_minutes": 60, "max_cache_disk_mb": 2048},
+            # Intro & Credits global detection settings; TheIntroDB api_key is masked (never
+            # sent to the client in the clear — see markers.settings.mask_global).
+            "markers": mask_global(settings.get("markers")),
         }
     )
 
@@ -377,6 +382,7 @@ _SAVE_SETTINGS_ALLOWED_FIELDS = (
     "frame_reuse",
     "config_backup_keep",
     "config_backup_max_age_days",
+    "markers",
 )
 
 _SAVE_SETTINGS_INT_FIELDS = (
@@ -400,20 +406,72 @@ _SAVE_SETTINGS_INT_FIELDS = (
 _SAVE_SETTINGS_BOOL_FIELDS = ("plex_verify_ssl", "webhook_enabled", "auto_requeue_on_restart")
 
 
-def _validate_and_coerce_settings_updates(data: dict) -> tuple[dict | None, tuple | None]:
+def _merge_sources_update(stored: list[dict], posted: list) -> list:
+    """Posted source entries over the stored ones, matched by id.
+
+    A list naming every stored source sets their order (the Settings page sends them all); a shorter list updates the
+    named sources where they are. A list with an entry that isn't an object, or naming a source twice, is left for
+    ``validate_global`` to reject (merged by id, the second entry would silently win).
+    """
+    if not all(isinstance(entry, dict) for entry in posted):
+        return posted
+    stored_by_id = {entry.get("id"): entry for entry in stored}
+    posted_by_id = {entry.get("id"): entry for entry in posted}
+    if len(posted_by_id) != len(posted):
+        return posted
+    if set(stored_by_id) <= set(posted_by_id):
+        return [{**stored_by_id.get(entry.get("id"), {}), **entry} for entry in posted]
+    merged = [{**entry, **posted_by_id.get(entry.get("id"), {})} for entry in stored]
+    return merged + [entry for entry in posted if entry.get("id") not in stored_by_id]
+
+
+def _merge_global_markers_update(stored: object, posted: object) -> object:
+    """Deep-merge a posted global ``markers`` block over the stored one, like the per-server block on PUT.
+
+    Without it a partial save (``{"credits_window": {"tv_s": 600}}``) resets detection, locks and the sources (their order
+    and switches) to the defaults, which also changes the detection fingerprint, so files are decided again.
+
+    Args:
+        stored: The stored block normalised by ``validate_global``, or None when there's none (or it's invalid).
+        posted: The posted block.
+
+    Returns:
+        The merged block, or ``posted`` unchanged when either side isn't an object (validation handles it).
+    """
+    if not isinstance(posted, dict) or not isinstance(stored, dict):
+        return posted
+    merged = {**stored, **posted}
+    if isinstance(stored.get("detect"), dict) and isinstance(posted.get("detect"), dict):
+        merged["detect"] = {**stored["detect"], **posted["detect"]}
+    if isinstance(stored.get("credits_window"), dict) and isinstance(posted.get("credits_window"), dict):
+        merged["credits_window"] = {**stored["credits_window"], **posted["credits_window"]}
+    if isinstance(stored.get("sources"), list) and isinstance(posted.get("sources"), list):
+        merged["sources"] = _merge_sources_update(stored["sources"], posted["sources"])
+    return merged
+
+
+def _validate_and_coerce_settings_updates(
+    data: dict, existing_markers: object = None
+) -> tuple[dict | None, tuple | None]:
     """Filter, validate, and coerce an incoming settings POST payload.
 
-    Returns ``(updates, error_response)``. Exactly one is non-None:
-    - ``(updates, None)`` on success — ``updates`` is the cleaned dict ready to
-      hand to ``settings.update()``. May be ``{}`` if the caller posted only
-      unknown keys.
-    - ``(None, (jsonify, status))`` on validation failure — bubble up to the
-      route as ``return *error_response``.
+    Args:
+        data: The raw POST body.
+        existing_markers: The currently-stored ``markers`` block, needed to resolve a masked
+            TheIntroDB ``api_key`` (``****``) back to the real key. Passed in by the caller
+            rather than read here so this function stays pure (no settings.json access).
+
+    Returns:
+        ``(updates, error_response)``. Exactly one is non-None:
+        - ``(updates, None)`` on success — ``updates`` is the cleaned dict ready to
+          hand to ``settings.update()``. May be ``{}`` if the caller posted only
+          unknown keys.
+        - ``(None, (jsonify, status))`` on validation failure — bubble up to the
+          route as ``return *error_response``.
 
     Validation covers: allow-listing, frame_reuse shape, typed-int coercion,
-    typed-bool rejection, masked-secret sentinel handling, and gpu_config
-    sanitisation. Pure function (no settings.json or filesystem touched) so it
-    is independently testable from the post-save side-effects.
+    typed-bool rejection, masked-secret sentinel handling, gpu_config
+    sanitisation, and the Intro & Credits ``markers`` block.
     """
     updates = {k: v for k, v in data.items() if k in _SAVE_SETTINGS_ALLOWED_FIELDS}
 
@@ -429,6 +487,23 @@ def _validate_and_coerce_settings_updates(data: dict) -> tuple[dict | None, tupl
             "ttl_minutes": max(1, int(fr.get("ttl_minutes", 60) or 60)),
             "max_cache_disk_mb": max(64, int(fr.get("max_cache_disk_mb", 2048) or 2048)),
         }
+
+    # Validate the Intro & Credits global block. ``validate_global`` needs the currently-stored
+    # block to resolve a masked TheIntroDB api_key (``****``) back to the real key on save.
+    if "markers" in updates:
+        from ...markers.settings import validate_global
+
+        # Merged over the stored block as readers see it: a stored block that doesn't validate reads as the defaults.
+        stored_block, _stored_err = validate_global(existing_markers, existing_markers)
+        if stored_block is None and isinstance(existing_markers, dict):
+            # As ``load_global`` does: a bad stored window reads as Automatic on its own, so a partial post can't
+            # reset the sources and switches beside it to the defaults.
+            stored_block, _stored_err = validate_global({**existing_markers, "credits_window": None}, existing_markers)
+        merged = _merge_global_markers_update(stored_block, updates["markers"])
+        block, err = validate_global(merged, existing_markers)
+        if err:
+            return None, (jsonify({"error": err}), 400)
+        updates["markers"] = block
 
     # Coerce/reject typed-int fields so a malformed POST can't poison
     # settings.json with a string (e.g. ``cpu_threads: "notanumber"``)
@@ -671,7 +746,7 @@ def save_settings():
     settings = get_settings_manager()
     data = request.get_json() or {}
 
-    updates, error_response = _validate_and_coerce_settings_updates(data)
+    updates, error_response = _validate_and_coerce_settings_updates(data, settings.get("markers"))
     if error_response is not None:
         body, status = error_response
         return body, status
@@ -1452,11 +1527,11 @@ def restore_backup():
     # snapshot in turn. Best-effort — never blocks the primary restore.
     if os.path.exists(live):
         try:
-            from datetime import datetime, timezone
+            from datetime import datetime
 
             from ...utils import _backup_max_age_days, _backup_retention, _prune_old_backups
 
-            ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
             shutil.copy2(live, f"{live}.{ts}.bak")
             _prune_old_backups(live, _backup_retention(), _backup_max_age_days())
         except OSError as exc:

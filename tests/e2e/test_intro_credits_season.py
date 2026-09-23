@@ -1,0 +1,795 @@
+"""E2E: Preview Inspector → Intro & Credits → "Whole season".
+
+Search, BIF and ``GET /api/markers/item`` are mocked as in ``test_intro_credits_inspector.py``; ``GET
+/api/markers/season`` returns the ``markers.inspect.season_payload`` shape and ``POST /api/markers/season/publish`` is
+captured, so each test pins how one season state renders and what the page sends.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import re
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+from playwright.sync_api import Page, Route, expect
+
+from ._mocks import _fulfill_json
+from .test_intro_credits_inspector import (
+    _DURATION,
+    _MEDIA_FILE,
+    _field,
+    _handle,
+    _Inspector,
+    _is_item,
+    _is_save,
+    _result,
+    _save_button,
+    _saved,
+    known_without_a_length,
+    locked_payload,
+    not_checked,
+    nothing_found_at_all,
+    south_park,
+)
+
+_FOLDER = "/data/tv/South Park (1997)/Season 01"
+_SERVERS = [
+    {"server_id": "plex-1", "server_name": "Plex", "server_type": "plex", "markers_enabled": True},
+    {"server_id": "jf-1", "server_name": "Jellyfin", "server_type": "jellyfin", "markers_enabled": True},
+    {"server_id": "emby-1", "server_name": "Emby", "server_type": "emby", "markers_enabled": False},
+]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _complete_setup(complete_setup) -> None:
+    return complete_setup
+
+
+def _type(status, start=None, end=None, *, locked=False, proposed=None, reason=""):
+    marker = None
+    if status == "decided":
+        marker = {"type": "x", "start_ms": start, "end_ms": end, "decided_by": ["season_audio"], "locked": locked}
+    return {"status": status, "reason": reason, "marker": marker, "proposed": proposed}
+
+
+def _dots(plex, jf, message=""):
+    return {
+        "plex-1": {"state": plex, "message": message},
+        "jf-1": {"state": jf, "message": message},
+        "emby-1": {"state": "off", "message": ""},
+    }
+
+
+def _episode(n, intro, credits, evidence, dots, *, known=True, review_reason=None):
+    """``review_reason`` None: in review exactly when intro or credits is (a recap or preview in review passes one)."""
+    in_review = [t for t in (intro, credits) if t["status"] == "needs_review"]
+    return {
+        "path": f"{_FOLDER}/South Park S01E{n:02d}.mkv",
+        "name": f"South Park S01E{n:02d}.mkv",
+        "episode": f"E{n:02d}",
+        "known": known,
+        "duration_ms": _DURATION if known else None,
+        "intro": intro,
+        "credits": credits,
+        "needs_review": bool(in_review) or review_reason is not None,
+        "review_reason": review_reason if review_reason is not None else next((t["reason"] for t in in_review), ""),
+        "evidence": evidence,
+        "servers": dots,
+    }
+
+
+def season() -> dict:
+    audio = {"source": "season_audio", "label": "10/10"}
+    tidb = {"source": "theintrodb", "label": ""}
+    return {
+        "folder": _FOLDER,
+        "show": "South Park (1997) {tvdb-75897}",
+        "season": "Season 01",
+        "servers": copy.deepcopy(_SERVERS),
+        "episodes": [
+            _episode(1, _type("decided", 127_000, 157_000), _type("decided", 1_295_000, _DURATION), [audio, tidb], _dots("ok", "ok", "2 marker(s)")),
+            _episode(2, _type("decided", 1_000, 30_000, locked=True), _type("decided", 1_246_000, _DURATION), [audio, {"source": "user", "label": ""}], _dots("ok", "waiting", "Not in this server's library yet")),
+            _episode(3, _type("decided", 2_000, 29_000), _type("needs_review", proposed={"start_ms": 1_230_000, "end_ms": _DURATION}), [audio], _dots("ok", "failed", "HTTP 500 from the plugin")),
+            _episode(4, _type(None), _type(None), [], _dots("none", "none"), known=False),
+        ],
+        "counts": {"episodes": 4, "total_episodes": 4, "ready": 3, "needs_review": 1},
+    }  # fmt: skip
+
+
+class _Season(_Inspector):
+    def __init__(self, page: Page, app_url: str, payload: dict, *, results=None, season_status: int = 200) -> None:
+        super().__init__(page, app_url, south_park(), results=results)
+        self.season_payload = payload
+        self.season_status = season_status
+        self.season_requests: list[str] = []
+        self.publish_bodies: list[dict] = []
+        page.route("**/api/markers/season?**", self._season)
+        page.route("**/api/markers/season/publish", self._publish)
+
+    def _season(self, route: Route) -> None:
+        self.season_requests.append(route.request.url)
+        _fulfill_json(route, self.season_payload, status=self.season_status)
+
+    def _publish(self, route: Route) -> None:
+        self.publish_bodies.append(route.request.post_data_json or {})
+        _fulfill_json(route, {"job_id": "5a5a5a5a-1111-4222-8333-444455556666"}, status=202)
+
+    def whole_season(self) -> Page:
+        self.page.locator("label[for='markersViewSeason']").click()
+        expect(self.page.locator("#markersSeasonBody")).not_to_contain_text("Loading", timeout=3000)
+        return self.page
+
+
+def _row(page: Page, episode: str):
+    return page.locator(f'#markersSeasonBody tr[data-episode="{episode}"]')
+
+
+def _action(page: Page, episode: str, name: str):
+    """One named button in a row's action cell (a row in review carries Review and Edit)."""
+    return _row(page, episode).locator(".mk-season-action").get_by_role("button", name=name, exact=True)
+
+
+def _is_season(response) -> bool:
+    return response.request.method == "GET" and "/api/markers/season?" in response.url
+
+
+@pytest.mark.e2e
+class TestSeasonView:
+    def test_toggle_shows_for_an_episode_and_loads_the_season_only_when_asked(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        view = _Season(authed_page, app_url, season())
+        view.open_result()
+        page = view.open_tab()
+        expect(page.locator("#markersViewToggle")).to_be_visible()
+        expect(page.locator("#markersViewEpisode")).to_be_checked()
+        assert view.season_requests == []
+
+        view.whole_season()
+        (url,) = view.season_requests
+        assert parse_qs(urlparse(url).query)["path"] == [_MEDIA_FILE]
+        expect(page.locator("#markersEpisodeView")).to_be_hidden()
+
+    def test_toggle_is_hidden_for_a_movie(self, authed_page: Page, app_url: str) -> None:
+        view = _Season(authed_page, app_url, season(), results=[{**_result(), "type": "movie"}])
+        view.open_result()
+        page = view.open_tab()
+        expect(page.locator("#markersViewToggle")).to_be_hidden()
+
+    def test_header_counts_rows_chips_and_dots(self, authed_page: Page, app_url: str) -> None:
+        view = _Season(authed_page, app_url, season())
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        body = page.locator("#markersSeasonBody")
+        expect(body.locator(".mk-season-title")).to_have_text("South Park (1997) · Season 01")
+        expect(body.locator(".mk-season-sub")).to_have_text("4 episodes")
+        expect(body.locator(".mk-season-ready")).to_have_text("3 ready")
+        expect(body.locator(".mk-season-review")).to_have_text("1 need review")
+        expect(body.locator("#markersSeasonPublishBtn")).to_have_text("Publish 3 to 2 servers")
+        expect(body.locator("thead th.mk-season-servers")).to_have_text("Plex · Jellyfin · Emby")
+
+        expect(_row(page, "E01").locator("td").nth(1)).to_have_text("2:07 – 2:37")
+        expect(_row(page, "E01").locator("td").nth(2)).to_have_text("21:35 →")
+        expect(_row(page, "E01").locator(".mk-chip")).to_have_text(["Audio 10/10", "TheIntroDB"])
+        expect(_row(page, "E01").locator(".mk-season-action")).to_have_text("Edit")
+        expect(_row(page, "E02").locator(".mk-chip")).to_have_text(["Audio 10/10", "Your marker", "🔒 Locked by you"])
+        expect(_row(page, "E02").locator(".mk-season-action")).to_have_text("Edit")
+        expect(_row(page, "E03").locator("td").nth(2)).to_have_text("Needs review")
+        expect(_row(page, "E03").locator(".mk-season-action button")).to_have_text(["Review", "Edit"])
+        expect(_row(page, "E04").locator("td").nth(1)).to_have_text("Not checked yet")
+
+        dots = _row(page, "E02").locator(".mk-dot")
+        expect(dots).to_have_count(3)
+        expect(dots.nth(0)).to_have_class(re.compile(r"\bmk-dot-ok\b"))
+        expect(dots.nth(1)).to_have_class(re.compile(r"\bmk-dot-waiting\b"))
+        expect(dots.nth(1)).to_have_attribute("title", "Jellyfin: Not in this server's library yet")
+        # Screen readers get the same words: the dot has no text of its own.
+        expect(dots.nth(1)).to_have_attribute("role", "img")
+        expect(dots.nth(1)).to_have_attribute("aria-label", "Jellyfin: Not in this server's library yet")
+        expect(dots.nth(2)).to_have_class(re.compile(r"\bmk-dot-off\b"))
+        expect(_row(page, "E03").locator(".mk-dot").nth(1)).to_have_class(re.compile(r"\bmk-dot-failed\b"))
+        expect(body.locator(".mk-season-legend")).to_have_text(
+            "Dots: green = server shows this marker, amber = waiting, red = failed, grey = server not enabled, skipped "
+            "or nothing sent yet"
+        )
+
+    def test_the_legend_names_every_grey_dot_state(self, authed_page: Page, app_url: str) -> None:
+        # markers.inspect._dot answers off / none / skipped too; those three have no colour of their own.
+        payload = season()
+        payload["episodes"][0]["servers"] = {
+            "plex-1": {"state": "skipped", "message": "The Media Preview Bridge plugin isn't installed"},
+            "jf-1": {"state": "none", "message": ""},
+            "emby-1": {"state": "off", "message": ""},
+        }
+        view = _Season(authed_page, app_url, payload)
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        dots = _row(page, "E01").locator(".mk-dot")
+        backgrounds = [dots.nth(i).evaluate("el => getComputedStyle(el).backgroundColor") for i in range(3)]
+        ok_background = (
+            _row(page, "E02").locator(".mk-dot").nth(0).evaluate("el => getComputedStyle(el).backgroundColor")
+        )
+        assert len(set(backgrounds)) == 1 and backgrounds[0] != ok_background
+        legend = page.locator("#markersSeasonBody .mk-season-legend").inner_text()
+        grey = legend.split("grey = ", 1)[1]
+        for word in ("not enabled", "skipped", "nothing sent yet"):
+            assert word in grey
+
+    @pytest.mark.parametrize(
+        ("total", "text"),
+        [(40, "40 episodes"), (60, "60 episodes (showing the 40 nearest)")],
+    )
+    def test_a_capped_season_says_how_many_it_has(self, authed_page: Page, app_url: str, total: int, text: str) -> None:
+        payload = season()
+        payload["episodes"] = [
+            _episode(n, _type(None), _type(None), [], _dots("none", "none"), known=False) for n in range(1, 41)
+        ]
+        payload["counts"] = {"episodes": 40, "total_episodes": total, "ready": 0, "needs_review": 0}
+        view = _Season(authed_page, app_url, payload)
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        expect(page.locator("#markersSeasonBody .mk-season-sub")).to_have_text(text)
+
+    def test_publish_sends_the_episode_path_and_links_the_job(self, authed_page: Page, app_url: str) -> None:
+        view = _Season(authed_page, app_url, season())
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        page.locator("#markersSeasonPublishBtn").click()
+        expect(page.locator("#toastBody")).to_contain_text("5a5a5a5a", timeout=3000)
+        assert view.publish_bodies == [{"path": _MEDIA_FILE}]
+
+    def test_publish_is_disabled_with_nothing_ready_or_no_server_on(self, authed_page: Page, app_url: str) -> None:
+        payload = season()
+        payload["counts"]["ready"] = 0
+        view = _Season(authed_page, app_url, payload)
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        expect(page.locator("#markersSeasonPublishBtn")).to_be_disabled()
+        expect(page.locator("#markersSeasonPublishBtn")).to_have_text("Publish 0 to 2 servers")
+
+    def test_a_season_all_in_review_shows_the_count_and_publishes_nothing(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        payload = season()
+        review = _type("needs_review", reason="Only one source found it")
+        payload["episodes"] = [_episode(n, review, _type("no_evidence"), [], _dots("none", "none")) for n in (1, 2, 3)]
+        payload["counts"] = {"episodes": 3, "ready": 0, "needs_review": 3}
+        view = _Season(authed_page, app_url, payload)
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        body = page.locator("#markersSeasonBody")
+        expect(body.locator(".mk-season-ready")).to_have_text("0 ready")
+        expect(body.locator(".mk-season-review")).to_have_text("3 need review")
+        expect(body.locator("#markersSeasonPublishBtn")).to_have_text("Publish 0 to 2 servers")
+        expect(body.locator("#markersSeasonPublishBtn")).to_be_disabled()
+        expect(body.locator(".mk-season-action button")).to_have_text(
+            ["Review", "Edit", "Review", "Edit", "Review", "Edit"]
+        )
+
+    def test_a_recap_in_review_gets_a_review_button_with_its_reason(self, authed_page: Page, app_url: str) -> None:
+        payload = season()
+        payload["episodes"][0] = _episode(
+            1, _type("decided", 127_000, 157_000), _type("decided", 1_295_000, _DURATION), [], _dots("ok", "ok"),
+            review_reason="intro and recap overlap",
+        )  # fmt: skip
+        payload["counts"] = {"episodes": 4, "ready": 3, "needs_review": 2}
+        view = _Season(authed_page, app_url, payload)
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        button = _action(page, "E01", "Review")
+        assert (button.get_attribute("data-bs-original-title") or button.get_attribute("title")) == (
+            "intro and recap overlap"
+        )
+        expect(page.locator("#markersSeasonBody .mk-season-review")).to_have_text("2 need review")
+        expect(page.locator("#markersSeasonPublishBtn")).to_have_text("Publish 3 to 2 servers")
+
+    def test_review_opens_that_episode(self, authed_page: Page, app_url: str) -> None:
+        view = _Season(authed_page, app_url, season())
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        before = len(view.item_requests)
+        with page.expect_response(_is_item, timeout=5000):
+            _action(page, "E03", "Review").click()
+        expect(page.locator("#markersViewEpisode")).to_be_checked()
+        expect(page.locator("#markersEpisodeView")).to_be_visible()
+        assert parse_qs(urlparse(view.item_requests[before]).query)["path"] == [f"{_FOLDER}/South Park S01E03.mkv"]
+        # Review is read-only: it never opens the editor.
+        expect(page.locator(".mk-edit-actions")).to_have_count(0)
+
+    def test_a_season_error_is_shown(self, authed_page: Page, app_url: str) -> None:
+        view = _Season(authed_page, app_url, {"error": "Not a TV episode"}, season_status=400)
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        expect(page.locator("#markersSeasonBody .alert-warning")).to_have_text(
+            "Couldn't load this season: Not a TV episode"
+        )
+
+    def test_a_second_toggle_uses_the_loaded_season(self, authed_page: Page, app_url: str) -> None:
+        view = _Season(authed_page, app_url, season())
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        page.locator("label[for='markersViewEpisode']").click()
+        view.whole_season()
+        assert len(view.season_requests) == 1
+
+    def test_switching_to_whole_season_before_the_episode_loads_uses_the_canonical_path(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        # The search result's media_file is a placeholder path; the episode's real (canonical) path only arrives
+        # once GET /api/markers/item resolves. Picking "Whole season" before that happens must not strand the
+        # season view on the placeholder's data once the real path is known.
+        other_path = f"{_FOLDER}/South Park S01E03 (Alt Cut).mkv"
+        item_payload = copy.deepcopy(south_park())
+        item_payload["canonical_path"] = other_path
+
+        wrong_season = season()
+        right_season = copy.deepcopy(season())
+        right_season["season"] = "Season 02"
+
+        view = _Season(authed_page, app_url, wrong_season)
+        held: list[Route] = []
+        view.item_handler = lambda route: held.append(route)
+
+        def _season_by_path(route: Route) -> None:
+            view.season_requests.append(route.request.url)
+            queried = parse_qs(urlparse(route.request.url).query)["path"][0]
+            _fulfill_json(route, right_season if queried == other_path else wrong_season)
+
+        authed_page.route("**/api/markers/season?**", _season_by_path)
+
+        page = view.open_result()
+        page.locator("#inspectorMarkersTabBtn").click()
+        expect(page.locator("#markersViewToggle")).to_be_visible(timeout=3000)
+        page.locator("label[for='markersViewSeason']").click()
+        expect(page.locator(".mk-season-title")).to_contain_text("Season 01", timeout=3000)
+        assert len(held) == 1
+
+        held[0].fulfill(status=200, content_type="application/json", body=json.dumps(item_payload))
+
+        expect(page.locator(".mk-season-title")).to_contain_text("Season 02", timeout=3000)
+        paths = [parse_qs(urlparse(u).query)["path"][0] for u in view.season_requests]
+        assert paths == [_MEDIA_FILE, other_path]
+
+    def test_a_canonical_path_arriving_never_loads_a_season_nobody_asked_for(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        other_path = f"{_FOLDER}/South Park S01E03 (Alt Cut).mkv"
+        view = _Season(authed_page, app_url, season())
+        view.payload = {**south_park(), "canonical_path": other_path}
+        view.open_result()
+        page = view.open_tab()
+        expect(page.locator("#markersInspectorPath")).to_have_text(other_path)
+        page.locator("button[data-bs-target='#inspector-tab-frames']").click()
+        view.open_tab()
+        page.wait_for_timeout(300)
+        assert view.season_requests == []
+
+    def test_re_showing_the_tab_asks_for_the_canonical_path_only(self, authed_page: Page, app_url: str) -> None:
+        # Once the item's canonical path is known, showing the tab again must not re-request the placeholder
+        # media_file's season first (setItem clears the path; the canonical one is remembered per media_file).
+        other_path = f"{_FOLDER}/South Park S01E03 (Alt Cut).mkv"
+        view = _Season(authed_page, app_url, season())
+        view.payload = {**south_park(), "canonical_path": other_path}
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        for _ in range(4):
+            page.locator("button[data-bs-target='#inspector-tab-frames']").click()
+            expect(page.locator("#inspector-tab-markers")).not_to_have_class(re.compile(r"\bactive\b"))
+            view.open_tab()
+            expect(page.locator("#markersSeasonBody .mk-season-title")).to_be_visible()
+        page.wait_for_timeout(300)
+        paths = [parse_qs(urlparse(u).query)["path"][0] for u in view.season_requests]
+        assert paths == [other_path]
+
+    def test_switching_to_another_episode_keeps_the_whole_season_view(self, authed_page: Page, app_url: str) -> None:
+        other_path = f"{_FOLDER}/South Park S01E04.mkv"
+
+        def _item_by_path(route: Route) -> None:
+            queried = parse_qs(urlparse(route.request.url).query).get("path", [None])[0]
+            payload = copy.deepcopy(south_park())
+            payload["canonical_path"] = queried or _MEDIA_FILE
+            _fulfill_json(route, payload)
+
+        view = _Season(
+            authed_page,
+            app_url,
+            season(),
+            results=[_result(), _result(item_id="9999", media_file=other_path, title="South Park S01E04")],
+        )
+        view.item_handler = _item_by_path
+        view.open_result(0)
+        view.open_tab()
+        page = view.whole_season()
+        assert len(view.season_requests) == 1
+
+        view.open_result(1)
+        expect(page.locator("#markersViewSeason")).to_be_checked()
+        expect(page.locator("#markersSeasonBody")).to_be_visible()
+        expect(page.locator("#markersEpisodeView")).to_be_hidden()
+        for _ in range(30):
+            if len(view.season_requests) > 1:
+                break
+            page.wait_for_timeout(100)
+        assert parse_qs(urlparse(view.season_requests[-1]).query)["path"] == [other_path]
+
+    def test_switching_to_a_movie_leaves_the_whole_season_view(self, authed_page: Page, app_url: str) -> None:
+        movie_path = "/data/movies/Movie (2020)/Movie.mkv"
+        movie_result = {**_result(item_id="9999", media_file=movie_path, title="Movie (2020)"), "type": "movie"}
+        view = _Season(authed_page, app_url, season(), results=[_result(), movie_result])
+        view.open_result(0)
+        view.open_tab()
+        page = view.whole_season()
+
+        view.open_result(1)
+        expect(page.locator("#markersViewToggle")).to_be_hidden()
+        expect(page.locator("#markersEpisodeView")).to_be_visible()
+        expect(page.locator("#markersSeasonBody")).to_be_hidden()
+        expect(page.locator("#markersViewEpisode")).to_be_checked()
+
+
+def _item_by_path(route: Route) -> None:
+    """South Park for every episode, answering under the path that was asked for."""
+    payload = copy.deepcopy(south_park())
+    payload["canonical_path"] = parse_qs(urlparse(route.request.url).query).get("path", [_MEDIA_FILE])[0]
+    _fulfill_json(route, payload)
+
+
+def _locked_e02(route: Route) -> None:
+    """E02 comes back with both types locked by the user; every other episode is plain South Park."""
+    asked = parse_qs(urlparse(route.request.url).query).get("path", [_MEDIA_FILE])[0]
+    payload = copy.deepcopy(locked_payload() if asked.endswith("E02.mkv") else south_park())
+    payload["canonical_path"] = asked
+    _fulfill_json(route, payload)
+
+
+def _season_with_e03_saved() -> dict:
+    """The season the API answers with once E03's intro has been adjusted to 0:12 and locked."""
+    payload = season()
+    payload["episodes"][2] = _episode(
+        3,
+        _type("decided", 12_000, 37_000, locked=True),
+        _type("decided", 1_299_000, _DURATION, locked=True),
+        [{"source": "user", "label": ""}],
+        _dots("ok", "ok", "2 marker(s)"),
+    )
+    payload["counts"] = {"episodes": 4, "total_episodes": 4, "ready": 4, "needs_review": 0}
+    return payload
+
+
+@pytest.mark.e2e
+class TestSeasonRowEdit:
+    def test_every_row_offers_edit_and_no_row_says_published(self, authed_page: Page, app_url: str) -> None:
+        view = _Season(authed_page, app_url, season())
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        body = page.locator("#markersSeasonBody")
+
+        expect(body.get_by_role("button", name="Edit", exact=True)).to_have_count(4)
+        # The dots carry the published state now (plan Task 6): the word is gone from the action column.
+        expect(body).not_to_contain_text("Published")
+        # A row in review keeps Review, with Edit beside it.
+        expect(_row(page, "E03").locator(".mk-season-action button")).to_have_text(["Review", "Edit"])
+        edit = _action(page, "E01", "Edit")
+        assert (edit.get_attribute("data-bs-original-title") or edit.get_attribute("title")) == (
+            "Adjust this episode's intro and credits, or add one that wasn't found."
+        )
+
+    def test_edit_opens_that_episode_in_the_editor_with_the_season_a_click_away(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        view = _Season(authed_page, app_url, season())
+        view.item_handler = _item_by_path
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        before = len(view.item_requests)
+
+        with page.expect_response(_is_item, timeout=5000):
+            _action(page, "E01", "Edit").click()
+
+        assert parse_qs(urlparse(view.item_requests[before]).query)["path"] == [f"{_FOLDER}/South Park S01E01.mkv"]
+        expect(page.locator("#markersViewEpisode")).to_be_checked()
+        expect(page.locator(".mk-edit-actions")).to_be_visible(timeout=5000)
+        expect(page.locator("#markersInspectorBody")).to_contain_text(
+            "Adjusting this episode. Nothing changes on your servers until you save."
+        )
+        expect(page.locator("#markersInspectorPath")).to_have_text(f"{_FOLDER}/South Park S01E01.mkv")
+        # The season context isn't lost: the toggle is still there and goes back to the same season.
+        expect(page.locator("#markersViewToggle")).to_be_visible()
+
+    def test_saving_a_row_shows_its_new_times_chips_and_dots_in_the_season(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        # E03 is the episode the season was asked under, so its own cached season is the one that goes stale.
+        view = _Season(authed_page, app_url, season())
+        view.item_handler = _item_by_path
+        view.save_answer = (
+            200,
+            {
+                "markers": {
+                    "intro": _saved("intro", 12_000, 37_000),
+                    "credits": _saved("credits", 1_299_000, _DURATION),
+                },
+                "servers": [],
+            },
+        )
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+
+        with page.expect_response(_is_item, timeout=5000):
+            _action(page, "E03", "Edit").click()
+        expect(page.locator(".mk-edit-actions")).to_be_visible(timeout=5000)
+        # This row's own file is the one that opened, not whichever file the tab was last on.
+        assert parse_qs(urlparse(view.item_requests[-1]).query)["path"] == [f"{_FOLDER}/South Park S01E03.mkv"]
+        _handle(page, "opening", "start").press("ArrowRight")
+        expect(_field(page, "intro", "start")).to_have_value("0:12")
+
+        with page.expect_response(_is_save, timeout=5000):
+            _save_button(page).click()
+        expect(page.locator(".mk-saved")).to_be_visible(timeout=5000)
+        assert view.save_bodies[-1]["path"] == _MEDIA_FILE
+        assert view.save_bodies[-1]["markers"] == [
+            {"type": "intro", "start_ms": 12_000, "end_ms": 37_000},
+            {"type": "credits", "start_ms": 1_299_000, "end_ms": None},
+        ]
+
+        view.season_payload = _season_with_e03_saved()
+        with page.expect_response(_is_season, timeout=5000):
+            page.locator("label[for='markersViewSeason']").click()
+        expect(page.locator("#markersSeasonBody")).not_to_contain_text("Loading", timeout=3000)
+
+        assert len(view.season_requests) == 2
+        row = _row(page, "E03")
+        expect(row.locator("td").nth(1)).to_have_text("0:12 – 0:37")
+        expect(row.locator(".mk-chip")).to_have_text(["Your marker", "🔒 Locked by you"])
+        expect(row.locator(".mk-dot").nth(1)).to_have_class(re.compile(r"\bmk-dot-ok\b"))
+        # It was the row in review; the saved marker settled it, so only Edit is left.
+        expect(row.locator(".mk-season-action button")).to_have_text("Edit")
+        expect(page.locator("#markersSeasonBody .mk-season-review")).to_have_count(0)
+
+    def test_a_locked_row_says_so_and_opens_the_editor_already_locked(self, authed_page: Page, app_url: str) -> None:
+        view = _Season(authed_page, app_url, season())
+        view.item_handler = _locked_e02
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+        expect(_row(page, "E02").locator(".mk-chip-locked")).to_have_text("🔒 Locked by you")
+
+        with page.expect_response(_is_item, timeout=5000):
+            _action(page, "E02", "Edit").click()
+
+        expect(page.locator(".mk-edit-actions")).to_be_visible(timeout=5000)
+        expect(page.locator(".mk-chips")).to_contain_text("Locked by you")
+        # A locked file opens for adjusting like any other, and the header offers Unlock rather than Lock.
+        expect(page.locator("#markersLockBtn")).to_have_text("Unlock")
+
+    def test_unlocking_a_row_also_makes_the_season_read_again(self, authed_page: Page, app_url: str) -> None:
+        # Unlock is the third way a file's markers change (save and Lock share one call site; this one is its own).
+        view = _Season(authed_page, app_url, season())
+        view.item_handler = _locked_e02
+        view.unlock_answer = (200, {"unlocked": ["intro", "credits"], "markers": {}, "decisions": {}})
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+
+        with page.expect_response(_is_item, timeout=5000):
+            _action(page, "E02", "Edit").click()
+        expect(page.locator(".mk-edit-actions")).to_be_visible(timeout=5000)
+        page.locator(".mk-edit-cancel").click()
+        page.locator("#markersLockBtn").click()
+        expect(page.locator("#markersUnlockModal")).to_be_visible()
+        with page.expect_response(
+            lambda r: r.request.method == "DELETE" and r.url.endswith("/api/markers/item/markers"), timeout=5000
+        ):
+            page.locator("#markersUnlockConfirm").click()
+        expect(page.locator("#toastBody")).to_contain_text("Unlocked", timeout=5000)
+        assert view.unlock_bodies == [{"path": f"{_FOLDER}/South Park S01E02.mkv", "types": ["intro", "credits"]}]
+
+        # The season was fetched under E03's path and lists E02, so it must be read again rather than replayed.
+        view.open_result(0)
+        with page.expect_response(_is_season, timeout=5000):
+            page.locator("label[for='markersViewSeason']").click()
+        paths = [parse_qs(urlparse(u).query)["path"][0] for u in view.season_requests]
+        assert paths == [_MEDIA_FILE, _MEDIA_FILE]
+
+    def test_edit_on_an_episode_with_nothing_to_adjust_says_why(self, authed_page: Page, app_url: str) -> None:
+        def _never_checked_e04(route: Route) -> None:
+            asked = parse_qs(urlparse(route.request.url).query).get("path", [_MEDIA_FILE])[0]
+            payload = copy.deepcopy(not_checked() if asked.endswith("E04.mkv") else south_park())
+            payload["canonical_path"] = asked
+            _fulfill_json(route, payload)
+
+        view = _Season(authed_page, app_url, season())
+        view.item_handler = _never_checked_e04
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+
+        with page.expect_response(_is_item, timeout=5000):
+            _action(page, "E04", "Edit").click()
+
+        # The only row Edit still refuses: no length means no timeline, so there is nowhere to add one either.
+        expect(page.locator("#toastBody")).to_contain_text(
+            "Nothing to adjust on this episode yet — Re-detect checks the file now.", timeout=5000
+        )
+        expect(page.locator(".mk-edit-actions")).to_have_count(0)
+        # The tab the user landed on still explains the state itself.
+        expect(page.locator("#markersInspectorBody .mk-not-checked")).to_be_visible()
+
+    def test_edit_on_a_row_with_nothing_found_opens_the_editor_on_its_add_buttons(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        """This row used to toast; now it is the whole point of Add."""
+
+        def _nothing_found_e04(route: Route) -> None:
+            asked = parse_qs(urlparse(route.request.url).query).get("path", [_MEDIA_FILE])[0]
+            payload = copy.deepcopy(nothing_found_at_all() if asked.endswith("E04.mkv") else south_park())
+            payload["canonical_path"] = asked
+            _fulfill_json(route, payload)
+
+        view = _Season(authed_page, app_url, season())
+        view.item_handler = _nothing_found_e04
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+
+        with page.expect_response(_is_item, timeout=5000):
+            _action(page, "E04", "Edit").click()
+
+        expect(page.locator(".mk-edit-actions")).to_be_visible(timeout=5000)
+        expect(page.locator("#toastBody")).not_to_contain_text("Nothing to adjust on this episode yet")
+        expect(page.locator(".mk-add")).to_have_count(4)
+        expect(page.locator(".mk-edit-pending")).to_have_text("Nothing to save yet")
+        assert view.save_bodies == []
+
+    def test_edit_on_a_known_file_with_no_duration_says_why(self, authed_page: Page, app_url: str) -> None:
+        """The other half of the toast's condition: a job saw this file, but ffprobe reported no duration."""
+
+        def _no_length_e04(route: Route) -> None:
+            asked = parse_qs(urlparse(route.request.url).query).get("path", [_MEDIA_FILE])[0]
+            payload = copy.deepcopy(known_without_a_length() if asked.endswith("E04.mkv") else south_park())
+            payload["canonical_path"] = asked
+            _fulfill_json(route, payload)
+
+        view = _Season(authed_page, app_url, season())
+        view.item_handler = _no_length_e04
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+
+        with page.expect_response(_is_item, timeout=5000):
+            _action(page, "E04", "Edit").click()
+
+        expect(page.locator("#toastBody")).to_contain_text(
+            "Nothing to adjust on this episode yet — Re-detect checks the file now.", timeout=5000
+        )
+        expect(page.locator(".mk-edit-actions")).to_have_count(0)
+        expect(page.locator("#markersInspectorBody")).to_contain_text(
+            "The file's length isn't known yet, so there is no timeline."
+        )
+
+    def test_every_rows_edit_says_it_can_add_one_that_wasnt_found(self, authed_page: Page, app_url: str) -> None:
+        view = _Season(authed_page, app_url, season())
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+
+        tip = "Adjust this episode's intro and credits, or add one that wasn't found."
+        for episode in ("E01", "E02", "E03", "E04"):
+            edit = _action(page, episode, "Edit")
+            assert (edit.get_attribute("data-bs-original-title") or edit.get_attribute("title")) == tip
+
+    def test_a_save_answering_after_the_user_moves_on_still_refreshes_the_season(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        other = f"{_FOLDER}/South Park S01E04.mkv"
+        view = _Season(
+            authed_page,
+            app_url,
+            season(),
+            results=[_result(), _result(item_id="9999", media_file=other, title="South Park S01E04")],
+        )
+        view.item_handler = _item_by_path
+        held: list[Route] = []
+        authed_page.route("**/api/markers/item/markers", lambda route: held.append(route))
+        view.open_result(0)
+        view.open_tab()
+        page = view.whole_season()
+
+        with page.expect_response(_is_item, timeout=5000):
+            _action(page, "E03", "Edit").click()
+        expect(page.locator(".mk-edit-actions")).to_be_visible(timeout=5000)
+        _save_button(page).click()
+        for _ in range(50):
+            if held:
+                break
+            page.wait_for_timeout(100)
+
+        # The user doesn't wait for the save: they open another file while it is still on its way.
+        with page.expect_response(_is_item, timeout=5000):
+            view.open_result(1)
+        with page.expect_response(_is_save, timeout=5000):
+            held[0].fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"markers": {"intro": _saved("intro", 12_000, 37_000)}, "servers": []}),
+            )
+        page.wait_for_timeout(250)
+
+        # The write landed on the server, so the season it changed can't be replayed from the cache.
+        view.open_result(0)
+        with page.expect_response(_is_season, timeout=5000):
+            page.locator("label[for='markersViewSeason']").click()
+        assert len(view.season_requests) == 2
+
+    def test_a_season_held_under_another_episode_is_read_again_after_a_save(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        view = _Season(authed_page, app_url, season())
+        view.item_handler = _item_by_path
+        view.save_answer = (200, {"markers": {"intro": _saved("intro", 11_000, 37_000)}, "servers": []})
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+
+        with page.expect_response(_is_item, timeout=5000):
+            _action(page, "E01", "Edit").click()
+        expect(page.locator(".mk-edit-actions")).to_be_visible(timeout=5000)
+        with page.expect_response(_is_save, timeout=5000):
+            _save_button(page).click()
+        expect(page.locator(".mk-saved")).to_be_visible(timeout=5000)
+        assert view.save_bodies[-1]["path"] == f"{_FOLDER}/South Park S01E01.mkv"
+
+        # E01's own season has never been asked for, so this one is a fresh read whatever the cache holds.
+        with page.expect_response(_is_season, timeout=5000):
+            page.locator("label[for='markersViewSeason']").click()
+        # The season held under E03 lists E01 too, so it was dropped as well: coming back to E03 re-reads it.
+        with page.expect_response(_is_season, timeout=5000):
+            view.open_result(0)
+        expect(page.locator("#markersSeasonBody .mk-season-title")).to_be_visible()
+        paths = [parse_qs(urlparse(u).query)["path"][0] for u in view.season_requests]
+        assert paths == [_MEDIA_FILE, f"{_FOLDER}/South Park S01E01.mkv", _MEDIA_FILE]
+
+
+@pytest.mark.e2e
+class TestSeasonTooltips:
+    def test_a_tooltip_doesnt_outlive_the_row_it_was_on(self, authed_page: Page, app_url: str) -> None:
+        # Bootstrap keys its tooltips by element and appends each one to <body>: a row replaced under an open
+        # tooltip leaves it on screen with nothing beneath it, and its instance is never collected.
+        view = _Season(authed_page, app_url, season())
+        view.open_result()
+        view.open_tab()
+        page = view.whole_season()
+
+        find_edit = (
+            "() => { window.__edit = document.querySelector("
+            "'#markersSeasonBody tr[data-episode=\"E01\"] .mk-season-action button');"
+            " return !!bootstrap.Tooltip.getInstance(window.__edit); }"
+        )
+        assert page.evaluate(find_edit) is True
+
+        # Clicked through the DOM so the pointer never moves: a real click elsewhere would hide the tooltip by
+        # itself and prove nothing about what the re-render left behind.
+        page.evaluate(
+            "() => { document.getElementById('markersViewEpisode').click();"
+            " document.getElementById('markersViewSeason').click(); }"
+        )
+
+        expect(page.locator("#markersSeasonBody .mk-season-title")).to_be_visible()
+        assert page.evaluate("() => document.contains(window.__edit)") is False
+        assert page.evaluate("() => !!bootstrap.Tooltip.getInstance(window.__edit)") is False

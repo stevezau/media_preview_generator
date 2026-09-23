@@ -79,7 +79,6 @@ def _reset_singletons():
 def app(tmp_path, monkeypatch):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
-    monkeypatch.setenv("CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("WEB_AUTH_TOKEN", "test-token-12345678")
     # _validate_plex_config requires plex_config_folder to exist + contain Media/.
     # Without this the journey's _start_job_async → load_config raises
@@ -112,6 +111,11 @@ def app(tmp_path, monkeypatch):
     )
     auth_path = config_dir / "auth.json"
     auth_path.write_text(json.dumps({"token": "test-token-12345678"}))
+    # CONFIG_DIR is pointed at this folder only once its settings.json exists: a thread still finishing the
+    # previous test can create the settings singleton at any moment, and one created for an empty folder
+    # would be kept by create_app (same config dir) with none of these settings.
+    monkeypatch.setenv("CONFIG_DIR", str(config_dir))
+    reset_settings_manager()
     return create_app(config_dir=str(config_dir))
 
 

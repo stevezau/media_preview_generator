@@ -76,5 +76,30 @@ media_preview_generator/release_notes.json
 *.png
 !docs/**/*.png
 
+# Intro & Credits evidence: local-only files (tokens, large dumps, regenerable media, Emby's proprietary DLLs)
+docs/design/intro-credits/evidence/lab/env
+docs/design/intro-credits/evidence/lab/synth/
+docs/design/intro-credits/evidence/lab/results/
+docs/design/intro-credits/evidence/lab/plugins-old/
+docs/design/intro-credits/evidence/lab/scale_mounts.sh
+docs/design/intro-credits/evidence/online/skipdb-dump.json
+docs/design/intro-credits/evidence/plugins/emby-4.10/embylibs/
+docs/design/intro-credits/evidence/detect/fpcache*/
+docs/design/intro-credits/evidence/credits/bench/
+# Truth sets / results list real library file paths (public repo): local only
+docs/design/intro-credits/evidence/**/*.json
+docs/design/intro-credits/evidence/**/*.jsonl
+# Phase-4 anime id maps: third-party data, multi-MB, and neither upstream repo carries a licence
+docs/design/intro-credits/evidence/online/phase4/animelists.xml
+docs/design/intro-credits/evidence/lab/*_truth.txt
+docs/design/intro-credits/evidence/lab/prod_plex_baseline.txt
+docs/design/intro-credits/evidence/credits/spot.txt
+docs/design/intro-credits/evidence/credits/framechecks/
+
+# Emby plugin build output (`dotnet build` locally and in CI)
+emby-plugin/bin/
+emby-plugin/obj/
+emby-plugin/out/
+
 # MkDocs build output
 site/

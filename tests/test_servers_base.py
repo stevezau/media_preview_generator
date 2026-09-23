@@ -167,6 +167,11 @@ class TestMediaServerABC:
         assert s.resolve_item_to_remote_path("nope") is None
         s.trigger_refresh(item_id=None, remote_path="/m/foo.mkv")  # no-op
 
+    def test_get_external_ids_default_is_none(self):
+        # Unsupported by default — vendors override; a server with no
+        # override must never fabricate ids for the marker pipeline.
+        assert _FakeServer().get_external_ids("42") is None
+
 
 class TestSearchItemsDefault:
     """D4 — base class search_items default falls back to a brute-force walk.

@@ -1,0 +1,1526 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Intro &amp; Credits — phase 4 mockup pack</title>
+
+<!-- Bootstrap 5.3.2 + Bootstrap Icons 1.11.1, the exact versions base.html loads from the CDN,
+     vendored here so the pack opens with no network. -->
+<link rel="stylesheet" href="vendor/bootstrap.min.css">
+<link rel="stylesheet" href="vendor/bootstrap-icons.css">
+<!-- The app's own stylesheets, referenced (not copied) so this pack can never drift from the shipped look. -->
+<link rel="stylesheet" href="../../../../../../media_preview_generator/web/static/css/style.css">
+<link rel="stylesheet" href="../../../../../../media_preview_generator/web/static/css/pages/markers_inspector.css">
+
+<style>
+/* ---- pack chrome (not part of the app) ---- */
+.pack-hd { border-bottom: 1px solid var(--bs-border-color); }
+.pack-kicker { font: 600 11px/1 var(--bs-font-monospace); letter-spacing: .14em; text-transform: uppercase; color: #e5a00d; }
+.pack-sec { scroll-margin-top: 1rem; }
+.pack-num { font: 600 11px/1 var(--bs-font-monospace); letter-spacing: .14em; text-transform: uppercase; color: var(--bs-secondary-color); }
+.pack-note { border-left: 3px solid #e5a00d; padding: 2px 0 2px 12px; max-width: 80ch; }
+.pack-q { border-left: 3px solid var(--bs-danger); padding: 2px 0 2px 12px; max-width: 80ch; }
+.mock { border: 1px solid var(--bs-border-color); border-radius: 10px; padding: 16px; background: var(--bs-body-bg); }
+.mock-cap { font-size: .8rem; color: var(--bs-secondary-color); margin-bottom: .4rem; }
+.phone { width: 390px; max-width: 100%; border: 1px solid var(--bs-border-color); border-radius: 16px; padding: 12px; overflow: hidden; background: var(--bs-body-bg); }
+
+/* ---- NEW styles phase 4 would add to css/pages/markers_inspector.css ---- */
+
+/* The bar being edited: grab handles at both edges, the amber decision colour kept. */
+.mk-bar-editing { outline: 2px solid var(--bs-body-bg); }
+.mk-handle {
+    position: absolute; top: -5px; bottom: -5px; width: 11px; padding: 0;
+    border: 2px solid var(--bs-body-bg); border-radius: 4px;
+    background: #e5a00d; cursor: col-resize; z-index: 3;
+}
+.mk-handle-start { left: -6px; }
+.mk-handle-end { right: -6px; }
+.mk-handle:focus-visible { outline: 2px solid #fff; outline-offset: 1px; }
+.mk-handle::after { content: ""; position: absolute; left: 4px; top: 5px; bottom: 5px; width: 1px; background: rgba(0,0,0,.45); }
+
+/* The per-type editing strip, directly under the Decision lane of the window being edited. */
+.mk-edit-strip {
+    display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem;
+    margin-top: .5rem; margin-left: calc(132px + 1rem);
+    padding: .5rem .6rem; border: 1px solid var(--bs-border-color); border-radius: 8px;
+    background: var(--bs-tertiary-bg);
+}
+.mk-edit-type { font-weight: 600; color: #e5a00d; }
+.mk-time {
+    width: 5.5rem; padding: .1rem .35rem; text-align: center;
+    font-family: var(--bs-font-monospace); font-size: .85rem;
+    color: var(--bs-body-color); background: var(--bs-body-bg);
+    border: 1px solid var(--bs-border-color); border-radius: 5px;
+}
+.mk-edit-hint { font-size: .75rem; color: var(--bs-secondary-color); }
+.mk-time.is-invalid { border-color: var(--bs-danger); box-shadow: 0 0 0 .15rem rgba(var(--bs-danger-rgb), .25); }
+.mk-edit-warn { font-size: .78rem; }
+
+/* The one action bar for the whole edit, under both zoom windows. */
+.mk-edit-actions {
+    display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem;
+    padding: .65rem .8rem; border: 1px solid #8a6310; border-radius: 10px;
+    background: var(--bs-tertiary-bg);
+}
+.mk-edit-pending { font-family: var(--bs-font-monospace); font-size: .82rem; }
+
+.mk-lock { font-size: .8rem; }
+@media (max-width: 575.98px) {
+    .mk-edit-strip { margin-left: 0; }
+}
+
+/* ---- NEW styles "add a marker by hand" would add to css/pages/markers_inspector.css ---- */
+
+/* The offers sit on their own row under the Decision lane, aligned with its track. Dashed and quiet, so an offer
+   never reads as a decision. They can't sit inside the track: a bar reaching the left edge puts its grab handle
+   (z-index 3) over the button and takes the click. */
+.mk-adds {
+    display: flex; flex-wrap: wrap; align-items: center; gap: .35rem;
+    margin-top: .4rem; margin-left: calc(132px + 1rem);
+}
+.mk-add {
+    height: 20px; padding: 0 .45rem;
+    font: 500 .72rem/18px var(--bs-body-font-family);
+    color: var(--bs-secondary-color); background: transparent;
+    border: 1px dashed var(--bs-border-color); border-radius: 4px;
+}
+.mk-add:hover:not(:disabled) { color: #e5a00d; border-color: #e5a00d; }
+.mk-add:disabled { opacity: .55; cursor: default; }
+.mk-add .bi { font-size: .7rem; }
+/* The Remove beside a marker added in this edit — a link, so it never competes with Save. */
+.mk-edit-remove { font-size: .78rem; padding: 0; border: 0; background: none; text-decoration: underline; }
+</style>
+</head>
+
+<body class="pb-5">
+
+<div class="container-fluid py-3 pack-hd mb-4">
+  <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap">
+    <div>
+      <div class="pack-kicker mb-2">Intro &amp; Credits · phase 4 · owner checkpoint 6</div>
+      <h1 class="h3 mb-1">Mockup pack — everything phase 4 puts on screen</h1>
+      <p class="text-muted mb-0" style="max-width:80ch">
+        Built from the app's own stylesheets and markup with made-up data, so what you see here is what the built
+        screen looks like. Nothing in this pack is wired up: buttons don't do anything, times don't move.
+        Tasks 5, 6, 9, 10 and surfaces 14&ndash;18 are built; notes marked <em>settled</em> or
+        <em>changed while building</em> record where the shipped screen differs from the drawing, and why.
+      </p>
+    </div>
+    <button type="button" class="btn btn-sm btn-outline-secondary" id="themeBtn">
+      <i class="bi bi-circle-half me-1"></i>Light / dark
+    </button>
+  </div>
+  <div class="small text-muted mt-3">
+    <strong class="text-body">On this page:</strong>
+    <a href="#s1" class="link-secondary">1 Buttons</a> ·
+    <a href="#s2" class="link-secondary">2 Editor, opening</a> ·
+    <a href="#s3" class="link-secondary">3 Editor, ending</a> ·
+    <a href="#s4" class="link-secondary">4 Editor on a phone</a> ·
+    <a href="#s5" class="link-secondary">5 Saving</a> ·
+    <a href="#s6" class="link-secondary">6 What each server did</a> ·
+    <a href="#s7" class="link-secondary">7 Locked</a> ·
+    <a href="#s8" class="link-secondary">8 Unlock</a> ·
+    <a href="#s9" class="link-secondary">9 Season view</a> ·
+    <a href="#s10" class="link-secondary">10 Settings</a> ·
+    <a href="#s11" class="link-secondary">11 Setup Health · Plex</a> ·
+    <a href="#s12" class="link-secondary">12 Setup Health · Jellyfin &amp; Emby</a> ·
+    <a href="#s13" class="link-secondary">13 Plex marker helper</a>
+  </div>
+  <div class="small text-muted mt-2">
+    <strong class="text-body">Added 2026-09-21 &mdash; adding a marker by hand:</strong>
+    <a href="#s14" class="link-secondary">14 Nothing found</a> ·
+    <a href="#s15" class="link-secondary">15 The just-added marker</a> ·
+    <a href="#s16" class="link-secondary">16 A movie</a> ·
+    <a href="#s17" class="link-secondary">17 A type no server can show</a> ·
+    <a href="#s18" class="link-secondary">18 Season view</a>
+  </div>
+</div>
+
+<div class="container-fluid" style="max-width:1220px">
+
+<!-- ===================== 1. The new buttons ===================== -->
+<section class="pack-sec mb-5" id="s1">
+  <div class="pack-num mb-1">Surface 1 &middot; Preview Inspector &rarr; Intro &amp; Credits</div>
+  <h2 class="h5">Two new buttons beside Re-detect</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">Today this row has only <em>Re-detect</em>. Adjust opens the editor; Lock keeps the times that were found, without changing them.</p>
+
+  <div class="mock" id="shot-s1">
+    <div class="mock-cap">Tab header &middot; nothing locked yet</div>
+    <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+      <div class="small text-muted text-break">/media/tv/Northern Lights/Season 02/Northern Lights - S02E04 - Drift.mkv</div>
+      <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
+                title="Drag the intro or credits to where they really are, then save. Your times are kept from then on."><i class="bi bi-pencil me-1"></i>Adjust</button>
+        <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
+                title="Keep these times exactly as they are. Later checks won't change them."><i class="bi bi-lock me-1"></i>Lock</button>
+        <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
+                title="Look this file up and detect it again, asking every source. Runs as a job on the Dashboard."><i class="bi bi-arrow-repeat me-1"></i>Re-detect</button>
+      </div>
+    </div>
+    <div class="mk-chips">
+      <span class="badge text-bg-success">Intro 0:11&ndash;0:37</span>
+      <span class="badge text-bg-success">Credits 40:55 &rarr;</span>
+      <span class="badge text-bg-secondary">Recap: No markers found</span>
+      <span class="badge text-bg-secondary opacity-75">Preview: Detection off</span>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 2. Editor - opening window ===================== -->
+<section class="pack-sec mb-5" id="s2">
+  <div class="pack-num mb-1">Surface 2 &middot; the editor, open</div>
+  <h2 class="h5">Dragging the intro</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">The decision bar grows a handle at each end. Drag either one, or focus it and use the arrow keys. The times under the timeline can be typed too. Both zoom windows stay as they are today &mdash; same lanes, same evidence.</p>
+
+  <div class="mock" id="shot-s2">
+    <div class="mock-cap">Northern Lights &middot; S02E04 &middot; being adjusted</div>
+
+    <div class="alert alert-warning py-2 small d-flex align-items-center gap-2 mb-3">
+      <i class="bi bi-pencil"></i><div>Adjusting this episode. Nothing changes on your servers until you save.</div>
+    </div>
+
+    <div class="card mk-window" data-window="opening">
+      <div class="card-header py-2 d-flex align-items-center">
+        <span class="mk-window-title">Opening &middot; 0:00 &ndash; 3:00</span>
+        <button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top"
+                title="Zoomed to the start or end of the file, so a difference of a second is visible."><i class="bi bi-info-circle"></i></button>
+      </div>
+      <div class="card-body mk-scroll">
+        <div class="mk-zoom">
+          <div class="mk-axis">
+            <span style="left:0%">0:00</span><span style="left:33.333%">1:00</span><span style="left:66.667%">2:00</span><span style="left:100%">3:00</span>
+          </div>
+
+          <div class="mk-lane mk-lane-decision" data-lane="Decision">
+            <div class="mk-lane-label"><span class="text-truncate">Decision</span></div>
+            <div class="mk-track">
+              <span class="mk-bar mk-bar-result mk-bar-editing" style="left:7.778%;width:15.000%">
+                <button class="mk-handle mk-handle-start" type="button" aria-label="Intro start, 0 minutes 14 seconds"></button>
+                <span class="mk-bar-text">Intro 0:14&ndash;0:41</span>
+                <button class="mk-handle mk-handle-end" type="button" aria-label="Intro end, 0 minutes 41 seconds"></button>
+              </span>
+            </div>
+          </div>
+
+          <div class="mk-edit-strip">
+            <span class="mk-edit-type">Intro</span>
+            <label class="d-flex align-items-center gap-1 small text-muted mb-0">Start <input class="mk-time" value="0:14" aria-label="Intro start"></label>
+            <label class="d-flex align-items-center gap-1 small text-muted mb-0">End <input class="mk-time" value="0:41" aria-label="Intro end"></label>
+            <span class="small text-muted">27 seconds long</span>
+            <span class="mk-edit-hint">Arrow keys move it 1 second &middot; hold <kbd>Shift</kbd> for 10 seconds</span>
+            <button type="button" class="info-icon" data-bs-toggle="tooltip" data-bs-placement="top"
+                    title="Tab to a handle, then use the arrow keys. You can also type a time straight into the boxes."><i class="bi bi-info-circle"></i></button>
+          </div>
+
+          <div class="mk-lane" data-lane="Chapters">
+            <div class="mk-lane-label"><span class="text-truncate">Chapters</span></div>
+            <div class="mk-track"><span class="mk-bar mk-bar-evidence" style="left:6.111%;width:14.444%"><span class="mk-bar-text">0:11&ndash;0:37</span></span></div>
+          </div>
+          <div class="mk-lane" data-lane="IntroDB">
+            <div class="mk-lane-label"><span class="text-truncate">IntroDB</span></div>
+            <div class="mk-track"><span class="mk-bar mk-bar-evidence" style="left:6.667%;width:14.444%"><span class="mk-bar-text">0:12&ndash;0:38</span></span></div>
+          </div>
+          <div class="mk-lane" data-lane="Season audio">
+            <div class="mk-lane-label"><span class="text-truncate">Season audio</span></div>
+            <div class="mk-track"><span class="mk-bar mk-bar-evidence" style="left:6.111%;width:14.444%"><span class="mk-bar-text">0:11&ndash;0:37 &middot; 10/10</span></span></div>
+          </div>
+          <div class="mk-lane" data-lane="SkipDB">
+            <div class="mk-lane-label"><span class="text-truncate">SkipDB</span></div>
+            <div class="mk-track"><span class="mk-lane-note">Nothing found</span></div>
+          </div>
+          <div class="mk-lane" data-lane="Plex - Main now">
+            <div class="mk-lane-label"><span class="text-truncate">Plex &middot; Main now</span></div>
+            <div class="mk-track"><span class="mk-bar mk-bar-evidence" style="left:5.000%;width:14.444%"><span class="mk-bar-text">0:09&ndash;0:35</span></span></div>
+          </div>
+          <div class="mk-lane" data-lane="Jellyfin - Lab now">
+            <div class="mk-lane-label"><span class="text-truncate">Jellyfin &middot; Lab now</span></div>
+            <div class="mk-track"><span class="mk-lane-note">none yet</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mk-edit-actions">
+      <span class="small text-muted">Adjusting</span>
+      <span class="mk-edit-pending">Intro 0:14&ndash;0:41</span>
+      <span class="flex-grow-1"></span>
+      <span class="small text-muted">Saving keeps your times &mdash; later checks won't change them.</span>
+      <button class="btn btn-sm btn-outline-secondary" type="button">Cancel</button>
+      <button class="btn btn-sm btn-primary" type="button">Save and publish to 3 servers</button>
+    </div>
+  </div>
+
+  <p class="pack-note small mt-3 mb-0"><strong>Wording to settle:</strong> the save button says <em>Save and publish to 3 servers</em>.
+  It counts only servers that have Intro &amp; Credits switched on and can show at least one type you changed.</p>
+</section>
+
+<!-- ===================== 3. Editor - ending window ===================== -->
+<section class="pack-sec mb-5" id="s3">
+  <div class="pack-num mb-1">Surface 3 &middot; the editor, ending of the file</div>
+  <h2 class="h5">Credits, &ldquo;runs to the end&rdquo;, and a marker we'd normally argue with</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">This episode has a scene after the credits, so the user turns off &ldquo;Runs to the end of the file&rdquo; and drags the end back to 43:30. The app warns when a time is unusual &mdash; it never refuses it. It refuses only two things: an end before the start, and a time past the end of the file.</p>
+
+  <div class="mock" id="shot-s3">
+    <div class="mock-cap">Same episode &middot; ending window</div>
+    <div class="card mk-window" data-window="ending">
+      <div class="card-header py-2 d-flex align-items-center">
+        <span class="mk-window-title">Ending &middot; 40:00 &ndash; 44:12 (end of file)</span>
+        <button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top"
+                title="Zoomed to the start or end of the file, so a difference of a second is visible."><i class="bi bi-info-circle"></i></button>
+      </div>
+      <div class="card-body mk-scroll">
+        <div class="mk-zoom">
+          <div class="mk-axis">
+            <span style="left:0%">40:00</span><span style="left:33.333%">41:24</span><span style="left:66.667%">42:48</span><span style="left:100%">44:12</span>
+          </div>
+
+          <div class="mk-lane mk-lane-decision" data-lane="Decision">
+            <div class="mk-lane-label"><span class="text-truncate">Decision</span></div>
+            <div class="mk-track">
+              <span class="mk-bar mk-bar-result mk-bar-editing" style="left:21.825%;width:61.508%">
+                <button class="mk-handle mk-handle-start" type="button" aria-label="Credits start, 40 minutes 55 seconds"></button>
+                <span class="mk-bar-text">Credits 40:55&ndash;43:30</span>
+                <button class="mk-handle mk-handle-end" type="button" aria-label="Credits end, 43 minutes 30 seconds"></button>
+              </span>
+            </div>
+          </div>
+
+          <div class="mk-edit-strip">
+            <span class="mk-edit-type">Credits</span>
+            <label class="d-flex align-items-center gap-1 small text-muted mb-0">Start <input class="mk-time" value="40:55" aria-label="Credits start"></label>
+            <label class="d-flex align-items-center gap-1 small text-muted mb-0">End <input class="mk-time" value="43:30" aria-label="Credits end"></label>
+            <div class="form-check form-switch mb-0 d-flex align-items-center gap-2">
+              <input class="form-check-input mt-0" type="checkbox" role="switch" id="mkRunsToEnd">
+              <label class="form-check-label small text-muted" for="mkRunsToEnd">Runs to the end of the file</label>
+            </div>
+            <button type="button" class="info-icon" data-bs-toggle="tooltip" data-bs-placement="top"
+                    title="Turn this off when something plays after the credits &mdash; a last scene, or a preview of the next episode."><i class="bi bi-info-circle"></i></button>
+            <div class="w-100"></div>
+            <div class="mk-edit-warn text-warning-emphasis"><i class="bi bi-exclamation-triangle me-1"></i>Credits usually run to the end of the file. This will still be saved.</div>
+          </div>
+
+          <div class="mk-lane" data-lane="Credit text">
+            <div class="mk-lane-label"><span class="text-truncate">Credit text</span></div>
+            <div class="mk-track"><span class="mk-bar mk-bar-evidence" style="left:21.825%;width:61.111%"><span class="mk-bar-text">40:55&ndash;43:29</span></span></div>
+          </div>
+          <div class="mk-lane" data-lane="Chapters">
+            <div class="mk-lane-label"><span class="text-truncate">Chapters</span></div>
+            <div class="mk-track"><span class="mk-bar mk-bar-evidence" style="left:20.635%;width:79.365%"><span class="mk-bar-text">40:52 &rarr;</span></span></div>
+          </div>
+          <div class="mk-lane" data-lane="Plex - Main now">
+            <div class="mk-lane-label"><span class="text-truncate">Plex &middot; Main now</span></div>
+            <div class="mk-track"><span class="mk-bar mk-bar-evidence" style="left:24.603%;width:75.397%"><span class="mk-bar-text">41:02 &rarr;</span></span></div>
+          </div>
+          <div class="mk-lane" data-lane="Emby - Lab now">
+            <div class="mk-lane-label"><span class="text-truncate">Emby &middot; Lab now</span></div>
+            <div class="mk-track"><span class="mk-lane-note">none yet</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mk-edit-actions">
+      <span class="small text-muted">Adjusting</span>
+      <span class="mk-edit-pending">Intro 0:14&ndash;0:41 &middot; Credits 40:55&ndash;43:30</span>
+      <span class="flex-grow-1"></span>
+      <span class="small text-muted">Saving keeps your times &mdash; later checks won't change them.</span>
+      <button class="btn btn-sm btn-outline-secondary" type="button">Cancel</button>
+      <button class="btn btn-sm btn-primary" type="button">Save and publish to 3 servers</button>
+    </div>
+
+    <div class="mock-cap mt-4">The two refusals &middot; Save stays disabled until they're fixed</div>
+    <div class="mk-edit-strip" style="margin-left:0">
+      <span class="mk-edit-type">Credits</span>
+      <label class="d-flex align-items-center gap-1 small text-muted mb-0">Start <input class="mk-time is-invalid" value="43:40" aria-label="Credits start"></label>
+      <label class="d-flex align-items-center gap-1 small text-muted mb-0">End <input class="mk-time" value="43:30" aria-label="Credits end"></label>
+      <div class="w-100"></div>
+      <div class="mk-edit-warn text-danger-emphasis"><i class="bi bi-x-circle me-1"></i>The end has to come after the start.</div>
+    </div>
+    <div class="mk-edit-strip mt-2" style="margin-left:0">
+      <span class="mk-edit-type">Credits</span>
+      <label class="d-flex align-items-center gap-1 small text-muted mb-0">Start <input class="mk-time" value="40:55" aria-label="Credits start"></label>
+      <label class="d-flex align-items-center gap-1 small text-muted mb-0">End <input class="mk-time is-invalid" value="46:02" aria-label="Credits end"></label>
+      <div class="w-100"></div>
+      <div class="mk-edit-warn text-danger-emphasis"><i class="bi bi-x-circle me-1"></i>That's past the end of the file (44:12).</div>
+    </div>
+
+    <div class="mock-cap mt-4">A recap, when one of your servers can show it &middot; editable, and the note names who won't get it</div>
+    <div class="mk-edit-strip" style="margin-left:0">
+      <span class="mk-edit-type">Recap</span>
+      <label class="d-flex align-items-center gap-1 small text-muted mb-0">Start <input class="mk-time" value="0:02" aria-label="Recap start"></label>
+      <label class="d-flex align-items-center gap-1 small text-muted mb-0">End <input class="mk-time" value="0:48" aria-label="Recap end"></label>
+      <div class="w-100"></div>
+      <div class="mk-edit-warn text-muted"><i class="bi bi-info-circle me-1"></i>Only Jellyfin shows recaps. Plex and Emby have no recap marker, so this one won't reach them.</div>
+    </div>
+
+    <div class="mock-cap mt-3">The same recap when no server can show it &middot; refused, nothing to type into</div>
+    <div class="mk-edit-strip opacity-75" style="margin-left:0">
+      <span class="mk-edit-type">Recap</span>
+      <label class="d-flex align-items-center gap-1 small text-muted mb-0">Start <input class="mk-time" value="0:02" aria-label="Recap start" disabled></label>
+      <label class="d-flex align-items-center gap-1 small text-muted mb-0">End <input class="mk-time" value="0:48" aria-label="Recap end" disabled></label>
+      <div class="w-100"></div>
+      <div class="mk-edit-warn text-danger-emphasis"><i class="bi bi-slash-circle me-1"></i>Recaps can't be adjusted here: neither Plex nor Emby has a recap marker, and no other server has this file.</div>
+    </div>
+
+    <p class="pack-q small mt-3 mb-0"><strong>Wording and behaviour to settle.</strong>
+    The plan says the editor <em>refuses</em> recap and preview for Plex and Emby. Drawn strictly, that means the
+    second strip is the only one that exists and a recap can never be adjusted while a Plex or Emby server is in the
+    picture &mdash; even when Jellyfin would happily show it. The pack proposes the first strip instead for that case:
+    the recap is editable, saved here, sent to Jellyfin, and the note names the two servers that get nothing.
+    The refusal stays for the case where no server can show it at all.</p>
+  </div>
+</section>
+
+<!-- ===================== 4. Editor on a phone ===================== -->
+<section class="pack-sec mb-5" id="s4">
+  <div class="pack-num mb-1">Surface 4 &middot; the editor at phone width</div>
+  <h2 class="h5">390 px</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">The timeline already scrolls sideways on a narrow screen and the lane names stay pinned. The times, the handles and the save bar all stack.</p>
+
+  <div class="mock d-inline-block" id="shot-s4">
+    <div class="phone">
+      <div class="d-flex justify-content-between align-items-center gap-2 mb-2 flex-wrap">
+        <div class="small text-muted text-break">&hellip;/Northern Lights - S02E04 - Drift.mkv</div>
+        <div class="d-flex gap-1 flex-wrap">
+          <button class="btn btn-sm btn-outline-secondary" type="button"><i class="bi bi-pencil me-1"></i>Adjust</button>
+          <button class="btn btn-sm btn-outline-secondary" type="button" aria-label="Lock"><i class="bi bi-lock"></i></button>
+          <button class="btn btn-sm btn-outline-secondary" type="button" aria-label="Re-detect"><i class="bi bi-arrow-repeat"></i></button>
+        </div>
+      </div>
+      <div class="alert alert-warning py-2 small mb-2">Adjusting this episode. Nothing changes on your servers until you save.</div>
+      <div class="card mk-window" data-window="opening">
+        <div class="card-header py-2 d-flex align-items-center"><span class="mk-window-title">Opening &middot; 0:00 &ndash; 3:00</span></div>
+        <div class="card-body mk-scroll">
+          <div class="mk-zoom">
+            <div class="mk-axis"><span style="left:0%">0:00</span><span style="left:33.333%">1:00</span><span style="left:66.667%">2:00</span><span style="left:100%">3:00</span></div>
+            <div class="mk-lane mk-lane-decision"><div class="mk-lane-label"><span class="text-truncate">Decision</span></div>
+              <div class="mk-track"><span class="mk-bar mk-bar-result mk-bar-editing mk-bar-out-right" style="left:7.778%;width:15.000%">
+                <button class="mk-handle mk-handle-start" type="button" aria-label="Intro start"></button>
+                <span class="mk-bar-text">Intro 0:14&ndash;0:41</span>
+                <button class="mk-handle mk-handle-end" type="button" aria-label="Intro end"></button></span></div></div>
+            <div class="mk-lane"><div class="mk-lane-label"><span class="text-truncate">Chapters</span></div>
+              <div class="mk-track"><span class="mk-bar mk-bar-evidence mk-bar-out-right" style="left:6.111%;width:14.444%"><span class="mk-bar-text">0:11&ndash;0:37</span></span></div></div>
+            <div class="mk-lane"><div class="mk-lane-label"><span class="text-truncate">Season audio</span></div>
+              <div class="mk-track"><span class="mk-bar mk-bar-evidence mk-bar-out-right" style="left:6.111%;width:14.444%"><span class="mk-bar-text">0:11&ndash;0:37</span></span></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="mk-edit-strip" style="margin-left:0">
+        <span class="mk-edit-type">Intro</span>
+        <label class="d-flex align-items-center gap-1 small text-muted mb-0">Start <input class="mk-time" value="0:14"></label>
+        <label class="d-flex align-items-center gap-1 small text-muted mb-0">End <input class="mk-time" value="0:41"></label>
+        <span class="mk-edit-hint">Arrow keys 1 second &middot; <kbd>Shift</kbd> 10 seconds</span>
+      </div>
+      <div class="mk-edit-actions mt-2">
+        <span class="mk-edit-pending">Intro 0:14&ndash;0:41</span>
+        <div class="w-100"></div>
+        <button class="btn btn-sm btn-primary flex-grow-1" type="button">Save and publish to 3 servers</button>
+        <button class="btn btn-sm btn-outline-secondary" type="button">Cancel</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 5. Saving ===================== -->
+<section class="pack-sec mb-5" id="s5">
+  <div class="pack-num mb-1">Surface 5 &middot; the moment after Save</div>
+  <h2 class="h5">Saving</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">Your times are stored first, then each server is sent them, one card at a time. The save button is busy; nothing else on the page moves.</p>
+
+  <div class="mock" id="shot-s5">
+    <div class="card mk-servers">
+      <div class="card-header py-2 d-flex align-items-center">
+        <span class="mk-window-title">On your servers</span>
+        <button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top"
+                title="What each server shows viewers today, and what the next Intro &amp; Credits job changes there."><i class="bi bi-info-circle"></i></button>
+      </div>
+      <div class="card-body">
+        <div class="mk-servers-grid">
+          <div class="mk-server">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <span class="mk-tile mk-tile-plex">P</span><strong class="text-break">Plex &middot; Main</strong>
+              <span class="badge mk-plan text-bg-success">Updated</span>
+            </div>
+            <div class="small text-muted mk-line">Intro 0:14&ndash;0:41 &middot; Credits 40:55&ndash;43:30</div>
+          </div>
+          <div class="mk-server">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <span class="mk-tile mk-tile-jellyfin">J</span><strong class="text-break">Jellyfin &middot; Lab</strong>
+              <span class="badge mk-plan text-bg-secondary"><span class="spinner-border spinner-border-sm me-1" style="width:.7rem;height:.7rem" aria-hidden="true"></span>Sending&hellip;</span>
+            </div>
+            <div class="small text-muted mk-line">Intro 0:14&ndash;0:41 &middot; Credits 40:55&ndash;43:30</div>
+          </div>
+          <div class="mk-server">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <span class="mk-tile mk-tile-emby">E</span><strong class="text-break">Emby &middot; Lab</strong>
+              <span class="badge mk-plan text-bg-info">Waiting</span>
+            </div>
+            <div class="small text-muted mk-line">Intro 0:14&ndash;0:41 &middot; Credits 40:55</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="mk-edit-actions mt-3">
+      <span class="small text-muted">Your times are saved. Sending them to your servers&hellip;</span>
+      <span class="flex-grow-1"></span>
+      <button class="btn btn-sm btn-primary" type="button" disabled><span class="spinner-border spinner-border-sm me-1" style="width:.8rem;height:.8rem" aria-hidden="true"></span>Saving&hellip;</button>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 6. The per-server result ===================== -->
+<section class="pack-sec mb-5" id="s6">
+  <div class="pack-num mb-1">Surface 6 &middot; what each server did</div>
+  <h2 class="h5">Every result you can actually meet</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">Five cards, five outcomes, all on the one screen without leaving the tab. A server that couldn't be reached keeps your edit &mdash; it just gets it later.</p>
+
+  <div class="mock" id="shot-s6">
+    <div class="card mk-servers">
+      <div class="card-header py-2 d-flex align-items-center">
+        <span class="mk-window-title">On your servers</span>
+        <button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top"
+                title="What each server shows viewers today, and what the next Intro &amp; Credits job changes there."><i class="bi bi-info-circle"></i></button>
+      </div>
+      <div class="card-body">
+        <div class="mk-servers-grid">
+
+          <div class="mk-server">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <span class="mk-tile mk-tile-plex">P</span><strong class="text-break">Plex &middot; Main</strong>
+              <span class="badge mk-plan text-bg-success">Updated</span>
+            </div>
+            <div class="small text-muted mk-line">Intro 0:14&ndash;0:41 &middot; Credits 40:55&ndash;43:30</div>
+            <div class="small text-muted mk-line">Replaced Plex's own marker. This server is set to keep Plex's, but a marker you adjust always wins.</div>
+            <div class="small text-muted mk-line">All versions of this item share one set of markers</div>
+          </div>
+
+          <div class="mk-server">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <span class="mk-tile mk-tile-emby">E</span><strong class="text-break">Emby &middot; Lab</strong>
+              <span class="badge mk-plan text-bg-success">Updated</span>
+            </div>
+            <div class="small text-muted mk-line">Intro 0:14&ndash;0:41 &middot; Credits 40:55</div>
+            <div class="small text-warning-emphasis mk-line">Your credits end wasn't sent. Emby skips to the end of the file, past any scene after the credits.</div>
+          </div>
+
+          <div class="mk-server">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <span class="mk-tile mk-tile-jellyfin">J</span><strong class="text-break">Jellyfin &middot; Lab</strong>
+              <span class="badge mk-plan text-bg-danger">Couldn't reach it</span>
+            </div>
+            <div class="small text-danger-emphasis mk-line">Your times are saved. This server gets them at the next Check servers run.</div>
+          </div>
+
+          <div class="mk-server">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <span class="mk-tile mk-tile-plex">P</span><strong class="text-break">Plex &middot; Parents</strong>
+              <span class="badge mk-plan text-bg-secondary">Intro &amp; Credits off</span>
+            </div>
+            <div class="small text-muted mk-line">Turn on Intro &amp; Credits for this server to send markers here.</div>
+          </div>
+
+          <div class="mk-server">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <span class="mk-tile mk-tile-emby">E</span><strong class="text-break">Emby &middot; Den</strong>
+              <span class="badge mk-plan text-bg-secondary">Recap not sent</span>
+            </div>
+            <div class="small text-muted mk-line">Emby has no recap marker. Its intro and credits were updated.</div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <div class="alert alert-success py-2 small mt-3 mb-0 d-flex align-items-center gap-2">
+      <i class="bi bi-lock-fill"></i><div>Saved and locked. Your times stay until you unlock them.</div>
+    </div>
+  </div>
+
+  <p class="pack-q small mt-3 mb-0"><strong>The one to look hard at (open question Q1).</strong>
+  The Plex card above says: <em>&ldquo;Replaced Plex's own marker. This server is set to keep Plex's, but a marker you adjust always wins.&rdquo;</em>
+  That is the plan's recommendation &mdash; your hand-made marker beats the per-server &ldquo;Keep Plex's&rdquo; choice.
+  The alternative is surface 7's second card: the server keeps its own and your edit never reaches it.</p>
+</section>
+
+<!-- ===================== 7. Locked ===================== -->
+<section class="pack-sec mb-5" id="s7">
+  <div class="pack-num mb-1">Surface 7 &middot; a locked marker, at rest</div>
+  <h2 class="h5">How locked reads once the editor is closed</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">A lock shows in three places: the chips at the top, the Decision lane, and (surface 9) the season row. The Lock button becomes Unlock.</p>
+
+  <div class="mock" id="shot-s7">
+    <div class="mock-cap">Header and chips</div>
+    <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+      <div class="small text-muted text-break">/media/tv/Northern Lights/Season 02/Northern Lights - S02E04 - Drift.mkv</div>
+      <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" type="button"><i class="bi bi-pencil me-1"></i>Adjust</button>
+        <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
+                title="Let later checks set these times again."><i class="bi bi-unlock me-1"></i>Unlock</button>
+        <button class="btn btn-sm btn-outline-secondary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Re-detect</button>
+      </div>
+    </div>
+    <div class="mk-chips">
+      <span class="badge text-bg-success">Intro 0:14&ndash;0:41</span>
+      <span class="badge text-bg-success">Credits 40:55&ndash;43:30</span>
+      <span class="badge mk-chip mk-chip-locked"><i class="bi bi-lock-fill me-1"></i>Locked by you</span>
+    </div>
+
+    <div class="mock-cap mt-4">The Decision lane carries the lock</div>
+    <div class="card mk-window">
+      <div class="card-header py-2 d-flex align-items-center"><span class="mk-window-title">Opening &middot; 0:00 &ndash; 3:00</span></div>
+      <div class="card-body mk-scroll">
+        <div class="mk-zoom">
+          <div class="mk-axis"><span style="left:0%">0:00</span><span style="left:33.333%">1:00</span><span style="left:66.667%">2:00</span><span style="left:100%">3:00</span></div>
+          <div class="mk-lane mk-lane-decision">
+            <div class="mk-lane-label"><span class="text-truncate">Decision</span>
+              <i class="bi bi-lock-fill mk-lock" data-bs-toggle="tooltip" data-bs-placement="top" title="You set these times. Later checks won't change them."></i></div>
+            <div class="mk-track"><span class="mk-bar mk-bar-result" style="left:7.778%;width:15.000%"><span class="mk-bar-text">Intro 0:14&ndash;0:41</span></span></div>
+          </div>
+          <div class="mk-lane">
+            <div class="mk-lane-label"><span class="text-truncate">Your marker</span></div>
+            <div class="mk-track"><span class="mk-bar mk-bar-evidence" style="left:7.778%;width:15.000%"><span class="mk-bar-text">0:14&ndash;0:41</span></span></div>
+          </div>
+          <div class="mk-lane lane-disagree">
+            <div class="mk-lane-label"><span class="text-truncate">Season audio</span><span class="badge text-bg-danger mk-disagree" title="Doesn't agree with the decision">&#10005;</span></div>
+            <div class="mk-track"><span class="mk-bar mk-bar-evidence" style="left:6.111%;width:14.444%"><span class="mk-bar-text">0:11&ndash;0:37 &middot; 10/10</span></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mock-cap mt-4">Two server cards on a locked marker &mdash; the Q1 fork, side by side</div>
+    <div class="card mk-servers">
+      <div class="card-body">
+        <div class="mk-servers-grid">
+          <div class="mk-server">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <span class="mk-tile mk-tile-plex">P</span><strong class="text-break">Plex &middot; Main</strong>
+              <span class="badge mk-plan text-bg-warning">Will replace</span>
+            </div>
+            <div class="small text-muted mk-line">Intro 0:09&ndash;0:35 &rarr; 0:14&ndash;0:41</div>
+            <div class="small text-muted mk-line">This server is set to keep Plex's own markers. Your locked marker replaces them anyway.</div>
+            <div class="small text-body-tertiary mk-line"><em>Plan's recommendation (Q1 option a)</em></div>
+          </div>
+          <div class="mk-server">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <span class="mk-tile mk-tile-plex">P</span><strong class="text-break">Plex &middot; Main</strong>
+              <span class="badge mk-plan text-bg-secondary">Keeps Plex's</span>
+            </div>
+            <div class="small text-muted mk-line">Plex keeps its own marker here, so your locked times aren't sent to this server.</div>
+            <div class="small text-body-tertiary mk-line"><em>Today's behaviour (Q1 option b)</em></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 8. Unlock ===================== -->
+<section class="pack-sec mb-5" id="s8">
+  <div class="pack-num mb-1">Surface 8 &middot; Unlock</div>
+  <h2 class="h5">What Unlock says before it drops your marker</h2>
+
+  <div class="mock" id="shot-s8">
+    <div class="modal position-static d-block" style="background:transparent">
+      <div class="modal-dialog modal-dialog-centered" style="margin:0">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title"><i class="bi bi-unlock me-2"></i>Unlock these markers?</h5>
+            <button type="button" class="btn-close" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <p class="mb-2">Your times stay on your servers for now:</p>
+            <ul class="mb-3">
+              <li class="font-monospace small">Intro 0:14&ndash;0:41</li>
+              <li class="font-monospace small">Credits 40:55&ndash;43:30</li>
+            </ul>
+            <p class="mb-0">The next time this episode is checked, the sources decide again and may move them. Re-detect does that straight away.</p>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary">Keep them locked</button>
+            <button type="button" class="btn btn-danger">Unlock</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 9. Season view ===================== -->
+<section class="pack-sec mb-5" id="s9">
+  <div class="pack-num mb-1">Surface 9 &middot; Inspector &rarr; Whole season</div>
+  <h2 class="h5">An Edit on every row</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">Edit opens that episode straight in the editor. Review is unchanged. A locked episode keeps its chip, and a save shows in the row without reloading the page.</p>
+
+  <div class="mock" id="shot-s9">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+      <div>
+        <div class="mk-season-title">Northern Lights &middot; Season 2</div>
+        <div class="mk-season-sub text-muted small">10 episodes</div>
+      </div>
+      <div class="d-flex align-items-center gap-2">
+        <span class="badge text-bg-success mk-season-ready">8 ready</span>
+        <span class="badge text-bg-warning mk-season-review">2 need review</span>
+        <button class="btn btn-sm btn-primary" type="button">Publish 8 to 3 servers</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0 mk-season-table">
+          <thead><tr><th>Ep</th><th>Intro</th><th>Credits</th><th>Evidence</th><th class="mk-season-servers">Plex &middot; Main &middot; Jellyfin &middot; Lab &middot; Emby &middot; Lab</th><th></th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="mk-season-time">E01</td>
+              <td class="mk-season-time">0:11 &ndash; 0:37</td>
+              <td class="mk-season-time">40:48 &rarr;</td>
+              <td><span class="badge mk-chip">Chapters</span><span class="badge mk-chip">Audio 10/10</span></td>
+              <td><div class="mk-dots"><span class="mk-dot mk-dot-ok"></span><span class="mk-dot mk-dot-ok"></span><span class="mk-dot mk-dot-ok"></span></div></td>
+              <td class="mk-season-action"><button class="btn btn-sm btn-outline-secondary py-0" type="button" data-bs-toggle="tooltip" data-bs-placement="top" title="Adjust this episode's intro and credits.">Edit</button></td>
+            </tr>
+            <tr>
+              <td class="mk-season-time">E04</td>
+              <td class="mk-season-time">0:14 &ndash; 0:41</td>
+              <td class="mk-season-time">40:55 &ndash; 43:30</td>
+              <td><span class="badge mk-chip">Your marker</span><span class="badge mk-chip mk-chip-locked">&#128274; Locked by you</span></td>
+              <td><div class="mk-dots"><span class="mk-dot mk-dot-ok"></span><span class="mk-dot mk-dot-failed"></span><span class="mk-dot mk-dot-ok"></span></div></td>
+              <td class="mk-season-action"><button class="btn btn-sm btn-outline-secondary py-0" type="button">Edit</button></td>
+            </tr>
+            <tr>
+              <td class="mk-season-time">E05</td>
+              <td class="mk-season-time"><span class="badge text-bg-warning">Needs review</span></td>
+              <td class="mk-season-time">41:02 &rarr;</td>
+              <td><span class="badge mk-chip">IntroDB</span></td>
+              <td><div class="mk-dots"><span class="mk-dot"></span><span class="mk-dot"></span><span class="mk-dot"></span></div></td>
+              <td class="mk-season-action">
+                <div class="d-flex gap-1">
+                  <button class="btn btn-sm btn-outline-secondary py-0" type="button" data-bs-toggle="tooltip" data-bs-placement="top" title="Only one source found this intro, and it doesn't know which cut you have.">Review</button>
+                  <button class="btn btn-sm btn-outline-secondary py-0" type="button">Edit</button>
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td class="mk-season-time">E06</td>
+              <td class="mk-season-time"><span class="text-muted">&mdash;</span></td>
+              <td class="mk-season-time"><span class="text-muted">&mdash;</span></td>
+              <td></td>
+              <td><div class="mk-dots"><span class="mk-dot"></span><span class="mk-dot"></span><span class="mk-dot"></span></div></td>
+              <td class="mk-season-action"><button class="btn btn-sm btn-outline-secondary py-0" type="button">Edit</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="mk-season-legend text-muted small mt-1">Dots: green = server shows this marker, amber = waiting, red = failed, grey = server not enabled, skipped or nothing sent yet</div>
+  </div>
+
+  <p class="pack-q small mt-3 mb-0"><strong>Wording to settle:</strong> today a fully published row says the word
+  <em>Published</em> in this last column. With Edit living there, the mockup drops that word and lets the three green dots say it.
+  Keep <em>Published</em> next to Edit, or let the dots carry it?</p>
+</section>
+
+<!-- ===================== 10. Settings ===================== -->
+<section class="pack-sec mb-5" id="s10">
+  <div class="pack-num mb-1">Surface 10 &middot; Settings &rarr; Intro &amp; Credits</div>
+  <h2 class="h5">One tooltip stops being a lie</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">The setting itself doesn't change. Its tooltip currently ends with &ldquo;Editing and locking markers in the Inspector comes in a later update&rdquo; &mdash; which stops being true the day the editor ships. Phase 4 adds no new setting here.</p>
+
+  <div class="mock" id="shot-s10">
+    <div class="mock-cap">Before &middot; the tooltip text is quoted under each row</div>
+    <div class="markers-opt mb-3">
+      <div>
+        <label for="respectLocksBefore">Never overwrite my edits</label>
+        <button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top"
+                title="Markers you lock in the Inspector always win and are never replaced by detection. Editing and locking markers in the Inspector comes in a later update."><i class="bi bi-info-circle"></i></button>
+      </div>
+      <div class="form-check form-switch markers-switch">
+        <input class="form-check-input" type="checkbox" role="switch" id="respectLocksBefore" checked>
+      </div>
+    </div>
+    <blockquote class="small text-muted border-start border-2 ps-2 mb-3">Markers you lock in the Inspector always win and are never replaced by detection. <span class="text-danger-emphasis">Editing and locking markers in the Inspector comes in a later update.</span></blockquote>
+
+    <div class="mock-cap">After</div>
+    <div class="markers-opt">
+      <div>
+        <label for="respectLocksAfter">Never overwrite my edits</label>
+        <button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top"
+                title="Markers you adjust or lock in the Inspector always win and are never replaced by detection."><i class="bi bi-info-circle"></i></button>
+      </div>
+      <div class="form-check form-switch markers-switch">
+        <input class="form-check-input" type="checkbox" role="switch" id="respectLocksAfter" checked>
+      </div>
+    </div>
+    <blockquote class="small text-muted border-start border-2 ps-2 mb-0">Markers you <span class="text-success-emphasis">adjust or</span> lock in the Inspector always win and are never replaced by detection.</blockquote>
+  </div>
+</section>
+
+<!-- ===================== 11. Setup Health - Plex ===================== -->
+<section class="pack-sec mb-5" id="s11">
+  <div class="pack-num mb-1">Surface 11 &middot; Servers &rarr; Edit &rarr; Setup Health &middot; Plex</div>
+  <h2 class="h5">Four new rows, in the buckets that already exist</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">The rows sit under a new <em>Intro &amp; Credits</em> subheading inside the buckets the card already has, each with what it is now and what it should be. None of these four can be flipped from here, so each carries the badge the app already uses for that.</p>
+
+  <div class="mock" id="shot-s11">
+    <div class="mock-cap">All three buckets are opened here so you can read them. In the app, Recommended and All good stay folded while there is anything to fix.</div>
+    <div class="card bg-body-tertiary">
+      <div class="card-body p-3">
+        <h6 class="mb-1 d-flex align-items-center gap-2 flex-wrap">
+          <i class="bi bi-clipboard-check me-1"></i>Setup Health
+          <span class="badge bg-danger ms-1">action needed</span>
+          <button type="button" class="btn btn-sm btn-link p-0 ms-1" data-bs-toggle="tooltip" title="Re-probe the server"><i class="bi bi-arrow-clockwise"></i></button>
+          <button type="button" class="info-icon info-icon-more ms-1" data-bs-toggle="tooltip" data-bs-placement="top" title="What Setup Health checks + how the toggles work &mdash; click for details"><i class="bi bi-info-circle"></i></button>
+        </h6>
+        <div class="d-flex flex-column gap-2 mb-2 small">
+
+          <details class="readiness-bucket mb-2" open>
+            <summary class="d-flex align-items-center gap-2 py-1 px-2 rounded user-select-none" style="cursor:pointer">
+              <i class="bi bi-x-octagon-fill text-danger me-2"></i><span class="fw-semibold">Must fix</span><span class="badge bg-danger ms-1">4</span>
+            </summary>
+            <div class="readiness-bucket-body ps-2 pt-2">
+              <div class="text-muted small text-uppercase mb-1 mt-2 d-flex align-items-center gap-1" style="letter-spacing:0.5px;font-weight:600"><span>Intro &amp; Credits</span></div>
+
+              <div class="d-flex align-items-start gap-2 mb-1 small">
+                <i class="bi bi-x-circle-fill text-danger mt-1"></i>
+                <div class="flex-grow-1">Skip buttons need Plex Pass<span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle ms-1" title="This app can't toggle this for you — open Plex's admin UI and follow the instructions below.">Change in Plex UI</span><button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top" title="Plex only shows Skip Intro and Skip Credits to viewers on a server with Plex Pass."><i class="bi bi-info-circle"></i></button>
+                  <div class="text-muted mt-1">Markers are still written, but nobody sees a skip button.</div>
+                  <div class="readiness-values d-flex flex-wrap gap-2 mt-1">
+                    <div class="readiness-current px-2 py-1 rounded"><span class="readiness-label">Currently</span> <code>not active</code></div>
+                    <div class="readiness-arrow text-body-tertiary align-self-center">&rarr;</div>
+                    <div class="readiness-recommended px-2 py-1 rounded"><span class="readiness-label">Recommended</span> <code>active</code></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="d-flex align-items-start gap-2 mb-1 small">
+                <i class="bi bi-x-circle-fill text-danger mt-1"></i>
+                <div class="flex-grow-1">Plex hasn't made its marker list yet<span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle ms-1" title="This app can't toggle this for you — open Plex's admin UI and follow the instructions below.">Change in Plex UI</span><button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top" title="Plex builds this list the first time it finds a marker itself. This app never creates it."><i class="bi bi-info-circle"></i></button>
+                  <div class="text-muted mt-1">Turn on Plex's own intro detection for one library and play a file, then check again.</div>
+                  <div class="readiness-values d-flex flex-wrap gap-2 mt-1">
+                    <div class="readiness-current px-2 py-1 rounded"><span class="readiness-label">Currently</span> <code>missing</code></div>
+                    <div class="readiness-arrow text-body-tertiary align-self-center">&rarr;</div>
+                    <div class="readiness-recommended px-2 py-1 rounded"><span class="readiness-label">Recommended</span> <code>present</code></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="d-flex align-items-start gap-2 mb-1 small">
+                <i class="bi bi-x-circle-fill text-danger mt-1"></i>
+                <div class="flex-grow-1">Plex's library database isn't on this machine<span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle ms-1" title="This app can't toggle this for you — open Plex's admin UI and follow the instructions below.">Change in Plex UI</span><button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top" title="Markers go straight into Plex's database, so this app must run on the Plex machine, or reach it through the helper."><i class="bi bi-info-circle"></i></button>
+                  <div class="text-muted mt-1">Run the Plex marker helper next to Plex, or run this app on the same machine as Plex.</div>
+                  <div class="readiness-values d-flex flex-wrap gap-2 mt-1">
+                    <div class="readiness-current px-2 py-1 rounded"><span class="readiness-label">Currently</span> <code>another machine</code></div>
+                    <div class="readiness-arrow text-body-tertiary align-self-center">&rarr;</div>
+                    <div class="readiness-recommended px-2 py-1 rounded"><span class="readiness-label">Recommended</span> <code>this machine</code></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="text-muted small text-uppercase mb-1 mt-2 d-flex align-items-center gap-1" style="letter-spacing:0.5px;font-weight:600"><span>Library settings</span></div>
+              <div class="d-flex align-items-start gap-2 mb-1 small">
+                <i class="bi bi-x-circle-fill text-danger mt-1"></i>
+                <div class="flex-grow-1">Movies &mdash; Preview thumbnails<span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle ms-1">Required &mdash; fix to enable</span>
+                  <div class="readiness-values d-flex flex-wrap gap-2 mt-1">
+                    <div class="readiness-current px-2 py-1 rounded"><span class="readiness-label">Currently</span> <code>Off</code></div>
+                    <div class="readiness-arrow text-body-tertiary align-self-center">&rarr;</div>
+                    <div class="readiness-recommended px-2 py-1 rounded"><span class="readiness-label">Recommended</span> <code>On</code></div>
+                  </div>
+                  <div class="d-flex gap-1 flex-wrap mt-1">
+                    <button class="btn btn-sm btn-warning" type="button"><i class="bi bi-toggle-on me-1"></i>Apply recommended</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <details class="readiness-bucket mb-2" open>
+            <summary class="d-flex align-items-center gap-2 py-1 px-2 rounded user-select-none" style="cursor:pointer">
+              <i class="bi bi-exclamation-triangle-fill text-warning me-2"></i><span class="fw-semibold">Recommended</span><span class="badge bg-warning text-dark ms-1">1</span>
+            </summary>
+            <div class="readiness-bucket-body ps-2 pt-2">
+              <div class="text-muted small text-uppercase mb-1 mt-2 d-flex align-items-center gap-1" style="letter-spacing:0.5px;font-weight:600"><span>Intro &amp; Credits</span></div>
+              <div class="d-flex align-items-start gap-2 mb-1 small">
+                <i class="bi bi-exclamation-triangle-fill text-warning mt-1"></i>
+                <div class="flex-grow-1">Plex's own detection can replace your markers<span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1" title="This app can't toggle this for you — open Plex's admin UI and follow the instructions below.">Change in Plex UI</span><button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top" title="When Plex finds markers itself it overwrites ours. The next Intro &amp; Credits run puts them back."><i class="bi bi-info-circle"></i></button>
+                  <div class="text-muted mt-1">Plex settings &rarr; Library &rarr; Generate intro and credits video markers.</div>
+                  <div class="readiness-values d-flex flex-wrap gap-2 mt-1">
+                    <div class="readiness-current px-2 py-1 rounded"><span class="readiness-label">Currently</span> <code>On</code></div>
+                    <div class="readiness-arrow text-body-tertiary align-self-center">&rarr;</div>
+                    <div class="readiness-recommended px-2 py-1 rounded"><span class="readiness-label">Recommended</span> <code>Off</code></div>
+                  </div><button type="button" class="btn btn-sm btn-link p-0 text-decoration-none ms-2 text-muted" style="font-size:0.85em" data-bs-toggle="tooltip" data-bs-placement="top" title="Hide this recommendation from the Recommended bucket. Reversible from the All good section."><i class="bi bi-x-circle me-1"></i>Dismiss</button>
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <details class="readiness-bucket mb-2" open>
+            <summary class="d-flex align-items-center gap-2 py-1 px-2 rounded user-select-none" style="cursor:pointer">
+              <i class="bi bi-check-circle-fill text-success me-2"></i><span class="fw-semibold">All good</span><span class="badge bg-success ms-1">5</span>
+            </summary>
+            <div class="readiness-bucket-body ps-2 pt-2">
+              <div class="text-muted small text-uppercase mb-1 mt-2 d-flex align-items-center gap-1" style="letter-spacing:0.5px;font-weight:600"><span>Connection</span></div>
+              <div class="d-flex align-items-start gap-2 mb-1 small">
+                <i class="bi bi-check-circle-fill text-success mt-1"></i>
+                <div class="flex-grow-1">Server reachable<span class="badge bg-success-subtle text-success-emphasis border border-success-subtle ms-1">Required</span>
+                  <div class="readiness-currently text-muted mt-1"><i class="bi bi-check2 me-1"></i>Currently <code>reachable</code></div>
+                </div>
+              </div>
+            </div>
+          </details>
+
+        </div>
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <button type="button" class="btn btn-sm btn-danger"><i class="bi bi-shield-exclamation me-1"></i>Fix critical</button>
+          <button type="button" class="btn btn-sm btn-warning"><i class="bi bi-magic me-1"></i>Fix all</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="mock mt-3" id="shot-s11b">
+    <div class="mock-cap">The same tab on a server that isn't sending markers &middot; one row, in All good, and nothing else</div>
+    <details class="readiness-bucket mb-0" open>
+      <summary class="d-flex align-items-center gap-2 py-1 px-2 rounded user-select-none" style="cursor:pointer">
+        <i class="bi bi-check-circle-fill text-success me-2"></i><span class="fw-semibold">All good</span><span class="badge bg-success ms-1">7</span>
+      </summary>
+      <div class="readiness-bucket-body ps-2 pt-2">
+              <div class="text-muted small text-uppercase mb-1 mt-2 d-flex align-items-center gap-1" style="letter-spacing:0.5px;font-weight:600"><span>Intro &amp; Credits</span></div>
+              <div class="d-flex align-items-start gap-2 mb-1 small">
+                <i class="bi bi-check-circle-fill text-success mt-1"></i>
+                <div class="flex-grow-1">Intro &amp; Credits is off for this server<span class="badge bg-secondary-subtle text-secondary-emphasis border border-secondary-subtle ms-1" title="Recommended optimisation — currently applied.">Recommended</span><button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top" title="Turn it on in the Intro &amp; Credits tab to send intro and credits markers to this server."><i class="bi bi-info-circle"></i></button>
+                  <div class="text-muted mt-1">Nothing here is checked until you switch it on.</div><button type="button" class="btn btn-sm btn-link p-0 text-decoration-none ms-2 text-muted" style="font-size:0.85em" data-bs-toggle="tooltip" data-bs-placement="top" title="Hide this recommendation from the Recommended bucket. Reversible from the All good section."><i class="bi bi-x-circle me-1"></i>Dismiss</button>
+                </div>
+              </div>
+      </div>
+    </details>
+  </div>
+
+  <p class="pack-q small mt-3 mb-0"><strong>Wording that doesn't fit, and needs your call.</strong>
+  The badge on a row with no button is the one the app already ships: <em>Change in Plex UI</em>. It is right for
+  Plex Pass, for the marker list and for Plex's own detection. It is wrong for
+  <em>&ldquo;Plex's library database isn't on this machine&rdquo;</em> &mdash; you fix that by moving this app or running the
+  helper, not by changing anything in Plex. Options: leave it (one row reads slightly off), or give that row a
+  <em>Set up helper</em> button once the helper exists (surface 13), which replaces the badge.</p>
+</section>
+
+<!-- ===================== 12. Setup Health - Jellyfin and Emby ===================== -->
+<section class="pack-sec mb-5" id="s12">
+  <div class="pack-num mb-1">Surface 12 &middot; Setup Health &middot; Jellyfin and Emby</div>
+  <h2 class="h5">Plugin missing, plugin too old</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">Jellyfin already has a plugin row; with Intro &amp; Credits on it becomes a must-fix instead of a suggestion. &ldquo;Too old&rdquo; is new on both. Emby gains both rows, plus the case where Emby's own catalogue doesn't list the plugin and there is nothing to click.</p>
+
+  <div class="mock" id="shot-s12">
+    <div class="mock-cap">Jellyfin</div>
+    <details class="readiness-bucket mb-3" open>
+      <summary class="d-flex align-items-center gap-2 py-1 px-2 rounded user-select-none" style="cursor:pointer">
+        <i class="bi bi-x-octagon-fill text-danger me-2"></i><span class="fw-semibold">Must fix</span><span class="badge bg-danger ms-1">1</span>
+      </summary>
+      <div class="readiness-bucket-body ps-2 pt-2">
+        <div class="text-muted small text-uppercase mb-1 mt-2 d-flex align-items-center gap-1" style="letter-spacing:0.5px;font-weight:600"><span>Plugin</span></div>
+        <div class="d-flex align-items-start gap-2 mb-1 small">
+          <i class="bi bi-x-circle-fill text-danger mt-1"></i>
+          <div class="flex-grow-1">Media Preview Bridge plugin<span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle ms-1">Required &mdash; fix to enable</span><button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top" title="Jellyfin takes intro and credits markers only through this plugin. Installing it restarts Jellyfin."><i class="bi bi-info-circle"></i></button>
+            <div class="text-muted mt-1">Without it, nothing can send markers to this server.</div>
+            <div class="readiness-values d-flex flex-wrap gap-2 mt-1">
+              <div class="readiness-current px-2 py-1 rounded"><span class="readiness-label">Currently</span> <code>not installed</code></div>
+              <div class="readiness-arrow text-body-tertiary align-self-center">&rarr;</div>
+              <div class="readiness-recommended px-2 py-1 rounded"><span class="readiness-label">Recommended</span> <code>installed</code></div>
+            </div>
+            <div class="d-flex gap-1 flex-wrap mt-1"><button class="btn btn-sm btn-warning" type="button"><i class="bi bi-toggle-on me-1"></i>Apply recommended</button></div>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details class="readiness-bucket mb-3" open>
+      <summary class="d-flex align-items-center gap-2 py-1 px-2 rounded user-select-none" style="cursor:pointer">
+        <i class="bi bi-exclamation-triangle-fill text-warning me-2"></i><span class="fw-semibold">Recommended</span><span class="badge bg-warning text-dark ms-1">1</span>
+      </summary>
+      <div class="readiness-bucket-body ps-2 pt-2">
+        <div class="text-muted small text-uppercase mb-1 mt-2 d-flex align-items-center gap-1" style="letter-spacing:0.5px;font-weight:600"><span>Plugin</span></div>
+        <div class="d-flex align-items-start gap-2 mb-1 small">
+          <i class="bi bi-exclamation-triangle-fill text-warning mt-1"></i>
+          <div class="flex-grow-1">The plugin is too old for intro and credits markers<span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1">Recommended</span><button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top" title="This version of the plugin can't take intro and credits markers. Updating installs the newest version."><i class="bi bi-info-circle"></i></button>
+            <div class="text-muted mt-1">Previews still work. Markers wait until it's updated.</div>
+            <div class="readiness-values d-flex flex-wrap gap-2 mt-1">
+              <div class="readiness-current px-2 py-1 rounded"><span class="readiness-label">Currently</span> <code>1.2.0</code></div>
+              <div class="readiness-arrow text-body-tertiary align-self-center">&rarr;</div>
+              <div class="readiness-recommended px-2 py-1 rounded"><span class="readiness-label">Recommended</span> <code>1.4.0</code></div>
+            </div>
+            <div class="d-flex gap-1 flex-wrap mt-1"><button class="btn btn-sm btn-warning" type="button"><i class="bi bi-toggle-on me-1"></i>Apply recommended</button></div><button type="button" class="btn btn-sm btn-link p-0 text-decoration-none ms-2 text-muted" style="font-size:0.85em" data-bs-toggle="tooltip" data-bs-placement="top" title="Hide this recommendation from the Recommended bucket. Reversible from the All good section."><i class="bi bi-x-circle me-1"></i>Dismiss</button>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <div class="mock-cap">Emby &middot; the plugin isn't in this server's catalogue, so there is no button</div>
+    <details class="readiness-bucket mb-0" open>
+      <summary class="d-flex align-items-center gap-2 py-1 px-2 rounded user-select-none" style="cursor:pointer">
+        <i class="bi bi-x-octagon-fill text-danger me-2"></i><span class="fw-semibold">Must fix</span><span class="badge bg-danger ms-1">1</span>
+      </summary>
+      <div class="readiness-bucket-body ps-2 pt-2">
+        <div class="text-muted small text-uppercase mb-1 mt-2 d-flex align-items-center gap-1" style="letter-spacing:0.5px;font-weight:600"><span>Plugin</span></div>
+        <div class="d-flex align-items-start gap-2 mb-1 small">
+          <i class="bi bi-x-circle-fill text-danger mt-1"></i>
+          <div class="flex-grow-1">Media Preview Bridge for Emby plugin<span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle ms-1" title="This app can't toggle this for you — open Emby's admin UI and follow the instructions below.">Change in Emby UI</span><button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top" title="Emby takes intro and credits markers only through this plugin."><i class="bi bi-info-circle"></i></button>
+            <div class="text-muted mt-1">This Emby's plugin catalogue doesn't list it. Install it by hand &mdash; the guide is in the Intro &amp; Credits tab.</div>
+            <div class="readiness-values d-flex flex-wrap gap-2 mt-1">
+              <div class="readiness-current px-2 py-1 rounded"><span class="readiness-label">Currently</span> <code>not installed</code></div>
+              <div class="readiness-arrow text-body-tertiary align-self-center">&rarr;</div>
+              <div class="readiness-recommended px-2 py-1 rounded"><span class="readiness-label">Recommended</span> <code>installed</code></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </details>
+  </div>
+</section>
+
+<!-- ===================== 13. Plex marker helper ===================== -->
+<section class="pack-sec mb-5" id="s13">
+  <div class="pack-num mb-1">Surface 13 &middot; Servers &rarr; Edit &rarr; Intro &amp; Credits &middot; Plex</div>
+  <h2 class="h5">The Plex marker helper block</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">Markers go straight into Plex's own database, which only works from the machine Plex runs on. The helper is a small container you run next to Plex so this app can do it from anywhere. Four states.</p>
+
+  <div class="mock" id="shot-s13">
+    <div class="mock-cap">a &middot; This app is already on the Plex machine &mdash; no helper needed</div>
+    <div class="markers-kv small mb-4">
+      <div class="markers-kv-label">How markers get here</div>
+      <div>Written into this Plex server's database<button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top" title="Plex has no API or plugins for this. Only on the same machine as Plex."><i class="bi bi-info-circle"></i></button></div>
+      <div class="markers-kv-label">Plex Pass</div>
+      <div><span class="badge bg-success-subtle text-success-emphasis border border-success-subtle">&#10003; Active</span></div>
+      <div class="markers-kv-label">Database location</div>
+      <div><span class="font-monospace text-break me-1">/plexconfig/Library/Application Support/Plex Media Server/Plug-in Support/Databases</span><span class="badge bg-success-subtle text-success-emphasis border border-success-subtle">&#10003; local disk</span><button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top" title="The folder of Plex's library database, as this app sees it. It has to be on a local disk of the machine Plex runs on."><i class="bi bi-info-circle"></i></button></div>
+    </div>
+
+    <div class="mock-cap">b &middot; Plex is on another machine and no helper is set up</div>
+    <div class="markers-kv small">
+      <div class="markers-kv-label">How markers get here</div>
+      <div>Written into this Plex server's database<button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top" title="Plex has no API or plugins for this. Only on the same machine as Plex, or through the helper."><i class="bi bi-info-circle"></i></button></div>
+      <div class="markers-kv-label">Plex marker helper</div>
+      <div><span class="badge bg-secondary-subtle text-secondary-emphasis border border-secondary-subtle">Not set up</span>
+        <button class="btn btn-sm btn-primary ms-2 py-0" type="button">Set up helper</button>
+        <button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top" title="A small container you run next to Plex. It is the only supported way to write markers to a Plex on another machine."><i class="bi bi-info-circle"></i></button>
+      </div>
+    </div>
+    <div class="alert alert-warning small text-break py-2 mb-4 mt-3" role="status">
+      <i class="bi bi-exclamation-triangle me-1"></i>Plex is on another machine, so markers can't be written from here.
+      <div class="mt-1">Run the Plex marker helper next to Plex, or run this app on the same machine as Plex.</div>
+    </div>
+
+    <div class="mock-cap">c &middot; Helper set up and answering</div>
+    <div class="markers-kv small mb-4">
+      <div class="markers-kv-label">How markers get here</div>
+      <div>Written into this Plex server's database, through the helper next to Plex<button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top" title="The helper does the database write on the Plex machine. This app never touches the file itself."><i class="bi bi-info-circle"></i></button></div>
+      <div class="markers-kv-label">Plex marker helper</div>
+      <div><span class="badge bg-success-subtle text-success-emphasis border border-success-subtle">&#10003; Connected</span>
+        <span class="font-monospace text-break ms-2">http://plex-host.lan:9494</span>
+        <span class="text-muted ms-2">version 0.4.1</span>
+        <button class="btn btn-sm btn-outline-secondary ms-2 py-0" type="button">Check again</button>
+      </div>
+      <div class="markers-kv-label">Shared key</div>
+      <div><span class="font-monospace">&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;</span><button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top" title="The same key is set on both sides. It is never written to the logs."><i class="bi bi-info-circle"></i></button></div>
+    </div>
+
+    <div class="mock-cap">d &middot; Helper set up but not answering, or too old</div>
+    <div class="markers-kv small">
+      <div class="markers-kv-label">Plex marker helper</div>
+      <div><span class="badge bg-danger-subtle text-danger-emphasis border border-danger-subtle">Can't reach it</span>
+        <span class="font-monospace text-break ms-2">http://plex-host.lan:9494</span>
+        <button class="btn btn-sm btn-outline-secondary ms-2 py-0" type="button">Check again</button>
+      </div>
+    </div>
+    <div class="alert alert-warning small py-2 mt-3 mb-3" role="status">
+      <i class="bi bi-exclamation-triangle me-1"></i>Markers wait here until the helper answers again. Nothing is lost.
+    </div>
+    <div class="markers-kv small">
+      <div class="markers-kv-label">Plex marker helper</div>
+      <div><span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle">Update needed</span>
+        <span class="text-muted ms-2">the helper is 0.3.0, this app needs 0.4.1</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 14. Nothing found - where Add lives ===================== -->
+<section class="pack-sec mb-5" id="s14">
+  <div class="pack-num mb-1">Surface 14 &middot; Preview Inspector &rarr; Intro &amp; Credits &middot; <span class="text-warning">new</span></div>
+  <h2 class="h5">Nothing was found for a type &mdash; the offer to put one there by hand</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">Today the Decision lane just says what wasn't found, and there is nothing on screen to drag for that type; on a file where <em>nothing</em> was found, <em>Adjust</em> is greyed out entirely. The offer to add one lives inside the editor, on a row directly under the Decision lane (inside the lane, a bar that reaches the left edge puts its grab handle over the button and takes the click). <strong>Adjust is the only way in</strong> &mdash; it now opens whenever the file has been checked and its length is known, even if nothing was found at all.</p>
+
+  <div class="mock" id="shot-s14">
+    <div class="mock-cap">Before &middot; Northern Lights &middot; S02E09 &middot; the intro was found, the credits weren't</div>
+    <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+      <div class="small text-muted text-break">/media/tv/Northern Lights/Season 02/Northern Lights - S02E09 - Slack Water.mkv</div>
+      <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
+                title="Drag the intro or credits to where they really are, or add one that wasn't found. Your times are kept from then on."><i class="bi bi-pencil me-1"></i>Adjust</button>
+        <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
+                title="Keep these times exactly as they are. Later checks won't change them."><i class="bi bi-lock me-1"></i>Lock</button>
+        <button class="btn btn-sm btn-outline-secondary" type="button"><i class="bi bi-arrow-repeat me-1"></i>Re-detect</button>
+      </div>
+    </div>
+    <div class="mk-chips mb-3">
+      <span class="badge text-bg-success">Intro 0:11&ndash;0:37</span>
+      <span class="badge text-bg-secondary">Credits: No markers found</span>
+      <span class="badge text-bg-secondary">Recap: No markers found</span>
+      <span class="badge text-bg-secondary opacity-75">Preview: Detection off</span>
+    </div>
+    <div class="card mk-window" data-window="ending">
+      <div class="card-header py-2 d-flex align-items-center">
+        <span class="mk-window-title">Ending &middot; 40:00 &ndash; 43:00 (end of file)</span>
+        <button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top"
+                title="Zoomed to the start or end of the file, so a difference of a second is visible."><i class="bi bi-info-circle"></i></button>
+      </div>
+      <div class="card-body mk-scroll">
+        <div class="mk-zoom">
+          <div class="mk-axis"><span style="left:0%">40:00</span><span style="left:33.333%">41:00</span><span style="left:66.667%">42:00</span><span style="left:100%">43:00</span></div>
+          <div class="mk-lane mk-lane-decision" data-lane="Decision">
+            <div class="mk-lane-label"><span class="text-truncate">Decision</span></div>
+            <div class="mk-track"><span class="mk-lane-note">Credits: no markers found</span></div>
+          </div>
+          <div class="mk-lane" data-lane="Credit text">
+            <div class="mk-lane-label"><span class="text-truncate">Credit text</span></div>
+            <div class="mk-track"><span class="mk-lane-note">Nothing found</span></div>
+          </div>
+          <div class="mk-lane" data-lane="Plex - Main now">
+            <div class="mk-lane-label"><span class="text-truncate">Plex &middot; Main now</span></div>
+            <div class="mk-track"><span class="mk-lane-note">none yet</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mock-cap mt-4">After &middot; the same window with the editor open</div>
+    <div class="alert alert-warning py-2 small d-flex align-items-center gap-2 mb-3">
+      <i class="bi bi-pencil"></i><div>Adjusting this episode. Nothing changes on your servers until you save.</div>
+    </div>
+    <div class="card mk-window" data-window="ending">
+      <div class="card-header py-2 d-flex align-items-center">
+        <span class="mk-window-title">Ending &middot; 40:00 &ndash; 43:00 (end of file)</span>
+        <button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top"
+                title="Zoomed to the start or end of the file, so a difference of a second is visible."><i class="bi bi-info-circle"></i></button>
+      </div>
+      <div class="card-body mk-scroll">
+        <div class="mk-zoom">
+          <div class="mk-axis"><span style="left:0%">40:00</span><span style="left:33.333%">41:00</span><span style="left:66.667%">42:00</span><span style="left:100%">43:00</span></div>
+          <div class="mk-lane mk-lane-decision" data-lane="Decision">
+            <div class="mk-lane-label"><span class="text-truncate">Decision</span></div>
+            <div class="mk-track"></div>
+          </div>
+          <div class="mk-adds">
+            <button class="mk-add" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
+                    title="Puts a marker on the timeline at a starting time. Drag it to where it really is, then save."><i class="bi bi-plus-lg me-1"></i>Add credits</button>
+            <button class="mk-add" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
+                    title="Puts a marker on the timeline at a starting time. Drag it to where it really is, then save."><i class="bi bi-plus-lg me-1"></i>Add preview</button>
+          </div>
+          <div class="mk-lane" data-lane="Credit text">
+            <div class="mk-lane-label"><span class="text-truncate">Credit text</span></div>
+            <div class="mk-track"><span class="mk-lane-note">Nothing found</span></div>
+          </div>
+          <div class="mk-lane" data-lane="Plex - Main now">
+            <div class="mk-lane-label"><span class="text-truncate">Plex &middot; Main now</span></div>
+            <div class="mk-track"><span class="mk-lane-note">none yet</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mock-cap mt-4">The action bar until something is added &middot; Save stays disabled</div>
+    <div class="mk-edit-actions">
+      <span class="small text-muted">Adjusting</span>
+      <span class="small text-muted">Nothing to save yet</span>
+      <span class="flex-grow-1"></span>
+      <span class="small text-muted">Saving keeps your times &mdash; later checks won't change them.</span>
+      <button class="btn btn-sm btn-outline-secondary" type="button">Cancel</button>
+      <button class="btn btn-sm btn-primary" type="button" disabled>Save</button>
+    </div>
+
+  </div>
+
+  <p class="pack-note small mt-3 mb-0"><strong>Settled 2026-09-21: one way in.</strong>
+  <em>Adjust</em> is the only route, and the Add buttons appear once the editor is open &mdash; one entry point, one
+  label, and the same route whether you are fixing a marker or making one. The alternative drawn here at checkpoint
+  time, a second <em>Add credits</em> in the read-only lane, was dropped.</p>
+</section>
+
+<!-- ===================== 15. The just-added marker ===================== -->
+<section class="pack-sec mb-5" id="s15">
+  <div class="pack-num mb-1">Surface 15 &middot; the editor, after Add &middot; <span class="text-warning">new</span></div>
+  <h2 class="h5">What you get the moment you press Add</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">A bar you can drag, a strip you can type into, and a line that says in words that these times are a starting point &mdash; not something the app found. The starting times are deliberately round so they can never be mistaken for a detection: an intro is the <strong>first 30 seconds</strong>, a recap the <strong>first 30 seconds</strong>, credits the <strong>last minute running to the end of the file</strong>, a preview the <strong>last 30 seconds running to the end</strong>.</p>
+
+  <div class="mock" id="shot-s15">
+    <div class="mock-cap">Add intro &middot; opening window &middot; nothing has been saved yet</div>
+    <div class="card mk-window" data-window="opening">
+      <div class="card-header py-2 d-flex align-items-center">
+        <span class="mk-window-title">Opening &middot; 0:00 &ndash; 3:00</span>
+        <button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top"
+                title="Zoomed to the start or end of the file, so a difference of a second is visible."><i class="bi bi-info-circle"></i></button>
+      </div>
+      <div class="card-body mk-scroll">
+        <div class="mk-zoom">
+          <div class="mk-axis"><span style="left:0%">0:00</span><span style="left:33.333%">1:00</span><span style="left:66.667%">2:00</span><span style="left:100%">3:00</span></div>
+          <div class="mk-lane mk-lane-decision" data-lane="Decision">
+            <div class="mk-lane-label"><span class="text-truncate">Decision</span></div>
+            <div class="mk-track">
+              <span class="mk-bar mk-bar-result mk-bar-editing" style="left:0%;width:16.667%">
+                <button class="mk-handle mk-handle-start" type="button" aria-label="Intro start, 0 minutes 0 seconds"></button>
+                <span class="mk-bar-text">Intro 0:00&ndash;0:30</span>
+                <button class="mk-handle mk-handle-end" type="button" aria-label="Intro end, 0 minutes 30 seconds"></button>
+              </span>
+            </div>
+          </div>
+          <div class="mk-adds">
+            <button class="mk-add" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
+                    title="Puts a marker on the timeline at a starting time. Drag it to where it really is, then save."><i class="bi bi-plus-lg me-1"></i>Add recap</button>
+          </div>
+          <div class="mk-edit-strip">
+            <span class="mk-edit-type">Intro</span>
+            <label class="d-flex align-items-center gap-1 small text-muted mb-0">Start <input class="mk-time" value="0:00" aria-label="Intro start"></label>
+            <label class="d-flex align-items-center gap-1 small text-muted mb-0">End <input class="mk-time" value="0:30" aria-label="Intro end"></label>
+            <span class="small text-muted">30 seconds long</span>
+            <span class="mk-edit-hint">Arrow keys move it 1 second &middot; hold <kbd>Shift</kbd> for 10 seconds</span>
+            <button type="button" class="info-icon" data-bs-toggle="tooltip" data-bs-placement="top"
+                    title="Tab to a handle, then use the arrow keys. You can also type a time straight into the boxes."><i class="bi bi-info-circle"></i></button>
+            <button type="button" class="btn btn-link mk-edit-remove text-danger-emphasis">Remove</button>
+            <button type="button" class="info-icon" data-bs-toggle="tooltip" data-bs-placement="top"
+                    title="Take this one back out. Nothing has been saved yet."><i class="bi bi-info-circle"></i></button>
+            <div class="mk-edit-messages">
+              <div class="mk-edit-warn text-muted"><i class="bi bi-info-circle me-1"></i>Starting times, not something we found &mdash; drag them to where they really are.</div>
+            </div>
+          </div>
+          <div class="mk-lane" data-lane="Chapters">
+            <div class="mk-lane-label"><span class="text-truncate">Chapters</span></div>
+            <div class="mk-track"><span class="mk-lane-note">Nothing found</span></div>
+          </div>
+          <div class="mk-lane" data-lane="IntroDB">
+            <div class="mk-lane-label"><span class="text-truncate">IntroDB</span></div>
+            <div class="mk-track"><span class="mk-lane-note">Nothing found</span></div>
+          </div>
+          <div class="mk-lane" data-lane="Plex - Main now">
+            <div class="mk-lane-label"><span class="text-truncate">Plex &middot; Main now</span></div>
+            <div class="mk-track"><span class="mk-lane-note">none yet</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mock-cap mt-4">Add credits &middot; ending window &middot; the last minute, running to the end of the file</div>
+    <div class="card mk-window" data-window="ending">
+      <div class="card-header py-2 d-flex align-items-center">
+        <span class="mk-window-title">Ending &middot; 40:00 &ndash; 43:00 (end of file)</span>
+      </div>
+      <div class="card-body mk-scroll">
+        <div class="mk-zoom">
+          <div class="mk-axis"><span style="left:0%">40:00</span><span style="left:33.333%">41:00</span><span style="left:66.667%">42:00</span><span style="left:100%">43:00</span></div>
+          <div class="mk-lane mk-lane-decision" data-lane="Decision">
+            <div class="mk-lane-label"><span class="text-truncate">Decision</span></div>
+            <div class="mk-track">
+              <span class="mk-bar mk-bar-result mk-bar-editing" style="left:66.667%;width:33.333%">
+                <button class="mk-handle mk-handle-start" type="button" aria-label="Credits start, 42 minutes 0 seconds"></button>
+                <span class="mk-bar-text">Credits 42:00 &rarr;</span>
+                <button class="mk-handle mk-handle-end" type="button" aria-label="Credits end, 43 minutes 0 seconds"></button>
+              </span>
+            </div>
+          </div>
+          <div class="mk-edit-strip">
+            <span class="mk-edit-type">Credits</span>
+            <label class="d-flex align-items-center gap-1 small text-muted mb-0">Start <input class="mk-time" value="42:00" aria-label="Credits start"></label>
+            <label class="d-flex align-items-center gap-1 small text-muted mb-0">End <input class="mk-time" value="43:00" aria-label="Credits end" disabled></label>
+            <span class="small text-muted">60 seconds long</span>
+            <div class="form-check form-switch mb-0 d-flex align-items-center gap-2">
+              <input class="form-check-input mt-0" type="checkbox" role="switch" id="mkRunsToEndAdd" checked>
+              <label class="form-check-label small text-muted" for="mkRunsToEndAdd">Runs to the end of the file</label>
+            </div>
+            <button type="button" class="info-icon" data-bs-toggle="tooltip" data-bs-placement="top"
+                    title="Turn this off when something plays after the credits &mdash; a last scene, or a preview of the next episode."><i class="bi bi-info-circle"></i></button>
+            <button type="button" class="btn btn-link mk-edit-remove text-danger-emphasis">Remove</button>
+            <div class="mk-edit-messages">
+              <div class="mk-edit-warn text-muted"><i class="bi bi-info-circle me-1"></i>Starting times, not something we found &mdash; drag them to where they really are.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mock-cap mt-4">Both added &middot; the action bar reads exactly as it does for an adjusted marker</div>
+    <div class="mk-edit-actions">
+      <span class="small text-muted">Adjusting</span>
+      <span class="mk-edit-pending">Intro 0:00&ndash;0:30 &middot; Credits 42:00 &rarr;</span>
+      <span class="flex-grow-1"></span>
+      <span class="small text-muted">Saving keeps your times &mdash; later checks won't change them.</span>
+      <button class="btn btn-sm btn-outline-secondary" type="button">Cancel</button>
+      <button class="btn btn-sm btn-primary" type="button">Save and publish to 3 servers</button>
+    </div>
+
+    <div class="mock-cap mt-4">After the first drag &middot; the starting-times line has done its job and goes</div>
+    <div class="mk-edit-strip" style="margin-left:0">
+      <span class="mk-edit-type">Intro</span>
+      <label class="d-flex align-items-center gap-1 small text-muted mb-0">Start <input class="mk-time" value="0:47" aria-label="Intro start"></label>
+      <label class="d-flex align-items-center gap-1 small text-muted mb-0">End <input class="mk-time" value="1:19" aria-label="Intro end"></label>
+      <span class="small text-muted">32 seconds long</span>
+      <button type="button" class="btn btn-link mk-edit-remove text-danger-emphasis">Remove</button>
+    </div>
+  </div>
+
+  <p class="pack-note small mt-3 mb-0"><strong>Why these starting times.</strong> They have to be somewhere near the
+  truth so the drag is short, and obviously <em>chosen</em> so nobody reads them as an answer. A whole 30 seconds from
+  0:00, or a whole minute ending exactly at the end of the file, is a shape the audio and text detectors practically
+  never produce &mdash; every real answer they have written has odd seconds in it. (A file whose <em>chapter</em>
+  marks happen to be round is the one way the same shape can turn up honestly.) On a file of ordinary episode or film
+  length these sit inside the usual bounds, so the editor opens with no warning already showing. Nothing is guessed
+  from the season, the neighbours or the sources. The credits and preview starts are clamped at 0:00, so a file
+  shorter than the seed itself still gets a legal marker &mdash; under four minutes for credits, under two for a
+  preview, the editor then shows its ordinary
+  &ldquo;That's earlier than credits usually start. This will still be saved.&rdquo; warning, which is true either
+  way.</p>
+</section>
+
+<!-- ===================== 16. A movie ===================== -->
+<section class="pack-sec mb-5" id="s16">
+  <div class="pack-num mb-1">Surface 16 &middot; the editor on a movie &middot; <span class="text-warning">new</span></div>
+  <h2 class="h5">A movie has one window, so it has one place to add</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">A movie has no opening window &mdash; intros and recaps are never looked for in one &mdash; so <em>Add intro</em> and <em>Add recap</em> appear nowhere. The ending window works exactly as an episode's.</p>
+
+  <div class="mock" id="shot-s16">
+    <div class="mock-cap">The Lighthouse Keeper (2021) &middot; 1:52:30 &middot; nothing found</div>
+    <div class="alert alert-warning py-2 small d-flex align-items-center gap-2 mb-3">
+      <i class="bi bi-pencil"></i><div>Adjusting this movie. Nothing changes on your servers until you save.</div>
+    </div>
+    <div class="mk-chips mb-3">
+      <span class="badge text-bg-secondary opacity-75">Intro: not used for movies</span>
+      <span class="badge text-bg-secondary">Credits: No markers found</span>
+      <span class="badge text-bg-secondary opacity-75">Recap: not used for movies</span>
+      <span class="badge text-bg-secondary opacity-75">Preview: Detection off</span>
+    </div>
+    <div class="card mk-window" data-window="ending">
+      <div class="card-header py-2 d-flex align-items-center">
+        <span class="mk-window-title">Ending &middot; 1:49:30 &ndash; 1:52:30 (end of file)</span>
+        <button type="button" class="info-icon ms-1" data-bs-toggle="tooltip" data-bs-placement="top"
+                title="Zoomed to the start or end of the file, so a difference of a second is visible."><i class="bi bi-info-circle"></i></button>
+      </div>
+      <div class="card-body mk-scroll">
+        <div class="mk-zoom">
+          <div class="mk-axis"><span style="left:0%">1:49:30</span><span style="left:33.333%">1:50:30</span><span style="left:66.667%">1:51:30</span><span style="left:100%">1:52:30</span></div>
+          <div class="mk-lane mk-lane-decision" data-lane="Decision">
+            <div class="mk-lane-label"><span class="text-truncate">Decision</span></div>
+            <div class="mk-track">
+              <span class="mk-bar mk-bar-result mk-bar-editing" style="left:66.667%;width:33.333%">
+                <button class="mk-handle mk-handle-start" type="button" aria-label="Credits start, 1 hour 51 minutes 30 seconds"></button>
+                <span class="mk-bar-text">Credits 1:51:30 &rarr;</span>
+                <button class="mk-handle mk-handle-end" type="button" aria-label="Credits end, 1 hour 52 minutes 30 seconds"></button>
+              </span>
+            </div>
+          </div>
+          <div class="mk-adds">
+            <button class="mk-add" type="button" data-bs-toggle="tooltip" data-bs-placement="top"
+                    title="Puts a marker on the timeline at a starting time. Drag it to where it really is, then save."><i class="bi bi-plus-lg me-1"></i>Add preview</button>
+          </div>
+          <div class="mk-edit-strip">
+            <span class="mk-edit-type">Credits</span>
+            <label class="d-flex align-items-center gap-1 small text-muted mb-0">Start <input class="mk-time" value="1:51:30" aria-label="Credits start"></label>
+            <label class="d-flex align-items-center gap-1 small text-muted mb-0">End <input class="mk-time" value="1:52:30" aria-label="Credits end" disabled></label>
+            <span class="small text-muted">60 seconds long</span>
+            <div class="form-check form-switch mb-0 d-flex align-items-center gap-2">
+              <input class="form-check-input mt-0" type="checkbox" role="switch" id="mkRunsToEndMovie" checked>
+              <label class="form-check-label small text-muted" for="mkRunsToEndMovie">Runs to the end of the file</label>
+            </div>
+            <button type="button" class="btn btn-link mk-edit-remove text-danger-emphasis">Remove</button>
+            <div class="mk-edit-messages">
+              <div class="mk-edit-warn text-muted"><i class="bi bi-info-circle me-1"></i>Starting times, not something we found &mdash; drag them to where they really are.</div>
+            </div>
+          </div>
+          <div class="mk-lane" data-lane="Credit text">
+            <div class="mk-lane-label"><span class="text-truncate">Credit text</span></div>
+            <div class="mk-track"><span class="mk-lane-note">Nothing found</span></div>
+          </div>
+          <div class="mk-lane" data-lane="Plex - Main now">
+            <div class="mk-lane-label"><span class="text-truncate">Plex &middot; Main now</span></div>
+            <div class="mk-track"><span class="mk-lane-note">none yet</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="mk-edit-actions mt-3">
+      <span class="small text-muted">Adjusting</span>
+      <span class="mk-edit-pending">Credits 1:51:30 &rarr;</span>
+      <span class="flex-grow-1"></span>
+      <span class="small text-muted">Saving keeps your times &mdash; later checks won't change them.</span>
+      <button class="btn btn-sm btn-outline-secondary" type="button">Cancel</button>
+      <button class="btn btn-sm btn-primary" type="button">Save and publish to 2 servers</button>
+    </div>
+  </div>
+
+  <p class="pack-note small mt-3 mb-0"><strong>Settled 2026-09-21: keep it.</strong> A movie's ending window covers
+  credits <em>and</em> preview, so <em>Add preview</em> is offered on a movie too, consistent with the window's other
+  type. Almost no movie has one, but it costs nothing and someone's cut may need it.</p>
+</section>
+
+<!-- ===================== 17. A type no server can show ===================== -->
+<section class="pack-sec mb-5" id="s17">
+  <div class="pack-num mb-1">Surface 17 &middot; a type none of your servers can show &middot; <span class="text-warning">new</span></div>
+  <h2 class="h5">The offer is still there, greyed, and it says why</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">This user runs Plex and Emby. Neither has a recap marker, so there is nowhere for a recap to go. The button stays on screen rather than quietly vanishing, and the sentence under the window is the one the editor already shows for a recap that was found &mdash; one word apart: <em>added</em> instead of <em>adjusted</em>.</p>
+
+  <div class="mock" id="shot-s17">
+    <div class="mock-cap">Northern Lights &middot; S02E07 &middot; Plex &middot; Main and Emby &middot; Lab, no Jellyfin</div>
+    <div class="card mk-window" data-window="opening">
+      <div class="card-header py-2 d-flex align-items-center">
+        <span class="mk-window-title">Opening &middot; 0:00 &ndash; 3:00</span>
+      </div>
+      <div class="card-body mk-scroll">
+        <div class="mk-zoom">
+          <div class="mk-axis"><span style="left:0%">0:00</span><span style="left:33.333%">1:00</span><span style="left:66.667%">2:00</span><span style="left:100%">3:00</span></div>
+          <div class="mk-lane mk-lane-decision" data-lane="Decision">
+            <div class="mk-lane-label"><span class="text-truncate">Decision</span></div>
+            <div class="mk-track">
+              <span class="mk-bar mk-bar-result mk-bar-editing" style="left:6.111%;width:14.444%">
+                <button class="mk-handle mk-handle-start" type="button" aria-label="Intro start, 0 minutes 11 seconds"></button>
+                <span class="mk-bar-text">Intro 0:11&ndash;0:37</span>
+                <button class="mk-handle mk-handle-end" type="button" aria-label="Intro end, 0 minutes 37 seconds"></button>
+              </span>
+            </div>
+          </div>
+          <div class="mk-adds">
+            <button class="mk-add" type="button" disabled data-bs-toggle="tooltip" data-bs-placement="top"
+                    title="Recaps can't be added here: neither Plex nor Emby has a recap marker, and no other server has this file."><i class="bi bi-plus-lg me-1"></i>Add recap</button>
+          </div>
+          <div class="mk-edit-strip">
+            <span class="mk-edit-type">Intro</span>
+            <label class="d-flex align-items-center gap-1 small text-muted mb-0">Start <input class="mk-time" value="0:11" aria-label="Intro start"></label>
+            <label class="d-flex align-items-center gap-1 small text-muted mb-0">End <input class="mk-time" value="0:37" aria-label="Intro end"></label>
+            <span class="small text-muted">26 seconds long</span>
+            <span class="mk-edit-hint">Arrow keys move it 1 second &middot; hold <kbd>Shift</kbd> for 10 seconds</span>
+          </div>
+        </div>
+      </div>
+      <div class="mk-window-note small text-muted pb-2"><i class="bi bi-slash-circle me-1"></i>Recaps can't be added here: neither Plex nor Emby has a recap marker, and no other server has this file.</div>
+    </div>
+
+    <div class="mock-cap mt-4">For comparison &middot; a recap that <em>was</em> found, on the same two servers (shipped today, surface 3)</div>
+    <div class="mk-edit-strip opacity-75" style="margin-left:0">
+      <span class="mk-edit-type">Recap</span>
+      <label class="d-flex align-items-center gap-1 small text-muted mb-0">Start <input class="mk-time" value="0:02" aria-label="Recap start" disabled></label>
+      <label class="d-flex align-items-center gap-1 small text-muted mb-0">End <input class="mk-time" value="0:48" aria-label="Recap end" disabled></label>
+      <div class="w-100"></div>
+      <div class="mk-edit-warn text-danger-emphasis"><i class="bi bi-slash-circle me-1"></i>Recaps can't be adjusted here: neither Plex nor Emby has a recap marker, and no other server has this file.</div>
+    </div>
+
+    <div class="mock-cap mt-4">One server <em>can</em> show it &middot; add it, and the note names who misses out</div>
+    <div class="mk-edit-strip" style="margin-left:0">
+      <span class="mk-edit-type">Recap</span>
+      <label class="d-flex align-items-center gap-1 small text-muted mb-0">Start <input class="mk-time" value="0:00" aria-label="Recap start"></label>
+      <label class="d-flex align-items-center gap-1 small text-muted mb-0">End <input class="mk-time" value="0:30" aria-label="Recap end"></label>
+      <span class="small text-muted">30 seconds long</span>
+      <button type="button" class="btn btn-link mk-edit-remove text-danger-emphasis">Remove</button>
+      <div class="mk-edit-messages">
+        <div class="mk-edit-warn text-muted"><i class="bi bi-info-circle me-1"></i>Only Jellyfin shows recaps. Plex and Emby have no recap marker, so this one won't reach them.</div>
+        <div class="mk-edit-warn text-muted"><i class="bi bi-info-circle me-1"></i>Starting times, not something we found &mdash; drag them to where they really are.</div>
+      </div>
+    </div>
+  </div>
+
+  <p class="pack-note small mt-3 mb-0">Nothing new is decided here: this is question 4 of the original pack answered
+  the same way for an added marker as for an adjusted one. A type one server can show is added and sent there; a type
+  none of them can show is refused, and the refusal is the one sentence that already exists.</p>
+</section>
+
+<!-- ===================== 18. Season view ===================== -->
+<section class="pack-sec mb-5" id="s18">
+  <div class="pack-num mb-1">Surface 18 &middot; Inspector &rarr; Whole season &middot; <span class="text-warning">new</span></div>
+  <h2 class="h5">The row with nothing found now has somewhere to go</h2>
+  <p class="text-muted small mb-3" style="max-width:80ch">Nothing moves in this table. <em>Edit</em> is already on every row; on a row with no marker it used to open the episode's tab and toast &ldquo;Nothing to adjust on this episode yet&rdquo;, because there was nothing to drag. Now it opens the editor with the Add buttons waiting. The toast survives for the one row it is still true of: a file no job has looked at, which has no length and so has no timeline.</p>
+
+  <div class="mock" id="shot-s18">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+      <div>
+        <div class="mk-season-title">Northern Lights &middot; Season 2</div>
+        <div class="mk-season-sub text-muted small">10 episodes</div>
+      </div>
+      <div class="d-flex align-items-center gap-2">
+        <span class="badge text-bg-success mk-season-ready">7 ready</span>
+        <button class="btn btn-sm btn-primary" type="button">Publish 7 to 3 servers</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0 mk-season-table">
+          <thead><tr><th>Ep</th><th>Intro</th><th>Credits</th><th>Evidence</th><th class="mk-season-servers">Plex &middot; Main &middot; Jellyfin &middot; Lab &middot; Emby &middot; Lab</th><th></th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="mk-season-time">E01</td>
+              <td class="mk-season-time">0:11 &ndash; 0:37</td>
+              <td class="mk-season-time">40:48 &rarr;</td>
+              <td><span class="badge mk-chip">Chapters</span><span class="badge mk-chip">Audio 10/10</span></td>
+              <td><div class="mk-dots"><span class="mk-dot mk-dot-ok"></span><span class="mk-dot mk-dot-ok"></span><span class="mk-dot mk-dot-ok"></span></div></td>
+              <td class="mk-season-action"><button class="btn btn-sm btn-outline-secondary py-0" type="button" data-bs-toggle="tooltip" data-bs-placement="top" title="Adjust this episode's intro and credits, or add one that wasn't found.">Edit</button></td>
+            </tr>
+            <tr>
+              <td class="mk-season-time">E06</td>
+              <td class="mk-season-time"><span class="text-muted">&mdash;</span></td>
+              <td class="mk-season-time"><span class="text-muted">&mdash;</span></td>
+              <td></td>
+              <td><div class="mk-dots"><span class="mk-dot"></span><span class="mk-dot"></span><span class="mk-dot"></span></div></td>
+              <td class="mk-season-action"><button class="btn btn-sm btn-outline-secondary py-0" type="button" data-bs-toggle="tooltip" data-bs-placement="top" title="Adjust this episode's intro and credits, or add one that wasn't found.">Edit</button></td>
+            </tr>
+            <tr>
+              <td class="mk-season-time">E09</td>
+              <td class="mk-season-time">0:11 &ndash; 0:37</td>
+              <td class="mk-season-time"><span class="text-muted">&mdash;</span></td>
+              <td><span class="badge mk-chip">Chapters</span></td>
+              <td><div class="mk-dots"><span class="mk-dot mk-dot-ok"></span><span class="mk-dot mk-dot-ok"></span><span class="mk-dot mk-dot-ok"></span></div></td>
+              <td class="mk-season-action"><button class="btn btn-sm btn-outline-secondary py-0" type="button" data-bs-toggle="tooltip" data-bs-placement="top" title="Adjust this episode's intro and credits, or add one that wasn't found.">Edit</button></td>
+            </tr>
+            <tr>
+              <td class="mk-season-time">E10</td>
+              <td class="mk-season-time"><span class="text-muted">Not checked yet</span></td>
+              <td class="mk-season-time"><span class="text-muted">Not checked yet</span></td>
+              <td></td>
+              <td><div class="mk-dots"><span class="mk-dot"></span><span class="mk-dot"></span><span class="mk-dot"></span></div></td>
+              <td class="mk-season-action"><button class="btn btn-sm btn-outline-secondary py-0" type="button" data-bs-toggle="tooltip" data-bs-placement="top" title="Adjust this episode's intro and credits, or add one that wasn't found.">Edit</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="mk-season-legend text-muted small mt-1">Dots: green = server shows this marker, amber = waiting, red = failed, grey = server not enabled, skipped or nothing sent yet</div>
+
+    <div class="mock-cap mt-4">E06 &middot; Edit &rarr; the episode's tab, editor open, both Add buttons waiting (surface 14)</div>
+    <div class="mock-cap mt-4">E10 &middot; Edit &rarr; the one row that still says no</div>
+    <div class="toast show align-items-center border-0" role="alert" style="max-width:520px">
+      <div class="d-flex">
+        <div class="toast-body"><strong class="d-block">Intro &amp; Credits</strong>Nothing to adjust on this episode yet &mdash; Re-detect checks the file now.</div>
+        <button type="button" class="btn-close me-2 m-auto" aria-label="Close"></button>
+      </div>
+    </div>
+  </div>
+
+  <p class="pack-note small mt-3 mb-0">The only change to this table is the wording of the Edit tooltip, which now
+  mentions adding. Nothing in the row moves, no column is added, and the &ldquo;Not checked yet&rdquo; row keeps the
+  behaviour it has today.</p>
+</section>
+
+<section class="pack-sec mb-5" id="s-nochange">
+  <div class="pack-num mb-1">What this pack does not change</div>
+  <ul class="small text-muted" style="max-width:80ch">
+    <li>Settings &rarr; Intro &amp; Credits gains no new source and no new switch. Phase 4 adds none.</li>
+    <li>The Servers page cards, the Dashboard job rows and the evidence lanes are untouched.</li>
+    <li>Re-detect, Publish N to M servers, and the Review button all keep today's wording and behaviour.</li>
+  </ul>
+</section>
+
+</div><!-- /container -->
+
+<script src="vendor/bootstrap.bundle.min.js"></script>
+<script>
+(function () {
+    document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(function (el) { new bootstrap.Tooltip(el); });
+    var btn = document.getElementById('themeBtn');
+    btn.addEventListener('click', function () {
+        var root = document.documentElement;
+        root.setAttribute('data-bs-theme', root.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark');
+    });
+})();
+</script>
+</body>
+</html>

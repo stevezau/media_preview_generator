@@ -91,6 +91,11 @@
                             <i class="bi bi-lightning-charge me-1"></i>Webhook &amp; Scanner
                         </button>
                     </li>
+                    <li class="nav-item" id="editTabMarkersLi">
+                        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#edit-tab-markers" type="button">
+                            <i class="bi bi-skip-forward me-1"></i>Intro &amp; Credits
+                        </button>
+                    </li>
                 </ul>
 
                 <div class="tab-content">
@@ -436,15 +441,31 @@
                     <div class="tab-pane fade" id="edit-tab-libraries">
                         <div class="d-flex justify-content-between align-items-center mb-2 gap-2 flex-wrap">
                             <p class="small text-muted mb-0">
-                                <strong>Libraries to monitor</strong> — applies to every job type for this server (webhooks, scheduled scans, Recently Added).
+                                <strong>Libraries to monitor</strong> — Previews covers every preview job for this server (webhooks, scheduled scans, Recently Added).
                                 <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
-                                        title="Server-level scope. Untick a library to make this app ignore everything in it. For a one-off run against a different subset, use the New Job button on the Dashboard — that picker is per-run only."><i class="bi bi-info-circle"></i></button>
+                                        title="Server-level scope. Untick Previews to make this app make no previews for anything in that library. Intro &amp; Credits, when it's on for this server, has its own column. For a one-off run against a different subset, use the New Job button on the Dashboard — that picker is per-run only."><i class="bi bi-info-circle"></i></button>
                             </p>
                             <button type="button" class="btn btn-sm btn-outline-secondary" id="editRefreshLibrariesBtn">
                                 <i class="bi bi-arrow-clockwise me-1"></i>Refresh libraries
                             </button>
                         </div>
-                        <div id="editLibraryList" class="list-group small"></div>
+                        <!-- Previews switches come from servers.js; the Intro & Credits column (markers.library_ids)
+                             is filled and shown by markers_server_tab.js while that tab's switch is on. -->
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle small mb-0" id="editLibraryTable">
+                                <thead>
+                                    <tr>
+                                        <th scope="col">Library</th>
+                                        <th scope="col" class="text-center edit-lib-switch-col">Previews</th>
+                                        <th scope="col" class="text-center edit-lib-switch-col markers-lib-col d-none">Intro &amp; Credits
+                                            <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                                    title="Which libraries get intro and credits markers on this server, whatever their Previews switch says. Sports libraries start off: no online source covers sports and detection isn't reliable there."><i class="bi bi-info-circle"></i></button>
+                                        </th>
+                                    </tr>
+                                </thead>
+                                <tbody id="editLibraryList"></tbody>
+                            </table>
+                        </div>
                     </div>
 
                     <!-- Path mappings — restructured Apr 2026: leads with a 1-line
@@ -679,6 +700,92 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- Intro & Credits: this server's switch and status. Filled by markers_server_tab.js; its library
+                         choice is the Libraries tab's Intro & Credits column; detection settings shared by every
+                         server live in Settings. -->
+                    <div class="tab-pane fade" id="edit-tab-markers">
+                        <div class="markers-opt mb-2">
+                            <div>
+                                <label class="fw-semibold" for="markersEnabled">Send intro &amp; credits markers to this server</label>
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                        title="Markers are detected once per file and shared by every server that has the file. Turn this on to send them here. Detection settings live in Settings → Intro &amp; Credits."><i class="bi bi-info-circle"></i></button>
+                                <div class="small text-muted">Viewers on this server see Skip Intro / Skip Credits</div>
+                            </div>
+                            <div class="form-check form-switch markers-switch">
+                                <input class="form-check-input" type="checkbox" role="switch" id="markersEnabled">
+                            </div>
+                        </div>
+
+                        <hr class="my-3">
+                        <div id="markersStatusBlock">
+                            <div class="text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Checking…</div>
+                        </div>
+                        <hr class="my-3">
+
+                        <p class="small text-muted mb-3" id="markersLibrariesPointer">
+                            Choose which libraries get markers on the <a href="#" class="markers-libraries-link">Libraries</a> tab once this is on.
+                        </p>
+
+                        <div class="markers-opt d-none" id="markersPlexRedetectGroup">
+                            <div class="fw-semibold small">When Plex has its own markers
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                        title="Plex can show intro and credits markers of its own, from its detection (for example Analyze on an item). Before we publish: 'Use ours' writes ours over them; 'Keep Plex's' leaves them and writes ours only for the types Plex has none of. After we publish, Plex's detection can replace ours: 'Use ours' writes ours again on the next Intro &amp; Credits job that checks the file; 'Keep Plex's' keeps Plex's until you switch to 'Use ours' or Plex removes them."><i class="bi bi-info-circle"></i></button>
+                            </div>
+                            <div class="btn-group btn-group-sm" role="group" aria-label="When Plex has its own markers">
+                                <input type="radio" class="btn-check" name="markersPlexRedetect" id="markersRedetectRestore" value="restore" autocomplete="off">
+                                <label class="btn btn-outline-secondary" for="markersRedetectRestore">Use ours</label>
+                                <input type="radio" class="btn-check" name="markersPlexRedetect" id="markersRedetectKeep" value="keep_plex" autocomplete="off">
+                                <label class="btn btn-outline-secondary" for="markersRedetectKeep">Keep Plex's</label>
+                            </div>
+                        </div>
+
+                        <!-- Plex only: the marker agent beside a Plex on another machine. Its address and shared
+                             key are stored in markers.plex.agent; the key comes back masked and is posted back
+                             masked unless the user types a new one. -->
+                        <div class="markers-opt d-none border-top pt-3 mt-3" id="markersPlexAgentGroup">
+                            <div>
+                                <label class="fw-semibold" for="markersAgentEnabled">Plex marker agent</label>
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                        title="A small container you run next to Plex. It is the only supported way to write markers to a Plex on another machine."><i class="bi bi-info-circle"></i></button>
+                                <div class="small text-muted">Only needed when this app and Plex are on different machines</div>
+                            </div>
+                            <div class="form-check form-switch markers-switch">
+                                <input class="form-check-input" type="checkbox" role="switch" id="markersAgentEnabled">
+                            </div>
+                        </div>
+                        <div class="d-none mb-3" id="markersPlexAgentFields">
+                            <div class="row g-2">
+                                <div class="col-md-7">
+                                    <label class="form-label small mb-1" for="markersAgentUrl">Address</label>
+                                    <input type="url" class="form-control form-control-sm" id="markersAgentUrl"
+                                           placeholder="http://plex-host.lan:9494" autocomplete="off">
+                                </div>
+                                <div class="col-md-5">
+                                    <label class="form-label small mb-1" for="markersAgentToken">Shared key
+                                        <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                                title="The same key is set on both sides. It is never written to the logs."><i class="bi bi-info-circle"></i></button>
+                                    </label>
+                                    <input type="password" class="form-control form-control-sm" id="markersAgentToken"
+                                           autocomplete="new-password">
+                                </div>
+                            </div>
+                            <div id="markersAgentState" class="small mt-2"></div>
+                        </div>
+
+                        <div class="markers-opt d-none" id="markersEmbyRedetectGroup">
+                            <div class="fw-semibold small">When Emby has its own markers
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top"
+                                        title="Emby can show intro and credits markers of its own, from its intro detection (Emby Premiere) or another plugin. Before we publish: 'Use ours' writes ours over them; 'Keep Emby's' leaves them and writes ours only for the types Emby has none of. After we publish, Emby's detection can replace ours: 'Use ours' writes ours again on the next Intro &amp; Credits job that checks the file; 'Keep Emby's' keeps Emby's until you switch to 'Use ours' or Emby removes them."><i class="bi bi-info-circle"></i></button>
+                            </div>
+                            <div class="btn-group btn-group-sm" role="group" aria-label="When Emby has its own markers">
+                                <input type="radio" class="btn-check" name="markersEmbyRedetect" id="markersEmbyRedetectRestore" value="restore" autocomplete="off">
+                                <label class="btn btn-outline-secondary" for="markersEmbyRedetectRestore">Use ours</label>
+                                <input type="radio" class="btn-check" name="markersEmbyRedetect" id="markersEmbyRedetectKeep" value="keep_emby" autocomplete="off">
+                                <label class="btn btn-outline-secondary" for="markersEmbyRedetectKeep">Keep Emby's</label>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <div id="editServerResult" class="d-none"></div>
@@ -688,6 +795,33 @@
                 <button type="button" class="btn btn-success" id="editServerSave">
                     <i class="bi bi-save me-1"></i>Save changes
                 </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Asked once per Plex server before Intro & Credits may write into Plex's database
+     (stores markers.plex.db_write_confirmed_at). Opened over the Edit dialog by markers_server_tab.js. -->
+<div class="modal fade" id="markersPlexConfirmModal" tabindex="-1" aria-hidden="true" aria-labelledby="markersPlexConfirmTitle">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="markersPlexConfirmTitle">Send intro &amp; credits markers to Plex?</h5>
+            </div>
+            <div class="modal-body small">
+                <p>Plex has no way for apps to add intro or credits markers, so they are written straight into Plex's database — the same place Plex stores its own.</p>
+                <ul class="mb-0">
+                    <li>Tested on Plex 1.43. A future Plex update could change this; we stop writing if the database looks different.</li>
+                    <li>The app must run on the same machine as Plex. <span id="markersPlexConfirmLocal"></span>
+                        <div class="text-muted">Map Plex's config folder into both containers from the identical host path (on unRAID, don't mix /mnt/user and /mnt/cache).</div>
+                    </li>
+                    <li>If Plex re-detects an item itself, it can replace ours. The next job that checks the file puts them back, unless you choose to keep Plex's.</li>
+                    <li>Viewers need Plex Pass (or Plex Home) to see skip buttons.</li>
+                </ul>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" id="markersPlexConfirmCancel">Cancel</button>
+                <button type="button" class="btn btn-primary" id="markersPlexConfirmOk">Enable for Plex</button>
             </div>
         </div>
     </div>
@@ -757,4 +891,5 @@
 <script src="{{ url_for('static', filename='js/plex-auth.js') }}"></script>
 <script src="{{ url_for('static', filename='js/plex_webhook_panel.js') }}"></script>
 <script src="{{ url_for('static', filename='js/servers.js') }}"></script>
+<script src="{{ url_for('static', filename='js/markers_server_tab.js') }}"></script>
 {% endblock %}

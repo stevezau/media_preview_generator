@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -34,7 +34,29 @@ from .base import (
 )
 
 if TYPE_CHECKING:
+    import xml.etree.ElementTree as ET
+
     from ..config import Config
+
+# Each library's own intro/credits detection switch (Edit library → Advanced). Plex detects in a library only when
+# this is on AND the server-wide ``Generate…MarkerBehavior`` pref isn't ``never``. Only TV libraries have the intro
+# one; both default to on.
+LIBRARY_MARKER_DETECTION_PREFS: dict[str, str] = {
+    "intro": "enableIntroMarkerGeneration",
+    "credits": "enableCreditsMarkerGeneration",
+}
+
+
+def _pref_bool(value: Any) -> bool | None:
+    """A bool pref's value as plexapi casts it, or as Plex's raw ``1``/``0``/``true``/``false``; None otherwise."""
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("1", "true"):
+        return True
+    if text in ("0", "false"):
+        return False
+    return None
 
 
 def _plex_item_id(m: Any) -> str:
@@ -922,9 +944,11 @@ class PlexServer(MediaServer):
 
         Returns the envelope documented on
         :meth:`MediaServer.previews_readiness`. Plex sections:
-        ``connection``, ``version``, ``library_settings`` (FSEvent
-        prefs — server-wide), ``server_config_folder`` (writable
-        probe), ``vendor_extraction``, ``path_mappings``.
+        ``connection``, ``version``, ``markers`` (Intro & Credits —
+        only when the feature is on, plus one row when it is off),
+        ``library_settings`` (FSEvent prefs — server-wide),
+        ``server_config_folder`` (writable probe),
+        ``vendor_extraction``, ``path_mappings``.
 
         Plex has no plugin architecture and no trickplay geometry knob;
         most "checks" are server-wide prefs or filesystem state.
@@ -1008,6 +1032,20 @@ class PlexServer(MediaServer):
                 ],
             }
         )
+
+        # --- Intro & Credits (spec §7 item 6) -----------------------
+        # Built from the facts the Intro & Credits tab already asked for, never a second probe — except Plex's
+        # per-library detection switches, read fresh (see markers_readiness.marker_facts); a server with the
+        # feature off gets the one row that says so and nothing else (plan P-R6).
+        from ..markers import readiness as markers_readiness
+
+        marker_facts = markers_readiness.marker_facts(self, self._server_config)
+        if marker_facts.enabled is False:
+            sections.append(markers_readiness.off_section())
+        elif marker_facts.on:
+            marker_section = markers_readiness.plex_section(marker_facts)
+            if marker_section is not None:
+                sections.append(marker_section)
 
         # --- Library settings (server-wide FSEvent prefs) -----------
         library_checks: list[dict[str, Any]] = []
@@ -1910,7 +1948,7 @@ class PlexServer(MediaServer):
         ]
         return [(bare, f) for f in files]
 
-    def _resolve_one_path(self, server_view_path: str) -> str | None:
+    def _resolve_one_path(self, server_view_path: str, *, library_ids: Collection[str] | None = None) -> str | None:
         """Return the Plex ratingKey for the file at ``server_view_path``.
 
         Uses Plex's per-section ``type=<media_type>&file=<basename>``
@@ -1934,6 +1972,10 @@ class PlexServer(MediaServer):
         The base class :meth:`MediaServer.resolve_remote_path_to_item_id`
         loops mapped candidates through this hook so callers can pass
         canonical paths.
+
+        ``library_ids`` (section keys) replaces the preview-library filter
+        below: Intro & Credits passes the libraries that hold the file,
+        which can have previews turned off.
         """
         import os as _os
         import urllib.parse
@@ -1977,8 +2019,11 @@ class PlexServer(MediaServer):
         selected_library_titles: set[str] = {
             str(n).strip().lower() for n in (getattr(self._config, "plex_libraries", None) or []) if str(n).strip()
         }
+        scoped_library_ids = None if library_ids is None else {str(s).strip() for s in library_ids}
 
         def _is_selected(section) -> bool:
+            if scoped_library_ids is not None:
+                return str(getattr(section, "key", "")).strip() in scoped_library_ids
             if selected_library_ids:
                 return str(getattr(section, "key", "")).strip() in selected_library_ids
             if selected_library_titles:
@@ -2090,6 +2135,280 @@ class PlexServer(MediaServer):
             if bundle_hash and file_path:
                 results.append((bundle_hash, file_path))
         return results
+
+    def get_external_ids(self, item_id: str) -> dict[str, Any] | None:
+        """Plex guids (``includeGuids=1``).
+
+        Episodes take tmdb/imdb/tvdb ONLY from the show's own guids (via ``grandparentRatingKey``);
+        if that key is missing, or the show lookup fails or returns nothing, the ids stay ``None``
+        (season/episode are still reported) — the episode's own guids are never used as a stand-in
+        for the show's, since a wrong id would route another show's markers to this file. Movies
+        never report a ``tvdb`` id (different id space to tmdb/imdb). Unrecognised item types
+        report no ids at all.
+        """
+        from ..plex_client import retry_plex_call
+
+        bare_id = str(item_id or "").strip().rsplit("/", 1)[-1]
+        if not bare_id:
+            return None
+
+        def _first_node(key: str) -> ET.Element | None:
+            root = retry_plex_call(self._connect().query, f"/library/metadata/{key}?includeGuids=1")
+            return next(iter(root), None) if root is not None else None
+
+        try:
+            node = _first_node(bare_id)
+        except Exception as exc:
+            logger.debug("Plex external-id lookup failed for {}: {}", bare_id, exc)
+            return None
+        if node is None:
+            return None
+
+        kind = node.get("type")
+        kind_norm = kind if kind in ("movie", "episode") else "unknown"
+        out: dict[str, Any] = {
+            "kind": kind_norm,
+            "tmdb": None,
+            "imdb": None,
+            "tvdb": None,
+            "season": None,
+            "episode": None,
+        }
+        if kind_norm == "unknown":
+            return out
+
+        if kind_norm == "episode":
+            out["season"] = int(node.get("parentIndex")) if (node.get("parentIndex") or "").isdigit() else None
+            out["episode"] = int(node.get("index")) if (node.get("index") or "").isdigit() else None
+            grandparent_key = node.get("grandparentRatingKey")
+            if not grandparent_key:
+                return out
+            try:
+                guid_node = _first_node(grandparent_key)
+            except Exception as exc:
+                logger.debug("Plex show-guid lookup failed for {}: {}", grandparent_key, exc)
+                return out
+            if guid_node is None:
+                return out
+            allowed_schemes = ("tmdb", "imdb", "tvdb")
+        else:
+            guid_node = node
+            allowed_schemes = ("tmdb", "imdb")  # movies: tvdb is a different id space
+
+        for guid in guid_node.findall("Guid"):
+            scheme, _, value = (guid.get("id") or "").partition("://")
+            if scheme in allowed_schemes and value:
+                out[scheme] = value
+        return out
+
+    def get_server_status(self) -> dict[str, Any] | None:
+        """Plex Pass and version, read fresh from ``GET /``; None when unreachable.
+
+        plexapi only reads ``myPlexSubscription`` and ``version`` when it connects, so its attributes would miss a
+        claim, a lapsed Pass or an upgrade until the app restarts.
+
+        Returns:
+            ``{"plex_pass": bool, "version": str | None}``, or None when Plex can't be reached.
+        """
+        try:
+            root = self._connect().query("/")
+        except Exception as exc:
+            logger.debug("Plex status check failed for {}: {}", self.name, exc)
+            return None
+        if root is None:
+            return None
+        return {"plex_pass": root.get("myPlexSubscription") in ("1", "true"), "version": root.get("version")}
+
+    def get_marker_detection_prefs(self) -> dict[str, str | None]:
+        """Plex's own intro/credits detection prefs, read fresh (Plex hides them on servers without Plex Pass)."""
+        from plexapi.exceptions import NotFound
+        from plexapi.settings import Settings
+
+        out: dict[str, str | None] = {"intro": None, "credits": None}
+        try:
+            conn = self._connect()
+            # A new Settings object: plexapi caches server.settings for the connection's lifetime.
+            settings = Settings(conn, conn.query(Settings.key))
+        except Exception as exc:
+            logger.debug("Plex marker prefs unavailable for {}: {}", self.name, exc)
+            return out
+        for key, pref in (("intro", "GenerateIntroMarkerBehavior"), ("credits", "GenerateCreditsMarkerBehavior")):
+            try:
+                out[key] = str(settings.get(pref).value)
+            except NotFound:
+                out[key] = None
+        return out
+
+    def get_library_marker_detection(self, library_ids: Collection[str]) -> dict[str, dict[str, Any]] | None:
+        """Each library's own intro/credits detection switch (Edit library → Advanced), read fresh.
+
+        Read the same way as ``enableBIFGeneration`` (:meth:`get_vendor_extraction_status`): the section list, then
+        each wanted section's ``/prefs``.
+
+        Args:
+            library_ids: Section keys to read. Sections not listed, and anything but movie and TV libraries, are
+                left out.
+
+        Returns:
+            ``{section_key: {"type": "movie" | "show", "intro": bool | None, "credits": bool | None}}``. A pref this
+            section doesn't list (a movie library's intro, or an older Plex) or whose prefs couldn't be read is
+            None. None when the section list itself couldn't be read.
+        """
+        from ..plex_client import retry_plex_call
+
+        wanted = {str(library_id) for library_id in library_ids}
+        if not wanted:
+            return {}
+        try:
+            # Readiness-only reads: no retries. A hung Plex would otherwise stall the whole Setup Health
+            # probe by ~4x per library (retry_plex_call's default max_retries=3, one call per section).
+            sections = retry_plex_call(self._connect().library.sections, max_retries=0)
+        except Exception as exc:
+            logger.debug("Plex library detection prefs unavailable for {}: {}", self.name, exc)
+            return None
+        out: dict[str, dict[str, Any]] = {}
+        for section in sections:
+            section_type = str(getattr(section, "type", "") or "")
+            section_key = str(getattr(section, "key", "") or "")
+            if section_type not in ("movie", "show") or section_key not in wanted:
+                continue
+            entry: dict[str, Any] = {"type": section_type, "intro": None, "credits": None}
+            out[section_key] = entry
+            try:
+                settings = retry_plex_call(section.settings, max_retries=0)
+            except Exception as exc:
+                logger.debug("Plex library {} detection prefs unavailable on {}: {}", section_key, self.name, exc)
+                continue
+            by_id = {str(getattr(setting, "id", "")): setting for setting in settings}
+            for kind, pref in LIBRARY_MARKER_DETECTION_PREFS.items():
+                if pref in by_id:
+                    entry[kind] = _pref_bool(getattr(by_id[pref], "value", None))
+        return out
+
+    def turn_off_library_marker_detection(self, library_id: str, prefs: Collection[str]) -> str | None:
+        """Switch Plex's own intro and/or credits detection off for one library, never server-wide.
+
+        The same ``PUT /library/sections/{id}/prefs`` write as :meth:`_set_bif_via_prefs_subpath`, which also works
+        for custom-agent libraries.
+
+        Args:
+            library_id: The section key.
+            prefs: Names from :data:`LIBRARY_MARKER_DETECTION_PREFS`, each set to off.
+
+        Returns:
+            None on success, otherwise why not.
+
+        Raises:
+            ValueError: ``prefs`` is empty or names anything else.
+        """
+        from urllib.parse import quote, urlencode
+
+        from ..plex_client import retry_plex_call
+
+        allowed = set(LIBRARY_MARKER_DETECTION_PREFS.values())
+        names = list(dict.fromkeys(prefs))
+        if not names or any(name not in allowed for name in names):
+            raise ValueError(f"prefs must be one or both of {sorted(allowed)}")
+        try:
+            plex = self._connect()
+            sections = retry_plex_call(plex.library.sections)
+        except Exception as exc:
+            return f"couldn't list Plex's libraries: {exc}"
+        section = next((s for s in sections if str(getattr(s, "key", "") or "") == str(library_id)), None)
+        if section is None:
+            return f"library {library_id} not found on this Plex"
+        section_type = str(getattr(section, "type", "") or "")
+        if section_type not in ("movie", "show"):
+            return f"library {library_id} is not a movie or TV library"
+        if LIBRARY_MARKER_DETECTION_PREFS["intro"] in names and section_type != "show":
+            return f"library {library_id} has no intro detection: only TV libraries do"
+        url = f"/library/sections/{quote(str(library_id), safe='')}/prefs?{urlencode({name: 0 for name in names})}"
+        try:
+            plex.query(url, method=plex._session.put)
+        except Exception as exc:
+            logger.warning(
+                "Could not turn off Plex's own marker detection for library {} on {!r}: {}", library_id, self.name, exc
+            )
+            return str(exc)
+        logger.info("Turned off {} for Plex library {} on {!r}", ", ".join(names), library_id, self.name)
+        return None
+
+    def get_markers(self, item_id: str) -> list[dict] | None:
+        """Intro/credits markers Plex serves for an item (``includeMarkers=1``); None on error."""
+        from ..plex_client import retry_plex_call
+
+        bare_id = str(item_id or "").strip().rsplit("/", 1)[-1]
+        try:
+            root = retry_plex_call(self._connect().query, f"/library/metadata/{bare_id}?includeMarkers=1")
+        except Exception as exc:
+            logger.debug("Plex marker read failed for {}: {}", bare_id, exc)
+            return None
+        node = next(iter(root), None) if root is not None else None
+        if node is None:
+            return None
+        out = []
+        for m in node.findall("Marker"):
+            if m.get("type") not in ("intro", "credits"):
+                continue
+            out.append(
+                {
+                    "type": m.get("type"),
+                    "start_ms": int(m.get("startTimeOffset") or 0),
+                    "end_ms": int(m.get("endTimeOffset") or 0),
+                    "final": m.get("final") in ("1", "true"),
+                }
+            )
+        return out
+
+    def get_part_durations(self, item_id: str) -> list[int | None] | None:
+        """Duration of every part of every version of an item (Plex serves one marker set per item).
+
+        Args:
+            item_id: Rating key or metadata key.
+
+        Returns:
+            Milliseconds per ``Media/Part`` in Plex's order (None for a part without a duration), or None on error.
+        """
+        from ..plex_client import retry_plex_call
+
+        bare_id = str(item_id or "").strip().rsplit("/", 1)[-1]
+        try:
+            root = retry_plex_call(self._connect().query, f"/library/metadata/{bare_id}")
+        except Exception as exc:
+            logger.debug("Plex part read failed for {}: {}", bare_id, exc)
+            return None
+        node = next(iter(root), None) if root is not None else None
+        if node is None:
+            return None
+        durations: list[int | None] = []
+        for part in node.findall("Media/Part"):
+            raw = part.get("duration")
+            durations.append(int(raw) if raw and raw.isdigit() else None)
+        return durations
+
+    def get_version_count(self, item_id: str) -> int | None:
+        """How many versions an item has: its ``Media`` nodes, leaving out Plex's optimized copies.
+
+        A stacked version has several parts but is one version; an "Optimize" copy carries ``proxyType``.
+
+        Args:
+            item_id: Rating key or metadata key.
+
+        Returns:
+            The number of versions, or None on error or when Plex has no such item.
+        """
+        from ..plex_client import retry_plex_call
+
+        bare_id = str(item_id or "").strip().rsplit("/", 1)[-1]
+        try:
+            root = retry_plex_call(self._connect().query, f"/library/metadata/{bare_id}")
+        except Exception as exc:
+            logger.debug("Plex version read failed for {}: {}", bare_id, exc)
+            return None
+        node = next(iter(root), None) if root is not None else None
+        if node is None:
+            return None
+        return sum(1 for media in node.findall("Media") if not media.get("proxyType"))
 
     def parse_webhook(self, payload: dict[str, Any] | bytes, headers: dict[str, str]) -> WebhookEvent | None:
         """Normalise a Plex webhook payload to a :class:`WebhookEvent`.

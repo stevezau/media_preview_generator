@@ -16,6 +16,7 @@ import requests
 
 from media_preview_generator.servers import (
     ConnectionResult,
+    Library,
     MediaItem,
     PlexServer,
     ServerType,
@@ -27,6 +28,21 @@ from media_preview_generator.servers import (
 def plex_wrapper(mock_config):
     """Construct a :class:`PlexServer` from the standard ``mock_config``."""
     return PlexServer(mock_config, server_id="plex-test", name="Test Plex")
+
+
+@pytest.fixture
+def plex_server_under_test(mock_config):
+    """A :class:`PlexServer` whose ``_connect`` is a ``MagicMock``.
+
+    ``retry_plex_call`` is patched to call straight through so tests can
+    drive ``conn.query`` directly without exercising the real retry/backoff
+    loop (which only matters for ``ParseError``/connection-error handling,
+    already covered elsewhere).
+    """
+    server = PlexServer(mock_config, server_id="plex-test", name="Test Plex")
+    server._connect = MagicMock()
+    with patch("media_preview_generator.plex_client.retry_plex_call", side_effect=lambda f, *a, **k: f(*a, **k)):
+        yield server
 
 
 class TestConstruction:
@@ -801,6 +817,61 @@ class TestResolveOnePath:
         assert result == "9"
 
 
+class TestResolveScopedToLibraries:
+    """Intro & Credits resolves in the libraries that hold the file, whatever their preview opt-in (audit C MED-1).
+
+    Movies (section 1) has previews on; TV Shows (section 2) has previews off because Plex makes its own thumbnails,
+    and Intro & Credits is on there. The preview path keeps searching only preview-enabled sections.
+    """
+
+    EPISODE = "/tv/Show/Season 01/Show S01E01.mkv"
+
+    def _server(self, *, tv_previews: bool):
+        from media_preview_generator.servers.base import Library, ServerConfig
+
+        cfg = ServerConfig(
+            id="plex-1",
+            type=ServerType.PLEX,
+            name="Plex",
+            enabled=True,
+            url="http://plex:32400",
+            auth={"token": "t"},
+            libraries=[
+                Library("1", "Movies", ("/movies",), enabled=True),
+                Library("2", "TV Shows", ("/tv",), enabled=tv_previews),
+            ],
+        )
+        server = PlexServer(cfg)
+        movies, tv = MagicMock(), MagicMock()
+        movies.key, movies.title, movies.METADATA_TYPE = 1, "Movies", "movie"
+        tv.key, tv.title, tv.METADATA_TYPE = 2, "TV Shows", "episode"
+        episode = MagicMock(ratingKey=42)
+        episode.media = [MagicMock(parts=[MagicMock(file=self.EPISODE)])]
+        in_section = {"1": [], "2": [episode]}
+        plex = MagicMock()
+        plex.library.sections.return_value = [movies, tv]
+        # Plex answers per section: only section 2's file= query holds the episode.
+        plex.fetchItems.side_effect = lambda ekey: in_section[ekey.split("/library/sections/")[1].split("/")[0]]
+        server._plex = plex
+        return server, plex
+
+    @pytest.mark.parametrize("tv_previews", [False, True], ids=["tv-previews-off", "tv-previews-on"])
+    def test_markers_caller_finds_the_episode_in_its_library(self, tv_previews):
+        server, plex = self._server(tv_previews=tv_previews)
+        with patch("media_preview_generator.plex_client.retry_plex_call", side_effect=lambda f, *a, **k: f(*a, **k)):
+            assert server.resolve_remote_path_to_item_id(self.EPISODE, library_ids=["2"]) == "42"
+        sections = [c.args[0].split("/library/sections/")[1].split("/")[0] for c in plex.fetchItems.call_args_list]
+        assert sections == ["2"]
+
+    @pytest.mark.parametrize(("tv_previews", "expected"), [(False, None), (True, "42")])
+    def test_preview_caller_keeps_the_preview_library_filter(self, tv_previews, expected):
+        server, plex = self._server(tv_previews=tv_previews)
+        with patch("media_preview_generator.plex_client.retry_plex_call", side_effect=lambda f, *a, **k: f(*a, **k)):
+            assert server.resolve_remote_path_to_item_id(self.EPISODE) == expected
+        sections = [c.args[0].split("/library/sections/")[1].split("/")[0] for c in plex.fetchItems.call_args_list]
+        assert sections == (["1"] if not tv_previews else ["1", "2"])
+
+
 class TestGetBundleMetadata:
     """D31 — get_bundle_metadata is the canary's path to Plex's bundle hash.
 
@@ -1555,3 +1626,1197 @@ class TestPlexPreviewsReadiness:
         assert row["severity"] == "recommended"
         assert "boom" in (row["reason"] or "")
         assert row["current"] == "unknown (probe failed)"
+
+
+class TestGetExternalIds:
+    def _xml(self, text):
+        import xml.etree.ElementTree as ET
+
+        return ET.fromstring(text)
+
+    def test_episode_uses_show_guids_and_indexes(self, plex_server_under_test):
+        episode = self._xml(
+            '<MediaContainer><Video type="episode" parentIndex="1" index="3" grandparentRatingKey="99">'
+            '<Guid id="imdb://tt5555555"/></Video></MediaContainer>'
+        )
+        show = self._xml(
+            '<MediaContainer><Directory type="show"><Guid id="imdb://tt2861424"/><Guid id="tmdb://60625"/>'
+            '<Guid id="tvdb://275274"/></Directory></MediaContainer>'
+        )
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = [episode, show]
+        ids = plex_server_under_test.get_external_ids("/library/metadata/123")
+        assert ids == {
+            "kind": "episode",
+            "tmdb": "60625",
+            "imdb": "tt2861424",
+            "tvdb": "275274",
+            "season": 1,
+            "episode": 3,
+        }
+        assert [c.args[0] for c in conn.query.call_args_list] == [
+            "/library/metadata/123?includeGuids=1",
+            "/library/metadata/99?includeGuids=1",
+        ]
+
+    def test_movie(self, plex_server_under_test):
+        movie = self._xml(
+            '<MediaContainer><Video type="movie"><Guid id="tmdb://862"/><Guid id="imdb://tt0114709"/>'
+            "</Video></MediaContainer>"
+        )
+        plex_server_under_test._connect.return_value.query.return_value = movie
+        assert plex_server_under_test.get_external_ids("862") == {
+            "kind": "movie",
+            "tmdb": "862",
+            "imdb": "tt0114709",
+            "tvdb": None,
+            "season": None,
+            "episode": None,
+        }
+
+    def test_query_failure_returns_none(self, plex_server_under_test):
+        plex_server_under_test._connect.return_value.query.side_effect = RuntimeError("down")
+        assert plex_server_under_test.get_external_ids("1") is None
+
+    def test_grandparent_query_failure_keeps_season_episode_but_no_ids(self, plex_server_under_test):
+        """RULING (fix round 1, HIGH-1, lab-verified on Plex): a show-guid lookup
+
+        failure must NEVER fall back to the episode's own (wrong, episode-scoped)
+        guids — that leaks an episode id into the series-id slot, which sends
+        another show's markers to this file. kind/season/episode are still
+        reported; tmdb/imdb/tvdb stay None."""
+        episode = self._xml(
+            '<MediaContainer><Video type="episode" parentIndex="1" index="3" grandparentRatingKey="99">'
+            '<Guid id="imdb://tt5555555"/></Video></MediaContainer>'
+        )
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = [episode, RuntimeError("show down")]
+        ids = plex_server_under_test.get_external_ids("123")
+        assert ids == {"kind": "episode", "tmdb": None, "imdb": None, "tvdb": None, "season": 1, "episode": 3}
+
+    def test_grandparent_lookup_empty_keeps_season_episode_but_no_ids(self, plex_server_under_test):
+        """RULING (fix round 1, HIGH-1): an empty show container (no children
+
+        at all) must NOT fall back to the episode's own guids either — same
+        leak as above, just via a different failure shape (empty vs. raising)."""
+        episode = self._xml(
+            '<MediaContainer><Video type="episode" parentIndex="1" index="3" grandparentRatingKey="99">'
+            '<Guid id="imdb://tt5555555"/></Video></MediaContainer>'
+        )
+        empty_show = self._xml("<MediaContainer></MediaContainer>")
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = [episode, empty_show]
+        ids = plex_server_under_test.get_external_ids("123")
+        assert ids == {"kind": "episode", "tmdb": None, "imdb": None, "tvdb": None, "season": 1, "episode": 3}
+
+    def test_episode_without_grandparent_key_keeps_season_episode_but_no_ids(self, plex_server_under_test):
+        """RULING (fix round 1, HIGH-1): no grandparentRatingKey at all (e.g. a
+
+        loose episode file Plex hasn't fully indexed into a show) must not
+        fall back to the episode's own guids, and must not issue a second
+        query at all."""
+        episode = self._xml(
+            '<MediaContainer><Video type="episode" parentIndex="1" index="3">'
+            '<Guid id="imdb://tt5555555"/></Video></MediaContainer>'
+        )
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = episode
+        ids = plex_server_under_test.get_external_ids("1")
+        assert ids == {"kind": "episode", "tmdb": None, "imdb": None, "tvdb": None, "season": 1, "episode": 3}
+        conn.query.assert_called_once()
+
+    def test_unknown_type_maps_to_unknown_kind_with_no_ids(self, plex_server_under_test):
+        """RULING (fix round 1, MED-3): an unrecognised type (e.g. the show
+
+        item itself) reports NO ids at all, not just kind="unknown" with the
+        node's own guids still leaking through."""
+        node = self._xml('<MediaContainer><Directory type="show"><Guid id="tmdb://1"/></Directory></MediaContainer>')
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = node
+        ids = plex_server_under_test.get_external_ids("5")
+        assert ids == {"kind": "unknown", "tmdb": None, "imdb": None, "tvdb": None, "season": None, "episode": None}
+        conn.query.assert_called_once()  # no further lookup for an unrecognised kind
+
+    def test_movie_never_reports_tvdb_even_if_present(self, plex_server_under_test):
+        """RULING (fix round 1, LOW): movies never report a tvdb id — different id space."""
+        movie = self._xml(
+            '<MediaContainer><Video type="movie"><Guid id="tmdb://862"/><Guid id="tvdb://999"/>'
+            "</Video></MediaContainer>"
+        )
+        plex_server_under_test._connect.return_value.query.return_value = movie
+        ids = plex_server_under_test.get_external_ids("1")
+        assert ids["tvdb"] is None
+        assert ids["tmdb"] == "862"
+
+    def test_empty_item_id_returns_none_without_query(self, plex_server_under_test):
+        assert plex_server_under_test.get_external_ids("") is None
+        assert plex_server_under_test.get_external_ids(None) is None
+        plex_server_under_test._connect.return_value.query.assert_not_called()
+
+    def test_missing_parent_and_index_become_none(self, plex_server_under_test):
+        episode = self._xml('<MediaContainer><Video type="episode" grandparentRatingKey="99"></Video></MediaContainer>')
+        show = self._xml('<MediaContainer><Directory type="show"><Guid id="tvdb://1"/></Directory></MediaContainer>')
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = [episode, show]
+        ids = plex_server_under_test.get_external_ids("1")
+        assert ids["season"] is None
+        assert ids["episode"] is None
+
+
+class TestPlexMarkerHelpers:
+    @staticmethod
+    def _root(subscription):
+        import xml.etree.ElementTree as ET
+
+        return ET.fromstring(f'<MediaContainer myPlexSubscription="{subscription}" friendlyName="lab"/>')
+
+    def test_plex_pass_is_read_fresh_from_the_server_root(self, plex_server_under_test):
+        # plexapi's myPlexSubscription attribute is frozen at connect time; a claim or lapse must show up.
+        conn = plex_server_under_test._connect.return_value
+        conn.myPlexSubscription = True
+        conn.query.side_effect = [self._root("1"), self._root("0")]
+        assert plex_server_under_test.get_server_status()["plex_pass"] is True
+        assert plex_server_under_test.get_server_status()["plex_pass"] is False
+        assert [c.args[0] for c in conn.query.call_args_list] == ["/", "/"]
+
+    def test_server_status_reads_pass_and_version_from_one_root_query(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = ET.fromstring(
+            '<MediaContainer myPlexSubscription="1" version="1.43.4.10903-e5521bd8c" friendlyName="lab"/>'
+        )
+        assert plex_server_under_test.get_server_status() == {"plex_pass": True, "version": "1.43.4.10903-e5521bd8c"}
+        assert [c.args[0] for c in conn.query.call_args_list] == ["/"]
+
+    @pytest.mark.parametrize("failure", ["connect", "query", "empty"])
+    def test_server_status_unreachable(self, plex_server_under_test, failure):
+        if failure == "connect":
+            plex_server_under_test._connect.side_effect = RuntimeError("down")
+        elif failure == "query":
+            plex_server_under_test._connect.return_value.query.side_effect = RuntimeError("down")
+        else:
+            plex_server_under_test._connect.return_value.query.return_value = None
+        assert plex_server_under_test.get_server_status() is None
+
+    def test_get_markers_parses_served_markers(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        xml = ET.fromstring(
+            '<MediaContainer><Video ratingKey="7"><Marker type="intro" startTimeOffset="990" '
+            'endTimeOffset="29306"/><Marker type="credits" startTimeOffset="1156521" endTimeOffset="1186521"/>'
+            '<Marker type="credits" startTimeOffset="1294044" endTimeOffset="1322272" final="1"/>'
+            '<Marker type="bookmark" startTimeOffset="5" endTimeOffset="6"/></Video></MediaContainer>'
+        )
+        plex_server_under_test._connect.return_value.query.return_value = xml
+        assert plex_server_under_test.get_markers("7") == [
+            {"type": "intro", "start_ms": 990, "end_ms": 29306, "final": False},
+            {"type": "credits", "start_ms": 1156521, "end_ms": 1186521, "final": False},
+            {"type": "credits", "start_ms": 1294044, "end_ms": 1322272, "final": True},
+        ]
+        assert (
+            plex_server_under_test._connect.return_value.query.call_args.args[0]
+            == "/library/metadata/7?includeMarkers=1"
+        )
+
+    def test_get_markers_accepts_a_metadata_key(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = ET.fromstring('<MediaContainer><Video ratingKey="7"/></MediaContainer>')
+        assert plex_server_under_test.get_markers("/library/metadata/7") == []
+        assert conn.query.call_args.args[0] == "/library/metadata/7?includeMarkers=1"
+
+    def test_get_markers_returns_none_when_plex_fails_or_has_no_item(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = RuntimeError("down")
+        assert plex_server_under_test.get_markers("7") is None
+        conn.query.side_effect = None
+        conn.query.return_value = ET.fromstring("<MediaContainer/>")
+        assert plex_server_under_test.get_markers("7") is None
+
+    def test_get_part_durations_lists_every_part_of_every_version(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        xml = ET.fromstring(
+            '<MediaContainer><Video ratingKey="777" duration="1444574">'
+            '<Media id="1" duration="1444574"><Part id="11" duration="1444574" file="/tv/bd.mkv"/></Media>'
+            '<Media id="2" duration="1384574"><Part id="21" duration="1384574" file="/tv/web.mkv"/></Media>'
+            '<Media id="3"><Part id="31" file="/tv/unknown.mkv"/></Media>'
+            "</Video></MediaContainer>"
+        )
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = xml
+        assert plex_server_under_test.get_part_durations("/library/metadata/777") == [1_444_574, 1_384_574, None]
+        assert conn.query.call_args.args[0] == "/library/metadata/777"
+
+    @pytest.mark.parametrize(
+        ("media", "count"),
+        [
+            # A stacked version (two parts) is one version.
+            ('<Media id="1"><Part id="11" file="/tv/cd1.mkv"/><Part id="12" file="/tv/cd2.mkv"/></Media>', 1),
+            # Plex's "Optimize" copy of a version isn't another version.
+            (
+                '<Media id="1"><Part id="11" file="/tv/bd.mkv"/></Media>'
+                '<Media id="2" proxyType="42"><Part id="21" file="/tv/Plex Versions/Optimized for TV/bd.mp4"/></Media>',
+                1,
+            ),
+            (
+                '<Media id="1"><Part id="11" file="/tv/bd.mkv"/></Media>'
+                '<Media id="2"><Part id="21" file="/tv/web.mkv"/></Media>',
+                2,
+            ),
+        ],
+        ids=["stacked", "optimized-copy", "two-versions"],
+    )
+    def test_get_version_count_counts_versions_not_parts_or_optimized_copies(
+        self, plex_server_under_test, media, count
+    ):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = ET.fromstring(
+            f'<MediaContainer><Video ratingKey="777">{media}</Video></MediaContainer>'
+        )
+        assert plex_server_under_test.get_version_count("/library/metadata/777") == count
+        assert conn.query.call_args.args[0] == "/library/metadata/777"
+
+    def test_get_version_count_returns_none_when_plex_fails_or_has_no_item(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = RuntimeError("down")
+        assert plex_server_under_test.get_version_count("7") is None
+        conn.query.side_effect = None
+        conn.query.return_value = ET.fromstring("<MediaContainer/>")
+        assert plex_server_under_test.get_version_count("7") is None
+
+    def test_get_part_durations_returns_none_when_plex_fails_or_has_no_item(self, plex_server_under_test):
+        import xml.etree.ElementTree as ET
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = RuntimeError("down")
+        assert plex_server_under_test.get_part_durations("7") is None
+        conn.query.side_effect = None
+        conn.query.return_value = ET.fromstring("<MediaContainer/>")
+        assert plex_server_under_test.get_part_durations("7") is None
+
+    @staticmethod
+    def _prefs(**values):
+        import xml.etree.ElementTree as ET
+
+        settings = "".join(f'<Setting id="{k}" type="text" default="asap" value="{v}"/>' for k, v in values.items())
+        return ET.fromstring(f"<MediaContainer>{settings}</MediaContainer>")
+
+    def test_marker_detection_prefs_are_read_fresh(self, plex_server_under_test):
+        conn = plex_server_under_test._connect.return_value
+        conn.query.side_effect = [
+            self._prefs(GenerateIntroMarkerBehavior="asap", GenerateCreditsMarkerBehavior="never"),
+            self._prefs(GenerateIntroMarkerBehavior="never", GenerateCreditsMarkerBehavior="scheduled"),
+        ]
+        assert plex_server_under_test.get_marker_detection_prefs() == {"intro": "asap", "credits": "never"}
+        assert plex_server_under_test.get_marker_detection_prefs() == {"intro": "never", "credits": "scheduled"}
+        assert [c.args[0] for c in conn.query.call_args_list] == ["/:/prefs", "/:/prefs"]
+
+    def test_marker_detection_prefs_hidden_pref_is_none(self, plex_server_under_test):
+        # Plex hides these prefs on servers without Plex Pass; plexapi's Settings.get raises NotFound for them.
+        from plexapi.exceptions import NotFound
+        from plexapi.settings import Settings
+
+        conn = plex_server_under_test._connect.return_value
+        conn.query.return_value = self._prefs(GenerateIntroMarkerBehavior="asap")
+        with pytest.raises(NotFound):
+            Settings(conn, conn.query.return_value).get("GenerateCreditsMarkerBehavior")
+        assert plex_server_under_test.get_marker_detection_prefs() == {"intro": "asap", "credits": None}
+
+    def test_marker_detection_prefs_unreachable(self, plex_server_under_test):
+        plex_server_under_test._connect.side_effect = RuntimeError("down")
+        assert plex_server_under_test.get_marker_detection_prefs() == {"intro": None, "credits": None}
+
+    @staticmethod
+    def _section(key: str, section_type: str, settings: dict | Exception | None = None):
+        section = MagicMock(key=key, type=section_type, title=f"Library {key}")
+        if isinstance(settings, Exception):
+            section.settings.side_effect = settings
+        else:
+            section.settings.return_value = [
+                MagicMock(id=pref_id, value=value) for pref_id, value in (settings or {}).items()
+            ]
+        return section
+
+    def test_library_detection_reads_each_wanted_video_library(self, plex_server_under_test):
+        conn = plex_server_under_test._connect.return_value
+        conn.library.sections.return_value = [
+            self._section("1", "movie", {"enableCreditsMarkerGeneration": True, "enableBIFGeneration": True}),
+            self._section("2", "show", {"enableIntroMarkerGeneration": True, "enableCreditsMarkerGeneration": False}),
+            self._section("3", "show", {"enableIntroMarkerGeneration": True}),
+            self._section("4", "artist", {"enableCreditsMarkerGeneration": True}),
+        ]
+
+        answer = plex_server_under_test.get_library_marker_detection(["1", "2", "4"])
+
+        # Library 3 wasn't asked for, library 4 is music: neither is read.
+        assert answer == {
+            "1": {"type": "movie", "intro": None, "credits": True},
+            "2": {"type": "show", "intro": True, "credits": False},
+        }
+        sections = conn.library.sections.return_value
+        assert sections[2].settings.call_count == 0 and sections[3].settings.call_count == 0
+
+    def test_library_detection_unreadable_library_is_none_not_off(self, plex_server_under_test):
+        conn = plex_server_under_test._connect.return_value
+        conn.library.sections.return_value = [self._section("2", "show", RuntimeError("500"))]
+
+        assert plex_server_under_test.get_library_marker_detection(["2"]) == {
+            "2": {"type": "show", "intro": None, "credits": None}
+        }
+
+    def test_library_detection_without_a_section_list_is_none(self, plex_server_under_test):
+        plex_server_under_test._connect.return_value.library.sections.side_effect = RuntimeError("down")
+        assert plex_server_under_test.get_library_marker_detection(["2"]) is None
+
+    def test_library_detection_asks_nothing_for_no_libraries(self, plex_server_under_test):
+        assert plex_server_under_test.get_library_marker_detection([]) == {}
+        plex_server_under_test._connect.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("prefs", "expected_query"),
+        [
+            (["enableIntroMarkerGeneration"], "enableIntroMarkerGeneration=0"),
+            (["enableCreditsMarkerGeneration"], "enableCreditsMarkerGeneration=0"),
+            (
+                ["enableIntroMarkerGeneration", "enableCreditsMarkerGeneration"],
+                "enableIntroMarkerGeneration=0&enableCreditsMarkerGeneration=0",
+            ),
+        ],
+    )
+    def test_turn_off_writes_only_that_librarys_prefs(self, plex_server_under_test, prefs, expected_query):
+        conn = plex_server_under_test._connect.return_value
+        conn.library.sections.return_value = [self._section("1", "movie"), self._section("2", "show")]
+
+        assert plex_server_under_test.turn_off_library_marker_detection("2", prefs) is None
+
+        conn.query.assert_called_once_with(f"/library/sections/2/prefs?{expected_query}", method=conn._session.put)
+
+    @pytest.mark.parametrize(
+        ("library_id", "prefs", "error"),
+        [
+            ("9", ["enableCreditsMarkerGeneration"], "library 9 not found on this Plex"),
+            ("1", ["enableIntroMarkerGeneration"], "library 1 has no intro detection: only TV libraries do"),
+            ("5", ["enableCreditsMarkerGeneration"], "library 5 is not a movie or TV library"),
+        ],
+    )
+    def test_turn_off_refuses_a_library_that_cant_have_it(self, plex_server_under_test, library_id, prefs, error):
+        conn = plex_server_under_test._connect.return_value
+        conn.library.sections.return_value = [self._section("1", "movie"), self._section("5", "photo")]
+
+        assert plex_server_under_test.turn_off_library_marker_detection(library_id, prefs) == error
+        conn.query.assert_not_called()
+
+    @pytest.mark.parametrize("prefs", [[], ["GenerateIntroMarkerBehavior"], ["enableBIFGeneration"]])
+    def test_turn_off_never_writes_another_pref(self, plex_server_under_test, prefs):
+        with pytest.raises(ValueError):
+            plex_server_under_test.turn_off_library_marker_detection("2", prefs)
+        plex_server_under_test._connect.return_value.query.assert_not_called()
+
+    def test_turn_off_reports_plexs_refusal(self, plex_server_under_test):
+        conn = plex_server_under_test._connect.return_value
+        conn.library.sections.return_value = [self._section("2", "show")]
+        conn.query.side_effect = RuntimeError("(400) bad_request")
+
+        assert (
+            plex_server_under_test.turn_off_library_marker_detection("2", ["enableCreditsMarkerGeneration"])
+            == "(400) bad_request"
+        )
+
+
+class _MarkerReadinessHarness:
+    """Drives ``previews_readiness`` with every non-marker probe stubbed out, for the classes below."""
+
+    CONFIRMED = {"db_write_confirmed_at": "2026-01-01T00:00:00Z", "on_plex_redetect": "restore"}
+
+    def _server(self, markers: dict | None, config_folder: str = "/plex", libraries: list | None = None):
+        from media_preview_generator.servers.base import ServerConfig
+
+        cfg = ServerConfig(
+            id="plex-1",
+            type=ServerType.PLEX,
+            name="Plex",
+            enabled=True,
+            url="http://plex:32400",
+            auth={"token": "t"},
+            libraries=libraries or [],
+            output={"plex_config_folder": config_folder},
+            markers=markers if markers is not None else {},
+        )
+        return PlexServer(cfg)
+
+    def _readiness(
+        self,
+        server,
+        capability: dict | None,
+        calls: list | None = None,
+        *,
+        library_detection: object = None,
+        library_calls: list | None = None,
+    ):
+        """Run ``previews_readiness`` with every non-marker probe stubbed out.
+
+        ``library_detection`` is what ``get_library_marker_detection`` answers (an exception is raised); the
+        library ids it was asked for land in ``library_calls``.
+        """
+
+        def read_library_detection(library_ids):
+            if library_calls is not None:
+                library_calls.append(list(library_ids))
+            if isinstance(library_detection, Exception):
+                raise library_detection
+            return library_detection
+
+        def status_payload(live, config):
+            if calls is not None:
+                calls.append((live, config.id))
+            return {
+                "server_id": config.id,
+                "server_type": "plex",
+                "enabled": True,
+                "settings": {},
+                "capability": capability,
+                "can_show": ["intro", "credits"],
+                "libraries": [],
+            }
+
+        prefs = MagicMock(
+            status_code=200,
+            json=MagicMock(return_value={"MediaContainer": {"Setting": []}}),
+            raise_for_status=MagicMock(),
+        )
+        with (
+            patch.object(PlexServer, "test_connection") as tc,
+            patch("media_preview_generator.servers.plex.requests.get", return_value=prefs),
+            patch.object(PlexServer, "get_vendor_extraction_status") as vs,
+            patch.object(PlexServer, "get_library_marker_detection", side_effect=read_library_detection),
+            patch("media_preview_generator.markers.inspect.server_status_payload", status_payload),
+        ):
+            tc.return_value = ConnectionResult(ok=True, message="Connected", version="1.43.0")
+            vs.return_value = {"extracting_count": 0, "stopped_count": 0, "skipped_count": 0, "total": 0}
+            return server.previews_readiness()
+
+    @staticmethod
+    def _capability(state: str, **details) -> dict:
+        return {"state": state, "message": "", "details": details, "warning": ""}
+
+    @staticmethod
+    def _failing_critical(payload: dict) -> list[str]:
+        """Ids of every failing critical check — what ``overall_ok`` is derived from."""
+        return [
+            check["id"]
+            for section in payload["sections"]
+            for check in section["checks"]
+            if check["ok"] is False and check["severity"] == "critical"
+        ]
+
+    @staticmethod
+    def _marker_checks(payload: dict) -> dict[str, dict]:
+        """Every emitted Intro & Credits row, by id."""
+        return {
+            check["id"]: check
+            for section in payload["sections"]
+            if section["id"] == "markers"
+            for check in section["checks"]
+        }
+
+    def _server_on(self, config_folder: str = "/plex"):
+        """A Plex with Intro & Credits switched on and the database write confirmed.
+
+        Pass ``str(tmp_path)`` whenever the test reads ``overall_ok`` or ``_failing_critical``: an unwritable
+        config folder fails its own critical row and would stand in for the one under test.
+        """
+        return self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED}, config_folder)
+
+    @staticmethod
+    def _libraries() -> list:
+        from media_preview_generator.servers.base import Library
+
+        return [
+            Library(id="1", name="Movies", remote_paths=(), kind="movie"),
+            Library(id="2", name="TV Shows", remote_paths=(), kind="episode"),
+            Library(id="3", name="Kids TV", remote_paths=(), kind="episode"),
+        ]
+
+    def _server_with_libraries(self, *, redetect: str = "restore", library_ids: list[str] | None = None):
+        """Intro & Credits on, with a movie and two TV libraries; ``library_ids`` narrows the selection."""
+        plex = {**self.CONFIRMED, "on_plex_redetect": redetect}
+        markers = {"enabled": True, "library_ids": library_ids, "plex": plex}
+        return self._server(markers, libraries=self._libraries())
+
+
+class TestPlexMarkersReadiness(_MarkerReadinessHarness):
+    """The Intro & Credits rows Plex's Setup Health card emits (plan phase 4 Task 9; spec §7 item 6).
+
+    Every row is read from the capability report the Intro & Credits tab already asks for, so these tests
+    drive ``markers.inspect.server_status_payload`` — the one source of truth — and assert the rows it
+    produces, not a second probe.
+    """
+
+    def test_feature_off_emits_only_the_one_row_and_probes_nothing(self):
+        """P-R6: a server that isn't sent markers gets one row, in All good, and no capability probe.
+
+        The probe matters: reading the capability of every Plex server would lock its database for a user
+        who never asked for markers.
+        """
+        calls: list = []
+        server = self._server({"enabled": False, "library_ids": None, "plex": self.CONFIRMED})
+
+        payload = self._readiness(server, self._capability("ready"), calls)
+
+        section = next(s for s in payload["sections"] if s["id"] == "markers")
+        assert section["title"] == "Intro & Credits"
+        assert [c["id"] for c in section["checks"]] == ["markers_off"]
+        row = section["checks"][0]
+        assert row["label"] == "Intro & Credits is off for this server"
+        # ``recommended`` + ``ok`` puts it in "All good"; ``info`` would be dropped by _partitionChecks.
+        assert row["severity"] == "recommended"
+        assert row["ok"] is True
+        assert row["current"] is None and row["recommended"] is None
+        assert row["reason"] == "Nothing here is checked until you switch it on."
+        assert row["actions"] == {}
+        assert calls == [], "the capability of a server with the feature off must never be probed"
+
+    def test_a_server_with_no_markers_block_gets_the_off_row(self):
+        """A server added before Intro & Credits existed reads as off, not as unknown."""
+        payload = self._readiness(self._server(None), self._capability("ready"))
+        assert list(self._marker_checks(payload)) == ["markers_off"]
+
+    def test_legacy_config_server_emits_no_markers_section(self, plex_wrapper, tmp_path):
+        """A PlexServer built from the legacy single-server Config has no per-server markers block."""
+        plex_wrapper._config.plex_config_folder = str(tmp_path)
+        payload = self._readiness(plex_wrapper, self._capability("ready"))
+        assert [s["id"] for s in payload["sections"] if s["id"] == "markers"] == []
+
+    def test_everything_healthy_shows_four_passing_rows(self, tmp_path):
+        """Feature on, capability READY: all four facts are known and good."""
+        calls: list = []
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED}, str(tmp_path))
+        capability = self._capability(
+            "ready",
+            plex_pass=True,
+            lock_holder=True,
+            fs_type="ext4",
+            detection={"intro": "never", "credits": "never"},
+        )
+
+        payload = self._readiness(server, capability, calls)
+
+        # The status is asked for THIS live client and THIS server's config — passing None would take
+        # ``_preview_capability``'s "couldn't set up a connection" branch and every row below would vanish.
+        assert calls == [(server, "plex-1")]
+        checks = self._marker_checks(payload)
+        assert set(checks) == {
+            "markers_plex_pass",
+            "markers_plex_tag_row",
+            "markers_plex_db_local",
+            "markers_plex_detection",
+        }
+        assert all(c["ok"] is True for c in checks.values())
+        assert checks["markers_plex_pass"]["current"] == "active"
+        assert checks["markers_plex_tag_row"]["current"] == "present"
+        assert checks["markers_plex_db_local"]["current"] == "this machine"
+        assert checks["markers_plex_detection"]["current"] == "Off"
+        # A passing row never keeps the failure wording.
+        assert checks["markers_plex_pass"]["label"] == "Plex Pass is active"
+        assert checks["markers_plex_detection"]["label"] == "Plex's own detection is off"
+        assert all(c["reason"] is None for c in checks.values())
+        assert payload["overall_ok"] is True
+
+    def test_no_plex_pass_is_critical_with_the_approved_copy(self, tmp_path):
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED}, str(tmp_path))
+        capability = self._capability("needs_pass", plex_pass=False, lock_holder=True, fs_type="ext4")
+
+        payload = self._readiness(server, capability)
+
+        checks = self._marker_checks(payload)
+        row = checks["markers_plex_pass"]
+        assert row["label"] == "Skip buttons need Plex Pass"
+        assert row["severity"] == "critical"
+        assert row["ok"] is False
+        assert (row["current"], row["recommended"]) == ("not active", "active")
+        assert row["reason"] == "Markers are still written, but nobody sees a skip button."
+        assert row["tooltip"] == ("Plex only shows Skip Intro and Skip Credits to viewers on a server with Plex Pass.")
+        # Nothing this app can toggle → no actions, so the card shows the shipped "Change in Plex UI" badge.
+        assert row["actions"] == {}
+        # The check stopped at Plex Pass, so the tag row and Plex's detection are simply unknown.
+        assert "markers_plex_tag_row" not in checks
+        assert "markers_plex_detection" not in checks
+        # The database it got past IS known.
+        assert checks["markers_plex_db_local"]["ok"] is True
+        # ...and the Plex Pass row is what fails the card, not another probe in the wiring.
+        assert self._failing_critical(payload) == ["markers_plex_pass"]
+        assert payload["overall_ok"] is False
+
+    def test_database_on_another_machine_is_critical_and_the_rest_unknown(self, tmp_path):
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED}, str(tmp_path))
+        capability = self._capability("needs_local_db", fs_type="nfs4", db_path="/plex/db")
+
+        payload = self._readiness(server, capability)
+
+        checks = self._marker_checks(payload)
+        assert list(checks) == ["markers_plex_db_local"]
+        row = checks["markers_plex_db_local"]
+        assert row["label"] == "Plex's library database isn't on this machine"
+        assert row["severity"] == "critical"
+        assert row["ok"] is False
+        assert (row["current"], row["recommended"]) == ("another machine", "this machine")
+        assert row["reason"] == (
+            "Run the Plex marker helper next to Plex, or run this app on the same machine as Plex."
+        )
+        assert self._failing_critical(payload) == ["markers_plex_db_local"]
+        assert payload["overall_ok"] is False
+
+    def test_plex_running_on_another_copy_of_the_database_is_the_same_row(self):
+        """``lock_holder`` False + needs_local_db — a local file, but not the one Plex has open."""
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED})
+        capability = self._capability(
+            "needs_local_db", fs_type="ext4", lock_holder=False, db_path="/plex/db", plex_pass=True
+        )
+
+        payload = self._readiness(server, capability)
+
+        checks = self._marker_checks(payload)
+        assert checks["markers_plex_db_local"]["ok"] is False
+        assert checks["markers_plex_db_local"]["current"] == "another machine"
+        # Plex answered, so Plex Pass is known even though the write is refused.
+        assert checks["markers_plex_pass"]["ok"] is True
+
+    def test_missing_marker_list_is_critical_and_detection_is_a_recommendation(self):
+        server = self._server_with_libraries(library_ids=["2"])
+        capability = self._capability(
+            "needs_plex_detection_once",
+            plex_pass=True,
+            lock_holder=True,
+            fs_type="ext4",
+            detection={"intro": "scheduled", "credits": "never"},
+        )
+
+        payload = self._readiness(
+            server, capability, library_detection={"2": {"type": "show", "intro": True, "credits": True}}
+        )
+
+        checks = self._marker_checks(payload)
+        tag = checks["markers_plex_tag_row"]
+        assert tag["label"] == "Plex hasn't made its marker list yet"
+        assert tag["severity"] == "critical"
+        assert tag["ok"] is False
+        assert (tag["current"], tag["recommended"]) == ("missing", "present")
+        assert tag["reason"] == (
+            "Turn on Plex's own intro detection for one library and play a file, then check again."
+        )
+        assert tag["tooltip"] == (
+            "Plex builds this list the first time it finds a marker itself. This app never creates it."
+        )
+        detection = checks["markers_plex_detection"]
+        assert detection["label"] == "Plex's own detection can replace your markers"
+        assert detection["severity"] == "recommended"
+        assert detection["ok"] is False
+        assert (detection["current"], detection["recommended"]) == ("On", "Off")
+        # Credits is ``never`` server-wide, so only the intro is Plex's to detect in TV Shows.
+        assert [(lib["name"], lib["detail"]) for lib in detection["libraries"]] == [("TV Shows", "intro")]
+
+    @pytest.mark.parametrize(
+        ("detection", "expected"),
+        [
+            ({"intro": "never", "credits": "never"}, True),
+            ({"intro": "scheduled", "credits": "never"}, False),
+            ({"intro": "never", "credits": "asap"}, False),
+            ({"intro": None, "credits": "never"}, True),
+        ],
+    )
+    def test_detection_row_matches_the_edit_tabs_rule(self, detection, expected):
+        """Server-wide, the same rule as ``markers_server_tab.js plexDetectionOn``: anything but ``never`` is on."""
+        server = self._server_with_libraries(library_ids=["2"])
+        capability = self._capability("ready", plex_pass=True, lock_holder=True, fs_type="ext4", detection=detection)
+
+        checks = self._marker_checks(
+            self._readiness(
+                server, capability, library_detection={"2": {"type": "show", "intro": True, "credits": True}}
+            )
+        )
+
+        assert checks["markers_plex_detection"]["ok"] is expected
+
+    @pytest.mark.parametrize("detection", [{"intro": None, "credits": None}, None, "nonsense"])
+    def test_unreadable_detection_prefs_emit_no_row(self, detection):
+        """Plex hides these prefs on a server without Plex Pass — an unknown fact says nothing."""
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED})
+        capability = self._capability("ready", plex_pass=True, lock_holder=True, fs_type="ext4", detection=detection)
+
+        assert "markers_plex_detection" not in self._marker_checks(self._readiness(server, capability))
+
+    @pytest.mark.parametrize("state", ["unreachable", "misconfigured", "unsupported_schema", "unknown"])
+    def test_a_capability_that_knows_nothing_emits_no_section(self, state):
+        """No facts → no rows, rather than a guessed row: the card must not cry wolf."""
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED})
+
+        payload = self._readiness(server, self._capability(state))
+
+        assert [s["id"] for s in payload["sections"] if s["id"] == "markers"] == []
+
+    def test_unreadable_settings_emit_no_section_rather_than_the_off_row(self, tmp_path):
+        """Settings that can't be read are unknown, not "off" — the card says nothing either way."""
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED}, str(tmp_path))
+
+        def boom(raw, server_type):
+            raise RuntimeError("settings.json is unreadable")
+
+        with patch("media_preview_generator.markers.settings.load_server", boom):
+            payload = self._readiness(server, self._capability("ready", plex_pass=True, lock_holder=True))
+
+        assert [s["id"] for s in payload["sections"] if s["id"] == "markers"] == []
+
+    def test_a_failing_status_read_emits_no_section(self, tmp_path):
+        """The Setup Health card survives an Intro & Credits status that raised."""
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED}, str(tmp_path))
+
+        def boom(live, config):
+            raise RuntimeError("markers.db is unreadable")
+
+        prefs = MagicMock(
+            status_code=200,
+            json=MagicMock(return_value={"MediaContainer": {"Setting": []}}),
+            raise_for_status=MagicMock(),
+        )
+        with (
+            patch.object(PlexServer, "test_connection") as tc,
+            patch("media_preview_generator.servers.plex.requests.get", return_value=prefs),
+            patch.object(PlexServer, "get_vendor_extraction_status") as vs,
+            patch("media_preview_generator.markers.inspect.server_status_payload", boom),
+        ):
+            tc.return_value = ConnectionResult(ok=True, message="Connected")
+            vs.return_value = {"extracting_count": 0, "stopped_count": 0, "skipped_count": 0, "total": 0}
+            payload = server.previews_readiness()
+
+        assert [s["id"] for s in payload["sections"] if s["id"] == "markers"] == []
+        assert payload["overall_ok"] is True
+
+    @pytest.mark.parametrize(
+        "capability_kwargs",
+        [
+            {"state": "ready", "plex_pass": True, "lock_holder": True, "detection": {"intro": "never"}},
+            {"state": "needs_pass", "plex_pass": False, "lock_holder": True},
+            {"state": "needs_local_db", "fs_type": "nfs4"},
+            {
+                "state": "needs_plex_detection_once",
+                "plex_pass": True,
+                "lock_holder": True,
+                "detection": {"intro": "scheduled"},
+            },
+        ],
+    )
+    def test_no_marker_row_is_ever_severity_info(self, capability_kwargs):
+        """``servers.js _partitionChecks`` drops every ``info`` row, so one here would never render."""
+        kwargs = dict(capability_kwargs)
+        state = kwargs.pop("state")
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED})
+
+        payload = self._readiness(server, self._capability(state, **kwargs))
+
+        rows = self._marker_checks(payload)
+        assert rows, "expected at least one Intro & Credits row"
+        assert all(row["severity"] in ("critical", "recommended") for row in rows.values())
+
+    def test_the_section_sits_before_library_settings(self):
+        """Mockup order: Intro & Credits rows read first inside a bucket."""
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED})
+        capability = self._capability("ready", plex_pass=True, lock_holder=True, fs_type="ext4")
+
+        ids = [s["id"] for s in self._readiness(server, capability)["sections"]]
+
+        assert ids.index("markers") < ids.index("library_settings")
+
+
+class TestPlexDetectionPerLibrary(_MarkerReadinessHarness):
+    """The "Plex's own detection" row: Plex detects in a library only when its server-wide pref isn't ``never``
+    AND the library's own ``enable…MarkerGeneration`` switch is on, and only "Use ours" makes that a problem."""
+
+    INTRO = "enableIntroMarkerGeneration"
+    CREDITS = "enableCreditsMarkerGeneration"
+    ALL_ON = {
+        "1": {"type": "movie", "intro": None, "credits": True},
+        "2": {"type": "show", "intro": True, "credits": True},
+        "3": {"type": "show", "intro": True, "credits": True},
+    }
+
+    def _row(self, server, detection: dict, *, library_detection: object = None, library_calls=None) -> dict:
+        capability = self._capability("ready", plex_pass=True, lock_holder=True, fs_type="ext4", detection=detection)
+        payload = self._readiness(server, capability, library_detection=library_detection, library_calls=library_calls)
+        return self._marker_checks(payload)["markers_plex_detection"]
+
+    def test_server_never_is_all_good_whatever_the_libraries_say(self):
+        calls: list = []
+        row = self._row(
+            self._server_with_libraries(),
+            {"intro": "never", "credits": "never"},
+            library_detection=self.ALL_ON,
+            library_calls=calls,
+        )
+
+        assert (row["ok"], row["severity"]) == (True, "recommended")
+        assert row["label"] == "Plex's own detection is off"
+        assert (row["current"], row["recommended"]) == ("Off", "Off")
+        assert "libraries" not in row
+        assert calls == [], "a server that never detects needs no library read"
+
+    def test_server_scheduled_and_library_on_is_listed_with_its_turn_off(self):
+        calls: list = []
+        row = self._row(
+            self._server_with_libraries(library_ids=["2"]),
+            {"intro": "scheduled", "credits": "scheduled"},
+            library_detection=self.ALL_ON,
+            library_calls=calls,
+        )
+
+        assert (row["ok"], row["severity"]) == (False, "recommended")
+        assert row["label"] == "Plex's own detection can replace your markers"
+        assert (row["current"], row["recommended"]) == ("On", "Off")
+        assert row["reason"] == (
+            "Turn off = Edit library → Advanced → Enable intro / credits detection, that library only."
+        )
+        assert row["libraries_caption"] == "Plex detects on its own in these libraries:"
+        assert row["actions"] == {}, "the only fixes are the per-library ones"
+        [library] = row["libraries"]
+        assert (library["id"], library["name"], library["detail"], library["button"]) == (
+            "2",
+            "TV Shows",
+            "intro, credits",
+            "Turn off",
+        )
+        action = library["action"]
+        assert action["action"] == "turn_off_plex_detection"
+        assert action["args"] == {"library_id": "2", "prefs": [self.INTRO, self.CREDITS]}
+        assert action["confirm"]["kind"] == "button"
+        assert "TV Shows only" in action["confirm"]["body"]
+        # Only the selected library's switches are read.
+        assert calls == [["2"]]
+
+    def test_server_asap_and_library_off_is_not_listed(self):
+        row = self._row(
+            self._server_with_libraries(library_ids=["2"]),
+            {"intro": "asap", "credits": "asap"},
+            library_detection={"2": {"type": "show", "intro": False, "credits": False}},
+        )
+
+        assert row["ok"] is True
+        assert row["label"] == "Plex's own detection is off in your Intro & Credits libraries"
+        assert (row["current"], row["recommended"]) == ("Off", "Off")
+        assert "libraries" not in row
+
+    def test_a_tv_library_lists_intro_and_credits_and_a_movie_library_credits_only(self):
+        detection = {**self.ALL_ON, "3": {"type": "show", "intro": False, "credits": False}}
+        row = self._row(
+            self._server_with_libraries(),
+            {"intro": "scheduled", "credits": "asap"},
+            library_detection=detection,
+        )
+
+        listed = [(lib["name"], lib["detail"], lib["action"]["args"]["prefs"]) for lib in row["libraries"]]
+        assert listed == [
+            ("Movies", "credits", [self.CREDITS]),
+            ("TV Shows", "intro, credits", [self.INTRO, self.CREDITS]),
+        ]
+
+    def test_only_the_types_plex_detects_server_wide_are_listed(self):
+        row = self._row(
+            self._server_with_libraries(),
+            {"intro": "never", "credits": "scheduled"},
+            library_detection=self.ALL_ON,
+        )
+
+        assert [(lib["name"], lib["detail"]) for lib in row["libraries"]] == [
+            ("Movies", "credits"),
+            ("TV Shows", "credits"),
+            ("Kids TV", "credits"),
+        ]
+
+    def test_a_library_outside_the_markers_selection_is_not_listed(self):
+        calls: list = []
+        detection = {**self.ALL_ON, "2": {"type": "show", "intro": False, "credits": False}}
+        row = self._row(
+            self._server_with_libraries(library_ids=["2"]),
+            {"intro": "scheduled", "credits": "scheduled"},
+            library_detection=detection,
+            library_calls=calls,
+        )
+
+        assert row["ok"] is True
+        assert "libraries" not in row
+        assert calls == [["2"]]
+
+    def test_keep_plex_never_warns_and_reads_no_library(self):
+        calls: list = []
+        row = self._row(
+            self._server_with_libraries(redetect="keep_plex"),
+            {"intro": "scheduled", "credits": "scheduled"},
+            library_detection=self.ALL_ON,
+            library_calls=calls,
+        )
+
+        assert (row["ok"], row["severity"]) == (True, "recommended")
+        assert row["label"] == "Keeping Plex's own markers: its detection can stay on"
+        assert (row["current"], row["recommended"], row["reason"]) == (None, None, None)
+        assert "libraries" not in row
+        assert calls == []
+
+    @pytest.mark.parametrize(
+        "library_detection",
+        [
+            RuntimeError("down"),
+            None,
+            {"2": {"type": "show", "intro": None, "credits": None}},
+            {"2": {"type": "show", "intro": True, "credits": None}},
+        ],
+        ids=["read-raised", "no-section-list", "library-unreadable", "older-plex-without-credits-pref"],
+    )
+    def test_an_unreadable_library_switch_falls_back_to_the_server_row(self, library_detection):
+        row = self._row(
+            self._server_with_libraries(library_ids=["2"]),
+            {"intro": "scheduled", "credits": "scheduled"},
+            library_detection=library_detection,
+        )
+
+        assert (row["ok"], row["severity"]) == (False, "recommended")
+        assert row["label"] == "Plex's own detection can replace your markers"
+        assert (row["current"], row["recommended"]) == ("unknown", "Off")
+        assert row["reason"] == "Plex settings → Library → Generate intro and credits video markers."
+        assert row["actions"] == {}
+        assert "libraries" not in row
+
+    def test_intro_and_credits_off_on_the_server_has_no_detection_row(self):
+        calls: list = []
+        markers = {"enabled": False, "library_ids": None, "plex": self.CONFIRMED}
+        server = self._server(markers, libraries=self._libraries())
+
+        payload = self._readiness(server, self._capability("ready"), library_detection=self.ALL_ON, library_calls=calls)
+
+        assert list(self._marker_checks(payload)) == ["markers_off"]
+        assert calls == []
+
+    def test_the_row_keeps_its_id_so_a_dismissal_still_applies(self):
+        """One id for every variant: the Dismiss the user already clicked keeps hiding the warning."""
+        rows = [
+            self._row(self._server_with_libraries(redetect=redetect), detection, library_detection=self.ALL_ON)
+            for redetect, detection in [
+                ("restore", {"intro": "scheduled", "credits": "scheduled"}),
+                ("keep_plex", {"intro": "scheduled", "credits": "scheduled"}),
+                ("restore", {"intro": "never", "credits": "never"}),
+            ]
+        ]
+        assert {row["id"] for row in rows} == {"markers_plex_detection"}
+
+    def test_the_confirm_body_escapes_the_library_name(self):
+        """``_openConfirmModal`` renders the body as HTML."""
+        library = Library(id="2", name="<b>TV</b>", remote_paths=(), kind="episode")
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED}, libraries=[library])
+
+        row = self._row(server, {"intro": "asap", "credits": "never"}, library_detection=self.ALL_ON)
+
+        body = row["libraries"][0]["action"]["confirm"]["body"]
+        assert "&lt;b&gt;TV&lt;/b&gt;" in body and "<b>" not in body
+        assert row["libraries"][0]["name"] == "<b>TV</b>", "the page escapes the name itself (textContent)"
+
+
+class TestPlexMarkerAgentReadiness(_MarkerReadinessHarness):
+    """The row for the Plex marker helper — the whole write path for a Plex on another machine.
+
+    ``AGENT_UNAVAILABLE`` returns from ``capability()`` before Plex Pass, the marker list, the database and
+    detection are read, so without this row a Plex writing no markers at all showed either no Intro & Credits
+    section (Plex unreachable too) or, when Plex still answered over HTTP, a lone green "Plex Pass is active".
+    """
+
+    @staticmethod
+    def _agent(state: str = "connected", url: str = "http://plex-host.lan:9494", **extra) -> dict:
+        return {"url": url, "version": "1.0.0", "state": state, "machine_identifier": "", **extra}
+
+    def _agent_row(self, capability: dict) -> dict:
+        server = self._server({"enabled": True, "library_ids": None, "plex": self.CONFIRMED})
+        return self._marker_checks(self._readiness(server, capability))["markers_plex_agent"]
+
+    @pytest.mark.parametrize(
+        ("agent", "label", "current", "reason"),
+        [
+            (
+                {"state": "unreachable"},
+                "The Plex marker helper isn't answering",
+                "can't be reached",
+                "Markers wait here until it answers again. Nothing is lost.",
+            ),
+            (
+                {"state": "rejected"},
+                "The Plex marker helper refused this app's key",
+                "key refused",
+                "Set the same shared key on the helper and in the Intro & Credits tab.",
+            ),
+            (
+                {"state": "incompatible"},
+                "The Plex marker helper and this app are different versions",
+                "version mismatch",
+                "The Intro & Credits tab says which of the two to update.",
+            ),
+            (
+                {"state": "connected", "wrong_plex": True},
+                "The Plex marker helper is beside a different Plex",
+                "wrong Plex server",
+                "Check its address in the Intro & Credits tab: markers would have gone into the wrong database.",
+            ),
+            # Connected and refused anyway, but NOT the wrong Plex: the agent answered something this app can't
+            # decode. Inferring "wrong Plex" from connected-yet-refused would send the user to change a correct
+            # address, so this cell has to read as "not answering" instead.
+            (
+                {"state": "connected"},
+                "The Plex marker helper isn't answering",
+                "can't be reached",
+                "Markers wait here until it answers again. Nothing is lost.",
+            ),
+        ],
+        ids=[
+            "unreachable",
+            "rejected",
+            "incompatible",
+            "connected-to-the-wrong-plex",
+            "connected-but-the-answer-was-unreadable",
+        ],
+    )
+    def test_every_refused_agent_state_is_its_own_must_fix_row(self, agent, label, current, reason):
+        row = self._agent_row(self._capability("agent_unavailable", agent=self._agent(**agent), plex_pass=True))
+
+        assert row["label"] == label
+        assert row["severity"] == "critical"
+        assert row["ok"] is False
+        assert (row["current"], row["recommended"]) == (current, "connected")
+        assert row["reason"] == reason
+        # Nothing this app can toggle for the user → the card shows the read-only badge, not a fix button.
+        assert row["actions"] == {}
+
+    def test_a_working_agent_is_a_passing_row(self):
+        capability = self._capability("ready", agent=self._agent(), plex_pass=True, lock_holder=True, fs_type="ext4")
+
+        row = self._agent_row(capability)
+
+        assert row["label"] == "The Plex marker helper is connected"
+        assert row["ok"] is True
+        assert (row["current"], row["recommended"]) == ("connected", "connected")
+        assert row["reason"] is None
+
+    @pytest.mark.parametrize(
+        "agent",
+        [{"url": "http://a:9494"}, {"url": "http://a:9494", "state": ""}, {"state": "something-new"}],
+        ids=["no-state-key", "empty-state", "unknown-state"],
+    )
+    def test_a_state_this_build_doesnt_know_reads_as_cant_be_reached(self, agent):
+        """The same fallback the Edit tab's badge uses (``markers_server_tab.js AGENT_BADGES``)."""
+        row = self._agent_row(self._capability("agent_unavailable", agent=agent))
+
+        assert row["current"] == "can't be reached"
+        assert row["ok"] is False
+
+    def test_a_refusal_with_no_agent_block_still_emits_the_row(self):
+        """Defensive: the row exists so this state is never silent, whatever the details carry."""
+        row = self._agent_row(self._capability("agent_unavailable"))
+
+        assert row["current"] == "can't be reached"
+        assert row["severity"] == "critical"
+
+    def test_a_plex_with_no_agent_gets_no_agent_row(self):
+        capability = self._capability("ready", plex_pass=True, lock_holder=True, fs_type="ext4")
+        assert "markers_plex_agent" not in self._marker_checks(self._readiness(self._server_on(), capability))
+
+    def test_an_unavailable_agent_fails_the_card_instead_of_looking_healthy(self, tmp_path):
+        """The regression: Plex still answers over HTTP, so ``plex_pass`` is known and used to be the only row —
+        a green "Plex Pass is active" on a server no marker can reach."""
+        capability = self._capability("agent_unavailable", agent=self._agent("unreachable"), plex_pass=True)
+
+        payload = self._readiness(self._server_on(str(tmp_path)), capability)
+
+        checks = self._marker_checks(payload)
+        assert list(checks) == ["markers_plex_agent", "markers_plex_pass"]
+        assert self._failing_critical(payload) == ["markers_plex_agent"]
+        section = next(s for s in payload["sections"] if s["id"] == "markers")
+        assert (section["ok"], section["severity"]) == (False, "critical")
+        assert payload["overall_ok"] is False
+
+    def test_an_unavailable_agent_on_an_unreachable_plex_still_emits_the_row(self, tmp_path):
+        """The cell the other test's ``plex_pass`` hides: with no fact at all the section used to be None."""
+        payload = self._readiness(
+            self._server_on(str(tmp_path)), self._capability("agent_unavailable", agent=self._agent("unreachable"))
+        )
+
+        assert list(self._marker_checks(payload)) == ["markers_plex_agent"]
+        assert self._failing_critical(payload) == ["markers_plex_agent"]
+        assert payload["overall_ok"] is False
+
+    @pytest.mark.parametrize("state", ["unreachable", "rejected", "incompatible", "connected"])
+    def test_no_agent_row_is_ever_severity_info(self, state):
+        """``servers.js _partitionChecks`` drops every ``info`` row, so one here would never render."""
+        row = self._agent_row(self._capability("agent_unavailable", agent=self._agent(state)))
+        assert row["severity"] in ("critical", "recommended")
+
+    def test_the_agent_row_reads_first(self):
+        """It is the gate: when it fails nothing past it was even checked."""
+        capability = self._capability("ready", agent=self._agent(), plex_pass=True, lock_holder=True, fs_type="ext4")
+        assert list(self._marker_checks(self._readiness(self._server_on(), capability)))[0] == "markers_plex_agent"
+
+    def test_the_states_are_the_ones_the_transport_sets(self):
+        """`readiness` keeps its own copy of the state names; a rename in the transport must not drift past it."""
+        from media_preview_generator.markers import readiness
+        from media_preview_generator.markers.publishers import plex_remote
+
+        assert set(readiness.AGENT_STATES) == {
+            plex_remote.AGENT_UNREACHABLE,
+            plex_remote.AGENT_REJECTED,
+            plex_remote.AGENT_INCOMPATIBLE,
+        }
+        assert readiness.AGENT_RECOMMENDED == plex_remote.AGENT_CONNECTED
+        assert readiness.AGENT_FALLBACK_STATE == plex_remote.AGENT_UNREACHABLE
+
+    def test_the_database_row_names_the_helpers_machine_when_a_helper_did_the_check(self):
+        """The check ran on the helper's machine, so "this machine" would be about the wrong container —
+        and the fix would tell the user to move the app the helper exists to leave where it is."""
+        capability = self._capability("needs_local_db", agent=self._agent(), fs_type="nfs4", db_path="/agent/db")
+
+        row = self._marker_checks(self._readiness(self._server_on(), capability))["markers_plex_db_local"]
+
+        assert row["label"] == "The helper isn't on the machine with Plex's database"
+        assert (row["current"], row["recommended"]) == ("another machine", "the helper's machine")
+        assert row["reason"] == (
+            "Run the helper on the Plex machine, with Plex's config folder mounted from a local disk."
+        )
+        assert "run this app on the same machine as Plex" not in row["reason"]
+        assert "the helper already does this write for you" in row["explanation"]
+        # Every piece of the row's copy switches together — a tooltip still saying "this app must run on the
+        # Plex machine" would contradict the label right next to it.
+        assert row["tooltip"] == (
+            "Markers go straight into Plex's database, so the helper must run on the Plex machine with that "
+            "machine's own copy of Plex's config folder."
+        )
+
+    def test_the_database_row_keeps_this_machine_without_a_helper(self):
+        capability = self._capability("needs_local_db", fs_type="nfs4", db_path="/plex/db")
+
+        row = self._marker_checks(self._readiness(self._server_on(), capability))["markers_plex_db_local"]
+
+        assert row["label"] == "Plex's library database isn't on this machine"
+        assert (row["current"], row["recommended"]) == ("another machine", "this machine")
+        assert row["tooltip"] == (
+            "Markers go straight into Plex's database, so this app must run on the Plex machine, or reach it "
+            "through the helper."
+        )
+
+    def test_a_helper_that_can_write_says_so_without_claiming_this_machine(self):
+        capability = self._capability("ready", agent=self._agent(), plex_pass=True, lock_holder=True, fs_type="ext4")
+
+        row = self._marker_checks(self._readiness(self._server_on(), capability))["markers_plex_db_local"]
+
+        assert row["label"] == "The helper is on the machine with Plex's database"
+        assert row["ok"] is True
+        assert (row["current"], row["recommended"]) == ("the helper's machine", "the helper's machine")

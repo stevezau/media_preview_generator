@@ -17,6 +17,9 @@ Each row lives in one of three sections:
 3. **Advanced** — server trickplay geometry, vendor extraction, path
    mappings, Plex config folder writability.
 
+A server with **Intro & Credits** switched on also gets an
+[Intro & Credits section](#intro-credits) (Plex) or plugin rows (Jellyfin, Emby).
+
 Every row carries an ⓘ tooltip (the one-liner), a direct link to
 **this page** anchored at the relevant check, and — where applicable —
 an **Enable** or **Disable** toggle that applies immediately.
@@ -327,6 +330,61 @@ publishing fails silently.
 
 **Enable / disable:** read-only status row. Fix under Server settings
 → Path mappings.
+
+---
+
+## Intro & Credits  <a id="intro-credits"></a>
+
+These rows appear only for a server that has **Send intro & credits markers to this server** switched on (Servers →
+Edit → Intro & Credits). Until then the server shows one row, **Intro & Credits is off for this server**, under "All
+good", and nothing about markers is checked or contacted. The rows are read from the same check the Intro & Credits
+tab runs, so the two never disagree. A fact the check never got to read shows no row: a Plex whose database is on
+another machine says nothing about Plex Pass until that is fixed.
+
+Only Plex's detection row has buttons, one **Turn off** per library. Every other row says what to change and where.
+
+### Plex
+
+- **Skip buttons need Plex Pass** (critical) / **Plex Pass is active**. Without Plex Pass Plex serves no intro or
+  credits markers at all, not ours and not its own, so nobody sees a skip button. Markers are still written and stay
+  for the day the server has a Pass. Viewers need Plex Pass or to be in your Plex Home too.
+- **Plex hasn't made its marker list yet** (critical) / **Plex's marker list is ready**. Plex only serves markers
+  attached to a database row it made itself, and this app never creates that row. Turn on Plex's own intro detection
+  for one library, play a file, then check again. You can turn Plex's detection back off afterwards.
+- **Plex's library database isn't on this machine** (critical) / **…is on this machine**. Markers are written into
+  Plex's database, which is only safe from the machine the file is on. Run this app on the Plex machine, or run the
+  [Plex marker agent](../guides.md#plex-on-another-machine-the-plex-marker-agent) next to Plex. With an agent
+  switched on the row reads **The helper isn't on the machine with Plex's database** and means the agent's
+  container: mount Plex's config folder into it from one of that machine's own disks.
+- **The Plex marker agent** (critical), shown only when an agent is switched on for this server. Setup Health calls
+  it "the Plex marker helper". **…is connected**, or one of: **isn't answering** (markers wait, nothing is lost),
+  **refused this app's key** (set the same shared key on both sides), **and this app are different versions** (the
+  Intro & Credits tab says which to update), **is beside a different Plex** (check the address: markers would have
+  gone into the wrong database). While it is red, no marker reaches this server.
+- **Plex's own detection can replace your markers** (recommended). When Plex analyses a file again it replaces the
+  markers on it with its own, ours included. The next Intro & Credits run puts ours back, but the file shows Plex's
+  times until then. Plex detects in a library only when both of its settings are on: the server's *Generate intro
+  video markers* / *Generate credits video markers* (Settings → Library) and the library's own *Enable intro
+  detection* / *Enable credits detection* (Edit library → Advanced; only TV libraries have the intro one). The row
+  lists each library Intro & Credits goes to where both are on, and what Plex detects there, for example
+  **TV Shows · intro, credits** and **Movies · credits**. **Turn off** switches off that library's own setting for the
+  types listed, after a confirmation. Plex's server setting and your other libraries stay as they are.
+  - **Plex's own detection is off** / **…is off in your Intro & Credits libraries**: nothing to do.
+  - **Keeping Plex's own markers: its detection can stay on**: the server is set to "Keep Plex's" under "When Plex
+    has its own markers", so Plex's detection is what you asked for.
+  - If a library's own setting can't be read (an older Plex, or Plex didn't answer), the row falls back to the server
+    setting alone, shows **unknown**, and has no buttons: turn the settings off in Plex yourself, or choose "Keep
+    Plex's".
+
+### Jellyfin and Emby
+
+- **Media Preview Bridge plugin** (Jellyfin) and **Media Preview Bridge for Emby plugin** (Emby), critical. Neither
+  server has an API for markers, so the plugin is the only way they reach it. Previews are not affected. The row
+  offers **Install** where the app can do it; on an Emby whose plugin catalogue doesn't list the plugin (or whose
+  catalogue couldn't be read) it says to install it by hand and the Intro & Credits tab links the guide. Emby and
+  Jellyfin restart once.
+- **The plugin is too old for intro and credits markers** (recommended). The installed build works for previews but
+  doesn't answer the markers feature, so markers wait. Update the plugin; nothing already published is lost.
 
 ---
 

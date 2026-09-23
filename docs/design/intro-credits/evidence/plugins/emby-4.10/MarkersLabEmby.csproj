@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>netstandard2.0</TargetFramework><AssemblyVersion>1.0.0.1</AssemblyVersion><LangVersion>latest</LangVersion></PropertyGroup>
+  <ItemGroup>
+    <Reference Include="MediaBrowser.Model"><HintPath>embylibs\MediaBrowser.Model.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="MediaBrowser.Common"><HintPath>embylibs\MediaBrowser.Common.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="MediaBrowser.Controller"><HintPath>embylibs\MediaBrowser.Controller.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

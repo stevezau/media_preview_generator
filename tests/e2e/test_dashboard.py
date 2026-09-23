@@ -10,10 +10,13 @@ Coverage:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from playwright.sync_api import Page, expect
 
 from ._mocks import (
+    _fulfill_json,
     capture_settings_save,
     mock_dashboard_defaults,
     mock_media_servers_status,
@@ -116,3 +119,60 @@ class TestDashboardVersion:
         badge = authed_page.locator("#dashboardUpdateBadge")
         expect(badge).to_be_visible(timeout=3000)
         expect(badge).to_contain_text("Update available")
+
+
+@pytest.mark.e2e
+class TestActiveJobWaitingToRetry:
+    def test_preview_job_waiting_to_retry_shows_its_attempt_and_countdown(
+        self, authed_page: Page, app_url: str
+    ) -> None:
+        """Regression: the retry-waiting card read undefined retryAttempt/maxRetries, so the render threw and the
+        Active Jobs card never appeared."""
+        mock_dashboard_defaults(authed_page)
+        eta = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+        job = {
+            "id": "abcdef01-0000-4000-8000-000000000001",
+            "status": "running",
+            "created_at": "2026-09-14T01:00:00+00:00",
+            "started_at": "2026-09-14T01:00:01+00:00",
+            "completed_at": None,
+            "library_name": "Retry: Show S01E01.mkv",
+            "server_id": "jf-1",
+            "server_name": "Home Jellyfin",
+            "server_type": "jellyfin",
+            "publishers": [],
+            "progress": {
+                "percent": 0.0,
+                "current_item": "",
+                "total_items": 1,
+                "processed_items": 0,
+                "workers": [],
+                "outcome": None,
+                "retry_eta": eta,
+                "retry_wait_total": 300,
+            },
+            "error": None,
+            "config": {"is_retry_chain": True, "retry_attempt": 2, "max_retries": 5},
+            "paused": False,
+            "priority": 2,
+            "parent_schedule_id": "",
+            "kind": "previews",
+        }
+        authed_page.route(
+            "**/api/jobs?**", lambda r: _fulfill_json(r, {"jobs": [job], "total": 1, "page": 1, "pages": 1})
+        )
+        authed_page.goto(f"{app_url}/")
+        authed_page.wait_for_load_state("domcontentloaded")
+
+        card = authed_page.locator(f"#active-job-{job['id']}")
+        expect(card).to_be_visible(timeout=5000)
+        expect(card).to_contain_text("Waiting to retry")
+        expect(card).to_contain_text("Next attempt in 5 min")
+        expect(card).to_contain_text("Attempt 2 of 5")
+        expect(card.locator(".job-kind-badge")).to_have_text("Previews")
+        expect(authed_page.locator(f"#job-row-{job['id']}")).to_contain_text("Retry starting in 5 min")
+
+        # The queue's first text column covers scans, webhooks, and retry
+        # chains alike — "Job" describes it, not "Library".
+        expect(authed_page.locator(".jobs-table thead th:nth-child(2)")).to_have_text("Job")
+        expect(card).to_contain_text("Job:")

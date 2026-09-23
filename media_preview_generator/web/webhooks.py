@@ -12,13 +12,14 @@ import re
 import secrets
 import threading
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request
 from loguru import logger
 
+from ..processing.retry_queue import retry_policy
 from .auth import api_token_required, validate_token
 from .jobs import get_job_manager, incoming_job_priority
 from .settings_manager import get_settings_manager
@@ -36,6 +37,14 @@ _pending_lock = threading.Lock()
 # metadata refreshes and analyzer reruns.
 _recent_dispatches: dict[tuple[str, str], float] = {}
 _RECENT_DISPATCH_TTL_SECONDS = 600
+# Files Sonarr's per-file import events reported, keyed (source, server_id, downloadId, path), so its "Import
+# Complete" event for the same download doesn't queue them again. Kept for hours: a slow season pack's first files
+# are reported long before the event, well past _RECENT_DISPATCH_TTL_SECONDS.
+_import_file_events: dict[tuple[str, str, str, str], float] = {}
+_IMPORT_FILE_EVENT_TTL_SECONDS = 6 * 3600
+# Longest a batch waits, counted from its first webhook. Each webhook restarts the delay, so without a cap a steady
+# stream of imports held its batch until the stream stopped (342 files waited 55 minutes in job 7d24a00b).
+_WEBHOOK_BATCH_MAX_WAIT_SECONDS = 600
 
 
 def reset_webhook_debounce() -> None:
@@ -79,6 +88,7 @@ def reset_webhook_debounce() -> None:
         _pending_timers.clear()
         _pending_batches.clear()
         _recent_dispatches.clear()
+        _import_file_events.clear()
 
 
 # In-memory log of received webhook events, persisted to disk on each write.
@@ -215,6 +225,9 @@ def _authenticate_webhook(f):
         )
         return jsonify({"error": "Authentication required"}), 401
 
+    # Read by create_app's CSRF setup: a receiver checks its own secret and never reads the browser session, so it
+    # needs no CSRF token (Radarr, Sonarr and Plex couldn't send one).
+    decorated_function.is_webhook_receiver = True
     return decorated_function
 
 
@@ -244,7 +257,7 @@ def _add_history_entry(
     query param on inbound webhook URLs).
     """
     entry: dict[str, object] = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "source": source,
         "event_type": event_type,
         "title": title,
@@ -354,7 +367,7 @@ def _check_and_record_dedup(source: str, server_id: str | None, canonical_path: 
 
     Caller must hold ``_pending_lock``.
     """
-    now_ts = datetime.now(timezone.utc).timestamp()
+    now_ts = datetime.now(UTC).timestamp()
     expired = [k for k, ts in _recent_dispatches.items() if now_ts - ts >= _RECENT_DISPATCH_TTL_SECONDS]
     for k in expired:
         _recent_dispatches.pop(k, None)
@@ -364,6 +377,51 @@ def _check_and_record_dedup(source: str, server_id: str | None, canonical_path: 
         return int(now_ts - last)
     _recent_dispatches[dedup_key] = now_ts
     return None
+
+
+def _was_recently_dispatched(source: str, server_id: str | None, canonical_path: str) -> bool:
+    """Whether ``_check_and_record_dedup`` saw this ``(source, server_id, path)`` within the TTL, without recording it.
+
+    Caller must hold ``_pending_lock``.
+    """
+    last = _recent_dispatches.get((source, server_id or "", canonical_path))
+    return last is not None and datetime.now(UTC).timestamp() - last < _RECENT_DISPATCH_TTL_SECONDS
+
+
+def _remember_import_file_event(source: str, server_id: str | None, download_id: str, path: str) -> None:
+    """Record that a per-file import event of this download reported ``path`` (already normalised).
+
+    Expired entries are evicted in the same pass. Caller must hold ``_pending_lock``.
+    """
+    now_ts = datetime.now(UTC).timestamp()
+    expired = [k for k, ts in _import_file_events.items() if now_ts - ts >= _IMPORT_FILE_EVENT_TTL_SECONDS]
+    for k in expired:
+        _import_file_events.pop(k, None)
+    _import_file_events[(source, server_id or "", download_id, path)] = now_ts
+
+
+def _reported_by_import_file_event(source: str, server_id: str | None, download_id: str, path: str) -> bool:
+    """Whether a per-file import event of this download reported ``path`` within the last few hours.
+
+    Caller must hold ``_pending_lock``.
+    """
+    seen = _import_file_events.get((source, server_id or "", download_id, path))
+    return seen is not None and datetime.now(UTC).timestamp() - seen < _IMPORT_FILE_EVENT_TTL_SECONDS
+
+
+def _queue_intro_credits_follow_up(
+    preview_job_id: str, paths: list[str], source: str, *, item_id_hints: dict[str, dict[str, str]] | None = None
+) -> None:
+    """Queue the Intro & Credits job for a webhook's files after its preview job has started.
+
+    Never raises: a markers problem must not cost the batch its previews or its history entry.
+    """
+    try:
+        from ..markers.triggers import submit_webhook_follow_up
+
+        submit_webhook_follow_up(preview_job_id=preview_job_id, paths=paths, source=source, item_id_hints=item_id_hints)
+    except Exception:
+        logger.exception("Could not queue the Intro & Credits job that follows webhook job {}", preview_job_id)
 
 
 def create_vendor_webhook_job(
@@ -449,11 +507,7 @@ def create_vendor_webhook_job(
     )
 
     settings = get_settings_manager()
-    # Global retry policy — key name is historical (these used to live on
-    # the webhook settings panel), but the values now apply to every job
-    # type. UI surface: Settings → Processing → Job Execution.
-    retry_count = max(0, min(10, int(settings.get("webhook_retry_count", 3))))
-    retry_delay = max(10, min(300, int(settings.get("webhook_retry_delay", 30))))
+    retry_count, retry_delay = retry_policy(settings)
 
     overrides: dict[str, object] = {
         "sort_by": "newest",
@@ -483,6 +537,9 @@ def create_vendor_webhook_job(
     from .routes import _start_job_async
 
     _start_job_async(job.id, overrides)
+    _queue_intro_credits_follow_up(
+        job.id, [canonical_path], safe_source, item_id_hints=overrides.get("webhook_item_id_hints") or None
+    )
     _add_history_entry(
         safe_source,
         "Webhook",
@@ -608,21 +665,18 @@ def _extract_sonarr_file_path(payload: dict) -> str:
     return file_path
 
 
-def _extract_sonarr_deleted_paths(payload: dict) -> list[str]:
-    """Extract paths of episode files Sonarr replaced during a Download upgrade.
+def _sonarr_file_list_paths(payload: dict, key: str) -> list[str]:
+    """Paths of the episode files a Sonarr payload lists under ``key``.
 
-    Sonarr's ``Download`` event carries the same ``deletedFiles`` array
-    shape as Radarr — each entry has ``path`` or ``relativePath``
-    (combined with ``series.path``). Returns unique normalised paths in
-    stable order; malformed entries are silently skipped (see
-    :func:`_extract_radarr_deleted_paths` for the rationale).
+    Each entry has ``path`` or ``relativePath`` (combined with ``series.path``). Returns unique normalised paths in
+    stable order; malformed entries are silently skipped (see :func:`_extract_radarr_deleted_paths` for the rationale).
     """
     paths: list[str] = []
     series_path = str(_as_dict(payload.get("series")).get("path", "")).strip()
 
-    raw_deleted = payload.get("deletedFiles") or []
-    if isinstance(raw_deleted, list):
-        for entry in raw_deleted:
+    raw_files = payload.get(key) or []
+    if isinstance(raw_files, list):
+        for entry in raw_files:
             if not isinstance(entry, dict):
                 continue
             absolute = str(entry.get("path") or "").strip()
@@ -633,6 +687,29 @@ def _extract_sonarr_deleted_paths(payload: dict) -> list[str]:
                 paths.append(absolute)
 
     return _dedupe_normalised_paths(paths)
+
+
+def _extract_sonarr_deleted_paths(payload: dict) -> list[str]:
+    """Extract paths of episode files Sonarr replaced during a Download upgrade.
+
+    Sonarr's ``Download`` event carries the same ``deletedFiles`` array
+    shape as Radarr — each entry has ``path`` or ``relativePath``
+    (combined with ``series.path``).
+    """
+    return _sonarr_file_list_paths(payload, "deletedFiles")
+
+
+def _extract_sonarr_import_complete_paths(payload: dict) -> list[str]:
+    """Extract the file paths of Sonarr's "Import Complete" event.
+
+    Sonarr v4 sends it once per import, right after the per-file ``Download`` events (one per episode file). It
+    reuses ``eventType: "Download"`` but has no ``episodeFile``: every imported file is listed under
+    ``episodeFiles[]`` instead, in the same shape as ``deletedFiles``.
+
+    Returns:
+        Unique normalised paths; empty when the payload has no usable ``episodeFiles``.
+    """
+    return _sonarr_file_list_paths(payload, "episodeFiles")
 
 
 _EP_CODE_RE = re.compile(r"\b[Ss](\d{1,3})[Ee](\d{1,3})\b")
@@ -773,13 +850,16 @@ def _schedule_webhook_job(
     server_id: str | None = None,
     *,
     deleted_paths: list[str] | None = None,
+    early_scan: bool = True,
 ) -> bool:
     """Schedule a debounced single-file webhook job and batch paths per (source, server_id).
 
     ``deleted_paths`` carries the Radarr/Sonarr ``deletedFiles[]`` array
     when this webhook is an upgrade event — they are merged into the
     batch and forwarded to ``process_canonical_path`` so the orphan
-    cleanup / deleted-path nudge can fire.
+    cleanup / deleted-path nudge can fire. ``early_scan=False`` leaves the
+    early scan-nudge to the caller (Sonarr's Import Complete sends one per
+    folder, not one per file).
     """
     safe_source = str(source or "unknown")
     safe_title = str(title or "Unknown")
@@ -790,7 +870,7 @@ def _schedule_webhook_job(
             "Other webhooks from this source are still being processed. "
             "If this keeps happening, check the sending tool's webhook template includes the file path "
             "(Radarr: 'movieFile.path' or 'movie.folderPath'+'movieFile.relativePath'; "
-            "Sonarr: 'episodeFile.path' or 'series.path'+'episodeFile.relativePath').",
+            "Sonarr: 'episodeFile.path', 'series.path'+'episodeFile.relativePath', or 'episodeFiles[].path').",
             safe_source,
             safe_title,
         )
@@ -844,8 +924,12 @@ def _schedule_webhook_job(
             # banner instead. Now the timestamp travels with the Job,
             # the row renders the countdown natively, and the banner
             # becomes redundant (issue: webhook countdown UX, May 2026).
-            fire_at_ts = datetime.now(timezone.utc).timestamp() + delay
-            fire_at_iso = datetime.fromtimestamp(fire_at_ts, tz=timezone.utc).isoformat()
+            now_ts = datetime.now(UTC).timestamp()
+            opened_at = now_ts if is_fresh_batch else float(batch.get("opened_at", now_ts))
+            elapsed = now_ts - opened_at
+            wait_s = min(delay, max(0.0, _WEBHOOK_BATCH_MAX_WAIT_SECONDS - elapsed))
+            fire_at_ts = now_ts + wait_s
+            fire_at_iso = datetime.fromtimestamp(fire_at_ts, tz=UTC).isoformat()
 
             if is_fresh_batch:
                 # Pull server-context resolution forward so the Job can be
@@ -892,6 +976,7 @@ def _schedule_webhook_job(
                     "server_id": server_id,
                     "deleted_paths": set(),
                     "job_id": job.id,
+                    "opened_at": opened_at,
                 }
                 _pending_batches[debounce_key] = batch
 
@@ -944,10 +1029,17 @@ def _schedule_webhook_job(
                     batch["job_id"],
                     f"INFO - Webhook merged into batch: {safe_title} (batch now has {path_count} path(s))",
                 )
+                if wait_s < delay:
+                    job_manager.add_log(
+                        batch["job_id"],
+                        f"INFO - Batch runs in {round(wait_s)}s: a batch waits at most "
+                        f"{_WEBHOOK_BATCH_MAX_WAIT_SECONDS // 60} minutes from its first webhook; "
+                        "webhooks after that start a new batch",
+                    )
 
             batch["fire_at"] = fire_at_ts
 
-            timer = threading.Timer(delay, _execute_webhook_job, args=[debounce_key])
+            timer = threading.Timer(wait_s, _execute_webhook_job, args=[debounce_key])
             timer.daemon = True
             _pending_timers[debounce_key] = timer
             timer.start()
@@ -965,11 +1057,15 @@ def _schedule_webhook_job(
     # Per-path: every webhook that joins a batch gets its own scan-nudge
     # for *just its path* (idempotent and cheap; late-joining files in a
     # season-pack get their own head start).
-    if early_scan_job_id is not None:
+    if early_scan and early_scan_job_id is not None:
         _kick_early_scan(normalized_path, server_id, early_scan_job_id)
 
     logger.info(
-        "Webhook: {} imported '{}' — scheduling job with {} path(s) in {}s", safe_source, safe_title, path_count, delay
+        "Webhook: {} imported '{}' — scheduling job with {} path(s) in {}s",
+        safe_source,
+        safe_title,
+        path_count,
+        round(wait_s),
     )
     return True
 
@@ -1142,10 +1238,7 @@ def _execute_webhook_job(debounce_key: str) -> None:
             raw_libs = plex_view.get("selected_libraries") or settings.get("selected_libraries", [])
             if isinstance(raw_libs, list):
                 selected_libraries = [str(name).strip() for name in raw_libs if str(name).strip()]
-        # Global retry policy — key name is historical; see settings.html
-        # "Job Execution" sub-section. Values apply to every job type.
-        retry_count = max(0, min(10, int(settings.get("webhook_retry_count", 3))))
-        retry_delay = max(10, min(300, int(settings.get("webhook_retry_delay", 30))))
+        retry_count, retry_delay = retry_policy(settings)
 
         # NOTE: dedup entries were already written by
         # ``_check_and_record_dedup`` inside ``_schedule_webhook_job`` at
@@ -1178,6 +1271,7 @@ def _execute_webhook_job(debounce_key: str) -> None:
         if webhook_deleted_paths:
             overrides["webhook_deleted_paths"] = webhook_deleted_paths
         _start_job_async(job.id, overrides)
+        _queue_intro_credits_follow_up(job.id, list(webhook_paths), source)
         _add_history_entry(
             source,
             "Download",
@@ -1329,6 +1423,18 @@ def _handle_sonarr_compatible_webhook(source: str):
     deleted_paths = _extract_sonarr_deleted_paths(data)
 
     server_id = (request.args.get("server_id") or "").strip() or None
+    download_id = str(data.get("downloadId") or "").strip()
+    if not episode_file_path:
+        import_complete_paths = _extract_sonarr_import_complete_paths(data)
+        if import_complete_paths:
+            return _handle_sonarr_import_complete(
+                source, display_title, import_complete_paths, server_id, download_id=download_id
+            )
+    elif download_id:
+        with _pending_lock:
+            _remember_import_file_event(
+                source, server_id, download_id, _dedupe_normalised_paths([episode_file_path])[0]
+            )
     kwargs = {"server_id": server_id} if server_id else {}
     if deleted_paths:
         kwargs["deleted_paths"] = deleted_paths
@@ -1355,6 +1461,61 @@ def _handle_sonarr_compatible_webhook(source: str):
 
     return (
         jsonify({"success": True, "message": f"Processing queued for '{display_title}'"}),
+        202,
+    )
+
+
+def _handle_sonarr_import_complete(
+    source: str, display_title: str, paths: list[str], server_id: str | None, *, download_id: str = ""
+):
+    """Queue the files of a Sonarr "Import Complete" event that no per-file event queued already.
+
+    With "On File Import" on too, Sonarr has sent one event per file and every file is queued, so this summary is
+    dropped quietly: a file counts as queued when a per-file event of the same download reported it in the last few
+    hours (a slow season pack reports its first files long before the summary), or when it was dispatched within
+    the dedup window. With only "On Import Complete" on, its files are queued here, through the same
+    ``_schedule_webhook_job`` normalisation and dedup as a per-file event, with one early scan-nudge per folder.
+
+    Args:
+        source: ``"sonarr"`` or ``"sportarr"``.
+        display_title: The event's title (series plus every episode code).
+        paths: The event's ``episodeFiles[]`` paths (``_extract_sonarr_import_complete_paths``).
+        server_id: The ``?server_id=`` the webhook URL carries, if any.
+        download_id: The event's ``downloadId`` ("" when Sonarr sent none, e.g. a manual import).
+
+    Returns:
+        Flask response tuple.
+    """
+    with _pending_lock:
+        fresh = [
+            path
+            for path in paths
+            if not _was_recently_dispatched(source, server_id, path)
+            and not (download_id and _reported_by_import_file_event(source, server_id, download_id, path))
+        ]
+    kwargs = {"server_id": server_id} if server_id else {}
+    queued = [path for path in fresh if _schedule_webhook_job(source, display_title, path, early_scan=False, **kwargs)]
+    if not queued:
+        logger.debug(
+            "Webhook from {}: import-complete event for {!r} ignored — its {} file(s) were already queued by their "
+            "own import events",
+            source,
+            display_title,
+            len(paths),
+        )
+        return jsonify({"success": True, "message": f"'{display_title}': every file was already queued"}), 200
+
+    with _pending_lock:
+        batch = _pending_batches.get(_debounce_key(source, server_id))
+        job_id = batch.get("job_id") if batch else None
+    if job_id:
+        # A server scans a folder at a time: one nudge per season folder, not one per episode.
+        first_per_folder = {os.path.dirname(path): path for path in reversed(queued)}
+        for path in sorted(first_per_folder.values()):
+            _kick_early_scan(path, server_id, job_id)
+    _add_history_entry(source, "Download", display_title, "queued")
+    return (
+        jsonify({"success": True, "message": f"Processing queued for '{display_title}' ({len(queued)} file(s))"}),
         202,
     )
 
@@ -2009,7 +2170,7 @@ def clear_webhook_history():
 @api_token_required
 def get_pending_webhooks():
     """Return currently pending (debouncing) webhook batches with countdown info."""
-    now = datetime.now(timezone.utc).timestamp()
+    now = datetime.now(UTC).timestamp()
     pending = []
     with _pending_lock:
         for key, batch in _pending_batches.items():
@@ -2022,7 +2183,7 @@ def get_pending_webhooks():
                     "source": batch.get("source", key),
                     "file_count": len(batch.get("file_paths", set())),
                     "first_title": titles[0] if titles else "",
-                    "fire_at": datetime.fromtimestamp(fire_at, tz=timezone.utc).isoformat() if fire_at else None,
+                    "fire_at": datetime.fromtimestamp(fire_at, tz=UTC).isoformat() if fire_at else None,
                     "remaining_seconds": round(remaining, 1),
                 }
             )

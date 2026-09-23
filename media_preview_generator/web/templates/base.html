@@ -32,8 +32,9 @@
     <!-- Custom CSS -->
     <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
 
-    <!-- CSRF Token for AJAX -->
+    <!-- CSRF token: csrf_fetch.js adds it to every state-changing fetch to this app -->
     <meta name="csrf-token" content="{{ csrf_token() }}">
+    <script src="{{ url_for('static', filename='js/csrf_fetch.js') }}"></script>
 
     {% block head %}{% endblock %}
 </head>
@@ -150,8 +151,15 @@
                                 </a>
                             </li>
                             <li>
-                                <a class="dropdown-item {% if request.endpoint == 'main.bif_viewer' %}active{% endif %}" href="{{ url_for('main.bif_viewer') }}">
+                                <a class="dropdown-item {% if request.endpoint == 'main.bif_viewer' and request.args.get('tab') != 'markers' %}active{% endif %}" href="{{ url_for('main.bif_viewer') }}">
                                     <i class="bi bi-film me-2"></i>Preview Inspector
+                                </a>
+                            </li>
+                            <li>
+                                {# Same page as the Preview Inspector, opened on its Intro & Credits tab: the editor and
+                                   the Whole-season view live there. A separate entry so it can be found. #}
+                                <a class="dropdown-item {% if request.endpoint == 'main.bif_viewer' and request.args.get('tab') == 'markers' %}active{% endif %}" href="{{ url_for('main.bif_viewer', tab='markers') }}">
+                                    <i class="bi bi-skip-forward me-2"></i>Intro &amp; Credits
                                 </a>
                             </li>
                             <li><hr class="dropdown-divider"></li>
@@ -304,9 +312,13 @@
                         </button>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link" href="{{ url_for('main.logout') }}">
-                            <i class="bi bi-box-arrow-right me-1"></i>Logout
-                        </a>
+                        {# A POST with the page's token: a plain link would let any page sign the user out. #}
+                        <form method="post" action="{{ url_for('main.logout') }}" class="m-0">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button type="submit" class="nav-link w-100 text-start" id="navLogoutBtn">
+                                <i class="bi bi-box-arrow-right me-1"></i>Logout
+                            </button>
+                        </form>
                     </li>
                 </ul>
                 </div>{# /.offcanvas-body #}
@@ -430,6 +442,9 @@
     </div>
 
     <!-- Bootstrap 5 JS Bundle -->
+    {# Upgrading Bootstrap: markers_server_tab.js confirmPlexMarkers() pauses the Edit dialog's private
+       Modal._focustrap while the Plex confirmation is stacked on top; re-check it
+       (tests/e2e/test_intro_credits_server_tab.py::test_escape_closes_only_the_confirmation). #}
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js" integrity="sha384-C6RzsynM9kWDrMNeT87bh95OGNyZPhcTNXj1NW7RuBCsyN/o0jlpcV8Qyq46cDfL" crossorigin="anonymous"></script>
     <!-- Socket.IO -->
     <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.2/dist/socket.io.min.js" integrity="sha256-g99KvH7slB8dKa4lToC6wLuC05j74ujuTqKn78jnBPE=" crossorigin="anonymous"></script>

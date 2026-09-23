@@ -1,9 +1,8 @@
 # =============================================================================
-# Stage 1: Builder — compile native extensions and build wheels
+# Build stages: `toolchain` (compiler + Python, shared), `model` (the credit
+# text detection model) and `builder` (dependency and app wheels)
 # =============================================================================
-FROM linuxserver/ffmpeg:8.1.2-cli-ls73 AS builder
-
-ARG SETUPTOOLS_SCM_PRETEND_VERSION=""
+FROM linuxserver/ffmpeg:8.1.2-cli-ls73 AS toolchain
 
 # Build-time only: compiler toolchain + Python + git (for setuptools-scm)
 RUN apt-get update && \
@@ -11,8 +10,18 @@ RUN apt-get update && \
     gcc musl-dev python3 python3-pip git && \
     rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
+# Credit text detection model (Intro & Credits, spec §5.4): PP-OCRv4 detection from the pinned rapidocr_onnxruntime
+# 1.4.4 wheel, wheel and model both verified by sha256 (scripts/fetch_textdet_model.py). A stage of its own, so an
+# edit to the fetch script never invalidates the dependency wheel cache (Layer A), and BuildKit fetches it while the
+# wheels build.
+FROM toolchain AS model
+COPY scripts/fetch_textdet_model.py /tmp/fetch_textdet_model.py
+RUN python3 /tmp/fetch_textdet_model.py --out /models
+
+FROM toolchain AS builder
+WORKDIR /build
 
 # ---------------------------------------------------------------------------
 # Layer A: pre-cache DEPENDENCY wheels via a stub package.
@@ -41,8 +50,13 @@ RUN mkdir -p media_preview_generator && \
 # --no-deps tells pip to skip dep resolution (already pre-built).
 # Source-only changes invalidate just this layer (~5-10s of work),
 # keeping iteration speed high.
+#
+# The version ARG is declared just before its only use: every RUN after an ARG
+# sees it as an environment variable, and CI passes a new version on every
+# build, so declared any earlier it would invalidate Layer A's cache each time.
 # ---------------------------------------------------------------------------
 COPY media_preview_generator/ ./media_preview_generator/
+ARG SETUPTOOLS_SCM_PRETEND_VERSION=""
 RUN if [ -n "$SETUPTOOLS_SCM_PRETEND_VERSION" ]; then \
       SETUPTOOLS_SCM_PRETEND_VERSION_FOR_MEDIA_PREVIEW_GENERATOR=$SETUPTOOLS_SCM_PRETEND_VERSION \
       pip3 wheel --wheel-dir=/wheels --no-cache-dir --no-deps .; \
@@ -51,7 +65,7 @@ RUN if [ -n "$SETUPTOOLS_SCM_PRETEND_VERSION" ]; then \
     fi
 
 # =============================================================================
-# Stage 2: Runtime — lean production image (no compiler toolchain)
+# Runtime stage — lean production image (no compiler toolchain)
 # =============================================================================
 FROM linuxserver/ffmpeg:8.1.2-cli-ls73
 
@@ -139,6 +153,9 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN pip3 install --no-cache-dir --no-index /tmp/wheels/*.whl \
     --ignore-installed blinker && \
     rm -rf /tmp/wheels
+
+# Loaded only by the credit text detection helper process (markers/credits/textdet_helper.py).
+COPY --from=model /models/ch_PP-OCRv4_det_infer.onnx /app/models/ch_PP-OCRv4_det_infer.onnx
 
 # Replace init-adduser with clean version (no branding)
 COPY docker-init-user.sh /etc/s6-overlay/s6-rc.d/init-adduser/run

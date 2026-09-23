@@ -1,0 +1,12 @@
+scan with old build:
+  outcome: markers_published | intro 0:00–4:34 (chapters); credits 21:40–23:40 (chapters) | rows: [('jf-1', 'markers_written', '2 marker(s)')]
+   credits: decided (chapters)
+   intro: decided (chapters)
+   PUBLISHED-SET credits 1300.0-1420.0 by ('chapters',)
+   PUBLISHED-SET intro 0.0-274.7 by ('chapters',)
+upgrade, normal run (ffprobe called 1x):
+  outcome: markers_published | intro 4:34–6:03 (chapters); credits 21:40–23:40 (chapters) | rows: [('jf-1', 'markers_written', '2 marker(s)')]
+   credits: decided (chapters)
+   intro: decided (chapters)
+   PUBLISHED-SET credits 1300.0-1420.0 by ('chapters',)
+   PUBLISHED-SET intro 274.7-363.9 by ('chapters',)

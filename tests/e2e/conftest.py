@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import http.cookiejar
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -235,11 +236,22 @@ def auth_token() -> str:
     return "e2e-test-token"
 
 
+def login_form_csrf_token(opener: urllib.request.OpenerDirector, target_url: str) -> str:
+    """GET /login through ``opener`` (which keeps the session cookie) and return the form's CSRF token."""
+    with opener.open(f"{target_url}/login", timeout=10) as resp:  # noqa: S310 (test-only localhost)
+        html = resp.read().decode()
+    match = re.search(r'name="csrf_token" value="([^"]+)"', html)
+    if not match:
+        raise RuntimeError("The login page has no csrf_token field")
+    return match.group(1)
+
+
 def _capture_session_cookie(target_url: str) -> dict:
-    """POST a real login + return the Flask session cookie as a Playwright dict."""
+    """Sign in through the real login form + return the Flask session cookie as a Playwright dict."""
     cookie_jar = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
-    data = urllib.parse.urlencode({"token": "e2e-test-token"}).encode()
+    csrf_token = login_form_csrf_token(opener, target_url)
+    data = urllib.parse.urlencode({"token": "e2e-test-token", "csrf_token": csrf_token}).encode()
     parsed = urlparse(target_url)
     req = urllib.request.Request(
         f"{target_url}/login",

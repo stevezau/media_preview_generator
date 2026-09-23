@@ -5,12 +5,70 @@ Provides common test fixtures including mock configs, Plex responses,
 temporary directories, and helper functions for mocking FFmpeg and Plex.
 """
 
+import atexit
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# tmp_path and pytest's own base temp dir default to /tmp. On this host /tmp is
+# ext4 on a loop device (~11.7ms per fsync), and the suite's sqlite-heavy
+# fixtures fsync a few thousand times, so /tmp adds minutes of pure disk-sync
+# wait. /dev/shm is tmpfs (RAM, no fsync cost). Redirect pytest's temp root
+# there when it looks safe: a run writes ~1.3GB, so require some headroom, and
+# never override an explicit PYTEST_DEBUG_TEMPROOT (e.g. CI or low-/dev/shm
+# hosts opting out). This must run before any tmp_path fixture is created.
+# ---------------------------------------------------------------------------
+if "PYTEST_DEBUG_TEMPROOT" not in os.environ and os.path.isdir("/dev/shm"):
+    _shm_usage = shutil.disk_usage("/dev/shm")
+    if _shm_usage.free >= 4 * 1024**3:
+        os.environ["PYTEST_DEBUG_TEMPROOT"] = "/dev/shm"
+
+# ---------------------------------------------------------------------------
+# Every default config location (webhook history, jobs.db, markers.db, ffmpeg
+# failure logs, auth.json) falls back to /config when CONFIG_DIR is unset, and
+# on a Docker host /config can hold other services' live configs. Point it at
+# a throwaway folder per test process, before anything imports the package:
+# auth.py reads CONFIG_DIR at import time. Tests that need their own folder
+# still set CONFIG_DIR themselves.
+# ---------------------------------------------------------------------------
+_TEST_CONFIG_DIR = tempfile.mkdtemp(prefix="mpg-test-config-")
+os.environ["CONFIG_DIR"] = _TEST_CONFIG_DIR
+atexit.register(shutil.rmtree, _TEST_CONFIG_DIR, ignore_errors=True)
+
+
+def _grouped_by_folder(args: list[str], invocation_dir: Path) -> list[str]:
+    """The command line's test paths with each folder's paths together, folders and paths in first-seen order.
+
+    pytest 9 binds a conftest's fixtures to the first collector of its folder. A folder named twice with another
+    folder's path between (``tests/markers/a.py tests/test_jobs.py tests/markers/b.py``) gets a second collector, and
+    the second group's tests lose that conftest's fixtures (``client``) and autouse fixtures.
+
+    Args:
+        args: Paths or node ids (``path::Class::test``), relative to ``invocation_dir`` or absolute.
+        invocation_dir: The folder pytest ran in.
+
+    Returns:
+        The same args, regrouped; a path's own node ids keep their order.
+    """
+    first_seen: dict[Path, int] = {}
+    chains = []
+    for arg in args:
+        path = Path(os.path.normpath(invocation_dir / arg.split("::", 1)[0]))
+        chain = [path, *path.parents][::-1]
+        chains.append([first_seen.setdefault(part, len(first_seen)) for part in chain])
+    order = sorted(range(len(args)), key=lambda i: chains[i])
+    return [args[i] for i in order]
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Collect each folder of the command line's test paths once (see ``_grouped_by_folder``)."""
+    config.args[:] = _grouped_by_folder(list(config.args), config.invocation_params.dir)
+
 
 # ---------------------------------------------------------------------------
 # Session-wide: swap APScheduler's SQLAlchemyJobStore for MemoryJobStore.
@@ -484,6 +542,35 @@ def _reset_shared_dispatcher():
 
 
 @pytest.fixture(autouse=True)
+def _close_job_managers(monkeypatch):
+    """Close every JobManager a test creates, directly or through ``create_app`` / ``get_job_manager``.
+
+    Each JobManager holds jobs.db open (3 fds with its WAL and shared-memory files) and an hourly retention timer
+    whose thread holds the manager, so a test that just drops one leaks both for the rest of the xdist worker's
+    run. A few hundred of those pushed a worker past fd 1024, where ``select.select`` raises ValueError.
+    """
+    try:
+        from media_preview_generator.web import jobs as jobs_mod
+    except ImportError:
+        yield
+        return
+    created = []
+    real_init = jobs_mod.JobManager.__init__
+
+    def recording_init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        created.append(self)
+
+    monkeypatch.setattr(jobs_mod.JobManager, "__init__", recording_init)
+    yield
+    for manager in created:
+        manager.close()
+    with jobs_mod._job_lock:
+        if any(jobs_mod._job_manager is manager for manager in created):
+            jobs_mod._job_manager = None
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_real_world_calls(request, monkeypatch):
     """Stub out the network / hardware calls that ``run_job`` would
     otherwise make on a developer's laptop or on an unsandboxed CI runner.
@@ -594,6 +681,12 @@ def _sync_start_job_async(request, monkeypatch):
             return getattr(_real_threading, name)
 
     monkeypatch.setattr(jr_mod, "threading", _ThreadingShim(), raising=True)
+    try:
+        import media_preview_generator.markers.job_runner as markers_jr
+    except ImportError:
+        markers_jr = None
+    if markers_jr is not None:
+        monkeypatch.setattr(markers_jr, "threading", _ThreadingShim(), raising=True)
 
 
 # ---------------------------------------------------------------------------
@@ -718,6 +811,19 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+# vcrpy calls ``before_record_request(request)`` and ``before_record_response(response)``
+# as two separate hooks — ``Cassette.append`` invokes them back-to-back for the same
+# interaction, but ``before_record_response`` only ever receives the response, never the
+# request it answers. ``_scrub_response_body`` needs the request PATH to scope certain
+# carve-outs (e.g. only treat an ``Items`` array as MediaSegments-shaped when it actually
+# came from a ``/MediaSegments`` request, not any Emby/Jellyfin endpoint that happens to
+# return sparse dicts). Recording is synchronous and single-interaction-at-a-time within a
+# process, so stashing the path here and reading it in ``_scrub_response_body`` right after
+# is safe — by the time the next request is scrubbed, this response has already been handled.
+_last_recorded_request_path = ""
+_last_recorded_request_query = ""
+
+
 def _scrub_request_uri(request):
     """Replace the recorded URI's host/port/scheme with a fake one.
 
@@ -726,6 +832,11 @@ def _scrub_request_uri(request):
     - Plex direct cert hostnames (``172-16-10-240.262280e6da5f4e50adbc3bffffa82415.plex.direct``)
       — these encode the user's Plex ``machineIdentifier``.
     - Custom port numbers that hint at network topology.
+    - The recording user's Emby/Jellyfin id in per-user paths (``/Users/<id>/Items/...``,
+      from ``EMBY_USER_ID`` / ``JELLYFIN_USER_ID`` while recording): replaced with
+      ``FAKE_USER_ID``, so a test replays them with ``user_id="FAKE_USER_ID"``. vcrpy
+      also runs this hook on replay, where those variables aren't set: a test sending
+      any other id doesn't match.
 
     Replaces every recorded request URI with a generic ``http://fake-server``
     prefix, keeping the path + query (which IS the API contract we
@@ -734,8 +845,16 @@ def _scrub_request_uri(request):
     """
     from urllib.parse import urlparse, urlunparse
 
+    global _last_recorded_request_path, _last_recorded_request_query
     parsed = urlparse(request.uri)
-    fake = parsed._replace(scheme="http", netloc="fake-server")
+    _last_recorded_request_path = parsed.path
+    _last_recorded_request_query = parsed.query
+    path = parsed.path
+    for variable in ("EMBY_USER_ID", "JELLYFIN_USER_ID"):
+        user_id = os.environ.get(variable)
+        if user_id and user_id != "FAKE_USER_ID":
+            path = path.replace(f"/Users/{user_id}/", "/Users/FAKE_USER_ID/")
+    fake = parsed._replace(scheme="http", netloc="fake-server", path=path)
     request.uri = urlunparse(fake)
     return request
 
@@ -746,6 +865,7 @@ def _scrub_response_body(response):
     Cassettes commit to the repo, so the response body MUST NOT leak:
     - Plex ``machineIdentifier`` (server fingerprint)
     - Plex ``friendlyName`` (server name)
+    - Plex ``myPlexUsername`` (the recording account's real plex.tv email)
     - Emby/Jellyfin ``ServerId`` / ``ServerName``
     - Library titles / item titles / file paths from the user's actual
       library
@@ -794,9 +914,25 @@ def _scrub_response_body(response):
         (r'"friendlyName"\s*:\s*"[^"]+"', '"friendlyName":"FAKE_PLEX_NAME"'),
         (r'machineIdentifier="[^"]+"', 'machineIdentifier="FAKE_PLEX_MID"'),
         (r'friendlyName="[^"]+"', 'friendlyName="FAKE_PLEX_NAME"'),
+        # Plex's ``GET /`` root identity response (every ``plex.query``/``_connect()``
+        # call triggers this) carries the recording account's plex.tv email in
+        # ``myPlexUsername`` — real PII, not a server fingerprint. XML and JSON forms.
+        (r'"myPlexUsername"\s*:\s*"[^"]*"', '"myPlexUsername":"plex-user@example.invalid"'),
+        (r'myPlexUsername="[^"]*"', 'myPlexUsername="plex-user@example.invalid"'),
         # Emby / Jellyfin
         (r'"ServerId"\s*:\s*"[^"]+"', '"ServerId":"FAKE_SERVER_ID"'),
         (r'"ServerName"\s*:\s*"[^"]+"', '"ServerName":"FAKE_SERVER_NAME"'),
+        # Emby/Jellyfin's ``/System/Info`` response embeds real network
+        # topology: the host's WAN IP (``WanAddress``/``RemoteAddresses``),
+        # LAN IP (``LocalAddress``/``LocalAddresses``), and — via
+        # ``WakeOnLanInfo`` — the NIC's real MAC address. All of these
+        # identify the real recording server, same trust level as
+        # ``machineIdentifier``/``friendlyName`` above.
+        (r'"WanAddress"\s*:\s*"[^"]*"', '"WanAddress":"http://FAKE_WAN_IP:0"'),
+        (r'"RemoteAddresses"\s*:\s*\[[^\]]*\]', '"RemoteAddresses":["http://FAKE_WAN_IP:0"]'),
+        (r'"LocalAddress"\s*:\s*"[^"]*"', '"LocalAddress":"http://FAKE_LAN_IP:0"'),
+        (r'"LocalAddresses"\s*:\s*\[[^\]]*\]', '"LocalAddresses":["http://FAKE_LAN_IP:0"]'),
+        (r'"MacAddress"\s*:\s*"[^"]*"', '"MacAddress":"FAKE_MAC_ADDRESS"'),
     ]
     scrubbed = text
     for pattern, replacement in substitutions:
@@ -821,13 +957,69 @@ def _scrub_response_body(response):
     #
     # The recording workflow (``tests/integration/up.sh``) ensures
     # path 1 is the normal case; path 2 is the safety net.
-    _SYNTHETIC_PREFIXES = ("/em-media/", "/jf-media/", "/media/Movies/Test ")
+    #
+    # ``/media/synth-chapters/`` is the Intro & Credits lab's synth show
+    # (``docs/design/intro-credits/evidence/lab/synth_chapters.sh``) —
+    # generated fixtures, same trust level as the other prefixes.
+    _SYNTHETIC_PREFIXES = ("/em-media/", "/jf-media/", "/media/Movies/Test ", "/media/synth-chapters/")
 
-    def _all_synthetic(items):
+    # Jellyfin's core ``/MediaSegments`` items (``ItemId``/``Type``/``StartTicks``/
+    # ``EndTicks``, optionally ``Id``) carry no path, title, or other
+    # user-identifying field at all — the schema itself has nothing to
+    # leak, so these are safe to keep regardless of ``Path``. Without this,
+    # every MediaSegments response fails the ``Path``-prefix check above
+    # (it has no ``Path`` key) and gets collapsed to ``[]``, destroying the
+    # marker cassettes' test data even though nothing PII-bearing was ever
+    # in the body.
+    #
+    # Scoped two ways so this can't widen to cover a real, unrelated Items
+    # response: (1) gated on the request actually being ``/MediaSegments``
+    # (via ``_last_recorded_request_path`` — vcrpy hands this hook the
+    # response only, never the request, see the comment above
+    # ``_scrub_request_uri``), and (2) the item must carry every required
+    # key, not merely a subset — a sparse real item like ``{"Id":
+    # ..., "Type": ...}`` from some other endpoint has the right key
+    # NAMES but is missing ``ItemId``/``StartTicks``/``EndTicks`` and so
+    # fails this check and falls through to the defensive collapse.
+    _REQUIRED_MEDIA_SEGMENT_KEYS = {"ItemId", "Type", "StartTicks", "EndTicks"}
+    _ALLOWED_MEDIA_SEGMENT_KEYS = _REQUIRED_MEDIA_SEGMENT_KEYS | {"Id"}
+
+    def _all_media_segments(items):
+        if not _last_recorded_request_path.startswith("/MediaSegments"):
+            return False
         return all(
-            isinstance(it, dict) and any(str(it.get("Path") or "").startswith(p) for p in _SYNTHETIC_PREFIXES)
+            isinstance(it, dict) and _REQUIRED_MEDIA_SEGMENT_KEYS <= it.keys() <= _ALLOWED_MEDIA_SEGMENT_KEYS
             for it in items
         )
+
+    # An ``/Items?Ids=<id>`` lookup (``item_missing`` with an API key) only pins whether the server lists the id.
+    # Jellyfin answers it without ``Path``/``MediaSources``, so the synthetic check above can't vouch for the item;
+    # rather than collapse the list (which turns "the server has it" into "it's gone" on replay), each item is cut to
+    # its opaque ``Id`` and ``Type``, which identify nothing. Scoped to exactly that request: path ``/Items`` and a
+    # query of ``Ids`` alone.
+    def _id_lookup_items(items):
+        from urllib.parse import parse_qs
+
+        if _last_recorded_request_path != "/Items" or set(parse_qs(_last_recorded_request_query)) != {"Ids"}:
+            return None
+        if not all(isinstance(it, dict) and "Id" in it for it in items):
+            return None
+        return [{key: it[key] for key in ("Id", "Type") if key in it} for it in items]
+
+    def _synthetic_item(item):
+        if not isinstance(item, dict):
+            return False
+        if item.get("Path"):
+            return str(item["Path"]).startswith(_SYNTHETIC_PREFIXES)
+        # An Emby item asked for other fields (``Chapters,MediaSources``) comes without its ``Path``: it is known by
+        # the files of its versions instead.
+        sources = item.get("MediaSources")
+        return bool(sources) and all(
+            isinstance(src, dict) and str(src.get("Path") or "").startswith(_SYNTHETIC_PREFIXES) for src in sources
+        )
+
+    def _all_synthetic(items):
+        return all(_synthetic_item(it) for it in items) or _all_media_segments(items)
 
     def _strip_item_identifiers(items):
         for it in items:
@@ -850,6 +1042,8 @@ def _scrub_response_body(response):
         if isinstance(items, list) and items:
             if _all_synthetic(items):
                 _strip_item_identifiers(items)
+            elif (id_only := _id_lookup_items(items)) is not None:
+                parsed["Items"] = id_only
             else:
                 parsed["Items"] = []
                 parsed["TotalRecordCount"] = 0
@@ -908,7 +1102,8 @@ def _scrub_response_body(response):
     # request types in the cassette.
     xml_synthetic = bool(
         re.search(
-            r'(?:file|path)="(?:/em-media/|/jf-media/|/media/Movies(?:/|")|/media/TV(?:/|")) ?',
+            r'(?:file|path)="(?:/em-media/|/jf-media/|/media/Movies(?:/|")|/media/TV(?:/|")'
+            r'|/media/synth-chapters(?:/|")) ?',
             scrubbed,
         )
     )
@@ -921,6 +1116,7 @@ def _scrub_response_body(response):
     always_on = [
         (r'machineIdentifier="[^"]*"', 'machineIdentifier="FAKE_PLEX_MID"'),
         (r'friendlyName="[^"]*"', 'friendlyName="FAKE_PLEX_NAME"'),
+        (r'myPlexUsername="[^"]*"', 'myPlexUsername="plex-user@example.invalid"'),
     ]
     for pattern, replacement in always_on:
         scrubbed = re.sub(pattern, replacement, scrubbed, flags=re.DOTALL)

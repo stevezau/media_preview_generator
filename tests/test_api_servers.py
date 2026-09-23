@@ -2311,3 +2311,131 @@ class TestDisabledServerGates:
         servers = get_settings_manager().get("media_servers") or []
         assert len(servers) == 1
         assert not servers[0].get("server_identity"), "disabled entry must not carry a probed identity"
+
+
+class TestPreviewsReadinessMarkerRows:
+    """The Intro & Credits rows reach the Setup Health card through the real route (plan phase 4 Task 9).
+
+    These go through ``EmbyServer.previews_readiness`` itself rather than a stubbed envelope: the point is
+    that the rows the vendor builds survive the route, including the dismissal tagging that keys on their ids.
+    """
+
+    MARKERS_ON = {"enabled": True, "library_ids": None, "emby": {"on_emby_redetect": "restore"}}
+
+    def _seed_emby(self, markers: dict, dismissals: list[str] | None = None) -> None:
+        entry: dict = {
+            "id": "emby-1",
+            "type": "emby",
+            "name": "Emby",
+            "enabled": True,
+            "url": "http://emby:8096",
+            "auth": {"method": "api_key", "api_key": "k"},
+            "markers": markers,
+        }
+        if dismissals is not None:
+            entry["health_dismissals"] = list(dismissals)
+        _seed_media_servers([entry])
+
+    def _probe(self, monkeypatch, capability: dict) -> None:
+        """Stub every server call the Emby readiness probe makes, plus the Intro & Credits status."""
+        from unittest.mock import MagicMock
+
+        from media_preview_generator.servers.emby import EmbyServer
+
+        def fake_request(self, method, url, **kwargs):
+            if url == "/System/Info":
+                return MagicMock(
+                    status_code=200,
+                    json=MagicMock(return_value={"Version": "4.10.0.40"}),
+                    raise_for_status=MagicMock(),
+                )
+            if url == "/Library/VirtualFolders":
+                return MagicMock(
+                    status_code=200,
+                    json=MagicMock(return_value=[]),
+                    raise_for_status=MagicMock(),
+                )
+            if url == "/ScheduledTasks":
+                return MagicMock(status_code=200, json=MagicMock(return_value=[]), raise_for_status=MagicMock())
+            raise AssertionError(f"unexpected {method} {url}")
+
+        def status_payload(live, config):
+            return {
+                "server_id": config.id,
+                "server_type": "emby",
+                "enabled": True,
+                "settings": {},
+                "capability": capability,
+                "can_show": ["intro", "credits"],
+                "libraries": [],
+            }
+
+        monkeypatch.setattr(EmbyServer, "_request", fake_request)
+        monkeypatch.setattr(EmbyServer, "bridge_catalog_listed", lambda self: True)
+        monkeypatch.setattr("media_preview_generator.markers.inspect.server_status_payload", status_payload)
+
+    def test_route_returns_the_marker_rows_and_none_of_them_are_info(self, client, auth_headers, monkeypatch):
+        """``servers.js _partitionChecks`` drops every ``info`` row — an info row here would never render."""
+        self._seed_emby(self.MARKERS_ON)
+        self._probe(
+            monkeypatch,
+            {"state": "plugin_outdated", "message": "", "details": {"plugin_version": "1.2.0"}, "warning": ""},
+        )
+
+        response = client.get("/api/servers/emby-1/previews-readiness", headers=auth_headers)
+
+        assert response.status_code == 200, response.get_json()
+        body = response.get_json()
+        plugin = next(s for s in body["sections"] if s["id"] == "plugin")
+        assert [c["id"] for c in plugin["checks"]] == ["markers_plugin_installed", "markers_plugin_outdated"]
+        # The convention the install controls read: section id "plugin", first check's ``current``.
+        assert plugin["checks"][0]["current"] == "1.2.0"
+        marker_rows = [c for s in body["sections"] for c in s["checks"] if c["id"].startswith("markers_")]
+        assert marker_rows
+        assert all(c["severity"] in ("critical", "recommended") for c in marker_rows)
+
+    def test_a_marker_row_can_be_dismissed_and_comes_back_tagged(self, client, auth_headers, monkeypatch):
+        """The row ids are stable enough to be the dismissal key the shipped Dismiss link posts."""
+        self._seed_emby(self.MARKERS_ON)
+        self._probe(
+            monkeypatch,
+            {"state": "plugin_outdated", "message": "", "details": {"plugin_version": "1.2.0"}, "warning": ""},
+        )
+
+        dismissed = client.post(
+            "/api/servers/emby-1/previews-readiness/dismiss",
+            headers=auth_headers,
+            json={"check_id": "markers_plugin_outdated"},
+        )
+        assert dismissed.status_code == 200, dismissed.get_json()
+
+        body = client.get("/api/servers/emby-1/previews-readiness", headers=auth_headers).get_json()
+
+        checks = {c["id"]: c for s in body["sections"] for c in s["checks"]}
+        assert checks["markers_plugin_outdated"].get("dismissed") is True
+        # Raw audit state is preserved — the frontend decides where the row lands.
+        assert checks["markers_plugin_outdated"]["ok"] is False
+        assert checks["markers_plugin_outdated"]["severity"] == "recommended"
+        assert "dismissed" not in checks["markers_plugin_installed"]
+
+    def test_feature_off_sends_one_row_and_no_plugin_section(self, client, auth_headers, monkeypatch):
+        """P-R6 through the route: nothing about markers is claimed, and no probe is made for it."""
+        self._seed_emby({"enabled": False, "library_ids": None, "emby": {"on_emby_redetect": "restore"}})
+        from media_preview_generator.servers.emby import EmbyServer
+
+        def never(live, config):
+            raise AssertionError("a server with Intro & Credits off must not be probed for it")
+
+        self._probe(monkeypatch, {"state": "ready", "message": "", "details": {}, "warning": ""})
+        monkeypatch.setattr("media_preview_generator.markers.inspect.server_status_payload", never)
+        monkeypatch.setattr(
+            EmbyServer, "bridge_catalog_listed", lambda self: pytest.fail("catalogue read not expected")
+        )
+
+        body = client.get("/api/servers/emby-1/previews-readiness", headers=auth_headers).get_json()
+
+        assert [s["id"] for s in body["sections"] if s["id"] == "plugin"] == []
+        markers = next(s for s in body["sections"] if s["id"] == "markers")
+        assert [c["id"] for c in markers["checks"]] == ["markers_off"]
+        assert markers["checks"][0]["severity"] == "recommended"
+        assert markers["checks"][0]["ok"] is True

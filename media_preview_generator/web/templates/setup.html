@@ -1046,7 +1046,8 @@ document.addEventListener('DOMContentLoaded', function() {
             if (!plex || !local) return;
             const webRaw = (rowEl.querySelector('.path-mapping-webhook')?.value || '').trim();
             const webhook_prefixes = webRaw ? webRaw.split(/[;,]/).map(s => s.trim()).filter(Boolean) : [];
-            rows.push({ plex_prefix: plex, local_prefix: local, webhook_prefixes });
+            // Both keys: this build reads remote_prefix first; older builds' path resolvers read only plex_prefix.
+            rows.push({ remote_prefix: plex, plex_prefix: plex, local_prefix: local, webhook_prefixes });
         });
         return rows;
     }
@@ -1070,7 +1071,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const webhookVal = Array.isArray(row.webhook_prefixes) ? row.webhook_prefixes.join('; ') : (row.webhook_prefixes || '');
         tr.innerHTML = `
             <td>
-                <input type="text" class="form-control form-control-sm path-mapping-plex" placeholder="e.g. /data" value="${_esc(row.plex_prefix)}">
+                <input type="text" class="form-control form-control-sm path-mapping-plex" placeholder="e.g. /data" value="${_esc(row.remote_prefix || row.plex_prefix)}">
             </td>
             <td>
                 <div class="input-group input-group-sm">

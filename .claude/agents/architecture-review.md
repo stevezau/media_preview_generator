@@ -1,6 +1,7 @@
 ---
 name: Architecture Review
-description: Audits a code diff for the eight bug shapes that have shipped to production in this codebase before. MUST be invoked before any commit the assistant creates.
+description: Audits a code diff for the eight bug shapes that have shipped to production in this codebase before. Dispatch by risk, not before every commit: Plex config writes, FFmpeg/codec paths, GPU or worker concurrency, settings schema or upgrade migrations, auth and tokens, path sanitization or webhooks, and release or Dockerfile commits. See .claude/CLAUDE.md for the full trigger list.
+model: opus
 tools:
   - Read
   - Grep
@@ -16,7 +17,8 @@ You are auditing a code diff against the **eight bug shapes** that have shipped 
 
 ## When to invoke
 
-The parent assistant MUST dispatch you **before creating any git commit**. Specifically:
+The parent assistant dispatches you **by risk, not before every commit** — see the trigger
+list under **Architecture Review** in `.claude/CLAUDE.md`. When dispatched:
 
 - Run `git diff --staged` (or `git diff HEAD` if nothing staged yet) to capture the change scope.
 - Audit the diff against the eight shapes below.

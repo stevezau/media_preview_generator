@@ -1,9 +1,10 @@
 {% extends "base.html" %}
 
-{% block title %}Preview Inspector - Media Preview Generator{% endblock %}
+{% block title %}{{ 'Intro & Credits' if initial_tab == 'markers' else 'Preview Inspector' }} - Media Preview Generator{% endblock %}
 
 {% block head %}
 <link rel="stylesheet" href="{{ url_for('static', filename='css/pages/bif_viewer.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/pages/markers_inspector.css') }}">
 {% endblock %}
 
 {% block content %}
@@ -18,8 +19,13 @@
      centered text-block is the sole flex child. -->
 <header class="page-header preview-inspector-header">
     <div class="w-100 text-center">
+        {% if initial_tab == 'markers' %}
+        <h1 class="page-title"><i class="bi bi-skip-forward me-2"></i>Intro &amp; Credits</h1>
+        <p class="page-subtitle mb-0">Search a media server by title to see, adjust or add its skip markers.</p>
+        {% else %}
         <h1 class="page-title"><i class="bi bi-film me-2"></i>Preview Inspector</h1>
         <p class="page-subtitle mb-0">Search a media server by title, or paste a preview file path directly.</p>
+        {% endif %}
     </div>
 </header>
 
@@ -89,48 +95,97 @@
         </div>
     </div>
 
-    <div class="row justify-content-center g-4">
-        <!-- Preview frame -->
-        <div class="col-lg-7">
-            <div class="card">
-                <div class="card-body text-center p-3">
-                    <img id="previewFrame" alt="BIF frame preview" src="">
-                    <div class="mt-3">
-                        <input type="range" class="form-range" id="frameSlider" min="0" max="0" value="0">
+    <div class="row justify-content-center">
+        <div class="col-lg-10">
+            <ul class="nav nav-tabs mb-3" id="inspectorTabs" role="tablist">
+                <li class="nav-item" role="presentation"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#inspector-tab-frames" type="button" role="tab">Frames</button></li>
+                <li class="nav-item" role="presentation"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#inspector-tab-markers" type="button" role="tab" id="inspectorMarkersTabBtn">Intro &amp; Credits</button></li>
+            </ul>
+        </div>
+    </div>
+    <div class="tab-content">
+        <div class="tab-pane fade show active" id="inspector-tab-frames" role="tabpanel">
+            <!-- A search result whose preview hasn't been generated still opens the Inspector (for its Intro &
+                 Credits tab); the frames area says so instead. -->
+            <div class="row justify-content-center" id="framesNoPreview" hidden>
+                <div class="col-lg-10">
+                    <div class="alert alert-secondary py-2 mb-0">
+                        <strong>No preview yet</strong>
+                        <div class="small" id="framesNoPreviewNote"></div>
                     </div>
-                    <div class="d-flex justify-content-between align-items-center mt-1">
-                        <button class="btn btn-sm btn-outline-secondary" id="prevBtn" title="Previous frame (Left arrow)">
-                            <i class="bi bi-chevron-left"></i>
-                        </button>
-                        <span class="text-muted ts-label">
-                            Frame <strong id="currentFrame">0</strong> / <span id="totalFrames">0</span>
-                            &mdash;
-                            <span id="currentTimestamp">00:00:00</span>
-                        </span>
-                        <button class="btn btn-sm btn-outline-secondary" id="nextBtn" title="Next frame (Right arrow)">
-                            <i class="bi bi-chevron-right"></i>
-                        </button>
+                </div>
+            </div>
+            <div class="row justify-content-center g-4" id="framesViewer">
+                <!-- Preview frame -->
+                <div class="col-lg-7">
+                    <div class="card">
+                        <div class="card-body text-center p-3">
+                            <img id="previewFrame" alt="BIF frame preview" src="">
+                            <div class="mt-3">
+                                <input type="range" class="form-range" id="frameSlider" min="0" max="0" value="0">
+                            </div>
+                            <div class="d-flex justify-content-between align-items-center mt-1">
+                                <button class="btn btn-sm btn-outline-secondary" id="prevBtn" title="Previous frame (Left arrow)">
+                                    <i class="bi bi-chevron-left"></i>
+                                </button>
+                                <span class="text-muted ts-label">
+                                    Frame <strong id="currentFrame">0</strong> / <span id="totalFrames">0</span>
+                                    &mdash;
+                                    <span id="currentTimestamp">00:00:00</span>
+                                </span>
+                                <button class="btn btn-sm btn-outline-secondary" id="nextBtn" title="Next frame (Right arrow)">
+                                    <i class="bi bi-chevron-right"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Thumbnail grid -->
+                <div class="col-lg-3">
+                    <div class="card">
+                        <div class="card-header py-2">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <span class="small fw-semibold"><i class="bi bi-grid-3x3 me-1"></i>Overview</span>
+                                <select id="gridStep" class="form-select form-select-sm" style="width:auto; font-size:0.75rem;">
+                                    <option value="5">Every 5th</option>
+                                    <option value="10" selected>Every 10th</option>
+                                    <option value="25">Every 25th</option>
+                                    <option value="50">Every 50th</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="card-body p-2" id="gridContainer">
+                            <div class="d-flex flex-wrap gap-1 justify-content-center" id="gridThumbs"></div>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
-
-        <!-- Thumbnail grid -->
-        <div class="col-lg-3">
-            <div class="card">
-                <div class="card-header py-2">
-                    <div class="d-flex justify-content-between align-items-center">
-                        <span class="small fw-semibold"><i class="bi bi-grid-3x3 me-1"></i>Overview</span>
-                        <select id="gridStep" class="form-select form-select-sm" style="width:auto; font-size:0.75rem;">
-                            <option value="5">Every 5th</option>
-                            <option value="10" selected>Every 10th</option>
-                            <option value="25">Every 25th</option>
-                            <option value="50">Every 50th</option>
-                        </select>
+        <div class="tab-pane fade" id="inspector-tab-markers" role="tabpanel">
+            <div class="row justify-content-center">
+                <div class="col-lg-10">
+                    <div class="d-flex align-items-center gap-2 mb-2" id="markersViewToggle" hidden>
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Show this episode or the whole season">
+                            <input type="radio" class="btn-check" name="markersView" id="markersViewEpisode" value="episode" autocomplete="off" checked>
+                            <label class="btn btn-outline-secondary" for="markersViewEpisode">This episode</label>
+                            <input type="radio" class="btn-check" name="markersView" id="markersViewSeason" value="season" autocomplete="off">
+                            <label class="btn btn-outline-secondary" for="markersViewSeason">Whole season</label>
+                        </div>
+                        <button type="button" class="info-icon" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Intros are found by comparing a season's episodes, so the whole season is the natural place to check and publish them."><i class="bi bi-info-circle"></i></button>
                     </div>
-                </div>
-                <div class="card-body p-2" id="gridContainer">
-                    <div class="d-flex flex-wrap gap-1 justify-content-center" id="gridThumbs"></div>
+                    <div id="markersEpisodeView">
+                        <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+                            <div class="small text-muted text-break" id="markersInspectorPath"></div>
+                            <div class="d-flex gap-2 flex-wrap">
+                                <button class="btn btn-sm btn-outline-secondary" id="markersAdjustBtn" type="button" disabled title="Drag the intro or credits to where they really are, or add one that wasn't found. Your times are kept from then on."><i class="bi bi-pencil me-1"></i>Adjust</button>
+                                <button class="btn btn-sm btn-outline-secondary" id="markersLockBtn" type="button" disabled title="Keep these times exactly as they are. Later checks won't change them."><i class="bi bi-lock me-1"></i>Lock</button>
+                                <button class="btn btn-sm btn-outline-secondary" id="markersRedetectBtn" type="button" disabled title="Look this file up and detect it again, asking every source. Runs as a job on the Dashboard."><i class="bi bi-arrow-repeat me-1"></i>Re-detect</button>
+                            </div>
+                        </div>
+                        <div id="markersInspectorBody"></div>
+                    </div>
+                    <div id="markersSeasonBody" hidden></div>
                 </div>
             </div>
         </div>
@@ -141,14 +196,66 @@
      JS hides it when a search runs or the viewer opens. -->
 <div id="emptyState" class="text-center py-5">
     <i class="bi bi-film d-block mb-3" style="font-size: 3rem; opacity: 0.25;"></i>
+    {% if initial_tab == 'markers' %}
+    <p class="text-muted mb-1">Search a title above, then open a file to see its skip markers.</p>
+    <p class="text-muted small mb-0">
+        Intro &amp; Credits has to be turned on for a server first: Settings &rarr; Servers.
+    </p>
+    {% else %}
     <p class="text-muted mb-1">Search a title above to inspect its preview thumbnails.</p>
     <p class="text-muted small mb-0">
         Or paste a preview file path directly to skip the lookup.
     </p>
+    {% endif %}
+</div>
+
+<!-- Lock confirmation (Intro & Credits tab). Lock publishes to every owning server exactly as Save does, so it
+     says which times it keeps and where they go before it sends anything. -->
+<div class="modal fade" id="markersLockModal" tabindex="-1" aria-labelledby="markersLockTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="markersLockTitle"><i class="bi bi-lock me-2"></i>Lock these markers?</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-2">These times are kept exactly as they are, and later checks won't change them:</p>
+                <ul class="mb-3" id="markersLockList"></ul>
+                <p class="mb-0">They go to your servers now, the same way Save sends them.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Leave them as they are</button>
+                <button type="button" class="btn btn-primary" id="markersLockConfirm">Lock and publish</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Unlock confirmation (Intro & Credits tab). Says what comes back before the user's own times stop winning. -->
+<div class="modal fade" id="markersUnlockModal" tabindex="-1" aria-labelledby="markersUnlockTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="markersUnlockTitle"><i class="bi bi-unlock me-2"></i>Unlock these markers?</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p class="mb-2">Your times stay on your servers for now:</p>
+                <ul class="mb-3" id="markersUnlockList"></ul>
+                <p class="mb-0">The next time this episode is checked, the sources decide again and may move them. Re-detect does that straight away.</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Keep them locked</button>
+                <button type="button" class="btn btn-danger" id="markersUnlockConfirm">Unlock</button>
+            </div>
+        </div>
+    </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='js/markers_inspector.js') }}"></script>
+<script src="{{ url_for('static', filename='js/markers_season.js') }}"></script>
 <script>
 (function() {
     const $ = id => document.getElementById(id);
@@ -158,6 +265,16 @@
     let servers = [];        // [{id, name, type, enabled, ...}] from /api/servers
     let viewerMode = 'bif';  // 'bif' (Plex/Emby) or 'trickplay' (Jellyfin)
     let trickplayState = null; // {path, manifest, sheets} when viewerMode==='trickplay'
+    // The video file behind the preview on show ({server_id, item_id, media_file}); null for a pasted preview path,
+    // which doesn't say which file it belongs to. The Intro & Credits tab loads it when shown.
+    let markersItem = null;
+
+    function setMarkersItem(item) {
+        markersItem = item;
+        if ($('inspectorMarkersTabBtn').classList.contains('active')) {
+            window.loadMarkersInspector(markersItem);
+        }
+    }
 
     // --- Helpers ---
 
@@ -272,13 +389,17 @@
             // {preview_kind, preview_path, preview_exists, media_file, title}.
             // The backend resolves the BIF/trickplay path eagerly for every
             // vendor (including Plex's bundle-hash lookup), so preview_exists
-            // is the single source of truth for whether the row is loadable.
-            const allowClick = !!r.preview_exists;
-            a.className = `list-group-item list-group-item-action result-item py-2 px-3${!allowClick ? ' opacity-50' : ''}`;
+            // is the single source of truth for whether frames can load.
+            // Every row opens the Inspector: without a preview the Frames tab
+            // says so and the Intro & Credits tab still works.
+            a.className = 'list-group-item list-group-item-action result-item py-2 px-3';
             a.dataset.previewPath = r.preview_path || '';
             a.dataset.previewKind = r.preview_kind || 'bif';
             a.dataset.mediaFile = r.media_file || '';
-            a.dataset.allowClick = String(allowClick);
+            a.dataset.itemId = r.item_id || '';
+            a.dataset.resultType = r.type || '';
+            a.dataset.previewExists = String(!!r.preview_exists);
+            a.dataset.note = r.note || '';
             a.dataset.serverType = (serverType || '').toLowerCase();
             a.dataset.title = r.title;
 
@@ -298,10 +419,6 @@
 
             a.addEventListener('click', e => {
                 e.preventDefault();
-                if (a.dataset.allowClick !== 'true') {
-                    showToast('Preview Inspector', 'No preview file exists for this item yet', 'warning');
-                    return;
-                }
                 list.querySelectorAll('.result-item').forEach(el => el.classList.remove('active'));
                 a.classList.add('active');
                 loadPreviewFromResult(a.dataset);
@@ -318,13 +435,24 @@
     async function loadPreviewFromResult(meta) {
         const kind = meta.previewKind || 'bif';
         const title = meta.title || meta.mediaFile || '';
+        const server = selectedServer();
+        setMarkersItem({
+            server_id: server ? server.id : '',
+            item_id: meta.itemId || '',
+            media_file: meta.mediaFile || '',
+            type: meta.resultType || '',
+        });
+        if (meta.previewExists !== 'true') {
+            showNoPreview(title, meta.note);
+            return;
+        }
         if (kind === 'trickplay') {
             await loadTrickplay(meta.previewPath, title);
             return;
         }
         // BIF flow \u2014 backend always resolves preview_path eagerly (Plex
-        // bundle hash, Emby sidecar). If it's empty the row was disabled
-        // up-front so we shouldn't be here.
+        // bundle hash, Emby sidecar). A row without a preview took the
+        // showNoPreview branch above.
         await loadBif(meta.previewPath, title);
     }
 
@@ -392,9 +520,25 @@
         return `/api/bif/trickplay/frame?${params.toString()}`;
     }
 
+    function showNoPreview(title, note) {
+        bifPath = '';
+        bifMeta = null;
+        trickplayState = null;
+        $('emptyState').classList.add('d-none');
+        $('viewerPanel').classList.remove('d-none');
+        $('metaBadges').innerHTML = `<span class="badge bg-primary badge-stat">${escapeHtml(title)}</span>`
+            + '<span class="badge bg-secondary badge-stat"><i class="bi bi-image me-1"></i>No preview yet</span>';
+        $('framesViewer').hidden = true;
+        $('framesNoPreview').hidden = false;
+        $('framesNoPreviewNote').textContent = note
+            || 'Previews for this file haven\'t been generated. The Intro & Credits tab still works.';
+    }
+
     function showViewer(title) {
         $('emptyState').classList.add('d-none');
         $('viewerPanel').classList.remove('d-none');
+        $('framesNoPreview').hidden = true;
+        $('framesViewer').hidden = false;
 
         const m = bifMeta;
         const totalDuration = formatTimestamp(m.frame_count - 1, m.frame_interval_ms);
@@ -480,6 +624,7 @@
         if (!path) { showToast('Preview Inspector', 'Enter a preview file path', 'warning'); return; }
         // Heuristic: Jellyfin trickplay paths end in manifest.json; everything
         // else is treated as a Plex/Emby BIF.
+        setMarkersItem(null);
         if (/manifest\.json$/i.test(path)) {
             loadTrickplay(path, '');
         } else {
@@ -487,11 +632,21 @@
         }
     });
 
+    $('inspectorMarkersTabBtn').addEventListener('shown.bs.tab', () => window.loadMarkersInspector(markersItem));
+
     // Initialise the server picker on page load.
     loadServers();
     $('pathInput').addEventListener('keydown', e => {
         if (e.key === 'Enter') $('loadPathBtn').click();
     });
+
+    // The Tools menu's "Intro & Credits" entry opens this page on that tab (server-rendered as initial_tab).
+    (function _openInitialTab() {
+        if ({{ 'true' if initial_tab == 'markers' else 'false' }}) {
+            const btn = document.getElementById('inspectorMarkersTabBtn');
+            if (btn && window.bootstrap) window.bootstrap.Tab.getOrCreateInstance(btn).show();
+        }
+    })();
 
     // D11 — preload from a deep-link query param. The Files panel on
     // the dashboard adds a shortcut button per row that links here as

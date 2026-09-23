@@ -1,0 +1,4 @@
+Blu-ray version (OP = chapter 2, 105.3-195.0 s):
+  outcome: markers_needs_review | intro needs review | rows: [('plex-1', 'markers_skipped', 'Not supported for this server type yet'), ('jf-1', 'markers_needs_review', "Sources don't agree yet")]
+   intro: needs_review (sources don't agree yet)
+  written to Jellyfin: nothing

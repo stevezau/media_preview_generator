@@ -3,14 +3,19 @@ name: CI
 on:
   push:
     branches: [dev]
-    # App release tags are pure semver (e.g. 4.2.1). Exclude plugin tags
-    # (plugin-v10.11.0.3) — they own jellyfin-plugin.yml and must NOT trigger
+    # App release tags are pure semver (e.g. 4.2.1). Exclude the component tags
+    # (plugin-v10.11.0.3, emby-plugin-v1.0.0.0, marker-agent-v1.0.0) — they own
+    # jellyfin-plugin.yml / emby-plugin.yml (and marker-agent.yml, which lands with
+    # the agent's first release; the negation is here first, deliberately) and must NOT trigger
     # the app image build: the tag name is fed to SETUPTOOLS_SCM_PRETEND_VERSION,
     # and a non-PEP440 value ("plugin-v…") aborts the wheel build (and would
-    # otherwise push :latest from a plugin release).
+    # otherwise push :latest from a component release). Note '*' matches across
+    # '-', so 'marker-agent-v1.0.0' does match '*.*.*' and needs its own negation.
     tags:
       - '*.*.*'
       - '!plugin-*'
+      - '!emby-plugin-*'
+      - '!marker-agent-*'
     paths-ignore:
       - 'docs/**'
       - '*.md'
@@ -77,8 +82,19 @@ jobs:
       - name: Ruff format check
         run: ruff format --check .
 
-  test:
+  unit:
+    # Shards the unit suite 3 ways so the required `test` check (below) only has to wait on
+    # the slowest shard, not the whole 12,641-test suite serially. A repo ruleset requires a
+    # status check literally named `test`, so this discovery job is named `unit` and the
+    # combine job keeps the `test` id/name. pytest-shard balances by test count, not wall
+    # time — locally that gave 4085/4307/4249 tests in 53.63s/45.91s/48.08s, close enough
+    # (~15% spread) that a time-based split isn't worth the extra complexity.
+    name: unit (${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -111,8 +127,70 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[test]"
 
-      - name: Run tests
-        run: pytest -m "not gpu and not e2e and not integration" --cov-report=xml
+      - name: Run tests (shard ${{ matrix.shard }}/3)
+        # Deliberately does NOT clear addopts (pyproject.toml) and re-specify everything
+        # it sets — that would duplicate the config and let a shard silently drift the
+        # next time someone edits addopts. Only add what a shard needs on top:
+        # --shard-id/--num-shards pick the slice, and --cov-fail-under is a `store`
+        # action (last value on the command line wins over addopts' 70), so 0 here defers
+        # the real floor to the `test` job below, which enforces it once over the
+        # combined 3-shard total. addopts' own --cov-report=term-missing still runs and
+        # prints its per-file table in each shard's log — harmless noise, not worth
+        # fighting (pytest-cov's --cov-report is an *append* action, so cancelling it
+        # from the CLI would need clearing addopts anyway).
+        env:
+          COVERAGE_FILE: .coverage.unit-${{ matrix.shard }}
+        run: >-
+          pytest --shard-id=$((${{ matrix.shard }} - 1)) --num-shards=3
+          --cov-fail-under=0
+
+      - name: Upload coverage data (shard ${{ matrix.shard }}/3)
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-unit-${{ matrix.shard }}
+          path: .coverage.unit-${{ matrix.shard }}
+          # The data file is a dotfile; upload-artifact@v4 skips hidden files by default
+          # and would silently upload an empty artifact without this.
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  test:
+    # Required status check name — a repo ruleset pins the name `test`, so this job (not
+    # `unit` above) is what that check watches. Combines the 3 shards' coverage data and
+    # enforces the 70% floor once over the whole suite, matching what the single-job `test`
+    # used to do.
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install coverage
+        # coverage combine/report/xml is all this job does — no need for the app's own
+        # deps or an editable install. Python 3.11+'s stdlib tomllib lets coverage.py read
+        # pyproject.toml's [tool.coverage.*] natively, so no [toml] extra either.
+        run: pip install coverage
+
+      - name: Download shard coverage data
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-unit-*
+          merge-multiple: true
+
+      - name: Combine shard coverage and enforce the 70% floor
+        # All 3 shard jobs and this job check out the same commit onto the same
+        # ubuntu-latest runner workspace path, so the source paths recorded in each
+        # shard's data file already line up — no [tool.coverage.paths] aliasing needed.
+        run: |
+          coverage combine .coverage.unit-1 .coverage.unit-2 .coverage.unit-3
+          coverage report --fail-under=70
+          coverage xml
 
       - name: Upload coverage to Codecov
         # Upload on every event that produced coverage.xml (push, PR,
@@ -225,12 +303,15 @@ jobs:
         # memory budget, so cross-test accumulation can't pile up
         # the way it did in the previous single-job design.
         #
-        # 4 shards × ~30-42 tests/shard sits at or under the empirical
-        # ~30-test Chromium crash threshold from prior runs. Two real
-        # bugs were fixed before reaching for sharding (webhook race
-        # in c8ac9d4, APScheduler thread drain in 20c42cf) — sharding
-        # mitigates only the residual environmental flakes, not real
-        # regressions.
+        # The suite has grown: `pytest -m e2e --collect-only` gives 411
+        # tests, so 4 shards is ~100-107 each (measured 103/107/100/101 —
+        # pytest-shard balances it fine). That is well past the empirical
+        # ~30-test Chromium crash threshold the split was originally sized
+        # for, so a shard is no longer "under" it; a fresh runner per shard
+        # is still what keeps memory accumulation bounded. Two real bugs
+        # were fixed before reaching for sharding (webhook race in c8ac9d4,
+        # APScheduler thread drain in 20c42cf) — sharding mitigates only
+        # the residual environmental flakes, not real regressions.
         #
         # --shard-id is 0-indexed; matrix index is 1-indexed for the
         # GH status check display ("e2e (shard 3/4)"). Shell arithmetic
@@ -247,7 +328,14 @@ jobs:
         run: >-
           pytest -m e2e -n 0 --no-cov --tb=short --timeout=120
           --shard-id=$((${{ matrix.shard }} - 1)) --num-shards=4
-        timeout-minutes: 10
+        # 10 minutes was sized for a ~38-test shard. The largest shard is now
+        # 107 tests and takes 110s serially on a fast 32-core box; a GH runner
+        # is several times slower than that, which left almost no headroom
+        # before a slow run started failing as a timeout rather than a test.
+        # 25 minutes is ~13x the measured local wall time — still short enough
+        # to catch a genuine hang, since the real backstop for one stuck test
+        # is --timeout=120 above.
+        timeout-minutes: 25
 
       - name: Upload Playwright traces on failure
         if: failure()
@@ -352,10 +440,22 @@ jobs:
         # reachable vendor. Skips any vendor that didn't come up.
         continue-on-error: true
 
+      - name: Credit text prerequisites (model and font)
+        # tests/markers/credits' integration-marked real-model tests skip without the model and the DejaVu font;
+        # fetch the model the same pinned, sha256-checked way the image does.
+        run: |
+          set -euo pipefail
+          python3 scripts/fetch_textdet_model.py --out "$RUNNER_TEMP/models"
+          if [[ ! -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf ]]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends fonts-dejavu-core
+          fi
+
       - name: Run integration tests
         env:
           PLEX_CLAIM: ${{ secrets.PLEX_CLAIM_TOKEN }}
-        run: pytest -m integration --no-cov --tb=short tests/integration/
+          MEDIA_PREVIEW_TEXTDET_MODEL: ${{ runner.temp }}/models/ch_PP-OCRv4_det_infer.onnx
+        run: pytest -m integration --no-cov --tb=short -rs tests/integration/ tests/markers/credits/
         timeout-minutes: 15
 
       - name: Vendor stack logs on failure
@@ -367,6 +467,179 @@ jobs:
         if: always()
         working-directory: tests/integration
         run: docker compose -f docker-compose.test.yml down -v
+
+  arm64-image-check:
+    # The `build` job below only runs on pushes and manual runs, so without this a PR never proves the arm64 image
+    # builds — and the image carries native wheels (onnxruntime, opencv-python-headless, pyclipper, numpy) that must
+    # exist for linux/arm64. Builds natively on GitHub's free arm64 runner and only loads the image into this
+    # runner's Docker: no push, no registry login, no secrets, no :dev / :latest tag. Then checks that the credit
+    # text detector runs inside it and that its model is the one the Dockerfile's fetch step pins.
+    name: arm64 image (build and check, no push)
+    if: github.event_name == 'pull_request'
+    needs: lint
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      CHECK_IMAGE: media-preview-generator-arm64-check:local
+      MODEL_PATH: /app/models/ch_PP-OCRv4_det_infer.onnx
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build linux/arm64 (loaded locally, never pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: ${{ env.CHECK_IMAGE }}
+          build-args: |
+            GIT_BRANCH=pr-${{ github.event.pull_request.number }}
+            GIT_SHA=${{ github.sha }}
+          # Reads the arm64 layers dev's `build` job saved (a PR into dev may read its base branch's cache) and
+          # writes none: every PR's full arm64 layers would crowd those publishing caches out of the repo's 10 GB.
+          cache-from: type=gha,scope=linux/arm64
+
+      - name: The image is linux/arm64
+        run: |
+          set -euo pipefail
+          arch="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$CHECK_IMAGE")"
+          if [[ "$arch" != "linux/arm64" ]]; then
+            echo "::error::Built $arch, expected linux/arm64"
+            exit 1
+          fi
+
+      - name: The credit text detector runs in the image
+        run: >-
+          docker run --rm --entrypoint python3 "$CHECK_IMAGE"
+          -m media_preview_generator.markers.credits.textdet_helper --check
+
+      - name: The image's model is the one the Dockerfile's fetch step pins
+        run: |
+          set -euo pipefail
+          expected="$(python3 -c 'import runpy; print(runpy.run_path("scripts/fetch_textdet_model.py")["MODEL_SHA256"])')"
+          if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Could not read MODEL_SHA256 from scripts/fetch_textdet_model.py (got '$expected')"
+            exit 1
+          fi
+          read -r actual _ < <(docker run --rm --entrypoint sha256sum "$CHECK_IMAGE" "$MODEL_PATH")
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::$MODEL_PATH is $actual, the fetch step pins $expected"
+            exit 1
+          fi
+          echo "$MODEL_PATH matches the pin ($expected)"
+
+  marker-agent-image:
+    # The Plex marker agent (plex-marker-agent/) installs the app's wheel with --no-deps, so the only libraries in
+    # that image are the ones requirements.lock.txt names. tests/test_plex_marker_agent.py can't see when that stops
+    # being enough: it imports the agent inside a full dev environment, so a new module-scope `import numpy`
+    # anywhere under markers/publishers/ would leave every one of those tests green and still kill the container at
+    # boot. Nothing else in CI builds this image. This job is what proves the --no-deps install still works: it
+    # builds it, boots it and calls it.
+    #
+    # Runs on every event this workflow handles, with no `if:` of its own (only `needs: lint`). paths-ignore doesn't exclude
+    # plex-marker-agent/, and `*.md` only matches top-level markdown (a GitHub path glob's `*` doesn't cross `/`),
+    # so a change anywhere in that folder reaches this job. amd64 only — the release workflow
+    # (.github/workflows/marker-agent.yml) builds arm64 on a native runner, and the image has no compiled code, so
+    # an arm64 build here would only re-prove the same pure-Python wheels.
+    name: Plex marker agent image (build, boot, call)
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CHECK_IMAGE: plex-marker-agent:ci
+      CONTAINER: plex-marker-agent-ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the agent image (loaded locally, never pushed)
+        uses: docker/build-push-action@v6
+        with:
+          # The repository root: the image installs the app's own source, which is what the agent runs.
+          context: .
+          file: plex-marker-agent/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ${{ env.CHECK_IMAGE }}
+          # No GHA layer cache, deliberately. A fork's pull_request run gets a read-only cache token, and
+          # `cache-to` then fails the whole build (the same hardening docker-pr.yml documents). A cold build of
+          # this image is ~74s locally — a few minutes on a runner — so there is nothing worth that risk.
+
+      - name: Boot it and call it
+        run: |
+          set -euo pipefail
+          # A throwaway key for this one container, generated here and masked out of the log. The agent refuses to
+          # start without one, so booting it at all needs a value; it is never committed and never leaves this job.
+          token="$(openssl rand -hex 24)"
+          echo "::add-mask::$token"
+
+          config_dir="$RUNNER_TEMP/plex-config"
+          mkdir -p "$config_dir"
+          trap 'docker logs "$CONTAINER" 2>&1 | tail -40 || true; docker rm -f "$CONTAINER" >/dev/null 2>&1 || true' EXIT
+
+          docker run -d --name "$CONTAINER" \
+            -e AGENT_TOKEN="$token" \
+            -e PLEX_CONFIG_DIR=/plex \
+            -v "$config_dir:/plex" \
+            -p 127.0.0.1:9494:9494 \
+            "$CHECK_IMAGE"
+
+          # The image's own HEALTHCHECK hits /v1/health, so "healthy" already means gunicorn imported the app —
+          # which is the --no-deps claim under test.
+          for _ in $(seq 1 60); do
+            status="$(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo gone)"
+            if [[ "$status" == "healthy" ]]; then
+              break
+            fi
+            if [[ "$status" == "gone" || "$status" == "unhealthy" ]]; then
+              echo "::error::Container went $status before it became healthy"
+              exit 1
+            fi
+            sleep 2
+          done
+          if [[ "$(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER")" != "healthy" ]]; then
+            echo "::error::Container never became healthy"
+            exit 1
+          fi
+          echo "Container is healthy"
+
+          # /v1/health takes no key; /v1/ping needs one and reaches the app's own plex_db code.
+          curl -fsS http://127.0.0.1:9494/v1/health > health.json
+          curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:9494/v1/ping > ping.json
+          jq -e '.ok == true' health.json > /dev/null
+          jq -e '.ok == true and (.result | has("db_present") and has("machine_identifier"))' ping.json > /dev/null
+
+          # An unauthenticated call is refused and says nothing about this Plex.
+          code="$(curl -s -o unauth.json -w '%{http_code}' http://127.0.0.1:9494/v1/ping)"
+          if [[ "$code" != "401" ]]; then
+            echo "::error::/v1/ping without a key answered $code, expected 401"
+            exit 1
+          fi
+          jq -e '.ok == false and .error.kind == "auth" and (.error | has("message") | not)' unauth.json > /dev/null
+
+          # The image reports the version the source says it should, so a stale build can't be published quietly.
+          expected="$(python3 -c 'import ast, sys; body = ast.parse(open(sys.argv[1]).read()).body; print(next(n.value.value for n in body if isinstance(n, ast.Assign) and any(getattr(t, "id", "") == "AGENT_VERSION" for t in n.targets)))' plex-marker-agent/plex_marker_agent.py)"
+          actual="$(jq -r '.agent.version' ping.json)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::The image reports agent version $actual, plex_marker_agent.py says $expected"
+            exit 1
+          fi
+          echo "Agent $actual answered /v1/health and /v1/ping, and refused a call without the key"
 
   context:
     runs-on: ubuntu-latest

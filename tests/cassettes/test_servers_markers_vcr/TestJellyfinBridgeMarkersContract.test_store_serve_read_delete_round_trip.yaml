@@ -1,0 +1,316 @@
+interactions:
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate, zstd
+      Authorization:
+      - FAKE_AUTH
+      Connection:
+      - keep-alive
+      User-Agent:
+      - python-requests/2.33.0
+      X-Emby-Token:
+      - FAKE_EMBY_TOKEN
+    method: GET
+    uri: http://fake-server/MediaPreviewBridge/ResolvePath?path=%2Fmedia%2Fsynth-chapters%2FSynth+Chapters+%282021%29%2FSeason+01%2FSynth+Chapters+%282021%29+-+S01E01.webm
+  response:
+    body:
+      string: '{"itemId":"2d6dff941c169f8d73e701c2b397b88d","name":"Synth Chapters","type":"Episode"}'
+    headers:
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Mon, 14 Sep 2026 11:00:43 GMT
+      Server:
+      - Kestrel
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Accept-Encoding
+      X-Response-Time-ms:
+      - '25.0355'
+      content-length:
+      - '86'
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate, zstd
+      Authorization:
+      - FAKE_AUTH
+      Connection:
+      - keep-alive
+      User-Agent:
+      - python-requests/2.33.0
+      X-Emby-Token:
+      - FAKE_EMBY_TOKEN
+    method: GET
+    uri: http://fake-server/MediaPreviewBridge/Markers/2d6dff941c169f8d73e701c2b397b88d
+  response:
+    body:
+      string: '{"itemId":"2d6dff941c169f8d73e701c2b397b88d","fileSize":6421799,"stale":false,"segments":[{"type":"Intro","startTicks":100000000,"endTicks":400000000},{"type":"Outro","startTicks":1000000000,"endTicks":1200000000}]}'
+    headers:
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Mon, 14 Sep 2026 11:00:43 GMT
+      Server:
+      - Kestrel
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Accept-Encoding
+      X-Response-Time-ms:
+      - '10.8997'
+      content-length:
+      - '215'
+    status:
+      code: 200
+      message: OK
+- request:
+    body: '{"segments": [{"type": "Intro", "startTicks": 100000000, "endTicks": 400000000},
+      {"type": "Outro", "startTicks": 1000000000, "endTicks": 1200000000}], "fileSize":
+      6421799}'
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate, zstd
+      Authorization:
+      - FAKE_AUTH
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '171'
+      Content-Type:
+      - application/json
+      User-Agent:
+      - python-requests/2.33.0
+      X-Emby-Token:
+      - FAKE_EMBY_TOKEN
+    method: POST
+    uri: http://fake-server/MediaPreviewBridge/Markers/2d6dff941c169f8d73e701c2b397b88d
+  response:
+    body:
+      string: '{"itemId":"2d6dff941c169f8d73e701c2b397b88d","stored":2}'
+    headers:
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Mon, 14 Sep 2026 11:00:43 GMT
+      Server:
+      - Kestrel
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Accept-Encoding
+      X-Response-Time-ms:
+      - '18.3143'
+      content-length:
+      - '56'
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate, zstd
+      Authorization:
+      - FAKE_AUTH
+      Connection:
+      - keep-alive
+      User-Agent:
+      - python-requests/2.33.0
+      X-Emby-Token:
+      - FAKE_EMBY_TOKEN
+    method: GET
+    uri: http://fake-server/MediaSegments/2d6dff941c169f8d73e701c2b397b88d
+  response:
+    body:
+      string: '{"Items": [{"Id": "d64535c919eb4557ab14c7a6dd81d5db", "ItemId": "2d6dff941c169f8d73e701c2b397b88d",
+        "Type": "Intro", "StartTicks": 100000000, "EndTicks": 400000000}, {"Id": "dab61cc68c12468ab4c2624039ca0024",
+        "ItemId": "2d6dff941c169f8d73e701c2b397b88d", "Type": "Outro", "StartTicks":
+        1000000000, "EndTicks": 1200000000}], "TotalRecordCount": 2, "StartIndex":
+        0}'
+    headers:
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Mon, 14 Sep 2026 11:00:43 GMT
+      Server:
+      - Kestrel
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Accept-Encoding
+      X-Response-Time-ms:
+      - '36.789'
+      content-length:
+      - '339'
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate, zstd
+      Authorization:
+      - FAKE_AUTH
+      Connection:
+      - keep-alive
+      User-Agent:
+      - python-requests/2.33.0
+      X-Emby-Token:
+      - FAKE_EMBY_TOKEN
+    method: GET
+    uri: http://fake-server/MediaPreviewBridge/Markers/2d6dff941c169f8d73e701c2b397b88d
+  response:
+    body:
+      string: '{"itemId":"2d6dff941c169f8d73e701c2b397b88d","fileSize":6421799,"stale":false,"segments":[{"type":"Intro","startTicks":100000000,"endTicks":400000000},{"type":"Outro","startTicks":1000000000,"endTicks":1200000000}]}'
+    headers:
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Mon, 14 Sep 2026 11:00:43 GMT
+      Server:
+      - Kestrel
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Accept-Encoding
+      X-Response-Time-ms:
+      - '11.3015'
+      content-length:
+      - '215'
+    status:
+      code: 200
+      message: OK
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate, zstd
+      Authorization:
+      - FAKE_AUTH
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '0'
+      User-Agent:
+      - python-requests/2.33.0
+      X-Emby-Token:
+      - FAKE_EMBY_TOKEN
+    method: DELETE
+    uri: http://fake-server/MediaPreviewBridge/Markers/2d6dff941c169f8d73e701c2b397b88d
+  response:
+    body:
+      string: ''
+    headers:
+      Date:
+      - Mon, 14 Sep 2026 11:00:43 GMT
+      Server:
+      - Kestrel
+      X-Response-Time-ms:
+      - '17.0141'
+    status:
+      code: 204
+      message: No Content
+- request:
+    body: null
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate, zstd
+      Authorization:
+      - FAKE_AUTH
+      Connection:
+      - keep-alive
+      User-Agent:
+      - python-requests/2.33.0
+      X-Emby-Token:
+      - FAKE_EMBY_TOKEN
+    method: GET
+    uri: http://fake-server/MediaPreviewBridge/Markers/2d6dff941c169f8d73e701c2b397b88d
+  response:
+    body:
+      string: '{"itemId":"2d6dff941c169f8d73e701c2b397b88d","stale":false,"segments":[]}'
+    headers:
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Mon, 14 Sep 2026 11:00:43 GMT
+      Server:
+      - Kestrel
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Accept-Encoding
+      X-Response-Time-ms:
+      - '14.2428'
+      content-length:
+      - '73'
+    status:
+      code: 200
+      message: OK
+- request:
+    body: '{"segments": [{"type": "Intro", "startTicks": 100000000, "endTicks": 400000000},
+      {"type": "Outro", "startTicks": 1000000000, "endTicks": 1200000000}], "fileSize":
+      6421799}'
+    headers:
+      Accept:
+      - application/json
+      Accept-Encoding:
+      - gzip, deflate, zstd
+      Authorization:
+      - FAKE_AUTH
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '171'
+      Content-Type:
+      - application/json
+      User-Agent:
+      - python-requests/2.33.0
+      X-Emby-Token:
+      - FAKE_EMBY_TOKEN
+    method: POST
+    uri: http://fake-server/MediaPreviewBridge/Markers/2d6dff941c169f8d73e701c2b397b88d
+  response:
+    body:
+      string: '{"itemId":"2d6dff941c169f8d73e701c2b397b88d","stored":2}'
+    headers:
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Mon, 14 Sep 2026 11:00:43 GMT
+      Server:
+      - Kestrel
+      Transfer-Encoding:
+      - chunked
+      Vary:
+      - Accept-Encoding
+      X-Response-Time-ms:
+      - '17.9962'
+      content-length:
+      - '56'
+    status:
+      code: 200
+      message: OK
+version: 1

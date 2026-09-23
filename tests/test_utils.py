@@ -7,6 +7,7 @@ and working directory setup.
 
 import os
 import tempfile
+import time
 from collections import namedtuple
 from unittest.mock import patch
 
@@ -17,9 +18,96 @@ from media_preview_generator.utils import (
     format_display_title,
     is_docker_environment,
     is_windows,
+    redact_secrets,
+    redacted_traceback,
     sanitize_path,
     setup_working_directory,
 )
+
+
+class TestRedactSecrets:
+    """Exception text shown on a job or logged can carry a server's URL or headers; secrets in it are masked."""
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("GET http://plex:32400/a?X-Plex-Token=abc123&type=4 failed",
+             "GET http://plex:32400/a?X-Plex-Token=****&type=4 failed"),
+            ("http://jf:8096/Items?api_key=abc123", "http://jf:8096/Items?api_key=****"),
+            ("http://emby/Items?ApiKey=abc123&Ids=1", "http://emby/Items?ApiKey=****&Ids=1"),
+            ("url=http://x/?access_token=abc123)", "url=http://x/?access_token=****)"),
+            ("{'X-Emby-Token': 'abc123', 'Accept': 'json'}", "{'X-Emby-Token': '****', 'Accept': 'json'}"),
+            ('MediaBrowser Client="app", Token="abc123"', 'MediaBrowser Client="app", Token="****"'),
+            # The header this app sends (servers/_mediabrowser_auth.py) puts the token first.
+            ('Authorization: MediaBrowser Token="abc123", Client="app"',
+             'Authorization: **** Token="****", Client="app"'),
+            ("Authorization: Bearer abc123", "Authorization: Bearer ****"),
+            ("X-Plex-Token: abc123", "X-Plex-Token: ****"),
+            ("X-Api-Key: abc123", "X-Api-Key: ****"),
+            ("Proxy-Authorization: Basic abc123", "Proxy-Authorization: Basic ****"),
+            ("--token=abc123", "--token=****"),
+            ('{"api_key": "abc123"}', '{"api_key": "****"}'),
+            ("password=hunter2 user=bob", "password=**** user=bob"),
+            ("GET http://x/?plex_token=abc123&a=1", "GET http://x/?plex_token=****&a=1"),
+            ("PlexToken=abc123", "PlexToken=****"),
+            ("client_secret=abc123", "client_secret=****"),
+            ("token=b'abc123'", "token=b'****'"),
+            ("{'X-Plex-Token': b'abc123'}", "{'X-Plex-Token': b'****'}"),
+            ("GET http://bob:hunter2@nas:8096/Items", "GET http://bob:****@nas:8096/Items"),
+            ("", ""),
+        ],
+        ids=["plex-query", "api_key", "ApiKey", "access_token", "header-dict", "mediabrowser", "mediabrowser-token-first",
+             "bearer", "header-token", "header-api-key", "header-proxy-authorization", "cli-flag", "json-key", "password",
+             "suffix-_token", "suffix-Token", "suffix-_secret",
+             "bytes-value", "bytes-value-quoted-key", "url-credentials", "empty"],
+    )  # fmt: skip
+    def test_masks_the_value_and_keeps_the_rest(self, text, expected):
+        assert redact_secrets(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "nothing secret here: 42 files",
+            "The Secret: Dare to Dream (2020).mkv",
+            "Invalid token: 401",
+            "Token count: 3",
+            "tokens=5 secretary=bob",
+            "http://plex:32400/library/sections/1/all",
+            "b'abc'",
+        ],
+        ids=["clean", "title-with-secret", "invalid-token", "token-count", "longer-words", "url-with-port", "bytes"],
+    )
+    def test_leaves_text_that_only_mentions_a_secret_alone(self, text):
+        # A ``:`` separates a secret only after a quoted key or a header's name; plain prose keeps its words.
+        assert redact_secrets(text) == text
+
+    @pytest.mark.parametrize(
+        "run",
+        [
+            "-".join(["3f2a9c1e-7b4d-4e8a-9f0c-1a2b3c4d5e6f"] * 2800),  # ~100 KB of dash-joined UUIDs
+            "a-" * 50000,
+            "Zm9v_YmFy-" * 10000,  # base64url
+        ],
+        ids=["uuids", "dashes", "base64url"],
+    )
+    def test_a_long_run_of_joined_words_is_masked_in_linear_time(self, run):
+        # Every log line goes through this on the logging thread; a match attempt at each word boundary of a long run
+        # rescanned the run (a 100 KB line took over a minute).
+        start = time.perf_counter()
+        assert redact_secrets(f"token {run} X-Plex-Token=abc123") == f"token {run} X-Plex-Token=****"
+        assert time.perf_counter() - start < 1.0
+
+    def test_a_traceback_is_formatted_without_locals_and_masked(self):
+        def fetch(token):
+            raise ConnectionError(f"GET http://plex/?X-Plex-Token={token}")
+
+        secret = "abc" + "123"  # not a literal: the traceback quotes the calling line's source
+        try:
+            fetch(secret)
+        except ConnectionError as exc:
+            text = redacted_traceback(exc)
+        assert text.startswith("Traceback (most recent call last):")
+        assert "in fetch" in text and "X-Plex-Token=****" in text and "abc123" not in text
 
 
 class TestCalculateTitleWidth:

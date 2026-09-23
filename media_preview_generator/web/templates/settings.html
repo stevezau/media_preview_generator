@@ -13,6 +13,7 @@
         <nav id="settings-sidebar" class="settings-sidebar sticky-top">
             <div class="nav flex-column nav-pills">
                 <a class="nav-link" href="#section-processing"><i class="bi bi-speedometer2 me-2"></i>Processing Options</a>
+                <a class="nav-link" href="#section-markers"><i class="bi bi-skip-forward me-2"></i>Intro &amp; Credits</a>
                 <a class="nav-link" href="#section-logging"><i class="bi bi-journal-text me-2"></i>Logging</a>
                 <a class="nav-link" href="#section-auth"><i class="bi bi-key me-2"></i>Authentication</a>
                 <a class="nav-link" href="#section-backups"><i class="bi bi-clock-history me-2"></i>Backups</a>
@@ -25,7 +26,7 @@
         <header class="page-header">
             <div>
                 <h1 class="page-title"><i class="bi bi-gear me-2"></i>Settings</h1>
-                <p class="page-subtitle mb-0">Processing options, logging, authentication, and backups.</p>
+                <p class="page-subtitle mb-0">Processing options, Intro &amp; Credits, logging, authentication, and backups.</p>
             </div>
             <div class="page-actions">
                 <span id="saveStatusIndicator" class="autosave-indicator"></span>
@@ -453,6 +454,214 @@
             </div>
         </div>
 
+        <!-- Intro & Credits: detection settings shared by every server (a file is detected once). Each server's
+             switch lives in Servers → Edit → Intro & Credits, its libraries in Servers → Edit → Libraries. -->
+        <div class="card section-card" id="section-markers">
+            <div class="card-header">
+                <i class="bi bi-skip-forward me-2"></i>Intro &amp; Credits
+            </div>
+            <div class="card-body">
+                <p class="form-text mt-0 mb-3">
+                    Shared by every server. Turn markers on for each server in
+                    <a href="/servers">Servers</a> → Edit → Intro &amp; Credits.
+                </p>
+                <div class="markers-settings-grid">
+                    <div>
+                        <h6 class="mb-3">What to detect</h6>
+                        <div class="markers-opt mb-3">
+                            <div>
+                                <label for="markersDetectIntro">Intros</label>
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Found from chapters, online databases, and by matching the theme tune across a season."><i class="bi bi-info-circle"></i></button>
+                                <div class="small text-muted">TV episodes</div>
+                            </div>
+                            <div class="form-check form-switch markers-switch">
+                                <input class="form-check-input" type="checkbox" role="switch" id="markersDetectIntro" checked>
+                            </div>
+                        </div>
+                        <div class="markers-opt mb-3">
+                            <div>
+                                <label for="markersDetectCredits">Credits</label>
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Found from chapters, online databases, and the on-screen credit roll."><i class="bi bi-info-circle"></i></button>
+                                <div class="small text-muted">TV episodes and movies</div>
+                            </div>
+                            <div class="form-check form-switch markers-switch">
+                                <input class="form-check-input" type="checkbox" role="switch" id="markersDetectCredits" checked>
+                            </div>
+                        </div>
+                        <div class="markers-opt mb-3">
+                            <div>
+                                <label for="markersDetectRecap">Recaps</label>
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Only Jellyfin shows a Skip Recap button. Needs chapters or an online source."><i class="bi bi-info-circle"></i></button>
+                                <div class="small text-muted">Jellyfin only</div>
+                            </div>
+                            <div class="form-check form-switch markers-switch">
+                                <input class="form-check-input" type="checkbox" role="switch" id="markersDetectRecap">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div>
+                        <div class="d-flex justify-content-between align-items-baseline gap-2 mb-2">
+                            <h6 class="mb-0" id="markersSourcesLabel">Where evidence comes from</h6>
+                            <span class="small text-muted">drag to reorder</span>
+                        </div>
+                        <!-- Order is the order sources are checked and which one's times win. Reordered by the grip
+                             (drag) or the ▲/▼ buttons (keyboard and touch). -->
+                        <ol id="markersSourceList" class="list-unstyled mb-0" aria-labelledby="markersSourcesLabel">
+                            <li class="markers-source" data-id="chapters">
+                                <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
+                                <div class="markers-source-body">
+                                    <span class="markers-source-name">Chapters inside the file</span>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Streaming releases often name chapters Intro, Title Sequence or End Credits. About 1 in 9 seasons in a sampled library."><i class="bi bi-info-circle"></i></button>
+                                    <div class="small text-muted">Free · exact when present</div>
+                                </div>
+                                <div class="markers-source-controls">
+                                    <div class="form-check form-switch markers-switch">
+                                        <input class="form-check-input markers-source-enabled" type="checkbox" role="switch" aria-label="Use chapters inside the file" checked>
+                                    </div>
+                                    <button type="button" class="btn btn-sm btn-link markers-source-up" aria-label="Move chapters inside the file up"><i class="bi bi-caret-up-fill"></i></button>
+                                    <button type="button" class="btn btn-sm btn-link markers-source-down" aria-label="Move chapters inside the file down"><i class="bi bi-caret-down-fill"></i></button>
+                                </div>
+                            </li>
+                            <li class="markers-source" data-id="theintrodb" data-has-key="0">
+                                <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
+                                <div class="markers-source-body">
+                                    <span class="markers-source-name">Online: TheIntroDB</span>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="When it has data: intros 35 of 43 right, credits 23 right / 4 wrong. Has data for about 1 in 4 TV episodes and 1 in 100 movies. Works without a key (500 lookups a day); your own free key raises that. Used without the site's written permission — keys can be revoked."><i class="bi bi-info-circle"></i></button>
+                                    <div class="d-flex align-items-center gap-2 mt-1">
+                                        <!-- new-password: stops a browser password manager filling this app's login into it. -->
+                                        <input type="password" class="form-control form-control-sm markers-key-input" id="markersTheIntroDbKey"
+                                               placeholder="(optional)" autocomplete="new-password" spellcheck="false" aria-label="Your TheIntroDB API key (optional)">
+                                        <button type="button" class="btn btn-link btn-sm p-0 text-nowrap d-none" id="markersTheIntroDbClearKey">Clear key</button>
+                                    </div>
+                                    <div class="small text-muted mt-1" id="markersTheIntroDbUsage">—</div>
+                                </div>
+                                <div class="markers-source-controls">
+                                    <div class="form-check form-switch markers-switch">
+                                        <input class="form-check-input markers-source-enabled" type="checkbox" role="switch" aria-label="Use TheIntroDB">
+                                    </div>
+                                    <button type="button" class="btn btn-sm btn-link markers-source-up" aria-label="Move TheIntroDB up"><i class="bi bi-caret-up-fill"></i></button>
+                                    <button type="button" class="btn btn-sm btn-link markers-source-down" aria-label="Move TheIntroDB down"><i class="bi bi-caret-down-fill"></i></button>
+                                </div>
+                            </li>
+                            <li class="markers-source" data-id="introdb">
+                                <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
+                                <div class="markers-source-body">
+                                    <span class="markers-source-name">Online: IntroDB.app</span>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Intros 26 of 43 right, credits 17 right / 4 wrong on a verified set. Agreement with TheIntroDB counts as one vote because its data looks partly copied."><i class="bi bi-info-circle"></i></button>
+                                    <div class="small text-muted">No key needed · TV only</div>
+                                </div>
+                                <div class="markers-source-controls">
+                                    <div class="form-check form-switch markers-switch">
+                                        <input class="form-check-input markers-source-enabled" type="checkbox" role="switch" aria-label="Use IntroDB.app" checked>
+                                    </div>
+                                    <button type="button" class="btn btn-sm btn-link markers-source-up" aria-label="Move IntroDB.app up"><i class="bi bi-caret-up-fill"></i></button>
+                                    <button type="button" class="btn btn-sm btn-link markers-source-down" aria-label="Move IntroDB.app down"><i class="bi bi-caret-down-fill"></i></button>
+                                </div>
+                            </li>
+                            <li class="markers-source" data-id="skipdb">
+                                <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
+                                <div class="markers-source-body">
+                                    <span class="markers-source-name">Online: SkipDB</span>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Only answers matched to the length of your file are used. Intros 16 of 43 right on a verified set, so it mostly serves as a second opinion."><i class="bi bi-info-circle"></i></button>
+                                    <div class="small text-muted">Free lookups · matched to your file's length</div>
+                                </div>
+                                <div class="markers-source-controls">
+                                    <div class="form-check form-switch markers-switch">
+                                        <input class="form-check-input markers-source-enabled" type="checkbox" role="switch" aria-label="Use SkipDB" checked>
+                                    </div>
+                                    <button type="button" class="btn btn-sm btn-link markers-source-up" aria-label="Move SkipDB up"><i class="bi bi-caret-up-fill"></i></button>
+                                    <button type="button" class="btn btn-sm btn-link markers-source-down" aria-label="Move SkipDB down"><i class="bi bi-caret-down-fill"></i></button>
+                                </div>
+                            </li>
+                            <li class="markers-source" data-id="season_audio">
+                                <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
+                                <div class="markers-source-body">
+                                    <span class="markers-source-name">Matching audio across a season</span>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds the theme tune a season's episodes share. Tested alone on 118 episodes: 91 right, 13 wrong, 14 missed (Plex's own intro detection: 23 right, 15 wrong), so it publishes an intro on its own when nothing else answers. When another source disagrees, the episode goes to Needs review. A server's own intro marker doesn't count as a second source for it."><i class="bi bi-info-circle"></i></button>
+                                    <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1 markers-source-unavailable" hidden>Not available</span>
+                                    <div class="small text-muted">Finds intros by matching the season's episodes, even for shows no database has · CPU, about 2 s per episode</div>
+                                    <div class="small text-warning-emphasis markers-source-reason" hidden></div>
+                                </div>
+                                <div class="markers-source-controls">
+                                    <div class="form-check form-switch markers-switch">
+                                        <input class="form-check-input markers-source-enabled" type="checkbox" role="switch" aria-label="Use matching audio across a season" checked>
+                                    </div>
+                                    <button type="button" class="btn btn-sm btn-link markers-source-up" aria-label="Move matching audio across a season up"><i class="bi bi-caret-up-fill"></i></button>
+                                    <button type="button" class="btn btn-sm btn-link markers-source-down" aria-label="Move matching audio across a season down"><i class="bi bi-caret-down-fill"></i></button>
+                                </div>
+                            </li>
+                            <li class="markers-source" data-id="credits_text">
+                                <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
+                                <div class="markers-source-body">
+                                    <span class="markers-source-name">On-screen credit text</span>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds where the credit roll starts from text on screen near the end of the file, and stops the skip at the last credit when a scene follows. Tested alone on 80 files, on a GPU: within 10 s on 64, more than 30 s early on 1, missed 3. It can publish credits on its own."><i class="bi bi-info-circle"></i></button>
+                                    <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1 markers-source-unavailable" hidden>Not available</span>
+                                    <div class="small text-muted">Reads the end of the file · GPU when that's faster, otherwise CPU · about 10–30 s per file; 4K without a GPU up to about 2 min</div>
+                                    <div class="small text-warning-emphasis markers-source-reason" hidden></div>
+                                </div>
+                                <div class="markers-source-controls">
+                                    <div class="form-check form-switch markers-switch">
+                                        <input class="form-check-input markers-source-enabled" type="checkbox" role="switch" aria-label="Use on-screen credit text" checked>
+                                    </div>
+                                    <button type="button" class="btn btn-sm btn-link markers-source-up" aria-label="Move on-screen credit text up"><i class="bi bi-caret-up-fill"></i></button>
+                                    <button type="button" class="btn btn-sm btn-link markers-source-down" aria-label="Move on-screen credit text down"><i class="bi bi-caret-down-fill"></i></button>
+                                </div>
+                            </li>
+                            <li class="markers-source" data-id="server_markers">
+                                <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
+                                <div class="markers-source-body">
+                                    <span class="markers-source-name">Markers already on your servers</span>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Plex's own markers are sometimes wrong (for example ~80 s late on South Park S01), so they can only confirm another source."><i class="bi bi-info-circle"></i></button>
+                                    <div class="small text-muted">Second opinion, never copied as-is</div>
+                                </div>
+                                <div class="markers-source-controls">
+                                    <div class="form-check form-switch markers-switch">
+                                        <input class="form-check-input markers-source-enabled" type="checkbox" role="switch" aria-label="Use markers already on your servers" checked>
+                                    </div>
+                                    <button type="button" class="btn btn-sm btn-link markers-source-up" aria-label="Move markers already on your servers up"><i class="bi bi-caret-up-fill"></i></button>
+                                    <button type="button" class="btn btn-sm btn-link markers-source-down" aria-label="Move markers already on your servers down"><i class="bi bi-caret-down-fill"></i></button>
+                                </div>
+                            </li>
+                        </ol>
+                        <!-- Each sentence mirrors markers/decide.py at APP_PUBLISH_WHEN ("medium"); change both together. -->
+                        <p class="small text-muted mt-3 mb-0" id="markersHowItDecides">
+                            <strong>How it decides:</strong> sources are asked in the order above. Chapters in the file
+                            decide on their own, unless two other sources agree on something different or an intro
+                            chapter is far longer than the rest of its season's. An online database's answer is
+                            published once an independent source agrees with it: on-screen credits, season audio,
+                            another database, or a server's own marker (IntroDB and TheIntroDB count as one). A single
+                            answer decides alone only when it checks your own file: on-screen credit text for credits,
+                            season audio for intros (so a show no online database has still gets them), or SkipDB
+                            matched to your file's length for intros and recaps. If sources disagree, or the
+                            only answer can't decide alone, the file goes to Needs review so you can pick.
+                        </p>
+                    </div>
+                </div>
+
+                <div class="mt-3">
+                    <button class="btn btn-sm btn-link px-0" type="button" data-bs-toggle="collapse" data-bs-target="#markersAdvanced" aria-expanded="false" aria-controls="markersAdvanced" id="markersAdvancedToggle">
+                        <i class="bi bi-chevron-right me-1"></i>Advanced
+                    </button>
+                    <div class="collapse" id="markersAdvanced">
+                        <div class="card card-body mt-2">
+                            <h6 class="mb-3">Where to look for credits
+                                <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="How far from the end of a file to search for the credit roll. Automatic fits nearly every library. Raise it only if credits are being missed because they start earlier than this. A longer window takes longer to decode for every file."><i class="bi bi-info-circle"></i></button>
+                            </h6>
+                            <div class="markers-opt mb-3">
+                                <label for="markersCreditsWindowTv">TV episodes</label>
+                                <select class="form-select form-select-sm w-auto" id="markersCreditsWindowTv"><option value="" selected>Automatic (last 7½ min)</option><option value="300">5 min</option><option value="600">10 min</option><option value="900">15 min</option><option value="1200">20 min</option><option value="1800">30 min</option></select>
+                            </div>
+                            <div class="markers-opt">
+                                <label for="markersCreditsWindowMovie">Movies</label>
+                                <select class="form-select form-select-sm w-auto" id="markersCreditsWindowMovie"><option value="" selected>Automatic (last 15 min)</option><option value="300">5 min</option><option value="600">10 min</option><option value="900">15 min</option><option value="1200">20 min</option><option value="1800">30 min</option></select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Logging -->
         <div class="card section-card" id="section-logging">
             <div class="card-header">
@@ -763,6 +972,10 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
+    _wireMarkersSettings();
+    loadMarkersUsage();
+    loadMarkersLocalSources();
+
     // Quality slider display
     document.getElementById('thumbnailQuality').addEventListener('input', function() {
         document.getElementById('qualityValue').textContent = this.value;
@@ -908,6 +1121,8 @@ async function loadSettings() {
         document.getElementById('requeueMaxAgeGroup').style.opacity = autoRequeue ? '1' : '0.5';
         document.getElementById('requeueMaxAge').disabled = !autoRequeue;
 
+        _applyMarkersSettings(settings.markers);
+
         // Show the multi-server hint when ≥2 enabled servers exist so users see
         // the most-relevant context for this setting.
         try {
@@ -927,11 +1142,199 @@ async function loadSettings() {
     }
 }
 
-function escapeHtml(str) {
-    if (str == null) return '';
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
+// ---------- Intro & Credits ----------------------------------------------------
+
+function _markersSourceItems() {
+    return Array.from(document.querySelectorAll('#markersSourceList .markers-source'));
+}
+
+function _applyMarkersSettings(markers) {
+    const block = markers && typeof markers === 'object' ? markers : {};
+    const detect = block.detect || {};
+    document.getElementById('markersDetectIntro').checked = detect.intro !== false;
+    document.getElementById('markersDetectCredits').checked = detect.credits !== false;
+    document.getElementById('markersDetectRecap').checked = detect.recap === true;
+    const creditsWindow = block.credits_window || {};
+    document.getElementById('markersCreditsWindowTv').value = creditsWindow.tv_s == null ? '' : String(creditsWindow.tv_s);
+    document.getElementById('markersCreditsWindowMovie').value = creditsWindow.movie_s == null ? '' : String(creditsWindow.movie_s);
+
+    if (!Array.isArray(block.sources)) return;
+    const list = document.getElementById('markersSourceList');
+    const byId = new Map(_markersSourceItems().map((li) => [li.dataset.id, li]));
+    const ordered = [];
+    block.sources.forEach((source) => {
+        const li = source && byId.get(String(source.id));
+        if (!li || ordered.includes(li)) return;
+        ordered.push(li);
+        li.querySelector('.markers-source-enabled').checked = source.enabled !== false;
+        if (li.dataset.id === 'theintrodb') {
+            // The API only ever sends "****" for a stored key; the real key never reaches the page.
+            li.dataset.hasKey = source.api_key ? '1' : '0';
+            document.getElementById('markersTheIntroDbKey').value = '';
+        }
+    });
+    byId.forEach((li) => { if (!ordered.includes(li)) ordered.push(li); });
+    ordered.forEach((li) => list.appendChild(li));
+    _refreshMarkersSourceControls();
+}
+
+// "" is Automatic, sent as null.
+function _creditsWindowValue(id) {
+    const value = document.getElementById(id).value;
+    return value === '' ? null : Number(value);
+}
+
+function _collectMarkersSettings() {
+    return {
+        detect: {
+            intro: document.getElementById('markersDetectIntro').checked,
+            credits: document.getElementById('markersDetectCredits').checked,
+            recap: document.getElementById('markersDetectRecap').checked,
+        },
+        credits_window: {
+            tv_s: _creditsWindowValue('markersCreditsWindowTv'),
+            movie_s: _creditsWindowValue('markersCreditsWindowMovie'),
+        },
+        sources: _markersSourceItems().map((li) => {
+            const entry = { id: li.dataset.id, enabled: li.querySelector('.markers-source-enabled').checked };
+            if (li.dataset.id === 'theintrodb') {
+                const typed = document.getElementById('markersTheIntroDbKey').value.trim();
+                // "****" tells the server to keep the stored key; "" clears it.
+                entry.api_key = typed || (li.dataset.hasKey === '1' ? '****' : '');
+            }
+            return entry;
+        }),
+    };
+}
+
+function _refreshMarkersSourceControls() {
+    const items = _markersSourceItems();
+    items.forEach((li, index) => {
+        li.querySelector('.markers-source-up').disabled = index === 0;
+        li.querySelector('.markers-source-down').disabled = index === items.length - 1;
+    });
+    const theintrodb = document.querySelector('#markersSourceList .markers-source[data-id="theintrodb"]');
+    const keyInput = document.getElementById('markersTheIntroDbKey');
+    const hasKey = theintrodb && theintrodb.dataset.hasKey === '1';
+    keyInput.placeholder = hasKey ? '****' : '(optional)';
+    document.getElementById('markersTheIntroDbClearKey').classList.toggle('d-none', !(hasKey || keyInput.value));
+}
+
+function _markersOrderChanged() {
+    _refreshMarkersSourceControls();
+    // Autosave only listens to form controls, so the list announces a reorder itself.
+    document.getElementById('markersSourceList').dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function _moveMarkersSource(button) {
+    const li = button.closest('.markers-source');
+    const list = li.parentElement;
+    const up = button.classList.contains('markers-source-up');
+    // Move the neighbour rather than this row so the focused button stays in the document and keeps focus.
+    if (up && li.previousElementSibling) list.insertBefore(li.previousElementSibling, li.nextElementSibling);
+    else if (!up && li.nextElementSibling) list.insertBefore(li.nextElementSibling, li);
+    else return;
+    _markersOrderChanged();
+    if (button.disabled) li.querySelector(up ? '.markers-source-down' : '.markers-source-up').focus();
+}
+
+function _wireMarkersSettings() {
+    const list = document.getElementById('markersSourceList');
+    const keyInput = document.getElementById('markersTheIntroDbKey');
+    let dragged = null;
+    let orderBeforeDrag = '';
+    const currentOrder = () => _markersSourceItems().map((li) => li.dataset.id).join(',');
+
+    list.addEventListener('change', (event) => {
+        if (event.target === list) markDirty();
+    });
+    list.addEventListener('click', (event) => {
+        const button = event.target.closest('.markers-source-up, .markers-source-down');
+        if (button) _moveMarkersSource(button);
+    });
+    list.addEventListener('dragstart', (event) => {
+        const grip = event.target.closest && event.target.closest('.markers-source-grip');
+        if (!grip) return;
+        dragged = grip.closest('.markers-source');
+        orderBeforeDrag = currentOrder();
+        dragged.classList.add('dragging');
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', dragged.dataset.id);
+        event.dataTransfer.setDragImage(dragged, 16, 16);
+    });
+    list.addEventListener('dragover', (event) => {
+        if (!dragged) return;
+        event.preventDefault();
+        const over = event.target.closest && event.target.closest('.markers-source');
+        if (!over || over === dragged) return;
+        const rect = over.getBoundingClientRect();
+        const after = event.clientY > rect.top + rect.height / 2;
+        list.insertBefore(dragged, after ? over.nextElementSibling : over);
+    });
+    list.addEventListener('drop', (event) => {
+        if (dragged) event.preventDefault();
+    });
+    list.addEventListener('dragend', () => {
+        if (!dragged) return;
+        dragged.classList.remove('dragging');
+        dragged = null;
+        if (currentOrder() !== orderBeforeDrag) _markersOrderChanged();
+    });
+
+    keyInput.addEventListener('input', _refreshMarkersSourceControls);
+    document.getElementById('markersTheIntroDbClearKey').addEventListener('click', () => {
+        document.querySelector('#markersSourceList .markers-source[data-id="theintrodb"]').dataset.hasKey = '0';
+        keyInput.value = '';
+        _refreshMarkersSourceControls();
+        markDirty();
+    });
+    _refreshMarkersSourceControls();
+}
+
+// Shared by every online source's usage line (today only TheIntroDB shows one): once a LOW-priority lookup would be
+// refused, say so plainly instead of a number that would otherwise look like slow, ordinary usage.
+function _formatSourceUsageLine(usage, sourceName) {
+    if (!usage) return '—';
+    if (usage.low_priority_exhausted) {
+        return `Daily limit reached — lookups resume at ${usage.resets_at}`;
+    }
+    const used = usage.used;
+    return Number.isFinite(used) ? `${used} of today's lookups used · limit set by ${sourceName}` : '—';
+}
+
+async function loadMarkersUsage() {
+    const line = document.getElementById('markersTheIntroDbUsage');
+    try {
+        const response = await fetch('/api/markers/sources/usage');
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        line.textContent = _formatSourceUsageLine(data && data.theintrodb, 'TheIntroDB');
+    } catch (_error) {
+        line.textContent = '—';
+    }
+}
+
+async function loadMarkersLocalSources() {
+    const rows = ['season_audio', 'credits_text']
+        .map((id) => [id, document.querySelector(`#markersSourceList .markers-source[data-id="${id}"]`)])
+        .filter(([, row]) => row);
+    if (!rows.length) return;
+    try {
+        const response = await fetch('/api/markers/sources/local');
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        rows.forEach(([id, row]) => {
+            const status = data && data[id];
+            if (!status || typeof status.available !== 'boolean') return;
+            // The switch keeps the stored choice: a job in another container (or after an image update) may run it.
+            row.querySelector('.markers-source-unavailable').hidden = status.available;
+            const reason = row.querySelector('.markers-source-reason');
+            reason.textContent = status.available ? '' : String(status.message || '');
+            reason.hidden = status.available;
+        });
+    } catch (_error) {
+        // Unknown: leave the rows as they are.
+    }
 }
 
 function fetchGpuStatus() {
@@ -1055,6 +1458,7 @@ async function saveAllSettings() {
         webhook_retry_delay: parseInt(document.getElementById('webhookRetryDelay').value, 10) || 30,
         auto_requeue_on_restart: document.getElementById('autoRequeueOnRestart').checked,
         requeue_max_age_minutes: parseInt(document.getElementById('requeueMaxAge').value, 10) || 720,
+        markers: _collectMarkersSettings(),
     };
 
     const result = await new SettingsManager().save(settings);

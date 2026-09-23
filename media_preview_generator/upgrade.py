@@ -9,10 +9,12 @@ After migration, settings.json is the single source of truth for all
 application-level configuration.
 """
 
+import copy
 import json
 import os
 import sqlite3
 import uuid
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +23,13 @@ from loguru import logger
 # -------------------------------------------------------------------------
 # Schema version — bump when adding new migrations
 # -------------------------------------------------------------------------
-_CURRENT_SCHEMA_VERSION = 14
+_CURRENT_SCHEMA_VERSION = 16
+
+#: Set by v16: once the job manager runs, the app queues the one job that decides the files in Intro & Credits' Needs
+#: review (and those waiting for their item's other versions) again (``web.app``). Cleared when that job completes
+#: (``markers.job_runner``), so a start after a failed, cancelled or interrupted one queues it again, and a start with
+#: Intro & Credits off everywhere leaves it for later.
+DECIDE_AGAIN_KEY = "_markers_decide_again"
 
 #: Count of consecutive v14 attempts that failed on IO. The version gate
 #: alone would forfeit the migration forever after one transient error,
@@ -120,6 +128,12 @@ _USER_FACING_NOTES: dict[int, str] = {
         "default', so it couldn't be told apart from a deliberate choice. If you "
         "did mean Normal, re-pin it under Automation → Schedules. Anything you set "
         "to High or Low was left alone."
+    ),
+    16: (
+        "Intro & Credits no longer waits for two sources to agree when one source that checks your own file found a "
+        "marker (on-screen credit text, chapters, or SkipDB matched to your file's length), so far fewer files wait "
+        "in Needs review. The files already waiting there are checked again by one Intro & Credits job, which "
+        "reuses what was already found."
     ),
     13: (
         "Your Thumbnail Interval setting now applies to every server consistently. "
@@ -363,6 +377,9 @@ def _migrate_schema(sm) -> None:
         v14 -- Unpins Recently Added schedules that carry the old UI's
                unconditional ``priority: 2`` seed so they inherit the new
                ``incoming_job_priority`` setting. Issue #285.
+        v15 -- Seeds Intro & Credits (markers) defaults, disabled per server.
+        v16 -- Drops the removed ``markers.publish_when`` and asks the next start to decide the files in Needs
+               review again from their stored answers.
     """
     current = sm.get("_schema_version", 1)
     if current > _CURRENT_SCHEMA_VERSION:
@@ -423,6 +440,10 @@ def _migrate_schema(sm) -> None:
         _run(13, _migrate_to_v13)
     if current < 14 or v14_retry:
         _run(14, _migrate_to_v14)
+    if current < 15:
+        _run(15, _migrate_to_v15)
+    if current < 16:
+        _run(16, _migrate_to_v16)
 
     sm.set("_schema_version", _CURRENT_SCHEMA_VERSION)
 
@@ -432,10 +453,13 @@ def _migrate_schema(sm) -> None:
         # so the user sees a single "we migrated your config" card on next
         # login. Dismissal removes the flag (see notifications.py).
         from datetime import datetime as _dt
-        from datetime import timezone as _tz
 
         bak_path = f"{getattr(sm, 'settings_file', '')}.bak" if getattr(sm, "settings_file", None) else ""
         existing = sm.get("_pending_migration_notice") or {}
+        # An existing notice's notes are unread, so merge into it rather than overwrite it —
+        # regardless of whether this boot is a real version move or a retry-only boot.
+        merged_notes = list(existing.get("notes") or [])
+        merged_notes.extend(note for note in user_notes if note not in merged_notes)
         if current == _CURRENT_SCHEMA_VERSION:
             # Retry-only boot (the version gate was already closed; a pending
             # v14 attempt got us here). A fresh header would claim "migrated
@@ -445,28 +469,29 @@ def _migrate_schema(sm) -> None:
             # original boot never wrote one (its migration failed, so it
             # produced no notes), omit from/to entirely — the renderer drops
             # the sentence rather than printing "v? to v?".
-            merged = list(existing.get("notes") or [])
-            merged.extend(note for note in user_notes if note not in merged)
             if existing:
-                sm.set("_pending_migration_notice", {**existing, "notes": merged})
+                sm.set("_pending_migration_notice", {**existing, "notes": merged_notes})
             else:
                 sm.set(
                     "_pending_migration_notice",
                     {
-                        "at": _dt.now(_tz.utc).isoformat(),
+                        "at": _dt.now(UTC).isoformat(),
                         "backup": bak_path,
-                        "notes": merged,
+                        "notes": merged_notes,
                     },
                 )
         else:
+            # Real version move. Keep the ORIGINAL "from" when an undismissed notice already
+            # exists — the user hasn't opened the bell since whatever earlier version they were
+            # actually on — and bump "to" to the version this boot reaches.
             sm.set(
                 "_pending_migration_notice",
                 {
-                    "from": current,
+                    "from": existing.get("from", current),
                     "to": _CURRENT_SCHEMA_VERSION,
-                    "at": _dt.now(_tz.utc).isoformat(),
+                    "at": _dt.now(UTC).isoformat(),
                     "backup": bak_path,
-                    "notes": user_notes,
+                    "notes": merged_notes,
                 },
             )
 
@@ -926,9 +951,9 @@ def _migrate_to_v9(sm) -> list:
 
     v9 walks every server entry and dedupes both lists in place,
     preserving the first occurrence of each row. For
-    ``path_mappings`` the dedupe key is the (plex_prefix, local_prefix,
-    sorted webhook_prefixes) triple — two rows with the same prefixes
-    but different webhook aliases are kept distinct. For
+    ``path_mappings`` the dedupe key is the (remote_prefix or legacy
+    plex_prefix, local_prefix, sorted webhook_prefixes) triple — two rows
+    with the same prefixes but different webhook aliases are kept distinct. For
     ``exclude_paths`` the key is the (value, type) pair.
 
     Idempotent (re-running on a clean v9 file is a no-op) and harmless
@@ -959,7 +984,7 @@ def _migrate_to_v9(sm) -> list:
                     deduped_pm.append(row)
                     continue
                 key = (
-                    (row.get("plex_prefix") or "").strip(),
+                    (row.get("remote_prefix") or row.get("plex_prefix") or "").strip(),
                     (row.get("local_prefix") or "").strip(),
                     tuple(sorted([str(w).strip() for w in (row.get("webhook_prefixes") or [])])),
                 )
@@ -1416,6 +1441,74 @@ def _migrate_to_v14(sm) -> list:
 
     _v14_mark_settled(sm)
     return [f"v14: unpinned {unpinned} Recently Added schedule(s) so they inherit incoming_job_priority (#285)"]
+
+
+def _migrate_to_v15(sm) -> list:
+    """Seed the Intro & Credits global block and a disabled per-server block (spec §8).
+
+    The feature is off until enabled per server, so this migration is purely additive: it seeds
+    ``markers`` (global detection settings) when absent, and adds a disabled ``markers`` block to
+    any ``media_servers`` entry that doesn't already have one (e.g. added by an earlier partial
+    upgrade or hand-edited settings.json). No ``_USER_FACING_NOTES[15]`` entry: no extra note, but the
+    standard "Settings migrated" card still appears when this returns notes; Intro & Credits stays off
+    everywhere until they turn it on.
+
+    Idempotent — a re-run against an already-migrated install returns no notes.
+    """
+    from .markers.settings import DEFAULT_GLOBAL_MARKERS, default_server_markers
+
+    notes: list[str] = []
+    if not isinstance(sm.get("markers"), dict):
+        sm.apply_changes(updates={"markers": copy.deepcopy(DEFAULT_GLOBAL_MARKERS)})
+        notes.append("v15: seeded Intro & Credits defaults (off until enabled per server)")
+
+    media_servers = sm.get("media_servers") or []
+    if not isinstance(media_servers, list):
+        return notes
+
+    updated: list = []
+    added = 0
+    for entry in media_servers:
+        if isinstance(entry, dict) and not isinstance(entry.get("markers"), dict):
+            entry = {**entry, "markers": default_server_markers(str(entry.get("type") or "").lower())}
+            added += 1
+        updated.append(entry)
+    if added:
+        sm.update({"media_servers": updated})
+        notes.append(f"v15: added a disabled Intro & Credits block to {added} server(s)")
+    return notes
+
+
+def _migrate_to_v16(sm) -> list:
+    """Drop ``markers.publish_when`` and have the files in Needs review decided again (owner ruling 2026-09-24).
+
+    The "Publish when" High/Medium choice is gone: every decision is made at Medium's rules
+    (``markers.decide.APP_PUBLISH_WHEN``), where one source that checks the file itself may decide alone. High was the
+    default and almost nobody chose it, and it left most of a library in Needs review, so the stored key carries no
+    choice worth keeping. A settings.json that still has it reads fine without this step (``validate_global`` drops
+    it); the step only tidies it away.
+
+    The files High held in Needs review would otherwise wait until some later job lists them, so this also sets
+    :data:`DECIDE_AGAIN_KEY`, whatever the stored value was (deciding again also brings the Needs review wording
+    of files already at Medium up to date, and publishes the files left waiting for their item's other versions). The
+    app queues that job once its job manager runs (``markers.triggers.submit_decide_again``) and the key is cleared
+    when the job completes; with Intro & Credits off everywhere the key waits for a start after it is turned on.
+
+    Runs once, gated on ``_schema_version``.
+
+    Returns:
+        A note when the stored rule was High: only then do decisions change. (Every block v15 seeded or a save wrote
+        before this step has the key; one v15 seeds in the same boot doesn't, and gets no note.)
+    """
+    markers = sm.get("markers")
+    if not isinstance(markers, dict) or "publish_when" not in markers:
+        sm.set(DECIDE_AGAIN_KEY, True)
+        return []
+    kept = {key: value for key, value in markers.items() if key != "publish_when"}
+    sm.apply_changes(updates={"markers": kept, DECIDE_AGAIN_KEY: True})
+    if markers["publish_when"] != "high":
+        return []
+    return ["v16: removed the Intro & Credits publish rule High; every file is decided at Medium's rules now"]
 
 
 # =========================================================================

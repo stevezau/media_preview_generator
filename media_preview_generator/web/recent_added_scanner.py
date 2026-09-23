@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from loguru import logger
 
@@ -256,7 +256,7 @@ def scan_recently_added(
     except (TypeError, ValueError):
         lookback = 1.0
     lookback = max(0.25, min(720.0, lookback))
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback)
+    cutoff = datetime.now(UTC) - timedelta(hours=lookback)
 
     explicit_ids: set[str] = set()
     if library_ids:

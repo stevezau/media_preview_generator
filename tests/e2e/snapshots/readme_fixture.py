@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -168,7 +168,7 @@ def write_settings(config_dir: str | Path) -> Path:
 
 
 def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat()
+    return dt.astimezone(UTC).isoformat()
 
 
 def seed_jobs(config_dir: str | Path) -> int:
@@ -192,7 +192,7 @@ def seed_jobs(config_dir: str | Path) -> int:
     db_path = str(Path(config_dir) / "jobs.db")
     storage = JobStorage(db_path)
     try:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         rows: list[Job] = []
 
         # 6 completed jobs spread across the last two days + both vendors.

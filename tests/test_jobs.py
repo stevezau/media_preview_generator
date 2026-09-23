@@ -8,7 +8,8 @@ or cleared.
 """
 
 import os
-from datetime import datetime, timedelta, timezone
+import time
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -38,6 +39,16 @@ def _reset_job_manager():
 def config_dir(tmp_path):
     """Temporary config directory for job logs."""
     return str(tmp_path / "config")
+
+
+@pytest.fixture
+def utc_plus_10(monkeypatch):
+    """The process's local time zone is UTC+10 (a POSIX rule, so no zoneinfo files are needed)."""
+    monkeypatch.setenv("TZ", "AEST-10")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
 
 
 class TestJobProgressSchemaTolerance:
@@ -78,6 +89,32 @@ class TestJobLogPersistence:
         assert "first line" in content
         assert "second line" in content
         assert content.count("\n") == 2
+
+    def test_a_log_line_carries_the_containers_local_time_like_app_log(self, config_dir, utc_plus_10):
+        import media_preview_generator.web.jobs as jobs_mod
+
+        class FixedClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                moment = datetime(2026, 9, 24, 0, 5, 7, tzinfo=UTC)
+                return moment if tz is not None else moment.astimezone().replace(tzinfo=None)
+
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test")
+        with patch.object(jobs_mod, "datetime", FixedClock):
+            jm.add_log(job.id, "INFO - Intro & Credits job started")
+        assert jm.get_logs(job.id) == ["[10:05:07] INFO - Intro & Credits job started"]
+
+    @pytest.mark.parametrize(
+        "moment",
+        [datetime(2026, 9, 24, 23, 59, 59, tzinfo=UTC), datetime(2026, 9, 24, 23, 59, 59)],
+        ids=["aware", "naive-read-as-utc"],
+    )
+    def test_log_clock_turns_a_stored_utc_time_into_local_time(self, utc_plus_10, moment):
+        from media_preview_generator.web.jobs import log_clock
+
+        assert log_clock(moment) == "09:59:59"
 
     def test_get_logs_reads_from_file_after_restart(self, config_dir):
         """get_logs returns file content when in-memory cache is empty (e.g. after restart)."""
@@ -126,7 +163,7 @@ class TestLogRetentionEnforcement:
         assert os.path.isfile(log_path)
 
         # Backdate completed_at to 60 days ago
-        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        old_time = (datetime.now(UTC) - timedelta(days=60)).isoformat()
         jm._jobs[job.id].completed_at = old_time
         jm._persist_job(jm._jobs[job.id])
 
@@ -164,7 +201,7 @@ class TestLogRetentionEnforcement:
         jm.add_log(job.id, "INFO - test")
 
         # Backdate created_at to 90 days ago
-        old_time = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        old_time = (datetime.now(UTC) - timedelta(days=90)).isoformat()
         jm._jobs[job.id].created_at = old_time
 
         with patch("media_preview_generator.web.settings_manager.get_settings_manager") as m:
@@ -257,6 +294,68 @@ class TestRetentionTimer:
         jm = JobManager(config_dir=config_dir)
         jm._stop_retention_timer()
         assert jm._retention_timer is None
+
+
+def _files_open_under(root: str) -> list[str]:
+    """The files this process has open under ``root``, by path (one entry per descriptor)."""
+    targets = []
+    for fd in os.listdir("/proc/self/fd"):
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            continue
+        if target.startswith(root + os.sep):
+            targets.append(target)
+    return targets
+
+
+class TestClose:
+    """A JobManager that's replaced releases jobs.db and its timer thread instead of holding them until exit."""
+
+    def test_close_releases_jobs_db_and_stops_the_timer_when_called(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        timer = jm._retention_timer
+        assert _files_open_under(config_dir)  # jobs.db, -wal and -shm
+
+        jm.close()
+
+        assert _files_open_under(config_dir) == []
+        timer.join(timeout=5)
+        assert not timer.is_alive()
+        jm.close()  # a second close is harmless
+
+    def test_a_closed_manager_keeps_working_in_memory_when_still_in_use(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        jm.close()
+
+        job = jm.create_job(library_name="Movies")
+
+        assert jm.get_job(job.id) is job
+        assert _files_open_under(config_dir) == []
+
+    def test_a_retention_tick_after_close_neither_sweeps_nor_schedules_a_new_timer(self, config_dir, monkeypatch):
+        # A tick that fired just before close() still runs; it mustn't sweep log files a replacement manager in the
+        # same config_dir now owns.
+        jm = JobManager(config_dir=config_dir)
+        jm.close()
+        swept = []
+        monkeypatch.setattr(jm, "_enforce_log_retention", lambda: swept.append(True))
+
+        jm._retention_tick()
+
+        assert swept == []
+        assert jm._retention_timer is None
+
+    def test_replacing_the_shared_manager_leaves_only_the_new_ones_files_open_when_config_dir_changes(self, tmp_path):
+        from media_preview_generator.web.jobs import get_job_manager
+
+        root = str(tmp_path)
+        managers = [get_job_manager(config_dir=os.path.join(root, f"config{i}")) for i in range(20)]
+
+        open_now = _files_open_under(root)
+        assert open_now, "the current manager's jobs.db should be open"
+        assert {os.path.dirname(path) for path in open_now} == {managers[-1].config_dir}
+        assert [jm for jm in managers[:-1] if jm._retention_timer is not None] == []
 
 
 class TestCompleteJobWarning:
@@ -368,7 +467,7 @@ class TestRequeueInterruptedJobs:
         os.makedirs(config_dir, exist_ok=True)
         jm = JobManager(config_dir=config_dir)
         job = jm.create_job(library_name="Old Job")
-        job.created_at = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        job.created_at = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
         jm._interrupted_jobs = [job]
 
         result = jm.requeue_interrupted_jobs(max_age_minutes=60)
@@ -381,8 +480,8 @@ class TestRequeueInterruptedJobs:
         os.makedirs(config_dir, exist_ok=True)
         jm = JobManager(config_dir=config_dir)
         job = jm.create_job(library_name="Long Runner")
-        job.created_at = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
-        job.started_at = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        job.created_at = (datetime.now(UTC) - timedelta(hours=5)).isoformat()
+        job.started_at = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
         job.status = JobStatus.FAILED
         job.error = "Job was interrupted by server restart"
         jm._interrupted_jobs = [job]
@@ -399,8 +498,8 @@ class TestRequeueInterruptedJobs:
         os.makedirs(config_dir, exist_ok=True)
         jm = JobManager(config_dir=config_dir)
         job = jm.create_job(library_name="Very Old Runner")
-        job.created_at = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()
-        job.started_at = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+        job.created_at = (datetime.now(UTC) - timedelta(hours=10)).isoformat()
+        job.started_at = (datetime.now(UTC) - timedelta(hours=5)).isoformat()
         job.status = JobStatus.FAILED
         jm._interrupted_jobs = [job]
 
@@ -433,7 +532,7 @@ class TestRequeueInterruptedJobs:
         original_created = job.created_at
         job.status = JobStatus.FAILED
         job.error = "Job was interrupted by server restart"
-        job.completed_at = datetime.now(timezone.utc).isoformat()
+        job.completed_at = datetime.now(UTC).isoformat()
         jm._interrupted_jobs = [job]
 
         result = jm.requeue_interrupted_jobs()
@@ -784,7 +883,7 @@ class TestSqliteJobsBackend:
         # Create 50 fat completed jobs, backdate them past retention,
         # then run the retention tick manually.
         fat_publishers = [{"server_id": f"s{i}", "counts": {"published": 9999}} for i in range(200)]
-        old_time = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        old_time = (datetime.now(UTC) - timedelta(days=60)).isoformat()
         for i in range(50):
             j = jm.create_job(library_name=f"old-{i}")
             jm.start_job(j.id)
@@ -1085,3 +1184,171 @@ class TestSetJobOutcome:
         jm = JobManager(config_dir=config_dir)
         job = jm.create_job(library_name="Test")
         assert job.progress.outcome is None
+
+
+class TestUpdateJobConfigIfPending:
+    """Intro & Credits joins write a waiting job's files only while it is still pending."""
+
+    def test_a_pending_job_takes_the_config(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test", config={"file_paths": ["/a"]})
+
+        assert jm.update_job_config_if_pending(job.id, {"file_paths": ["/a", "/b"]}) is True
+        assert jm.get_job(job.id).config == {"file_paths": ["/a", "/b"]}
+
+    @pytest.mark.parametrize("state", ["running", "completed", "cancelled"])
+    def test_a_job_no_longer_pending_keeps_its_config(self, config_dir, state):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test", config={"file_paths": ["/a"]})
+        if state == "cancelled":
+            jm.cancel_job(job.id)
+        else:
+            jm.start_job(job.id)
+        if state == "completed":
+            jm.complete_job(job.id)
+
+        assert jm.update_job_config_if_pending(job.id, {"file_paths": ["/a", "/b"]}) is False
+        assert jm.get_job(job.id).config == {"file_paths": ["/a"]}
+
+    def test_a_missing_job_is_refused(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        assert jm.update_job_config_if_pending("nope", {"file_paths": ["/b"]}) is False
+
+
+class TestMergeJobConfig:
+    """A running job adds keys to its config without losing what other threads wrote there (a stop-time pause)."""
+
+    def test_the_keys_join_the_live_config_and_are_persisted(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test", config={"reconcile": True})
+        jm.start_job(job.id)
+        jm.request_pause(job.id, by_schedule=True)  # written after the runner read its config
+
+        assert jm.merge_job_config(job.id, {"check_servers_listing": {"files": ["/a"]}}) is True
+
+        expected = {"reconcile": True, "paused_by_schedule": True, "check_servers_listing": {"files": ["/a"]}}
+        assert jm.get_job(job.id).config == expected
+        assert JobManager(config_dir=config_dir).get_job(job.id).config == expected
+
+    def test_keys_can_be_taken_out(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test", config={"reconcile": True, "check_servers_listing": {"files": []}})
+
+        assert jm.merge_job_config(job.id, {}, remove=("check_servers_listing", "absent")) is True
+
+        assert jm.get_job(job.id).config == {"reconcile": True}
+        assert JobManager(config_dir=config_dir).get_job(job.id).config == {"reconcile": True}
+
+    def test_a_missing_job_is_refused(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        assert jm.merge_job_config("nope", {"a": 1}) is False
+
+
+class TestSecretsAreMaskedWhereJobTextIsStored:
+    """Every writer's text passes through the job manager: a token in it is masked before it is kept or served."""
+
+    LEAK = "GET http://plex:32400/library/metadata/1?X-Plex-Token=s3cr3t failed"
+    MASKED = "GET http://plex:32400/library/metadata/1?X-Plex-Token=**** failed"
+
+    @pytest.mark.parametrize("field", ["error", "warning"])
+    def test_a_finished_jobs_error_or_warning(self, config_dir, field):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test")
+        jm.start_job(job.id)
+
+        jm.complete_job(job.id, **{field: self.LEAK})
+
+        assert jm.get_job(job.id).error == self.MASKED
+        assert JobManager(config_dir=config_dir).get_job(job.id).error == self.MASKED
+
+    def test_a_job_log_line(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test")
+
+        jm.add_log(job.id, f"WARNING - {self.LEAK}")
+
+        (line,) = jm.get_logs(job.id)
+        assert line.endswith(f"WARNING - {self.MASKED}") and "s3cr3t" not in str(list(jm._job_logs[job.id]))
+
+    @pytest.mark.parametrize("where", ["reason", "reason-from-server-message", "server-message"])
+    def test_a_files_panel_row(self, config_dir, where):
+        jm = JobManager(config_dir=config_dir)
+        job = jm.create_job(library_name="Test")
+        server = {"server_id": "plex-1", "server_name": "Plex", "server_type": "plex", "status": "failed"}
+        reason = {"reason": self.LEAK, "reason-from-server-message": "", "server-message": "Couldn't publish"}[where]
+        server["message"] = "" if where == "reason" else self.LEAK
+
+        jm.record_file_result(job.id, "/m/a.mkv", "failed", reason=reason, servers=[server], server_messages=True)
+
+        (row,) = jm.get_file_results(job.id)
+        assert row["reason"] == (self.MASKED if where != "server-message" else "Couldn't publish")
+        # A server's message is kept only when it differs from the row's reason.
+        assert row["servers"][0].get("message") == (self.MASKED if where == "server-message" else None)
+        with open(jm._file_results_path(job.id)) as f:
+            assert "s3cr3t" not in f.read()
+
+
+class TestPendingJobsUnderConcurrentCreation:
+    """Webhook threads create jobs while other threads list the pending ones (Intro & Credits follow-up dedupe)."""
+
+    def test_listing_pending_jobs_while_jobs_are_created_never_raises(self, config_dir):
+        import threading
+
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        jm._persist_job = lambda job: None  # keep creation fast so the dict grows during the listing loop
+        for i in range(3000):
+            jm.create_job(library_name=f"seed {i}")
+        stop = threading.Event()
+        created = []
+
+        def create_jobs():
+            while not stop.is_set():
+                created.append(jm.create_job(library_name="webhook").id)
+
+        errors = []
+        creator = threading.Thread(target=create_jobs)
+        creator.start()
+        try:
+            for _ in range(400):
+                try:
+                    pending = jm.get_pending_jobs()
+                except RuntimeError as exc:  # "dictionary changed size during iteration"
+                    errors.append(exc)
+                    continue
+                assert all(job.status is JobStatus.PENDING for job in pending)
+        finally:
+            stop.set()
+            creator.join(timeout=5)
+        assert errors == []
+        assert created, "the creator thread must have run during the listing"
+        assert {j.id for j in jm.get_pending_jobs()} >= set(created)
+
+
+class TestFailUnrevivedInterruptedJobs:
+    """Interrupted jobs a restart didn't revive are settled per kind."""
+
+    def test_only_pending_jobs_of_the_kind_left_behind_are_failed(self, config_dir):
+        os.makedirs(config_dir, exist_ok=True)
+        jm = JobManager(config_dir=config_dir)
+        stale_ic = jm.create_job(library_name="old backfill", kind="intro_credits")
+        stale_preview = jm.create_job(library_name="old scan")
+        finished_ic = jm.create_job(library_name="interrupted while running", kind="intro_credits")
+        finished_ic.status = JobStatus.FAILED
+        fresh_ic = jm.create_job(library_name="fresh", kind="intro_credits")
+        stale_ic.created_at = stale_preview.created_at = finished_ic.created_at = (
+            datetime.now(UTC) - timedelta(hours=3)
+        ).isoformat()
+        jm._interrupted_jobs = [stale_ic, stale_preview, finished_ic, fresh_ic]
+
+        revived = jm.requeue_interrupted_jobs(max_age_minutes=60)
+        failed = jm.fail_unrevived_interrupted_jobs("intro_credits")
+
+        assert [j.id for j in revived] == [fresh_ic.id]
+        assert finished_ic.status is JobStatus.FAILED and finished_ic.error is None  # already settled at load
+        assert [j.id for j in failed] == [stale_ic.id]
+        assert stale_ic.status is JobStatus.FAILED and stale_ic.error == "Interrupted by a restart and not resumed"
+        assert stale_preview.status is JobStatus.PENDING
+        assert fresh_ic.status is JobStatus.PENDING
+        assert jm.fail_unrevived_interrupted_jobs("intro_credits") == []
+        assert JobManager(config_dir=config_dir).get_job(stale_ic.id).status is JobStatus.FAILED

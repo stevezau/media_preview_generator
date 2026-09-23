@@ -7,9 +7,11 @@ the web layer and the CLI processing pipeline.
 
 import threading
 from contextlib import ExitStack
+from datetime import UTC
 
 from loguru import logger
 
+from ...job_kinds import JOB_KIND_INTRO_CREDITS
 from ..job_gate import format_wait_message
 from ..jobs import PRIORITY_NORMAL, WorkerStatus, get_job_manager, incoming_job_priority, parse_priority
 
@@ -94,7 +96,7 @@ def _retry_completion_message(
 
     Returns:
         ``("INFO", "Retry job completed successfully")`` when the chain succeeded.
-        ``("WARNING", "Retry chain exhausted after N attempt(s); …")`` when
+        ``("WARNING", "N file(s) still weren't indexed … after M retries, … (Plex pending × N)")`` when
         ``retry_paths`` is non-empty AND ``spawned_retry_id`` is ``None``
         (chain ran out of attempts).
     """
@@ -103,8 +105,65 @@ def _retry_completion_message(
             ", ".join(f"{name} pending × {n}" for name, n in sorted(pending_by_server.items(), key=lambda kv: -kv[1]))
             or f"{len(retry_paths)} path(s) still pending"
         )
-        return "WARNING", f"Retry chain exhausted after {effective_max} attempt(s); {pending_summary}"
+        return "WARNING", f"{_gave_up_text(len(retry_paths), effective_max)} ({pending_summary})"
     return "INFO", "Retry job completed successfully"
+
+
+def _log_item_complete(display_name: str, title: str, success: bool) -> None:
+    """Log one finished file of a preview job.
+
+    The checking stage finishes every already-done file of a scan (4 INFO lines per such file were 92% of a 12 h log),
+    so its successes are DEBUG: the job's "Processing complete: …" line counts them.
+
+    Args:
+        display_name: The worker that finished it, or the checking stage's ``CHECK_STAGE_WORKER_NAME``.
+        title: The file's title.
+        success: Whether it succeeded.
+    """
+    from ...jobs.dispatcher import CHECK_STAGE_WORKER_NAME
+
+    level = "DEBUG" if success and display_name == CHECK_STAGE_WORKER_NAME else "INFO"
+    logger.log(level, "{} completed: {!r} ({})", display_name, title, "success" if success else "failed")
+
+
+def _retries_text(count: int) -> str:
+    return f"{count} {'retry' if count == 1 else 'retries'}"
+
+
+def _gave_up_text(file_count: int, retries: int) -> str:
+    """The final give-up of a retry chain, as the job log and the chain head's row say it."""
+    return (
+        f"{file_count} file(s) still weren't indexed by the media server after {_retries_text(retries)}, so no more "
+        "retries are queued. The next scheduled scan will pick them up."
+    )
+
+
+def _not_indexed_message(count: int, *, is_retry: bool, retry_attempt: int, effective_max: int) -> str:
+    """Why files still waiting for the media server to index them get no retry from this job.
+
+    Only called when this job queued no retry: the chain ran out of retries, retries are off, or nothing was flagged
+    for one.
+
+    Args:
+        count: Files that ended ``skipped_not_indexed``.
+        is_retry: Whether this job is a retry of a chain.
+        retry_attempt: Which retry it is (0 for the original job).
+        effective_max: The retry count in force.
+
+    Returns:
+        The job log line and completion warning.
+    """
+    if is_retry and retry_attempt >= effective_max:
+        return _gave_up_text(count, retry_attempt)
+    if effective_max <= 0:
+        return (
+            f"{count} file(s) weren't indexed by the media server yet, and retries are off (Settings → Retry policy). "
+            "The next scheduled scan will pick them up."
+        )
+    return (
+        f"{count} file(s) weren't indexed by the media server yet, and no retry was queued for them. "
+        "The next scheduled scan will pick them up."
+    )
 
 
 def _format_retry_wait_server_label(parent_job, run_job_config) -> str:
@@ -264,7 +323,9 @@ def _is_force_fire_now_set(job_manager, job_id: str) -> bool:
 
 
 def resume_running_and_drain_pending() -> None:
-    """Resume paused running jobs and start every PENDING job, in priority order.
+    """Resume paused running preview jobs and start every PENDING job, in priority order.
+
+    Intro & Credits jobs keep their own per-job pause; "Pause all" holds them through the global flag instead.
 
     The shared body for ALL resume paths — manual resume
     (``api_jobs.resume_processing``), worker-availability auto-resume
@@ -282,6 +343,10 @@ def resume_running_and_drain_pending() -> None:
 
     jm = get_job_manager()
     for running in jm.get_running_jobs():
+        # A global resume must not clear an Intro & Credits job's own pause; Pause all holds those jobs through
+        # the global flag, which the caller has already cleared.
+        if running.kind == JOB_KIND_INTRO_CREDITS:
+            continue
         jm.request_resume(running.id)
     pending = sorted(jm.get_pending_jobs(), key=lambda j: (j.priority, j.created_at or ""))
     for pj in pending:
@@ -294,7 +359,21 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
     If a thread is already in-flight for *job_id* (e.g. still scanning
     libraries after a revive), the call is silently skipped to avoid
     duplicate work.
+
+    Intro & Credits jobs are handed to their own runner, so every start path (manual resume, pending drain,
+    restart requeue, reprocess) runs them with the marker pipeline.
     """
+    try:
+        queued = get_job_manager().get_job(job_id)
+    except Exception as exc:
+        # The preview thread below reads the job again and reports the failure on the job.
+        logger.debug("Could not read job {} to pick its runner: {}", job_id, exc)
+        queued = None
+    if queued is not None and queued.kind == JOB_KIND_INTRO_CREDITS:
+        from ...markers.job_runner import start_intro_credits_job_async
+
+        start_intro_credits_job_async(job_id, config_overrides)
+        return
     with _inflight_lock:
         if job_id in _inflight_jobs:
             logger.info("Skipping duplicate _start_job_async for {} — already in flight", job_id)
@@ -620,10 +699,10 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
             run_job_config = job_manager.get_job(job_id)
             if run_job_config and run_job_config.config.get("is_retry"):
                 import time as _time
-                from datetime import datetime, timedelta, timezone
+                from datetime import datetime, timedelta
 
                 delay_sec = max(1, int(run_job_config.config.get("retry_delay", 30)))
-                retry_eta = (datetime.now(timezone.utc) + timedelta(seconds=delay_sec)).isoformat()
+                retry_eta = (datetime.now(UTC) + timedelta(seconds=delay_sec)).isoformat()
                 _parent_job_id = (run_job_config.config or {}).get("parent_job_id")
                 _parent_job = job_manager.get_job(_parent_job_id) if _parent_job_id else None
                 _server_label = _format_retry_wait_server_label(_parent_job, run_job_config)
@@ -831,10 +910,6 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                     # JSONL stopped growing after 6 seconds of a ~13min run.
                     set_file_result_callback(_file_result_cb, job_id=job_id)
 
-                    def _on_item_complete(display_name, title, success):
-                        outcome = "success" if success else "failed"
-                        logger.info("{} completed: {!r} ({})", display_name, title, outcome)
-
                     def _on_dispatch_start():
                         """Transition PENDING -> RUNNING when items are dispatched."""
                         job_manager.start_job(job_id)
@@ -867,7 +942,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         selected_gpus,
                         progress_callback=progress_callback,
                         worker_callback=worker_callback,
-                        item_complete_callback=_on_item_complete,
+                        item_complete_callback=_log_item_complete,
                         cancel_check=lambda: job_manager.is_cancellation_requested(job_id),
                         pause_check=lambda: (
                             job_manager.is_pause_requested(job_id) or get_settings_manager().processing_paused
@@ -1114,7 +1189,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         ``published``/``skipped_output_exists``).
                         """
                         import os as _os
-                        from datetime import datetime, timedelta, timezone
+                        from datetime import datetime, timedelta
 
                         from media_preview_generator.processing.retry_queue import scaled_backoff_delay
 
@@ -1151,7 +1226,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                         # tunable webhook_retry_delay (default 30) scales
                         # the schedule so manual tuning still works.
                         backoff_delay = scaled_backoff_delay(attempt, retry_delay_sec)
-                        scheduled_at = (datetime.now(timezone.utc) + timedelta(seconds=backoff_delay)).isoformat()
+                        scheduled_at = (datetime.now(UTC) + timedelta(seconds=backoff_delay)).isoformat()
                         parent_priority = current_job.priority if current_job else 2
                         # K1: preserve the originating server triple so retry
                         # jobs stay scoped to whichever server fired the
@@ -1351,6 +1426,9 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             )
                         elif not is_retry and effective_max > 0:
                             spawned_retry_id = _spawn_retry_job(retry_paths, 1, retry_reason=retry_reason)
+                            from media_preview_generator.processing.retry_queue import scaled_backoff_delay
+
+                            first_delay = scaled_backoff_delay(1, retry_delay_sec)
                             reason_parts = []
                             if unresolved_paths:
                                 reason_parts.append(f"{len(unresolved_paths)} not found on any server")
@@ -1366,7 +1444,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             # scheduled. Operator-visible signal.
                             job_manager.add_log(
                                 job_id,
-                                f"WARNING - {reason}, retry scheduled in {retry_delay_sec}s",
+                                f"WARNING - {reason}, retry scheduled in {first_delay}s (retry 1 of {effective_max})",
                             )
 
                     # Terminal chain transition: this is a retry Job, it
@@ -1388,9 +1466,8 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                                 if retry_paths:
                                     _chain_outcome = "exhausted"
                                     _chain_reason = (
-                                        f"Source server did not register {len(retry_paths)} "
-                                        f"file(s) after {effective_max} retry attempts. "
-                                        f"Check the Files panel for the affected paths."
+                                        f"{_gave_up_text(len(retry_paths), effective_max)} "
+                                        "Check the Files panel for the affected paths."
                                     )
                                 else:
                                     _chain_outcome = "completed"
@@ -1570,20 +1647,18 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             else:
                                 job_manager.complete_job(job_id, warning=error_msg)
                         else:
-                            # D25 — when files ended in skipped_not_indexed,
-                            # the JOB has finished dispatching but background
-                            # retries are still pending. Marking it plain
-                            # "Completed" (green) is misleading because more
-                            # work IS scheduled. Surface as a warning so the
-                            # user sees an amber badge with a clear message.
+                            # D25 — files that ended in skipped_not_indexed get an
+                            # amber badge, not a green "Completed". A job that
+                            # queued a retry never gets here (its error_parts
+                            # name the retry), so these files get no retry
+                            # from this job: say so instead of promising one.
                             not_indexed_count = (outcome or {}).get("skipped_not_indexed", 0) if outcome else 0
                             if not_indexed_count > 0:
-                                msg = (
-                                    f"{not_indexed_count} file(s) waiting for the media server to scan / "
-                                    "analyse them (the media server hasn't finished its own analysis pass "
-                                    "for these files, so we don't have the bundle hash needed to publish the "
-                                    "BIF). They'll be retried automatically — slow backoff: 1m → 2m → 5m "
-                                    "→ 15m → 60m."
+                                msg = _not_indexed_message(
+                                    not_indexed_count,
+                                    is_retry=is_retry,
+                                    retry_attempt=retry_attempt,
+                                    effective_max=effective_max,
                                 )
                                 job_manager.add_log(job_id, f"INFO - {msg}")
                                 job_manager.complete_job(job_id, warning=msg)

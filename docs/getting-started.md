@@ -102,12 +102,14 @@ You can add more servers — any vendor, any number of each — at any time from
 
 ## Recommended media-server settings
 
-This tool generates **video preview thumbnails only** — the small frames you
+This tool's main job is **video preview thumbnails** — the small frames you
 see when you drag the scrub bar. Plex stores them as **BIF bundles**, Emby
 reads a **BIF sidecar** next to the media file, and Jellyfin reads a folder of
 JPG tile sheets called **trickplay** next to the media file. The app writes
-the right format for each. It does **not** generate chapter thumbnails,
-intro/credit detection, or other media analysis.
+the right format for each. It does **not** generate chapter thumbnails or do
+other media analysis. It can also send **Skip Intro / Skip Credits markers**
+to your servers; that is off until you turn it on per server (see the
+[Intro & Credits guide](guides.md#intro--credits)).
 
 **Turn off built-in preview generation on each server you configure** so this
 tool isn't competing with a redundant CPU job:

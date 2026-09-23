@@ -7,6 +7,7 @@ and the webhooks page route.
 
 import json
 import os
+from datetime import UTC
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -44,6 +45,7 @@ def _reset_singletons():
         wh._pending_timers.clear()
         wh._pending_batches.clear()
         wh._recent_dispatches.clear()
+        wh._import_file_events.clear()
     yield
     reset_settings_manager()
     with jobs_mod._job_lock:
@@ -63,6 +65,7 @@ def _reset_singletons():
         wh._pending_timers.clear()
         wh._pending_batches.clear()
         wh._recent_dispatches.clear()
+        wh._import_file_events.clear()
 
 
 @pytest.fixture()
@@ -954,7 +957,7 @@ def test_schedule_webhook_job_dedupes_within_ttl(mock_timer_cls, mock_settings_m
     """A second call with the same (source, path) during the TTL window
     should be dropped without starting a new timer, and should log a
     'deduped' history entry."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from media_preview_generator.web import webhooks as wh
 
@@ -965,7 +968,7 @@ def test_schedule_webhook_job_dedupes_within_ttl(mock_timer_cls, mock_settings_m
     # (source, server_id, path) — server_id is "" when the webhook isn't
     # scoped to one configured server.
     normalized_path = os.path.normpath("/tv/Show/S01E01.mkv").replace("\\", "/")
-    now_ts = datetime.now(timezone.utc).timestamp()
+    now_ts = datetime.now(UTC).timestamp()
     with wh._pending_lock:
         wh._recent_dispatches[("sonarr", "", normalized_path)] = now_ts
 
@@ -985,7 +988,7 @@ def test_schedule_webhook_job_dedupes_within_ttl(mock_timer_cls, mock_settings_m
 def test_schedule_webhook_job_allows_dispatch_after_ttl(mock_timer_cls, mock_settings_mgr, app):
     """Entries older than _RECENT_DISPATCH_TTL_SECONDS should be pruned
     and no longer block new dispatches."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from media_preview_generator.web import webhooks as wh
 
@@ -993,7 +996,7 @@ def test_schedule_webhook_job_allows_dispatch_after_ttl(mock_timer_cls, mock_set
     mock_settings_mgr.return_value = MagicMock(get=lambda key, default=None: 60 if key == "webhook_delay" else default)
 
     normalized_path = os.path.normpath("/tv/Show/S01E01.mkv").replace("\\", "/")
-    stale_ts = datetime.now(timezone.utc).timestamp() - wh._RECENT_DISPATCH_TTL_SECONDS - 5
+    stale_ts = datetime.now(UTC).timestamp() - wh._RECENT_DISPATCH_TTL_SECONDS - 5
     with wh._pending_lock:
         wh._recent_dispatches[("sonarr", "", normalized_path)] = stale_ts
 
@@ -1016,7 +1019,7 @@ def test_schedule_webhook_job_allows_dispatch_after_ttl(mock_timer_cls, mock_set
 @patch("media_preview_generator.web.webhooks.threading.Timer")
 def test_schedule_webhook_job_dedup_is_per_source(mock_timer_cls, mock_settings_mgr, app):
     """A recent dispatch for ('plex', path) must not block ('sonarr', path)."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from media_preview_generator.web import webhooks as wh
 
@@ -1024,7 +1027,7 @@ def test_schedule_webhook_job_dedup_is_per_source(mock_timer_cls, mock_settings_
     mock_settings_mgr.return_value = MagicMock(get=lambda key, default=None: 60 if key == "webhook_delay" else default)
 
     normalized_path = os.path.normpath("/tv/Show/S01E01.mkv").replace("\\", "/")
-    now_ts = datetime.now(timezone.utc).timestamp()
+    now_ts = datetime.now(UTC).timestamp()
     with wh._pending_lock:
         wh._recent_dispatches[("plex", "", normalized_path)] = now_ts
 
@@ -1069,7 +1072,7 @@ def test_execute_webhook_job_records_dispatch_before_start(
 @patch("media_preview_generator.web.webhooks.threading.Timer")
 def test_schedule_webhook_job_per_server_dedup_is_independent(mock_timer_cls, mock_settings_mgr, app):
     """A dispatch scoped to one server must not block the same path on another server."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from media_preview_generator.web import webhooks as wh
 
@@ -1077,7 +1080,7 @@ def test_schedule_webhook_job_per_server_dedup_is_independent(mock_timer_cls, mo
     mock_settings_mgr.return_value = MagicMock(get=lambda key, default=None: 60 if key == "webhook_delay" else default)
 
     normalized_path = os.path.normpath("/tv/Show/S01E01.mkv").replace("\\", "/")
-    now_ts = datetime.now(timezone.utc).timestamp()
+    now_ts = datetime.now(UTC).timestamp()
     with wh._pending_lock:
         # Plex server "p1" already dispatched this path recently...
         wh._recent_dispatches[("sonarr", "p1", normalized_path)] = now_ts
@@ -1904,3 +1907,390 @@ class TestWebhookHistoryDiskRoundTrip:
         wh._webhook_history.clear()
         wh._load_history_from_disk()  # must not raise
         assert len(wh._webhook_history) == 0
+
+
+# ---------------------------------------------------------------------------
+# Sonarr v4 "Import Complete" event
+# ---------------------------------------------------------------------------
+
+_SONARR_SERIES = {
+    "id": 412,
+    "title": "Accused: Guilty or Innocent?",
+    "titleSlug": "accused-guilty-or-innocent",
+    "path": "/data_16tb3/TV Shows/Accused Guilty or Innocent (2020) {tvdb-390742}",
+    "tvdbId": 390742,
+    "tvMazeId": 51004,
+    "tmdbId": 112840,
+    "imdbId": "tt13453126",
+    "type": "standard",
+    "year": 2020,
+    "genres": ["Crime", "Documentary"],
+    "images": [],
+    "tags": [],
+    "originalLanguage": {"id": 1, "name": "English"},
+}
+_SONARR_RELEASE = {
+    "quality": "WEBDL-1080p",
+    "qualityVersion": 1,
+    "releaseGroup": "playWEB",
+    "releaseTitle": "Accused.Guilty.or.Innocent.S04.1080p.AMZN.WEB-DL.DDP2.0.H.264-playWEB",
+    "indexer": "Indexer (Prowlarr)",
+    "size": 9876543210,
+    "customFormatScore": 0,
+    "customFormats": [],
+    "indexerFlags": [],
+    "releaseType": "seasonPack",
+}
+
+
+def _sonarr_episode(number: int) -> dict:
+    return {
+        "id": 90000 + number,
+        "episodeNumber": number,
+        "seasonNumber": 4,
+        "title": f"Episode {number}",
+        "airDate": "2026-09-01",
+        "airDateUtc": "2026-09-01T02:00:00Z",
+        "seriesId": 412,
+        "tvdbId": 10500000 + number,
+    }
+
+
+def _sonarr_episode_file(number: int) -> dict:
+    relative = (
+        f"Season 04/Accused Guilty or Innocent (2020) - S04E{number:02d} - Episode {number} "
+        "[AMZN][WEBDL-1080p][EAC3 2.0][h264]-playWEB.mkv"
+    )
+    return {
+        "id": 70000 + number,
+        "relativePath": relative,
+        "path": f"{_SONARR_SERIES['path']}/{relative}",
+        "quality": "WEBDL-1080p",
+        "qualityVersion": 1,
+        "releaseGroup": "playWEB",
+        "sceneName": f"Accused.Guilty.or.Innocent.S04E{number:02d}.1080p.AMZN.WEB-DL.DDP2.0.H.264-playWEB",
+        "size": 1234567890,
+        "dateAdded": "2026-09-23T20:23:05Z",
+        "languages": [{"id": 1, "name": "English"}],
+        "mediaInfo": {"audioChannels": 2.0, "audioCodec": "EAC3", "height": 1080, "videoCodec": "h264", "width": 1920},
+        "sourcePath": f"/downloads/complete/Accused.S04/Accused.S04E{number:02d}.mkv",
+    }
+
+
+def _sonarr_on_import_payload(number: int) -> dict:
+    """Sonarr v4's per-file ``Download`` event ("On File Import"), as ``BuildOnDownloadPayload`` shapes it."""
+    return {
+        "series": dict(_SONARR_SERIES),
+        "episodes": [_sonarr_episode(number)],
+        "episodeFile": _sonarr_episode_file(number),
+        "isUpgrade": False,
+        "downloadClient": "qBittorrent",
+        "downloadClientType": "qBittorrent",
+        "downloadId": "A1B2C3D4E5F6",
+        "customFormatInfo": {"customFormats": [], "customFormatScore": 0},
+        "release": dict(_SONARR_RELEASE),
+        "eventType": "Download",
+        "instanceName": "Sonarr",
+        "applicationUrl": "",
+    }
+
+
+def _sonarr_import_complete_payload(numbers: list[int]) -> dict:
+    """Sonarr v4's "On Import Complete" event, as ``BuildOnImportCompletePayload`` shapes it: the same ``Download``
+    event type, every file under ``episodeFiles[]``, no ``episodeFile``."""
+    return {
+        "series": dict(_SONARR_SERIES),
+        "episodes": [_sonarr_episode(n) for n in numbers],
+        "episodeFiles": [_sonarr_episode_file(n) for n in numbers],
+        "release": dict(_SONARR_RELEASE),
+        "downloadClient": "qBittorrent",
+        "downloadClientType": "qBittorrent",
+        "downloadId": "A1B2C3D4E5F6",
+        "sourcePath": "/downloads/complete/Accused.S04",
+        "destinationPath": f"{_SONARR_SERIES['path']}/Season 04",
+        "isUpgrade": False,
+        "eventType": "Download",
+        "instanceName": "Sonarr",
+        "applicationUrl": "",
+    }
+
+
+@pytest.fixture()
+def _no_timer_threads():
+    """Real batching, without the debounce Timer thread or the early scan-nudge thread."""
+    with (
+        patch("media_preview_generator.web.webhooks.threading.Timer", return_value=MagicMock()),
+        patch("media_preview_generator.web.webhooks._kick_early_scan"),
+    ):
+        yield
+
+
+@pytest.mark.usefixtures("_no_timer_threads")
+class TestSonarrImportComplete:
+    """Sonarr v4 sends a per-file event for each imported file, then one "Import Complete" event listing them all
+    under ``episodeFiles[]``. That second event used to be logged as a payload with no file path (~960 false
+    warnings in 12 h on the owner's server)."""
+
+    @staticmethod
+    def _batch_paths(source: str = "sonarr", server_id: str | None = None) -> set[str]:
+        import media_preview_generator.web.webhooks as wh
+
+        batch = wh._pending_batches.get(wh._debounce_key(source, server_id)) or {}
+        return set(batch.get("file_paths") or set())
+
+    @staticmethod
+    def _statuses() -> list[str]:
+        import media_preview_generator.web.webhooks as wh
+
+        return [entry["status"] for entry in wh._webhook_history]
+
+    def test_import_complete_is_dropped_quietly_when_its_files_were_already_queued(self, client):
+        with patch("media_preview_generator.web.webhooks.logger") as mock_logger:
+            for number in (6, 7):
+                resp = client.post(
+                    "/api/webhooks/sonarr", json=_sonarr_on_import_payload(number), headers=_auth_headers()
+                )
+                assert resp.status_code == 202
+            resp = client.post(
+                "/api/webhooks/sonarr", json=_sonarr_import_complete_payload([6, 7]), headers=_auth_headers()
+            )
+
+        assert resp.status_code == 200
+        assert "already queued" in resp.get_json()["message"]
+        assert self._batch_paths() == {_sonarr_episode_file(6)["path"], _sonarr_episode_file(7)["path"]}
+        assert self._statuses() == ["queued", "queued"], "the summary event must add no history row"
+        warnings = " | ".join(str(call) for call in mock_logger.warning.call_args_list)
+        assert "didn't carry a file path" not in warnings
+        assert any("import-complete" in str(call) for call in mock_logger.debug.call_args_list)
+
+    def test_import_complete_queues_its_files_when_no_per_file_event_did(self, client):
+        """Only "On Import Complete" enabled in Sonarr: its ``episodeFiles[]`` are the only paths we get."""
+        resp = client.post(
+            "/api/webhooks/sonarr", json=_sonarr_import_complete_payload([1, 2, 3]), headers=_auth_headers()
+        )
+
+        assert resp.status_code == 202
+        assert "3 file(s)" in resp.get_json()["message"]
+        assert self._batch_paths() == {_sonarr_episode_file(n)["path"] for n in (1, 2, 3)}
+        assert self._statuses() == ["queued"]
+
+    def test_import_complete_queues_only_the_files_no_per_file_event_queued(self, client):
+        client.post("/api/webhooks/sonarr", json=_sonarr_on_import_payload(1), headers=_auth_headers())
+
+        with patch("media_preview_generator.web.webhooks._schedule_webhook_job", return_value=True) as mock_schedule:
+            resp = client.post(
+                "/api/webhooks/sonarr", json=_sonarr_import_complete_payload([1, 2]), headers=_auth_headers()
+            )
+
+        assert resp.status_code == 202
+        mock_schedule.assert_called_once_with(
+            "sonarr", "Accused: Guilty or Innocent? S04E01, S04E02", _sonarr_episode_file(2)["path"], early_scan=False
+        )
+
+    def test_import_complete_forwards_the_server_pin(self, client):
+        with patch("media_preview_generator.web.webhooks._schedule_webhook_job", return_value=True) as mock_schedule:
+            client.post(
+                "/api/webhooks/sonarr?server_id=plex-b",
+                json=_sonarr_import_complete_payload([2]),
+                headers=_auth_headers(),
+            )
+
+        assert mock_schedule.call_args.kwargs == {"server_id": "plex-b", "early_scan": False}
+
+    @staticmethod
+    def _age_webhook_memory(seconds: float) -> None:
+        """Move every dedup and per-file-event timestamp ``seconds`` into the past, and let the batch fire."""
+        import media_preview_generator.web.webhooks as wh
+
+        with wh._pending_lock:
+            for key in list(wh._recent_dispatches):
+                wh._recent_dispatches[key] -= seconds
+            for key in list(wh._import_file_events):
+                wh._import_file_events[key] -= seconds
+            wh._pending_batches.clear()
+
+    def test_a_slow_import_isnt_queued_again_when_import_complete_comes_after_the_dedup_window(self, client):
+        """Review MED: per-file events 5 min apart, Import Complete at +15 min. The first files' dedup entries (10 min)
+        had expired, so the summary queued them as a second job ("(2 file(s))")."""
+        client.post("/api/webhooks/sonarr", json=_sonarr_on_import_payload(1), headers=_auth_headers())
+        self._age_webhook_memory(5 * 60)
+        client.post("/api/webhooks/sonarr", json=_sonarr_on_import_payload(2), headers=_auth_headers())
+        self._age_webhook_memory(10 * 60)
+
+        resp = client.post(
+            "/api/webhooks/sonarr", json=_sonarr_import_complete_payload([1, 2]), headers=_auth_headers()
+        )
+
+        assert resp.status_code == 200, resp.get_json()
+        assert "already queued" in resp.get_json()["message"]
+        assert self._batch_paths() == set()
+
+    @pytest.mark.parametrize(
+        ("download_id", "age_s"),
+        [("OTHER-DOWNLOAD", 15 * 60), (None, 15 * 60), ("A1B2C3D4E5F6", 7 * 3600)],
+        ids=["another-download", "no-download-id", "reported-hours-ago"],
+    )
+    def test_import_complete_queues_files_no_per_file_event_of_its_download_reported_recently(
+        self, client, download_id, age_s
+    ):
+        client.post("/api/webhooks/sonarr", json=_sonarr_on_import_payload(1), headers=_auth_headers())
+        self._age_webhook_memory(age_s)
+        summary = _sonarr_import_complete_payload([1])
+        summary["downloadId"] = download_id
+
+        resp = client.post("/api/webhooks/sonarr", json=summary, headers=_auth_headers())
+
+        assert resp.status_code == 202
+        assert self._batch_paths() == {_sonarr_episode_file(1)["path"]}
+
+    def test_import_complete_sends_one_early_scan_per_folder(self, client):
+        payload = _sonarr_import_complete_payload([1, 2, 3])
+        season5 = _sonarr_episode_file(4)
+        season5["path"] = season5["path"].replace("Season 04/", "Season 05/").replace("S04E04", "S05E01")
+        payload["episodeFiles"].append(season5)
+        import media_preview_generator.web.webhooks as wh
+
+        with patch.object(wh, "_kick_early_scan") as kick:
+            resp = client.post("/api/webhooks/sonarr?server_id=plex-a", json=payload, headers=_auth_headers())
+
+        assert resp.status_code == 202
+        job_id = wh._pending_batches[wh._debounce_key("sonarr", "plex-a")]["job_id"]
+        assert [c.args for c in kick.call_args_list] == [
+            (_sonarr_episode_file(1)["path"], "plex-a", job_id),
+            (season5["path"], "plex-a", job_id),
+        ]
+
+    def test_already_queued_check_is_per_server(self, client):
+        """A per-file event pinned to one server doesn't cover the same file sent for another server."""
+        client.post("/api/webhooks/sonarr?server_id=plex-a", json=_sonarr_on_import_payload(5), headers=_auth_headers())
+
+        resp = client.post(
+            "/api/webhooks/sonarr?server_id=plex-b",
+            json=_sonarr_import_complete_payload([5]),
+            headers=_auth_headers(),
+        )
+
+        assert resp.status_code == 202
+        assert self._batch_paths(server_id="plex-b") == {_sonarr_episode_file(5)["path"]}
+
+    def test_import_complete_uses_series_path_plus_relative_path_when_path_is_missing(self, client):
+        payload = _sonarr_import_complete_payload([4])
+        del payload["episodeFiles"][0]["path"]
+
+        resp = client.post("/api/webhooks/sonarr", json=payload, headers=_auth_headers())
+
+        assert resp.status_code == 202
+        assert self._batch_paths() == {_sonarr_episode_file(4)["path"]}
+
+    def test_import_complete_paths_are_normalised_like_a_per_file_event(self, client):
+        payload = _sonarr_import_complete_payload([3])
+        payload["episodeFiles"][0]["path"] = "/data_16tb3/TV Shows/./Accused//Season 04/../Season 04/E03.mkv"
+
+        client.post("/api/webhooks/sonarr", json=payload, headers=_auth_headers())
+
+        assert self._batch_paths() == {"/data_16tb3/TV Shows/Accused/Season 04/E03.mkv"}
+
+    @pytest.mark.parametrize(
+        "episode_files",
+        [[], ["not-a-dict", 42, None], [{"id": 1}], [{"path": "   ", "relativePath": ""}], "not-a-list"],
+    )
+    def test_payload_without_any_usable_path_still_warns(self, client, episode_files):
+        payload = _sonarr_import_complete_payload([1])
+        payload["episodeFiles"] = episode_files
+        with patch("media_preview_generator.web.webhooks.logger.warning") as mock_warning:
+            resp = client.post("/api/webhooks/sonarr", json=payload, headers=_auth_headers())
+
+        assert resp.status_code == 200
+        assert "no file path" in resp.get_json()["message"].lower()
+        assert "didn't carry a file path" in " | ".join(str(call) for call in mock_warning.call_args_list)
+        assert self._statuses() == ["ignored_no_path"]
+
+
+class TestWebhookBatchMaxWait:
+    """Each webhook restarts a batch's delay; a batch still runs at most ``_WEBHOOK_BATCH_MAX_WAIT_SECONDS`` after its
+    first webhook (job 7d24a00b: 342 Sonarr imports 10 s apart held one batch for 55 minutes)."""
+
+    @pytest.fixture()
+    def timers(self, app):
+        import media_preview_generator.web.webhooks as wh
+
+        wh.get_settings_manager().set("webhook_delay", 120)
+        created: list[float] = []
+
+        def _timer(delay, target, args=None, kwargs=None):
+            created.append(delay)
+            return MagicMock()
+
+        with (
+            patch.object(wh.threading, "Timer", side_effect=_timer),
+            patch.object(wh, "_kick_early_scan"),
+            patch.object(wh, "_resolve_webhook_server_context", return_value=(None, None, None)),
+        ):
+            yield created
+
+    @staticmethod
+    def _age_batch(seconds: float) -> dict:
+        """Pretend the pending sonarr batch opened ``seconds`` ago."""
+        import media_preview_generator.web.webhooks as wh
+
+        batch = wh._pending_batches[wh._debounce_key("sonarr")]
+        batch["opened_at"] -= seconds
+        return batch
+
+    @staticmethod
+    def _job_config(batch: dict) -> dict:
+        import media_preview_generator.web.webhooks as wh
+
+        return wh.get_job_manager().get_job(batch["job_id"]).config
+
+    def test_webhook_merging_early_restarts_the_full_delay(self, timers):
+        import media_preview_generator.web.webhooks as wh
+
+        wh._schedule_webhook_job("sonarr", "Show S01E01", "/tv/Show/S01E01.mkv")
+        self._age_batch(30)
+        wh._schedule_webhook_job("sonarr", "Show S01E02", "/tv/Show/S01E02.mkv")
+
+        assert timers == [120, 120]
+
+    def test_webhook_near_the_cap_only_waits_until_the_cap(self, timers):
+        import media_preview_generator.web.webhooks as wh
+
+        wh._schedule_webhook_job("sonarr", "Show S01E01", "/tv/Show/S01E01.mkv")
+        batch = self._age_batch(wh._WEBHOOK_BATCH_MAX_WAIT_SECONDS - 50)
+        wh._schedule_webhook_job("sonarr", "Show S01E02", "/tv/Show/S01E02.mkv")
+
+        assert timers[0] == 120
+        assert timers[1] == pytest.approx(50, abs=1)
+        cap = batch["opened_at"] + wh._WEBHOOK_BATCH_MAX_WAIT_SECONDS
+        assert batch["fire_at"] == pytest.approx(cap, abs=1)
+        from datetime import datetime
+
+        stored_fire_at = datetime.fromisoformat(self._job_config(batch)["webhook_fire_at"]).timestamp()
+        assert stored_fire_at == pytest.approx(cap, abs=1), "the row's countdown must show the capped time"
+        logs = " ".join(wh.get_job_manager().get_logs(batch["job_id"]))
+        assert "waits at most 10 minutes from its first webhook" in logs
+
+    def test_webhook_after_the_cap_fires_the_batch_at_once(self, timers):
+        """The Timer at the cap may not have run yet when the next webhook arrives; the batch must not wait again."""
+        import media_preview_generator.web.webhooks as wh
+
+        wh._schedule_webhook_job("sonarr", "Show S01E01", "/tv/Show/S01E01.mkv")
+        self._age_batch(wh._WEBHOOK_BATCH_MAX_WAIT_SECONDS + 5)
+        wh._schedule_webhook_job("sonarr", "Show S01E02", "/tv/Show/S01E02.mkv")
+
+        assert timers[1] == 0
+
+    def test_webhook_after_the_batch_fired_starts_a_new_batch(self, timers):
+        import media_preview_generator.web.webhooks as wh
+
+        wh._schedule_webhook_job("sonarr", "Show S01E01", "/tv/Show/S01E01.mkv")
+        first = self._age_batch(wh._WEBHOOK_BATCH_MAX_WAIT_SECONDS)
+        with patch("media_preview_generator.web.routes._start_job_async") as mock_start:
+            wh._execute_webhook_job(wh._debounce_key("sonarr"))
+        wh._schedule_webhook_job("sonarr", "Show S01E02", "/tv/Show/S01E02.mkv")
+
+        assert mock_start.call_args.args[1]["webhook_paths"] == ["/tv/Show/S01E01.mkv"]
+        second = wh._pending_batches[wh._debounce_key("sonarr")]
+        assert second["job_id"] != first["job_id"]
+        assert second["file_paths"] == {"/tv/Show/S01E02.mkv"}
+        assert timers == [120, 120]

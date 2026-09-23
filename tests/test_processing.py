@@ -1168,6 +1168,31 @@ class TestSummaryAndWarnings:
 
         assert any("path mapping" in msg.lower() for msg in captured)
 
+    def test_an_all_already_done_run_still_logs_its_summary_count_at_info(self, tmp_path):
+        """Each already-done file's own lines are DEBUG now; the job's one summary line keeps the count at INFO."""
+        from loguru import logger as _loguru_logger
+
+        config = _make_config(tmp_path)
+        section = _make_section("TV Shows")
+        items = [("k1", "E1", "episode"), ("k2", "E2", "episode"), ("k3", "E3", "episode")]
+        outcome = {r.value: 0 for r in ProcessingResult}
+        outcome["skipped_bif_exists"] = 3
+        records: list[tuple[str, str]] = []
+        with (
+            patch(f"{MODULE}._enumerate_plex_full_scan_items", return_value=iter([(section, items)])),
+            patch(f"{MODULE}.WorkerPool") as MockPool,
+        ):
+            MockPool.return_value.process_items_headless.return_value = _pool_result(completed=3, outcome=outcome)
+            sink = _loguru_logger.add(
+                lambda m: records.append((m.record["level"].name, m.record["message"])), level="DEBUG"
+            )
+            try:
+                run_processing(config, selected_gpus=[])
+            finally:
+                _loguru_logger.remove(sink)
+
+        assert ("INFO", "Processing complete: 3 already existed") in records, records
+
     def test_cancellation_noted_in_summary(self, tmp_path):
         """When dispatch reports cancellation, the summary log line names it.
 

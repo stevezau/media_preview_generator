@@ -3,7 +3,7 @@
 from flask import redirect, render_template, request, session, url_for
 from loguru import logger
 
-from ..auth import is_authenticated, login_required, validate_token
+from ..auth import is_auth_external, is_authenticated, login_required, start_signed_in_session, validate_token
 from . import main
 from ._helpers import limiter
 
@@ -26,8 +26,7 @@ def login():
     if request.method == "POST":
         token = request.form.get("token", "")
         if validate_token(token):
-            session["authenticated"] = True
-            session.permanent = True
+            start_signed_in_session()
             logger.info("User logged in successfully")
             return redirect(url_for("main.index"))
         return render_template("login.html", error="Invalid token")
@@ -37,11 +36,19 @@ def login():
     return render_template("login.html")
 
 
-@main.route("/logout")
+@main.route("/logout", methods=["GET", "POST"])
 def logout():
-    """Logout and clear session."""
-    session.clear()
-    return redirect(url_for("main.login"))
+    """Sign out on a POST from the nav's Logout button (it carries the page's CSRF token).
+
+    A GET only asks: any page could make the browser fetch /logout (an ``<img>`` on another app on this host would do),
+    so a GET that signed out would let it sign the user out.
+    """
+    if request.method == "POST":
+        session.clear()
+        return redirect(url_for("main.login"))
+    if not is_authenticated():
+        return redirect(url_for("main.login"))
+    return render_template("logout.html", auth_external=is_auth_external())
 
 
 @main.route("/settings")
@@ -115,8 +122,13 @@ def schedules_page():
 @main.route("/bif-viewer")
 @login_required
 def bif_viewer():
-    """BIF thumbnail viewer for troubleshooting preview quality."""
-    return render_template("bif_viewer.html")
+    """Preview Inspector: BIF thumbnails, and the Intro & Credits tab.
+
+    ``?tab=markers`` (the Tools menu's "Intro & Credits" entry) opens the page on the Intro & Credits tab.
+    """
+    return render_template(
+        "bif_viewer.html", initial_tab="markers" if request.args.get("tab") == "markers" else "frames"
+    )
 
 
 @main.route("/servers")

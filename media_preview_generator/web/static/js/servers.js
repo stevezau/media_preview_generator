@@ -155,7 +155,14 @@
         });
         // Per-card connection + readiness probe — sequential per server
         // to avoid hammering 3+ servers in parallel from the same
-        // browser tab. Each probe is ~200-1500ms. Connection runs
+        // browser tab. Each probe is ~200-1500ms; on a Plex with Intro &
+        // Credits switched on the readiness also runs the marker
+        // capability check, which waits on Plex's SQLite lock for
+        // markers.inspect.UI_DB_WAIT_S (5 s) per check rather than a
+        // job's 30 s budget, and is cached 60 s — 5 s while it isn't
+        // healthy. A load that finds a check already running for the
+        // same server is served the last answer instead of queueing
+        // behind it. Connection runs
         // first and returns its status; when the server is unreachable
         // we SKIP the readiness probe (the endpoint would error out and
         // paint a misleading "unknown" glyph when the real problem is
@@ -1303,6 +1310,7 @@
             const tabMap = {
                 general: 'edit-tab-general',
                 health: 'edit-tab-health',
+                markers: 'edit-tab-markers',
             };
             const paneId = tabMap[openTab] || 'edit-tab-general';
             const activeTab = document.querySelector(`#editServerModal [data-bs-target="#${paneId}"]`);
@@ -1346,6 +1354,7 @@
         renderEditLibraries(server.libraries || []);
         renderEditPathMappings(server.path_mappings || []);
         renderEditExcludePaths(server.exclude_paths || []);
+        if (window.loadMarkersTab) window.loadMarkersTab(server);
         $('#editServerResult').className = 'd-none';
         $('#editServerResult').innerHTML = '';
 
@@ -1354,23 +1363,37 @@
         modal.show();
     }
 
+    // Each row's Intro & Credits cell is left empty and hidden: markers_server_tab.js fills it
+    // (window.renderMarkersLibraryColumn) and shows the column while that tab's switch is on.
     function renderEditLibraries(libraries) {
         const list = $('#editLibraryList');
         if (!libraries.length) {
-            list.innerHTML = '<div class="text-muted small">No cached libraries — click "Refresh libraries" on the server card to fetch them from the server.</div>';
+            list.innerHTML = '<tr><td colspan="3" class="text-muted">No cached libraries — click "Refresh libraries" on the server card to fetch them from the server.</td></tr>';
             return;
         }
-        list.innerHTML = libraries.map((lib, idx) => `
-            <label class="list-group-item d-flex align-items-center gap-2">
-                <input type="checkbox" class="form-check-input edit-lib-toggle"
-                       data-idx="${idx}"
-                       data-id="${escapeHtml(lib.id || '')}"
-                       data-name="${escapeHtml(lib.name || lib.id || '')}"
-                       ${lib.enabled ? 'checked' : ''}>
-                <span>${escapeHtml(lib.name || lib.id || 'unnamed')}</span>
-                <span class="badge bg-secondary ms-auto">${escapeHtml(lib.kind || 'unknown')}</span>
-            </label>
-        `).join('');
+        list.innerHTML = libraries.map((lib, idx) => {
+            const label = lib.name || lib.id || 'unnamed';
+            return `
+            <tr data-lib-id="${escapeHtml(lib.id || '')}"
+                data-lib-name="${escapeHtml(lib.name || '')}"
+                data-lib-kind="${escapeHtml(lib.kind || '')}">
+                <td class="text-break">
+                    ${escapeHtml(label)}
+                    <span class="badge bg-secondary ms-1">${escapeHtml(lib.kind || 'unknown')}</span>
+                </td>
+                <td class="text-center">
+                    <div class="form-check form-switch edit-lib-switch">
+                        <input type="checkbox" role="switch" class="form-check-input edit-lib-toggle"
+                               data-idx="${idx}"
+                               data-id="${escapeHtml(lib.id || '')}"
+                               data-name="${escapeHtml(lib.name || lib.id || '')}"
+                               aria-label="Previews for ${escapeHtml(label)}"
+                               ${lib.enabled ? 'checked' : ''}>
+                    </div>
+                </td>
+                <td class="text-center markers-lib-col markers-lib-cell d-none"></td>
+            </tr>`;
+        }).join('');
     }
 
     function renderEditPathMappings(mappings) {
@@ -1384,7 +1407,7 @@
         row = row || {};
         const tbody = $('#editPathMappingsTable tbody');
         const tr = document.createElement('tr');
-        const remoteVal = row.plex_prefix || row.remote_prefix || '';
+        const remoteVal = row.remote_prefix || row.plex_prefix || '';
         const localVal = row.local_prefix || '';
         const webhookAliases = Array.isArray(row.webhook_prefixes)
             ? row.webhook_prefixes.join('; ')
@@ -1506,7 +1529,8 @@
                 ? webhookRaw.split(/[;,]/).map((s) => s.trim()).filter(Boolean)
                 : [];
             if (!remote && !local && !webhook_prefixes.length) return null;
-            return { plex_prefix: remote, local_prefix: local, webhook_prefixes };
+            // Both keys: this build reads remote_prefix first; older builds' path resolvers read only plex_prefix.
+            return { remote_prefix: remote, plex_prefix: remote, local_prefix: local, webhook_prefixes };
         }).filter(Boolean);
     }
 
@@ -1623,6 +1647,18 @@
                 jellyfin_config_folder: ($('#editJellyfinConfigFolder').value || '').trim(),
             };
         }
+
+        // Plex: turning Intro & Credits on needs the database-write confirmation (asked when the switch was
+        // flipped; asked again here in case that was dismissed).
+        if (window.markersNeedsPlexConfirmation && window.markersNeedsPlexConfirmation(server)) {
+            const confirmed = await window.confirmPlexMarkers(server);
+            if (!confirmed) {
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = orig;
+                return;
+            }
+        }
+        if (window.readMarkersFromForm) payload.markers = window.readMarkersFromForm(server);
 
         const r = await api('PUT', `/api/servers/${encodeURIComponent(server.id)}`, payload);
         saveBtn.disabled = false;
@@ -1886,7 +1922,8 @@
     //   amber "recommendations"   — non-critical issues only
     //   green "ready (instant)"   — Jellyfin + plugin installed
     //   green "ready (next scan)" — Jellyfin without plugin (Mode B is valid)
-    //   green "ready"             — everything ok, no plugin concept (Plex/Emby)
+    //   green "ready"             — everything ok, no previews plugin (Plex/Emby;
+    //                               an Emby markers plugin doesn't change this)
     //
     // Walks sections[] and rolls up severity. Drives the sub-label
     // off the plugin section's current state — no vendor branching
@@ -1911,9 +1948,17 @@
                     anyRecommended = true;
                 }
             }
-            if (section.id === 'plugin' && section.checks && section.checks.length) {
+            if (section.id === 'plugin' && section.checks && section.checks.length
+                && section.checks[0].id === 'plugin_installed') {
                 // Plugin section carries the installed bit in the first row's
                 // ``current`` value ("installed"/"not installed"/version).
+                //
+                // Keyed on the row id, not just the section id: the sub-label
+                // below says how PREVIEWS activate, which only Jellyfin's
+                // Bridge plugin decides. Emby's Intro & Credits plugin shares
+                // the section id (the install controls key on it) but has
+                // nothing to do with previews — reading it here would label a
+                // healthy Emby "ready (instant)".
                 pluginInstalled = section.checks[0].current !== 'not installed';
             }
             for (const check of section.checks || []) {
@@ -2259,7 +2304,11 @@
         // when the app actually CAN'T act on this row at all. The new
         // wording names the actual place the user has to go.
         const actionsObj = check.actions || {};
-        const hasFixAction = !!(actionsObj.enable || actionsObj.disable);
+        // A row can carry one scoped fix per library instead of a row-wide one
+        // (Plex's own intro/credits detection: one Turn off per library).
+        const libraryItems = Array.isArray(check.libraries) ? check.libraries : [];
+        const hasFixAction = !!(actionsObj.enable || actionsObj.disable)
+            || libraryItems.some((lib) => lib && lib.action);
         const vendorLabel = _vendorDisplayName(serverType);
         const manualBadgeText = `Change in ${vendorLabel} UI`;
         const manualBadgeTitle = `This app can't toggle this for you — open ${vendorLabel}'s admin UI and follow the instructions below.`;
@@ -2314,7 +2363,21 @@
             : '';
 
         const labelHtml = escapeHtml(check.label || check.id || '');
-        row.innerHTML = `${icon}<div class="flex-grow-1">${labelHtml}${tierBadge}${manualChip}${infoIcon}${reasonStr}${valuesHtml}</div>`;
+        if (libraryItems.length > 0) {
+            // Per-library rows read top to bottom: the diff, the libraries
+            // with their own buttons, then the note on what the button does.
+            row.innerHTML = `${icon}<div class="flex-grow-1">${labelHtml}${tierBadge}${manualChip}${infoIcon}${valuesHtml}</div>`;
+            const body = row.querySelector('.flex-grow-1');
+            body.appendChild(_renderLibraryActions(serverId, serverType, check, libraryItems));
+            if (check.reason) {
+                const note = document.createElement('div');
+                note.className = 'text-muted mt-1';
+                note.textContent = check.reason;
+                body.appendChild(note);
+            }
+        } else {
+            row.innerHTML = `${icon}<div class="flex-grow-1">${labelHtml}${tierBadge}${manualChip}${infoIcon}${reasonStr}${valuesHtml}</div>`;
+        }
 
         // Attach the rich explanation HTML to the info-icon button as
         // a DOM property — can't round-trip multi-paragraph HTML through
@@ -2462,6 +2525,53 @@
         }
     }
 
+    // One line per library — name, what the vendor does there, and that
+    // library's own fix button. Each button acts on its library only.
+    function _renderLibraryActions(serverId, serverType, check, libraryItems) {
+        const wrap = document.createElement('div');
+        wrap.className = 'readiness-libraries mt-1';
+        if (check.libraries_caption) {
+            const caption = document.createElement('div');
+            caption.className = 'text-muted';
+            caption.textContent = check.libraries_caption;
+            wrap.appendChild(caption);
+        }
+        // A table so name, detail and button line up in columns however
+        // wide the dialog is.
+        const table = document.createElement('table');
+        table.className = 'table table-sm table-borderless w-auto mb-0 mt-1';
+        const tbody = document.createElement('tbody');
+        for (const lib of libraryItems) {
+            const line = document.createElement('tr');
+            line.className = 'readiness-library align-middle';
+            line.dataset.libraryId = String(lib.id || '');
+            const name = document.createElement('td');
+            name.className = 'fw-semibold ps-0 bg-transparent';
+            name.textContent = lib.name || lib.id || '';
+            const detail = document.createElement('td');
+            detail.className = 'text-muted bg-transparent';
+            detail.textContent = lib.detail || '';
+            const cell = document.createElement('td');
+            cell.className = 'bg-transparent';
+            if (lib.action) {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'btn btn-sm btn-warning';
+                btn.innerHTML = `<i class="bi bi-toggle-off me-1"></i>${escapeHtml(lib.button || 'Turn off')}`;
+                btn.title = `${lib.button || 'Turn off'} — ${lib.name || lib.id || ''} only`;
+                btn.addEventListener('click', () => _runAction(
+                    serverId, serverType, check, lib.action, btn, `${check.label || 'Setting'}: ${lib.name || lib.id || ''} updated.`,
+                ));
+                cell.appendChild(btn);
+            }
+            line.append(name, detail, cell);
+            tbody.appendChild(line);
+        }
+        table.appendChild(tbody);
+        wrap.appendChild(table);
+        return wrap;
+    }
+
     function _makeActionButton(colorCls, iconCls, text, check, direction) {
         const btn = document.createElement('button');
         btn.type = 'button';
@@ -2479,6 +2589,10 @@
     async function _runCheckAction(serverId, serverType, check, direction, btn) {
         const action = (check.actions || {})[direction];
         if (!action) return;
+        await _runAction(serverId, serverType, check, action, btn, `${check.label || 'Setting'} updated.`);
+    }
+
+    async function _runAction(serverId, serverType, check, action, btn, successText) {
         const confirm = action.confirm;
 
         const proceed = async () => {
@@ -2503,10 +2617,29 @@
                         (d) => _pluginInstalledFromEnvelope(d) === expected,
                         { deadlineMs: 90_000, intervalMs: 3_000 },
                     );
+                } else if (action.action === 'update_plugin') {
+                    // An update can't wait on "the plugin appeared" — it was
+                    // already there, so that predicate is true on the first
+                    // poll and we'd report success while the server is still
+                    // restarting.
+                    //
+                    // Both halves are needed. "The row is gone" alone is also
+                    // true mid-restart (the server can't be read, so the row
+                    // can't be built) — and the probe returns a degraded 200,
+                    // not an error, so nothing else would keep us polling.
+                    // Requiring the plugin to read as installed as well means
+                    // we wait for the server to answer again before believing
+                    // the row cleared.
+                    await reprobeUntilConverged(
+                        serverId,
+                        serverType,
+                        (d) => _pluginInstalledFromEnvelope(d) === true && !_hasFailingCheck(d, check.id),
+                        { deadlineMs: 90_000, intervalMs: 3_000 },
+                    );
                 } else {
                     await runReadinessProbe(serverId, serverType);
                 }
-                showToast('Applied', `${check.label || 'Setting'} updated.`, 'success');
+                showToast('Applied', successText, 'success');
             } catch (e) {
                 showToast('Action error', String(e), 'danger');
                 btn.disabled = false;
@@ -2554,6 +2687,13 @@
                 const r = await api('POST', `/api/servers/${encoded}/uninstall-plugin`, {});
                 return { ok: !!(r.data && r.data.ok) && r.ok, error: r.data && r.data.error, status: r.status };
             }
+            case 'update_plugin': {
+                // Same endpoint: it installs the newest build over the old
+                // one. Named apart only so the caller waits for the right
+                // thing (see _runCheckAction).
+                const r = await api('POST', `/api/servers/${encoded}/install-plugin`, {});
+                return { ok: !!(r.data && r.data.ok) && r.ok, error: r.data && r.data.error, status: r.status };
+            }
             case 'sync_trickplay_options': {
                 const r = await api('POST', `/api/servers/${encoded}/trickplay-fix-all`, { install_plugin: false });
                 return { ok: !!(r.data && r.data.ok) && r.ok, error: r.data && r.data.error, status: r.status };
@@ -2568,6 +2708,15 @@
                     body.library_ids = args.library_ids;
                 }
                 const r = await api('POST', `/api/servers/${encoded}/vendor-extraction`, body);
+                return { ok: !!(r.data && r.data.ok) && r.ok, error: r.data && r.data.error, status: r.status };
+            }
+            case 'turn_off_plex_detection': {
+                // One library's own intro/credits detection switches —
+                // never Plex's server-wide prefs.
+                const r = await api('POST', `/api/servers/${encoded}/plex-marker-detection`, {
+                    library_id: String(args.library_id || ''),
+                    prefs: Array.isArray(args.prefs) ? args.prefs : [],
+                });
                 return { ok: !!(r.data && r.data.ok) && r.ok, error: r.data && r.data.error, status: r.status };
             }
             case 'set_scheduled_trickplay': {
@@ -2645,6 +2794,16 @@
 
         const modal = window.bootstrap.Modal.getOrCreateInstance(modalEl);
         modal.show();
+    }
+
+    // Whether an envelope still carries this check, failing. Used by
+    // reprobeUntilConverged to wait out an action whose effect is "this row
+    // goes away" rather than a state flip (plugin update).
+    function _hasFailingCheck(data, checkId) {
+        if (!checkId) return false;
+        return ((data && data.sections) || []).some(
+            (s) => (s.checks || []).some((c) => c.id === checkId && c.ok === false),
+        );
     }
 
     // Read plugin-installed bit from a unified envelope. Used by
@@ -3262,6 +3421,7 @@
             const fresh = await api('GET', `/api/servers/${encodeURIComponent(id)}`);
             if (fresh.ok && fresh.data) {
                 renderEditLibraries(fresh.data.libraries || []);
+                if (window.renderMarkersLibraryColumn) window.renderMarkersLibraryColumn();
                 // D23 — sync the cached server payload so saveEditedServer
                 // sees the freshly-fetched libraries, not the stale [] it
                 // captured at modal open. Without this, ticking checkboxes
@@ -3396,6 +3556,8 @@
     window.MPGShared.validateLocalPathInput = _validateLocalPathInput;
     window.MPGShared.debouncedValidatePath = _debouncedValidatePath;
     window.MPGShared.addPathMappingRow = addPathMappingRow;
+    // Quote-safe (attribute values too); markers_server_tab.js renders with it.
+    window.MPGShared.escapeHtml = escapeHtml;
     // Used by the /setup wizard's vendor picker to enter the inlined
     // connection form at "step-connect" without going through #step-type
     // (which only exists in the modal).

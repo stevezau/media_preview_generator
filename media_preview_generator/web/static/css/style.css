@@ -2380,3 +2380,63 @@ html[data-bs-theme="light"] #logsContent {
     background-color: #0f172a !important;
     color: #e2e8f0;
 }
+
+/* Servers → Edit → Intro & Credits tab (markers_server_tab.js). Label left, control right, as in the
+ * approved design; the status block is a two-column label/value grid. */
+.markers-opt {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+.markers-opt > :first-child {
+    min-width: 0;
+}
+/* A switch stays beside its label on a phone; segmented controls may wrap under theirs. */
+.markers-opt:has(> .markers-switch) {
+    flex-wrap: nowrap;
+}
+.markers-switch {
+    margin: 0;
+    padding-left: 0;
+}
+.markers-switch .form-check-input {
+    margin-left: 0;
+    width: 2.5em;
+    height: 1.35em;
+}
+.markers-kv {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.5rem 1rem;
+    align-items: center;
+}
+.markers-kv > .markers-kv-label {
+    color: var(--bs-secondary-color);
+}
+@media (max-width: 575.98px) {
+    .markers-kv {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 0 1rem;
+    }
+    .markers-kv > .markers-kv-label:not(:first-child) {
+        margin-top: 0.5rem;
+    }
+}
+/* Servers → Edit → Libraries: one switch per column, centred under its header with no label beside it (the row
+ * names the library). Switch columns stay as narrow as their one-line header; the library name takes the rest. */
+.edit-lib-switch-col {
+    width: 1%;
+    white-space: nowrap;
+}
+.edit-lib-switch {
+    display: inline-block;
+    min-height: 0;
+    margin: 0;
+    padding-left: 0;
+}
+.edit-lib-switch .form-check-input {
+    float: none;
+    margin-left: 0;
+}

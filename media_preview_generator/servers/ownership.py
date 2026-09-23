@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import unicodedata
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -121,12 +122,26 @@ def apply_path_mappings(remote_path: str, mappings: list[dict[str, Any]]) -> lis
     ``settings.json``: each entry has ``remote_prefix`` and ``local_prefix``
     (or the legacy ``plex_prefix``/``local_prefix`` shape).
     """
+    return [local for local, _root in path_mapping_candidates(remote_path, mappings)]
+
+
+def path_mapping_candidates(remote_path: str, mappings: list[dict[str, Any]]) -> list[tuple[str, str | None]]:
+    """:func:`apply_path_mappings`, with the ``local_prefix`` each candidate came from.
+
+    Args:
+        remote_path: A path as the server sees it.
+        mappings: The server's ``path_mappings``.
+
+    Returns:
+        ``(local path, local_prefix)`` per candidate, in :func:`apply_path_mappings`' order; ``(remote_path, None)``
+        when no mapping matches.
+    """
     if not mappings:
-        return [remote_path]
+        return [(remote_path, None)]
 
     # Convert backslashes up-front on both sides — see apply_webhook_prefixes.
     remote_path_fwd = (remote_path or "").replace("\\", "/")
-    candidates: list[str] = []
+    candidates: list[tuple[str, str | None]] = []
     norm = _normalize(remote_path_fwd)
     for entry in mappings:
         remote = entry.get("remote_prefix") or entry.get("plex_prefix") or ""
@@ -137,9 +152,9 @@ def apply_path_mappings(remote_path: str, mappings: list[dict[str, Any]]) -> lis
         norm_remote = _normalize(remote_fwd)
         if norm.startswith(norm_remote):
             tail = remote_path_fwd[len(remote_fwd.rstrip("/")) :]
-            candidates.append(local.rstrip("/") + tail)
+            candidates.append((local.rstrip("/") + tail, local.rstrip("/") or "/"))
     if not candidates:
-        candidates.append(remote_path)
+        candidates.append((remote_path, None))
     return candidates
 
 
@@ -175,6 +190,30 @@ def apply_inverse_path_mappings(local_path: str, mappings: list[dict[str, Any]])
     return candidates
 
 
+def webhook_path_candidates(path: str, configs: list[ServerConfig]) -> list[str]:
+    """Every local form a webhook path can take on this app's disk: the path itself, then each server's translations.
+
+    Two namespaces arrive from webhooks and each needs its own translator: Sonarr/Radarr/Tdarr send their own view
+    (``/data/...``), mapped by the ``webhook_prefixes`` of any server's mappings; a Plex/Emby/Jellyfin ``library.new``
+    webhook resolves the file through the server's API, so it arrives in that server's view (``/mnt/Media/...``),
+    mapped like a library's ``remote_paths`` (issue #254). No disk access.
+
+    Args:
+        path: The path as the sender reported it.
+        configs: Server configs in registry order.
+
+    Returns:
+        Distinct candidates, the raw path first, then per server its webhook-prefix and path-mapping translations.
+    """
+    candidates: list[str] = [path]
+    for cfg in configs:
+        for translate in (apply_webhook_prefixes, apply_path_mappings):
+            for translated in translate(path, cfg.path_mappings or []):
+                if translated not in candidates:
+                    candidates.append(translated)
+    return candidates
+
+
 def server_owns_path(
     canonical_path: str,
     server: ServerConfig,
@@ -195,7 +234,11 @@ def server_owns_path(
     """
     if not server.enabled:
         return None
+    return next(_library_matches(canonical_path, server, _enabled_libraries(server)), None)
 
+
+def _library_matches(canonical_path: str, server: ServerConfig, libraries: list[Library]) -> Iterator[OwnershipMatch]:
+    """Yield a match for each of ``libraries`` (in order) whose mapped folder covers ``canonical_path``."""
     # NFC-normalise the canonical path *before* splitting; the basename
     # may be the bit that differs (NFD vs NFC) when the parent dir is
     # ASCII but the filename has accented characters.
@@ -207,24 +250,49 @@ def server_owns_path(
     canonical_path = unicodedata.normalize("NFC", canonical_path).replace("\\", "/")
     norm_path = _normalize(os.path.dirname(canonical_path)) + os.path.basename(canonical_path)
 
-    for library in _enabled_libraries(server):
+    for library in libraries:
         for remote_path in library.remote_paths:
             # An empty/whitespace remote path would normalise to "/" and
             # match every absolute file path; reject those explicitly.
             if not (remote_path or "").strip():
                 continue
-            for local_candidate in apply_path_mappings(remote_path, server.path_mappings):
-                if not (local_candidate or "").strip():
-                    continue
-                local_prefix = _normalize(local_candidate)
-                if norm_path.startswith(local_prefix):
-                    return OwnershipMatch(
-                        server_id=server.id,
-                        library_id=library.id,
-                        library_name=library.name,
-                        local_prefix=local_candidate,
-                    )
-    return None
+            matched = next(
+                (
+                    local_candidate
+                    for local_candidate in apply_path_mappings(remote_path, server.path_mappings)
+                    if (local_candidate or "").strip() and norm_path.startswith(_normalize(local_candidate))
+                ),
+                None,
+            )
+            if matched is not None:
+                yield OwnershipMatch(
+                    server_id=server.id,
+                    library_id=library.id,
+                    library_name=library.name,
+                    local_prefix=matched,
+                )
+                break
+
+
+def find_library_matches(canonical_path: str, servers: list[ServerConfig]) -> list[OwnershipMatch]:
+    """Every library of every enabled server whose folder covers ``canonical_path``.
+
+    Unlike :func:`find_owning_servers` this ignores the preview opt-in (``Library.enabled``) and keeps every
+    matching library: Intro & Credits picks its own libraries per server (``markers.library_ids``), and a file in
+    overlapping libraries ("Movies" + "4K Movies") belongs to each of them.
+
+    Args:
+        canonical_path: Local path of the file.
+        servers: Server configs in registry order.
+
+    Returns:
+        Matches ordered by server, then by library.
+    """
+    matches: list[OwnershipMatch] = []
+    for server in servers:
+        if server.enabled:
+            matches.extend(_library_matches(canonical_path, server, list(server.libraries)))
+    return matches
 
 
 def find_owning_servers(

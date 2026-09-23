@@ -16,6 +16,7 @@ docs_dir: docs
 exclude_docs: |
   /design/
   /README.md
+  /superpowers/
 
 theme:
   name: material

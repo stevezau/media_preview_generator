@@ -13,7 +13,7 @@ module rather than the shared helper.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from loguru import logger
 
@@ -70,7 +70,7 @@ class PlexProcessor(_MediaServerProcessor):
             return
 
         wanted_ids: set[str] | None = set(library_ids) if library_ids else None
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+        cutoff = datetime.now(UTC) - timedelta(hours=lookback_hours)
         cutoff_naive = cutoff.replace(tzinfo=None)
 
         for section in sections:

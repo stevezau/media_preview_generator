@@ -7,7 +7,8 @@ run_scheduled_job, and create_app configuration.
 
 import json
 import os
-from unittest.mock import patch
+from datetime import UTC
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -453,7 +454,10 @@ class TestRequeueInterruptedOnStartup:
 
         _requeue_interrupted_on_startup("/tmp/config")
 
-        mock_get_job_manager.assert_not_called()
+        jm = mock_get_job_manager.return_value
+        jm.requeue_interrupted_jobs.assert_not_called()
+        # Nothing is revived, so Intro & Credits jobs left PENDING are settled instead of blocking their schedule.
+        jm.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
         mock_start_job.assert_not_called()
 
     @patch("media_preview_generator.web.routes._start_job_async")
@@ -471,6 +475,7 @@ class TestRequeueInterruptedOnStartup:
         _requeue_interrupted_on_startup("/tmp/config")
 
         mock_get_job_manager.return_value.requeue_interrupted_jobs.assert_called_once_with(max_age_minutes=45)
+        mock_get_job_manager.return_value.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
         mock_start_job.assert_called_once_with("job-123", {"foo": "bar"})
 
     @patch("media_preview_generator.web.routes._start_job_async")
@@ -494,6 +499,123 @@ class TestRequeueInterruptedOnStartup:
 
         assert sm.processing_paused is True, "an explicit pause must survive the restart"
         mock_start_job.assert_called_once_with("job-456", {})
+
+    @pytest.mark.parametrize("auto_requeue", [True, False])
+    @patch("media_preview_generator.web.routes._start_job_async")
+    @patch("media_preview_generator.web.app.get_job_manager")
+    @patch("media_preview_generator.web.settings_manager.get_settings_manager")
+    def test_revived_jobs_start_even_when_settling_leftover_intro_credits_jobs_fails(
+        self, mock_get_settings_manager, mock_get_job_manager, mock_start_job, auto_requeue
+    ):
+        # A jobs.db write error while failing the leftovers must not strand the revived (preview) jobs PENDING.
+        from loguru import logger
+
+        warnings: list[str] = []
+        sink = logger.add(lambda message: warnings.append(str(message)), level="WARNING", format="{message}")
+        mock_get_settings_manager.return_value.get.side_effect = lambda key, default=None: {
+            "auto_requeue_on_restart": auto_requeue,
+            "requeue_max_age_minutes": 720,
+        }.get(key, default)
+        mock_get_settings_manager.return_value.processing_paused = False
+        jm = mock_get_job_manager.return_value
+        jm.requeue_interrupted_jobs.return_value = [type("RequeuedJob", (), {"id": "job-123", "config": {"a": 1}})()]
+        jm.fail_unrevived_interrupted_jobs.side_effect = OSError("disk I/O error")
+
+        try:
+            _requeue_interrupted_on_startup("/tmp/config")
+        finally:
+            logger.remove(sink)
+
+        jm.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
+        if auto_requeue:
+            mock_start_job.assert_called_once_with("job-123", {"a": 1})
+        else:
+            mock_start_job.assert_not_called()
+        text = "".join(warnings)
+        assert (
+            "Couldn't mark the Intro & Credits jobs left over from before the restart as failed (OSError: disk I/O "
+            "error). They stay pending until a later restart settles them or you cancel them on the dashboard" in text
+        )
+        assert "Could not resume jobs" not in text
+
+    @patch("media_preview_generator.web.routes._start_job_async")
+    @patch("media_preview_generator.web.app.get_job_manager")
+    @patch("media_preview_generator.web.settings_manager.get_settings_manager")
+    def test_leftover_intro_credits_jobs_are_settled_when_nothing_is_revived(
+        self, mock_get_settings_manager, mock_get_job_manager, mock_start_job
+    ):
+        mock_get_settings_manager.return_value.get.side_effect = lambda key, default=None: {
+            "auto_requeue_on_restart": True,
+            "requeue_max_age_minutes": 30,
+        }.get(key, default)
+        jm = mock_get_job_manager.return_value
+        jm.requeue_interrupted_jobs.return_value = []
+
+        _requeue_interrupted_on_startup("/tmp/config")
+
+        jm.requeue_interrupted_jobs.assert_called_once_with(max_age_minutes=30)
+        jm.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
+        mock_start_job.assert_not_called()
+
+    @patch("media_preview_generator.markers.job_runner.pass_on_requests_of_unrevived_jobs")
+    @patch("media_preview_generator.web.routes._start_job_async")
+    @patch("media_preview_generator.web.app.get_job_manager")
+    @patch("media_preview_generator.web.settings_manager.get_settings_manager")
+    def test_the_intro_credits_jobs_left_behind_pass_on_what_other_jobs_handed_them(
+        self, mock_get_settings_manager, mock_get_job_manager, mock_start_job, mock_pass_on
+    ):
+        # A Season job that died with the restart held episodes other jobs had handed it; they get a Season job.
+        mock_get_settings_manager.return_value.get.side_effect = lambda key, default=None: {
+            "auto_requeue_on_restart": False,
+        }.get(key, default)
+        left_behind = [type("Job", (), {"id": "season-1", "config": {"source": "season"}})()]
+        mock_get_job_manager.return_value.fail_unrevived_interrupted_jobs.return_value = left_behind
+
+        _requeue_interrupted_on_startup("/tmp/config")
+
+        mock_pass_on.assert_called_once_with(left_behind)
+
+
+class TestLeftoverIntroCreditsJobsBeforeSchedulesStart:
+    """A schedule tick that fires as the scheduler starts must not see a leftover job from before the restart."""
+
+    def test_tick_fired_during_startup_creates_a_job(self, tmp_path):
+        from media_preview_generator.web import scheduler as sched_mod
+        from media_preview_generator.web.app import create_app
+        from media_preview_generator.web.jobs import JobManager
+
+        config_dir = str(tmp_path / "config")
+        os.makedirs(config_dir, exist_ok=True)
+        with open(os.path.join(config_dir, "settings.json"), "w") as f:
+            json.dump({"setup_complete": True, "auto_requeue_on_restart": False}, f)
+        before = JobManager(config_dir=config_dir)
+        before.create_job(
+            library_name="weekly",
+            kind="intro_credits",
+            priority=3,
+            parent_schedule_id="sched-1",
+            config={"kind": "intro_credits", "libraries": [], "file_paths": []},
+        )
+
+        created = []
+        real_start = sched_mod.ScheduleManager.start
+
+        def start_and_tick(manager):
+            real_start(manager)
+            # APScheduler can run a missed tick the moment it starts.
+            with patch(
+                "media_preview_generator.markers.triggers.create_intro_credits_job",
+                side_effect=lambda **kw: created.append(kw) or MagicMock(id="new"),
+            ):
+                sched_mod._start_scheduled_intro_credits_job(manager, "sched-1", [], "TV", None, None)
+
+        with (
+            patch.dict(os.environ, {"CONFIG_DIR": config_dir, "WEB_AUTH_TOKEN": "test-token-12345678"}),
+            patch.object(sched_mod.ScheduleManager, "start", start_and_tick),
+        ):
+            create_app(config_dir=config_dir)
+
+        assert len(created) == 1 and created[0]["parent_schedule_id"] == "sched-1"
 
 
 class TestResumeInterruptedRetryChains:
@@ -539,7 +661,7 @@ class TestResumeInterruptedRetryChains:
         clobber such chains (which would orphan the still-living
         retry).
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from media_preview_generator.web.jobs import JobStatus
 
@@ -550,12 +672,12 @@ class TestResumeInterruptedRetryChains:
                 "id": "originating-uuid",
                 "library_name": "Foo",
                 "server_id": "jelly-1",
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
                 "config": {
                     "is_retry_chain": True,
                     "retry_attempt": 2,
                     "retry_max_attempts": 5,
-                    "retry_started_at": datetime.now(timezone.utc).isoformat(),
+                    "retry_started_at": datetime.now(UTC).isoformat(),
                     "source": "sonarr",
                 },
                 "status": JobStatus.PENDING,
@@ -588,7 +710,7 @@ class TestResumeInterruptedRetryChains:
         """Without a child to drive the chain, the head would sit
         PENDING forever. Mark FAILED so the user knows to re-trigger.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from media_preview_generator.web.jobs import JobStatus
 
@@ -599,11 +721,11 @@ class TestResumeInterruptedRetryChains:
                 "id": "stuck-uuid",
                 "library_name": "Foo",
                 "server_id": "jelly-1",
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
                 "config": {
                     "is_retry_chain": True,
                     "retry_attempt": 1,
-                    "retry_started_at": datetime.now(timezone.utc).isoformat(),
+                    "retry_started_at": datetime.now(UTC).isoformat(),
                 },
                 "status": JobStatus.PENDING,
                 "error": None,
@@ -650,11 +772,11 @@ class TestResumeInterruptedRetryChains:
         ancient chains PENDING and re-fire against potentially-deleted
         media. Boundary: 25h must be stale.
         """
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from media_preview_generator.web.jobs import JobStatus
 
-        old_started = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+        old_started = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
         chain = type(
             "Chain",
             (),
@@ -770,3 +892,92 @@ class TestPrewarmCaches:
 
         mock_gpu.assert_called_once()
         mock_version.assert_called_once()
+
+
+class TestRedecideInReviewAfterUpgrade:
+    """Settings v16 removed "Publish when: High"; while its request is open, a start queues the one job that decides the
+    files it held in Needs review again (``triggers.submit_decide_again``, which reuses one already queued or running).
+    The request is cleared when that job completes (``job_runner._settle_decide_again``)."""
+
+    SUBMIT = "media_preview_generator.markers.triggers.submit_decide_again"
+    ENABLED = "media_preview_generator.markers.triggers.markers_enabled_anywhere"
+
+    def _settings(self, tmp_path, **values):
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        sm = get_settings_manager(str(tmp_path))
+        sm.apply_changes(updates=values)
+        return sm
+
+    @pytest.mark.parametrize(
+        ("enabled", "queued", "request_left"),
+        [
+            (True, "job-1", True),  # cleared once the job completes, not when it is queued
+            (True, None, False),  # nothing in review or waiting: nothing left to do
+            (False, None, True),  # Intro & Credits off everywhere: a start after it is turned on queues the job
+        ],
+        ids=["queued", "nothing-to-do", "intro-and-credits-off"],
+    )
+    def test_an_open_request_queues_the_job(self, tmp_path, enabled, queued, request_left):
+        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
+        from media_preview_generator.web.app import _decide_again_after_upgrade
+
+        sm = self._settings(tmp_path, **{DECIDE_AGAIN_KEY: True})
+        with patch(self.ENABLED, return_value=enabled), patch(self.SUBMIT, return_value=queued) as submit:
+            _decide_again_after_upgrade(str(tmp_path))
+        assert submit.call_count == int(enabled)
+        assert (sm.get(DECIDE_AGAIN_KEY) is True) is request_left
+
+    def test_without_a_request_nothing_is_queued(self, tmp_path):
+        from media_preview_generator.web.app import _decide_again_after_upgrade
+
+        self._settings(tmp_path, setup_complete=True)
+        with patch(self.ENABLED, return_value=True), patch(self.SUBMIT) as submit:
+            _decide_again_after_upgrade(str(tmp_path))
+        submit.assert_not_called()
+
+    def test_a_failure_keeps_the_request_for_the_next_start(self, tmp_path):
+        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
+        from media_preview_generator.web.app import _decide_again_after_upgrade
+
+        sm = self._settings(tmp_path, **{DECIDE_AGAIN_KEY: True})
+        with patch(self.ENABLED, return_value=True), patch(self.SUBMIT, side_effect=OSError("markers.db is locked")):
+            _decide_again_after_upgrade(str(tmp_path))  # never raises
+        assert sm.get(DECIDE_AGAIN_KEY) is True
+
+    def test_every_start_until_the_job_completes_asks_for_it_and_none_after(self, tmp_path):
+        from media_preview_generator.upgrade import DECIDE_AGAIN_KEY
+        from media_preview_generator.web.app import create_app
+        from media_preview_generator.web.settings_manager import get_settings_manager
+
+        config_dir = str(tmp_path / "config")
+        os.makedirs(config_dir, exist_ok=True)
+        with open(os.path.join(config_dir, "settings.json"), "w") as f:
+            json.dump(
+                {
+                    "setup_complete": True,
+                    "_schema_version": 15,
+                    "markers": {"detect": {"intro": True, "credits": True, "recap": False}, "publish_when": "high"},
+                },
+                f,
+            )
+        env = {"CONFIG_DIR": config_dir, "WEB_AUTH_TOKEN": "test-token-12345678"}
+        for _ in range(2):  # the job didn't complete before the restart: asked again (and reused if still queued)
+            reset_settings_manager()
+            with (
+                patch.dict(os.environ, env),
+                patch(self.ENABLED, return_value=True),
+                patch(self.SUBMIT, return_value="job-1") as submit,
+            ):
+                create_app(config_dir=config_dir)
+            submit.assert_called_once_with()
+        with open(os.path.join(config_dir, "settings.json")) as f:
+            saved = json.load(f)
+        assert saved["_schema_version"] == 16
+        assert "publish_when" not in saved["markers"] and saved[DECIDE_AGAIN_KEY] is True
+
+        get_settings_manager(config_dir).delete(DECIDE_AGAIN_KEY)  # what the completed job does
+        reset_settings_manager()
+        with patch.dict(os.environ, env), patch(self.ENABLED, return_value=True), patch(self.SUBMIT) as submit_again:
+            create_app(config_dir=config_dir)
+        submit_again.assert_not_called()

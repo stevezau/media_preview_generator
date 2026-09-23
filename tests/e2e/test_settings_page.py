@@ -110,9 +110,12 @@ class TestSettingsAuth:
         authed_page.locator("#customAuthToken").fill("brand-new-tok-1")
         authed_page.locator("#customAuthTokenConfirm").fill("brand-new-tok-1")
         authed_page.evaluate("void setCustomToken()")
-        with authed_page.expect_request("**/api/token/set") as req_info:
+        with authed_page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/token/set"),
+            timeout=5000,
+        ) as req_info:
             accept_app_confirm(authed_page)
-        req_info.value  # noqa: B018 — the request landed
+        req_info.value  # noqa: B018 — waiting for the response, not the request, means the mock has recorded the body
         assert captured, "POST /api/token/set never fired"
         # Pin the payload: the token field must equal the typed value.
         # A regression that always sent an empty/wrong token would have
@@ -136,9 +139,12 @@ class TestSettingsAuth:
         # Playwright's auto-await on returned Promises doesn't deadlock
         # waiting for the modal to resolve before we've clicked OK.
         authed_page.evaluate("void regenerateToken()")
-        with authed_page.expect_request("**/api/token/regenerate") as req_info:
+        with authed_page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/token/regenerate"),
+            timeout=5000,
+        ) as req_info:
             accept_app_confirm(authed_page)
-        req_info.value  # noqa: B018 — the request landed
+        req_info.value  # noqa: B018 — waiting for the response, not the request, means the mock has recorded the body
         assert called, "POST /api/token/regenerate never fired"
 
 
@@ -163,9 +169,12 @@ class TestSettingsBackupsPanel:
         # plain click on it posts the newest backup filename. Restore
         # is gated by an appConfirm modal — accept it to fire the POST.
         settings_page.locator("#backupRestorePanel button:has-text('Restore')").first.click()
-        with settings_page.expect_request("**/api/settings/backups/restore") as req_info:
+        with settings_page.expect_response(
+            lambda r: r.request.method == "POST" and r.url.endswith("/api/settings/backups/restore"),
+            timeout=5000,
+        ) as req_info:
             accept_app_confirm(settings_page)
-        req_info.value  # noqa: B018 — the request landed
+        req_info.value  # noqa: B018 — waiting for the response, not the request, means the mock has recorded the body
         assert captured, "POST /api/settings/backups/restore never fired"
         assert captured[0]["file"] == "settings.json"
         # Newest entry is the timestamped one.

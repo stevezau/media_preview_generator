@@ -11,7 +11,7 @@ authors = [
 description = "GPU-accelerated video preview thumbnail generation for Plex, Emby, and Jellyfin media servers"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: End Users/Desktop",
@@ -19,7 +19,6 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Multimedia :: Video",
@@ -30,7 +29,7 @@ dependencies = [
     "requests==2.33.0",
     # urllib3 >=2.6.3 covers CVE-2025-50181/50182 (redirect-handling),
     # CVE-2025-66418/66471 (chunked encoding), CVE-2026-21441
-    # (proxy-auth). python>=3.10 is already required so dropping 1.x
+    # (proxy-auth). python>=3.11 is already required so dropping 1.x
     # support is safe.
     "urllib3>=2.6.3,<3.0.0",
     # python-dotenv >=1.2.2 covers CVE-2026-28684.
@@ -52,6 +51,15 @@ dependencies = [
     # 10x10 tile sheets (Jellyfin 10.9+ native trickplay format).
     # >=12.2.0 covers CVE-2026-25990 and CVE-2026-40192.
     "pillow>=12.2.0,<14",
+    # numpy vectorises the season intro matcher (markers/audio/matcher.py); imported only by Intro & Credits.
+    "numpy>=2.0,<3",
+    # Credit text detection (markers/credits/textdet.py). Imported only by its helper process, never by the web app.
+    "onnxruntime==1.30.0",
+    # x86_64 only: the WebGPU plugin publishes no Linux aarch64 wheel, so the arm64 image (and any arm64 install)
+    # detects text on the CPU.
+    "onnxruntime-ep-webgpu==0.3.0; platform_machine == 'x86_64'",
+    "opencv-python-headless==5.0.0.93",
+    "pyclipper==1.4.0",
 ]
 
 [project.optional-dependencies]
@@ -78,9 +86,10 @@ test = [
     # Chromium, fresh memory budget, so no cross-test state
     # accumulation can trigger the known Playwright-on-small-CI
     # Chromium crash pattern (playwright#34075). 4-shard split
-    # gives 30-42 tests/shard (151 ÷ 4); the largest shards sit
-    # just above the empirical ~30-test threshold, so the
-    # ``--reruns 1`` safety net in ci.yml covers residual risk.
+    # gives ~100-107 tests/shard (411 ÷ 4, measured 103/107/100/101);
+    # the suite has outgrown the empirical ~30-test threshold the
+    # split was sized for, so the fresh runner per shard — not the
+    # shard size — is what bounds memory accumulation now.
     "pytest-shard>=0.1.2",
     "playwright>=1.40.0",
     "flask-cors>=6.0.0,<7",
@@ -92,6 +101,8 @@ test = [
     # type= is omitted" bug that the mock-based unit test missed.
     "pytest-recording>=0.13.0",
     "vcrpy>=6.0.0",
+    # tests/markers/credits/rapidocr_reference.py: the verbatim rapidocr post-processing uses shapely.
+    "shapely==2.1.2",
     # tests/test_docs_site.py builds the docs site; CI installs only `.[test]`.
     "media-preview-generator[docs]",
 ]
@@ -123,13 +134,16 @@ include = ["media_preview_generator*"]
 testpaths = ["tests"]
 addopts = [
     "--cov=media_preview_generator",
+    # The Plex marker agent ships in its own folder, outside the package, but tests/test_plex_marker_agent.py
+    # covers it like any other module — without this its lines counted towards nothing at all.
+    "--cov=plex-marker-agent",
     "--cov-report=term-missing",
     "--cov-fail-under=70",
     "--tb=short",
     "--strict-markers",
     "--disable-warnings",
     "-n", "auto",
-    "--dist", "load",
+    "--dist", "worksteal",
     "-m", "not gpu and not e2e and not integration",
     "--timeout=30",
     "--timeout-method=thread",
@@ -137,6 +151,9 @@ addopts = [
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+# A run writes ~1.3 GB of tmp_path dirs; pytest keeps the last 3 runs by default, which fills
+# /dev/shm (64 MB default in Docker, and finite even on a real RAM disk) fast.
+tmp_path_retention_count = 1
 markers = [
     "integration: marks tests as integration tests",
     "real_plex_server: tests that require a live Plex server (opt out of the global Plex mock)",
@@ -155,12 +172,14 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["media_preview_generator"]
+source = ["media_preview_generator", "plex-marker-agent"]
 omit = [
     "*/tests/*",
     "*/__pycache__/*",
     "*/venv/*",
-    "*/test_env/*"
+    "*/test_env/*",
+    # Written by setuptools_scm at install time, so CI's coverage-combine job (no install) has no source for it.
+    "*/_version.py",
 ]
 
 [tool.coverage.report]
@@ -180,13 +199,14 @@ git_describe_command = ["git", "describe", "--dirty", "--tags", "--long", "--mat
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
 extend-exclude = [
     "media_preview_generator/_version.py",
     ".venv",
     ".venv-test",
     "htmlcov",
     "tmp_migration_test",
+    "docs/design/intro-credits/evidence",
 ]
 
 [tool.ruff.lint]
@@ -201,6 +221,10 @@ select = [
 ignore = [
     "E501",  # line-too-long handled by formatter
     "B008",  # function calls in argument defaults (Flask/Depends idiom)
+    # UP042 wants the 13 `str, Enum` classes on StrEnum, which changes what str()/f-string give:
+    # "ServerType.PLEX" today, "plex" after. Those strings reach logs, settings.json and the API, so the
+    # migration is its own change with its own tests, not a side effect of moving the floor to 3.11.
+    "UP042",
 ]
 
 [tool.ruff.lint.per-file-ignores]

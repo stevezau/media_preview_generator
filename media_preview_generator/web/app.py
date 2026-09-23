@@ -9,7 +9,7 @@ import hmac
 import json
 import logging  # stdlib logging only — required to mute werkzeug's own logger; app code must use loguru
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from flask import Flask
@@ -19,6 +19,7 @@ from flask_wtf.csrf import CSRFProtect
 from loguru import logger
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from ..job_kinds import JOB_KIND_INTRO_CREDITS
 from .auth import log_token_on_startup
 from .jobs import JobStatus, get_job_manager
 from .scheduler import get_schedule_manager
@@ -309,7 +310,7 @@ def _resume_interrupted_retry_chains_on_startup(config_dir: str) -> None:
         if not chains:
             return
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         max_chain_age = _MAX_CHAIN_AGE_FOR_RESUME
         all_jobs = job_manager.get_all_jobs()
         revived = 0
@@ -323,7 +324,7 @@ def _resume_interrupted_retry_chains_on_startup(config_dir: str) -> None:
                 started_str = chain.config.get("retry_started_at") or chain.created_at
                 started = datetime.fromisoformat(started_str.replace("Z", "+00:00")) if started_str else now
                 if started.tzinfo is None:
-                    started = started.replace(tzinfo=timezone.utc)
+                    started = started.replace(tzinfo=UTC)
             except (ValueError, AttributeError):
                 started = now
             if now - started > max_chain_age:
@@ -430,6 +431,28 @@ def _warn_unhealthy_media_mounts(media_servers: list) -> list[dict[str, str]]:
     return issues
 
 
+def _fail_unrevived_intro_credits_jobs() -> None:
+    """Settle the Intro & Credits jobs a restart left behind and didn't revive.
+
+    Left PENDING they would block their schedule and absorb webhook follow-ups for good. A Season job among them passes
+    on the episodes other jobs had handed it. Its own failure is logged and never stops the revived jobs from starting.
+    """
+    try:
+        failed = get_job_manager().fail_unrevived_interrupted_jobs(JOB_KIND_INTRO_CREDITS)
+        from ..markers.job_runner import pass_on_requests_of_unrevived_jobs
+
+        pass_on_requests_of_unrevived_jobs(list(failed or []))
+    except Exception as exc:
+        logger.warning(
+            "Couldn't mark the Intro & Credits jobs left over from before the restart as failed ({}: {}). They stay "
+            "pending until a later restart settles them or you cancel them on the dashboard; until then their "
+            "schedules skip every run (a leftover Check servers job blocks every Check servers run) and new webhook "
+            "follow-ups for the same files can be folded into them instead of running",
+            type(exc).__name__,
+            exc,
+        )
+
+
 def _requeue_interrupted_on_startup(config_dir: str) -> None:
     """Revive jobs that were running or pending when the server last stopped.
 
@@ -448,6 +471,7 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
         )
         if not auto_requeue_enabled:
             logger.info("Auto-requeue on restart is disabled")
+            _fail_unrevived_intro_credits_jobs()
             return
 
         # A pause from the previous session is honored across the restart —
@@ -461,6 +485,7 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
         max_age = int(settings.get("requeue_max_age_minutes", 720))
         job_manager = get_job_manager()
         revived = job_manager.requeue_interrupted_jobs(max_age_minutes=max_age)
+        _fail_unrevived_intro_credits_jobs()
 
         if not revived:
             return
@@ -484,6 +509,38 @@ def _requeue_interrupted_on_startup(config_dir: str) -> None:
             "you can re-run them manually from the Jobs page when ready.",
             type(e).__name__,
             e,
+        )
+
+
+def _decide_again_after_upgrade(config_dir: str) -> None:
+    """Queue the one job that decides the files in Intro & Credits' Needs review (and those waiting for their item's
+    other versions) again, while the settings upgrade's request for it is open (``upgrade.DECIDE_AGAIN_KEY``).
+
+    Runs after the restart requeue, once the job manager can start jobs, so a revived job is found and not queued twice
+    (``triggers.submit_decide_again`` returns it). The request is cleared when the job completes
+    (``job_runner._settle_decide_again``), or here when nothing is in review or waiting. With Intro & Credits off on
+    every server it stays open, so a start after it is turned on queues the job. Never raises: a failure leaves the
+    request for the next start.
+    """
+    from ..upgrade import DECIDE_AGAIN_KEY
+    from .settings_manager import get_settings_manager
+
+    try:
+        settings = get_settings_manager(config_dir)
+        if not settings.get(DECIDE_AGAIN_KEY):
+            return
+        from ..markers.triggers import markers_enabled_anywhere, submit_decide_again
+
+        if not markers_enabled_anywhere():
+            return
+        if submit_decide_again() is None:
+            settings.delete(DECIDE_AGAIN_KEY)
+    except Exception as exc:
+        logger.warning(
+            "Couldn't queue the Intro & Credits job that decides the files in Needs review again ({}: {}); the "
+            "next start tries again",
+            type(exc).__name__,
+            exc,
         )
 
 
@@ -534,6 +591,66 @@ def _log_image_deprecation_warning() -> None:
     )
 
 
+_CSRF_REFUSED_MESSAGE = (
+    "This page's security token is missing or out of date. Reload the page and try again. "
+    "Scripts: send the API token in an Authorization: Bearer or X-Auth-Token header instead."
+)
+
+
+# Sec-Fetch-Site values of a request one of this app's own pages made ("none": the user typed or bookmarked it).
+_OWN_FETCH_SITES = frozenset({"same-origin", "none"})
+
+
+def _install_csrf_protection(app: Flask) -> None:
+    """Require a CSRF token on every state-changing request that relies on the browser session.
+
+    A signed-in browser sends its session cookie with any request to this app, including one a page on another
+    site makes it send. The token (the ``csrf-token`` meta tag, or the login form's hidden field) proves the request
+    came from one of this app's own pages. Two kinds of request don't use the session, so need no token: one with a
+    valid API token header (a script), and a webhook receiver, which checks its own secret on every call.
+
+    A browser request that says it came from another origin (``Sec-Fetch-Site``, which pages can't set or fake) is
+    refused even with a token: another app on this host (a different port is the same site for cookies) could have
+    read one. Older browsers and scripts send no such header, and the token alone decides.
+
+    Args:
+        app: The app.
+    """
+    from flask import jsonify, redirect, render_template, request, url_for
+    from flask_wtf.csrf import CSRFError
+
+    from .auth import _check_token_headers
+
+    @app.before_request
+    def _require_csrf_for_browser_requests():
+        if not app.config["WTF_CSRF_ENABLED"] or request.method not in app.config["WTF_CSRF_METHODS"]:
+            return
+        if _check_token_headers():
+            return
+        if getattr(app.view_functions.get(request.endpoint), "is_webhook_receiver", False):
+            return
+        fetch_site = request.headers.get("Sec-Fetch-Site")
+        if fetch_site is not None and fetch_site not in _OWN_FETCH_SITES:
+            raise CSRFError(f"The request came from another site (Sec-Fetch-Site: {fetch_site}).")
+        csrf.protect()
+
+    @app.errorhandler(CSRFError)
+    def _csrf_refused(error: CSRFError):
+        logger.info("Refused {} {}: {}", request.method, request.path, error.description)
+        sent_api_token = request.headers.get("X-Auth-Token", "").strip() or request.headers.get(
+            "Authorization", ""
+        ).startswith("Bearer ")
+        if sent_api_token:
+            # A script with a wrong token: the same answer the route's own auth check gives.
+            return jsonify({"error": "Authentication required"}), 401
+        if request.endpoint == "main.login":
+            return render_template("login.html", page_expired=True), 400
+        if request.endpoint == "main.logout":
+            # A Logout button on a page older than this session: the confirm page carries a fresh token.
+            return redirect(url_for("main.logout"))
+        return jsonify({"error": _CSRF_REFUSED_MESSAGE}), 400
+
+
 def create_app(config_dir: str | None = None) -> Flask:
     """Create and configure the Flask application.
 
@@ -575,7 +692,15 @@ def create_app(config_dir: str | None = None) -> Flask:
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     app.config["CONFIG_DIR"] = config_dir
-    app.config["WTF_CSRF_CHECK_DEFAULT"] = False  # We apply CSRF selectively
+    # Flask-WTF's own check can't tell a script's API token from a browser session, so
+    # _require_csrf_for_browser_requests (below) runs the check instead.
+    app.config["WTF_CSRF_CHECK_DEFAULT"] = False
+    # A dashboard tab stays open for days; the default one-hour token lifetime would make every button in it fail
+    # after an hour. The token is tied to the session, which has its own lifetime.
+    app.config["WTF_CSRF_TIME_LIMIT"] = None
+    # The strict HTTPS check also demands a Referer matching the Host the app sees, which refuses every button behind
+    # a reverse proxy that doesn't pass the original Host on. The session-bound token is the protection that counts.
+    app.config["WTF_CSRF_SSL_STRICT"] = False
     # Cap inbound request bodies to 1 MiB. Webhook payloads from
     # Plex/Emby/Jellyfin/Sonarr/Radarr are kilobytes at most; anything
     # larger is either misconfiguration or a DoS attempt. Flask returns
@@ -598,11 +723,7 @@ def create_app(config_dir: str | None = None) -> Flask:
     # Allow cross-origin requests on all routes (token-auth, not cookie-based)
     CORS(app, origins=cors_origins)
 
-    # Initialize CSRF protection
     csrf.init_app(app)
-
-    # CSRF exemptions are applied selectively per-endpoint after
-    # blueprint registration.  See the loop below register_blueprint().
 
     # Threading mode + polling-only transport. The two design constraints:
     #   1. Eventlet/gevent monkey-patches threading.Thread into green threads
@@ -704,55 +825,7 @@ def create_app(config_dir: str | None = None) -> Flask:
 
     _load_history_from_disk()
 
-    # Selectively exempt API endpoints that use Bearer/X-Auth-Token
-    # (external API calls, not browser-initiated).  Browser-initiated
-    # POST endpoints remain CSRF-protected.
-    _csrf_exempt_endpoints = [
-        # Jobs — @api_token_required, called by external API / dashboard
-        "api.get_jobs",
-        "api.get_job",
-        "api.create_job",
-        "api.cancel_job",
-        "api.get_job_logs",
-        "api.get_worker_statuses",
-        "api.delete_job",
-        "api.clear_jobs",
-        "api.get_job_stats",
-        # Schedules — @api_token_required
-        "api.get_schedules",
-        "api.get_schedule",
-        "api.create_schedule",
-        "api.update_schedule",
-        "api.delete_schedule",
-        "api.enable_schedule",
-        "api.disable_schedule",
-        "api.run_schedule_now",
-        "api.get_quiet_hours",
-        "api.update_quiet_hours",
-        # Token management
-        "api.api_regenerate_token",
-        # System config
-        "api.get_config",
-        "api.rescan_gpus",
-        # Libraries
-        "api.get_libraries",
-        # Webhooks — external POST from Radarr/Sonarr/Custom/Plex
-        "webhooks_bp.radarr_webhook",
-        "webhooks_bp.sonarr_webhook",
-        "webhooks_bp.sportarr_webhook",
-        "webhooks_bp.custom_webhook",
-        "webhooks_bp.plex_webhook",
-        "webhooks_bp.get_webhook_history",
-        "webhooks_bp.clear_webhook_history",
-        "webhooks_bp.get_pending_webhooks",
-        # Multi-server router — auto-detects vendor by payload shape
-        "webhooks_bp.webhook_incoming",
-        "webhooks_bp.webhook_per_server",
-    ]
-    for _ep in _csrf_exempt_endpoints:
-        _view = app.view_functions.get(_ep)
-        if _view:
-            csrf.exempt(_view)
+    _install_csrf_protection(app)
 
     # Initialize rate limiter with app
     limiter.init_app(app)
@@ -872,6 +945,12 @@ def create_app(config_dir: str | None = None) -> Flask:
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         return response
 
+    # Auto-requeue jobs that were interrupted by the server restart. Kept ahead of schedule ticks; leftover Intro &
+    # Credits jobs that aren't revived are settled by fail_unrevived_interrupted_jobs, so no tick skips on them.
+    _requeue_interrupted_on_startup(config_dir)
+    # After it, so a revived one is found instead of queueing a second.
+    _decide_again_after_upgrade(config_dir)
+
     # Start scheduler
     schedule_manager.start()
 
@@ -890,9 +969,6 @@ def create_app(config_dir: str | None = None) -> Flask:
 
     # Log token on startup
     log_token_on_startup()
-
-    # Auto-requeue jobs that were interrupted by the server restart
-    _requeue_interrupted_on_startup(config_dir)
 
     # Re-arm Timers for retry-chain Jobs that were mid-backoff at restart.
     # Must run AFTER settings/config are accessible (load_config + registry

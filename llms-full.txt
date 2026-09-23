@@ -273,12 +273,14 @@ You can add more servers — any vendor, any number of each — at any time from
 
 ## Recommended media-server settings
 
-This tool generates **video preview thumbnails only** — the small frames you
+This tool's main job is **video preview thumbnails** — the small frames you
 see when you drag the scrub bar. Plex stores them as **BIF bundles**, Emby
 reads a **BIF sidecar** next to the media file, and Jellyfin reads a folder of
 JPG tile sheets called **trickplay** next to the media file. The app writes
-the right format for each. It does **not** generate chapter thumbnails,
-intro/credit detection, or other media analysis.
+the right format for each. It does **not** generate chapter thumbnails or do
+other media analysis. It can also send **Skip Intro / Skip Credits markers**
+to your servers; that is off until you turn it on per server (see the
+[Intro & Credits guide](https://mediapreviewgenerator.dev/guides/#intro--credits)).
 
 **Turn off built-in preview generation on each server you configure** so this
 tool isn't competing with a redundant CPU job:
@@ -1395,6 +1397,7 @@ Guides for the web interface, automation and webhooks, HDR handling, and trouble
 - [Previews readiness (per-check toggles & explanations)](https://mediapreviewgenerator.dev/guides/previews-readiness/)
 - [Webhook Integration](https://mediapreviewgenerator.dev/guides/#webhook-integration)
 - [Auto-trigger from Plex (no Sonarr/Radarr)](https://mediapreviewgenerator.dev/guides/#auto-trigger-from-plex-no-sonarrradarr)
+- [Intro & Credits](https://mediapreviewgenerator.dev/guides/#intro--credits)
 - [HDR & Dolby Vision](https://mediapreviewgenerator.dev/guides/#hdr--dolby-vision)
 - [Troubleshooting](https://mediapreviewgenerator.dev/guides/#troubleshooting)
 - [FAQ](https://mediapreviewgenerator.dev/faq/)
@@ -1505,6 +1508,9 @@ Each pick becomes a removable chip; **Start Job** processes them all. The **Publ
 - **Pause Processing** — Stops all processing system-wide: no new jobs will start (manual, scheduled, or webhook), and the current job stops dispatching new tasks. Files already mid-process finish first, then workers go idle (a "soft" pause — nothing is killed mid-frame). Use this to cap bandwidth or pause overnight.
 - **Resume Processing** — Clears the global pause; new jobs can start and the current job resumes dispatching.
 - Controls appear in the **Current Job** header and to the left of **Clear Jobs** in the Job Queue. State is persisted and survives restarts.
+- An **Intro & Credits** job also has its own **Pause** button on its row: files already in progress finish, the job
+  hands its slot back so other jobs can run, and it waits until you click its **Resume**. **Pause Processing** holds
+  it too, but **Resume Processing** doesn't resume a job you paused on its own.
 
 **Scheduling:**
 
@@ -1670,6 +1676,17 @@ The web interface uses token-based authentication:
 2. **Custom token via wizard** — set your own token during the setup wizard (Step 5)
 3. **Fixed token** — set `WEB_AUTH_TOKEN` environment variable (overrides wizard setting)
 4. **Token masking** — tokens are always masked in logs (only last 4 chars shown)
+5. **Server secrets** — a media server token, API key or password inside an error (a request's URL, say) shows as
+   `****` in this app's own log lines (tracebacks included), a job's error and log, and the Files panel
+6. **Protection from other sites** — while you're signed in, every change the browser makes (saving settings,
+   starting or cancelling a job, editing a server) carries a security token only this app's pages know, so a page on
+   another site can't make those changes for you. You never see it; if a button ever says the page's security token is
+   out of date, reload the page. Webhooks aren't affected (they use the webhook secret). A script must send the API
+   token in a header on every request, as below: signing in once with `POST /api/auth/login` and reusing the cookie
+   no longer works for changes. See [Reference — Authentication](https://mediapreviewgenerator.dev/reference/#authentication).
+7. **Signing out** — **Logout** signs out this browser only; other browsers stay signed in, even after you change the
+   token. To sign every browser out, delete `flask_secret.key` from the config folder (or change `FLASK_SECRET_KEY`,
+   if you set it) and restart the container (see [Reference — Authentication](https://mediapreviewgenerator.dev/reference/#authentication)).
 
 API authentication:
 
@@ -1699,8 +1716,8 @@ Automatically generate preview thumbnails when Radarr or Sonarr imports new medi
 
 1. Radarr/Sonarr imports a file (or an external tool sends a custom webhook) and a POST is sent to this app.
 2. The app **queues** the file and starts (or resets) a timer. Imports from the same source (Radarr, Sonarr, or Custom) are batched together.
-3. A batch is processed only after the **delay** (e.g. 60s) has passed with **no new** imports from that source. So if another file arrives 1 second before the batch would run, it is added to the queue and the timer resets — the batch runs 60 seconds after that file. Every file gets at least 60 seconds before we process it.
-4. This delay is important because **your media servers need time to add the new file to their library**. If we process too soon, the file may not be indexed yet (regardless of vendor) and the job can fail or skip the item. Not-yet-indexed files are automatically retried on a backoff (1 m → 2 m → 5 m with the default retry count of 3; more retries add 15 m and 60 m steps), so transient indexing lag doesn't drop work. See [Slow-backoff retry queue](https://mediapreviewgenerator.dev/multi-server/#slow-backoff-retry-queue).
+3. A batch is processed only after the **delay** (e.g. 60s) has passed with **no new** imports from that source. So if another file arrives 1 second before the batch would run, it is added to the queue and the timer resets — the batch runs 60 seconds after that file. A batch never waits more than **10 minutes** from its first file, though: a steady stream of imports would otherwise hold it until the stream stopped. Files that arrive once that limit is reached start the next batch.
+4. This delay is important because **your media servers need time to add the new file to their library**. If we process too soon, the file may not be indexed yet (regardless of vendor) and the job can fail or skip the item. Not-yet-indexed files are automatically retried on a backoff (1 m → 2 m → 5 m with the default retry count of 3 and initial delay of 30 s; the delay setting scales every wait, so 60 s gives 2 m → 4 m → 10 m, and more retries add 15 m and 60 m steps), so transient indexing lag doesn't drop work. Once the retries run out, the job says the file wasn't indexed after that many retries; the next scheduled scan picks it up. See [Slow-backoff retry queue](https://mediapreviewgenerator.dev/multi-server/#slow-backoff-retry-queue).
 5. When the timer fires, the app resolves each queued path against every configured server that owns it, processes it once, and publishes to each in its native format — Plex BIF bundle, Emby sidecar BIF, Jellyfin trickplay tiles. Items that already have a fresh preview are skipped automatically (source-aware dedup).
 
 ### Prerequisites
@@ -1731,7 +1748,10 @@ Automatically generate preview thumbnails when Radarr or Sonarr imports new medi
 2. In Sonarr, go to **Settings → Connect → + → Webhook**
 3. Set **Name**: `Plex Previews`
 4. Set **URL**: paste the Sonarr Webhook URL
-5. Under **Events**, enable **On File Import** and **On File Upgrade**
+5. Under **Events**, enable **On File Import** and **On File Upgrade**. **On Import Complete** can stay on as well: it
+   lists the files of an import again once they're all in, so a file its per-file event already sent is skipped (the
+   two are matched by Sonarr's download id, so a season pack that takes an hour to import isn't queued twice), and a
+   file it's the only one to list is processed.
 6. **Authentication** (use one):
    - **Username/Password** (works in all versions): Leave **Username** empty and set **Password** to your API token or webhook secret. The app treats the password as the token.
    - **Custom headers** (if your webhook form has a Headers section): Add **Key** = `X-Auth-Token`, **Value** = your API token or webhook secret.
@@ -1833,7 +1853,7 @@ All settings are configurable from the **Automation** page → **Triggers** tab 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | **Enable Webhooks** | On | Master toggle |
-| **Delay before processing** | 60s | How long to wait with no new imports before running a batch (10–300 s). Incoming files are queued; a batch runs only after this many seconds of “quiet” from that source. Each new import resets the timer so every file gets at least this long for Plex to add it to the library before we process. |
+| **Delay before processing** | 60s | How long to wait with no new imports before running a batch (10–300 s). Incoming files are queued; a batch runs only after this many seconds of “quiet” from that source. Each new import resets the timer, up to 10 minutes from the batch's first file. |
 | **Webhook Secret** | *(empty)* | Dedicated authentication token for webhooks |
 
 Webhook processing uses your Settings library selection. If a webhook path belongs to an unchecked library, it is skipped.
@@ -1848,9 +1868,11 @@ By default, webhooks authenticate using your main API token. You can optionally 
 
 ### Batching and the delay
 
-When multiple files are imported in quick succession (e.g., a season pack), the app **queues** them per source (Radarr, Sonarr, or Custom). Each new import **resets** the delay timer for that source. A batch runs only when the timer finally fires — i.e. when that many seconds have passed with no new imports. So every file in the batch has had at least that long for Plex to add it to the library before we process.
+When multiple files are imported in quick succession (e.g., a season pack), the app **queues** them per source (Radarr, Sonarr, or Custom). Each new import **resets** the delay timer for that source. A batch runs when the timer finally fires — i.e. when that many seconds have passed with no new imports — or 10 minutes after its first file, whichever comes first.
 
 **Example:** Sonarr imports 10 episodes over 30 seconds with a 60s delay. The timer keeps resetting as each episode arrives. One job runs 60 seconds after the *last* episode and processes all 10 files. A file that arrived at 59 seconds is not processed in an earlier batch — it goes in this batch, and the batch runs 60 seconds after it, so Plex has time to index it.
+
+**Example (long import):** Sonarr imports 300 episodes one every 10 seconds (50 minutes in all). The batch runs 10 minutes after its first episode with the ~60 episodes it has by then, and the next episode opens a new batch. A file that joined a batch just before its 10 minutes were up gets less than the full delay; if the server hasn't indexed it yet, it's retried automatically.
 
 **Viewing files in a batch:** On the **Dashboard**, jobs from webhooks show a label like "Sonarr: 3 files". Click the **+** (chevron) next to the label to expand and see the list of files. On the **Automation** page (Triggers tab), **Activity Log** rows for triggered batches include a chevron; click it to expand and see the files in that batch.
 
@@ -1923,6 +1945,585 @@ A scheduled poll for items where Plex's `addedAt` falls within a configured look
 | **Network requirements** | Plex must be able to reach this app | This app must be able to reach Plex |
 
 You can enable **both** if you want belt-and-suspenders behavior — the recently-added scan acts as a safety net for any `library.new` event Plex's push-notification code path might drop.
+
+---
+
+## Intro & Credits
+
+Skip Intro / Skip Credits markers for Plex, Jellyfin and Emby. Detected once per file — from chapters inside the file,
+online databases, matching the theme tune across a season, and reading the on-screen credit roll — then published to
+every server that has that file. **Precision over coverage:** a missing marker is fine, a
+wrong one isn't, so a marker only ships when the evidence clears the bar below.
+
+### Turning it on
+
+Detection settings are shared by every server: **Settings → Intro & Credits**. What each server actually *receives*
+is controlled per server: **Servers → (server) → Edit → Intro & Credits tab → "Send intro & credits markers to this
+server"**. A server is off by default even after you turn the shared settings on.
+
+Once the switch is on, the same server's **Libraries** tab gets an **Intro & Credits** column beside **Previews**:
+switch on the libraries that get markers on that server. The two columns are independent — a library can get markers
+with previews off, or previews without markers. **Sports libraries start off** — no online source covers sports and
+local detection isn't reliable there either. You can still switch one on by hand if you want to try it.
+
+### Sources and the publish rule
+
+In **Settings → Intro & Credits**, "Where evidence comes from" lists every source in the order it's checked, with
+drag-to-reorder:
+
+| Source | Notes |
+|---|---|
+| Chapters inside the file | Free, exact when present (~1 in 9 seasons in a sampled library). On a TV episode (a file whose name has a season and an episode number) a chapter named `Ending` counts as credits, since anime names its ending that way; on a movie it doesn't, because there it is usually the last scene. `End` alone never counts. An intro chapter much longer than the rest of the season's (more than twice their median length and more than 30 s longer than it, with at least 2 other episodes carrying one) doesn't decide alone: another source that isn't a server's own marker has to agree. |
+| TheIntroDB | Optional **API key** (masked once saved). Works without one (500 lookups/day); your own free key raises that. Off by default — see the note below. |
+| IntroDB.app | No key needed, TV only. |
+| SkipDB | Free, only counts an answer matched to your file's own length. |
+| Matching audio across a season | TV intros. Finds the theme tune a season's episodes share. On its own it was 91 right, 13 wrong and 14 missed on 118 test episodes (Plex's own intro detection: 23 right, 15 wrong), so it publishes an intro by itself when nothing else answers — a show no online database has still gets intros.
+The online sources are still asked on their usual schedule (one with no entry again after 14 days): one that later
+agrees confirms the intro, one that disagrees sends it to **Needs review**. When another source disagrees, the episode goes to **Needs review**. A server's own marker doesn't count as a second source for it, since a server's intro detection matches audio too, but one that agrees doesn't hold it back either: season audio then decides as it would alone. One that disagrees sends the episode to **Needs review**, and the previous-season hint (below) plus only a server's own marker goes to **Needs review** too. Needs an ffmpeg with chromaprint, which the amd64 Docker image has; elsewhere Settings shows **Not available** and why. CPU, about 2 s per episode, at most 2 at once. See [Season audio and weekly releases](https://mediapreviewgenerator.dev/guides/#season-audio-and-weekly-releases). |
+| On-screen credit text | Finds where the credit roll starts from text on screen in the last 15 minutes of a movie (7.5 of an episode, or the window you set under Advanced), and stops the skip at the last credit when a scene follows the roll (Emby skips to the end of the file). Tested alone on 80 files: within 10 s on 66 (61 when decoded on the CPU), more than 30 s early on 1. Text that stays in one place through the story (a channel logo, a score bug, a ticker) is ignored, and a file with text on screen through most of its ending (a burnt-in timecode, say) still gets no answer. Credits already running when those last minutes begin are still found, by reading 2 more minutes back. Credits that start in the first 30 seconds of those minutes right after a scene, or more than 1½ minutes before them, get no answer. It publishes credits on its own. On TV recordings with a channel logo or other on-screen graphics it is about as accurate as Plex's own credits detection, not better: on its own it skipped into the story on 4–5 of the 39 episodes we checked and put credits on 4–5 of 12 sports broadcasts, which have none (sports libraries are left out of Intro & Credits unless you tick them). Uses your GPU when a quick self-test shows it is faster than the CPU and finds the same text; otherwise the CPU (about 10–30 s per file; 4K without a GPU up to about 2 min). A file where every frame is a keyframe (ProRes, DNxHD, MJPEG, all-intra H.264) is checked for text one frame every 2 seconds at the end; its whole ending is still read from disk, so a very high-bitrate one on a slow network share can still time out. It is then left alone for a day unless it changes or you Re-detect it. |
+| Markers already on your servers | Second opinion only — see below. |
+
+**How it decides** (the note under the list says the same):
+
+- **Chapters** in the file decide on their own, unless two other independent sources agree on something different
+  (then the file goes to **Needs review**), or an intro chapter is much longer than the rest of its season's (then one
+  other source has to agree).
+- **An online database's answer** is published once an independent source agrees with it: on-screen credit text,
+  season audio, another database, or a server's own marker. IntroDB and TheIntroDB count as one, because IntroDB's data
+  looks partly copied.
+- **A single answer** decides alone only when it checks *your* file's own cut: on-screen credit text (credits), season
+  audio (intros, so a show no online database has still gets them), or a SkipDB exact/shifted match (intros and
+  recaps). A lone IntroDB or TheIntroDB answer never publishes, because neither knows which cut of the file you have;
+  SkipDB's credits often start minutes before the real credit roll, so they need a second source too. The previous
+  season's audio (a season's first episode) never publishes alone.
+- **Anything else** — sources that disagree, or an only answer that can't decide alone — goes to **Needs review** with
+  the reason, e.g. "Only IntroDB has the intro; an online answer needs a check against the file".
+
+There is no stricter mode. An earlier "Publish when: High" setting (always two agreeing sources) left most of a library
+in Needs review and was removed; upgrading queues one Low-priority Intro & Credits job that checks the files it held
+there again, along with any file still waiting for its item's other versions. Like any job it reuses what was already
+found and only asks or reads again what is due. Until that job completes, each start of the app queues it again.
+
+Markers already on a Plex/Jellyfin/Emby server only ever *confirm* another source — they never publish on their own,
+and they can only **shorten** a skip (a later intro start, an earlier credits end), never lengthen one. That's
+deliberate: a crowd-sourced answer that runs to the very end of the file must never swallow a scene after the
+credits that the server's own marker correctly stops before. Once credits are decided, a server's own detected
+markers can also move the credits start later — when none of them already covers the decided start and one starts
+more than 10 seconds later — so an "End Credits" chapter placed on the last shot of the story doesn't skip that shot;
+the Inspector then says "Shortened to Plex's own credits start". Intro ends are never moved this way. A Jellyfin or
+Emby server's markers imported by its own intro-database plugin (e.g. an AniSkip importer) never do that and
+don't count as an independent second opinion — they join the online-database group instead of adding a vote of their
+own. AniSkip itself is not a source: it matched IntroDB to within 44 ms on 21 % of intros, against 10 % between the
+two intro databases already counted as one, and nothing in the library carries the id it needs. Plex keeps one marker set per item, so when a Plex item has another version whose length differs from this
+file's by more than 2 seconds (or the lengths can't be read), that server's markers aren't used for this file at all.
+Emby keeps each version's markers apart (see [Emby](https://mediapreviewgenerator.dev/guides/#emby-the-media-preview-bridge-for-emby-plugin)), so its
+markers are read only from the file's own version and no such check applies. Season audio and a server's own marker never confirm each
+other: another source has to agree. Markers this app wrote itself never count as a server's own on Jellyfin, or on
+Emby while its Bridge plugin is still installed: it asks its own plugin there which markers are its. Plex records no
+author, so if you lose or reset the app's config folder, or remove and add the Plex server again, markers it wrote to
+Plex before that read back as Plex's own for those files. On the lab's scale run they never published a marker by
+themselves, but 57 credits and 36 intros came out shorter than they should be, 6 credits were published only because
+those old markers of ours counted as a second opinion, and 1 credits and 2 intros went to Needs review instead of
+being written.
+
+A marker you lock is never replaced by detection; to let detection decide a type again, **Unlock** it. See
+[Adjusting, adding and locking markers](https://mediapreviewgenerator.dev/guides/#adjusting-adding-and-locking-markers).
+
+**Advanced → Where to look for credits** (collapsed by default) sets how far from the end of a file the on-screen
+credit text is searched for, separately for **TV episodes** and **Movies**. Each is **Automatic** (the last 7½
+minutes of an episode, the last 15 minutes of a movie or of a file that isn't recognised as an episode) or 5, 10, 15,
+20 or 30 minutes. Automatic fits nearly every library: raise a window only if credits are being missed because they
+start earlier than it reaches. When the credits are already rolling where the window begins, the search follows them
+back two minutes at a time until it finds where they start, but only as far as a start could still be used: the last
+quarter of the file, and for a movie 15 minutes from the end (or your movie window, if that is longer). The first two
+minutes before the window are always read when the credits fill its start; on Automatic a movie is never read further
+back than that. A file that isn't recognised as an episode or a movie gets the movie window but not the 15-minute
+limit, so for it the last quarter is the limit. A window that covers your credits is still the surer choice. It never
+spends longer on this than the ten minutes a single decode is allowed; a file that runs out of that time (a slow or
+stalled network share) is tried again the next day. A longer window takes longer to decode for every file, and a window you choose also lets credits start that early: without it a start earlier than the last quarter of the file, or (for a movie window above 15 minutes) more than 15 minutes from the end, would be found and then refused. It never lets credits start before the middle of the file. Changing it reads files
+again on the new window (files you leave on Automatic are not read again). Locked markers are unaffected.
+
+**TheIntroDB** is used without the site's written permission (its terms restrict server-side use); it's off by
+default, and pasting your own free key is optional and entirely up to you. The key is masked (`****`) everywhere it's
+shown or returned by the API, and never logged.
+
+TheIntroDB's usage line in Settings shows "N of today's lookups used · limit set by TheIntroDB" — once a library
+job's daily lookups (or the smaller share left for full-library backfills) run out, it switches to "Daily limit
+reached — lookups resume at 00:00 UTC" instead. See the troubleshooting table below for what a job or a file shows
+when this happens mid-run. Files checked without TheIntroDB for that reason, and left with a marker undecided, are
+checked again automatically just after 00:00 UTC by one low-priority **TheIntroDB recheck** job (up to 500 files; it
+skips a file another job decided meanwhile, and runs nothing if you've turned TheIntroDB off by then).
+
+To keep the daily lookups for shows TheIntroDB knows, a show it has no entry for (talk shows, for example) is left
+alone for 7 days once 3 of its episodes came back with nothing, while no episode of the show has an answer from it
+(one saved by an earlier run counts). The 7 days run from then: a new episode that comes back with nothing meanwhile
+doesn't add to them. After them the show's episodes are asked again, older ones due their re-check included, and it
+takes 3 more with nothing to leave it alone again. The log says so once per pause, at INFO: "TheIntroDB has no entry
+for 3 or more episodes of <show> …; its episodes aren't looked up there until <date>". **Re-detect** in the Inspector
+always asks.
+
+### Needs review
+
+When the sources don't clear the bar above for a marker — the only answer can't decide alone, or two credible answers
+disagree — that marker isn't sent to any server and the file shows **Needs review**. When the job sent the file's
+other markers, the file shows **Markers written** instead, and its reason in the Files panel names the marker still in
+review, the times proposed and why (e.g. "intro needs review (only IntroDB has the intro; an online answer needs a
+check against the file): 2:07–2:36 from introdb"). A server's row where nothing was sent says why the same way, or
+e.g. "Sources disagree: credits_text, skipdb". Nothing is guessed. **Re-detect** in the Inspector asks every source
+again, and **Adjust** lets you put the marker where it
+really is by hand — including for a type nothing was found for at all, where **Add intro** / **Add credits** puts one
+on the timeline at a starting time for you to drag. Saving it locks it, so later checks leave it alone.
+
+Two reasons are specific to TV intros: "Season audio and a server's own marker agree, but both come from matching
+audio; needs another source", and "Intro chapter is much longer than the rest of the season's".
+
+### Season audio and weekly releases
+
+Season audio compares an episode with the other episodes of its season on disk: the video files in the same folder
+with the same season number in their names (in a folder holding more than 40 of them, the 40 nearest by episode
+number). The first episode of a season a job checks fingerprints every member that has no fingerprint yet, on a
+worker (once per file; a replaced file is fingerprinted again). The rest of the season then matches from those saved
+fingerprints, normally without taking a worker. An episode ffmpeg can't fingerprint (damaged audio, a network read that
+stalls) is left out of the other episodes' matching for a day while the file stays unchanged; its own check and a
+re-detect still try it.
+
+Saved fingerprints take up to about 28 KB per episode. When an Intro & Credits job completes (except Season, retry and
+verify jobs), a cleanup starts in the background, at most once an hour. It looks for up to 2,000 fingerprinted files on
+disk, for at most a minute, and clears the fingerprints of files that are gone (renamed by an upgrade, or deleted) while
+their folder is still there; the next cleanup goes on where it stopped. A file whose folder is missing, as in an
+unmounted library, keeps its fingerprint. The app log (not the job's log) says how many were cleared, and warns (at most
+every 10 minutes) when a cleanup is still waiting on a stalled network share.
+
+An episode with no other episode of its season on disk yet (a new season's first weekly release) is compared with the
+previous season's first 4 episodes that are already fingerprinted, when its folder is named like a season (`Season 2`
+next to `Season 1`). That answer never publishes on its own (alone it was 48 useful / 10 wrong / 24 missed on 82
+episodes), and it isn't a second opinion for season audio (it's the same method on the same show). The Inspector shows it as **Previous season audio**.
+
+When a new episode arrives, the season's earlier episodes may now be decided differently: their audio answer can
+change, or the new episode's intro chapter changes what counts as normal for the season. Episodes outside the job
+that brought the new one are checked again by a **Season: …** job (see
+[Webhook follow-ups and retries](https://mediapreviewgenerator.dev/guides/#webhook-follow-ups-and-retries)), so the season ends with the same markers whatever
+order its episodes arrived in.
+
+### Adjusting, adding and locking markers
+
+Open it from **Tools → Intro & Credits** (the same page as Tools → Preview Inspector, opened on its Intro & Credits tab), search for a title and open a file. The Intro & Credits tab has three buttons for setting a marker yourself. Adjust stays greyed out until a job
+has read the file's length.
+
+- **Adjust** opens the editor on the timeline. Drag the handle at each edge of a marker, or type the times. **Save and
+  publish to N servers** saves; **Cancel** throws the edit away. A time that looks odd (an intro shorter or longer than
+  most, credits that don't run to the end) gets a warning and is still saved. Only two things are refused: a marker
+  outside the file, and one that ends before it starts.
+- **Add a marker where nothing was found.** On a file where no source found a marker, Adjust still opens. A type with
+  no marker shows **Add intro**, **Add credits**, **Add recap** or **Add preview** where its bar would be. It puts a
+  marker on the timeline at a starting time that is round on purpose, so it can't be mistaken for something the app
+  found: an intro or recap from 0:00 to 0:30, credits the last 60 seconds, a preview the last 30. Drag it to where it
+  really is. **Remove** takes back a marker you added before you save it.
+- **Saving locks.** There is no adjusted-but-unlocked marker. A saved marker is locked and published straight away to
+  every server that has the file and has Intro & Credits on. Detection and later jobs leave it alone.
+- **Lock** on its own locks the times the app already decided, unchanged, and publishes them. Once anything on the file
+  is locked the same button reads **Unlock**. It asks first, then drops the lock. Your times stay on the servers for
+  now; the next check decides those types again and may move them, and **Re-detect** does that straight away. Unlock
+  publishes nothing.
+- **Your marker wins over "Keep Plex's" and "Keep Emby's".** See [Plex](https://mediapreviewgenerator.dev/guides/#plex-writing-straight-into-plexs-database)
+  and [Emby](https://mediapreviewgenerator.dev/guides/#emby-the-media-preview-bridge-for-emby-plugin) for the row message.
+- **Recap and preview** stay editable, with a note per server: only Jellyfin shows them. Where a server can't show a
+  type the editor says so ("Only Jellyfin shows recaps. Plex has no recap marker, so this one won't reach it.") and
+  leaves that type out of the save when no server with Intro & Credits on could show it. **Emby and credits:** an edited credits
+  *end* is accepted, but Emby's Skip Credits always skips to the end of the file, and the editor says so.
+
+A save is one web request, so it is bounded. Your times are saved and locked before any server is contacted, so a
+server that fails can't lose your edit. Each call to a server waits at most 8 seconds, and Plex's database waits at most
+8 seconds for its locks. A server the request hasn't started on within 25 seconds isn't started: its row says
+"Couldn't publish to this server in time; the next Intro & Credits run publishes it". These are per-call limits and a
+start gate, not a cap on the whole request, so a server already under way can take a few times 8 seconds. If an
+Intro & Credits job is running on the same file, the row says "Intro & Credits is running for this file; the next run
+publishes your marker".
+
+### Season view in the Inspector
+
+For a TV episode, the Inspector's Intro & Credits tab has a **This episode** / **Whole season** switch. **Whole
+season** lists the season's episodes (the same group season audio uses) with each one's intro and credits, the
+sources behind them, and one dot per server. A season of more than 40 episodes lists the 40 nearest, and the header
+says so ("60 episodes (showing the 40 nearest)"). It reads only this app's own records, so a whole season loads at
+once; **This episode** stays the place for what a server shows right now. An episode in **Needs review** has a
+**Review** button (its tooltip gives the reason) that opens that episode. Every row also has an **Edit** button that
+opens that episode in the marker editor; once you save there, that row shows your times and its 🔒 lock the next time
+you open **Whole season**.
+
+**Publish N to M servers** queues a Normal-priority Intro & Credits job named `Intro & Credits: <show> · Season N`
+(or `· Specials`) for exactly the listed episodes: decided episodes go to every server that doesn't show them yet,
+and the rest are checked again. Clicking it again while that job is still queued or running reuses it. N (and
+**N ready**) counts the episodes with at least one decided marker, since the job sends those even when another type
+of the same episode is in Needs review; **N need review** counts the episodes with any type in review, recaps and
+previews included. The header names the show and season the way the job does.
+
+### Plex: writing straight into Plex's database
+
+Plex has no API or plugin system for markers, so this app writes them directly into Plex's own SQLite database — the
+exact place Plex stores its own. Because that's unsupported by Plex, it's **opt-in with a one-time confirmation** the
+first time you turn it on for a Plex server:
+
+- **The app must run on the same machine as Plex, or you run the Plex marker agent next to Plex.** SQLite's write
+  mode (WAL) doesn't work over a network filesystem, so a network-mounted database stays read-only. See
+  [Plex on another machine](https://mediapreviewgenerator.dev/guides/#plex-on-another-machine-the-plex-marker-agent).
+- **Map Plex's config folder into both containers from the identical host path.** On unRAID specifically, don't mix
+  `/mnt/user` and `/mnt/cache` between the two containers — even though both paths can reach the same files, Plex and
+  this app must open the database through the exact same path for the app's same-host proof to succeed.
+- **Viewers need Plex Pass** (or Plex Home) to see skip buttons at all — Plex hides markers entirely without it, even
+  ones already in its database.
+- If Plex's own detection re-analyzes an item, it can replace our markers with its own. The next Intro & Credits job
+  that checks the file notices (see [Checking the servers still show them](https://mediapreviewgenerator.dev/guides/#checking-the-servers-still-show-them)):
+  with **"When Plex has its own markers" → "Use ours"** (the default) it writes ours again; with
+  **"Keep Plex's"** it leaves Plex's markers of that type, and the file's row says so, e.g. **"Keeping Plex's
+  credits"** or **"1 marker(s); keeping Plex's credits"**. This is decided per type: Plex's intro can be kept while
+  our credits are still written. Once kept, no job touches Plex's markers of that type — not a forced **Re-detect**,
+  not a run after a failed or skipped attempt, not another version of the item — until you switch the server to
+  **Use ours** (the next job writes ours) or Plex no longer has markers of that type (then ours are written
+  again). Markers that are simply gone are written again either way. A file Plex already has its own markers of a
+  type for isn't read again for that type (no credit-text or season-audio pass), as long as every server the file's
+  markers go to keeps its own and shows one: the row says **"Keeping Plex's credits"** and the Inspector **"Kept
+  Plex's own marker"**. **Check servers** still watches that marker: once Plex no longer has it, or the server is
+  switched to **Use ours**, it runs the file, which then reads it and writes ours.
+- Plex detects in a library only when its server setting (Settings → Library → *Generate intro / credits video
+  markers*) **and** the library's own setting (Edit library → Advanced → *Enable intro / credits detection*) are on.
+  With **Use ours**, **Servers → Edit → Setup Health** lists the Intro & Credits libraries where both are on, each
+  with a **Turn off** that switches off only that library's own setting. With **Keep Plex's** it doesn't warn. See
+  [Previews Readiness](https://mediapreviewgenerator.dev/guides/previews-readiness/#intro-credits).
+- **A marker you adjust or lock in the Inspector is the exception**: it is written over Plex's own markers of that
+  type even on a server set to **Keep Plex's**, and the server's row says so — *"Replaced Plex's own marker. This
+  server is set to keep Plex's, but a marker you adjust always wins."* The Inspector says it before you save, too.
+  Emby works the same way with **Keep Emby's**. Unlock the marker and that type goes back to the setting.
+- With **"Keep Plex's"**, markers Plex already shows of a type this app has no record of writing on that item are
+  kept too, unless they already match ours: Plex's own markers from before Intro & Credits was turned on, markers
+  Plex filled in after this app removed its own (for example while an item's versions disagreed), and markers on an
+  item after the app's Intro & Credits data was reset or the Plex server was removed and added again (the app can't
+  tell those from Plex's own). What's kept is remembered per Plex item in the app's `markers.db`; after such a reset
+  it is worked out again from what Plex shows.
+- Tested against Plex 1.43. If a future Plex update changes the database's shape, the app stops writing and shows a
+  message rather than guessing.
+
+### Plex on another machine: the Plex marker agent
+
+If this app and Plex run on different machines, run the **Plex marker agent** next to Plex. It is a small container of
+its own (`plex-marker-agent/` in the repository, image `ghcr.io/stevezau/plex-marker-agent`) with Plex's config folder
+mounted. The app asks it to do the database write on Plex's machine. It is the only supported way to write markers to a
+Plex on another machine: without it that Plex stays read-only for markers. If the app and Plex are on the same machine,
+don't run it.
+
+1. Run the agent as its [README](https://github.com/stevezau/media_preview_generator/blob/dev/plex-marker-agent/README.md) says: the compose file, the settings (`AGENT_TOKEN`,
+   `PLEX_CONFIG`, `PUID`/`PGID`) and the key.
+2. In the app: **Servers → your Plex → Edit → Intro & Credits → Plex marker agent**. Switch it on, enter its **Address**
+   (for example `http://plex-host.lan:9494`) and the **Shared key**, the same value as `AGENT_TOKEN`. The key is masked
+   once saved. The one-time database-write confirmation still applies.
+3. The line under the address shows the state: **Connected**, **Can't reach it**, **Key refused** or **Update needed**.
+   **Check again** asks now. The agent has its own version, and a version the app doesn't accept is refused on the first
+   call, in either direction, with a message saying which side to update.
+
+The agent only ever writes the marker rows of one item into Plex's library database. It refuses a database that isn't
+on a local disk of its own machine, a database schema it doesn't know, and a Plex that has no marker list yet, with the
+same messages a same-machine setup gives. While it isn't answering, markers wait in this app and the next Intro &
+Credits run sends them. Setup Health shows a row for it (see
+[Previews Readiness](https://mediapreviewgenerator.dev/guides/previews-readiness/#intro-credits)).
+
+### Jellyfin: the Media Preview Bridge plugin
+
+Jellyfin also has no core API for markers. This app's existing **Media Preview Bridge** plugin (the same one used for
+trickplay tiles) gets a markers feature. The Edit tab's status block shows whether it's installed, its version, and
+an **Install** / **Update** button that uses the same plugin-install flow as trickplay. Markers show as Skip Intro /
+Skip Credits / Skip Recap / Skip Preview depending on what was decided.
+
+### Emby: the Media Preview Bridge for Emby plugin
+
+Emby has no API for markers, so a small Emby plugin, **Media Preview Bridge for Emby**, stores them and writes them
+as Emby's own intro/credits chapter markers, next to the file's own chapters (which it never changes). It puts them
+back when a "Replace all metadata" or "Search for missing metadata" refresh deletes them, stops showing them once the
+file is replaced by a different file until this app sends markers for the new one, and forgets them when the item is
+removed from Emby.
+
+The Edit tab shows whether the plugin is installed and its version. When Emby's plugin catalog lists the plugin,
+**Install** installs it and restarts Emby. Otherwise the tab offers **Install by hand**: download the DLL for your
+Emby version (`MediaPreviewBridge.Emby-4.10.dll` for Emby 4.10, `MediaPreviewBridge.Emby-4.9.dll` for Emby 4.9)
+from the plugin's GitHub release (tags `emby-plugin-v…`), rename it to `MediaPreviewBridge.Emby.dll`, copy it into
+Emby's `plugins` folder (`/config/plugins` in the official Emby container) and restart Emby. The tab shows the
+plugin's version with a ✓ once Emby is back. The API key or user this app uses for Emby needs administrator rights.
+
+- **What Emby shows:** the tab's "Can show" reads **Intro · credits start**. Emby has no credits end: its Skip
+  Credits button always skips to the end of the file, including any scene after the credits. The app still sends
+  the decided credits start; when those credits end before the file does, the file's row and the Inspector's Emby
+  card say **"Emby skips to the end of the file"**. Recaps and previews aren't sent to Emby (it has no button for
+  them).
+- **"When Emby has its own markers"** works like Plex's setting. Emby can have intro and credits markers of its own,
+  from its intro detection (an Emby Premiere feature) or another plugin. **Use ours** (the default) replaces them
+  with ours. **Keep Emby's** leaves a type Emby already has and sends ours only for the other types; the row says so,
+  e.g. **"1 marker(s); keeping Emby's intro"**, and the Inspector shows **Keeps Emby's**. The plugin still keeps ours
+  for a kept type and shows them once Emby's are gone.
+- **Versions:** Emby keeps each version of a video (a movie in two cuts, an episode with two releases) as its own
+  item with its own chapters, and its player shows the chapters of the version playing. So each version gets the
+  markers decided for its own file, with no waiting for the other versions to agree. A file that Emby lists under
+  another version's item isn't written: **"This file is Emby item 55, another version of item 53; markers not
+  written"**.
+- **Emby Premiere:** Emby only lets viewers skip intros when the Emby server has an active Emby Premiere key: without
+  one, Emby shows "Skip Intro" a few times and then asks for Premiere instead of skipping. The credits "Up Next" prompt
+  works either way. The key is the server's, so it covers every user and app on that server. When the server has no
+  key, the tab's amber **Emby Premiere** row says so.
+
+### Multi-version Plex items
+
+When a Plex item has more than one version (a movie in two cuts, an episode with two releases), Plex serves **one**
+marker set for the whole item, not one per file. A marker type only shows up once every version has a decided marker
+of that type **and** they agree within 2 seconds. A newly added version that hasn't been decided yet temporarily
+hides that item's markers on Plex until it catches up — precision first. Jellyfin and Emby versions each get their
+own markers.
+
+In the Preview Inspector, the Intro & Credits tab shows the version you clicked. When that version's file isn't on
+this app's disk (the other version is, say, or a path mapping is missing), the tab says **"This version's file isn't on
+this disk"** instead of showing another version's markers.
+
+### Checking the servers still show them
+
+A server can lose or change our markers without this app doing anything: Plex's own detection replaces them, and a
+server that rescans a replaced file can drop them. So before a job reports a file **Up to date** on a server, it
+reads back what that server shows — Plex's marker rows for the item in its database (read-only, with the same
+same-machine checks as a write), Jellyfin's served segments (one request), Emby's chapter markers (one request) —
+and writes ours again when they're gone or different. If that read fails, the file stays **Up to date** for this run,
+and the job finishes with a warning such as **"Couldn't check what 3 file(s) show on Home Plex"**.
+
+**Markers written** always means the job changed what the server shows (a forced **Re-detect** that restores lost
+markers included); **Up to date** means the server already showed exactly this.
+
+After a webhook job (or its retry) publishes to a file that was replaced (same path, new file), servers often rescan
+it shortly after. The job therefore queues one **Verify: …** job for those files, which waits three times the first
+retry delay (at least 10 minutes; its queue row reads **"Checking again in 10 min"**) and then checks them again the
+same way. It follows **Settings → Retry policy** (none when the retry count is 0) and holds at most 500 files (the job
+log says how many more wait for the next run). A verify job, and any retry it queues, never queues another verify;
+its retries count on from the retries already used, and a file gone from disk by then isn't retried. Library runs
+and files you picked yourself don't queue one: their replaced files may have changed long ago.
+
+For Jellyfin and Emby, a replaced file whose markers are unchanged is always sent again when the plugin still holds
+the old file's size: the plugin serves nothing for a file whose size changed (Jellyfin can still list the old
+segments meanwhile).
+
+In the Inspector, a server whose markers differ from ours shows **Will replace** or **Will add**, or **Keeps
+Plex's** / **Keeps Emby's** when the server's own markers replaced ours and that server is set to keep them; the
+reason names the kept types ("Keeping Plex's credits"), also next to **Will add** when another type is still
+written. Another Jellyfin provider's segments next to ours don't count as a difference. The note "All versions of
+this item share one set of markers" appears only on a Plex item with more than one version (a stacked file or a Plex
+optimized copy isn't a version).
+
+### Check servers
+
+The checks above only run for files a job looks at. To check everything this app has published, run **Intro &
+Credits · Check servers**: **Start New Job → Intro & Credits → Check servers** on the Dashboard,
+`POST /api/markers/reconcile`, or a schedule in **Automation → Schedules** (type **Intro & Credits → Check servers**;
+the server and library pickers don't apply). Nothing is scheduled by default. It runs at Low priority unless you pick
+another. A marker you locked in the Inspector that a server didn't get (it was down or not ready when you saved)
+is published again on every run until the server has it. Only one runs at a time: asking again while one is queued or
+running reuses it ("A Check servers job is
+already queued"), and a schedule tick then queues nothing. **Re-run** on a finished Check servers job asks the same
+way. When the job already there is paused, the message is "A Check servers job is paused. Resume or cancel it on the
+dashboard." A job paused by its schedule's stop time is resumed by that schedule's next start (or **Run now**), even
+if you've switched the schedule between **Find markers** and **Check servers** since. That start queues nothing else;
+the schedule's own mode queues on a later start, once the resumed job has finished. A job you paused yourself stays
+paused until you resume it. Deleting the schedule, or switching it to a preview or Recently Added schedule, leaves a
+paused job paused, and the log gets a warning naming the job: resume or cancel it on the dashboard. **Re-run** clears
+**Pause all**, as it does for any job. With Intro & Credits off on every server there's nothing to check.
+
+Its tooltip sums it up: "Checks that every server with Intro & Credits on still shows the markers this app sent, and
+sends them again where they're missing or changed (unless that server is set to keep its own). Covers all servers and
+libraries." In detail:
+
+- It reads back every item whose last publish from this app succeeded, on each server with Intro & Credits on (Plex
+  one item at a time, with the same same-machine checks as a write; Jellyfin and Emby one request per item), 500 items
+  per step so its progress moves. Pausing the job during the read-back gives its job slot back until you resume it.
+- Only the files of items whose markers are gone or different, whose Plex item gained or lost a version, or that the
+  server replaced with a new item go through the normal rules again (**Keep Plex's** / **Keep Emby's**, versions, the
+  server switch). A server set back to **Use ours** gets ours for the types it was keeping. The Plex item's current
+  versions go along too: a file that replaced the one this app published there (an upgrade that deleted the old
+  file) gets its own markers on that item, and markers decided for the old file come off.
+- Items whose last publish failed (Plex busy writing its database, a server that stopped answering mid-write) aren't
+  read back; their files run again 1 day after the failure, then 2, 4, 8 and 16 days after each retry that fails too.
+  After 5 retries they wait for the next job that runs those files. A publish that works, or a new failure
+  after one that did, starts over.
+- It also re-reads a server's own markers for files with decided credits where that server had none (or its answer
+  couldn't be used) and shows none of ours, since its own detection may have run since and can shorten our credits
+  (see [Sources and the publish rule](https://mediapreviewgenerator.dev/guides/#sources-and-the-publish-rule)). Every enabled server counts, with Intro &
+  Credits on or not. The re-read waits until the answer is 1 day old, then 2, 4, 8 and 16 days after each re-read that
+  stays empty or fails; after 5 such re-reads it stops.
+- One run takes at most 500 files; the job warns "N more changed file(s) are checked on a later run", and waiting
+  items take turns across runs. Whatever is still waiting is listed again next run, with one exception below.
+- An item the server no longer has, with no file here that still belongs to it, is dropped from Check servers
+  quietly. When a listed file's row is **Waiting** because it isn't in that server's library yet, and that server
+  confirms the item is gone, the file gets one retry job, the same one any job queues for a file not in a server's
+  library yet (same delay and retry count), since the server may not have added the file's new item yet. Once that
+  retry is queued the item is dropped too, until this app publishes to it again. If the job is cancelled or fails
+  first, or retries are off, nothing is dropped and the next run checks the file again. If the server doesn't confirm
+  the item is gone, there is no retry and the file is listed again next run.
+- A server that can't take markers is skipped with its reason ("Skipped Home Plex: …"). Items whose read fails get a
+  warning ("Couldn't read what 3 item(s) show on Home Plex") and are read again next run. "Couldn't check Home Plex"
+  means reading that server raised an error, or a Jellyfin or Emby server failed 20 reads in a row and the rest of it
+  was left for the next run; "Couldn't check Home Plex: no connection to it" means there was no client for it.
+- With nothing to fix it finishes at once; its log says "Every server checked still shows what this app published".
+- A Check servers job that was running when the app restarted picks up where it was: it checks the files its first run
+  listed, skipping those it had finished, rather than listing again. A file's recheck or retry is used up only once
+  that file is actually checked, so a cancelled or interrupted run doesn't push any file's next check further out.
+  The list is kept on the job only until it ends.
+
+### Turning it off, or revoking the Plex confirmation
+
+Turning the per-server switch off — or revoking the Plex database-write confirmation — takes effect immediately,
+including for a job that's already running: its next per-file write to that server is skipped rather than going
+ahead on a stale setting.
+
+### Webhook follow-ups and retries
+
+A Sonarr/Radarr/webhook import queues an Intro & Credits job right after the preview job for the same files. It
+runs at Normal priority, or at Low when the preview job itself runs at Low, and it starts after that preview job's
+first try (it doesn't wait out the preview job's retries; episodes that join it later, see below, don't wait for their
+own preview jobs). If a file isn't on disk yet, a server hasn't indexed it into its library yet, or Plex didn't answer
+its Plex Pass check, it's retried the way preview jobs are, with the same backoff — **Settings → Retry policy → Retry
+count / Initial retry delay**. The job stays one row in the queue: **Pending**, with a **Retry 1/3** chip and
+"Retry starting in …", then **Running** while the retry checks the files still waiting. Files that were already
+done keep their results. The row turns **Completed** once every file is in, or **Failed** when the retries run out
+with files still waiting (the Files panel lists them). **Retry now** starts the waiting retry at once. A job with no
+preview job before it (markers on with previews off, a manual job, the Inspector) retries the same way.
+A retry resolves the path Sonarr/Radarr sent again, so a file that lands on a
+different disk than the first mapped one is still found. A retry batch holds at most 500 files at a time — a bigger backlog (e.g. a brand new library)
+is picked up on the next run instead.
+
+Plex, Emby and Jellyfin send one webhook per episode. Episodes of a season that arrive while an earlier episode's
+follow-up is still waiting join that job (up to 500 files), so a season pack becomes one Intro & Credits job rather
+than one per episode. An episode that joins doesn't wait for its own preview job: the job runs once the first
+episode's preview job has finished, and markers don't need previews.
+
+A new episode can change what the season's other episodes should get (for example, an intro chapter that looked
+normal turns out far longer than the rest of the season). The job then queues a **Season: …** job that checks those
+other episodes again. It runs at Low priority, or Normal right after a webhook import, unless those episodes are
+already waiting in a Low Season job, which then checks them. Once it has run, the season has
+the same markers whatever order the episodes arrived in, as if they had all been checked together. A Season job holds
+at most 500 episodes; any beyond that, and any request lost to a restart before the job finished, are picked up the
+next time an episode of that season is checked.
+
+### Reading an Intro & Credits job's log
+
+Each file gets two lines in the job's log: what was sent to each server and what was decided per marker type, then
+what every source you turned on answered, in your source order. For example:
+
+```
+[10:14:03] INFO - Brave New World S01E05: nothing sent to Plex · intro not found · credits 47:36–48:38 found by credit text → needs review (sources don't agree yet; at Publish when: High one source isn't enough)
+  sources: chapters none · TheIntroDB skipped (daily limit reached, resets 00:00 UTC) · credit text credits from 47:36 · Plex's own none
+[10:14:09] INFO - The Fall (2013) S03E05: sent intro to Plex; Plex keeps its own credits ("Keep Plex's") · intro 1:02–1:33 (from chapters) · credits: kept Plex's own marker
+  sources: chapters intro 1:02–1:33 · TheIntroDB no entry · credit text not read (every server keeps its own credits) · Plex's own credits from 58:23
+```
+
+- A decided marker names the sources it came from: "(from chapters)", or "(TheIntroDB + credit text agree)". A marker
+  in review names who found it, the proposed times and why it wasn't sent. Times are `m:ss`, or `h:mm:ss` past an hour.
+- Per server: "sent intro and credits to Plex", "Plex already has our intro", "nothing sent to Plex", "waiting for Plex
+  to add the file to its library" (the job tries it again), and the types that server keeps as its own.
+- Per source: its answer ("no entry", "none", "credits from 47:36"), or why it wasn't asked: "not needed (already
+  decided)", "skipped (daily limit reached, …)", "skipped (no data for this show; asked again after <date>)", "not
+  read (every server keeps its own credits)". **(saved earlier)**
+  means the answer was stored before (by an earlier run, or while the job checked another episode of the season) and
+  was used without asking again.
+
+A **Season: …** job logs these lines only for episodes whose result changed, and one line per season for the rest:
+"Season re-check, Brave New World S01 (3 episodes): no change, E01/E03/E04 still need review (credits from credit
+text only)". A **TheIntroDB recheck** job does the same for its episodes ("TheIntroDB recheck, Brave New World S01
+(3 episodes): no change"), and logs each movie on its own. Every job ends with a totals line, e.g. "Done: 12 files · 9 sent to Plex · 2 need review · 1 nothing found
+· TheIntroDB skipped for 3 files".
+
+Job log times are the container's local time (its `TZ`, or the `/etc/localtime` you mounted), the same clock as the
+app's own log.
+
+### Troubleshooting Intro & Credits
+
+Each server's Edit → Intro & Credits tab checks whether that server can actually receive markers right now. This
+table covers every state the check can report, using its exact wording:
+
+| What you see | Why | What to do |
+|---|---|---|
+| Green "Installed ✓" / no warning banner, status block all green | Everything needed to write markers checks out | Nothing — turn the server switch on if you haven't |
+| *(Plex)* No Plex Pass row, amber banner: "Can't reach Plex to confirm Plex Pass, so markers wait until Plex answers" | The database checks passed but Plex didn't answer the Plex Pass check (usually restarting or updating) | Wait for Plex to come back; affected files show **Waiting** and are retried |
+| No status block; only the off switch | "Intro & Credits is off for this server" | Turn on "Send intro & credits markers to this server" |
+| *(Plex)* Status block: "Confirm the Plex database write to turn this on" | Plex has no marker API, so writing needs a one-time confirmation per Plex server; flipping the switch opens that confirmation dialog | Read the dialog and click "Enable for Plex" |
+| *(Jellyfin)* Red "Not installed" badge + **Install** button: "Install the Media Preview Bridge plugin" | Jellyfin has no core marker-write API; the plugin renders markers as media segments | Click **Install** |
+| *(Emby)* Red "Not installed" badge + **Install** button: "Install the Media Preview Bridge for Emby plugin" | The plugin isn't on this Emby server, and Emby's plugin catalog lists it | Click **Install** (Emby restarts; the tab checks again after 20 s) |
+| *(Emby)* Red "Not installed" · **Install by hand** | Emby's plugin catalog doesn't list the plugin yet (or couldn't be read) | Follow [the manual install](https://mediapreviewgenerator.dev/guides/#emby-the-media-preview-bridge-for-emby-plugin) |
+| *(Emby)* After **Install** or **Update**: "Media Preview Bridge for Emby isn't in the Emby plugin catalog yet; install it by hand (see the Intro & Credits guide)" · **Install by hand** / "Couldn't read Emby's plugin catalog" | The catalog doesn't list the plugin, or Emby didn't answer the catalog request | Follow [the manual install](https://mediapreviewgenerator.dev/guides/#emby-the-media-preview-bridge-for-emby-plugin), or try again once Emby answers |
+| *(Emby)* Amber "Update needed" badge, "— installed 1.0.0.0" (the version the plugin reports; "installed version unknown" when it doesn't say) + **Update** button; the job's rows say "Update Media Preview Bridge for Emby (installed …) to get markers support" | An older plugin without markers support | Click **Update**, or copy the newer DLL in by hand and restart Emby |
+| *(Emby)* "Can't reach this Emby server" / "Can't reach the Media Preview Bridge markers endpoint on this Emby server" | A transient connection problem | Confirm the server is up and reachable; recheck |
+| *(Emby)* "Emby rejected this server's credentials; reconnect it" | The stored API key or login no longer works | Reconnect the server from the Servers page |
+| *(Emby)* "Emby refused the Media Preview Bridge markers endpoint; this server's API key or user needs administrator rights" | The connected account isn't an administrator | Reconnect with an admin account or API key |
+| *(Emby)* Emby shows "Unlock Feature" when a viewer clicks **Skip Intro**, or stops showing Skip Intro; the tab's amber **Emby Premiere** row reads "Viewers can't skip intros: this Emby server has no Emby Premiere key. Skip Credits (Up Next) still works." | Emby only skips intros on a server with an active Emby Premiere key. Without one, its player shows Skip Intro for the first few episodes, asks for Premiere instead of skipping, then hides the button | Add an Emby Premiere key to this Emby server. Nothing to change in this app: the markers are written either way, and the tab notices the key within an hour |
+| *(Settings)* **Matching audio across a season** shows "Not available" with a reason, e.g. "Needs an ffmpeg with the chromaprint muxer (jellyfin-ffmpeg in the amd64 image); none was found" | This container's ffmpeg has no chromaprint (the arm64 image, or a custom ffmpeg) | Use the amd64 Docker image; every other source keeps working. Saved season audio answers can't help decide an intro meanwhile, so one decided with them goes to **Needs review** on its next check unless other sources agree; they can still keep an intro in review that they contradict |
+| *(Settings)* **Matching audio across a season** shows "Not available": "ffmpeg didn't answer the check for the chromaprint muxer; it is checked again in 10 minutes" | ffmpeg timed out, couldn't start, or exited with an error when asked for its muxers (a busy or slow container start) | Nothing: jobs started meanwhile match no episodes, but saved season audio answers still count, and the check runs again after 10 minutes |
+| *(Settings)* **On-screen credit text** says "Not available" with one of: "Needs ONNX Runtime and OpenCV, which the Docker image includes; they aren't installed here" · "Needs the text detection model, which the Docker image includes; it isn't at …" · "The text detection model at … isn't the expected file" · "The text detection check didn't answer; it is checked again in 10 minutes" | Running outside the Docker image without the packages/model installed, a moved or corrupted model file, or the check timed out/crashed | Use the Docker image, which ships the packages and model; every other source keeps working meanwhile. The last reason clears itself — the check runs again after 10 minutes |
+| Log line "Credit text detection on \<device\>: CPU (\<reason\>)" although this host has a GPU | The self-test or the device check picked the CPU: the reason is e.g. "the GPU wasn't at least 10% faster than the CPU (median 4.9 vs 5.2 ms per frame; GPU/CPU 0.94 per round)", "the GPU was finding different boxes than the CPU", "Vulkan reports no hardware GPU", "no WebGPU device is this GPU", "… GPUs have no WebGPU path here", "this GPU has no usable WebGPU adapter", or a WebGPU session or helper failure | Nothing to fix if the CPU really is faster or there's no hardware GPU for this device; otherwise check the GPU is passed into the container the way previews use it. arm64 has no GPU path for credit text either way |
+| Log line "season_audio had no answer for \<file\> this time: Not fingerprinting \<episode\>: N earlier fingerprint ffmpegs are still stuck reading their files" | Earlier fingerprint reads stalled on the media mount and can't be stopped until it answers; no more are started meanwhile, so episodes that still need fingerprinting get no season audio answer (nothing is held against the files) | Check the media mount (NFS/SMB) is responding. It clears on its own once the stuck reads finish; the next run matches the season |
+| A file fails with "Couldn't read the file: Not reading \<path\>: N earlier ffprobes are still stuck reading their files", or a log line "season_audio (or credits_text) had no answer for \<file\> this time: … Not reading \<path\>: N earlier ffprobes are still stuck reading their files" | Earlier ffprobe reads stalled on the media mount; until they finish no new ffprobe is started, so new files can't be checked | Check the media mount is responding; it clears on its own once the stuck reads finish, and the files are tried again on the next run |
+| *(Plex)* Red "✕ Not active" next to Plex Pass: "This Plex server has no Plex Pass, so Plex won't show any markers." | Plex hides all markers — even ones already in its database — without Plex Pass | Add Plex Pass to this Plex server |
+| *(Plex)* "Plex's database is on a network share (…). The app must run on the same machine as Plex to write markers; Plex stays read-only." | SQLite's write mode doesn't work over NFS/SMB/CIFS | Run this app on the same machine as Plex, or run the [Plex marker agent](https://mediapreviewgenerator.dev/guides/#plex-on-another-machine-the-plex-marker-agent) next to Plex. With an agent, the same kind of message means the *agent's* mount is a network share |
+| *(Plex)* "Plex's database is on a filesystem this app doesn't recognise as a local disk (…); Plex stays read-only." | The app couldn't prove the folder is a real local disk, so it refuses to risk Plex's database | Check the mount; open an issue if it's genuinely local |
+| *(Plex)* "Plex is running, but not with the database file this app sees at …. Mount the exact folder Plex uses, on the same machine (on unRAID, the same /mnt/cache or /mnt/user path Plex uses)." | The app proves it shares Plex's live database lock before ever writing; this Plex has a different copy open | Map Plex's config folder into both containers from the identical host path |
+| *(Plex)* "Plex doesn't have its database open through this folder right now (Plex is stopped, or this app sees a different path to the file). Markers are only written while Plex is running." | Same same-host proof, failing because nothing has the database open | Start Plex; recheck the mounted path |
+| *(Plex)* "Plex hasn't created its marker tag yet. Run Plex's own intro or credits detection once on any item, then try again." | Markers reuse a database row Plex creates itself the first time it ever writes a marker | Run Plex's own intro or credits analysis once on any item, then recheck |
+| *(Jellyfin)* Amber "Update needed" badge, "— installed 1.0.0.0" (the version the plugin reports; "installed version unknown" when it doesn't say) + **Update** button; the job's rows say "Update Media Preview Bridge (installed …) to get markers support" | An older plugin build predates the markers feature | Click **Update** |
+| *(Plex)* "Plex […] data has an unknown shape; not writing markers." / "Plex's database has more than one marker tag row, so it's unclear which one Plex serves; not writing markers." | A future Plex version changed its database in a way the app doesn't recognise | Check for an app update; report your Plex version in an issue |
+| *(Plex)* "Plex is busy writing its database; trying again on the next run (…)." | Another process (usually Plex itself) holds the database briefly | Nothing — it retries on the next job |
+| *(Jellyfin)* "Can't reach this Jellyfin server" / "Can't reach the Media Preview Bridge markers endpoint on this Jellyfin server" | A transient connection problem | Confirm the server is up and reachable; recheck |
+| *(Jellyfin)* "Jellyfin rejected this server's credentials; reconnect it" | The stored token/login no longer works | Reconnect the server from the Servers page |
+| *(Jellyfin)* "Jellyfin refused the Media Preview Bridge markers endpoint; this server's API key or user needs administrator rights" | The connected account isn't an administrator | Reconnect with an admin account or API key |
+| *(Plex)* "This app (user N) can't write …. Run it with the user that owns Plex's database (user M)." | A `PUID`/`PGID` mismatch between the two containers | Set this container's `PUID`/`PGID` to the user that owns Plex's files |
+| *(Plex)* "Disk full: Plex's database can't take any writes (…)." | The disk holding Plex's database is full | Free up space on that disk |
+| Status block fails to load: "Couldn't check this server's Intro & Credits status" (Edit tab) or "Couldn't read this server's Intro & Credits state (…)" (Inspector row) | An unexpected error while checking (e.g. `markers.db` unreadable) — one server's failure never blocks the rest of the page | Reload; check the logs for the exception type named in the message |
+
+A file's row for one server (the job's Files panel, the Inspector) can also say:
+
+| Message | Why | What to do |
+|---|---|---|
+| **Waiting**: "Can't reach Plex to confirm Plex Pass" | Plex answered its database checks but not the Plex Pass check, usually while restarting | Nothing; the file is retried (up to your retry count), and the next file checks Plex again |
+| **Waiting**: "Not in this server's library yet" | The server hasn't scanned the file in yet | Nothing; the file is retried |
+| **Up to date**: "Keeping Plex's intro" (or credits, or both; also added to other rows, e.g. "1 marker(s); keeping Plex's credits") | This Plex server is set to **Keep Plex's**, and Plex shows its own markers of that type (its detection replaced ours, or they were there before this app had a record of the item) | Switch it to **Use ours** if you want ours; the next job that checks the file writes them |
+| **Skipped**: "This server was removed" | The server was deleted while the job ran | Nothing |
+| **Skipped**: "This server is turned off on the Servers page" | The server was disabled while the job ran | Turn it back on, then run the library or Re-detect the file |
+| **Skipped**: "Intro & Credits is off for this server" | The switch was turned off (or the Plex confirmation revoked) while the job ran | Turn it back on; the job's next file already checks again |
+| **Skipped**: "This library isn't selected for Intro & Credits on this server" | The library was switched off for Intro & Credits, or removed from the server, while the job ran | Switch it back on in Edit → Libraries → Intro & Credits column |
+| **Skipped**: "This file is excluded on this server" | The file matches one of that server's exclude paths | Remove the exclusion if it's wrong |
+| **Up to date**: "Keeping Emby's intro" (or credits; also added to other rows, e.g. "1 marker(s); keeping Emby's intro") | This Emby server is set to **Keep Emby's**, and Emby shows its own markers of that type | Switch it to **Use ours** if you want ours |
+| **Written**: "… Replaced Plex's own marker. This server is set to keep Plex's, but a marker you adjust always wins." (Emby says the same about Emby's) | You adjusted or locked that marker in the Inspector, so it was written over the server's own although the server is set to keep its own | Nothing; unlock the marker if you want the server's own back |
+| Any row ending "…; Emby skips to the end of the file" | The credits end before the file does (a scene follows them), but Emby's Skip Credits always skips to the end of the file | Nothing; Emby has no credits end |
+| **Waiting**: "Emby doesn't show which of this item's versions is this file yet; if the file is already in Emby's library, check this server's path mappings" | Emby groups several versions in this item, and none of them maps to this file with its own item id | Nothing while Emby is still scanning; otherwise fix the server's path mappings |
+| **Failed**: "This file is Emby item 55, another version of item 53; markers not written" | The job found another version's item for this file | Check how Emby grouped this item's versions |
+| **Failed**: "Couldn't read this server's saved settings (…)" | `settings.json` couldn't be read just before the write, so nothing was written | Check the config volume and the log; the next run tries again |
+| Evidence detail: "Couldn't read this server's plugins, so its markers aren't used" | A Jellyfin/Emby server's plugin list couldn't be read, so its markers might be a crowd database's copy | Nothing; they're read again on a later run |
+| Evidence detail: "Markers on this server look imported from …; not a second opinion for that database" | That server's markers came from a plugin that imports a skip database (IntroDB/TheIntroDB, SkipDB or AniSkip), so they don't confirm that database's own answer | Nothing; this is expected |
+| Job warning: "TheIntroDB's daily lookup limit was reached: N files were checked without it. It resets at 00:00 UTC; the files it left undecided are checked again automatically after that (or add a TheIntroDB API key for a higher limit)." | The source's daily budget (or the smaller share full-library backfills may spend) ran out partway through the job | Nothing to fix; a **TheIntroDB recheck** job waits for 00:00 UTC and checks those files again. Add your own TheIntroDB API key for a higher limit. (IntroDB and SkipDB say "run the library again after that" instead: their files aren't rechecked automatically.) |
+| File reason ends with "…; TheIntroDB not checked (daily limit reached)" | This file's result could still change once the source is available again — a file every other source already decided doesn't get this note | Nothing; the TheIntroDB recheck job asks for it after 00:00 UTC, and nothing was stored for this source, so any later run asks it too |
+| Log: "TheIntroDB has no entry for 3 or more episodes of <show> …; its episodes aren't looked up there until <date>" | TheIntroDB had nothing for 3 episodes of the show and an answer for none, so the show's episodes stop using its daily lookups for 7 days | Nothing; after the date its episodes are asked again. **Re-detect** in the Inspector asks at once |
+
+Per-file job outcomes use plainer labels in the job queue and Files panel: **Markers written** (the job changed
+what a server shows), **Up to date** (every server already showed this),
+**Needs review**, **Waiting** (a server hasn't indexed the file yet, Plex didn't answer its Plex Pass check, or the
+item's versions don't agree yet), **Skipped** (the server can't take markers right now, or a setting changed while
+the job ran — see the tables above for why — or the file is a trailer or other extra: "Extras aren't checked for
+markers"), **No markers found**, and **No server with Intro & Credits on**. When a file's servers end differently,
+the file shows the one that still needs something: **Failed**, then **Waiting** for a server the job tries again
+(it hasn't indexed the file yet, or Plex didn't answer its Plex Pass check), then **Markers written**, then **Needs
+review**, then **Waiting** for the item's other versions, then **Up to date**. So a file whose intro was written while
+its credits need review counts as **Markers written** (its reason names the credits), and a file written to Plex but
+still waiting on Jellyfin shows **Waiting**; each server's own result is on the file's row.
+
+Under a job's per-server results, **Decided by** counts how many files each source decided, per marker type — for
+example "Credits: chapters 40 · credit text 9 · TheIntroDB + server markers 3". It fills in while the job runs. A file
+counts once per type, under the sources its marker came from; a marker a chapter set counts as **chapters** even when
+other sources agreed, and **server markers** (markers already on your servers) only appear as the second opinion a
+single source needed; your own edited markers count as **your edits**. Markers that need review, and files that failed
+or weren't checked, aren't counted. See
+[Reference — Decided-by counts](https://mediapreviewgenerator.dev/reference/#decided-by-counts).
+
+> [!NOTE]
+> Rolling back to a version before Intro & Credits existed needs an extra step — see
+> [Rolling back to a previous version](https://mediapreviewgenerator.dev/guides/#rolling-back-to-a-previous-version).
 
 ---
 
@@ -2006,7 +2607,9 @@ Use this table to diagnose common failures quickly.
 | Webhook job sits in **Pending** for a long time | The concurrent-job gate is full — active jobs are running at capacity | Check **Settings → Processing Options → Incoming job priority** is **High** (the default) so webhook jobs take the reserved slot instead of queueing. Otherwise wait for a slot to free up (priority-ordered), raise the cap, or check the global **Pause Processing** toggle isn't on. Pausing ≠ cancelling — paused jobs stay in Pending. |
 | Webhook returns `401` | Invalid or missing authentication | In Sonarr/Radarr webhook settings, leave **Username** empty and set **Password** to your API token or webhook secret. |
 | Webhook test passes but imports do not trigger jobs | Wrong webhook events or webhooks disabled | Enable **On Import** in Radarr/Sonarr and verify `webhook_enabled=true`. |
+| Log warns `Webhook from sonarr: ignored '…' — the payload didn't carry a file path` | The sender's payload has no file path anywhere: no `episodeFile`, no `episodeFiles[]`, no `filePath` (Sonarr's own "On Import Complete" event lists its files, so it never causes this) | Check the sender posts Sonarr's standard webhook body; a custom template or a proxy that rewrites the body must keep `episodeFile.path` (or `series.path` + `episodeFile.relativePath`). |
 | New files are imported but previews are not generated | Plex indexing delay or wrong library mapping | Increase webhook delay and verify Radarr/Sonarr library mapping in Webhooks settings. |
+| Job warning: "N file(s) still weren't indexed by the media server after N retries, so no more retries are queued. The next scheduled scan will pick them up." | The media server hadn't added the file to its library by the last retry | Nothing, if you have a scheduled scan: it picks the file up once the server has it. Otherwise raise **Retry count** or **Initial retry delay** (Settings → Retry policy), or check the file is under a library folder the server scans. |
 | Radarr/Sonarr cannot reach webhook URL | Network routing or hostname issue | Use host IP or reachable Docker hostname (not `localhost`), then verify firewall and port `8080`. |
 | New job starts after I paused | Global pause not set or UI not refreshed | Use **Pause Processing** (Current Job or Job Queue header). Pause is global and persisted; in-flight files finish before workers idle. |
 | DV Profile 5 thumbnails are visibly dim, and the log warns that no working Vulkan device was found | The container can't reach a hardware Vulkan device, so the app skips Profile 5 tone mapping and extracts plain frames instead | Pass an iGPU to the container with `--device /dev/dri:/dev/dri` (Intel/AMD), or for NVIDIA set `NVIDIA_DRIVER_CAPABILITIES=all` so the NVIDIA Vulkan driver gets injected. Most users already pass `/dev/dri` for hardware video acceleration, which brings the Vulkan driver along for free. |
@@ -2046,6 +2649,27 @@ Schema downgrades are **not automated**. If you need to revert from a release th
    ```bash
    docker run ... your/image:older-tag
    ```
+
+> [!WARNING]
+> **Rolling back from a version with Intro & Credits (settings schema v15 or newer).** The older binary doesn't know
+> about the `intro_credits` job kind — it treats every job row it finds the same way, so a leftover Intro & Credits
+> job comes back as a **full preview scan** of that job's libraries instead of quietly disappearing. Before you stop
+> the container, **cancel any pending or running Intro & Credits jobs** from the Dashboard, or run this against your
+> config volume's `jobs.db` (check `web/jobs.py`'s `jobs` table — columns `kind` and `status` — before running
+> anything against a database you haven't looked at):
+> ```bash
+> sqlite3 /config/jobs.db "UPDATE jobs SET status='cancelled' WHERE kind='intro_credits' AND status IN ('pending','running')"
+> ```
+> This only stops the surprise scan; it doesn't restore markers already written to Plex or Jellyfin, and the older
+> binary can't write or read them either way.
+>
+> **Intro & Credits schedules are worse: the older binary runs each one as a full preview scan on every tick.** While
+> the new version is still running, open **Automation → Schedules** and **delete** (or **disable**) every schedule
+> with the **Intro & Credits** badge. Both remove it from the scheduler's own database (`scheduler.db`) as well as
+> from `schedules.json`. Editing `schedules.json` by hand isn't enough, because the older binary also starts the jobs
+> already stored in `scheduler.db`, and there's no reliable command for those. Then keep the current
+> `schedules.json`: in step 2, don't restore a `schedules.json` backup from before that change, or the schedules
+> come back.
 
 > **Multi-server caveat.** Multi-server installs cannot meaningfully downgrade to a single-server release without losing the second / third server's settings. The newer schema holds richer data than the older one can represent. The downgrade-refusal guard (introduced in this release) intentionally refuses to start the older binary against a newer `settings.json` — its log message names the `.bak` path so you have a one-line recovery hint.
 
@@ -2089,6 +2713,9 @@ Each row lives in one of three sections:
 2. **Library settings** — per-library (or server-wide for Plex) flags.
 3. **Advanced** — server trickplay geometry, vendor extraction, path
    mappings, Plex config folder writability.
+
+A server with **Intro & Credits** switched on also gets an
+[Intro & Credits section](https://mediapreviewgenerator.dev/guides/previews-readiness/#intro-credits) (Plex) or plugin rows (Jellyfin, Emby).
 
 Every row carries an ⓘ tooltip (the one-liner), a direct link to
 **this page** anchored at the relevant check, and — where applicable —
@@ -2400,6 +3027,61 @@ publishing fails silently.
 
 **Enable / disable:** read-only status row. Fix under Server settings
 → Path mappings.
+
+---
+
+## Intro & Credits  <a id="intro-credits"></a>
+
+These rows appear only for a server that has **Send intro & credits markers to this server** switched on (Servers →
+Edit → Intro & Credits). Until then the server shows one row, **Intro & Credits is off for this server**, under "All
+good", and nothing about markers is checked or contacted. The rows are read from the same check the Intro & Credits
+tab runs, so the two never disagree. A fact the check never got to read shows no row: a Plex whose database is on
+another machine says nothing about Plex Pass until that is fixed.
+
+Only Plex's detection row has buttons, one **Turn off** per library. Every other row says what to change and where.
+
+### Plex
+
+- **Skip buttons need Plex Pass** (critical) / **Plex Pass is active**. Without Plex Pass Plex serves no intro or
+  credits markers at all, not ours and not its own, so nobody sees a skip button. Markers are still written and stay
+  for the day the server has a Pass. Viewers need Plex Pass or to be in your Plex Home too.
+- **Plex hasn't made its marker list yet** (critical) / **Plex's marker list is ready**. Plex only serves markers
+  attached to a database row it made itself, and this app never creates that row. Turn on Plex's own intro detection
+  for one library, play a file, then check again. You can turn Plex's detection back off afterwards.
+- **Plex's library database isn't on this machine** (critical) / **…is on this machine**. Markers are written into
+  Plex's database, which is only safe from the machine the file is on. Run this app on the Plex machine, or run the
+  [Plex marker agent](https://mediapreviewgenerator.dev/guides/#plex-on-another-machine-the-plex-marker-agent) next to Plex. With an agent
+  switched on the row reads **The helper isn't on the machine with Plex's database** and means the agent's
+  container: mount Plex's config folder into it from one of that machine's own disks.
+- **The Plex marker agent** (critical), shown only when an agent is switched on for this server. Setup Health calls
+  it "the Plex marker helper". **…is connected**, or one of: **isn't answering** (markers wait, nothing is lost),
+  **refused this app's key** (set the same shared key on both sides), **and this app are different versions** (the
+  Intro & Credits tab says which to update), **is beside a different Plex** (check the address: markers would have
+  gone into the wrong database). While it is red, no marker reaches this server.
+- **Plex's own detection can replace your markers** (recommended). When Plex analyses a file again it replaces the
+  markers on it with its own, ours included. The next Intro & Credits run puts ours back, but the file shows Plex's
+  times until then. Plex detects in a library only when both of its settings are on: the server's *Generate intro
+  video markers* / *Generate credits video markers* (Settings → Library) and the library's own *Enable intro
+  detection* / *Enable credits detection* (Edit library → Advanced; only TV libraries have the intro one). The row
+  lists each library Intro & Credits goes to where both are on, and what Plex detects there, for example
+  **TV Shows · intro, credits** and **Movies · credits**. **Turn off** switches off that library's own setting for the
+  types listed, after a confirmation. Plex's server setting and your other libraries stay as they are.
+  - **Plex's own detection is off** / **…is off in your Intro & Credits libraries**: nothing to do.
+  - **Keeping Plex's own markers: its detection can stay on**: the server is set to "Keep Plex's" under "When Plex
+    has its own markers", so Plex's detection is what you asked for.
+  - If a library's own setting can't be read (an older Plex, or Plex didn't answer), the row falls back to the server
+    setting alone, shows **unknown**, and has no buttons: turn the settings off in Plex yourself, or choose "Keep
+    Plex's".
+
+### Jellyfin and Emby
+
+- **Media Preview Bridge plugin** (Jellyfin) and **Media Preview Bridge for Emby plugin** (Emby), critical. Neither
+  server has an API for markers, so the plugin is the only way they reach it. Previews are not affected. The row
+  offers **Install** where the app can do it; on an Emby whose plugin catalogue doesn't list the plugin (or whose
+  catalogue couldn't be read) it says to install it by hand and the Intro & Credits tab links the guide. Emby and
+  Jellyfin restart once.
+- **The plugin is too old for intro and credits markers** (recommended). The installed build works for previews but
+  doesn't answer the markers feature, so markers wait. Update the plugin; nothing already published is lost.
 
 ---
 
@@ -2869,6 +3551,7 @@ Complete reference for all configuration options and REST API endpoints.
 - [Environment Variables](https://mediapreviewgenerator.dev/reference/#environment-variables)
 - [Web Interface Settings](https://mediapreviewgenerator.dev/reference/#web-interface-settings)
 - [Webhook Settings](https://mediapreviewgenerator.dev/reference/#webhook-settings)
+- [Intro & Credits](https://mediapreviewgenerator.dev/reference/#intro--credits)
 - [Path Mappings](https://mediapreviewgenerator.dev/reference/#path-mappings)
 - [REST API](https://mediapreviewgenerator.dev/reference/#rest-api)
 - [WebSocket Events](https://mediapreviewgenerator.dev/reference/#websocket-events)
@@ -3019,6 +3702,15 @@ These are not migrated to settings.json and remain in effect:
 | `MEDIA_ROOT` | `/` | Same as `PLEX_DATA_ROOT` but for media paths. |
 | `RATELIMIT_STORAGE_URL` | `memory://` | Backend for rate-limit counters. The default in-memory store is fine for a single-container deploy; set to `redis://host:port/0` if you run behind a load balancer with multiple replicas. |
 
+### Developer / harness-only
+
+Not for deployment — these override paths used during development and the accuracy harness, and are never migrated
+into `settings.json`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEDIA_PREVIEW_TEXTDET_MODEL` | the Docker image's own copy (`/app/models/ch_PP-OCRv4_det_infer.onnx`) | Overrides the on-screen credit text model path, for development and the `tools/markers_eval credits-text` harness. |
+
 ### External Authentication (AUTH_METHOD)
 
 If you secure access via a reverse proxy (Authelia, Authentik, Caddy Security, nginx basic auth, etc.) or a VPN (Tailscale, WireGuard), you can disable the built-in login screen:
@@ -3032,6 +3724,8 @@ When set to `external`:
 
 - The login page is bypassed; all browser and API requests are treated as authenticated.
 - Webhook authentication (`webhook_secret` / Bearer token) is **not** affected — external services like Radarr and Sonarr still need their shared secret.
+- A browser's `POST`/`PUT`/`PATCH`/`DELETE` still needs the page's CSRF token (the app's pages send it). Scripts
+  should send the API token (`X-Auth-Token` or `Authorization: Bearer`); see [REST API → Authentication](https://mediapreviewgenerator.dev/reference/#authentication).
 - The setup wizard still runs on first boot.
 - Removing the variable (or setting it back to `internal`) instantly re-enables built-in auth.
 
@@ -3076,7 +3770,7 @@ Settings for automatic preview generation when media is imported via Radarr or S
 | Setting | Default | Web UI | Description |
 |---------|---------|--------|-------------|
 | `webhook_enabled` | `true` | Yes | Master enable/disable for webhook processing |
-| `webhook_delay` | `60` | Yes | Delay before processing (10–300 s). Incoming webhooks are queued per source; a batch runs only after this many seconds with no new imports, so every file gets at least this long for Plex to add it before we process. |
+| `webhook_delay` | `60` | Yes | Delay before processing (10–300 s). Incoming webhooks are queued per source; a batch runs after this many seconds with no new imports, or 10 minutes after its first webhook, whichever comes first. |
 | `webhook_secret` | *(empty)* | Yes | Dedicated secret for webhook auth (falls back to API token) |
 | `plex_webhook_enabled` | `false` | Yes | Enable the Plex direct webhook (`/api/webhooks/plex`). Requires Plex Pass on the server-owner account. |
 | `plex_webhook_public_url` | *(empty)* | Yes | URL Plex Media Server should POST to. Defaults to the URL you registered through. Override for reverse-proxy / split-network setups. |
@@ -3090,6 +3784,510 @@ The **Recently Added Scanner** is not configured via settings keys any more — 
 
 > [!TIP]
 > Configure webhooks on the **Automation** page (`/automation`, Triggers tab) in the web UI. See [Webhook Integration](https://mediapreviewgenerator.dev/guides/#webhook-integration) for setup instructions. The legacy `/webhooks` and `/schedules` URLs still work — they 302-redirect to the relevant tab.
+
+---
+
+## Intro & Credits
+
+Skip Intro / Skip Credits markers for Plex, Jellyfin and Emby. See the
+[Intro & Credits guide](https://mediapreviewgenerator.dev/guides/#intro--credits) for setup and troubleshooting; this section is the settings/API
+reference. Schema version 15 (`upgrade.py`) added this feature, off everywhere by default.
+
+### Global settings (`settings.json["markers"]`)
+
+Shared detection settings — one file is detected once, whatever the publish rule decides. Managed from
+**Settings → Intro & Credits**.
+
+```json
+{
+  "detect": {"intro": true, "credits": true, "recap": false},
+  "credits_window": {"tv_s": null, "movie_s": null},
+  "sources": [
+    {"id": "chapters", "enabled": true},
+    {"id": "theintrodb", "enabled": false, "api_key": ""},
+    {"id": "introdb", "enabled": true},
+    {"id": "skipdb", "enabled": true},
+    {"id": "season_audio", "enabled": true},
+    {"id": "credits_text", "enabled": true},
+    {"id": "server_markers", "enabled": true}
+  ]
+}
+```
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `detect.intro` | bool | `true` | TV episodes only. |
+| `detect.credits` | bool | `true` | TV episodes and movies. |
+| `detect.recap` | bool | `false` | Jellyfin's player is the only one with a Skip Recap button. |
+| `credits_window` | object | `{"tv_s": null, "movie_s": null}` | Settings → Intro & Credits → Advanced → "Where to look for credits". How far from the end of a file on-screen credit text is searched for; credits already rolling where it begins are followed back 120 s at a time, only as far as a start the last-quarter rule and the movie cap would still keep. `tv_s` applies to TV episodes, `movie_s` to movies and files of unknown kind. Each is `null` (Automatic: last 450 s of an episode, 900 s of a movie) or one of `300`, `600`, `900`, `1200`, `1800` seconds; anything else is refused with a 400 naming the key. A key left out means Automatic, and a partial post merges over the stored value. A longer window decodes longer for every file. A window you choose also lets credits start that far before the end even where the last-quarter-of-the-file rule would refuse them, and a movie window above 15 minutes raises the 900 s cap on how far before the end a movie's credits may start. Automatic keeps both rules exactly as before. Changing it decides files again, and files already read on another window are read again. A stored value that isn't valid is treated as Automatic (logged). |
+| `sources` | array | see above | Evidence sources, in checking/precedence order. Reordering in the UI reorders this array. |
+| `sources[].id` | one of `chapters`, `theintrodb`, `introdb`, `skipdb`, `season_audio`, `credits_text`, `server_markers` | — | `credits_text` runs where text detection is available (see `GET /api/markers/sources/local`); it decides credits alone. `season_audio` runs where ffmpeg has chromaprint (see `GET /api/markers/sources/local`); it decides an intro alone when nothing else answers, and confirms one another source found. Its previous-season hint is stored as `season_audio_previous` evidence (not a settings id). |
+| `sources[].enabled` | bool | varies | `theintrodb` defaults to `false` (used without the vendor's written permission); the rest default to `true`. |
+| `sources[].api_key` | string | `""` | `theintrodb` only. Optional. `GET`/`POST /api/settings` mask a set key as `****`; posting `****` back keeps the stored key unchanged. Never logged. |
+
+There is no publish rule setting. Every file is decided the same way: chapters decide alone unless two other
+independent sources agree on something different; any other source needs an independent source to agree, except that
+on-screen credit text (credits), season audio (intros) and a SkipDB `exact`/`shifted` match (intros and recaps) may
+decide alone. IntroDB, TheIntroDB, the previous-season hint (`season_audio_previous`) and markers already on servers
+never decide alone, and season audio (or `season_audio_previous`) with markers already on servers isn't an agreeing
+pair on its own. An agreeing server marker doesn't hold season audio back (it decides as if alone, credited to
+`season_audio` only); the hint with only a server's marker stays in Needs review. The removed
+`publish_when` key (`"high"` / `"medium"`) is ignored when an older `settings.json` or client sends it, and schema
+version 16 deletes it and has the next start queue one job, **Intro & Credits: Needs review and waiting files, decided
+again** (Low priority, source `decide_again`), an ordinary Intro & Credits job over every file in Needs review and
+every file whose last row waits for its item's other versions, listed when it runs. The request (settings key
+`_markers_decide_again`) is cleared when that job completes; until then every start queues it again (or finds it
+queued), and with Intro & Credits off on every server it waits. An intro season audio decided alone keeps asking the
+online sources on their schedule: one that later disagrees sends it to Needs review.
+
+### Per-server settings (`media_servers[].markers`)
+
+Whether — and where — a server actually receives markers. Managed from **Servers → (server) → Edit → Intro &
+Credits tab**; `library_ids` from the **Libraries tab's Intro & Credits column** (shown while `enabled` is on), which
+is separate from the Previews column's `libraries[].enabled`.
+
+```json
+{
+  "enabled": false,
+  "library_ids": null,
+  "plex": {
+    "db_write_confirmed_at": null,
+    "on_plex_redetect": "restore",
+    "agent": {"enabled": false, "url": "", "token": ""}
+  }
+}
+```
+
+An Emby server's block has `"emby": {"on_emby_redetect": "restore"}` in place of `plex`.
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `false` | Off until turned on for this server. On a Plex server, setting this `true` requires `plex.db_write_confirmed_at` to already be set (or included in the same request) — 400 otherwise. |
+| `library_ids` | array of strings \| `null` | `null` | `null` = every library except sports-type ones (name matched, whole word "sport"/"sports" — no vendor exposes an actual sports library kind). An explicit list is taken literally, including a deliberate sports library. |
+| `plex` | object | *(Plex servers only)* | Absent on Emby/Jellyfin entries. |
+| `emby` | object | *(Emby servers only)* | Absent on Plex/Jellyfin entries. |
+| `emby.on_emby_redetect` | `"restore"` \| `"keep_emby"` | `"restore"` | Edit → Intro & Credits "When Emby has its own markers": `restore` is "Use ours", `keep_emby` is "Keep Emby's". Markers from Emby's own intro detection (Emby Premiere) or another plugin: `restore` has the Media Preview Bridge for Emby plugin replace them with ours (`ReplaceOwn`); `keep_emby` leaves a type Emby has markers of and shows ours only for the other types (row message e.g. "1 marker(s); keeping Emby's intro"). The plugin still stores ours for a kept type and shows them once Emby's are gone; the next job that checks the file records them as ours again (or writes them, when it finds none of Emby's left). Remembered per server item in `markers.db`. **A marker you adjust or lock in the Inspector overrides this setting for its type**: it is sent with `ReplaceOwn` anyway and the row says "Replaced Emby's own marker…". |
+| `plex.db_write_confirmed_at` | ISO-8601 timestamp \| `null` | `null` | Set once the one-time "Send intro & credits markers to Plex?" confirmation is accepted. Clearing it while `enabled` stays `true` in the same request is rejected (400) — send `enabled: false` in the same PUT to revoke. |
+| `plex.on_plex_redetect` | `"restore"` \| `"keep_plex"` | `"restore"` | Edit → Intro & Credits "When Plex has its own markers": `restore` is "Use ours", `keep_plex` is "Keep Plex's". What a job does when Plex shows markers of a decided type that aren't ours: `restore` writes ours over them; `keep_plex` keeps Plex's markers of that type on every later run (forced ones included) until the setting is switched to `restore` or Plex has none of that type left (row message e.g. "Keeping Plex's credits", or "1 marker(s); keeping Plex's credits"). Under `keep_plex`, "not ours" means not what the job would write and not what the item record says this app left there, so markers on an item with no record of that type (a first publish, a reset `markers.db`, a re-added server) are kept too. Decided per type, and remembered per server item in `markers.db`. Markers that are gone are written again either way. **A marker you adjust or lock in the Inspector overrides this setting for its type**: its rows and `pv:` key are written over Plex's own and the row says "Replaced Plex's own marker…". |
+| `plex.agent` | object | `{"enabled": false, "url": "", "token": ""}` | Edit → Intro & Credits → Plex marker agent: a [Plex marker agent](https://mediapreviewgenerator.dev/reference/#plex-marker-agent) beside a Plex on another machine, which does the database write there. Plex servers only. |
+| `plex.agent.enabled` | bool | `false` | `true` needs `url` and `token` set (400 otherwise: "Set the Plex marker agent's address and shared key before turning it on"). The database-write confirmation (`plex.db_write_confirmed_at`) still applies. |
+| `plex.agent.url` | string | `""` | `http` or `https` address, e.g. `http://plex-host.lan:9494`. A trailing `/` is dropped. 400 for a query string, fragment, or a username/password in it. |
+| `plex.agent.token` | string | `""` | The key both sides share (the agent's `AGENT_TOKEN`). Printable ASCII, no spaces. `GET`/`POST` return a set key as `****`; posting `****` (or leaving `token` out) keeps the stored key. Never logged. |
+
+### Plex marker agent
+
+The small container for a Plex on another machine (`plex-marker-agent/`, image `ghcr.io/stevezau/plex-marker-agent`). Its
+setup, compose file, build steps, version rules and endpoint contract are in its
+[README](https://github.com/stevezau/media_preview_generator/blob/dev/plex-marker-agent/README.md); the app side is `media_preview_generator/markers/publishers/plex_remote.py`.
+The agent's own settings:
+
+| Variable | Notes |
+|---|---|
+| `AGENT_TOKEN` | Required. The key both sides share (Bearer token); it is what the app's `plex.agent.token` must equal. Never logged. |
+| `PLEX_CONFIG_DIR` | Plex's config folder as the agent's container sees it. The database path is derived from it; the app never sends a path. |
+| `PLEX_CONFIG` | Compose only: Plex's config folder on the agent's host, mounted at `/plex`. Required. |
+| `AGENT_PORT` | Port to listen on. Default `9494`. |
+| `AGENT_BIND` | Compose only: the host address to publish on. Default `0.0.0.0`. |
+| `PUID` / `PGID` | The user that owns Plex's database. Default `1000`. |
+
+Every request carries `Authorization: Bearer <AGENT_TOKEN>` and `X-Marker-Agent-Protocol: 1`, and every answer carries
+the agent's version and the protocols it speaks; a mismatch in either direction is refused before anything is written.
+
+### Job kind `intro_credits`
+
+Intro & Credits jobs are a distinct `kind` (alongside `previews`) on the same `Job`/`jobs.db` row shape as preview
+jobs (see [Jobs Endpoints](https://mediapreviewgenerator.dev/reference/#jobs-endpoints)) — same queue, priority levels, pause/cancel and dashboard, routed to
+`markers`-specific check/process functions instead of the preview pipeline. `config` (the job's `config_json`
+column) holds:
+
+| Key | Type | Notes |
+|---|---|---|
+| `kind` | `"intro_credits"` | Always this value for a markers job. |
+| `source` | string | What created it: `manual`, `schedule`, `inspector` (re-detect), `inspector_season` (Season view **Publish**), `season` (a Season follow-up job), `reconcile` (Check servers), or a webhook source name (`sonarr`, `radarr`, `plex`, `retry`, …). |
+| `libraries` | `[{"server_id", "library_id"}]` | Libraries to enumerate. Empty with no `file_paths` = every library Intro & Credits goes to. |
+| `file_paths` | array of strings | Explicit files/folders instead of libraries (webhook follow-ups, Inspector re-detect, retries). |
+| `follows_job_id` | string \| `null` | The preview job this job waits for before taking a job-gate slot (webhook follow-ups only). Episodes that later joined the job (see below) don't wait for their own preview jobs. |
+| `files_sealed` | bool | Present once a webhook follow-up or Season job has read its `file_paths`: no more files join it after that. |
+| `force` | bool | Re-detect files already decided, asking every source again. |
+| `webhook_item_id_hints` | `{path: {server_id: item_id}}` | Item ids a vendor webhook already supplied, so the job skips a lookup. |
+| `retry_attempt` | int | Present only on a retry job: which retry this is (1-based). |
+| `verify_chain` | bool | Present only on a retry queued by a verify job or by another retry in its chain: it queues no verify job. |
+| `chain_attempt` | int | Present only on a verify job queued by a retry: the retries already used, so the verify job's own retry goes on counting. |
+| `retry_delay` | int | Present only on a retry or verify job: seconds waited before it took a slot. |
+| `retry_not_before` | ISO-8601 timestamp | Present only on a retry or verify job: the due time (survives a restart without waiting again in full). |
+| `verify` | bool | Present only on a verify job: the delayed check of files published after they were replaced. It queues no further verify job, and doesn't retry a file gone from disk. |
+| `reconcile` | bool | Present only on a Check servers job: it lists the files of drifted published items (and of items whose last publish failed, files with a locked marker a server never received, and decided files to ask servers again about) instead of libraries or paths. |
+| `paused_by_schedule` | bool | Set when a schedule's stop time paused the job: that schedule's next start (or **Run now**) resumes it. Any resume, and a pause by hand, clears it (a job cancelled while so paused keeps it); a Re-run drops it. |
+
+Retries (files not yet on disk, not yet in a server's library, or on a Plex whose Plex Pass check didn't answer)
+reuse the webhook preview-retry backoff (`webhook_retry_count` / `webhook_retry_delay`) and cap at **500 files** per
+retry job — a bigger backlog waits for the next run. A retry job's `file_paths` are the paths the job was given (a
+webhook's own paths, not the first mapped disk's), with their `webhook_item_id_hints`. A job that publishes to
+replaced files also queues one verify job (`verify: true`, named "Verify: …") for them, due after three times the
+first retry delay (at least 600 s); none when `webhook_retry_count` is 0. Only jobs for sent files (webhooks and
+retries, not `manual`/`inspector` or library runs) queue one. A job whose read-back of a server failed completes with
+the warning `Couldn't check what N file(s) show on <server>`. A job where an online source's daily budget ran out
+partway through completes with one warning per source that ran out (see `GET /api/markers/sources/usage` above for
+the same state in Settings), and doesn't queue a retry for those files — nothing was stored for the source, so the
+next scheduled or manual run for the same files asks it again on its own. For TheIntroDB only, the files it left with
+a type undecided (`needs_review` / `no_evidence`) join one waiting LOW-priority job (`source: "theintrodb_recheck"`,
+named "TheIntroDB recheck: N files", at most 500 files) due 5 minutes after the next 00:00 UTC (`retry_not_before`);
+when it runs it drops files decided since, and lists nothing if TheIntroDB has been turned off. TheIntroDB also isn't
+asked about a series (keyed by the tmdb/tvdb/imdb id it's sent) for 7 days once 3 of its episodes got "no entry"
+while none has an answer: none recorded in `series_lookups`, and no file under the show's folder with a stored
+TheIntroDB answer holding a marker. The 7 days run from the pause's start (`series_pauses` in `markers.db`); "no
+entry" answers during it don't extend it, the next pause needs 3 new ones after it ends, an answer with a marker ends
+it, and a forced run (`force`, Inspector re-detect) always asks.
+
+When a job's season step finds that other episodes of the same season could now be decided differently (their season
+intro-chapter check or season audio answer is out of date; an episode season audio never answered for, such as one no
+server takes for Intro & Credits, has no answer to go out of date), the job queues a **Season job** for them once it
+completes: `source: "season"`, named `Season: <show> · <season folder>` (or `Season: N seasons`), at Low priority —
+Normal when the job was a webhook follow-up (not its retries or verify job, which queue theirs at Low), never ahead of
+the job that asked — and capped at 500 files; more are left to their next run. Episodes already listed by a Season job
+that hasn't read its files yet, or by a webhook follow-up that hasn't started, aren't queued again; new ones join such
+a Season job at the same priority while it stays within 500 files. A Season job queues no further Season job, verify
+job or retry for a file gone from disk. A cancelled job queues none. The requests live in memory: a restart before the
+job completes drops them, and the season's next run asks again. Every job that completes, except Season, retry and verify
+jobs, then starts a background cleanup once it has given back its slot (at most one running, and at most one start an
+hour). It checks up to 2,000 fingerprinted files on disk for at most 60 s, those checked longest ago first, and clears
+the cached fingerprints (and the matches made with them) of files gone from a folder that still exists. The app log
+line, not the job's, is `Cleared the cached audio fingerprints of N file(s) no longer on disk`. Plex/Emby/Jellyfin webhooks arrive one episode at a
+time: an episode whose season folder a webhook follow-up that hasn't read its files yet already covers joins that
+follow-up (renamed "Intro & Credits · N files") while it stays within 500 files, instead of queuing another. A joined
+episode doesn't wait for its own preview job: markers don't need previews.
+
+**Check servers** (`reconcile: true`, `source: "reconcile"`, named "Intro & Credits · Check servers") is created by
+`POST /api/markers/reconcile`, the Dashboard's Start New Job dialog, or a schedule with `config.reconcile` (see
+[Schedules](https://mediapreviewgenerator.dev/reference/#post-apischedules)); nothing schedules it by default. LOW priority unless the request or schedule sets one.
+Only one is queued or running at a time: asking again (a **Re-run** of a finished one included) returns that job. It
+reads back every item this app published (`item_publish_state` with status `written`) on each enabled server with
+Intro & Credits on, 500 items per call (Plex one item per connection under the lock proof; Jellyfin and Emby one
+request per item, stopping a server after 20 failed reads in a row; a read that got no HTTP answer isn't followed by an
+"is the item gone?" request), and lists only the files of items that aren't `ours` any more (`missing`, `replaced`,
+`versions_changed`, `gone`, or a kept type on a server now set to `restore`). For `missing`, `replaced` and
+`versions_changed` the Plex item's current version files (optimized copies left out, mapped through the server's path
+mappings) are listed too. Items whose last publish failed (status `failed`) aren't read back: their files are listed 1
+day after the failure, then 2, 4, 8 and 16 days after each retry, at most 5 retries per failure (a success, or a new
+failure after one, starts over); an item whose files don't fit the run's remaining files waits untaken. A pause during
+the read-back gives the job's gate slot back until resume. It
+also lists files with decided credits or preview whose stored answer from an enabled server (Intro & Credits on or not)
+is empty or unusable and that show none of ours on that server's item, re-reading that server's own markers once the
+answer is 1 day old, then 2, 4, 8 and 16 days after each re-read that stays empty or fails, and not after the fifth; a
+file taken for a server isn't taken again within a day. At most 500 files per run (100 of them kept for those re-reads
+while more drifted files wait); drifted items take turns across runs, with the warning "N more changed file(s) are
+checked on a later run". An item the server no longer has is dropped quietly when no runnable file here belongs to it,
+or when its file's row was "not in library" and the server confirmed the item missing: that file gets one retry job
+(the normal retry above, `source: "reconcile"`, attempt 1; like `manual` jobs, it and its retries queue no not-on-disk
+retry and no verify job) and the item is dropped only once that retry is queued. A run cancelled or failed before
+then, or with `webhook_retry_count` 0, drops nothing, so the next run confirms the item again. Check servers queues no
+other retry (a later run lists what still waits). Other warnings: `Skipped <server>:
+<reason>`, `Couldn't check <server>`, `Couldn't check <server>: no connection to it`, `Couldn't read what N item(s)
+show on <server>`. With nothing to list it completes at once (log "Every server checked still shows what this app
+published").
+
+### Outcome keys
+
+Per-file outcomes (`markers.outcomes.FileOutcome`, shown in the job's Files panel and progress breakdown):
+
+| Key | Label | Meaning |
+|---|---|---|
+| `markers_published` | Markers written | The job changed what at least one server shows (a forced restore included); another marker type may still need review, and the reason names it |
+| `markers_up_to_date` | Up to date | Every enabled server already showed these markers (read back before saying so) |
+| `markers_waiting` | Waiting | A server hasn't indexed the file yet, Plex didn't answer its Plex Pass check, or a Plex item's versions don't yet agree |
+| `markers_needs_review` | Needs review | At least one marker wasn't sent (the sources disagree, or the only answer can't decide alone), and the job wrote nothing else for the file. The server row's message gives each such marker's reason |
+| `markers_none` | No markers found | No source found an intro or credits for this file |
+| `markers_no_owners` | No server with Intro & Credits on | No enabled server with Intro & Credits on holds this file |
+| `skipped_file_not_found` | Not Found | File not found on disk |
+| `markers_skipped` | Skipped | Every server that owns this file can't take markers right now (see the [capability states](https://mediapreviewgenerator.dev/guides/#troubleshooting-intro--credits) — a plugin missing, Plex not ready, etc.), or the file is a trailer or other extra (reason "Extras aren't checked for markers") |
+| `failed` | Failed | Processing failed |
+
+Per-server row statuses (`markers.outcomes.ServerStatus`) use the same `markers_written` / `markers_up_to_date` /
+`markers_needs_review` / `markers_skipped` / `markers_waiting` / `failed` keys, plus `markers_none` (nothing to
+publish on that server). A file's overall outcome shows what still needs something, first match wins: any server
+failed → failed; any server waiting with a retry queued (not indexed yet, Plex Pass unconfirmed) → waiting; any
+written → published (or waiting while another server waits for the item's versions); any marker in review → needs
+review; any server waiting → waiting; any up to date → up to date; any with nothing to publish → no markers; otherwise
+skipped. So one server that is still
+waiting (or failed) is never hidden behind another server that was written or is up to date. Retries and verify jobs
+read the per-server rows, not this outcome.
+
+Extras are never checked: a file with a Plex extra suffix (`-trailer`, `-featurette`, `-behindthescenes`,
+`-deleted`, `-interview`, `-scene`, `-short`, `-other`, `-sample`) or directly inside an extras folder (`Trailers`,
+`Featurettes`, `Extras`, `Behind The Scenes`, `Deleted Scenes`, `Interviews`, `Scenes`, `Shorts`, `Other`, `Samples`)
+is `markers_skipped` before it is probed or looked up, whether it came from a folder, a webhook or a library listing.
+
+### Decided-by counts
+
+An Intro & Credits job's `progress.marker_sources` (in `GET /api/jobs/{id}` and the live `job_progress` event;
+`null` on other jobs, and on an Intro & Credits job until its first file finishes) counts the files each source
+decided, per marker type:
+
+```json
+{"intro": {"chapters": 40, "theintrodb+skipdb": 6}, "credits": {"chapters": 40, "credits_text": 9, "theintrodb+server_markers": 3}}
+```
+
+A file counts once per decided marker type, under one group: its marker's sources (source ids from Settings, joined
+with `+`, in your source order). A marker a chapter set counts as `chapters` even when other sources agreed (a chapter
+decides on its own; they only confirmed or trimmed it); markers already on servers (`server_markers`, importer copies
+included) are named only when they were the one other opinion a single source needed; the user's own marker is
+`user`. A file counts when its run ends with any outcome but `failed`, so a file whose every server was skipped still
+counts what its sources decided, while a type in review, and a file not found, with no server, or an extra, never
+count. A job revived after a restart counts the files it carries from what the markers store holds for them. The
+Dashboard shows these as **Decided by** under the job's per-server breakdown, biggest group first, at most five groups
+per type (the rest add up under "other").
+
+### Intro & Credits Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/markers/jobs` | Start an Intro & Credits job |
+| GET | `/api/markers/servers/{server_id}/status` | This server's Intro & Credits status (Edit tab) |
+| GET | `/api/markers/sources/usage` | Today's online-lookup usage per source |
+| GET | `/api/markers/item` | Inspector data for one file |
+| POST | `/api/markers/item/redetect` | Re-run Intro & Credits for one file, asking every source again |
+| POST | `/api/markers/item/markers` | Save your own markers for one file, lock them and publish to every owning server |
+| DELETE | `/api/markers/item/markers` | Unlock one or more marker types of one file |
+| GET | `/api/markers/season` | Inspector Season view data for one episode's season |
+| POST | `/api/markers/season/publish` | Queue an Intro & Credits job for the episodes of one episode's season |
+| GET | `/api/markers/sources/local` | Whether season audio matching and on-screen credit text can run in this container |
+| POST | `/api/markers/reconcile` | Queue Intro & Credits · Check servers |
+
+All of them require the same `X-Auth-Token` / `Authorization: Bearer` auth (or a logged-in session) as the rest of the
+API. A script sending the API token can call any of the `POST` routes directly; from a signed-in browser they also
+need the page's CSRF token, like every other state-changing route (see [Authentication](https://mediapreviewgenerator.dev/reference/#authentication)).
+
+#### POST /api/markers/jobs
+
+**Request:** `{"libraries": [{"server_id", "library_id"}]}` or `{"file_paths": [...]}` — omit both for every library
+Intro & Credits goes to. Optional: `priority` (`1`-`3` or `high`/`normal`/`low`, default `low`), `force` (re-detect
+files already done), `library_name` (job title).
+
+**Response:** `201` with the created job; `400` for an invalid body (both `libraries` and `file_paths` given, a bad
+`priority`, …); `503` when the config directory isn't writable.
+
+#### GET /api/markers/servers/{server_id}/status
+
+**Response:** `200` with `server_id`, `server_type`, `enabled`, `settings` (as stored), `capability` (`{state,
+message, details, warning}`, checked as if Intro & Credits were already on — one of `ready`, `disabled`,
+`needs_confirmation`, `needs_plugin`, `plugin_outdated`, `needs_pass`, `needs_local_db`,
+`agent_unavailable` (the Plex marker agent didn't answer, refused the key, is the wrong version or is beside another Plex),
+`needs_plex_detection_once`, `unsupported_schema`, `unreachable`, `misconfigured`, or `unknown` when the check itself
+failed; `warning` is `""` unless a `ready` Plex couldn't confirm Plex Pass, in which case jobs wait instead of
+writing; on Emby, `needs_plugin` carries `details.catalog_listed`: `true` when Emby's plugin catalog lists the plugin,
+`false` when it doesn't, `null` when the catalog couldn't be read; on a reachable Emby, `details.intro_skip_registered`
+is Emby's `GET /Registrations/dvr` `IsRegistered` (whether its Emby Premiere key lets viewers skip intros), left out
+when that couldn't be read or Emby rejected the credentials), `can_show` (marker types this server type can
+display) and `libraries` (with each one's default selection).
+`404` for an unknown server; `500` with a JSON error when the status can't be built. A server turned off on the
+Servers page isn't contacted (`capability.state` is `disabled`).
+
+#### GET /api/markers/sources/usage
+
+**Response:** `200` with `{source_id: {day, used, limit, remaining, has_key, low_priority_exhausted, resets_at}}`
+for `theintrodb`, `introdb` and `skipdb`. `has_key` is only meaningful for `theintrodb`; the key itself is never
+returned. `low_priority_exhausted` is `true` once a full-library backfill (LOW priority) lookup against that source
+would be refused right now — no budget left, or only the share reserved for higher-priority jobs remains.
+`resets_at` is always the daily budget's day boundary in the user's words (`"00:00 UTC"`), never the source's own
+reset header (TheIntroDB's can't be trusted — see `ratelimit.py`).
+
+#### GET /api/markers/item
+
+**Query:** either `path` (a file inside a server library), or `server_id` + `item_id`, optionally with
+`version_file`: the version's file as the Preview Inspector's search row gave it (needed for Plex, where every version
+of an item shares its id). By id, the version asked for is the one `version_file` names, else the one whose own id is
+`item_id` (a Jellyfin version, a merged Jellyfin item's primary version, or an Emby item, whose media sources list
+its other versions too), else the item's only version; another version is never opened in its place. A Plex
+`version_file` that names none of the item's versions any more counts as a version that isn't here. Only a Plex item
+with several versions asked for without `version_file` opens the first version whose file is on this disk.
+
+**Response:** `200` with `known`, `canonical_path`, `duration_ms`, `is_movie`, `decisions` (by marker type),
+`evidence` rows (each with its `label`: a chapter's title, season audio's `"10/10"`, or `""`), and `servers` (one row per owning server: `current` markers as read live, `published` markers that
+are ours, `plan` — `will_add` / `will_replace` / `will_remove` / `up_to_date` / `waiting` / `keeps_plex` (Plex's own
+detection replaced ours and `on_plex_redetect` is `keep_plex`) / `keeps_emby` (the same for Emby and `keep_emby`) /
+`not_enabled` / `nothing_to_publish` / `unknown` — with `plan_reason` (names the types the server keeps, e.g. "Keeping
+Plex's credits", on any plan; on Emby also "Emby skips to the end of the file" when decided credits end before the file
+does), and `version_count`: a
+Plex item's number of versions (`Media` entries other than optimized copies), which share one marker set (`null` for
+other servers or when it can't be read); a server whose state can't be read gets a degraded row with `error` set
+instead of failing the whole response). `400` when the path isn't a file inside a server library, the
+query is incomplete, or `item_id` isn't shaped like an id that server's type uses (a Plex rating key is digits
+only, e.g. `42`, not `/library/metadata/42`; a Jellyfin or Emby id is up to 36 ASCII hex digits and dashes starting
+with a hex digit, or ASCII digits; checked before any server is contacted). `404` for an unknown server, or a
+`server_id`+`item_id` with no file on this app's disk: `{"error": "This version's file isn't on this disk", "reason":
+"version_not_here"}` when the server has the version asked for but its file isn't here. `409` when the
+server is disabled. `500` with a JSON error when the file's data can't be built.
+
+#### POST /api/markers/item/redetect
+
+**Request:** `{"path"}`.
+
+**Response:** `202` with `{"job_id"}` — a HIGH-priority, forced, single-file job. If this same file already has a
+re-detect queued or running, that job's id is returned instead of starting a second one (a double-click, or clicking
+again before the first finishes, doesn't spend the online sources' daily budget twice). `400` when the path isn't a
+file inside a server library. `503` when the config directory isn't writable.
+
+#### POST /api/markers/item/markers
+
+Saves your own markers for one file, locks them, and publishes them to every owning server inside the request. Saving is
+locking: there is no adjusted-but-unlocked marker. The save lands before any server is contacted, so a server that fails
+can't lose it.
+
+**Request:** the file, as `path` (inside a server library) or `server_id` + `item_id` (+ `version_file`, as in
+`GET /api/markers/item`), plus `markers`: a non-empty list with one entry per type.
+
+```json
+{
+  "path": "/media/tv/Show/Season 1/Show - S01E02.mkv",
+  "markers": [
+    {"type": "intro", "start_ms": 30000, "end_ms": 92000},
+    {"type": "credits", "start_ms": 1320000, "end_ms": null}
+  ]
+}
+```
+
+`type` is `intro`, `credits`, `recap` or `preview`. `start_ms` and `end_ms` are whole milliseconds; `end_ms` `null` or
+left out means "runs to the end of the file", and an end up to 2 s past the file's length is clamped to it. Only two
+bounds apply to your own marker: it must be inside the file and must end after it starts. The 3 s minimum, the intro
+length cap and the position windows that catch a wrong source are not applied.
+
+**Response:** `200` with the file's stored markers and one row per owning server:
+
+```json
+{
+  "canonical_path": "/media/tv/Show/Season 1/Show - S01E02.mkv",
+  "duration_ms": 1440000,
+  "markers": {
+    "intro": {"type": "intro", "start_ms": 30000, "end_ms": 92000, "locked": true, "locked_at": "2026-09-21T10:15:02+00:00"}
+  },
+  "servers": [
+    {
+      "server_id": "plex-default",
+      "server_name": "Plex",
+      "server_type": "plex",
+      "result": "written",
+      "message": "…",
+      "can_show": ["intro", "credits"],
+      "cant_show": [],
+      "notes": [],
+      "replaced_own": []
+    }
+  ]
+}
+```
+
+`markers` holds every stored marker of the file, keyed by type. Per server, `result` is `written`, `unchanged`,
+`waiting`, `failed`, `not_enabled` (Intro & Credits is off there), `nothing_to_publish` or `needs_review`; `message` is
+the same wording a job's row carries. `can_show` is what that server type can display and `cant_show` the saved types it
+can't (Plex and Emby take no recap or preview). `notes` are per-field notes: on Emby an edited credits `end` is accepted
+and published start-only, and the note says so. `replaced_own` lists the types whose own markers that server lost to
+your lock although it is set to keep its own (`keep_plex` / `keep_emby`).
+
+The publish is bounded: each call to a server waits at most 8 s, and a server the publish hasn't started on 25 s after
+it began is not contacted: its row is `failed` with "Couldn't publish to this server in time; the next Intro & Credits
+run publishes it". These are per-call limits and a start gate, not a cap on the whole request. A job already running on
+the same file gives a `waiting` row, "Intro & Credits is running for this file; the next run publishes your marker".
+
+**Errors:** `400` for a body it can't save from (a duplicate type, a marker outside the file or ending before it
+starts, a non-integer time), a path outside every server library, or a type no enabled owner can show. `404` for an
+unknown server or item. `409` when the server is off, no server with Intro & Credits on has the file
+(`"reason": "no_marker_owner"`), the file was never analysed (`"reason": "not_analysed"`) or changed on disk since it was
+analysed (`"reason": "file_changed"`). `503` when the config directory isn't writable.
+
+#### DELETE /api/markers/item/markers
+
+Drops your lock on one or more marker types. Nothing is published: the servers keep showing your times until the next
+run decides those types again.
+
+**Request:** the file as above, plus `types`: a non-empty list of `intro`, `credits`, `recap`, `preview`.
+
+```json
+{"path": "/media/tv/Show/Season 1/Show - S01E02.mkv", "types": ["intro"]}
+```
+
+**Response:** `200` with `canonical_path`, `unlocked` (the requested types that were locked; the rest were already
+unlocked), `markers` (the file's remaining stored markers) and `decisions`, by type, for the requested types that have
+one: `{"intro": {"status": "needs_review", "reason": "unlocked; the next run decides this type again"}}`. `400`, `404`
+and `503` as above; `409` when the server is off or the file was never analysed.
+
+#### GET /api/markers/season
+
+**Query:** `path` (a TV episode file inside a server library; any episode of the season).
+
+Read from this app's own marker database only — no server is contacted, so a whole season is one quick request (the
+per-episode `GET /api/markers/item` stays the place for what a server shows right now).
+
+**Response:** `200` with:
+
+- `folder`, `show`, `season` — the season folder, and the show and season as the Publish job names them: the show
+  folder's name (the folder itself when episodes sit straight in it) and `"Season N"` or `"Specials"` from the
+  episode's name.
+- `servers` — the enabled servers holding the episode, in server order: `server_id`, `server_name`, `server_type`,
+  `markers_enabled` (Intro & Credits is on there and this library is selected).
+- `episodes` — the episodes matched as one season (same folder and season number; at most the 40 nearest in a flat
+  folder of hundreds; extras left out), each with `path`, `name`, `episode` (`"E01"`), `known` (the app has looked at
+  it), `duration_ms`, `intro` and `credits` (`{status, reason, marker, proposed}` as in `GET /api/markers/item`),
+  `needs_review` (any marker type in Needs review, recap and preview included) with `review_reason` (the first such
+  type's reason, `""` when none),
+  `evidence` chips (`[{source, label}]`: the sources with intro or credits evidence, markers already on servers left
+  out; only season audio has a `label`, e.g. `"10/10"`) and `servers` dots (`{server_id: {state, message}}`, `state`
+  one of `ok` — last publish wrote our markers, `none` — nothing of ours there or never published, `waiting`,
+  `failed`, `skipped`, or `off` — Intro & Credits off there, or this episode's library isn't selected or is excluded).
+- `counts` — `episodes` (the episodes listed), `total_episodes` (the season's size before the 40-nearest cap), `ready`
+  (at least one decided marker of any type: what Publish sends, even when another type is in Needs review) and
+  `needs_review` (any type in Needs review).
+
+`400` `{"error": "Path is not a file inside any server library"}` (also for a missing `path`) or `{"error": "Not a TV
+episode"}` (no `SxxEyy` in its name). `500` `{"error": "Couldn't build the Season view for this file"}`.
+
+#### POST /api/markers/season/publish
+
+**Request:** `{"path"}` — any episode of the season.
+
+**Response:** `202` with `{"job_id"}` — a NORMAL-priority, not forced Intro & Credits job named `Intro & Credits:
+<show> · Season N` (or `· Specials`) for exactly the episodes `GET /api/markers/season` lists for that path (same
+folder and season number, at most the 40 nearest), so a folder holding several seasons only sends this one: decided
+episodes are sent to every server that doesn't show them yet, undecided ones are checked again. While a Publish of the
+same episodes is still queued or running, its id is returned instead of starting a second one. For example
+`{"path": "/tv/Show/S01E02.mkv"}` in a flat `Show` folder that also holds `S02E01.mkv` queues "Intro & Credits: Show ·
+Season 1" for `S01E01.mkv` and `S01E02.mkv` only, and answers `202` `{"job_id": "…"}`. `400` `{"error": "The request
+body must be a JSON object with a path"}`, `{"error": "Path is not a file inside any server library"}` or `{"error":
+"Not a TV episode"}`. `503` when the config directory isn't writable.
+
+#### GET /api/markers/sources/local
+
+**Response:** `200` with `{"season_audio": {"available", "ffmpeg", "message"}, "credits_text": {"available",
+"message"}}` — season audio matching needs an ffmpeg with the chromaprint muxer (jellyfin-ffmpeg in the amd64
+image; the arm64 image has none). `ffmpeg` is the binary found (`null` when none), and `message` says why it isn't
+available (`""` when it is): no ffmpeg lists the muxer, or one didn't answer the check (then it is asked again
+after 10 minutes), e.g.
+`{"season_audio": {"available": true, "ffmpeg": "/usr/lib/jellyfin-ffmpeg/ffmpeg", "message": ""}}`.
+
+`credits_text.available` is `false` when ONNX Runtime/OpenCV aren't installed, the text detection model isn't at
+its expected path or isn't the expected file, or the check didn't answer (checked again after 10 minutes; arm64
+has no GPU path but is still available on the CPU). `message` names the reason (`""` when available), e.g.
+`{"credits_text": {"available": true, "message": ""}}` or
+`{"credits_text": {"available": false, "message": "Needs the text detection model, which the Docker image includes; it isn't at /app/models/ch_PP-OCRv4_det_infer.onnx"}}`.
+
+A check that fails outright answers `"available": null` for that source only (with `"ffmpeg": null` for season audio
+and a `message` such as "Couldn't check whether credit text can run here"); the other source's answer is unaffected,
+and Settings leaves a `null` row as it is.
+
+#### POST /api/markers/reconcile
+
+**Request:** optional JSON body `{"priority"}` (`1`-`3` or `high`/`normal`/`low`, default `low`); no body is fine.
+
+**Response:** `202` `{"job_id": "…", "already_queued": false}` for a new Intro & Credits · Check servers job, or
+`{"job_id": "…", "already_queued": true}` with the one already queued or running (whatever priority was asked for),
+plus `"paused": true` when that job is paused.
+`200` `{"job_id": null, "reason": "Intro & Credits is off on every server"}`. `400` `{"error": "The request body must
+be JSON"}`, `{"error": "The request body must be a JSON object"}` or `{"error": "priority must be 1, 2, 3, high, normal
+or low"}`. `503` when the config directory isn't writable (checked before the body).
+
+> [!NOTE]
+> There is no separate "install the plugin" route for Intro & Credits — the Edit tab's Install/Update button (Jellyfin
+> and Emby) calls the existing `POST /api/servers/{id}/install-plugin` (see
+> [Servers](https://mediapreviewgenerator.dev/reference/#servers-beyond-the-basics-in-multi-media-server-endpoints)).
 
 ---
 
@@ -3195,6 +4393,38 @@ curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8080/api/jobs
 ```
 
 Get your token from [Authentication Token](https://mediapreviewgenerator.dev/getting-started/#authentication-token), or set a fixed token with `WEB_AUTH_TOKEN`.
+
+**Scripts: always send the API token in one of these headers.** A request with a valid API token needs nothing
+else. A wrong one gets `401 {"error": "Authentication required"}`.
+
+**CSRF token (browser sessions).** A request that relies on the signed-in browser session instead of the API token
+must also send the page's CSRF token on every `POST`, `PUT`, `PATCH` and `DELETE`. This stops a page on another site
+from using your signed-in browser to change settings or start jobs. The app's own pages do it for you: every page
+carries the token in `<meta name="csrf-token">` and sends it as the `X-CSRFToken` header, and the login form sends it
+as a hidden `csrf_token` field. Without it (or with a stale one) the request is refused with `400`:
+
+```json
+{"error": "This page's security token is missing or out of date. Reload the page and try again. Scripts: send the API token in an Authorization: Bearer or X-Auth-Token header instead."}
+```
+
+- `GET` requests never need it.
+- The webhook receivers (`POST /api/webhooks/radarr`, `/sonarr`, `/sportarr`, `/custom`, `/plex`, `/incoming` and
+  `/server/{server_id}`) never need it: they check their own webhook secret on every call.
+- The setup wizard sends it too, including before setup is finished when its routes need no sign-in.
+- With `AUTH_METHOD=external`, browser requests still need it; scripts behind the proxy should send the API token.
+- A browser request that says it came from another origin (the browser-set `Sec-Fetch-Site` header is anything but
+  `same-origin` or `none`) is refused even with a valid token: another app on the same host, on a different port,
+  counts as the same site for cookies. Requests without the header (older browsers, scripts) rely on the token alone.
+- The token lasts as long as the browser's signed-in session, up to 7 days after its last visit. Signing in starts a
+  new session, so nothing from before it (a token another page may have read) stays valid. With
+  `AUTH_METHOD=external` this app never sees a sign-in, so the `Sec-Fetch-Site` check above is what refuses such a
+  token; its **Logout** only clears this app's session (sign out at your proxy or VPN).
+- Signing out (`POST /logout`, the nav's **Logout**; opening `/logout` only asks), or changing the API token, ends
+  **this browser's** session, and a tab still open from before has to be reloaded. Other browsers stay signed in:
+  each session lives in a signed cookie in its browser, and the app keeps no list of sessions to end, even when the
+  API token changes. To sign every browser out, delete `flask_secret.key` from the config folder (or change
+  `FLASK_SECRET_KEY`, if you set it) and restart the container: every session cookie stops being valid, and each
+  browser signs in again with the current token.
 
 ### Setup & Settings Endpoints
 
@@ -3323,6 +4553,11 @@ Update settings. Send only the fields to change.
 }
 ```
 
+`markers` (the Intro & Credits block) may be partial: posted keys merge over the stored block — `detect` key by key,
+`sources` by `id` (a list naming every source sets their order; a shorter one updates those sources where they are;
+naming a source twice is a `400`). `api_key: "****"` keeps the stored TheIntroDB key and `""` clears it. `GET
+/api/settings` returns the block with the key masked.
+
 ### Plex OAuth Endpoints
 
 #### POST /api/plex/auth/pin
@@ -3400,8 +4635,8 @@ Test Plex connection. Request: `{"url": "...", "token": "..."}`. Returns `{"succ
 | POST | `/api/jobs` | Create new job |
 | GET | `/api/jobs/{id}` | Get job details |
 | POST | `/api/jobs/{id}/cancel` | Cancel job |
-| POST | `/api/jobs/{id}/pause` | Global pause (delegates to `/api/processing/pause`) |
-| POST | `/api/jobs/{id}/resume` | Global resume (delegates to `/api/processing/resume`) |
+| POST | `/api/jobs/{id}/pause` | Intro & Credits job: pauses that job only (`200` with the job; `409` `{"error": "Only running jobs can be paused"}` when it isn't running). Preview job: global pause (delegates to `/api/processing/pause`). `404` for an unknown id. |
+| POST | `/api/jobs/{id}/resume` | Intro & Credits job: resumes that job only (`200` with the job plus `processing_paused`, true while **Pause all** still holds it; `409` `{"error": "Only running jobs can be resumed"}` when it isn't running). Preview job: global resume (delegates to `/api/processing/resume`). `404` for an unknown id. |
 | DELETE | `/api/jobs/{id}` | Delete job |
 
 #### GET /api/jobs
@@ -3513,6 +4748,7 @@ explicit `null` clears it.
 
 - `"full_library"` *(default — optional, omit to get the same behaviour)* — schedule runs a full library scan via the standard job pipeline, processing every item in `library_id` that's missing previews.
 - `"recently_added"` — schedule runs a Recently Added scan instead. Requires `config.lookback_hours` (float, clamped to 0.25–720). Scans only items added within the lookback window (Plex `addedAt`, Emby/Jellyfin `DateCreated`), queuing each through the webhook job pipeline. When `library_id` is `null`, the scan falls back to the globally selected libraries in Settings (or every supported library when no global filter is set); when set, only that section is scanned. Works for Plex, Emby, and Jellyfin — each vendor's processor implements `scan_recently_added` against its native API.
+- `"intro_credits"` — schedule creates an [Intro & Credits](https://mediapreviewgenerator.dev/reference/#intro--credits) job (`kind=intro_credits`) instead of a preview job, for the schedule's libraries (every library Intro & Credits goes to when none are chosen). LOW priority unless the schedule sets one. Skipped while an earlier Find markers job from the same schedule is still pending or running. With `config.reconcile: true` it queues Intro & Credits · Check servers instead (every server; libraries and server don't apply; the UI shows it as "All servers"), skipped while any Check servers job is still pending or running. A start tick (or `POST /api/schedules/{id}/run`) first resumes every Intro & Credits job of the schedule that its stop time paused, whichever of the two it is (the schedule may have been switched since), and then queues nothing that tick; the check above applies only when it resumed nothing. A job paused by hand (`POST /api/jobs/{id}/pause`) is never resumed by a tick, and a stop tick doesn't take over a pause made by hand; the job's config carries `paused_by_schedule: true` from a stop-time pause until the next resume, pause by hand, or the job's end. Deleting a schedule leaves its paused jobs paused and logs a WARNING naming each; so does a `PUT` that switches `config.job_type` to a kind its start ticks don't resume (`intro_credits` ↔ `full_library`, or either to `recently_added`), for each job its stop time paused. While a Check servers job runs, its config also carries `check_servers_listing` (the files it listed), so a run revived after a restart checks those same files; the key is dropped when the job ends.
 
 ### System Endpoints
 
@@ -3532,7 +4768,7 @@ For full design and per-vendor details see [Multi-Media-Server](https://mediapre
 | GET | `/api/servers` | List configured servers (auth redacted) |
 | POST | `/api/servers` | Add a new server (auto-generates id) |
 | GET | `/api/servers/<id>` | Fetch one server (auth redacted) |
-| PUT/PATCH | `/api/servers/<id>` | Update; redacted auth values are kept |
+| PUT/PATCH | `/api/servers/<id>` | Update; redacted auth values are kept. A body without `markers` keeps the stored Intro & Credits block; a partial `markers` merges over it, `plex`/`emby` sub-block included (a key sent as `null` wins; `"markers": null` resets the block to the defaults, Intro & Credits off) |
 | DELETE | `/api/servers/<id>` | Remove a server |
 | POST | `/api/servers/test-connection` | Test a candidate config without saving |
 | POST | `/api/servers/<id>/refresh-libraries` | Re-fetch the server's library list |
@@ -3546,7 +4782,8 @@ For full design and per-vendor details see [Multi-Media-Server](https://mediapre
 | GET | `/api/servers/<id>/health-check` | Per-server settings audit. Returns `{vendor, issues, issue_count, fixable_count}`; `issues[]` carries `{flag, label, severity, current, recommended, rationale, library_id, library_name, fixable}`. Works for Plex (server-wide prefs via `/:/prefs`), Emby and Jellyfin (per-library `LibraryOptions`). Replaces the older Jellyfin-only `/jellyfin/trickplay-status` route. |
 | POST | `/api/servers/<id>/health-check/apply` | Apply settings to one or more flags. Three body shapes (all backwards-compatible): `{}` = fix every issue at recommended value; `{"flags": ["FlagName", ...]}` = fix only named flags toward recommended; `{"set": [{"flag": "X", "value": true\|false, "library_ids": ["id"]\|null}]}` = set each flag to the EXPLICIT value (enables disable-direction toggles on the Previews readiness card). Returns `{ok, results}` keyed `<library_id>:<flag>` (or `:<flag>` for server-wide prefs). |
 | GET | `/api/servers/<id>/previews-readiness` | Unified readiness payload for every vendor. Returns `{vendor, overall_ok, sections: [{id, title, docs_anchor, ok, severity, checks: [{id, label, docs_anchor, tooltip, ok, severity, current, recommended, actions: {enable?, disable?}, reason, meta}]}]}`. Drives the unified Previews readiness card on the Edit Server modal. See the [Previews readiness guide](https://mediapreviewgenerator.dev/guides/previews-readiness/). |
-| POST | `/api/servers/<id>/install-plugin` | Jellyfin only. Adds the Media Preview Bridge manifest URL to Jellyfin's plugin repos, queues the package install, and restarts Jellyfin. Returns `{ok, steps: [{step, ok, detail}], error}`. |
+| POST | `/api/servers/<id>/install-plugin` | Jellyfin and Emby (400 for Plex). Jellyfin: adds the Media Preview Bridge manifest URL to Jellyfin's plugin repos, queues the package install, and restarts Jellyfin. Returns `{ok, steps: [{step, ok, detail}], error}`. Emby: installs Media Preview Bridge for Emby from Emby's own plugin catalog and restarts Emby; when the catalog doesn't list it, answers `ok: false, manual: true` (install the DLL by hand). Returns `{ok, steps, error, manual}`. |
+| POST | `/api/servers/<id>/plex-marker-detection` | Plex only. Setup Health's per-library **Turn off** for Plex's own intro/credits detection. Body `{"library_id": "2", "prefs": ["enableIntroMarkerGeneration", "enableCreditsMarkerGeneration"]}` (one or both); sets them off with `PUT /library/sections/{id}/prefs` for that library only, never Plex's server-wide prefs. 400 for any other pref, a library outside the server's Intro & Credits selection, or a non-Plex server. Returns `{ok, library_id, prefs}` or `{ok: false, error}`. |
 | POST | `/api/servers/<id>/uninstall-plugin` | Jellyfin only. Removes the Media Preview Bridge plugin (`DELETE /Packages/{GUID}`; 404 treated as success — already gone) and restarts Jellyfin. Repo URL stays in place for possible re-install. Same response shape as `/install-plugin`. |
 | GET | `/api/bif/servers/<id>/search?q=<query>` | Multi-server BIF Viewer search; returns `preview_kind` (`bif` or `trickplay`) per result so the viewer renders the right format |
 | GET | `/api/bif/trickplay/info?server_id=...&path=...` | Parse a Jellyfin trickplay manifest + report sheet metadata |
@@ -3807,7 +5044,8 @@ unless noted.
 | Method | Endpoint | Description |
 |---|---|---|
 | GET | `/api/auth/status` | Session auth state — used by the UI on page load |
-| POST | `/api/auth/login` · `/api/auth/logout` | Session login/logout (cookie-based) |
+| POST | `/api/auth/login` · `/api/auth/logout` | Session login/logout (cookie-based, for the browser: needs the page's CSRF token; scripts send the API token instead) |
+| POST | `/logout` | Sign this browser out (the nav's **Logout**, with the page's CSRF token). `GET /logout` only shows a "Sign out?" page |
 | POST | `/api/token/regenerate` | Rotate the stored API token (disabled when `WEB_AUTH_TOKEN` is set) |
 | POST | `/api/token/set` | Set a custom token — min 8 chars; returns `{success: false, error: ...}` on validation failure |
 
@@ -3818,7 +5056,7 @@ unless noted.
 | POST | `/api/jobs/manual` | Submit one or more absolute paths — `{"file_paths": ["/a.mkv", "/tv/Show"], "force_regenerate": false, "priority": 2, "server_id": "..."}`. Directories are expanded to the video files inside; bypasses library scan. |
 | GET | `/api/media/search` | Backs the Manual Generation typeahead. `?q=` (min 2 chars), optional `?server_id=` to scope to one server. Fans across enabled servers and returns `{results: [{kind: "show"\|"movie"\|"episode", title, year, paths: [local container paths], child_count, servers: [{id, name, type}]}]}`. Shows resolve to their folder(s); the same item reported by several servers is merged into one row (union of paths + servers). |
 | POST | `/api/jobs/{id}/priority` | Change a pending/running job's priority (`{"priority": 1\|2\|3}`; 1 = high) |
-| POST | `/api/jobs/{id}/reprocess` | Re-run a finished job with the same config |
+| POST | `/api/jobs/{id}/reprocess` | Re-run a finished job with the same config: `201` with the new job (an Intro & Credits job keeps its schedule), `409` while it's pending or running. A Check servers job is queued like `POST /api/markers/reconcile` and answers the same way (`202` `{"job_id", "already_queued"}`, reusing one already queued or running). A Re-run clears the global pause. |
 | POST | `/api/jobs/{id}/retry-now` | Skip the retry back-off on a chain-head job whose next attempt is currently in the back-off countdown. Returns 200 + `{"fired": true, ...}` on success, 409 when no retry is pending, 400 if the job isn't a chain head. |
 | POST | `/api/jobs/{id}/fire-webhook-now` | Skip the debounce window on a webhook-batch job that's still waiting to dispatch. Looks up the in-memory batch by `job_id` and cancels its threading timer, then dispatches the same callback synchronously. 202 on success, 404 when the job has no live pending batch (already fired, never had one, or container restart cleared the in-memory dict). |
 | GET | `/api/jobs/{id}/logs` | Paginated log stream — `?offset=&limit=` (limit capped at 5000); or legacy `?last=N` for the tail |
@@ -3968,7 +5206,7 @@ Yes — run the Docker image on Docker Desktop with the WSL2 backend. If you hav
 
 ### Does this generate chapter thumbnails?
 
-No. This tool only generates **video preview thumbnails** (the timeline-scrubbing strip). It does not generate chapter thumbnails, intro/credit detection, or other server-side media analysis.
+No. Previews are only the **video preview thumbnails** (the timeline-scrubbing strip). It does not generate chapter thumbnails or other server-side media analysis. Separately, and off until you turn it on per server, it can send **Skip Intro / Skip Credits markers** to your servers. See the [Intro & Credits guide](https://mediapreviewgenerator.dev/guides/#intro--credits).
 
 ### Can I use this without a GPU?
 

@@ -1,0 +1,9 @@
+# The agent's runtime dependencies. Every line is copied character for character from the app's own
+# pyproject.toml — tests/test_plex_marker_agent.py fails if one drifts — because the agent runs the app's code
+# (markers/publishers/plex_db.py) and must run it against the same libraries.
+requests==2.33.0
+urllib3>=2.6.3,<3.0.0
+loguru==0.7.3
+flask>=3.0.0,<4
+werkzeug>=3.0.0,<3.1.7
+gunicorn>=22.0.0,<24
