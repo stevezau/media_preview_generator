@@ -100,3 +100,6 @@ docs/design/intro-credits/evidence/credits/framechecks/
 emby-plugin/bin/
 emby-plugin/obj/
 emby-plugin/out/
+
+# MkDocs build output
+site/

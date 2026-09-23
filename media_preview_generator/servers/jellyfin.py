@@ -2211,15 +2211,82 @@ class JellyfinServer(EmbyApiClient):
             vendor_current = f"stopped on {stopped}/{stopped + extracting}"
         else:
             vendor_current = "unknown"
+
+        # Same plugin-aware rule as the per-library row in
+        # ``_recommended_settings``: without the plugin, scan-time
+        # extraction is how Jellyfin adopts our tiles, so never offer to
+        # stop it there.
+        if plugin_installed:
+            vendor_recommended = "stopped"
+            vendor_fix_action = "disable"
+            vendor_tooltip = "Stop Jellyfin running its own trickplay generation"
+            vendor_why = (
+                "<p><strong>Why we recommend stopping it:</strong> the Media Preview "
+                "Bridge plugin registers this app's previews instantly, so letting "
+                "Jellyfin ALSO extract tiles during scans is pure duplicate CPU.</p>"
+                "<p><strong>What happens if you re-enable:</strong> Jellyfin starts "
+                "generating tiles during scans in parallel to this app's output. "
+                "Wasteful but non-destructive — both sets of tiles end up in the "
+                "same <code>.trickplay/</code> directory structure, and whichever "
+                "gets registered first wins.</p>"
+            )
+            enable_body = (
+                "Re-enables Jellyfin's scan-time trickplay extraction "
+                "across all libraries. Jellyfin will generate its OWN "
+                "preview tiles in parallel to this app — duplicate CPU, "
+                "but no data loss. Useful only if you want Jellyfin to "
+                "take over preview generation and plan to stop using "
+                "this app for the affected libraries."
+            )
+        else:
+            vendor_recommended = "running (no Media Preview Bridge plugin)"
+            vendor_fix_action = "enable"
+            vendor_tooltip = "Keep Jellyfin's scan-time extraction on — it's how Jellyfin picks up this app's previews"
+            vendor_why = (
+                "<p><strong>Why we recommend keeping it on:</strong> the Media Preview "
+                "Bridge plugin isn't installed, so Jellyfin only picks up this app's "
+                "previews during a library scan with this setting on. Turning it off "
+                "leaves them unused until Jellyfin's daily 3 AM task. To stop Jellyfin's "
+                "own extraction, install the plugin first.</p>"
+            )
+            enable_body = (
+                "Turns Jellyfin's scan-time trickplay extraction on for "
+                "every library. Without the Media Preview Bridge plugin, this "
+                "is how Jellyfin picks up this app's previews on its next scan."
+            )
+        vendor_actions: dict[str, Any] = {
+            "enable": {
+                "action": "set_vendor_extraction",
+                "args": {"scan_extraction": True},
+                "confirm": {"kind": "button", "phrase": "", "body": enable_body},
+            }
+        }
+        if plugin_installed:
+            vendor_actions["disable"] = {
+                "action": "set_vendor_extraction",
+                "args": {"scan_extraction": False},
+                "confirm": {
+                    "kind": "button",
+                    "phrase": "",
+                    "body": (
+                        "Stops Jellyfin running its own trickplay extraction "
+                        "during library scans across all libraries. "
+                        "Recommended when this app owns preview generation. "
+                        "Non-destructive — existing tiles stay on disk and "
+                        "continue to work."
+                    ),
+                },
+            }
+
         sections.append(
             {
                 "id": "vendor_extraction",
                 "title": "Vendor-side preview generation",
                 "docs_anchor": "vendor-extraction",
-                # Advisory only — Jellyfin re-enabling its own extraction is
-                # wasteful (dup work) but never breaks playback. When the
-                # probe itself fails we surface that (ok=False, info) so
-                # the UI doesn't lie about state we couldn't read.
+                # Advisory only — the per-library rows carry the real
+                # severity for this flag. When the probe itself fails we
+                # surface that (ok=False, info) so the UI doesn't lie
+                # about state we couldn't read.
                 "ok": vendor_probe_ok,
                 "severity": "info",
                 "checks": [
@@ -2227,62 +2294,22 @@ class JellyfinServer(EmbyApiClient):
                         "id": "vendor_extraction_state",
                         "label": "Jellyfin scan-time extraction",
                         "docs_anchor": "vendor-extraction",
-                        "tooltip": "Stop Jellyfin running its own trickplay generation",
+                        "tooltip": vendor_tooltip,
                         "explanation": (
                             "<p><strong>What this controls:</strong> whether Jellyfin runs its own "
                             "trickplay extraction during library scans across every configured "
                             "library in one batch. This is a shortcut for flipping "
                             "<code>ExtractTrickplayImagesDuringLibraryScan</code> + "
-                            "<code>SaveTrickplayWithMedia</code> on every library at once.</p>"
-                            "<p><strong>Why we recommend stopping it:</strong> this app owns "
-                            "preview generation end-to-end (with GPU acceleration, HDR tonemapping, "
-                            "frame-reuse caching, etc.) so letting Jellyfin ALSO extract tiles "
-                            "during scans is pure duplicate CPU. Published tiles get adopted via "
-                            "the plugin (Mode A, instant) or the scan-adoption path (Mode B); "
-                            "either way Jellyfin doesn't need to generate its own.</p>"
-                            "<p><strong>What happens if you re-enable:</strong> Jellyfin starts "
-                            "generating tiles during scans in parallel to this app's output. "
-                            "Wasteful but non-destructive — both sets of tiles end up in the "
-                            "same <code>.trickplay/</code> directory structure, and whichever "
-                            "gets registered first wins.</p>"
+                            "<code>SaveTrickplayWithMedia</code> on every library at once.</p>" + vendor_why
                         ),
                         "ok": vendor_probe_ok,
                         "severity": "info",
                         "current": vendor_current,
-                        "recommended": "stopped",
-                        "actions": {
-                            "disable": {
-                                "action": "set_vendor_extraction",
-                                "args": {"scan_extraction": False},
-                                "confirm": {
-                                    "kind": "button",
-                                    "phrase": "",
-                                    "body": (
-                                        "Stops Jellyfin running its own trickplay extraction "
-                                        "during library scans across all libraries. "
-                                        "Recommended when this app owns preview generation. "
-                                        "Non-destructive — existing tiles stay on disk and "
-                                        "continue to work."
-                                    ),
-                                },
-                            },
-                            "enable": {
-                                "action": "set_vendor_extraction",
-                                "args": {"scan_extraction": True},
-                                "confirm": {
-                                    "kind": "button",
-                                    "phrase": "",
-                                    "body": (
-                                        "Re-enables Jellyfin's scan-time trickplay extraction "
-                                        "across all libraries. Jellyfin will generate its OWN "
-                                        "preview tiles in parallel to this app — duplicate CPU, "
-                                        "but no data loss. Useful only if you want Jellyfin to "
-                                        "take over preview generation and plan to stop using "
-                                        "this app for the affected libraries."
-                                    ),
-                                },
-                            },
-                        },
+                        "recommended": vendor_recommended,
+                        # ``recommended`` is a descriptive string, so the JS
+                        # direction-picker needs this hint to pick the right key.
+                        "fix_action": vendor_fix_action,
+                        "actions": vendor_actions,
                         "reason": vendor_probe_reason or None,
                         "meta": extraction_status,
                     }

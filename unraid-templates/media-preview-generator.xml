@@ -76,7 +76,7 @@ GPU SETUP — pick ONE path:
     <Config Name="Plex Token" Target="PLEX_TOKEN" Default="" Mode="" Description="Plex authentication token. Find it at: https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/ (or use OAuth via Web UI)" Type="Variable" Display="always" Required="false" Mask="true"/>
 
     <!-- Path Mappings -->
-    <Config Name="Media Path" Target="/media" Default="/mnt/user/media" Mode="ro" Description="Path to your media files on Unraid (read-only)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/media</Config>
+    <Config Name="Media Path" Target="/media" Default="/mnt/user/media" Mode="ro" Description="Path to your media files on Unraid. Read-only is fine for Plex. Set to Read/Write for Emby, or Jellyfin in its default layout, because those previews are written next to each video." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/media</Config>
     <Config Name="Plex Data Path" Target="/plex" Default="/mnt/user/appdata/plex/Library/Application Support/Plex Media Server" Mode="rw" Description="Path to Plex application data where previews will be stored" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/plex/Library/Application Support/Plex Media Server</Config>
     <Config Name="Config Path" Target="/config" Default="/mnt/user/appdata/media-preview-generator" Mode="rw" Description="Path to store configuration, schedules, and job history" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/media-preview-generator</Config>
 

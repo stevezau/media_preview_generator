@@ -40,6 +40,18 @@ _VULKAN_DEVICE_PROBED: bool = False
 _VULKAN_ENV_OVERRIDES: dict = {}
 _VULKAN_DEBUG_BUFFER: str = ""
 
+# What users see without hardware Vulkan: the DV5 path skips libplacebo and
+# extracts frames with no tone mapping (see processing/generator.py), so the
+# thumbnails are dim. Shared by every log line below so they can't drift.
+DV5_NO_VULKAN_EFFECT = (
+    "Dolby Vision Profile 5 thumbnails will come out dim (no tone mapping); "
+    "everything else (regular previews, HDR10, other Dolby Vision) is unaffected."
+)
+DV5_NO_VULKAN_FIX = (
+    "To fix: on NVIDIA, set NVIDIA_DRIVER_CAPABILITIES=all (adds the 'graphics' capability) and restart; "
+    "on Intel/AMD, pass /dev/dri into the container so it can use a hardware Vulkan driver."
+)
+
 # Candidate paths the Vulkan loader searches for the NVIDIA ICD JSON. The
 # nvidia-container-toolkit mounts it at /etc/vulkan/icd.d/, but older
 # loaders and some distributions only look under /usr/share/vulkan/icd.d/
@@ -106,10 +118,10 @@ class VulkanProbeResult:
                      (0x1e02)"``), or ``None`` if Vulkan is
                      unavailable in the container.
         is_software: True when the selected device is a software
-                     rasteriser (``llvmpipe`` / ``lavapipe``), which
-                     triggers libplacebo's green-overlay bug on DV5
-                     thumbnails and must short-circuit to the DV-safe
-                     fps+scale retry.
+                     rasteriser (``llvmpipe`` / ``lavapipe``). DV5 files
+                     then skip libplacebo (which would paint a green
+                     overlay there) and use the DV-safe fps+scale chain,
+                     so their thumbnails come out dim.
     """
 
     device: str | None
@@ -252,8 +264,8 @@ def _run_vulkan_probe(
         # here would fire once per retry strategy (up to 4 times) and
         # clutter the startup log on FFmpeg builds without Vulkan.
         logger.debug(
-            "Vulkan probe: FFmpeg was built without Vulkan hwaccel support; "
-            "libplacebo DV Profile 5 tone mapping will run in software."
+            "Vulkan probe: FFmpeg was built without Vulkan hwaccel support. {}",
+            DV5_NO_VULKAN_EFFECT,
         )
         return None, ""
     cmd = [
@@ -291,20 +303,17 @@ def _run_vulkan_probe(
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
         logger.warning(
-            "Vulkan probe failed to launch ffmpeg ({}). "
-            "Dolby Vision Profile 5 thumbnails will render in software (which can show a green overlay). "
-            "Non-DV5 content is unaffected. "
-            "Fix: confirm `ffmpeg` is on PATH inside the container.",
+            "Vulkan probe failed to launch ffmpeg ({}). {} Fix: confirm `ffmpeg` is on PATH inside the container.",
             exc,
+            DV5_NO_VULKAN_EFFECT,
         )
         return None, str(exc)
     except Exception as exc:
         logger.warning(
-            "Vulkan probe raised an unexpected error ({}). "
-            "Dolby Vision Profile 5 thumbnails will render in software (which can show a green overlay). "
-            "Non-DV5 content is unaffected. "
+            "Vulkan probe raised an unexpected error ({}). {} "
             "Please open a GitHub issue with the exception text above so we can handle this case explicitly.",
             exc,
+            DV5_NO_VULKAN_EFFECT,
         )
         return None, str(exc)
     stderr = result.stderr or ""
@@ -552,10 +561,10 @@ def _probe_vulkan_device() -> str | None:
     # a real problem worth seeing in the main log.
     logger.warning(
         "Vulkan hardware setup couldn't be detected on this container, even after trying NVIDIA-specific fixes. "
-        "Dolby Vision Profile 5 thumbnails will render in software, which can show a green overlay on those titles. "
-        "Everything else (regular previews, HDR10, non-DV content) still works. "
-        "Fix: open Settings → System in the dashboard and click 'Copy Vulkan diagnostic bundle' "
-        "({} bytes captured), or include it when filing a GitHub issue.",
+        "{} {} If that doesn't help, open Settings → System in the dashboard and click "
+        "'Copy Vulkan diagnostic bundle' ({} bytes captured), or include it when filing a GitHub issue.",
+        DV5_NO_VULKAN_EFFECT,
+        DV5_NO_VULKAN_FIX,
         len(_VULKAN_DEBUG_BUFFER),
     )
     if _VULKAN_DEBUG_BUFFER:
@@ -586,8 +595,8 @@ def get_vulkan_device_info() -> VulkanProbeResult:
             Vulkan device description string, or ``None`` if Vulkan is
             unavailable) and ``is_software`` (True when the selected
             device is a software rasteriser like ``llvmpipe`` /
-            ``lavapipe``, which triggers the DV5 green overlay bug in
-            libplacebo).  Callers assemble the user-facing warning
+            ``lavapipe``, so DV5 files skip tone mapping and get dim
+            thumbnails).  Callers assemble the user-facing warning
             message themselves.
     """
     global _VULKAN_DEVICE_CACHE, _VULKAN_DEVICE_PROBED
@@ -605,18 +614,18 @@ def get_vulkan_device_info() -> VulkanProbeResult:
         probe_device = _VULKAN_DEVICE_CACHE
         if probe_device is None:
             logger.info(
-                "Vulkan not available in this container; Dolby Vision "
-                "Profile 5 thumbnails will render in software. Non-DV5 "
-                "content is unaffected."
+                "Vulkan not available in this container. {} {}",
+                DV5_NO_VULKAN_EFFECT,
+                DV5_NO_VULKAN_FIX,
             )
         elif _is_software_vulkan_device(probe_device):
             logger.warning(
-                "Vulkan picked a software rasterizer ({}) instead of your GPU. "
-                "Dolby Vision Profile 5 thumbnails will show a green overlay; everything else still works "
-                "(regular previews, HDR10, non-DV content). "
-                "Fix: open Settings → System in the dashboard for GPU-specific remediation steps and "
-                "a diagnostic bundle you can attach to a GitHub issue.",
+                "Vulkan picked a software rasterizer ({}) instead of your GPU. {} {} "
+                "Settings → System in the dashboard has GPU-specific steps and a diagnostic bundle "
+                "you can attach to a GitHub issue.",
                 probe_device,
+                DV5_NO_VULKAN_EFFECT,
+                DV5_NO_VULKAN_FIX,
             )
         else:
             via = ""

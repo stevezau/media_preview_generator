@@ -1,7 +1,7 @@
 """Vulkan diagnostics API routes.
 
 Hosts the ``/system/vulkan`` and ``/system/vulkan/debug`` endpoints used by
-the dashboard's "Dolby Vision Profile 5 green-overlay" warning banner and
+the dashboard's "Dolby Vision Profile 5 dim thumbnails" warning banner and
 the GitHub-issue-bundle copy button. Split out of ``api_system.py`` because
 ~640 lines of NVIDIA-ICD-path probing and loader-debug capture are
 unrelated to the rest of the system endpoints (status / config / health /
@@ -185,12 +185,12 @@ def _diagnose_vulkan_environment() -> dict:
 
 
 def _get_vulkan_info() -> dict:
-    """Return Vulkan device info and warn if the DV5 green-overlay bug will hit.
+    """Return Vulkan device info and warn when DV5 thumbnails will come out dim.
 
     When the cached Vulkan device from ``get_vulkan_device_info()`` is a
     software rasteriser (``llvmpipe`` / ``lavapipe``), builds a
     GPU-aware HTML warning that leads with the user-visible symptom
-    (green overlay on some Dolby Vision thumbnails), then branches on
+    (dim Dolby Vision Profile 5 thumbnails), then branches on
     what the user can actually do about it:
 
     - **Pure NVIDIA** (regardless of ``/dev/dri``): upstream version
@@ -267,11 +267,11 @@ def _get_vulkan_info() -> dict:
 
     header = (
         "When this app creates thumbnails for <strong>Dolby Vision "
-        "Profile 5</strong> content, it relies on GPU-accelerated color "
-        "conversion. Your container does not have a working GPU rendering "
-        "driver for this step, so the app is falling back to software "
-        "rendering — which has a known bug that paints a green rectangle "
-        "onto a portion of each affected thumbnail."
+        "Profile 5</strong> content, it uses the GPU to tone map them "
+        "(convert the HDR picture to normal brightness). Your container "
+        "does not have a working hardware Vulkan driver for this step, so "
+        "those thumbnails are made without tone mapping and come out "
+        "<strong>dim</strong>."
         "<br><br>"
         "All other content (standard video, HDR10, Dolby Vision Profile "
         "7 and 8) is not affected."
@@ -279,8 +279,8 @@ def _get_vulkan_info() -> dict:
     )
     footer = (
         '<div class="small text-muted mt-2">You can safely dismiss this '
-        "warning if you have no Dolby Vision Profile 5 content, or if a "
-        "green overlay on a few thumbnails doesn't bother you.</div>"
+        "warning if you have no Dolby Vision Profile 5 content, or if dim "
+        "thumbnails on those titles don't bother you.</div>"
     )
 
     # Pure-NVIDIA takes precedence over dri_mapped: mounting /dev/dri on
@@ -335,8 +335,8 @@ def _get_vulkan_info() -> dict:
                 "</ul>"
                 '<div class="small mt-2">This is the single most common '
                 "cause of this warning on pure-NVIDIA hosts and will "
-                "almost certainly fix it. After the restart the green "
-                "overlay will disappear.</div>"
+                "almost certainly fix it. After the restart those "
+                "thumbnails come out at normal brightness.</div>"
             )
         elif diag["nvidia_icd_json_path"] is None:
             # Case A2: graphics capability is set but the ICD JSON is
@@ -436,7 +436,7 @@ def _get_vulkan_info() -> dict:
                 "container ({!r}, all toolkit checks pass), but the Vulkan loader still rejected it. "
                 "This is rare — please open a GitHub issue and include the diagnostic bundle from "
                 "the 'Copy diagnostic bundle' button on the Settings page (or GET /api/system/vulkan/debug). "
-                "Software fallback is in use, which can cause green overlays on DV5 thumbnails only; "
+                "Until then, Dolby Vision Profile 5 thumbnails come out dim (no tone mapping); "
                 "all other thumbnails are unaffected.",
                 nvidia_name,
             )
@@ -476,8 +476,8 @@ def _get_vulkan_info() -> dict:
             "step, but the container can't reach it because the "
             "<code>/dev/dri</code> render node isn't forwarded. NVIDIA's "
             "own rendering driver can't be used due to a separate "
-            "version-mismatch issue, so the app falls back to software "
-            "rendering."
+            "version-mismatch issue, so those thumbnails skip tone "
+            "mapping."
             "<br><br>"
             '<span class="small"><strong>Fix</strong> — add this to '
             "your Docker configuration and restart the container:</span>"
@@ -488,8 +488,8 @@ def _get_vulkan_info() -> dict:
             "<code>devices: [&quot;/dev/dri:/dev/dri&quot;]</code> "
             "under the service</li>"
             "</ul>"
-            '<div class="small mt-2">After the restart, the green '
-            f"overlay will disappear. Your NVIDIA card keeps handling "
+            '<div class="small mt-2">After the restart, those thumbnails '
+            "come out at normal brightness. Your NVIDIA card keeps handling "
             "video decoding &mdash; the two paths are independent.</div>"
         )
     elif has_mesa_vendor and not has_nvidia and not dri_mapped:
@@ -511,8 +511,8 @@ def _get_vulkan_info() -> dict:
             "<code>devices: [&quot;/dev/dri:/dev/dri&quot;]</code> "
             "under the service</li>"
             "</ul>"
-            '<div class="small mt-2">After the restart, the green '
-            "overlay will disappear.</div>"
+            '<div class="small mt-2">After the restart, those thumbnails '
+            "come out at normal brightness.</div>"
         )
     elif has_mesa_vendor and dri_mapped:
         # Intel/AMD (with or without NVIDIA) already has /dev/dri but
@@ -608,8 +608,8 @@ def get_vulkan_debug():
     bundle_lines = [
         "=== media_preview_generator Vulkan diagnostic bundle ===",
         "",
-        "Use this block when reporting a Dolby Vision Profile 5 green-overlay",
-        "issue. It captures the app's view of your container's Vulkan state,",
+        "Use this block when reporting dim Dolby Vision Profile 5 thumbnails.",
+        "It captures the app's view of your container's Vulkan state,",
         "plus the full VK_LOADER_DEBUG=all trace (if one was captured).",
         "",
         "--- Probe result ---",

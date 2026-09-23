@@ -1,3 +1,7 @@
+---
+description: Every Media Preview Generator setting, environment variable, path mapping and REST API endpoint, with defaults, request and response examples.
+---
+
 # Configuration & API Reference
 
 > [Back to Docs](README.md)
@@ -28,7 +32,7 @@ Complete reference for all configuration options and REST API endpoints.
 - [Getting Started](getting-started.md)
 - [Guides & Troubleshooting](guides.md)
 - [FAQ](faq.md)
-- [Main README](../README.md)
+- [Main README](https://github.com/stevezau/media_preview_generator/blob/dev/README.md)
 
 ---
 
@@ -331,7 +335,7 @@ An Emby server's block has `"emby": {"on_emby_redetect": "restore"}` in place of
 
 The small container for a Plex on another machine (`plex-marker-agent/`, image `ghcr.io/stevezau/plex-marker-agent`). Its
 setup, compose file, build steps, version rules and endpoint contract are in its
-[README](../plex-marker-agent/README.md); the app side is `media_preview_generator/markers/publishers/plex_remote.py`.
+[README](https://github.com/stevezau/media_preview_generator/blob/dev/plex-marker-agent/README.md); the app side is `media_preview_generator/markers/publishers/plex_remote.py`.
 The agent's own settings:
 
 | Variable | Notes |
@@ -1591,4 +1595,4 @@ Rate limit headers are included in responses:
 
 ---
 
-[Back to Docs](README.md) | [Main README](../README.md)
+[Back to Docs](README.md) | [Main README](https://github.com/stevezau/media_preview_generator/blob/dev/README.md)

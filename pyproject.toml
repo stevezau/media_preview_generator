@@ -103,6 +103,15 @@ test = [
     "vcrpy>=6.0.0",
     # tests/markers/credits/rapidocr_reference.py: the verbatim rapidocr post-processing uses shapely.
     "shapely==2.1.2",
+    # tests/test_docs_site.py builds the docs site; CI installs only `.[test]`.
+    "media-preview-generator[docs]",
+]
+# Docs site (mkdocs.yml). docs.yml installs exactly this list. mkdocs is capped below 2.0:
+# Material for MkDocs does not support MkDocs 2.0's rewritten plugin/theme system.
+docs = [
+    "mkdocs>=1.6.1,<2",
+    "mkdocs-material>=9.7.7,<10",
+    "markdown-callouts>=0.4.0,<0.5",
 ]
 dev = [
     "media-preview-generator[test]",
@@ -115,6 +124,7 @@ dev = [
 Homepage = "https://github.com/stevezau/media_preview_generator"
 Repository = "https://github.com/stevezau/media_preview_generator"
 Issues = "https://github.com/stevezau/media_preview_generator/issues"
+Documentation = "https://stevezau.github.io/media_preview_generator/"
 
 [tool.setuptools.packages.find]
 where = ["."]

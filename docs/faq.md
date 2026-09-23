@@ -1,3 +1,7 @@
+---
+description: "Answers to common Media Preview Generator questions: Plex, Emby and Jellyfin support, Windows and Docker, GPU choice, speed, RAM use and skipped files."
+---
+
 # FAQ
 
 > [Back to Docs](README.md)
@@ -22,40 +26,40 @@ Common questions about setup, usage, and behavior. For troubleshooting specific 
 
 ## General
 
-**What does this tool do?**
+### What does this tool do?
 
 Generates video preview thumbnails for **Plex, Emby, and Jellyfin** — alone or in any combination. These are the small images you see when scrubbing through videos. It runs preview generation off the media server, on a machine of your choosing, using every GPU it finds. When two or more of your servers contain the same file, FFmpeg runs only once and the output is written in each server's expected format (Plex stores it as a **BIF** bundle, Emby reads a **BIF** sidecar file next to the video, Jellyfin reads a folder of JPG tiles called **trickplay**).
 
-**What Plex/Emby/Jellyfin settings should I use?**
+### What Plex/Emby/Jellyfin settings should I use?
 
 - **Plex**: In Settings → Library, set **"Generate video preview thumbnails"** to **Never**.
-- **Emby**: Emby has no built-in trickplay generation, so no setting to change.
-- **Jellyfin**: In each library's settings, **enable "Trickplay image extraction"** (Jellyfin reads this app's published manifests only when this is on).
+- **Emby**: Emby can make its own thumbnails during library scans. Turn off its scan-time thumbnail extraction and chapter-image extraction on each library (`ExtractTrickplayImagesDuringLibraryScan` and `ExtractChapterImagesDuringLibraryScan`). The readiness card recommends this; it changes them only when you click **Disable**.
+- **Jellyfin**: In each library's settings, **enable "Trickplay image extraction"** (Jellyfin reads this app's published tiles only when this is on). For **"Extract trickplay images during library scan"**: turn it off if the Media Preview Bridge plugin is installed. Without the plugin, keep it **on** — it's how Jellyfin picks up the tiles on its next scan.
 
 The **Previews Readiness** card on the Edit Server modal audits every required
 flag across all three vendors and offers one-click toggles — see the
 [Previews Readiness guide](guides/previews-readiness.md). Destructive flips
 (like disabling Jellyfin's trickplay extraction) require typed confirmation.
 
-Disabling each vendor's built-in generation avoids duplicate work and prevents the server from using CPU for thumbnails when you want this app to handle them.
+Disabling each vendor's built-in generation avoids duplicate work and prevents the server from using CPU for thumbnails when you want this app to handle them. The one exception is Jellyfin without the plugin, as above.
 
-**Does this work on Windows?**
+### Does this work on Windows?
 
 Yes — run the Docker image on Docker Desktop with the WSL2 backend. If you have an **NVIDIA** GPU it is accelerated: the NVIDIA Windows driver exposes CUDA and NVDEC into WSL2, so `--gpus all` works much as it does on Linux (best-effort — WSL2 GPU detection is less reliable than native Linux). **AMD and Intel** GPUs are not accelerated under Docker (D3D11VA can't be reached from Docker's Linux VM), so those setups process on CPU — raise **CPU Workers** in Settings, or run the container on a Linux host. There's no separate Windows native build. See [Getting Started — Windows](getting-started.md#windows).
 
-**Does this generate chapter thumbnails?**
+### Does this generate chapter thumbnails?
 
 No. Previews are only the **video preview thumbnails** (the timeline-scrubbing strip). It does not generate chapter thumbnails or other server-side media analysis. Separately, and off until you turn it on per server, it can send **Skip Intro / Skip Credits markers** to your servers. See the [Intro & Credits guide](guides.md#intro--credits).
 
-**Can I use this without a GPU?**
+### Can I use this without a GPU?
 
 Yes. In **Settings** → **Processing Options**, disable all GPUs (or set workers to 0) and set **CPU Workers** to your desired value (e.g. `4` or `8`).
 
-**Is Docker required? Is there a standalone .exe?**
+### Is Docker required? Is there a standalone .exe?
 
 Docker is required. There is no standalone executable and no from-source install path — the container bundles the FFmpeg build and codec support the app depends on, so Docker is the only supported deployment. See [Getting Started](getting-started.md) for setup. It runs on Linux, Windows (Docker Desktop, WSL2 backend), macOS, Unraid, Synology, and anywhere else Docker runs.
 
-**Does my media server need to run in Docker too?**
+### Does my media server need to run in Docker too?
 
 No. Plex, Emby, and Jellyfin can all run bare-metal, in Docker, or any other
 way. This tool just needs:
@@ -64,18 +68,23 @@ way. This tool just needs:
   Emby/Jellyfin by default).
 - **For Plex specifically**: read/write access to the Plex application data
   directory (where BIF bundles are stored — mounted as `/plex`).
-- **For Emby and Jellyfin**: read access to the media files (where trickplay
-  tiles / sidecar BIFs are written, next to the media). No server-config
-  mount needed.
+- **For Emby and Jellyfin**: **read-write** access to the media files,
+  because Emby BIFs and Jellyfin trickplay tiles are written next to each
+  video. A `:ro` media mount makes every write fail for those servers. No
+  server-config mount needed. The exception is Jellyfin's
+  [off-media mode](guides/previews-readiness.md#jellyfin-config-folder): it
+  writes into Jellyfin's config folder instead, so that folder must be
+  read-write and the media can stay read-only.
+- **For Plex only**: read access to the media is enough.
 
-**Can I run this on a different machine than my media server(s)?**
+### Can I run this on a different machine than my media server(s)?
 
 Yes. The tool can run anywhere that can reach your servers' APIs over the
 network. For Plex you also need access to the Plex config directory (NFS,
 SMB, shared volume, etc.); for Emby/Jellyfin you just need the media files
 visible. See [Networking](getting-started.md#networking) for setup details.
 
-**Does this work with Jellyfin or Emby?**
+### Does this work with Jellyfin or Emby?
 
 Yes. The app supports Plex, Emby, and Jellyfin — alone or in any combination. Each server is added under **Settings → Media Servers**. When two or more servers contain the same file, FFmpeg runs only once and the result is written in each server's expected format (Plex stores it as a BIF bundle, Emby reads a BIF sidecar file next to the video, Jellyfin reads a folder of JPG tiles called trickplay). See the [Multi-Server guide](multi-server.md) for setup, webhook routing, and per-server library/exclude rules.
 
@@ -83,15 +92,15 @@ Yes. The app supports Plex, Emby, and Jellyfin — alone or in any combination. 
 
 ## GPUs
 
-**How do I know which GPUs are detected?**
+### How do I know which GPUs are detected?
 
 Open **Settings** → **Processing Options**. The GPU panel lists all detected GPUs with their device IDs, names, and types.
 
-**Can I use multiple GPUs?**
+### Can I use multiple GPUs?
 
 Yes. In **Settings** → **Processing Options**, enable individual GPUs and set workers and FFmpeg threads per GPU. Each GPU can be enabled/disabled independently.
 
-**Which GPU should I use?**
+### Which GPU should I use?
 
 | GPU Type | Best For |
 |----------|----------|
@@ -100,7 +109,7 @@ Yes. In **Settings** → **Processing Options**, enable individual GPUs and set 
 | AMD | Good VAAPI support on Linux |
 | CPU-only | Works everywhere, slower |
 
-**HDR / Dolby Vision support?**
+### HDR / Dolby Vision support?
 
 See the dedicated [HDR & Dolby Vision](guides.md#hdr--dolby-vision) section in Guides for the full per-vendor breakdown and expected speeds.
 
@@ -108,11 +117,11 @@ See the dedicated [HDR & Dolby Vision](guides.md#hdr--dolby-vision) section in G
 
 ## Performance
 
-**How many threads should I use?**
+### How many threads should I use?
 
 Start with the defaults and increase gradually while monitoring system load. See the [Performance Tuning](getting-started.md#performance-tuning) table in Getting Started for concrete starting points across hardware tiers.
 
-**Why is CPU usage high when I have a GPU configured?**
+### Why is CPU usage high when I have a GPU configured?
 
 GPU workers use both GPU and CPU — this is normal. The GPU handles video decoding and downscaling to thumbnail size; the CPU handles frame selection, JPEG encoding, and (for HDR content) part of the colour conversion. Standard SDR content barely uses the CPU at all; HDR content — especially Dolby Vision — uses noticeably more because frames have to move between CPU and GPU memory for the colour conversion step.
 
@@ -126,7 +135,7 @@ Expected speeds on 4K content:
 
 The **FFmpeg Threads** setting per GPU controls how many CPU cores each worker can use. If you're running multiple GPU workers and seeing CPU contention, lower this value.
 
-**How much RAM does each worker use?**
+### How much RAM does each worker use?
 
 Typical per-worker RSS with hardware decode:
 
@@ -138,7 +147,7 @@ Typical per-worker RSS with hardware decode:
 
 Earlier builds used ~1 GB per worker on 4K HDR content because frames were downloaded from the GPU at full source resolution. A recent fix moved the downscale onto the GPU itself, so only the small thumbnail-sized frame moves back to system RAM. An 8 GB container now comfortably supports 12+ GPU workers.
 
-**What's thumbnail quality 1-10?**
+### What's thumbnail quality 1-10?
 
 Lower numbers = higher quality but larger file sizes.
 
@@ -150,7 +159,7 @@ The value is passed straight to FFmpeg's `-q:v`. FFmpeg's MJPEG encoder clamps
 qscale to a minimum of 2, so setting 1 produces byte-identical output to 2 —
 2 really is as sharp as it goes.
 
-**Generation feels disk-bound on my multi-disk setup (unraid/mergerfs/JBOD) — how do I speed it up?**
+### Generation feels disk-bound on my multi-disk setup (unraid/mergerfs/JBOD) — how do I speed it up?
 
 On setups where one share is backed by multiple physical disks (unraid's `shfs`, mergerfs, JBOD), parallel workers processing files in alphabetical order tend to pile onto one disk at a time. Open the **New Job** modal (or edit a full-library schedule) and set **Processing Order** to **Random**. Workers will pull items from different disks in parallel, so disk read throughput — not GPU — sets the ceiling. Webhook jobs and Recently Added scans don't expose this setting because they only touch a handful of files where ordering doesn't matter. See [Issue #219](https://github.com/stevezau/media_preview_generator/issues/219) for background.
 
@@ -158,15 +167,15 @@ On setups where one share is backed by multiple physical disks (unraid's `shfs`,
 
 ## Docker
 
-**Why does my container fail to start?**
+### Why does my container fail to start?
 
 Most common cause: `init: true` in your docker-compose. Remove it — this container manages its own processes internally, and `init: true` conflicts with that.
 
-**Why can't the container find my files?**
+### Why can't the container find my files?
 
 Path mapping issue. See [Path Mappings](reference.md#path-mappings).
 
-**How do I get the authentication token?**
+### How do I get the authentication token?
 
 Use [Authentication Token](getting-started.md#authentication-token).
 
@@ -174,15 +183,15 @@ Use [Authentication Token](getting-started.md#authentication-token).
 
 ## Processing
 
-**Can I process specific libraries only?**
+### Can I process specific libraries only?
 
 Yes. In **Settings** → **Libraries**, select which libraries to process.
 
-**How do I regenerate existing thumbnails?**
+### How do I regenerate existing thumbnails?
 
 When starting a job, use the **Regenerate** option to force regeneration of existing thumbnails.
 
-**Why is it "skipping" some files?**
+### Why is it "skipping" some files?
 
 Possible causes:
 
@@ -190,7 +199,7 @@ Possible causes:
 - File not found (check [path mappings](reference.md#path-mappings))
 - Invalid file format
 
-**Why does ETA show "Calculating..." for so long?**
+### Why does ETA show "Calculating..." for so long?
 
 The ETA calculation is designed to be **accurate, not fast**:
 
@@ -201,7 +210,7 @@ The ETA calculation is designed to be **accurate, not fast**:
 
 Early ETA guesses based on incomplete data are wildly inaccurate. The "Calculating…" phase filters out this noise.
 
-**What is the webhook / Sonarr / Radarr path column for?**
+### What is the webhook / Sonarr / Radarr path column for?
 
 Only relevant if you use [webhook integration](guides.md#webhook-integration).
 When Sonarr, Radarr, or Tdarr fire a webhook, they include the file path as
@@ -220,4 +229,4 @@ leave the webhook column blank.
 
 ---
 
-[Back to Docs](README.md) | [Main README](../README.md)
+[Back to Docs](README.md) | [Main README](https://github.com/stevezau/media_preview_generator/blob/dev/README.md)

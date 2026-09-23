@@ -16,12 +16,14 @@ Verifies that:
 
 from __future__ import annotations
 
+import errno
 import os
 import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from loguru import logger
 from PIL import Image
 
 from media_preview_generator.output import BifBundle, JellyfinTrickplayAdapter
@@ -527,3 +529,93 @@ class TestMultiServerFanout:
         # exact set (not just "contains") catches a stray off-media write here.
         media_names = {p.name for p in media_dir.iterdir()}
         assert media_names == {"Foo (2024).mkv", "Foo (2024).trickplay", "Foo (2024)-320-10.bif"}, media_names
+
+
+class TestPublishWriteDenied:
+    """A folder Jellyfin trickplay can't be written to must log an actionable hint.
+
+    The first write is the staging-folder ``mkdir``. The advice depends on the
+    layout: the default layout writes beside the video (media mount must be
+    read-write, or switch to off-media), off-media writes into Jellyfin's
+    config folder. Matrix: layout (media-adjacent, off-media) × errno
+    (EACCES, EROFS), plus an unrelated errno that gets neither hint.
+    """
+
+    def _publish_with_mkdir_error(
+        self, tmp_path, monkeypatch, *, err_no: int, off_media: bool
+    ) -> tuple[OSError, list[str]]:
+        frame_dir = tmp_path / "frames"
+        _populate_frames(frame_dir, count=3)
+        media_dir = tmp_path / "Movies" / "Test (2024)"
+        media_dir.mkdir(parents=True)
+        media_file = media_dir / "Test (2024).mkv"
+        media_file.write_bytes(b"")
+
+        if off_media:
+            config_dir = tmp_path / "jellyfin-config"
+            config_dir.mkdir()
+            adapter = JellyfinTrickplayAdapter(save_with_media=False, jellyfin_config_folder=str(config_dir))
+        else:
+            adapter = JellyfinTrickplayAdapter()
+        bundle = _make_bundle(str(media_file), frame_dir, frame_count=3)
+        sheet0 = adapter.compute_output_paths(bundle, server=None, item_id=_GUID)[0]
+
+        real_mkdir = os.mkdir
+
+        def fake_mkdir(path, *args, **kwargs):
+            if ".staging" in str(path):
+                raise OSError(err_no, os.strerror(err_no), str(path))
+            return real_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "mkdir", fake_mkdir)
+        messages: list[str] = []
+        sink_id = logger.add(lambda msg: messages.append(str(msg)), level="ERROR", format="{message}")
+        try:
+            with pytest.raises(OSError) as excinfo:
+                adapter.publish(bundle, [sheet0], item_id=_GUID)
+        finally:
+            logger.remove(sink_id)
+        return excinfo.value, messages
+
+    def test_suggests_read_write_or_off_media_when_media_mount_is_read_only(self, tmp_path, monkeypatch):
+        exc, messages = self._publish_with_mkdir_error(tmp_path, monkeypatch, err_no=errno.EROFS, off_media=False)
+
+        assert exc.errno == errno.EROFS
+        assert len(messages) == 1, messages
+        assert "media folder is mounted read-only" in messages[0]
+        assert "read-write" in messages[0]
+        assert "Store trickplay off the media drive" in messages[0]
+
+    def test_logs_permission_hint_when_media_folder_is_not_writable(self, tmp_path, monkeypatch):
+        exc, messages = self._publish_with_mkdir_error(tmp_path, monkeypatch, err_no=errno.EACCES, off_media=False)
+
+        assert exc.errno == errno.EACCES
+        assert len(messages) == 1, messages
+        assert "permission denied" in messages[0]
+        assert "media" in messages[0]
+        assert "read-write" in messages[0]
+
+    def test_names_config_folder_when_off_media_mount_is_read_only(self, tmp_path, monkeypatch):
+        exc, messages = self._publish_with_mkdir_error(tmp_path, monkeypatch, err_no=errno.EROFS, off_media=True)
+
+        assert exc.errno == errno.EROFS
+        assert len(messages) == 1, messages
+        assert "Jellyfin config folder is mounted read-only" in messages[0]
+        assert "read-write" in messages[0]
+        assert "media folder" not in messages[0]
+
+    def test_names_config_folder_when_off_media_folder_is_not_writable(self, tmp_path, monkeypatch):
+        exc, messages = self._publish_with_mkdir_error(tmp_path, monkeypatch, err_no=errno.EACCES, off_media=True)
+
+        assert exc.errno == errno.EACCES
+        assert len(messages) == 1, messages
+        assert "permission denied" in messages[0]
+        assert "Jellyfin config folder" in messages[0]
+        assert "media file" not in messages[0]
+
+    @pytest.mark.parametrize("off_media", [False, True])
+    def test_logs_no_mount_hint_when_error_is_unrelated(self, tmp_path, monkeypatch, off_media: bool):
+        exc, messages = self._publish_with_mkdir_error(tmp_path, monkeypatch, err_no=errno.ENOSPC, off_media=off_media)
+
+        assert exc.errno == errno.ENOSPC
+        assert messages == []

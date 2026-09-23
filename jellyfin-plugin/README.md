@@ -116,4 +116,4 @@ Copy `out/<abi>/Jellyfin.Plugin.MediaPreviewBridge.dll` into `<jellyfin-config>/
 
 ## Release process
 
-Tag with `plugin-v10.11.X.Y`. The CI workflow at `.github/workflows/jellyfin-plugin.yml` builds both DLLs (`10.11.X.Y` and `12.0.X.Y`), attaches both zips to one GitHub release, and publishes `manifest.json` (two `versions` entries, `targetAbi` `10.11.0.0` and `12.0.0.0`) to GitHub Pages — Jellyfin's plugin catalogue picks up the new version. Pull requests that touch the plugin build both ABIs in `.github/workflows/plugins-ci.yml`.
+Tag with `plugin-v10.11.X.Y`. The CI workflow at `.github/workflows/jellyfin-plugin.yml` builds both DLLs (`10.11.X.Y` and `12.0.X.Y`), attaches both zips to one GitHub release, and deploys the updated `manifest.json` (two `versions` entries, `targetAbi` `10.11.0.0` and `12.0.0.0`) to GitHub Pages together with the docs site (via `.github/workflows/docs.yml`) — Jellyfin's plugin catalogue picks up the new version. Pull requests that touch the plugin build both ABIs in `.github/workflows/plugins-ci.yml`.

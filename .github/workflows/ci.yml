@@ -758,10 +758,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # pyproject's description is the single source for the one-line pitch;
+      # Docker Hub rejects short descriptions over 100 characters.
+      - name: Read short description
+        id: meta
+        run: |
+          short=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['description'])")
+          if (( ${#short} > 100 )); then
+            echo "::error::pyproject description is ${#short} chars; Docker Hub allows 100"
+            exit 1
+          fi
+          echo "short=$short" >> "$GITHUB_OUTPUT"
+
       - name: Update canonical Docker Hub description
         uses: peter-evans/dockerhub-description@v5
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: stevezzau/media_preview_generator
+          short-description: ${{ steps.meta.outputs.short }}
           readme-filepath: ./DOCKERHUB_README.md

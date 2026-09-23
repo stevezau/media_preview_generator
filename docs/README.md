@@ -1,6 +1,6 @@
 # Documentation
 
-> Media Preview Generator | [Main README](../README.md)
+> Media Preview Generator | [Main README](https://github.com/stevezau/media_preview_generator/blob/dev/README.md)
 
 Pick the right doc for what you're trying to do.
 
@@ -14,7 +14,7 @@ Pick the right doc for what you're trying to do.
 | **Look up a setting or endpoint** — config keys, env vars, REST API, WebSocket events | [Reference](reference.md) |
 | **Troubleshoot something** — common errors and fixes | [Guides — Troubleshooting](guides.md#troubleshooting) |
 | **Read common questions** — "does it work with…", "how many workers…", HDR behavior | [FAQ](faq.md) |
-| **Contribute code** — dev setup, tests, style, PRs | [Contributing](../CONTRIBUTING.md) |
+| **Contribute code** — dev setup, tests, style, PRs | [Contributing](https://github.com/stevezau/media_preview_generator/blob/dev/CONTRIBUTING.md) |
 
 ## Quick Links
 
@@ -33,4 +33,4 @@ Pick the right doc for what you're trying to do.
 
 ---
 
-[Back to Main README](../README.md)
+[Back to Main README](https://github.com/stevezau/media_preview_generator/blob/dev/README.md)

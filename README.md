@@ -1,15 +1,19 @@
 <!-- PROJECT SHIELDS -->
 <div align="center">
 
-[![Contributors][contributors-shield]][contributors-url]
-[![Forks][forks-shield]][forks-url]
+[![Build][build-shield]][build-url]
+[![Release][release-shield]][release-url]
+[![Docker Pulls][docker-shield]][docker-url]
+[![Image Size][image-size-shield]][docker-url]
+[![codecov][codecov-shield]][codecov-url]
 [![Stargazers][stars-shield]][stars-url]
 [![Issues][issues-shield]][issues-url]
 [![MIT License][license-shield]][license-url]
-[![Docker Pulls][docker-shield]][docker-url]
-[![codecov][codecov-shield]][codecov-url]
+[![Contributors][contributors-shield]][contributors-url]
+[![Forks][forks-shield]][forks-url]
 [![AI-Assisted][ai-shield]][ai-url]
 [![Sponsor][sponsor-shield]][sponsor-url]
+[![Buy me a coffee][kofi-shield]][kofi-url]
 
 </div>
 
@@ -22,7 +26,7 @@
   <p align="center">
     GPU-accelerated video preview thumbnail generation for <strong>Plex, Emby, and Jellyfin</strong>
     <br />
-    <a href="docs/README.md"><strong>Explore the docs</strong></a>
+    <a href="https://stevezau.github.io/media_preview_generator/"><strong>Explore the docs</strong></a>
     <br />
     <br />
     <a href="#quick-start">Quick Start</a>
@@ -41,9 +45,11 @@ Generates video preview thumbnails for **Plex, Emby, and Jellyfin**. These are t
 
 **The Problem:** Built-in preview generation has gaps depending on the server you run:
 
-- **Plex** generates thumbnails single-threaded on the CPU (no GPU support).
-- **Emby** has no GPU support for thumbnail generation at all.
-- **Jellyfin** does support hardware-accelerated trickplay, but it shares CPU/GPU with playback — and on a busy server that's resources you'd rather give to the player.
+- **Plex** documents no GPU option for preview thumbnails, and calls the job CPU-intensive.
+- **Emby** has no GPU option for thumbnail extraction.
+- **Jellyfin** can use hardware decoding for trickplay, but it's off by default, and by default the job runs at below-normal priority with one thread.
+
+See the [dated, sourced comparison](https://stevezau.github.io/media_preview_generator/comparison/) for details and for when the built-ins are the better choice.
 
 **The Solution:** This tool runs preview generation **off the media server** on a machine of your choosing, uses every GPU it finds, and processes files in parallel. When two or more servers contain the same file, FFmpeg runs only once — the result is then written out in each server's own expected format, automatically.
 
@@ -62,9 +68,9 @@ file to every server that owns it.
 
 **Automation that just works.** Radarr / Sonarr / Tdarr / FileFlows webhooks,
 Plex direct (Plex Pass), Recently Added polling, cron & interval schedules —
-all share one universal inbound URL with vendor auto-detection. A 5-step
-backoff retry (30 s → 2 m → 5 m → 15 m → 60 m) handles files your server
-hasn't indexed yet. Source-aware dedup re-runs automatically when a file is
+all share one universal inbound URL with vendor auto-detection. A backoff
+retry (1 m → 2 m → 5 m by default; raise the retry count for 15 m and
+60 m) handles files your server hasn't indexed yet. Source-aware dedup re-runs automatically when a file is
 swapped (e.g. a Sonarr/Radarr quality upgrade) and skips when nothing changed.
 Need to (re)generate something by hand? **Manual Generation** lets you search
 your servers by title — pick a show to cover every episode, or a movie, episode,
@@ -96,10 +102,10 @@ per server. See the [Intro & Credits guide](docs/guides.md#intro--credits).
 ## Screenshots
 
 <table><tr>
-<td><a href="docs/images/home.png"><img src="docs/images/home.png" alt="Dashboard showing connected Plex / Jellyfin / Emby servers, GPU workers, and job statistics" width="380"></a></td>
-<td><a href="docs/images/servers.png"><img src="docs/images/servers.png" alt="Servers page with one card per Plex / Jellyfin / Emby server, each showing connection status and library count" width="380"></a></td>
-<td><a href="docs/images/settings.png"><img src="docs/images/settings.png" alt="Settings — Processing Options card with per-GPU configuration for an NVIDIA TITAN RTX and Intel UHD 770, CPU workers, and thumbnail quality" width="380"></a></td>
-<td><a href="docs/images/automation.png"><img src="docs/images/automation.png" alt="Automation page Triggers tab listing trigger sources for Sonarr / Radarr / Tdarr / per-vendor manual imports" width="380"></a></td>
+<td><a href="docs/images/home.webp"><img src="docs/images/home.webp" alt="Dashboard showing connected Plex / Jellyfin / Emby servers, GPU workers, and job statistics" width="380"></a></td>
+<td><a href="docs/images/servers.webp"><img src="docs/images/servers.webp" alt="Servers page with one card per Plex / Jellyfin / Emby server, each showing connection status and library count" width="380"></a></td>
+<td><a href="docs/images/settings.webp"><img src="docs/images/settings.webp" alt="Settings — Processing Options card with per-GPU configuration for an NVIDIA TITAN RTX and Intel UHD 770, CPU workers, and thumbnail quality" width="380"></a></td>
+<td><a href="docs/images/automation.webp"><img src="docs/images/automation.webp" alt="Automation page Triggers tab listing trigger sources for Sonarr / Radarr / Tdarr / per-vendor manual imports" width="380"></a></td>
 </tr></table>
 
 ---
@@ -124,6 +130,8 @@ docker run -d \
 ```
 
 Replace `/path/to/media`, `/path/to/plex/config`, and `/path/to/app/config` with your actual paths.
+
+> **Emby or Jellyfin?** This command is for Plex, which only writes into `/plex`, so the media stays `:ro`. Emby and Jellyfin (default layout) write previews next to each video, so change the media mount to `:rw`. See [Volume Mounts](docs/getting-started.md#volume-mounts).
 
 > **Timezone:** The `/etc/localtime` mount ensures log timestamps and scheduled jobs use your local time. Alternatively, use `-e TZ=America/New_York` (replace with your [timezone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)).
 
@@ -218,7 +226,7 @@ media server a few hundred hours of CPU time, sponsorship helps fund the time
 that goes into it — new server integrations, GPU support, and keeping up with
 FFmpeg and the Plex/Emby/Jellyfin APIs.
 
-[:heart: **Sponsor this project**][sponsor-url]
+[:heart: **Sponsor this project**][sponsor-url] or [**buy me a coffee on Ko-fi**][kofi-url] (no account needed).
 
 Not in a position to sponsor? Starring the repo, reporting bugs, and answering
 questions in [Discussions](https://github.com/stevezau/media_preview_generator/discussions)
@@ -246,11 +254,18 @@ Distributed under the MIT License. See [LICENSE](LICENSE) for details.
 
 Made with care by [stevezau](https://github.com/stevezau)
 
-Star this repo if you find it useful!
+If this saved you an evening, a [star][stars-url] helps other people find it.
 
 </div>
 
 <!-- MARKDOWN LINKS & IMAGES -->
+[build-shield]: https://img.shields.io/github/actions/workflow/status/stevezau/media_preview_generator/ci.yml?branch=dev&style=for-the-badge&label=build
+[build-url]: https://github.com/stevezau/media_preview_generator/actions/workflows/ci.yml
+[release-shield]: https://img.shields.io/github/v/release/stevezau/media_preview_generator?filter=!plugin-v*&style=for-the-badge
+[release-url]: https://github.com/stevezau/media_preview_generator/releases
+[image-size-shield]: https://img.shields.io/docker/image-size/stevezzau/media_preview_generator/latest?style=for-the-badge
+[kofi-shield]: https://img.shields.io/badge/Buy%20me%20a%20coffee-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white
+[kofi-url]: https://ko-fi.com/stevezau
 [contributors-shield]: https://img.shields.io/github/contributors/stevezau/media_preview_generator.svg?style=for-the-badge
 [contributors-url]: https://github.com/stevezau/media_preview_generator/graphs/contributors
 [forks-shield]: https://img.shields.io/github/forks/stevezau/media_preview_generator.svg?style=for-the-badge

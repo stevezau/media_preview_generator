@@ -11,12 +11,17 @@ on:
         required: false
         default: ""
 
-# Two jobs run in sequence:
+# Three jobs run in sequence:
 #   1. build-release  → one row per Jellyfin ABI (10.11/net9, 12.0/net10):
 #      DLL + zip + attachment on ONE GitHub release (tag plugin-v<10.11 version>)
-#   2. publish-pages  → uploads manifest.json via the official Pages
-#      Actions API (no branch push, so repo branch-protection rules
-#      don't apply). Requires Pages → "Build and deployment" set to
+#   2. build-manifest → patches both new versions into the live
+#      manifest.json and hands it over as an artifact
+#   3. publish-site   → calls docs.yml, which builds the docs site from
+#      `dev`, adds that manifest at jellyfin-plugin/manifest.json and
+#      deploys both via the official Pages Actions API (no branch push,
+#      so repo branch-protection rules don't apply). A Pages deploy
+#      replaces the whole site, so the manifest and the docs always ship
+#      together. Requires Pages → "Build and deployment" set to
 #      "GitHub Actions" once in the repo settings.
 permissions:
   contents: write
@@ -24,6 +29,9 @@ permissions:
   id-token: write
 
 # Stops two tag pushes / dispatches from racing the manifest publish.
+# The Pages deploy itself is serialised with docs-only deploys by the
+# job-level `pages` group inside docs.yml. Don't use `pages` here too:
+# the same group at caller and callee level deadlocks.
 concurrency:
   group: jellyfin-plugin
   cancel-in-progress: false
@@ -152,12 +160,11 @@ jobs:
           files: jellyfin-plugin/${{ steps.pack.outputs.zip }}
           fail_on_unmatched_files: true
 
-  publish-pages:
+  build-manifest:
     needs: build-release
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -183,17 +190,26 @@ jobs:
           SITE_DIR=_site/jellyfin-plugin
           mkdir -p "$SITE_DIR"
 
-          # Fetch the previously-published manifest (if any) so we
-          # preserve version history. Falls back to the seed template
-          # on the very first deploy.
+          # Fetch the previously-published manifest so we preserve version
+          # history. Only a genuine 404 (never published) seeds from the
+          # template; any other failure aborts, because publishing the bare
+          # template would wipe every earlier version from users' catalogs.
           PREV_URL="https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json"
-          if curl -fsSL "$PREV_URL" -o existing.json; then
-            echo "Fetched existing manifest:"
-            wc -l existing.json
-          else
-            cp jellyfin-plugin/manifest.template.json existing.json
-            echo "First publish — seeded from template."
-          fi
+          status=$(curl -sSL --retry 3 -o existing.json -w '%{http_code}' "$PREV_URL" || true)
+          case "$status" in
+            200)
+              echo "Fetched existing manifest:"
+              wc -l existing.json
+              ;;
+            404)
+              cp jellyfin-plugin/manifest.template.json existing.json
+              echo "First publish — seeded from template."
+              ;;
+            *)
+              echo "::error::Could not fetch the live manifest (HTTP ${status:-none}); refusing to publish over it."
+              exit 1
+              ;;
+          esac
 
           SITE_DIR="$SITE_DIR" TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)" python3 <<'PY'
           import json
@@ -203,10 +219,9 @@ jobs:
           env = os.environ
           template = json.loads(Path("jellyfin-plugin/manifest.template.json").read_text())
           data = json.loads(Path("existing.json").read_text())
-          # The fetched JSON might have stale MIME shenanigans — guard
-          # against unexpected shapes and reseed from the template.
+          # Reseeding here would silently drop the published version history.
           if not isinstance(data, list) or not data:
-              data = template
+              raise SystemExit("Live manifest is not a non-empty JSON list; refusing to overwrite it.")
 
           plugin = data[0]
           plugin["description"] = template[0]["description"]
@@ -234,34 +249,20 @@ jobs:
           out.write_text(json.dumps(data, indent=4) + "\n")
           PY
 
-          # Tiny landing index so a stray browser visit isn't a 404.
-          cat > _site/index.html <<HTML
-          <!doctype html>
-          <html lang="en">
-          <head><meta charset="utf-8"><title>Media Preview Bridge</title></head>
-          <body>
-            <h1>Media Preview Bridge — Jellyfin plugin</h1>
-            <p>Add this URL to Jellyfin → Dashboard → Plugins → Repositories:</p>
-            <p><code>https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json</code></p>
-            <p>Source: <a href="https://github.com/${REPOSITORY}">github.com/${REPOSITORY}</a></p>
-          </body>
-          </html>
-          HTML
-
-          echo "Site contents:"
+          # The site root (index.html) is the docs home page now, built by
+          # docs.yml; the "add this repository URL" instructions live in
+          # docs/multi-server.md.
+          echo "Manifest:"
           find _site -maxdepth 3
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+      - name: Upload manifest artifact
+        uses: actions/upload-artifact@v4
         with:
-          path: _site
-
-      - name: Deploy to GitHub Pages
-        id: deploy
-        uses: actions/deploy-pages@v4
+          name: jellyfin-plugin-manifest
+          path: _site/jellyfin-plugin/manifest.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
 
       - name: Summary
         run: |
@@ -269,8 +270,18 @@ jobs:
             echo "## Media Preview Bridge ${{ needs.build-release.outputs.release_version }} published"
             echo ""
             echo "- Release: https://github.com/${{ github.repository }}/releases/tag/plugin-v${{ needs.build-release.outputs.release_version }}"
-            echo "- Manifest: https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json"
-            echo "- Pages URL: ${{ steps.deploy.outputs.page_url }}"
+            echo "- Manifest: https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json (deployed by the publish-site job)"
             echo "- Jellyfin 10.11 build ${{ needs.build-release.outputs.version_10_11 }}: MD5 \`${{ needs.build-release.outputs.checksum_10_11 }}\`"
             echo "- Jellyfin 12.0 build ${{ needs.build-release.outputs.version_12_0 }}: MD5 \`${{ needs.build-release.outputs.checksum_12_0 }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-site:
+    needs: build-manifest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/docs.yml
+    with:
+      manifest_artifact: jellyfin-plugin-manifest
+      docs_ref: dev

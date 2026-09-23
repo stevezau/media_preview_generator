@@ -1,3 +1,7 @@
+---
+description: Install Media Preview Generator with Docker or Docker Compose, then set up NVIDIA, Intel or AMD GPU acceleration, Unraid, volume mounts and networking.
+---
+
 # Getting Started
 
 > [Back to Docs](README.md)
@@ -28,7 +32,7 @@ Get preview thumbnails generating in minutes — for **Plex, Emby, Jellyfin**, o
 - [Guides & Troubleshooting](guides.md)
 - [Configuration & API Reference](reference.md)
 - [FAQ](faq.md)
-- [Contributing & Development](../CONTRIBUTING.md)
+- [Contributing & Development](https://github.com/stevezau/media_preview_generator/blob/dev/CONTRIBUTING.md)
 
 ---
 
@@ -64,6 +68,9 @@ docker run -d \
 ```
 
 Replace `/path/to/media`, `/path/to/plex/config`, and `/path/to/app/config` with your actual paths.
+
+> [!IMPORTANT]
+> This command is for Plex, which only writes into `/plex`, so the media can stay `:ro`. **Using Emby, or Jellyfin?** Change the media mount to `:rw`, because those previews are written next to each video. (Jellyfin's off-media mode is the exception.) See [Volume Mounts](#volume-mounts).
 
 > [!NOTE]
 > No environment variables are required for first-time setup. Server connections (Plex / Emby / Jellyfin), libraries, GPU/CPU threads, and path mappings are all configured in the Setup Wizard and **Settings**. Environment variables are optional overrides (see [Reference](reference.md)).
@@ -108,13 +115,24 @@ to your servers; that is off until you turn it on per server (see the
 tool isn't competing with a redundant CPU job:
 
 - **Plex** — **Settings → Library → Generate video preview thumbnails → Never**.
-- **Emby** — no action needed (Emby has no built-in trickplay generation).
+- **Emby** — Emby can make its own thumbnails during library scans. Turn
+  off its scan-time thumbnail extraction and chapter-image extraction on
+  each library (`ExtractTrickplayImagesDuringLibraryScan` and
+  `ExtractChapterImagesDuringLibraryScan`). The Previews
+  Readiness card recommends this and turns them off when you click
+  **Disable**; the app never changes them on its own.
 - **Jellyfin** — keep **"Trickplay image extraction"** *enabled* on each
   library (Jellyfin only reads this app's published tiles when that flag is
-  on), but turn off **"Extract trickplay images during library scan"** so
-  Jellyfin doesn't re-generate on top of your files. The Previews Readiness
-  card (Servers → Edit → Setup Health) flags all of these and can toggle
-  them for you.
+  on). What to do with **"Extract trickplay images during library scan"**
+  depends on the Media Preview Bridge plugin:
+  - **Plugin installed:** turn it off. The plugin registers new tiles
+    directly, so Jellyfin's own extraction is wasted CPU.
+  - **No plugin:** keep it **on**. Without the plugin, this flag is what
+    lets Jellyfin pick up the tiles on its next library scan. Off means new
+    previews wait for Jellyfin's daily trickplay task (3 AM by default).
+
+The Previews Readiness card (Servers → Edit → Setup Health) checks all of
+these and can toggle them for you.
 
 > [!TIP]
 > **After setup, you probably want one or both of:**
@@ -127,16 +145,26 @@ tool isn't competing with a redundant CPU job:
 
 | Container Path | Purpose | Mode | Required when… |
 |----------------|---------|------|----------------|
-| `/media` | Your media files (path seen by Emby/Jellyfin's write step) | `ro` (read-only) | **Emby or Jellyfin is configured** — trickplay tiles and Emby BIF sidecars are written next to the media file, so the container needs the media folder visible. Read-only is fine. |
+| `/media` | Your media files. FFmpeg reads the videos from here. | `ro` if only Plex is configured. `rw` if Emby is configured, or Jellyfin in its default layout. | Always. |
 | `/plex` | Plex application data (where Plex stores BIF bundles) | `rw` | **Plex is configured** — BIFs land inside Plex's config at `Media/localhost/<hash>/.../index-sd.bif`. Omit this mount entirely if you don't configure any Plex server. |
 | `/config` | This app's settings, schedules, and job history | `rw` | Always |
 
+**Which servers need the media mounted read-write:**
+
+- **Plex:** no. Previews go into `/plex`. Nothing is written next to the video, so `:ro` is fine.
+- **Emby:** yes. The BIF is written next to each video (for example `<video>-320-10.bif`).
+- **Jellyfin, default layout:** yes. Tiles are written next to each video (`<video>.trickplay/`).
+- **Jellyfin, off-media mode:** no. Tiles go into Jellyfin's data folder instead. This needs the Media Preview Bridge plugin and Jellyfin's config folder mounted read-write in this container. See [off-media mode](guides/previews-readiness.md#jellyfin-config-folder).
+
+With a `:ro` media mount, Emby and default-layout Jellyfin can't save anything. Each file fails for that server with "Could not write preview file: … Read-only file system" in the job's per-server result and the logs. Those files aren't retried. Other servers on the same file are unaffected. No setup check warns about this in advance.
+
 > [!NOTE]
-> **Jellyfin and Emby don't need Plex's config mount.** Trickplay and Emby
-> sidecar BIFs are written next to each media file under `/media`, and the
-> scan-nudge is sent over HTTP. So a Jellyfin-only or Emby-only setup needs
-> `/media` + `/config` and nothing else. A mixed setup needs whichever
-> mount(s) each configured server requires.
+> **Jellyfin and Emby don't need Plex's config mount.** Emby BIFs and
+> default-layout Jellyfin tiles are written next to each media file under
+> `/media`, and the scan-nudge is sent over HTTP. So a Jellyfin-only or
+> Emby-only setup needs `/media` (read-write) + `/config`. Jellyfin's
+> off-media mode needs Jellyfin's config folder (read-write) as well. A mixed
+> setup needs whichever mount(s) each configured server requires.
 
 ---
 
@@ -158,7 +186,7 @@ WEB_AUTH_TOKEN=your-password
 
 ## Docker Compose
 
-See [docker-compose.example.yml](../docker-compose.example.yml) for ready-to-use configurations:
+See [docker-compose.example.yml](https://github.com/stevezau/media_preview_generator/blob/dev/docker-compose.example.yml) for ready-to-use configurations:
 
 | Configuration | Use Case |
 |---------------|----------|
@@ -251,7 +279,7 @@ docker run -d \
 ```
 
 > [!TIP]
-> **Why `NVIDIA_DRIVER_CAPABILITIES=all`?** Dolby Vision videos need the NVIDIA Vulkan driver to render colours correctly; the `all` value is what makes that driver available inside the container. Without it, Dolby Vision thumbnails may show with a green tint. (The older `compute,video,utility` setting is fine for everything except Dolby Vision.)
+> **Why `NVIDIA_DRIVER_CAPABILITIES=all`?** Dolby Vision Profile 5 videos need the NVIDIA Vulkan driver to be tone-mapped; the `all` value is what makes that driver available inside the container. Without it, the app skips tone mapping for those files and their thumbnails come out visibly dim. (The older `compute,video,utility` setting is fine for everything except Dolby Vision Profile 5.)
 
 > [!TIP]
 > **Multi-GPU?** Hosts with two or more NVIDIA cards are detected automatically — each card appears as a separate row in **Settings → Processing Options → GPU Configuration** with its own enable toggle, worker count, and FFmpeg thread setting. Work spreads across cards.
@@ -435,6 +463,8 @@ docker run -d \
 | `PUID` | `99` | `nobody` user |
 | `PGID` | `100` | `users` group |
 
+**Emby or Jellyfin on Unraid** — the commands above are for Plex. For Emby, or Jellyfin in its default layout, change `/data/plex:ro` to `/data/plex:rw`, because those previews are written next to each video. See [Volume Mounts](#volume-mounts).
+
 **Network Considerations** — When completing the Setup Wizard, make sure each media server you pick is reachable from the container (not `localhost` from Unraid's perspective). Plex appears as a dropdown after OAuth sign-in; Emby and Jellyfin are connected by URL.
 
 **Check Intel GPU Exists:**
@@ -591,4 +621,4 @@ SHA against the `dev` branch HEAD on GitHub.
 
 ---
 
-[Back to Docs](README.md) | [Main README](../README.md)
+[Back to Docs](README.md) | [Main README](https://github.com/stevezau/media_preview_generator/blob/dev/README.md)

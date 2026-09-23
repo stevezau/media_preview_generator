@@ -69,8 +69,8 @@ SURFACE_SCOPE: dict[str, tuple[str, ...]] = {
         r'<div class="form-text">\s*Quality:.*?</div>',
     ),
     "unraid-template": (r"^.*THUMBNAIL_QUALITY.*$",),
-    # The whole FAQ answer, heading to the next bold heading.
-    "faq.md": (r"\*\*What's thumbnail quality 1-10\?\*\*.*?(?=\n\*\*)",),
+    # The whole FAQ answer, question heading to the next question heading.
+    "faq.md": (r"^### What's thumbnail quality 1-10\?\n.*?(?=\n### )",),
     "reference.md": (r"^.*[Pp]review quality.*$",),
     "llms.txt": (r"^.*thumbnail quality.*$",),
 }

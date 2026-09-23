@@ -226,6 +226,19 @@ If you need shared state across multiple processes (e.g. for horizontal scaling)
 4. Update `mock_config` fixture in `tests/conftest.py`
 5. Document in `docs/reference.md`
 
+### Editing a Docs Page
+
+After changing any file under `docs/`, regenerate `llms-full.txt` (every docs page
+concatenated, for LLM agents that fetch the whole site in one file) so it stays in
+sync with the page you just edited:
+
+```bash
+python scripts/generate_llms_full.py         # writes llms-full.txt
+python scripts/generate_llms_full.py --check # CI-style: exits non-zero if it's stale
+```
+
+`tests/test_llms_full.py` fails the build if `llms-full.txt` drifts from `docs/`.
+
 ---
 
 ## Docker Build

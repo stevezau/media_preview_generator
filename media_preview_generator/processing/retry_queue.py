@@ -46,6 +46,26 @@ from typing import Any
 #: window without turning into a runaway loop.
 BACKOFF_SCHEDULE: tuple[int, ...] = (60, 120, 300, 900, 3600)
 
+
+def scaled_backoff_delay(attempt: int, retry_delay_sec: int) -> int:
+    """Return the wait in seconds before retry ``attempt``.
+
+    The user's "Initial retry delay" setting (default 30) scales every step of
+    :data:`BACKOFF_SCHEDULE` by ``retry_delay_sec / 30``, floored at half speed.
+    Attempts past the end of the schedule reuse its last step.
+
+    Args:
+        attempt: 1-indexed retry attempt number.
+        retry_delay_sec: The ``webhook_retry_delay`` setting in seconds.
+
+    Returns:
+        The delay in whole seconds, never less than 1.
+    """
+    scale = max(0.5, retry_delay_sec / 30.0)
+    step = BACKOFF_SCHEDULE[min(attempt - 1, len(BACKOFF_SCHEDULE) - 1)]
+    return max(1, int(step * scale))
+
+
 #: Per-publisher status values (as ``.value`` strings of
 #: :class:`PublisherStatus`) that flag a file as "still needs another
 #: attempt because the destination server isn't ready yet."
