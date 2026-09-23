@@ -1045,16 +1045,24 @@ class TestProtocol:
 
     def test_the_helper_serves_a_stdin_numbered_past_1024_when_many_files_are_open(self, monkeypatch):
         # select() can't watch a descriptor at or above FD_SETSIZE (1024) and raises ValueError instead.
-        if resource.getrlimit(resource.RLIMIT_NOFILE)[0] <= 1100:
-            pytest.skip("the open-file limit is too low to number a descriptor past 1024")
-        request = json.dumps({"id": 1, "frames": 2, "height": 2, "width": 3}).encode()
-        read_fd, write_fd = os.pipe()
-        os.write(write_fd, request + b"\n" + self.PLANES.tobytes())
-        os.close(write_fd)
-        high_fd = fcntl.fcntl(read_fd, fcntl.F_DUPFD, 1024)
-        os.close(read_fd)
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft <= 1100:
+            if hard != resource.RLIM_INFINITY and hard <= 1100:
+                pytest.skip("the open-file limit is too low to number a descriptor past 1024")
+            resource.setrlimit(
+                resource.RLIMIT_NOFILE, (4096 if hard == resource.RLIM_INFINITY else min(hard, 4096), hard)
+            )
+        try:
+            request = json.dumps({"id": 1, "frames": 2, "height": 2, "width": 3}).encode()
+            read_fd, write_fd = os.pipe()
+            os.write(write_fd, request + b"\n" + self.PLANES.tobytes())
+            os.close(write_fd)
+            high_fd = fcntl.fcntl(read_fd, fcntl.F_DUPFD, 1024)
+            os.close(read_fd)
 
-        code, written = self._serve_stdin(monkeypatch, high_fd, idle_exit_s=5.0)
+            code, written = self._serve_stdin(monkeypatch, high_fd, idle_exit_s=5.0)
+        finally:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
 
         assert high_fd >= 1024
         assert code == 0

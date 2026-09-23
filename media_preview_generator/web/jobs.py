@@ -1138,6 +1138,8 @@ class JobManager:
         """Periodic callback: run retention then schedule the next tick."""
         try:
             with self._lock:
+                if self._closed:  # a tick that fired just before close() still reaches here; cancel() can't stop it
+                    return
                 self._enforce_log_retention()
         except Exception as e:
             logger.debug("Retention tick error: {}", e)

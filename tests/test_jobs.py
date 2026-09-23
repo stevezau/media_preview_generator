@@ -296,12 +296,17 @@ class TestClose:
         assert jm.get_job(job.id) is job
         assert _files_open_under(config_dir) == []
 
-    def test_a_retention_tick_after_close_schedules_no_new_timer(self, config_dir):
+    def test_a_retention_tick_after_close_neither_sweeps_nor_schedules_a_new_timer(self, config_dir, monkeypatch):
+        # A tick that fired just before close() still runs; it mustn't sweep log files a replacement manager in the
+        # same config_dir now owns.
         jm = JobManager(config_dir=config_dir)
         jm.close()
+        swept = []
+        monkeypatch.setattr(jm, "_enforce_log_retention", lambda: swept.append(True))
 
         jm._retention_tick()
 
+        assert swept == []
         assert jm._retention_timer is None
 
     def test_replacing_the_shared_manager_leaves_only_the_new_ones_files_open_when_config_dir_changes(self, tmp_path):
