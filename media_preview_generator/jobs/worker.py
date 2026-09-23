@@ -94,6 +94,14 @@ def resolve_per_item_pin(config, item, registry) -> str | None:
     return None
 
 
+# Emit cadences for ``process_items_headless``'s poll loop. Module-level so
+# tests can drive the loop deterministically: asserting "the callback fires"
+# by sleeping a stub just past a hardcoded threshold makes the test a race,
+# which is exactly how it flaked in CI while passing locally.
+WORKER_STATUS_EMIT_INTERVAL_S = 1.0
+HEADLESS_PROGRESS_EMIT_INTERVAL_S = 3.0
+
+
 class Worker:
     """Represents a worker thread for processing media items."""
 
@@ -1253,7 +1261,7 @@ class WorkerPool:
 
             # Emit progress/ETA updates every 3 seconds so the ETA stays
             # fresh even during long FFmpeg runs between task completions.
-            if progress_callback and current_time - last_progress_update >= 3.0:
+            if progress_callback and current_time - last_progress_update >= HEADLESS_PROGRESS_EMIT_INTERVAL_S:
                 progress_callback(
                     completed_tasks,
                     total_items,
@@ -1261,7 +1269,7 @@ class WorkerPool:
                 )
                 last_progress_update = current_time
 
-            if worker_callback and current_time - last_worker_update >= 1.0:
+            if worker_callback and current_time - last_worker_update >= WORKER_STATUS_EMIT_INTERVAL_S:
                 worker_statuses = []
                 all_workers = self._snapshot_workers()
 
