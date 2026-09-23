@@ -206,8 +206,16 @@ class TestItemsWithoutPathScrub:
     def _kept_items(sources):
         import json
 
-        from tests.conftest import _scrub_response_body
+        from vcr.request import Request
 
+        from tests.conftest import _scrub_request_uri, _scrub_response_body
+
+        # _scrub_response_body reads the request path/query off module-level state that
+        # _scrub_request_uri sets — vcrpy calls the two hooks back-to-back for the same
+        # interaction. Calling _scrub_request_uri here (with the real /Items?Ids=&Fields=
+        # shape _fetch_media_sources sends) pins that state instead of inheriting whatever
+        # an unrelated test left behind, which made this test order-dependent under xdist.
+        _scrub_request_uri(Request("GET", "http://fake-server/Items?Ids=53&Fields=Path,MediaSources", None, {}))
         body = json.dumps({"Items": [{"Id": "53", "MediaSources": sources}], "TotalRecordCount": 1})
         scrubbed = _scrub_response_body({"headers": {}, "body": {"string": body}})
         return json.loads(scrubbed["body"]["string"])["Items"]
