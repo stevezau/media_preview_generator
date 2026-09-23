@@ -1413,7 +1413,7 @@ class TestBudgetExhaustedJobWarning:
         _run(ctx, media, {"plex-1": ready_publisher()})
         assert pipeline.budget_exhausted_warnings(ctx) == [
             "TheIntroDB's daily lookup limit was reached: 1 file was checked without it. "
-            "It resets at 00:00 UTC; run the library again after that "
+            "It resets at 00:00 UTC; the files it left undecided are checked again automatically after that "
             "(or add a TheIntroDB API key for a higher limit)."
         ]
 
@@ -1429,7 +1429,7 @@ class TestBudgetExhaustedJobWarning:
             _run(ctx, p, {"plex-1": ready_publisher()})
         assert pipeline.budget_exhausted_warnings(ctx) == [
             "TheIntroDB's daily lookup limit was reached: 3 files were checked without it. "
-            "It resets at 00:00 UTC; run the library again after that "
+            "It resets at 00:00 UTC; the files it left undecided are checked again automatically after that "
             "(or add a TheIntroDB API key for a higher limit)."
         ]
 
@@ -1501,6 +1501,9 @@ class TestBudgetExhaustedJobWarning:
         assert "API key" not in warnings[0]
         assert warnings[1].startswith("SkipDB's daily lookup limit was reached: 1 file")
         assert "API key" not in warnings[1]
+        # Only TheIntroDB's refused files are checked again automatically (job_runner._queue_budget_recheck).
+        assert warnings[0].endswith("It resets at 00:00 UTC; run the library again after that.")
+        assert warnings[1].endswith("It resets at 00:00 UTC; run the library again after that.")
         assert warnings[2].startswith("TheIntroDB's daily lookup limit was reached: 1 file")
         assert "add a TheIntroDB API key for a higher limit" in warnings[2]
 

@@ -8,7 +8,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from loguru import logger
 
@@ -42,7 +42,10 @@ from ..web.routes.job_runner import (
 from ..web.settings_manager import get_settings_manager
 from .audio.fingerprint import start_fingerprint_sweep
 from .audio.season import season_audio_answer_outdated
+from .decide import DecisionStatus
 from .external_ids import is_season_folder
+from .job_log import BUDGET_RECHECK_LABEL, SEASON_RECHECK_LABEL
+from .models import Source
 from .outcomes import (
     NOT_IN_LIBRARY,
     PLEX_PASS_UNKNOWN,
@@ -65,6 +68,7 @@ from .pipeline import (
 from .reconcile import LISTING_CONFIG_KEY, RECONCILE_SOURCE, CheckServersListing
 from .settings import load_server
 from .source_counts import DecidedByTally, stored_groups
+from .sources.ratelimit import RESET_TIME_LABEL
 from .store import MarkerStore
 
 _POLL_S = 1.0
@@ -81,6 +85,10 @@ _FINISHED = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLE
 # Job sources where the user chose the files (API/Start job dialog, Inspector re-detect, Season view Publish).
 _USER_PICKED_SOURCES = frozenset({"manual", "inspector", "inspector_season"})
 SEASON_SOURCE = "season"
+# A job that checks files again once TheIntroDB's daily budget has reset (``_queue_budget_recheck``).
+BUDGET_RECHECK_SOURCE = "theintrodb_recheck"
+# How long after the UTC day roll that job starts, so the limiter and TheIntroDB have both started the new day.
+BUDGET_RECHECK_AFTER_RESET = timedelta(minutes=5)
 # A follow-up's config key once its runner has read its files: nothing joins it after that.
 FILES_SEALED = "files_sealed"
 # A running Season job's config keys: the episodes other jobs asked for while it ran, each with the
@@ -94,7 +102,7 @@ FOLLOW_UP_LOCK = threading.Lock()
 _JOINED_KEYS = ("file_paths", "webhook_item_id_hints", FILES_SEALED, LATE_REQUESTS, LATE_SEALED)
 # Job sources whose files no sender just reported: a file missing from disk won't appear by waiting (and nothing was
 # just replaced). A retry Check servers queued is one of them; its not-in-library retries still chain.
-_NO_RETRY_SOURCES = _USER_PICKED_SOURCES | {SEASON_SOURCE, RECONCILE_SOURCE}
+_NO_RETRY_SOURCES = _USER_PICKED_SOURCES | {SEASON_SOURCE, RECONCILE_SOURCE, BUDGET_RECHECK_SOURCE}
 
 
 def _utcnow() -> datetime:
@@ -604,17 +612,123 @@ def _queue_season_followups_after(job, cfg: dict, ctx, listed: set[str]) -> None
     _queue_season_followups(job, paths)
 
 
+def budget_recheck_due(refused_at: datetime) -> datetime:
+    """When files TheIntroDB's used-up daily budget refused at ``refused_at`` are checked again.
+
+    Args:
+        refused_at: When (UTC) the first of them was refused.
+
+    Returns:
+        Shortly after the next UTC day roll, when the budget resets.
+    """
+    next_day = (refused_at + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return next_day + BUDGET_RECHECK_AFTER_RESET
+
+
+def _waiting_budget_recheck(jm):
+    """The recheck job whose runner hasn't read its files yet, if any (call under ``FOLLOW_UP_LOCK``)."""
+    for job in jm.get_pending_jobs():
+        cfg = job.config or {}
+        if (
+            job.kind == JOB_KIND_INTRO_CREDITS
+            and cfg.get("source") == BUDGET_RECHECK_SOURCE
+            and not cfg.get(FILES_SEALED)
+        ):
+            return job
+    return None
+
+
+def _queue_budget_recheck(job, ctx) -> None:
+    """Queue the files this job checked without TheIntroDB, because its daily budget had run out, that it left with a
+    type undecided: they're checked again just after the budget resets at 00:00 UTC. Never raises.
+
+    One waiting recheck job (LOW, like a backfill) takes the files of every job that ran out that day, up to
+    ``MAX_RETRY_FILES``; it lists each file only if TheIntroDB is still on and the file still has a type undecided when
+    it runs (``_budget_recheck_items``). Its own files that run out again are queued for the next reset the same way.
+
+    Args:
+        job: The job that just finished.
+        ctx: Its pipeline context.
+    """
+    jm = get_job_manager()
+    try:
+        paths, refused_at = ctx.take_budget_rechecks()
+        if not paths or refused_at is None or not ctx.settings.source_enabled(Source.THEINTRODB.value):
+            return
+        from .triggers import create_intro_credits_job
+
+        with FOLLOW_UP_LOCK:
+            target = _waiting_budget_recheck(jm)
+            listed = list((target.config or {}).get("file_paths") or []) if target is not None else []
+            fresh = [path for path in paths if path not in listed]
+            room = MAX_RETRY_FILES - len(listed)
+            chosen, left_out = fresh[: max(0, room)], fresh[max(0, room) :]
+            if target is not None and chosen:
+                files = [*listed, *chosen]
+                # Refused when the job was cancelled since it was listed: the files get a new job instead.
+                if jm.update_job_config_if_pending(target.id, {**target.config, "file_paths": files}):
+                    jm.update_job_library_name(target.id, f"TheIntroDB recheck: {len(files)} files")
+                else:
+                    target = None
+            if target is None and chosen:
+                due = budget_recheck_due(refused_at)
+                target = create_intro_credits_job(
+                    library_name=f"TheIntroDB recheck: {len(chosen)} files",
+                    priority=PRIORITY_LOW,
+                    source=BUDGET_RECHECK_SOURCE,
+                    file_paths=chosen,
+                    retry_delay_s=max(0, int((due - _utcnow()).total_seconds())),
+                )
+        if chosen:
+            jm.add_log(
+                job.id,
+                f"INFO - {len(chosen)} file(s) checked without TheIntroDB (daily limit reached) are checked again after "
+                f"it resets at {RESET_TIME_LABEL} (job {target.id[:8]})",
+            )
+        if left_out:
+            jm.add_log(
+                job.id,
+                f"INFO - {len(left_out)} more file(s) checked without TheIntroDB aren't checked again automatically; "
+                "the next run of their library checks them",
+            )
+    except Exception:
+        logger.exception("Could not queue the TheIntroDB recheck for Intro & Credits job {}", job.id)
+
+
+def _still_undecided(store: MarkerStore, path: str) -> bool:
+    """Whether a file has a type left undecided (True when the store knows no decisions for it)."""
+    rec = store.get_file(path)
+    decisions = store.get_decisions(rec.id) if rec is not None else {}
+    return not decisions or any(
+        row.status in (DecisionStatus.NEEDS_REVIEW, DecisionStatus.NO_EVIDENCE) for row in decisions.values()
+    )
+
+
+def _budget_recheck_items(job_id: str, ctx, items: list[ProcessableItem]) -> list[ProcessableItem]:
+    """A recheck job's files that are still worth TheIntroDB's answer: none once TheIntroDB is off, and only files
+    another job hasn't decided since."""
+    jm = get_job_manager()
+    if not ctx.settings.source_enabled(Source.THEINTRODB.value):
+        jm.add_log(job_id, "INFO - TheIntroDB is turned off now, so these files aren't checked again")
+        return []
+    still = [item for item in items if _still_undecided(ctx.store, item.canonical_path)]
+    if len(still) < len(items):
+        jm.add_log(job_id, f"INFO - {len(items) - len(still)} file(s) were decided since; they aren't checked again")
+    return still
+
+
 def _seal_files(jm, job_id: str, job, cfg: dict) -> dict:
     """The config whose files the job lists now: re-read and sealed when other requests may have added files to it.
 
-    Episodes of a season join a webhook follow-up, and Season requests join a Season job, while it waits; the read and
-    the seal happen under the lock those additions take, so a file added to a job is listed by it and nothing is added
-    once it has read its files. (A file can still be listed by two jobs, e.g. a Season job and a started follow-up.)
+    Episodes of a season join a webhook follow-up, Season requests join a Season job, and files TheIntroDB's budget
+    refused join the waiting recheck job, while it waits; the read and the seal happen under the lock those additions
+    take, so a file added to a job is listed by it and nothing is added once it has read its files. (A file can still be
+    listed by two jobs, e.g. a Season job and a started follow-up.)
 
     Returns:
         The config to list the files of.
     """
-    if not (cfg.get("follows_job_id") or cfg.get("source") == SEASON_SOURCE):
+    if not (cfg.get("follows_job_id") or cfg.get("source") in (SEASON_SOURCE, BUDGET_RECHECK_SOURCE)):
         return cfg
     with FOLLOW_UP_LOCK:
         # Only the seal is written (under the job manager's lock): a key another thread set meanwhile stays.
@@ -642,6 +756,8 @@ def _wait_for_retry_time(job_id: str, cfg: dict, cancel_check: Callable[[], bool
         waiting_for = (
             f"Check starting in {remaining}s — servers often rescan a replaced file after its markers are sent"
         )
+    elif cfg.get("source") == BUDGET_RECHECK_SOURCE:
+        waiting_for = f"Check starting in {remaining}s — after TheIntroDB's daily limit resets at {RESET_TIME_LABEL}"
     else:
         waiting_for = f"Retry starting in {remaining}s — waiting for these files to appear on disk or on a server"
     jm.update_progress(
@@ -1234,7 +1350,11 @@ def run_intro_credits_job(job_id: str) -> None:
                     priority=live_priority,
                     force=bool(cfg.get("force")),
                     recheck_empty_server_markers=bool(cfg.get("reconcile")),
-                    season_recheck=cfg.get("source") == SEASON_SOURCE,
+                    # A TheIntroDB recheck mostly finds nothing new either: one line per season, as a Season job.
+                    season_recheck=cfg.get("source") in (SEASON_SOURCE, BUDGET_RECHECK_SOURCE),
+                    recheck_label=(
+                        BUDGET_RECHECK_LABEL if cfg.get("source") == BUDGET_RECHECK_SOURCE else SEASON_RECHECK_LABEL
+                    ),
                 )
                 listing = None
                 if cfg.get("reconcile"):
@@ -1272,6 +1392,8 @@ def run_intro_credits_job(job_id: str) -> None:
                         cfg, registry=registry, cancel_check=cancel_check, progress_callback=progress_callback
                     )
                     cfg = _with_merged_sender_hints(cfg, items, sender_paths)
+                    if cfg.get("source") == BUDGET_RECHECK_SOURCE:
+                        items = _budget_recheck_items(job_id, ctx, items)
                 if cancel_check():
                     jm.cancel_job(job_id)
                     return
@@ -1421,6 +1543,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 if chain_head and not retried:
                     _end_chain(jm, cfg, waiting)
                 _queue_season_followups_after(job, cfg, ctx, listed)
+                _queue_budget_recheck(job, ctx)
                 if replaced and checks_replaced_later:
                     _queue_verify(job, cfg, replaced, sender_paths)
                 sweep_store = ctx.store

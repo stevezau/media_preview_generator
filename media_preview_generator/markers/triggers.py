@@ -116,7 +116,7 @@ def create_intro_credits_job(
         item_id_hints: ``{path: {server_id: item_id}}`` from vendor webhooks.
         retry_attempt: For a retry of files a server hadn't indexed yet or that weren't on disk yet: which retry this
             is (1-based).
-        retry_delay_s: For a retry or a verify job: seconds to wait before it takes a slot.
+        retry_delay_s: For a retry, a verify job or a TheIntroDB recheck: seconds to wait before it takes a slot.
         verify: A later check of files published after they were replaced (``job_runner._queue_verify``).
         verify_chain: For a retry that follows a verify job (directly or through other retries): it queues no verify.
         chain_attempt: For a verify job: the retries its chain already used, so a retry it queues goes on counting.
@@ -148,7 +148,7 @@ def create_intro_credits_job(
         config["verify_chain"] = True
     if retry_attempt:
         config["retry_attempt"] = int(retry_attempt)
-    if retry_attempt or verify:
+    if retry_attempt or verify or retry_delay_s:
         # The due time (not just the delay) is stored so a job revived after a restart doesn't wait again in full.
         config["retry_delay"] = int(retry_delay_s)
         config["retry_not_before"] = (_utcnow() + timedelta(seconds=int(retry_delay_s))).isoformat()

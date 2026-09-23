@@ -225,6 +225,27 @@ class TestCreateIntroCreditsJob:
             "retry_not_before": "2026-09-14T10:10:00+00:00",
         }
 
+    @pytest.mark.parametrize(("delay", "delayed"), [(68_700, True), (0, False)], ids=["delayed", "due-now"])
+    def test_a_theintrodb_recheck_carries_its_due_time_only_when_delayed(self, monkeypatch, delay, delayed):
+        from datetime import datetime
+
+        jm = MagicMock()
+        jm.create_job.return_value = MagicMock(id="recheck-1")
+        monkeypatch.setattr(triggers, "get_job_manager", lambda: jm)
+        monkeypatch.setattr(triggers, "_utcnow", lambda: datetime(2026, 9, 24, 5, 0, tzinfo=UTC))
+        with patch.object(triggers, "start_intro_credits_job_async"):
+            triggers.create_intro_credits_job(
+                library_name="TheIntroDB recheck: 1 files",
+                priority=3,
+                source="theintrodb_recheck",
+                file_paths=["/m/a.mkv"],
+                retry_delay_s=delay,
+            )
+        config = jm.create_job.call_args.kwargs["config"]
+        timing = {k: config[k] for k in ("retry_delay", "retry_not_before") if k in config}
+        assert timing == ({"retry_delay": 68_700, "retry_not_before": "2026-09-25T00:05:00+00:00"} if delayed else {})
+        assert "retry_attempt" not in config and "is_retry" not in config
+
     @pytest.mark.parametrize(
         ("kwargs", "stored"),
         [

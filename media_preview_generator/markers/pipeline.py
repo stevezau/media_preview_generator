@@ -46,6 +46,7 @@ from .decide import (
 )
 from .external_ids import ids_from_path, ids_from_server_dict, is_extra, merge_ids
 from .job_log import (
+    SEASON_RECHECK_LABEL,
     RunNotes,
     SeasonEpisode,
     ServerResult,
@@ -55,6 +56,7 @@ from .job_log import (
     review_note,
     season_line,
     season_of,
+    show_name,
     source_answers,
     totals_line,
 )
@@ -105,6 +107,14 @@ from .sources.theintrodb import TheIntroDbClient, is_key_refusal
 from .store import EvidenceRow, FileRecord, ItemPublishStateRow, MarkerStore, get_marker_store
 
 NO_DATA_RETRY = timedelta(days=14)
+# TheIntroDB's daily budget is small (1,000 lookups with a key) and whole shows are missing from it (talk shows, some
+# anime): once this many episodes of a series got "no entry" and none an answer, the series isn't asked about for
+# SERIES_NO_ENTRY_PAUSE, counted from its latest "no entry" (``MarkerStore.series_lookups_paused_until``).
+SERIES_NO_ENTRY_MISSES = 3
+SERIES_NO_ENTRY_PAUSE = timedelta(days=7)
+_SERIES_PAUSED_SOURCES = frozenset({Source.THEINTRODB})
+# Types still worth another source's answer once a file's run ends.
+_UNDECIDED = frozenset({DecisionStatus.NEEDS_REVIEW, DecisionStatus.NO_EVIDENCE})
 # Servers detect their own markers on a schedule (Plex overnight), so "none there" is asked again a day later.
 EMPTY_SERVER_MARKERS_RETRY = timedelta(days=1)
 # Check servers asks a server again for a decided file it had no markers for once the answer is this old, a step further
@@ -291,6 +301,7 @@ class PipelineContext:
             web request may take (ruling P-R1).
         season_recheck: A Season job: a file whose decisions didn't change logs no lines of its own; the job ends with
             one line per season instead (``summary_lines``).
+        recheck_label: How those per-season lines name the job (a TheIntroDB recheck logs them too).
     """
 
     registry: Any
@@ -310,6 +321,7 @@ class PipelineContext:
     credits_text: TextDetState = TextDetState.AVAILABLE
     db_timeout_s: float | None = None
     season_recheck: bool = False
+    recheck_label: str = SEASON_RECHECK_LABEL
     decided_by: DecidedByTally = field(default_factory=DecidedByTally, repr=False)
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
@@ -342,6 +354,10 @@ class PipelineContext:
     _pending_skips: dict[str, dict[Source, str]] = field(default_factory=dict, repr=False)
     # Sources whose running out this job already logged.
     _budget_warned: set[Source] = field(default_factory=set, repr=False)
+    # Files checked without TheIntroDB because its daily budget ran out that ended with a type undecided, and when the
+    # first of them was refused (``take_budget_rechecks``).
+    _budget_rechecks: set[str] = field(default_factory=set, repr=False)
+    _budget_refused_at: datetime | None = field(default=None, repr=False)
     _budget_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # Per file being run: the thread running it and what that run computes once (``run_memo``).
     _run_memos: dict[str, tuple[int, dict[str, Any]]] = field(default_factory=dict, repr=False)
@@ -432,6 +448,20 @@ class PipelineContext:
             self._followups.clear()
         return taken
 
+    def take_budget_rechecks(self) -> tuple[list[str], datetime | None]:
+        """The files to check again once TheIntroDB's daily budget resets, and forget them.
+
+        Returns:
+            The local paths, sorted, of files checked without TheIntroDB because its budget ran out that ended with a
+            type undecided; and when the first of them was refused (None when there are none).
+        """
+        with self._budget_lock:
+            taken = sorted(self._budget_rechecks)
+            refused_at = self._budget_refused_at if taken else None
+            self._budget_rechecks.clear()
+            self._budget_refused_at = None
+        return taken, refused_at
+
     def note_changed_sibling_left_out(self, canonical_path: str) -> None:
         """Remember that this file's season audio answer left out a sibling that had changed on disk.
 
@@ -480,7 +510,7 @@ class PipelineContext:
                 skipped[_ONLINE_LABELS[source]] = skipped.get(_ONLINE_LABELS[source], 0) + count
             for source, (_detail, count) in self._key_refused.items():
                 skipped[_ONLINE_LABELS[source]] = skipped.get(_ONLINE_LABELS[source], 0) + count
-        lines = [season_line(season, episodes) for season, episodes in sorted(seasons.items())]
+        lines = [season_line(season, episodes, self.recheck_label) for season, episodes in sorted(seasons.items())]
         return [*lines, totals_line(outcome, sent, skipped)]
 
 
@@ -674,6 +704,7 @@ def build_context(
     force: bool = False,
     recheck_empty_server_markers: bool = False,
     season_recheck: bool = False,
+    recheck_label: str = SEASON_RECHECK_LABEL,
 ) -> PipelineContext:
     """Context from live settings (used by the job runner).
 
@@ -689,7 +720,8 @@ def build_context(
         priority: The job's priority, or a callable returning its current value.
         force: Re-detect.
         recheck_empty_server_markers: Check servers (``PipelineContext.recheck_empty_server_markers``).
-        season_recheck: A Season job (``PipelineContext.season_recheck``).
+        season_recheck: A Season job or a TheIntroDB recheck (``PipelineContext.season_recheck``).
+        recheck_label: Which of the two (``PipelineContext.recheck_label``).
 
     Returns:
         A context for one job.
@@ -720,6 +752,7 @@ def build_context(
         chromaprint=chromaprint,
         credits_text=credits_text,
         season_recheck=season_recheck,
+        recheck_label=recheck_label,
     )
 
 
@@ -1146,9 +1179,9 @@ def budget_exhausted_warnings(ctx: PipelineContext) -> list[str]:
 
     Returns:
         User-facing warnings (empty when every source answered), e.g. "TheIntroDB's daily lookup limit was reached: 39
-        files were checked without it. It resets at 00:00 UTC; run the library again after that (or add a TheIntroDB
-        API key for a higher limit)." or "TheIntroDB rejected the API key (HTTP 401): 39 files were checked without it.
-        Check the TheIntroDB API key in Settings → Intro & Credits."
+        files were checked without it. It resets at 00:00 UTC; the files it left undecided are checked again
+        automatically after that (or add a TheIntroDB API key for a higher limit)." or "TheIntroDB rejected the API key
+        (HTTP 401): 39 files were checked without it. Check the TheIntroDB API key in Settings → Intro & Credits."
     """
     with ctx._budget_lock:
         exhausted = dict(ctx._budget_exhausted)
@@ -1156,10 +1189,16 @@ def budget_exhausted_warnings(ctx: PipelineContext) -> list[str]:
     warnings = []
     for source in sorted(exhausted, key=lambda s: _ONLINE_LABELS[s]):
         label = _ONLINE_LABELS[source]
-        key_hint = " (or add a TheIntroDB API key for a higher limit)" if source is Source.THEINTRODB else ""
+        # job_runner queues TheIntroDB's undecided files for after the reset (``take_budget_rechecks``).
+        after = (
+            "the files it left undecided are checked again automatically after that (or add a TheIntroDB API key for a "
+            "higher limit)"
+            if source is Source.THEINTRODB
+            else "run the library again after that"
+        )
         warnings.append(
             f"{label}'s daily lookup limit was reached: {_files_were(exhausted[source])} checked without it. "
-            f"It resets at {RESET_TIME_LABEL}; run the library again after that{key_hint}."
+            f"It resets at {RESET_TIME_LABEL}; {after}."
         )
     for source in sorted(refused, key=lambda s: _ONLINE_LABELS[s]):
         detail, count = refused[source]
@@ -1200,6 +1239,47 @@ def _lookup(
     else:
         logger.debug("{} lookup for {}: {}", _ONLINE_LABELS[source], rec.canonical_path, result)
     return result
+
+
+def _series_lookups_paused_until(ctx: PipelineContext, source: Source, ids: MediaIds) -> datetime | None:
+    """Until when ``source`` isn't asked about this episode: enough of its series' episodes had no entry there.
+
+    Returns:
+        The end of the pause, or None when the episode may be asked now. The file's job log line names the skip.
+    """
+    key = theintrodb.series_key(ids) if source in _SERIES_PAUSED_SOURCES else None
+    if key is None:
+        return None
+    return ctx.store.series_lookups_paused_until(
+        source, key, misses=SERIES_NO_ENTRY_MISSES, pause=SERIES_NO_ENTRY_PAUSE
+    )
+
+
+def _note_series_answer(
+    ctx: PipelineContext, source: Source, ids: MediaIds, path: str, result: LookupResult | None
+) -> None:
+    """Remember a stored answer for the episode's series, and say so once the series is paused."""
+    if source not in _SERIES_PAUSED_SOURCES or result is None or result.status not in _STORED_LOOKUPS:
+        return
+    key = theintrodb.series_key(ids)
+    if key is None or ids.season is None or ids.episode is None:
+        return
+    found = result.status == "ok"
+    ctx.store.record_series_lookup(source, key, f"S{ids.season:02d}E{ids.episode:02d}", found=found)
+    if found:
+        return
+    until = ctx.store.series_lookups_paused_until(
+        source, key, misses=SERIES_NO_ENTRY_MISSES, pause=SERIES_NO_ENTRY_PAUSE
+    )
+    if until is not None:
+        logger.info(
+            "{} has no entry for {} or more episodes of {} ({}); its episodes aren't looked up there until {}",
+            _ONLINE_LABELS[source],
+            SERIES_NO_ENTRY_MISSES,
+            show_name(path),
+            key,
+            until.strftime("%Y-%m-%d %H:%M UTC"),
+        )
 
 
 def _importer_plugin(ctx: PipelineContext, owner: _Owning) -> tuple[bool, str | None]:
@@ -2134,16 +2214,24 @@ def _attempt(
                 notes.not_asked[source] = "not asked (not set up)"
             elif _needs_lookup(ctx, rec, source, refresh):
                 lookup_ids = lookup_ids or _lookup_ids(ids, servers)
-                phase(f"Looking up {_ONLINE_LABELS[source]}…")
-                result = _lookup(client, source, lookup_ids, rec, ctx, cancel_check)
-                refusal = _job_wide_refusal(source, result)
-                if refusal is not None:
-                    skipped[source] = refusal
-                elif result is not None and result.status in _STORED_LOOKUPS:
-                    skipped.pop(source, None)  # an earlier stage's refusal no longer holds (the budget reset)
-                    notes.answered(source)
+                paused_until = _series_lookups_paused_until(ctx, source, lookup_ids)
+                if paused_until is not None:
+                    # Shown in place of any older saved answer: this run didn't ask.
+                    notes.unanswered[source] = (
+                        f"skipped (no data for this show; asked again after {paused_until:%Y-%m-%d})"
+                    )
                 else:
-                    notes.unanswered[source] = _unstored_lookup(source, result)
+                    phase(f"Looking up {_ONLINE_LABELS[source]}…")
+                    result = _lookup(client, source, lookup_ids, rec, ctx, cancel_check)
+                    _note_series_answer(ctx, source, lookup_ids, path, result)
+                    refusal = _job_wide_refusal(source, result)
+                    if refusal is not None:
+                        skipped[source] = refusal
+                    elif result is not None and result.status in _STORED_LOOKUPS:
+                        skipped.pop(source, None)  # an earlier stage's refusal no longer holds (the budget reset)
+                        notes.answered(source)
+                    else:
+                        notes.unanswered[source] = _unstored_lookup(source, result)
         elif source is Source.SERVER_MARKERS:
             phase("Reading markers already on servers…")
             first_read_only = not gather_all and _all_decided(decisions, types)
@@ -2247,6 +2335,12 @@ def _attempt(
     except Exception as exc:
         # The file is done: a problem describing it mustn't fail it.
         logger.warning("Couldn't write the job log lines for {}: {}", path, type(exc).__name__)
+    if is_budget_exhausted(skipped.get(Source.THEINTRODB, "")) and any(
+        decisions[t].status in _UNDECIDED for t in types
+    ):
+        with ctx._budget_lock:
+            ctx._budget_rechecks.add(path)
+            ctx._budget_refused_at = ctx._budget_refused_at or ctx.now()
     labels = tuple(sorted(_ONLINE_LABELS[source] for source, answer in skipped.items() if is_budget_exhausted(answer)))
     return ItemOutcome(outcome.value, _summary(decisions, types, labels), rows)
 
@@ -2302,10 +2396,11 @@ def _log_file(
 ) -> None:
     """Log what each source answered, what was decided and what was sent where (the job log's lines for this file).
 
-    A Season job logs only files whose decisions changed; the rest go into its season's summary line.
+    A Season job (and a TheIntroDB recheck) logs only files whose decisions changed; the rest go into their season's
+    summary line. A recheck can also list movies: a file that isn't an episode logs its own lines there.
     """
     season = None
-    if ctx.season_recheck:
+    if ctx.season_recheck and (rec.season_key is not None or ctx.recheck_label == SEASON_RECHECK_LABEL):
         name, episode = season_of(rec.canonical_path)
         season = (name, SeasonEpisode(episode, changed, review_note(decisions, types)))
     ctx._note_finished(rows, season)

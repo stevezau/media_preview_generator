@@ -386,7 +386,12 @@ retries, not `manual`/`inspector` or library runs) queue one. A job whose read-b
 the warning `Couldn't check what N file(s) show on <server>`. A job where an online source's daily budget ran out
 partway through completes with one warning per source that ran out (see `GET /api/markers/sources/usage` above for
 the same state in Settings), and doesn't queue a retry for those files — nothing was stored for the source, so the
-next scheduled or manual run for the same files asks it again on its own.
+next scheduled or manual run for the same files asks it again on its own. For TheIntroDB only, the files it left with
+a type undecided (`needs_review` / `no_evidence`) join one waiting LOW-priority job (`source: "theintrodb_recheck"`,
+named "TheIntroDB recheck: N files", at most 500 files) due 5 minutes after the next 00:00 UTC (`retry_not_before`);
+when it runs it drops files decided since, and lists nothing if TheIntroDB has been turned off. TheIntroDB also isn't
+asked about a series (keyed by the tmdb/tvdb/imdb id it's sent) for 7 days once 3 of its episodes got "no entry" and
+none an answer (`series_lookups` table in `markers.db`); the next episode after that is asked again.
 
 When a job's season step finds that other episodes of the same season could now be decided differently (their season
 intro-chapter check or season audio answer is out of date; an episode season audio never answered for, such as one no

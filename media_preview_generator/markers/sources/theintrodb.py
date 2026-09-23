@@ -151,6 +151,26 @@ class TheIntroDbClient:
         return result_from(_candidates(body))
 
 
+def series_key(ids: MediaIds) -> str | None:
+    """The series id an episode lookup is sent with, picked as ``_params`` picks it (e.g. ``tmdb:12345``).
+
+    Args:
+        ids: The episode's ids (they carry the show's).
+
+    Returns:
+        None for anything but an episode with an id TheIntroDB takes.
+    """
+    if not ids.is_episode:
+        return None
+    if ids.tmdb:
+        return f"tmdb:{ids.tmdb}"
+    if ids.tvdb:
+        return f"tvdb:{ids.tvdb}"
+    if valid_imdb(ids.imdb):
+        return f"imdb:{ids.imdb}"
+    return None
+
+
 def _params(ids: MediaIds, duration_ms: int | None) -> dict[str, object] | LookupResult:
     if ids.kind not in _API_TYPES:
         return LookupResult("not_applicable", detail=f"{_LABEL} needs a movie or a TV episode")

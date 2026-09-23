@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 from loguru import logger
 
+from media_preview_generator.markers import pipeline
 from media_preview_generator.markers.job_log import (
     SeasonEpisode,
     clock,
@@ -317,11 +318,19 @@ class TestSeasonJob:
         season.season_recheck = True
         outcomes = [run(season, path, INTRO_CHAPTERS if path == paths[1] else ()).outcome_key for path in paths]
 
+        # The first job's 4 "no entry" answers paused TheIntroDB for the show, so the replaced E02 isn't asked again.
+        paused_until = store.series_lookups_paused_until(
+            Source.THEINTRODB,
+            "tvdb:275274",
+            misses=pipeline.SERIES_NO_ENTRY_MISSES,
+            pause=pipeline.SERIES_NO_ENTRY_PAUSE,
+        )
         assert job_log == [
             _lines(
                 "Rick and Morty (2013) S01E02: sent intro to Plex · intro 2:06–2:37 (from chapters) · credits "
                 f"21:31–22:01 found by credit text → {REVIEW_AT_HIGH}",
-                "chapters intro 2:06–2:37 · TheIntroDB no entry · credit text credits from 21:31 · Plex's own none",
+                "chapters intro 2:06–2:37 · TheIntroDB skipped (no data for this show; asked again after "
+                f"{paused_until:%Y-%m-%d}) · credit text credits from 21:31 · Plex's own none",
             )
         ]
         counts = {key: outcomes.count(key) for key in set(outcomes)}

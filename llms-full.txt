@@ -2036,7 +2036,15 @@ shown or returned by the API, and never logged.
 TheIntroDB's usage line in Settings shows "N of today's lookups used · limit set by TheIntroDB" — once a library
 job's daily lookups (or the smaller share left for full-library backfills) run out, it switches to "Daily limit
 reached — lookups resume at 00:00 UTC" instead. See the troubleshooting table below for what a job or a file shows
-when this happens mid-run.
+when this happens mid-run. Files checked without TheIntroDB for that reason, and left with a marker undecided, are
+checked again automatically just after 00:00 UTC by one low-priority **TheIntroDB recheck** job (up to 500 files; it
+skips a file another job decided meanwhile, and runs nothing if you've turned TheIntroDB off by then).
+
+To keep the daily lookups for shows TheIntroDB knows, a show it has no entry for (talk shows, for example) is left
+alone for 7 days once 3 of its episodes came back with nothing, and none with an answer. After the 7 days the next
+episode is asked again; if that one has nothing either, the show is left alone for another 7 days. The log says so
+once, at INFO: "TheIntroDB has no entry for 3 or more episodes of <show> …; its episodes aren't looked up there
+until <date>". Forced re-detects follow the same rule.
 
 ### Needs review
 
@@ -2395,13 +2403,15 @@ what every source you turned on answered, in your source order. For example:
 - Per server: "sent intro and credits to Plex", "Plex already has our intro", "nothing sent to Plex", "waiting for Plex
   to add the file to its library" (the job tries it again), and the types that server keeps as its own.
 - Per source: its answer ("no entry", "none", "credits from 47:36"), or why it wasn't asked: "not needed (already
-  decided)", "skipped (daily limit reached, …)", "not read (every server keeps its own credits)". **(saved earlier)**
+  decided)", "skipped (daily limit reached, …)", "skipped (no data for this show; asked again after <date>)", "not
+  read (every server keeps its own credits)". **(saved earlier)**
   means the answer was stored before (by an earlier run, or while the job checked another episode of the season) and
   was used without asking again.
 
 A **Season: …** job logs these lines only for episodes whose result changed, and one line per season for the rest:
 "Season re-check, Brave New World S01 (3 episodes): no change, E01/E03/E04 still need review (credits from credit
-text only)". Every job ends with a totals line, e.g. "Done: 12 files · 9 sent to Plex · 2 need review · 1 nothing found
+text only)". A **TheIntroDB recheck** job does the same for its episodes ("TheIntroDB recheck, Brave New World S01
+(3 episodes): no change"), and logs each movie on its own. Every job ends with a totals line, e.g. "Done: 12 files · 9 sent to Plex · 2 need review · 1 nothing found
 · TheIntroDB skipped for 3 files".
 
 Job log times are the container's local time (its `TZ`, or the `/etc/localtime` you mounted), the same clock as the
@@ -2469,8 +2479,9 @@ A file's row for one server (the job's Files panel, the Inspector) can also say:
 | **Failed**: "Couldn't read this server's saved settings (…)" | `settings.json` couldn't be read just before the write, so nothing was written | Check the config volume and the log; the next run tries again |
 | Evidence detail: "Couldn't read this server's plugins, so its markers aren't used" | A Jellyfin/Emby server's plugin list couldn't be read, so its markers might be a crowd database's copy | Nothing; they're read again on a later run |
 | Evidence detail: "Markers on this server look imported from …; not a second opinion for that database" | That server's markers came from a plugin that imports a skip database (IntroDB/TheIntroDB, SkipDB or AniSkip), so they don't confirm that database's own answer | Nothing; this is expected |
-| Job warning: "TheIntroDB's daily lookup limit was reached: N files were checked without it. It resets at 00:00 UTC; run the library again after that (or add a TheIntroDB API key for a higher limit)." | The source's daily budget (or the smaller share full-library backfills may spend) ran out partway through the job | Nothing to fix; run the library again after 00:00 UTC, or add your own TheIntroDB API key for a higher limit |
-| File reason ends with "…; TheIntroDB not checked (daily limit reached)" | This file's result could still change once the source is available again — a file every other source already decided doesn't get this note | Nothing; nothing was stored for this source, so the next scheduled or manual run for this file asks it again automatically |
+| Job warning: "TheIntroDB's daily lookup limit was reached: N files were checked without it. It resets at 00:00 UTC; the files it left undecided are checked again automatically after that (or add a TheIntroDB API key for a higher limit)." | The source's daily budget (or the smaller share full-library backfills may spend) ran out partway through the job | Nothing to fix; a **TheIntroDB recheck** job waits for 00:00 UTC and checks those files again. Add your own TheIntroDB API key for a higher limit. (IntroDB and SkipDB say "run the library again after that" instead: their files aren't rechecked automatically.) |
+| File reason ends with "…; TheIntroDB not checked (daily limit reached)" | This file's result could still change once the source is available again — a file every other source already decided doesn't get this note | Nothing; the TheIntroDB recheck job asks for it after 00:00 UTC, and nothing was stored for this source, so any later run asks it too |
+| Log: "TheIntroDB has no entry for 3 or more episodes of <show> …; its episodes aren't looked up there until <date>" | TheIntroDB had nothing for 3 episodes of the show and an answer for none, so the show's episodes stop using its daily lookups for 7 days | Nothing; after the date the next episode is asked again |
 
 Per-file job outcomes use plainer labels in the job queue and Files panel: **Markers written** (the job changed
 what a server shows), **Up to date** (every server already showed this),
@@ -3886,7 +3897,12 @@ retries, not `manual`/`inspector` or library runs) queue one. A job whose read-b
 the warning `Couldn't check what N file(s) show on <server>`. A job where an online source's daily budget ran out
 partway through completes with one warning per source that ran out (see `GET /api/markers/sources/usage` above for
 the same state in Settings), and doesn't queue a retry for those files — nothing was stored for the source, so the
-next scheduled or manual run for the same files asks it again on its own.
+next scheduled or manual run for the same files asks it again on its own. For TheIntroDB only, the files it left with
+a type undecided (`needs_review` / `no_evidence`) join one waiting LOW-priority job (`source: "theintrodb_recheck"`,
+named "TheIntroDB recheck: N files", at most 500 files) due 5 minutes after the next 00:00 UTC (`retry_not_before`);
+when it runs it drops files decided since, and lists nothing if TheIntroDB has been turned off. TheIntroDB also isn't
+asked about a series (keyed by the tmdb/tvdb/imdb id it's sent) for 7 days once 3 of its episodes got "no entry" and
+none an answer (`series_lookups` table in `markers.db`); the next episode after that is asked again.
 
 When a job's season step finds that other episodes of the same season could now be decided differently (their season
 intro-chapter check or season audio answer is out of date; an episode season audio never answered for, such as one no

@@ -307,6 +307,7 @@ def env(monkeypatch):
     gpus = [("nvidia", "/dev/nvidia0", {"workers": 1})]
     monkeypatch.setattr(job_runner, "_build_selected_gpus", lambda settings: gpus)
     ctx = MagicMock()
+    ctx.take_budget_rechecks.return_value = ([], None)
     monkeypatch.setattr(job_runner, "build_context", MagicMock(return_value=ctx))
     handlers = MagicMock()
     kind_handlers = MagicMock(return_value=handlers)
@@ -2650,7 +2651,8 @@ class TestBudgetExhaustedCompletionWarning:
 
     _TIDB_WARNING = (
         "TheIntroDB's daily lookup limit was reached: 39 files were checked without it. "
-        "It resets at 00:00 UTC; run the library again after that (or add a TheIntroDB API key for a higher limit)."
+        "It resets at 00:00 UTC; the files it left undecided are checked again automatically after that (or add a "
+        "TheIntroDB API key for a higher limit)."
     )
 
     def test_the_jobs_warning_includes_it(self, env, monkeypatch):
@@ -2723,13 +2725,211 @@ class TestClosingLogLines:
         env.jm.complete_job.assert_called_once_with("j1", warning=None)
 
     @pytest.mark.parametrize(
-        ("source", "season_recheck"), [("season", True), ("sonarr", False), ("manual", False), (None, False)]
+        ("source", "season_recheck", "label"),
+        [
+            ("season", True, "Season re-check"),
+            ("theintrodb_recheck", True, "TheIntroDB recheck"),
+            ("sonarr", False, "Season re-check"),
+            ("manual", False, "Season re-check"),
+            (None, False, "Season re-check"),
+        ],
     )
-    def test_only_a_season_job_logs_one_line_per_season(self, env, source, season_recheck):
+    def test_only_a_season_job_or_a_theintrodb_recheck_logs_one_line_per_season(
+        self, env, source, season_recheck, label
+    ):
         env.job.config = {"libraries": [], "source": source}
+        env.ctx.store.get_decisions.return_value = {}  # a recheck job's file is still undecided
         with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
             job_runner.run_intro_credits_job("j1")
         assert env.build_context.call_args.kwargs["season_recheck"] is season_recheck
+        assert env.build_context.call_args.kwargs["recheck_label"] == label
+
+
+class TestTheIntroDbBudgetRecheck:
+    """Files TheIntroDB's used-up daily budget refused, left undecided, are checked again just after the 00:00 UTC
+    reset by one waiting LOW job (production: 198 such files in 25 jobs were never asked again)."""
+
+    REFUSED_AT = datetime(2026, 9, 24, 4, 42, tzinfo=UTC)
+    NOW = datetime(2026, 9, 24, 5, 0, tzinfo=UTC)
+    DUE = datetime(2026, 9, 25, 0, 5, tzinfo=UTC)
+
+    @pytest.fixture
+    def jm(self, monkeypatch):
+        jm = MagicMock()
+        jm.get_pending_jobs.return_value = []
+        jm.update_job_config_if_pending.return_value = True
+        monkeypatch.setattr(job_runner, "get_job_manager", lambda: jm)
+        monkeypatch.setattr(job_runner, "_utcnow", lambda: self.NOW)
+        return jm
+
+    @pytest.fixture
+    def create(self):
+        with patch(
+            "media_preview_generator.markers.triggers.create_intro_credits_job", return_value=MagicMock(id="r1234567")
+        ) as create:
+            yield create
+
+    def _ctx(self, paths, *, enabled=True, refused_at=REFUSED_AT):
+        return SimpleNamespace(
+            take_budget_rechecks=lambda: (list(paths), refused_at if paths else None),
+            settings=SimpleNamespace(source_enabled=lambda source_id: enabled and source_id == "theintrodb"),
+        )
+
+    @staticmethod
+    def _waiting(files, **config):
+        return MagicMock(
+            id="w7654321",
+            kind=JOB_KIND_INTRO_CREDITS,
+            config={"source": job_runner.BUDGET_RECHECK_SOURCE, "file_paths": list(files), **config},
+        )
+
+    @pytest.mark.parametrize(
+        ("refused_at", "due"),
+        [
+            (datetime(2026, 9, 24, 4, 42, tzinfo=UTC), datetime(2026, 9, 25, 0, 5, tzinfo=UTC)),
+            (datetime(2026, 9, 24, 0, 0, tzinfo=UTC), datetime(2026, 9, 25, 0, 5, tzinfo=UTC)),
+            (datetime(2026, 9, 24, 23, 59, 59, tzinfo=UTC), datetime(2026, 9, 25, 0, 5, tzinfo=UTC)),
+            (datetime(2026, 9, 30, 12, 0, tzinfo=UTC), datetime(2026, 10, 1, 0, 5, tzinfo=UTC)),
+        ],
+    )
+    def test_due_just_after_the_next_utc_day_roll(self, refused_at, due):
+        assert job_runner.budget_recheck_due(refused_at) == due
+
+    def test_queues_one_low_job_due_after_the_reset(self, jm, create):
+        job_runner._queue_budget_recheck(MagicMock(id="j1"), self._ctx(["/m/a.mkv", "/m/b.mkv"]))
+
+        kwargs = create.call_args.kwargs
+        assert kwargs["source"] == job_runner.BUDGET_RECHECK_SOURCE
+        assert kwargs["priority"] == job_runner.PRIORITY_LOW
+        assert kwargs["file_paths"] == ["/m/a.mkv", "/m/b.mkv"]
+        assert kwargs["retry_delay_s"] == int((self.DUE - self.NOW).total_seconds())
+        assert kwargs["library_name"] == "TheIntroDB recheck: 2 files"
+        jm.add_log.assert_any_call(
+            "j1",
+            "INFO - 2 file(s) checked without TheIntroDB (daily limit reached) are checked again after it resets at "
+            "00:00 UTC (job r1234567)",
+        )
+
+    def test_a_job_finishing_after_the_reset_queues_a_recheck_due_now(self, jm, create, monkeypatch):
+        monkeypatch.setattr(job_runner, "_utcnow", lambda: self.DUE + timedelta(hours=1))
+        job_runner._queue_budget_recheck(MagicMock(id="j1"), self._ctx(["/m/a.mkv"]))
+        assert create.call_args.kwargs["retry_delay_s"] == 0
+
+    def test_files_join_the_waiting_recheck_job(self, jm, create):
+        waiting = self._waiting(["/m/a.mkv"])
+        jm.get_pending_jobs.return_value = [waiting]
+
+        job_runner._queue_budget_recheck(MagicMock(id="j1"), self._ctx(["/m/a.mkv", "/m/b.mkv"]))
+
+        create.assert_not_called()
+        jm.update_job_config_if_pending.assert_called_once_with(
+            "w7654321", {**waiting.config, "file_paths": ["/m/a.mkv", "/m/b.mkv"]}
+        )
+        jm.update_job_library_name.assert_called_once_with("w7654321", "TheIntroDB recheck: 2 files")
+
+    @pytest.mark.parametrize(
+        "waiting",
+        [
+            MagicMock(
+                id="w1",
+                kind=JOB_KIND_INTRO_CREDITS,
+                config={"source": "theintrodb_recheck", "file_paths": ["/m/x.mkv"], "files_sealed": True},
+            ),
+            MagicMock(id="w2", kind=JOB_KIND_INTRO_CREDITS, config={"source": "sonarr", "file_paths": ["/m/x.mkv"]}),
+            MagicMock(id="w3", kind="previews", config={"source": "theintrodb_recheck", "file_paths": ["/m/x.mkv"]}),
+        ],
+        ids=["sealed", "another-source", "another-kind"],
+    )
+    def test_a_job_that_cant_take_files_gets_a_new_recheck_job(self, jm, create, waiting):
+        jm.get_pending_jobs.return_value = [waiting]
+        job_runner._queue_budget_recheck(MagicMock(id="j1"), self._ctx(["/m/a.mkv"]))
+        jm.update_job_config_if_pending.assert_not_called()
+        assert create.call_args.kwargs["file_paths"] == ["/m/a.mkv"]
+
+    def test_a_waiting_job_cancelled_meanwhile_gets_a_new_recheck_job(self, jm, create):
+        jm.get_pending_jobs.return_value = [self._waiting(["/m/x.mkv"])]
+        jm.update_job_config_if_pending.return_value = False
+        job_runner._queue_budget_recheck(MagicMock(id="j1"), self._ctx(["/m/a.mkv"]))
+        assert create.call_args.kwargs["file_paths"] == ["/m/a.mkv"]
+
+    def test_the_waiting_job_lists_at_most_max_retry_files(self, jm, create):
+        listed = [f"/m/{n}.mkv" for n in range(job_runner.MAX_RETRY_FILES - 1)]
+        jm.get_pending_jobs.return_value = [self._waiting(listed)]
+
+        job_runner._queue_budget_recheck(MagicMock(id="j1"), self._ctx(["/m/new1.mkv", "/m/new2.mkv", "/m/new3.mkv"]))
+
+        files = jm.update_job_config_if_pending.call_args.args[1]["file_paths"]
+        assert files == [*listed, "/m/new1.mkv"]
+        jm.add_log.assert_any_call(
+            "j1",
+            "INFO - 2 more file(s) checked without TheIntroDB aren't checked again automatically; the next run of "
+            "their library checks them",
+        )
+
+    @pytest.mark.parametrize(("paths", "enabled"), [([], True), (["/m/a.mkv"], False)], ids=["no-files", "tidb-off"])
+    def test_nothing_is_queued(self, jm, create, paths, enabled):
+        job_runner._queue_budget_recheck(MagicMock(id="j1"), self._ctx(paths, enabled=enabled))
+        create.assert_not_called()
+        jm.update_job_config_if_pending.assert_not_called()
+
+    def test_a_finished_job_hands_its_context_over(self, env, monkeypatch):
+        queue = MagicMock()
+        monkeypatch.setattr(job_runner, "_queue_budget_recheck", queue)
+        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
+            job_runner.run_intro_credits_job("j1")
+        queue.assert_called_once_with(env.job, env.ctx)
+
+    def test_a_cancelled_job_queues_no_recheck(self, env, monkeypatch):
+        queue = MagicMock()
+        monkeypatch.setattr(job_runner, "_queue_budget_recheck", queue)
+        env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "cancelled": True}
+        with patch.object(job_runner, "build_items", return_value=([_item()], [], {})):
+            job_runner.run_intro_credits_job("j1")
+        queue.assert_not_called()
+
+    def _decisions(self, env, by_path):
+        env.ctx.store.get_file.side_effect = lambda path: SimpleNamespace(id=path) if path in by_path else None
+        env.ctx.store.get_decisions.side_effect = lambda file_id: {
+            n: SimpleNamespace(status=DecisionStatus(status)) for n, status in enumerate(by_path[file_id])
+        }
+
+    def test_the_recheck_job_runs_only_files_still_undecided(self, env):
+        env.job.config = {
+            "source": job_runner.BUDGET_RECHECK_SOURCE,
+            "file_paths": ["/m/a.mkv", "/m/b.mkv", "/m/c.mkv"],
+        }
+        env.ctx.settings.source_enabled.side_effect = lambda source_id: source_id == "theintrodb"
+        self._decisions(env, {"/m/a.mkv": ["decided", "needs_review"], "/m/b.mkv": ["decided", "disabled"]})
+        items = [_item("/m/a.mkv"), _item("/m/b.mkv"), _item("/m/c.mkv")]
+        with patch.object(job_runner, "build_items", return_value=(items, [], {})):
+            job_runner.run_intro_credits_job("j1")
+
+        submitted = [i.canonical_path for i in env.dispatcher.submit_items.call_args.kwargs["items"]]
+        assert submitted == ["/m/a.mkv", "/m/c.mkv"]  # c: no decisions stored yet
+        env.jm.add_log.assert_any_call("j1", "INFO - 1 file(s) were decided since; they aren't checked again")
+
+    def test_the_recheck_job_runs_nothing_once_theintrodb_is_off(self, env):
+        env.job.config = {"source": job_runner.BUDGET_RECHECK_SOURCE, "file_paths": ["/m/a.mkv"]}
+        env.ctx.settings.source_enabled.return_value = False
+        with patch.object(job_runner, "build_items", return_value=([_item("/m/a.mkv")], [], {})):
+            job_runner.run_intro_credits_job("j1")
+
+        env.dispatcher.submit_items.assert_not_called()
+        env.jm.add_log.assert_any_call("j1", "INFO - TheIntroDB is turned off now, so these files aren't checked again")
+        env.jm.complete_job.assert_called_once_with("j1", warning="No files to check.")
+
+    def test_the_recheck_job_seals_its_files_when_it_reads_them(self, env):
+        env.job.config = {"source": job_runner.BUDGET_RECHECK_SOURCE, "file_paths": ["/m/a.mkv"]}
+        with patch.object(job_runner, "build_items", return_value=([], [], {})):
+            job_runner.run_intro_credits_job("j1")
+        env.jm.merge_job_config.assert_any_call("j1", {job_runner.FILES_SEALED: True})
+
+    def test_other_jobs_are_not_filtered(self, env):
+        env.job.config = {"source": "sonarr", "file_paths": ["/m/a.mkv"]}
+        self._decisions(env, {"/m/a.mkv": ["decided"]})
+        with patch.object(job_runner, "build_items", return_value=([_item("/m/a.mkv")], [], {})):
+            job_runner.run_intro_credits_job("j1")
+        assert [i.canonical_path for i in env.dispatcher.submit_items.call_args.kwargs["items"]] == ["/m/a.mkv"]
 
 
 class TestRetryCarriesTheSenderPath:
@@ -2870,8 +3070,12 @@ class TestRetryWait:
                 {"verify": True},
                 "Check starting in 120s — servers often rescan a replaced file after its markers are sent",
             ),
+            (
+                {"source": job_runner.BUDGET_RECHECK_SOURCE},
+                "Check starting in 120s — after TheIntroDB's daily limit resets at 00:00 UTC",
+            ),
         ],
-        ids=["retry", "verify"],
+        ids=["retry", "verify", "theintrodb-recheck"],
     )
     def test_waits_until_the_retry_is_due_without_a_slot(self, env, monkeypatch, kind, waiting_for):
         from datetime import datetime, timedelta
@@ -2885,6 +3089,7 @@ class TestRetryWait:
             "retry_delay": 120,
             "retry_not_before": due.isoformat(),
         }
+        env.ctx.store.get_decisions.return_value = {}  # a recheck job's file is still undecided
         sleeps = []
 
         def fake_sleep(seconds):

@@ -240,6 +240,16 @@ _SCHEMA = (
         remaining INTEGER,
         updated_at TEXT NOT NULL,
         PRIMARY KEY (source, day))""",
+    # An online source's last answer for each episode of a series ("found" or "no entry"), keyed by the id the lookup
+    # was sent with, so a series the source has nothing for stops costing its daily budget
+    # (``series_lookups_paused_until``). Not tied to a file row: a replaced episode keeps its series' answers.
+    """CREATE TABLE IF NOT EXISTS series_lookups (
+        source TEXT NOT NULL,
+        series_key TEXT NOT NULL,
+        episode TEXT NOT NULL,
+        found INTEGER NOT NULL,
+        answered_at TEXT NOT NULL,
+        PRIMARY KEY (source, series_key, episode))""",
 )
 
 # Ordered migrations: _MIGRATIONS[v] holds the statements that take an existing database from schema
@@ -1917,6 +1927,51 @@ class MarkerStore:
         with self._lock:
             r = self._conn.execute("SELECT * FROM source_usage WHERE source=? AND day=?", (source_id, day)).fetchone()
         return {"used": r["used"], "limit": r["limit_"], "remaining": r["remaining"]} if r else None
+
+    def record_series_lookup(self, source: Source, series_key: str, episode: str, *, found: bool) -> None:
+        """Remember an online source's answer for one episode of a series (replaces that episode's older answer).
+
+        Args:
+            source: The online source.
+            series_key: The series id the lookup was sent with, e.g. ``tmdb:12345``.
+            episode: The episode, e.g. ``S01E02``.
+            found: Whether the source had anything for it.
+        """
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO series_lookups (source, series_key, episode, found, answered_at) "
+                "VALUES (?,?,?,?,?)",
+                (source.value, series_key, episode, int(found), self._now()),
+            )
+
+    def series_lookups_paused_until(
+        self, source: Source, series_key: str, *, misses: int, pause: timedelta
+    ) -> datetime | None:
+        """Until when a source isn't asked about a series it has no entries for.
+
+        A series is paused once at least ``misses`` of its episodes got "no entry" and none got an answer, for
+        ``pause`` counted from its latest "no entry". When the pause ends, the next episode is asked; another
+        "no entry" pauses the series again straight away.
+
+        Args:
+            source: The online source.
+            series_key: The series id the lookups were sent with.
+            misses: Episodes with "no entry" that pause the series.
+            pause: How long a pause lasts.
+
+        Returns:
+            The end of the pause, or None when the series may be asked now.
+        """
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT MAX(found) AS any_found, COUNT(*) AS answered, MAX(answered_at) AS last_answer "
+                "FROM series_lookups WHERE source=? AND series_key=?",
+                (source.value, series_key),
+            ).fetchone()
+        if not r or r["any_found"] or int(r["answered"]) < misses:
+            return None
+        until = datetime.fromisoformat(r["last_answer"]) + pause
+        return until if until > self._clock() else None
 
     def _count(self, table: str) -> int:
         with self._lock:

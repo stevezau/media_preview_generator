@@ -12,6 +12,7 @@ import pytest
 from media_preview_generator.job_kinds import JOB_KIND_INTRO_CREDITS, ItemOutcome, KindHandlers
 from media_preview_generator.jobs.dispatcher import reset_dispatcher
 from media_preview_generator.markers import job_runner, pipeline, triggers
+from media_preview_generator.markers.job_log import SEASON_RECHECK_LABEL
 from media_preview_generator.markers.pipeline import PipelineContext
 from media_preview_generator.markers.probe import Chapter, MediaProbe
 from media_preview_generator.markers.publishers.base import ItemNotFoundError, PublishError
@@ -101,7 +102,14 @@ class TestRetryThroughThePipeline:
             }
 
             def build_context(
-                *, registry, config, priority, force=False, recheck_empty_server_markers=False, season_recheck=False
+                *,
+                registry,
+                config,
+                priority,
+                force=False,
+                recheck_empty_server_markers=False,
+                season_recheck=False,
+                recheck_label=SEASON_RECHECK_LABEL,
             ):
                 return PipelineContext(
                     registry=registry,
@@ -115,6 +123,7 @@ class TestRetryThroughThePipeline:
                     live_config=registry.get_config,  # the fake registry stands in for the saved servers
                     recheck_empty_server_markers=recheck_empty_server_markers,
                     season_recheck=season_recheck,
+                    recheck_label=recheck_label,
                 )
 
             monkeypatch.setattr(job_runner, "_build_multi_server_registry", lambda config: registry)
@@ -716,7 +725,14 @@ class TestCreditTextOnTheWorkers:
         monkeypatch.setattr(triggers, "start_intro_credits_job_async", lambda job_id: None)
 
         def build_context(
-            *, registry, config, priority, force=False, recheck_empty_server_markers=False, season_recheck=False
+            *,
+            registry,
+            config,
+            priority,
+            force=False,
+            recheck_empty_server_markers=False,
+            season_recheck=False,
+            recheck_label=SEASON_RECHECK_LABEL,
         ):
             return PipelineContext(
                 registry=registry,

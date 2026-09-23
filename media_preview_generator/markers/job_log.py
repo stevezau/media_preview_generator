@@ -57,6 +57,10 @@ _SEP = " · "
 # Release tags and ids in a folder or file name ("{tvdb-275274}", "[imdbid-tt0944947]", "[1080p]").
 _TAG_RE = re.compile(r"\s*[\{\[][^\}\]]*[\}\]]")
 _NO_SECOND_SOURCE = "sources don't agree yet"
+# How a job that logs one line per season names itself there: a Season job, or the job that checks files TheIntroDB's
+# used-up daily budget refused again after the reset.
+SEASON_RECHECK_LABEL = "Season re-check"
+BUDGET_RECHECK_LABEL = "TheIntroDB recheck"
 
 
 @dataclass
@@ -443,12 +447,13 @@ def _joined(names: list[str]) -> str:
     return "/".join(names)
 
 
-def season_line(season: str, episodes: list[SeasonEpisode]) -> str:
+def season_line(season: str, episodes: list[SeasonEpisode], label: str = SEASON_RECHECK_LABEL) -> str:
     """A Season job's one line for one season.
 
     Args:
         season: The season's name (``season_of``).
         episodes: The episodes of that season the job checked.
+        label: What the job is (``SEASON_RECHECK_LABEL``, or ``BUDGET_RECHECK_LABEL`` for a TheIntroDB recheck).
 
     Returns:
         E.g. ``Season re-check, Rick and Morty (2013) S01 (3 episodes): no change, E01/E03/E04 still need review
@@ -473,7 +478,7 @@ def season_line(season: str, episodes: list[SeasonEpisode]) -> str:
                 text += f" ({notes.pop()})"
         parts.append(text)
     count = len(ordered)
-    return f"Season re-check, {season} ({count} episode{'' if count == 1 else 's'}): {'; '.join(parts)}"
+    return f"{label}, {season} ({count} episode{'' if count == 1 else 's'}): {'; '.join(parts)}"
 
 
 def _files(count: int) -> str:
