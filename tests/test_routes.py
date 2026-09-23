@@ -118,6 +118,20 @@ def _api_headers(token: str = "test-token-12345678") -> dict:
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 
+def _allow_dev_tmp_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exempt ``/dev`` from the folder-browse denylist for a single test.
+
+    ``tmp_path`` lives under ``/dev/shm`` on this suite's RAM-backed temp root
+    (see ``tests/conftest.py``), which would otherwise trip the ``/dev`` entry
+    meant to keep real system dirs like ``/dev/sda`` out of the picker.
+    ``test_browse_rejects_denylisted_paths`` still exercises the real,
+    unpatched denylist.
+    """
+    from media_preview_generator.web.routes import api_system
+
+    monkeypatch.setattr(api_system, "_BROWSE_DENYLIST", tuple(p for p in api_system._BROWSE_DENYLIST if p != "/dev"))
+
+
 # ---------------------------------------------------------------------------
 # Page Routes
 # ---------------------------------------------------------------------------
@@ -5655,7 +5669,8 @@ class TestBifSearchPhases:
 class TestFolderBrowse:
     """Verify /api/system/browse safety + behaviour."""
 
-    def test_browse_lists_subdirectories(self, client, tmp_path):
+    def test_browse_lists_subdirectories(self, client, tmp_path, monkeypatch):
+        _allow_dev_tmp_path(monkeypatch)
         # Use a private subdir so the test fixture's "config/" sibling
         # (created by the autouse temp-config fixture) doesn't pollute results.
         sandbox = tmp_path / "browse_sandbox"
@@ -5673,7 +5688,8 @@ class TestFolderBrowse:
         names = {e["name"] for e in body["entries"]}
         assert names == {"movies", "tv"}  # files filtered out
 
-    def test_browse_hides_dot_dirs_by_default(self, client, tmp_path):
+    def test_browse_hides_dot_dirs_by_default(self, client, tmp_path, monkeypatch):
+        _allow_dev_tmp_path(monkeypatch)
         sandbox = tmp_path / "dot_sandbox"
         sandbox.mkdir()
         (sandbox / ".secret").mkdir()
@@ -5691,11 +5707,12 @@ class TestFolderBrowse:
         )
         assert {e["name"] for e in resp.get_json()["entries"]} == {".secret", "public"}
 
-    def test_browse_includes_video_files_when_requested(self, client, tmp_path):
+    def test_browse_includes_video_files_when_requested(self, client, tmp_path, monkeypatch):
         """``include_files=1`` (Manual Generation picker) surfaces video files
         alongside dirs and tags every entry with ``is_dir``. Non-video files
         (.nfo/.srt/artwork) stay filtered so the picker isn't drowned.
         """
+        _allow_dev_tmp_path(monkeypatch)
         sandbox = tmp_path / "file_sandbox"
         sandbox.mkdir()
         (sandbox / "Season 01").mkdir()

@@ -15,6 +15,20 @@ from unittest.mock import MagicMock
 import pytest
 
 # ---------------------------------------------------------------------------
+# tmp_path and pytest's own base temp dir default to /tmp. On this host /tmp is
+# ext4 on a loop device (~11.7ms per fsync), and the suite's sqlite-heavy
+# fixtures fsync a few thousand times, so /tmp adds minutes of pure disk-sync
+# wait. /dev/shm is tmpfs (RAM, no fsync cost). Redirect pytest's temp root
+# there when it looks safe: a run writes ~1.3GB, so require some headroom, and
+# never override an explicit PYTEST_DEBUG_TEMPROOT (e.g. CI or low-/dev/shm
+# hosts opting out). This must run before any tmp_path fixture is created.
+# ---------------------------------------------------------------------------
+if "PYTEST_DEBUG_TEMPROOT" not in os.environ and os.path.isdir("/dev/shm"):
+    _shm_usage = shutil.disk_usage("/dev/shm")
+    if _shm_usage.free >= 4 * 1024**3:
+        os.environ["PYTEST_DEBUG_TEMPROOT"] = "/dev/shm"
+
+# ---------------------------------------------------------------------------
 # Every default config location (webhook history, jobs.db, markers.db, ffmpeg
 # failure logs, auth.json) falls back to /config when CONFIG_DIR is unset, and
 # on a Docker host /config can hold other services' live configs. Point it at

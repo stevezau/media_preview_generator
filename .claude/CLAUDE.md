@@ -11,8 +11,8 @@ pip install -e ".[dev]"
 # Run (web UI)
 gunicorn media_preview_generator.web.wsgi:app --bind 0.0.0.0:8080 --worker-class gthread --workers 1
 
-# Test — default runs parallel (xdist), excludes gpu + e2e, keeps coverage
-pytest                                          # ~5s, 1321 tests, ~79% cov
+# Test — default runs parallel (xdist, worksteal), excludes gpu + e2e, keeps coverage
+pytest                                          # ~100s, 12604 tests, ~89% cov
 pytest --no-cov tests/test_config.py            # Single file, skip coverage
 pytest -m e2e -n 8 --no-cov                     # E2E: cap at 8 workers, NOT -n auto (see below)
 pytest -m e2e -n 0 --no-cov                     # E2E serial (also fine)
@@ -22,6 +22,14 @@ pytest -n 0                                     # Serial mode (for debugging)
 python scripts/generate_llms_full.py            # writes llms-full.txt
 python scripts/generate_llms_full.py --check    # CI-style: non-zero exit if stale
 ```
+
+**Tests run under `/dev/shm`:** `tests/conftest.py` points pytest's temp root (`tmp_path`,
+`PYTEST_DEBUG_TEMPROOT`) at `/dev/shm` when there's ~4GB+ free, since `/tmp` on this box is
+ext4 on a loop device (~11.7ms/fsync) and the suite's sqlite-heavy fixtures fsync thousands of
+times — that alone was 84% of wall time (11m23s -> ~100s once moved to tmpfs, plus
+`--dist worksteal` instead of `load` so one xdist worker doesn't get stuck with a slow tail).
+Falls back to `/tmp` automatically (slower, still correct) when `/dev/shm` is small or missing,
+e.g. Docker's default 64MB `/dev/shm` — or set `PYTEST_DEBUG_TEMPROOT` yourself to opt out.
 
 **E2E parallelism cap:** Do NOT run `pytest -m e2e -n auto` on a multi-core box.
 Each xdist worker spawns ~5 chromium processes; each chrome process reserves

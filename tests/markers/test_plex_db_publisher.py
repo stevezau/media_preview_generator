@@ -120,7 +120,13 @@ def _make_db(
     db.parent.mkdir(parents=True)
     conn = sqlite3.connect(db)
     conn.execute(f"PRAGMA journal_mode={journal_mode or _JOURNAL_MODE}")
-    conn.executescript((FIX / "plex_schema_1_43.sql").read_text())
+    # The schema is 48 CREATE TABLE/INDEX statements; each fsyncs its own autocommit
+    # transaction by default. synchronous=OFF plus one BEGIN...COMMIT around the load
+    # collapses that to a single fsync. Test DBs are throwaway, so durability doesn't
+    # matter here -- this only touches how the fixture loads the schema, not the
+    # journal mode or sync setting the publisher tests under it are exercising.
+    conn.execute("PRAGMA synchronous=OFF")
+    conn.executescript("BEGIN;\n" + (FIX / "plex_schema_1_43.sql").read_text() + "\nCOMMIT;")
     conn.execute("INSERT INTO metadata_items (id, metadata_type, title) VALUES (?, 4, 'Ep')", (metadata_item_id,))
     if tag_row is not None:
         conn.execute("INSERT INTO tags (id, tag, tag_type) VALUES (562, NULL, 12)")

@@ -143,7 +143,7 @@ addopts = [
     "--strict-markers",
     "--disable-warnings",
     "-n", "auto",
-    "--dist", "load",
+    "--dist", "worksteal",
     "-m", "not gpu and not e2e and not integration",
     "--timeout=30",
     "--timeout-method=thread",
@@ -151,6 +151,9 @@ addopts = [
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+# A run writes ~1.3 GB of tmp_path dirs; pytest keeps the last 3 runs by default, which fills
+# /dev/shm (64 MB default in Docker, and finite even on a real RAM disk) fast.
+tmp_path_retention_count = 1
 markers = [
     "integration: marks tests as integration tests",
     "real_plex_server: tests that require a live Plex server (opt out of the global Plex mock)",
