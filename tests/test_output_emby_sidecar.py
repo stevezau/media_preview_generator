@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import builtins
+import errno
+import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from loguru import logger
 
 from media_preview_generator.output import BifBundle, EmbyBifAdapter
 
@@ -134,3 +138,92 @@ class TestStaticHelpers:
             width=320,
             frame_interval=10,
         ) == Path("/m/Foo (2024)/Foo (2024)-320-10.bif")
+
+
+class TestPublishWriteDenied:
+    """A media mount Emby can't write to must log an actionable hint.
+
+    The sidecar lives beside the video, so the write fails when the ``.bif``
+    is opened — the media folder already exists, so ``mkdir`` succeeds even
+    on a read-only mount. EACCES (permission) and EROFS (``:ro`` mount) need
+    different advice; any other OSError gets neither hint.
+    """
+
+    def _publish_with_open_error(self, tmp_path, monkeypatch, err_no: int) -> tuple[OSError, list[str]]:
+        frame_dir = tmp_path / "frames"
+        frame_dir.mkdir()
+        (frame_dir / "00000.jpg").write_bytes(b"\xff\xd8\xff")
+        media_dir = tmp_path / "Movies" / "Test (2024)"
+        media_dir.mkdir(parents=True)
+        media_file = media_dir / "Test (2024).mkv"
+        media_file.write_bytes(b"")
+
+        adapter = EmbyBifAdapter()
+        bundle = _make_bundle(str(media_file), frame_dir)
+        out_path = adapter.compute_output_paths(bundle, MagicMock(), item_id=None)[0]
+
+        real_open = builtins.open
+
+        def fake_open(file, mode="r", *args, **kwargs):
+            if str(file) == str(out_path) and "w" in mode:
+                raise OSError(err_no, os.strerror(err_no), str(file))
+            return real_open(file, mode, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", fake_open)
+        messages: list[str] = []
+        sink_id = logger.add(lambda msg: messages.append(str(msg)), level="ERROR", format="{message}")
+        try:
+            with pytest.raises(OSError) as excinfo:
+                adapter.publish(bundle, [out_path])
+        finally:
+            logger.remove(sink_id)
+        return excinfo.value, messages
+
+    def test_logs_mount_read_write_hint_when_media_mount_is_read_only(self, tmp_path, monkeypatch):
+        exc, messages = self._publish_with_open_error(tmp_path, monkeypatch, errno.EROFS)
+
+        assert exc.errno == errno.EROFS
+        hint = next((m for m in messages if "read-only" in m), None)
+        assert hint is not None, f"no read-only hint logged: {messages}"
+        assert "media folder is mounted read-only" in hint
+        assert "Emby" in hint
+        assert "read-write" in hint
+
+    def test_logs_permission_hint_when_media_folder_is_not_writable(self, tmp_path, monkeypatch):
+        exc, messages = self._publish_with_open_error(tmp_path, monkeypatch, errno.EACCES)
+
+        assert exc.errno == errno.EACCES
+        hint = next((m for m in messages if "Emby preview file" in m), None)
+        assert hint is not None, f"no Emby permission hint logged: {messages}"
+        assert "permission denied" in hint
+        assert "read-write" in hint
+
+    def test_logs_no_mount_hint_when_error_is_unrelated(self, tmp_path, monkeypatch):
+        exc, messages = self._publish_with_open_error(tmp_path, monkeypatch, errno.ENOSPC)
+
+        assert exc.errno == errno.ENOSPC
+        assert not [m for m in messages if "read-only" in m or "permission denied" in m], messages
+
+    def test_logs_no_media_hint_when_frames_folder_is_unreadable(self, tmp_path, monkeypatch):
+        frame_dir = tmp_path / "frames"
+        frame_dir.mkdir()
+        media_file = tmp_path / "Movies" / "Test.mkv"
+        media_file.parent.mkdir()
+        media_file.write_bytes(b"")
+        adapter = EmbyBifAdapter()
+        bundle = _make_bundle(str(media_file), frame_dir)
+        out_path = adapter.compute_output_paths(bundle, MagicMock(), item_id=None)[0]
+
+        def denied_listdir(path):
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
+
+        monkeypatch.setattr(os, "listdir", denied_listdir)
+        messages: list[str] = []
+        sink_id = logger.add(lambda msg: messages.append(str(msg)), level="ERROR", format="{message}")
+        try:
+            with pytest.raises(PermissionError):
+                adapter.publish(bundle, [out_path])
+        finally:
+            logger.remove(sink_id)
+
+        assert not [m for m in messages if "Emby preview file" in m], messages

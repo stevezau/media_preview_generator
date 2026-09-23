@@ -51,6 +51,7 @@ References:
 
 from __future__ import annotations
 
+import errno
 import math
 import os
 import shutil
@@ -306,6 +307,50 @@ class JellyfinTrickplayAdapter(OutputAdapter):
             orphans.append(path)
         return orphans
 
+    def _log_write_denied(self, folder: Path, exc: OSError) -> None:
+        """Log how to fix a read-only or permission-denied trickplay folder.
+
+        The advice depends on the layout: the default layout writes beside
+        the video, off-media writes into Jellyfin's config folder. Other
+        OSErrors (disk full, etc.) are left to the caller's generic log.
+        """
+        if self._save_with_media:
+            target = "media folder"
+            read_only_fix = (
+                "Jellyfin's default layout stores trickplay beside the video, so mount the media "
+                "folder read-write (remove :ro from the Docker volume) — or turn on 'Store trickplay "
+                "off the media drive' for this server to write into Jellyfin's data folder instead."
+            )
+            denied_fix = "WRITE access to the folder containing this media file"
+        else:
+            target = "Jellyfin config folder"
+            read_only_fix = (
+                "Off-media trickplay is written into Jellyfin's data folder, so mount the Jellyfin "
+                "config folder read-write (remove :ro from the Docker volume)."
+            )
+            denied_fix = "WRITE access to the Jellyfin config folder (off-media trickplay is written there)"
+
+        if exc.errno == errno.EROFS:
+            logger.error(
+                "Cannot create Jellyfin trickplay staging folder at {}: the {} is mounted read-only. {} "
+                "Original error: {}",
+                folder,
+                target,
+                read_only_fix,
+                exc,
+            )
+        elif exc.errno in (errno.EACCES, errno.EPERM):
+            logger.error(
+                "Cannot create Jellyfin trickplay staging folder at {}: permission denied. "
+                "The container or process running this tool needs {}. "
+                "If running in Docker, make sure that volume is mounted read-write "
+                "(not :ro) and the PUID/PGID env vars match the file owner. "
+                "Original error: {}",
+                folder,
+                denied_fix,
+                exc,
+            )
+
     def publish(self, bundle: BifBundle, output_paths: list[Path], item_id: str | None = None) -> None:
         """Pack ``bundle.frame_dir`` JPG frames into Jellyfin tile sheets.
 
@@ -356,17 +401,8 @@ class JellyfinTrickplayAdapter(OutputAdapter):
         shutil.rmtree(old_dir, ignore_errors=True)
         try:
             staging_sheets_dir.mkdir(parents=True, exist_ok=True)
-        except PermissionError as exc:
-            logger.error(
-                "Cannot create Jellyfin trickplay staging folder at {}: permission denied. "
-                "The container or process running this tool needs WRITE access to the "
-                "folder containing this media file. "
-                "If running in Docker, make sure your media volume is mounted read-write "
-                "(not :ro) and the PUID/PGID env vars match the file owner. "
-                "Original error: {}",
-                staging_sheets_dir,
-                exc,
-            )
+        except OSError as exc:
+            self._log_write_denied(staging_sheets_dir, exc)
             raise
 
         thumb_w, thumb_h = _measure_first_frame(Path(bundle.frame_dir) / frames[0])
