@@ -1,3 +1,7 @@
+---
+description: What each Previews Readiness check means and how to fix it, so Plex, Emby and Jellyfin show the preview thumbnails this app generates.
+---
+
 # Previews Readiness
 
 > [Back to Guides](../guides.md) · [Configuration & API Reference](../reference.md) · [Multi-Media-Server Guide](../multi-server.md)
@@ -172,6 +176,8 @@ container path in the server's **Jellyfin config folder** field.
   `TrickplayProvider` only adopts existing tiles on scan when this
   flag is on. Off without the plugin means adoption stalls until the
   3 AM daily task.
+- **Emby:** recommend **off**. Emby has no plugin mode; its scan-time
+  extraction just repeats this app's work.
 
 **Enable / disable:** toggle directly. Disable while in Mode B shows a
 click-to-confirm dialog.
@@ -279,8 +285,11 @@ on top of this app's output.
 generation is wasted CPU. Plex: `enableBIFGeneration` per library
 section. Emby: `ExtractTrickplayImagesDuringLibraryScan` +
 `ExtractChapterImagesDuringLibraryScan` per library. Jellyfin:
-same pair but `EnableTrickplayImageExtraction` stays on (destructive
-when off — see above).
+`ExtractTrickplayImagesDuringLibraryScan`, while
+`EnableTrickplayImageExtraction` stays on (destructive when off — see
+above). **Jellyfin without the plugin:** don't stop it here. This row
+always recommends "stopped", but without the plugin scan-time extraction
+must stay on (see [scan-time extraction](#scan-extraction)).
 
 **Enable / disable:** toggles with the current aggregate state
 reported (e.g. "stopped on 3/5 libraries"). Non-destructive.

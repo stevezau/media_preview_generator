@@ -75,3 +75,6 @@ media_preview_generator/release_notes.json
 # Real docs screenshots should live under docs/ and be added explicitly.
 *.png
 !docs/**/*.png
+
+# MkDocs build output
+site/

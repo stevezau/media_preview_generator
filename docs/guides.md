@@ -1,3 +1,7 @@
+---
+description: Use the Media Preview Generator web UI, trigger jobs from Sonarr, Radarr or Plex webhooks, handle HDR and Dolby Vision, and fix common problems.
+---
+
 # Guides & Troubleshooting
 
 > [Back to Docs](README.md)
@@ -24,7 +28,7 @@ Guides for the web interface, automation and webhooks, HDR handling, and trouble
 - [Getting Started](getting-started.md)
 - [Configuration & API Reference](reference.md)
 - [FAQ](faq.md)
-- [Main README](../README.md)
+- [Main README](https://github.com/stevezau/media_preview_generator/blob/dev/README.md)
 
 ---
 
@@ -41,7 +45,7 @@ When you first access the web interface, you'll be guided through a **Setup Wiza
    - **Emby** — enter the server URL and an API key.
    - **Jellyfin** — enter the URL and run a **Quick Connect** ceremony (or paste an API key).
 2. **Server & Libraries** *(Plex only)* — pick which Plex server (if you have several) and which libraries to enable. Emby/Jellyfin flows skip this step; libraries are managed later from **Settings → Media Servers**.
-3. **Path Configuration** *(Plex only)* — confirm the Plex application data folder where BIF files are written, plus any media path mappings. Emby/Jellyfin push their output via HTTP, so this step is skipped for those flows.
+3. **Path Configuration** *(Plex only)* — confirm the Plex application data folder where BIF files are written, plus any media path mappings. Emby and Jellyfin write their previews next to each video (so the media must be mounted read-write for them), and only nudge the server over HTTP, so this step is skipped for those flows.
 4. **Processing Options** — per-GPU enable/workers/FFmpeg threads, CPU workers, thumbnail interval, and quality.
 5. **Security** — view or replace your access token (optional).
 
@@ -213,7 +217,7 @@ The legacy `/webhooks` and `/schedules` URLs still work — they 302-redirect to
 
 ### Production Server
 
-The Docker image runs the web interface for you — there's nothing to configure. The dashboard updates in real time over WebSocket; long-running jobs survive the default proxy timeouts. If you're running the app outside Docker (or just curious how the container is wired internally — gunicorn settings, single-worker rationale, WebSocket transport), see [CONTRIBUTING.md → Architecture](../CONTRIBUTING.md#architecture).
+The Docker image runs the web interface for you — there's nothing to configure. The dashboard updates in real time over WebSocket; long-running jobs survive the default proxy timeouts. If you're running the app outside Docker (or just curious how the container is wired internally — gunicorn settings, single-worker rationale, WebSocket transport), see [CONTRIBUTING.md → Architecture](https://github.com/stevezau/media_preview_generator/blob/dev/CONTRIBUTING.md#architecture).
 
 ### Reverse Proxy
 
@@ -320,7 +324,7 @@ Automatically generate preview thumbnails when Radarr or Sonarr imports new medi
 1. Radarr/Sonarr imports a file (or an external tool sends a custom webhook) and a POST is sent to this app.
 2. The app **queues** the file and starts (or resets) a timer. Imports from the same source (Radarr, Sonarr, or Custom) are batched together.
 3. A batch is processed only after the **delay** (e.g. 60s) has passed with **no new** imports from that source. So if another file arrives 1 second before the batch would run, it is added to the queue and the timer resets — the batch runs 60 seconds after that file. Every file gets at least 60 seconds before we process it.
-4. This delay is important because **your media servers need time to add the new file to their library**. If we process too soon, the file may not be indexed yet (regardless of vendor) and the job can fail or skip the item. Not-yet-indexed files are automatically re-queued on a 5-step backoff (30 s → 2 m → 5 m → 15 m → 60 m), so transient indexing lag doesn't drop work.
+4. This delay is important because **your media servers need time to add the new file to their library**. If we process too soon, the file may not be indexed yet (regardless of vendor) and the job can fail or skip the item. Not-yet-indexed files are automatically retried on a backoff (1 m → 2 m → 5 m with the default retry count of 3; more retries add 15 m and 60 m steps), so transient indexing lag doesn't drop work. See [Slow-backoff retry queue](multi-server.md#slow-backoff-retry-queue).
 5. When the timer fires, the app resolves each queued path against every configured server that owns it, processes it once, and publishes to each in its native format — Plex BIF bundle, Emby sidecar BIF, Jellyfin trickplay tiles. Items that already have a fresh preview are skipped automatically (source-aware dedup).
 
 ### Prerequisites
@@ -595,7 +599,7 @@ You don't have to do anything for these — the container handles them on startu
 > [!IMPORTANT]
 > **NVIDIA users: set `NVIDIA_DRIVER_CAPABILITIES=all` (or include `graphics`).**
 >
-> Dolby Vision Profile 5 needs the NVIDIA Vulkan driver inside the container. NVIDIA's container toolkit only loads it when the `graphics` capability is declared. The common `compute,video,utility` setting is fine for everything else but **not** for Dolby Vision — without `graphics`, DV Profile 5 thumbnails come out with a green rectangle.
+> Dolby Vision Profile 5 needs the NVIDIA Vulkan driver inside the container. NVIDIA's container toolkit only loads it when the `graphics` capability is declared. The common `compute,video,utility` setting is fine for everything else but **not** for Dolby Vision Profile 5 — without `graphics`, the app can't tone-map those files and their thumbnails come out visibly dim.
 >
 > **Fix:** add `-e NVIDIA_DRIVER_CAPABILITIES=all` to your `docker run` command (or set it in the `environment:` block of your compose file) and restart the container. `all` is what the official NVIDIA Vulkan images use. If you prefer minimum privilege, `compute,video,utility,graphics` works too.
 >
@@ -625,7 +629,7 @@ Use this table to diagnose common failures quickly.
 | New files are imported but previews are not generated | Plex indexing delay or wrong library mapping | Increase webhook delay and verify Radarr/Sonarr library mapping in Webhooks settings. |
 | Radarr/Sonarr cannot reach webhook URL | Network routing or hostname issue | Use host IP or reachable Docker hostname (not `localhost`), then verify firewall and port `8080`. |
 | New job starts after I paused | Global pause not set or UI not refreshed | Use **Pause Processing** (Current Job or Job Queue header). Pause is global and persisted; in-flight files finish before workers idle. |
-| DV Profile 5 thumbnails have a bright green rectangle or overall green cast | The container can't reach a real Vulkan-capable GPU, so DV tone mapping falls back to a slow software path that has a known rendering bug | Pass an iGPU to the container with `--device /dev/dri:/dev/dri` (Intel/AMD), or for NVIDIA set `NVIDIA_DRIVER_CAPABILITIES=all` so the NVIDIA Vulkan driver gets injected. Most users already pass `/dev/dri` for hardware video acceleration, which brings the Vulkan driver along for free. |
+| DV Profile 5 thumbnails are visibly dim, and the log warns that no working Vulkan device was found | The container can't reach a hardware Vulkan device, so the app skips Profile 5 tone mapping and extracts plain frames instead | Pass an iGPU to the container with `--device /dev/dri:/dev/dri` (Intel/AMD), or for NVIDIA set `NVIDIA_DRIVER_CAPABILITIES=all` so the NVIDIA Vulkan driver gets injected. Most users already pass `/dev/dri` for hardware video acceleration, which brings the Vulkan driver along for free. |
 
 ### Validate Plex Config Path
 
@@ -682,4 +686,4 @@ Open a [GitHub Issue](https://github.com/stevezau/media_preview_generator/issues
 
 ---
 
-[Back to Docs](README.md) | [Main README](../README.md)
+[Back to Docs](README.md) | [Main README](https://github.com/stevezau/media_preview_generator/blob/dev/README.md)

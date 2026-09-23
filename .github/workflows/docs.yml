@@ -1,0 +1,147 @@
+name: Docs site — build and deploy to GitHub Pages
+
+# The ONE workflow that deploys GitHub Pages. A Pages deploy replaces the whole site, and
+# the site also serves the Jellyfin plugin repository manifest that every Jellyfin install
+# of Media Preview Bridge polls:
+#   https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json
+# So every deploy ships the docs AND a manifest:
+#   - push to dev / manual run: re-publishes the LIVE manifest unchanged.
+#   - called by jellyfin-plugin.yml: publishes the freshly patched manifest it hands over
+#     as an artifact (the plugin release must also ship the docs, or it would wipe them).
+# If no valid manifest is available the job fails before deploying anything.
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - "docs/**"
+      - "docs_theme/**"
+      - "mkdocs.yml"
+      - "llms.txt"
+      - "llms-full.txt"
+      - "pyproject.toml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      manifest_artifact:
+        description: "Artifact holding manifest.json to publish. Empty = re-publish the live manifest."
+        type: string
+        required: false
+        default: ""
+      docs_ref:
+        description: "Git ref to build the docs from. Empty = the triggering ref."
+        type: string
+        required: false
+        default: ""
+
+permissions: {}
+
+env:
+  # Docs-only deploys copy this live manifest and fail if it's missing, so a
+  # brand-new Pages site must be bootstrapped once by a plugin release
+  # (jellyfin-plugin.yml seeds from the template on a genuine 404).
+  # When the site moves to a custom domain, update this URL and PREV_URL there.
+  LIVE_MANIFEST_URL: https://stevezau.github.io/media_preview_generator/jellyfin-plugin/manifest.json
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    # One job does fetch-manifest → build → deploy so the whole sequence is serialised.
+    # Split across jobs, a docs deploy could fetch the live manifest, lose the race to a
+    # plugin release, then deploy its stale copy over the new version. Job-level (not
+    # workflow-level) so a caller holding its own workflow-level group can't deadlock.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.docs_ref || github.ref }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install docs dependencies
+        # Pins live in pyproject.toml's `docs` extra; install just those, not the app.
+        run: |
+          set -euo pipefail
+          python - <<'PY' > docs-requirements.txt
+          import tomllib
+          with open("pyproject.toml", "rb") as fh:
+              print("\n".join(tomllib.load(fh)["project"]["optional-dependencies"]["docs"]))
+          PY
+          pip install -r docs-requirements.txt
+
+      - name: Build site
+        run: mkdocs build --strict --site-dir site
+
+      - name: Download plugin manifest artifact
+        if: inputs.manifest_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.manifest_artifact }}
+          path: manifest-in
+
+      - name: Place and validate Jellyfin plugin manifest
+        env:
+          MANIFEST_ARTIFACT: ${{ inputs.manifest_artifact }}
+        run: |
+          set -euo pipefail
+          readonly target="site/jellyfin-plugin/manifest.json"
+          if [[ -e "$target" ]]; then
+            echo "::error::The docs build produced $target itself; it must only come from the plugin release."
+            exit 1
+          fi
+          mkdir -p "$(dirname "$target")"
+          if [[ -n "$MANIFEST_ARTIFACT" ]]; then
+            cp manifest-in/manifest.json "$target"
+            source_desc="artifact $MANIFEST_ARTIFACT"
+          else
+            curl -fsSL --retry 3 "$LIVE_MANIFEST_URL" -o "$target"
+            source_desc="live $LIVE_MANIFEST_URL"
+          fi
+          python - "$target" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as fh:
+              data = json.load(fh)
+          if not isinstance(data, list) or not data:
+              sys.exit("::error::Jellyfin manifest is not a non-empty JSON list; refusing to deploy.")
+          print(f"Manifest OK: {len(data)} plugin(s), {len(data[0].get('versions', []))} version(s).")
+          PY
+          echo "MANIFEST_SOURCE=$source_desc" >> "$GITHUB_ENV"
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+      - name: Summary
+        env:
+          PAGE_URL: ${{ steps.deploy.outputs.page_url }}
+        run: |
+          {
+            echo "## Docs site deployed"
+            echo ""
+            echo "- Site: $PAGE_URL"
+            echo "- Jellyfin manifest from: $MANIFEST_SOURCE"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -10,9 +10,11 @@ GPU-accelerated video preview thumbnail generation for **Plex, Emby, and Jellyfi
 
 **The Problem:** Built-in preview generation has gaps depending on which server you run:
 
-- **Plex** generates thumbnails single-threaded on the CPU (no GPU support).
-- **Emby** has no GPU support for thumbnail generation at all.
-- **Jellyfin** does support hardware-accelerated trickplay, but it shares CPU/GPU with playback — and on a busy server those are resources you'd rather give to the player.
+- **Plex** documents no GPU option for preview thumbnails, and calls the job CPU-intensive.
+- **Emby** has no GPU option for thumbnail extraction.
+- **Jellyfin** can use hardware decoding for trickplay, but it's off by default, and by default the job runs at below-normal priority with one thread.
+
+See the [dated, sourced comparison](https://stevezau.github.io/media_preview_generator/comparison/) for details and for when the built-ins are the better choice.
 
 **The Solution:** This tool runs preview generation **off the media server** on a machine of your choosing, uses every GPU it finds, and processes files in parallel. When two or more servers contain the same file, FFmpeg runs only once — the result is then written out in each server's expected format.
 
@@ -24,9 +26,9 @@ any number — and a single generation run writes the right output format to eac
 
 **Automation that just works.** Radarr / Sonarr / Tdarr / FileFlows webhooks,
 Plex direct (Plex Pass), Recently Added polling, cron & interval schedules —
-all share one universal inbound URL with vendor auto-detection. A 5-step
-backoff retry (30 s → 2 m → 5 m → 15 m → 60 m) handles files your server hasn't
-indexed yet. Source-aware dedup re-runs automatically when a file is swapped
+all share one universal inbound URL with vendor auto-detection. A backoff
+retry (1 m → 2 m → 5 m by default; raise the retry count for 15 m and
+60 m) handles files your server hasn't indexed yet. Source-aware dedup re-runs automatically when a file is swapped
 (e.g. a Sonarr/Radarr quality upgrade) and skips when nothing changed.
 
 **Hardware you already have.** NVIDIA, AMD, Intel — per-GPU worker counts and
@@ -55,6 +57,8 @@ docker run -d \
 
 Replace `/path/to/media`, `/path/to/plex/config`, and `/path/to/app/config` with your actual paths.
 
+> **Emby or Jellyfin?** This command is for Plex, which only writes into `/plex`, so the media stays `:ro`. Emby and Jellyfin (default layout) write previews next to each video, so change the media mount to `:rw`. See [Volume Mounts](https://github.com/stevezau/media_preview_generator/blob/main/docs/getting-started.md#volume-mounts).
+
 > **Timezone:** The `/etc/localtime` mount ensures log timestamps and scheduled jobs use your local time. Alternatively, use `-e TZ=America/New_York` (replace with your [timezone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)).
 
 Then open `http://YOUR_IP:8080`, retrieve the authentication token from container logs, and complete the setup wizard. All settings (Plex connection, GPU config, processing options) are configured in the web UI Settings page.
@@ -73,7 +77,7 @@ See the [releases page](https://github.com/stevezau/media_preview_generator/rele
 
 | Container Path | Purpose | Mode |
 |----------------|---------|------|
-| `/media` | Your media files | `ro` (read-only) |
+| `/media` | Your media files | `ro` for Plex only. `rw` for Emby, or Jellyfin in its default layout (previews are written next to each video). |
 | `/plex` | Plex application data (where BIF files are stored) | `rw` |
 | `/config` | App settings, schedules, job history | `rw` |
 
@@ -109,6 +113,7 @@ services:
       - PUID=1000
       - PGID=1000
     volumes:
+      # :ro is fine for Plex. Use :rw for Emby, or Jellyfin in its default layout.
       - /path/to/your/media:/media:ro
       - /path/to/plex/config:/plex:rw
       - /path/to/app/config:/config:rw
@@ -131,6 +136,7 @@ services:
       - PUID=1000
       - PGID=1000
     volumes:
+      # :ro is fine for Plex. Use :rw for Emby, or Jellyfin in its default layout.
       - /path/to/your/media:/media:ro
       - /path/to/plex/config:/plex:rw
       - /path/to/app/config:/config:rw

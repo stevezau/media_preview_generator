@@ -64,7 +64,9 @@ services:
       # - AUTH_METHOD=external
 
     volumes:
-      # Your media files (read-only)
+      # Your media files. :ro is fine for Plex (it only writes into /plex).
+      # Using Emby, or Jellyfin in its default layout? Change this to :rw —
+      # those previews are written next to each video.
       - /path/to/your/media:/media:ro
       # Plex application data (read-write for saving BIF files)
       - /path/to/plex/config:/plex:rw
@@ -91,6 +93,7 @@ services:
       # Timezone — ensures log timestamps and scheduled jobs use your local time
       # - TZ=America/New_York
     volumes:
+      # :ro is fine for Plex. Use :rw for Emby, or Jellyfin in its default layout.
       - /path/to/your/media:/media:ro
       - /path/to/plex/config:/plex:rw
       - /path/to/app/config:/config:rw
@@ -135,7 +138,8 @@ services:
       # - TZ=America/New_York
 
     volumes:
-      # Media share (read-only) — use the same path as your Plex container
+      # Media share — use the same path as your Plex container.
+      # :ro is fine for Plex. Use :rw for Emby, or Jellyfin in its default layout.
       - /mnt/user/data/plex:/data/plex:ro
       # Plex appdata (read-write for BIF files)
       - /mnt/user/appdata/plex/Library/Application Support/Plex Media Server:/plex:rw
