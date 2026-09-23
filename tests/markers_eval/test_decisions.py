@@ -27,7 +27,8 @@ def test_rows_for_plex_audio_high_and_medium_with_g3_on_and_off():
     on = compare_with_plex([e1, e2, e3], segments, baseline)
     assert on.plex.as_dict() == {"useful": 2, "wrong": 1, "missed": 0}
     assert on.audio.as_dict() == {"useful": 2, "wrong": 0, "missed": 1}
-    # Ruling G3 (shipped): season audio and a server's own marker never decide together; neither decides alone.
+    # Ruling G3 (shipped): season audio and a server's own marker never decide together. Plex answers every episode
+    # here, so season audio never stands alone (it would decide an intro alone since 2026-09-24).
     assert on.high.as_dict() == on.medium.as_dict() == {"useful": 0, "wrong": 0, "missed": 3}
     off = compare_with_plex([e1, e2, e3], segments, baseline, g3=False)
     assert off.plex.as_dict() == on.plex.as_dict() and off.audio.as_dict() == on.audio.as_dict()
@@ -50,8 +51,11 @@ def test_the_gate_needs_medium_as_useful_as_plex_and_no_more_wrong():
     off = compare_with_plex([e1, e2, e3], segments, baseline, g3=False)
     assert on.plex.as_dict() == {"useful": 1, "wrong": 1, "missed": 1}
     assert on.audio.as_dict() == {"useful": 3, "wrong": 0, "missed": 0}
-    assert off.medium.as_dict() == {"useful": 1, "wrong": 0, "missed": 2}  # e3: season audio alone never decides (R2)
-    assert (on.gate(), off.gate()) == (False, True)
+    # e3: season audio alone decides an intro (owner 2026-09-24, overriding R2); e1 still needs G3 off.
+    assert on.medium.as_dict() == {"useful": 1, "wrong": 0, "missed": 2}
+    assert off.medium.as_dict() == {"useful": 2, "wrong": 0, "missed": 1}
+    # With R2 there were none of e3's, and G3 on failed the gate here (Medium 0 useful against Plex's 1).
+    assert (on.gate(), off.gate()) == (True, True)
     assert [(d["file"], d["g3_off"]) for d in g3_differences(on, off)] == [(e1.file, "useful")]
 
 

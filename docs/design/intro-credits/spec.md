@@ -276,8 +276,11 @@ Task 7).
   files per season, only files with chapters) reproduces the table above exactly (91 / 13 / 14); app mode, whole season
   folder (158 files matched): **91 useful / 10 wrong / 17 missed** (The Simpsons S03: 3 wrong become missed).
 
-Season audio never decides alone, at High or Medium (R2), and neither it nor the previous-season hint makes an
-agreeing pair with markers already on a server (G3, §5.5 rule 4): both come from matching audio.
+Season audio decides an intro alone at Medium when nothing else answers (owner, 2026-09-24, overriding R2 "never
+alone at High or Medium": alone 91 useful / 13 wrong / 14 missed on the 118, against Plex's own 23 right / 15 wrong).
+The previous-season hint still never decides alone (48 / 10 / 24 above; owner 2026-09-13: it needs a second source).
+Neither season audio nor the hint makes an agreeing pair with markers already on a server (G3, §5.5 rule 4): both come
+from matching audio, so an episode where only those two answer stays in Needs review.
 
 Remaining failures: variable couch gag (The Simpsons), a repeated segment ahead of the real intro (Carême), title card
 10–20 s longer than the chapter (Daredevil, Outlander). Credits via audio matching: 54% precision — **rejected**.
@@ -594,9 +597,10 @@ Each source yields candidates `{type, start_ms, end_ms, source, confidence}`.
    pair; a chapter within tolerance of two groups that disagree with each other is still accepted.
 6. A single source is accepted only at the **"Medium"** rules (the app's only rules since 2026-09-24, §14:
    `decide.APP_PUBLISH_WHEN`; "High" stays in `DecisionContext` for the evaluation harness), only when that source checks the file's
-   cut itself — chapters, credits text (it reads this file's own frames), or SkipDB `exact`/`shifted` matches for an
-   intro or recap (IntroDB and TheIntroDB return an answer whatever the file's length, so alone they never decide;
-   SkipDB alone never decides credits or a preview, which need an agreeing independent source as at High) — and only
+   cut itself — chapters, credits text (it reads this file's own frames), season audio for an intro (since
+   2026-09-24, §14; not the previous-season hint), or SkipDB `exact`/`shifted` matches for an intro or recap (IntroDB
+   and TheIntroDB return an answer whatever the file's length, so alone they never decide; SkipDB alone never decides
+   credits or a preview, which need an agreeing independent source as at High) — and only
    when no sane candidate from another independent source (markers already on a server included) contradicts it and
    every pair of the source's own candidates agrees; its other edge takes the safer value across those candidates.
 7. Markers already on a server count as agreement evidence, never as a sole source, and never supply the published
@@ -2050,3 +2054,15 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   found the intro; matching audio needs another source to agree", "only a server's own marker has …"), a
   disagreement keeps "sources disagree: …", and a server row's message is those reasons (it said "Sources don't
   agree yet" for both). No reason code changed; the Files panel still hides the old row text as routine.
+- 2026-09-24 · **Season audio may publish an intro alone** (owner, overriding R2 of 2026-09-14/15; §5.3, §5.5 rule 6):
+  "if it doesn't exist online then use the GPU/CPU check". On the 118 intro episodes season audio alone is 91 useful /
+  13 wrong / 14 missed, against Plex's own detection at 23 right / 15 wrong. `decide._may_decide_alone` now lets a
+  `season_audio` intro decide at Medium when it is the only independent group (not credits, recaps or previews: only
+  intros were measured, and audio credits were rejected at 54 % precision). The previous-season hint
+  (`season_audio_previous`) stays agreement-only: the spec's data doesn't support it alone (48 useful / 10 wrong / 24
+  missed, precision 83 % against 88 % for this season's audio) and the owner ruled on 2026-09-13 that it needs a second
+  source. Unchanged: G3 (season audio or the hint with only a server's own marker is not an agreeing pair and stays in
+  review with the G3 reason, even when they agree), a disagreeing source sends the intro to review, and the hint
+  disagreeing with this season's audio is one source contradicting itself. A season-audio decision rests on its
+  answer, so it is decided again when the season grows (`intro_rests_on_season_audio`). The harness gate row
+  (`tests/markers_eval/test_decisions.py`) now passes with G3 on: an episode Plex didn't answer is decided by audio.

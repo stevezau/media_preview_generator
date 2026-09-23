@@ -321,8 +321,9 @@ class TestIntroCreditsSettings:
         )
         assert tooltip == (
             "Finds the theme tune a season's episodes share. Tested alone on 118 episodes: 91 right, 13 wrong, 14 "
-            "missed — too error-prone to decide by itself, so it never publishes an intro alone; it only confirms "
-            "what another source already found. A server's own intro marker doesn't count as that other source."
+            "missed (Plex's own intro detection: 23 right, 15 wrong), so it publishes an intro on its own when nothing "
+            "else answers. When another source disagrees, the episode goes to Needs review. A server's own intro "
+            "marker doesn't count as a second source for it."
         )
 
         switch.click()
@@ -386,8 +387,9 @@ class TestIntroCreditsSettings:
             "intro chapter is far longer than the rest of its season's. "
             "An online database's answer is published once an independent source agrees with it: on-screen credits, "
             "season audio, another database, or a server's own marker (IntroDB and TheIntroDB count as one). "
-            "A single answer decides alone only when it checks your own file: on-screen credit text for credits, or "
-            "SkipDB matched to your file's length for intros and recaps. "
+            "A single answer decides alone only when it checks your own file: on-screen credit text for credits, "
+            "season audio for intros (so a show no online database has still gets them), or SkipDB matched to your "
+            "file's length for intros and recaps. "
             "If sources disagree, or the only answer can't decide alone, the file goes to Needs review so you can pick."
         )
 
@@ -416,6 +418,7 @@ class TestIntroCreditsSettings:
         answers = {Source.CREDITS_TEXT: {MarkerType.CREDITS}}
         qualifiers = {
             frozenset({MarkerType.CREDITS}): "for credits",
+            frozenset({MarkerType.INTRO}): "for intros",
             frozenset({MarkerType.INTRO, MarkerType.RECAP}): "for intros and recaps",
         }
 

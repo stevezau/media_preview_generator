@@ -56,8 +56,11 @@ class TestStoredAnswers:
 
     def test_a_current_answer_is_not_asked_again_while_the_type_stays_undecided(self, store, media):
         reg = _registry(media, ServerType.PLEX)
-        detector = MagicMock(return_value=[AUDIO_INTRO])  # one source: the intro stays in review at "High"
-        ctx = _ctx(store, reg, detectors=(_spec(detector),), settings_raw=INTRO_ONLY)
+        # The previous season's hint alone: it never decides, so the intro stays in review.
+        hint = Candidate(T.INTRO, 126_000, 158_000, Source.SEASON_AUDIO_PREVIOUS, 1.0, "4/4")
+        detector = MagicMock(return_value=[hint])
+        spec = _spec(detector, stores=frozenset({Source.SEASON_AUDIO, Source.SEASON_AUDIO_PREVIOUS}))
+        ctx = _ctx(store, reg, detectors=(spec,), settings_raw=INTRO_ONLY)
         first, _ = _run(ctx, media, _pubs(), stage="process")
         second, _ = _run(ctx, media, _pubs(), stage="process")
         assert first.outcome_key == second.outcome_key == FileOutcome.NEEDS_REVIEW.value
@@ -206,7 +209,8 @@ class TestWhereItRuns:
         cancel = MagicMock(return_value=False)
         ctx = _ctx(store, reg, detectors=(_spec(detector, needs_worker=needs),), settings_raw=INTRO_ONLY)
         out, _ = _run(ctx, media, _pubs(), cancel_check=cancel)
-        assert out is not None and out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        # Season audio decides an intro alone (owner 2026-09-24): the file is done on the checking thread.
+        assert out is not None and out.outcome_key == FileOutcome.PUBLISHED.value
         kwargs = detector.call_args.kwargs
         assert (kwargs["gpu"], kwargs["gpu_device_path"], kwargs["pause_check"]) == (None, None, None)
         assert kwargs["cancel_check"] is cancel and kwargs["ctx"] is ctx

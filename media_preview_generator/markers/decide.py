@@ -48,13 +48,15 @@ _INDEPENDENCE_GROUP = {
 # decision, not a fallback someone "simplifies" away.
 _IMPORTED_GROUP = {"introdb": _INTRODB_GROUP, "skipdb": Source.SKIPDB.value, "aniskip": _INTRODB_GROUP}
 # At "Medium" a lone source publishes only when it checks this file's cut itself (rule 6): chapters, SkipDB's
-# duration-matched intros and recaps, and credits text, which reads this file's own frames (owner, Q1, 2026-09-16).
-# IntroDB takes no duration, TheIntroDB answers the closest cut it has, and markers already on servers never decide
-# alone (rule 7). Season audio only agrees (R2: 13 wrong of 104 answered alone), and the previous season's is a hint.
+# duration-matched intros and recaps, credits text, which reads this file's own frames (owner, Q1, 2026-09-16), and
+# season audio's intros (owner, 2026-09-24, overriding R2: alone 91 useful / 13 wrong / 14 missed on 118 episodes,
+# against Plex's own 23 right / 15 wrong; "if it doesn't exist online then use the GPU/CPU check"). IntroDB takes no
+# duration, TheIntroDB answers the closest cut it has, and markers already on servers never decide alone (rule 7). The
+# previous season's audio stays a hint: alone it was 48 useful / 10 wrong / 24 missed (precision 83 %), and the owner
+# ruled on 2026-09-13 that it needs a second source.
 _AGREEMENT_ONLY = SERVER_SOURCES | {
     Source.INTRODB,
     Source.THEINTRODB,
-    Source.SEASON_AUDIO,
     Source.SEASON_AUDIO_PREVIOUS,
 }
 # Season audio doesn't confirm markers already on a server on its own: a server's own intro detection matches audio across
@@ -558,20 +560,23 @@ def _decide_from_cliques(mtype: MarkerType, cliques: list[list[Candidate]], ctx:
 
 def _may_decide_alone(candidate: Candidate) -> bool:
     """Whether a candidate's source checks this file's cut well enough to publish alone at "Medium" (rule 6): chapters,
-    credits text, and SkipDB for intros and recaps.
+    credits text, season audio for intros, and SkipDB for intros and recaps.
 
     SkipDB's duration match holds for intros and recaps, not for credits or previews: on the lab scale run every lone
-    SkipDB credits answer started early, some by minutes (Battlestar Galactica S04E05: 6.7 min of story).
+    SkipDB credits answer started early, some by minutes (Battlestar Galactica S04E05: 6.7 min of story). Season audio
+    was only ever measured on intros (its credits were rejected at 54 % precision), so only an intro of it decides.
     """
     if candidate.source in _AGREEMENT_ONLY:
         return False
+    if candidate.source is Source.SEASON_AUDIO:
+        return candidate.type is MarkerType.INTRO
     return candidate.type in _START_SEGMENTS or candidate.source is not Source.SKIPDB
 
 
 def _decide_from_single_source(mtype: MarkerType, sane: list[Candidate], ctx: DecisionContext) -> TypeDecision:
     """No two independent sources agree. Only "medium" may publish, and only a lone, self-consistent group that
-    checks this file's cut itself (not IntroDB/TheIntroDB, not season audio, not markers already on servers, and SkipDB
-    only for an intro or recap).
+    checks this file's cut itself (not IntroDB/TheIntroDB, not the previous season's audio, not markers already on
+    servers; SkipDB only for an intro or recap, season audio only for an intro).
 
     Any second independent group here (server markers included) stops "medium": it either disagrees, or it
     agrees without being able to form a cluster (a server's own markers and an importer plugin's copy; or season

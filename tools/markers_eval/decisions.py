@@ -4,10 +4,11 @@ Chapters are the truth on this set, so they can't also be a source, and no onlin
 files. What's left is what a library without chapters or online answers gets: season audio (the app's season step)
 and Plex's own intro marker as ``server_markers``, decided by the real ``decide()`` at High and Medium.
 
-Two rulings shape the rows. R2: season audio never decides alone. G3 (precision first): season audio and a server's
-own marker never decide together. With G3 on (shipped), no High or Medium row here can publish anything, so every
-row is also reported with G3 off (season audio and a server's own marker count as two agreeing independent sources),
-for the owner to rule on G3 with numbers. G3 off never changes the shipped rule: ``g3_rule`` patches it for the
+Two rulings shape the rows. R2 (until 2026-09-24): season audio never decided alone; since then it decides an intro
+alone at Medium when nothing else answers (owner, on these 118 episodes' numbers). G3 (precision first): season audio
+and a server's own marker never decide together. With G3 on (shipped), an episode Plex also answers publishes nothing
+here, so every row is also reported with G3 off (season audio and a server's own marker count as two agreeing
+independent sources), for the owner to rule on G3 with numbers. G3 off never changes the shipped rule: ``g3_rule`` patches it for the
 duration of a block only.
 """
 

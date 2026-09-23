@@ -291,15 +291,16 @@ Shared detection settings — one file is detected once, whatever the publish ru
 | `detect.recap` | bool | `false` | Jellyfin's player is the only one with a Skip Recap button. |
 | `credits_window` | object | `{"tv_s": null, "movie_s": null}` | Settings → Intro & Credits → Advanced → "Where to look for credits". How far from the end of a file on-screen credit text is searched for; credits already rolling where it begins are followed back 120 s at a time, only as far as a start the last-quarter rule and the movie cap would still keep. `tv_s` applies to TV episodes, `movie_s` to movies and files of unknown kind. Each is `null` (Automatic: last 450 s of an episode, 900 s of a movie) or one of `300`, `600`, `900`, `1200`, `1800` seconds; anything else is refused with a 400 naming the key. A key left out means Automatic, and a partial post merges over the stored value. A longer window decodes longer for every file. A window you choose also lets credits start that far before the end even where the last-quarter-of-the-file rule would refuse them, and a movie window above 15 minutes raises the 900 s cap on how far before the end a movie's credits may start. Automatic keeps both rules exactly as before. Changing it decides files again, and files already read on another window are read again. A stored value that isn't valid is treated as Automatic (logged). |
 | `sources` | array | see above | Evidence sources, in checking/precedence order. Reordering in the UI reorders this array. |
-| `sources[].id` | one of `chapters`, `theintrodb`, `introdb`, `skipdb`, `season_audio`, `credits_text`, `server_markers` | — | `credits_text` runs where text detection is available (see `GET /api/markers/sources/local`); it decides credits alone. `season_audio` runs where ffmpeg has chromaprint (see `GET /api/markers/sources/local`); it only confirms intros another source found. Its previous-season hint is stored as `season_audio_previous` evidence (not a settings id). |
+| `sources[].id` | one of `chapters`, `theintrodb`, `introdb`, `skipdb`, `season_audio`, `credits_text`, `server_markers` | — | `credits_text` runs where text detection is available (see `GET /api/markers/sources/local`); it decides credits alone. `season_audio` runs where ffmpeg has chromaprint (see `GET /api/markers/sources/local`); it decides an intro alone when nothing else answers, and confirms one another source found. Its previous-season hint is stored as `season_audio_previous` evidence (not a settings id). |
 | `sources[].enabled` | bool | varies | `theintrodb` defaults to `false` (used without the vendor's written permission); the rest default to `true`. |
 | `sources[].api_key` | string | `""` | `theintrodb` only. Optional. `GET`/`POST /api/settings` mask a set key as `****`; posting `****` back keeps the stored key unchanged. Never logged. |
 
 There is no publish rule setting. Every file is decided the same way: chapters decide alone unless two other
 independent sources agree on something different; any other source needs an independent source to agree, except that
-on-screen credit text (credits) and a SkipDB `exact`/`shifted` match (intros and recaps) may decide alone. IntroDB,
-TheIntroDB, season audio and markers already on servers never decide alone, and season audio (or
-`season_audio_previous`) with markers already on servers isn't an agreeing pair on its own. The removed
+on-screen credit text (credits), season audio (intros) and a SkipDB `exact`/`shifted` match (intros and recaps) may
+decide alone. IntroDB, TheIntroDB, the previous-season hint (`season_audio_previous`) and markers already on servers
+never decide alone, and season audio (or `season_audio_previous`) with markers already on servers isn't an agreeing
+pair on its own: that episode stays in Needs review. The removed
 `publish_when` key (`"high"` / `"medium"`) is ignored when an older `settings.json` or client sends it, and schema
 version 16 deletes it and has the next start queue one job, **Intro & Credits: Needs review and waiting files, decided
 again**, that decides every file in Needs review, and every file whose last row waits for its item's other versions,

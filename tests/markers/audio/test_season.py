@@ -211,8 +211,8 @@ class TestSeasonAudio:
         start, end = planted_ms(e1)
         assert abs(cand.start_ms - start) <= 500 and abs(cand.end_ms - end) <= 500
         assert cand.origin == "2/2" and cand.confidence == 1.0
-        # Owner decision 2026-09-14: season audio never decides alone, not even at Medium.
-        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        # Season audio decides an intro alone (owner 2026-09-24, overriding the 2026-09-14 ruling R2).
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
         assert ctx.take_followups() == []  # e2 and e3 never had an answer: their own runs match the whole season
         assert all(store.get_fingerprint(store.get_file(p).id, "intro") is not None for p in (e1, e2, e3))
 
@@ -229,21 +229,20 @@ class TestSeasonAudio:
         assert cand.origin == "2/2"
         assert ctx.take_followups() == []  # e1 already ran with this season's fingerprints; e3 never had an answer
 
-    def test_a_lone_audio_match_needs_review(self, store, show):
+    def test_a_lone_audio_match_publishes_the_intro(self, store, show):
+        # "If it doesn't exist online then use the GPU/CPU check" (owner, 2026-09-24): no online source answers here.
         e1, _, _ = show(1, 3)
+        pub = ready_publisher()
         with _Audio():
-            out, _ = _run(_season_ctx(store, e1), e1, {"plex-1": ready_publisher()}, stage="process")
-        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
-        decision = store.get_decisions(store.get_file(e1).id)[MarkerType.INTRO]
-        assert (decision.status, decision.reason) == (
-            DecisionStatus.NEEDS_REVIEW,
-            "only season audio found the intro; matching audio needs another source to agree",
-        )
-        rows = {r["server_id"]: r for r in out.publisher_rows}
-        assert (
-            rows["plex-1"]["message"]
-            == "Only season audio found the intro; matching audio needs another source to agree"
-        )
+            out, _ = _run(_season_ctx(store, e1), e1, {"plex-1": pub}, stage="process")
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        rec = store.get_file(e1)
+        decision = store.get_decisions(rec.id)[MarkerType.INTRO]
+        assert (decision.status, decision.reason) == (DecisionStatus.DECIDED, "single source (season_audio)")
+        (cand,) = _evidence(store, e1, Source.SEASON_AUDIO)
+        marker = Marker(MarkerType.INTRO, cand.start_ms, cand.end_ms, ("season_audio",))
+        assert store.get_markers(rec.id)[MarkerType.INTRO] == marker
+        assert pub.write.call_args.args[1] == [marker]
 
     def test_an_agreeing_online_source_publishes_the_audio_intro(self, store, show):
         e1, _, _ = show(1, 3)
@@ -481,9 +480,10 @@ class TestWeeklyReleases:
             out, _ = _run(ctx, s2e1, {"plex-1": ready_publisher()})  # the Season follow-up job's check stage
         (cand,) = _evidence(store, s2e1, Source.SEASON_AUDIO)
         assert cand.origin == "1/1" and _evidence(store, s2e1, Source.SEASON_AUDIO_PREVIOUS) == []
-        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
-        decided = store.get_decisions(store.get_file(s2e1).id)[MarkerType.INTRO]
-        assert (decided.proposed_start_ms, decided.proposed_end_ms) == (cand.start_ms, cand.end_ms)
+        # The hint alone kept it in review; this season's audio decides it alone.
+        assert out.outcome_key == FileOutcome.PUBLISHED.value
+        marker = store.get_markers(store.get_file(s2e1).id)[MarkerType.INTRO]
+        assert marker == Marker(MarkerType.INTRO, cand.start_ms, cand.end_ms, ("season_audio",))
         assert season.season_audio_due(store.get_file(s2e1), ctx) is False
 
 

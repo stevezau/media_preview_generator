@@ -935,11 +935,11 @@ class TestSingleSource:
                 DecisionStatus.DECIDED,
                 'only on-screen text found the intro; at "high" a second source must agree',
             ),
-            # season audio (same season or the previous season's hint) only agrees in phase 2 (owner, 2026-09-14)
+            # season audio decides an intro alone (owner 2026-09-24, overriding R2); the previous season's is a hint
             (
                 [intro(S.SEASON_AUDIO, 127_000, 157_000)],
-                DecisionStatus.NEEDS_REVIEW,
-                "only season audio found the intro; matching audio needs another source to agree",
+                DecisionStatus.DECIDED,
+                'only season audio found the intro; at "high" a second source must agree',
             ),
             (
                 [intro(S.SEASON_AUDIO_PREVIOUS, 127_000, 157_000)],
@@ -947,10 +947,10 @@ class TestSingleSource:
                 "only the previous season's audio found the intro; matching audio needs another source to agree",
             ),
             (
-                [intro(S.SEASON_AUDIO, 127_000, 157_000), intro(S.SEASON_AUDIO_PREVIOUS, 127_500, 157_200)],
-                DecisionStatus.NEEDS_REVIEW,
-                "only season audio and the previous season's audio found the intro; matching audio needs another "
-                "source to agree",
+                [intro(S.SEASON_AUDIO, 127_000, 157_000), intro(S.SEASON_AUDIO_PREVIOUS, 126_500, 157_200)],
+                DecisionStatus.DECIDED,
+                'only season audio and the previous season\'s audio found the intro; at "high" a second source must '
+                "agree",
             ),
             # chapters are rule 3, the same at both levels
             ([intro(S.CHAPTERS, 127_000, 157_000)], DecisionStatus.DECIDED, None),
@@ -1769,9 +1769,9 @@ _REF_SOURCES = list(S)
 # Rule 7: markers already on servers (an importer plugin's copy included) confirm and may shorten, never decide alone;
 # they only move the checked edge of an already decided marker toward a shorter skip.
 _REF_SERVER = (S.SERVER_MARKERS, S.SERVER_MARKERS_IMPORTED)
-# Rule 6: at "Medium" these only agree -- they don't check this file's cut, or (season audio, owner 2026-09-14) are
-# not trusted alone yet.
-_REF_AGREEMENT_ONLY = (*_REF_SERVER, S.INTRODB, S.THEINTRODB, S.SEASON_AUDIO, S.SEASON_AUDIO_PREVIOUS)
+# Rule 6: at "Medium" these only agree -- they don't check this file's cut, or (the previous season's audio, owner
+# 2026-09-13) are a hint. This season's audio decides an intro alone (owner 2026-09-24, overriding R2).
+_REF_AGREEMENT_ONLY = (*_REF_SERVER, S.INTRODB, S.THEINTRODB, S.SEASON_AUDIO_PREVIOUS)
 _REF_LONG_INTRO_CHAPTER = "Intro chapter is much longer than the rest of the season's"
 _REF_AUDIO = (S.SEASON_AUDIO, S.SEASON_AUDIO_PREVIOUS)
 _REF_AUDIO_WITH_SERVER = (
@@ -1998,7 +1998,9 @@ def _ref_decide_type(mtype, cands, x):
         ranked = sorted(sane, key=lambda c: _ref_rank(c, x))
 
         def may_decide_alone(c):
-            # SkipDB alone: intros and recaps only
+            # SkipDB alone: intros and recaps only; season audio alone: intros only
+            if c.source is S.SEASON_AUDIO:
+                return mtype is T.INTRO
             return c.source not in _REF_AGREEMENT_ONLY and (mtype in _REF_START_TYPES or c.source is not S.SKIPDB)
 
         proposal = next((c for c in ranked if may_decide_alone(c)), None)
@@ -2155,7 +2157,8 @@ def _random_candidates(rng, mtype, duration, anchor):
     if rng.random() < 0.25:
         # One source (or the IntroDB pair) only: what "medium" decides on. The sources that may decide alone come up
         # more often: credit text three times (besides chapters the only one for credits and previews), SkipDB twice
-        # (intros and recaps). Season audio only agrees in phase 2.
+        # (intros and recaps). Season audio (which may decide an intro alone since 2026-09-24) comes up as often as the
+        # rest: the draws stay as they were, so every seed keeps its files.
         crowd = [S.THEINTRODB, S.INTRODB, S.SERVER_MARKERS_IMPORTED]
         alone = [*_NON_CHAPTER_SOURCES, S.CHAPTERS, S.CREDITS_TEXT, S.CREDITS_TEXT, S.SKIPDB]
         sources = rng.choice((crowd, [rng.choice(alone)]))
@@ -2304,12 +2307,22 @@ class TestProperties:
         assert moved  # a generator that stopped reaching rule 7 would pass this vacuously
 
     @pytest.mark.parametrize("seed", SEEDS)
-    def test_season_audio_and_markers_on_servers_never_decide_on_their_own(self, seed):
+    def test_season_audio_decides_alone_only_an_intro_and_never_with_markers_on_servers(self, seed):
+        # Owner 2026-09-24 overrides R2 for this season's audio on intros; the previous season's hint and markers
+        # already on a server still never decide on their own, and G3 still keeps season audio and a server's own apart.
         only_agree = {*_REF_AUDIO, *_REF_SERVER}
+        alone = 0
         for cands, x, locked in self._files(seed):
-            for decision in decide(cands, x, locked).values():
-                if _unlocked_decided(decision):
-                    assert not {S(s) for s in decision.marker.decided_by} <= only_agree, (cands, x, decision)
+            for mtype, decision in decide(cands, x, locked).items():
+                if not _unlocked_decided(decision):
+                    continue
+                sources = {S(s) for s in decision.marker.decided_by}
+                if sources <= only_agree:
+                    assert S.SEASON_AUDIO in sources and not sources & set(_REF_SERVER), (cands, x, decision)
+                    assert (mtype, x.publish_when) == (T.INTRO, "medium"), (cands, x, decision)
+                    assert decision.reason == "single source (season_audio)", (cands, x, decision)
+                    alone += 1
+        assert alone  # a generator that stopped reaching the rule would pass this vacuously
 
     @pytest.mark.parametrize("seed", SEEDS)
     def test_markers_on_servers_never_supply_the_checked_edge_unless_they_shortened_it(self, seed):
@@ -2370,8 +2383,9 @@ class TestProperties:
 
 
 class TestSeasonAudioSources:
-    """Spec §5.3/§5.5 and the owner decision of 2026-09-14: season audio never decides alone in phase 2, whether it
-    matched this season or is the previous season's hint, and the two are one independent source."""
+    """Spec §5.3/§5.5: this season's audio decides an intro alone at "medium" (owner 2026-09-24, overriding R2), the
+    previous season's hint never does, the two are one independent source, and G3 keeps season audio and markers
+    already on a server from agreeing."""
 
     DUR = 1_321_472
     ORDER = ("chapters", "theintrodb", "introdb", "skipdb", "season_audio", "season_audio_previous", "credits_text",
@@ -2380,23 +2394,59 @@ class TestSeasonAudioSources:
     def _ctx(self, publish_when):
         return DecisionContext(self.DUR, False, publish_when, frozenset({MarkerType.INTRO}), self.ORDER)
 
-    @pytest.mark.parametrize("publish_when", ["high", "medium"])
-    @pytest.mark.parametrize(("source", "origin"), [(S.SEASON_AUDIO, "10/10"), (S.SEASON_AUDIO_PREVIOUS, "4/4")])
-    def test_season_audio_alone_never_decides(self, publish_when, source, origin):
-        c = [Candidate(MarkerType.INTRO, 126_000, 157_000, source, 1.0, origin)]
+    def test_season_audio_alone_decides_an_intro(self):
+        # "If it doesn't exist online then use the GPU/CPU check" (owner, 2026-09-24).
+        c = [Candidate(MarkerType.INTRO, 126_000, 157_000, S.SEASON_AUDIO, 1.0, "10/10")]
+        d = decide(c, self._ctx("medium"), {})[MarkerType.INTRO]
+        assert (d.status, d.reason) == (DecisionStatus.DECIDED, "single source (season_audio)")
+        assert (d.marker, d.proposed) == (Marker(MarkerType.INTRO, 126_000, 157_000, ("season_audio",)), None)
+
+    @pytest.mark.parametrize(
+        ("publish_when", "source", "why"),
+        [
+            ("medium", S.SEASON_AUDIO_PREVIOUS, "the previous season's audio found the intro; matching audio needs"),
+            ("high", S.SEASON_AUDIO_PREVIOUS, "the previous season's audio found the intro; matching audio needs"),
+            ("high", S.SEASON_AUDIO, 'season audio found the intro; at "high" a second source must agree'),
+        ],
+        ids=["hint-medium", "hint-high", "audio-high"],
+    )
+    def test_the_hint_alone_never_decides_nor_season_audio_at_high(self, publish_when, source, why):
+        c = [Candidate(MarkerType.INTRO, 126_000, 157_000, source, 1.0, "4/4")]
         d = decide(c, self._ctx(publish_when), {})[MarkerType.INTRO]
-        label = "season audio" if source is S.SEASON_AUDIO else "the previous season's audio"
-        why = f"only {label} found the intro; matching audio needs another source to agree"
-        assert (d.status, d.reason) == (DecisionStatus.NEEDS_REVIEW, why)
+        assert d.status is DecisionStatus.NEEDS_REVIEW
+        assert d.reason.startswith(f"only {why}"), d.reason
         assert d.proposed == Marker(MarkerType.INTRO, 126_000, 157_000, (source.value,))
 
-    @pytest.mark.parametrize("publish_when", ["high", "medium"])
-    def test_hint_and_same_season_audio_are_one_source(self, publish_when):
+    @pytest.mark.parametrize("mtype", [MarkerType.CREDITS, MarkerType.RECAP, MarkerType.PREVIEW])
+    def test_season_audio_alone_decides_nothing_but_an_intro(self, mtype):
+        start, end = (20_000, 60_000) if mtype is MarkerType.RECAP else (1_290_000, 1_310_000)
+        c = [Candidate(mtype, start, end, S.SEASON_AUDIO, 1.0, "10/10")]
+        ctx = DecisionContext(self.DUR, False, "medium", frozenset({mtype}), self.ORDER)
+        d = decide(c, ctx, {})[mtype]
+        assert d.status is DecisionStatus.NEEDS_REVIEW
+        assert d.reason == f"only season audio found the {mtype.value}; matching audio needs another source to agree"
+
+    def test_season_audio_and_a_disagreeing_online_answer_need_review(self):
+        c = [
+            Candidate(MarkerType.INTRO, 126_000, 157_000, S.SEASON_AUDIO, 1.0, "10/10"),
+            Candidate(MarkerType.INTRO, 20_000, 60_000, S.INTRODB),
+        ]
+        d = decide(c, self._ctx("medium"), {})[MarkerType.INTRO]
+        assert (d.status, d.marker) == (DecisionStatus.NEEDS_REVIEW, None)
+        assert d.reason == "sources disagree: introdb/theintrodb, season_audio"
+
+    @pytest.mark.parametrize(
+        ("publish_when", "reason"), [("high", "only "), ("medium", "single source (season_audio)")]
+    )
+    def test_hint_and_same_season_audio_are_one_source(self, publish_when, reason):
+        # One source: at "high" it needs a second one; at "medium" this season's audio decides as if alone.
         c = [
             Candidate(MarkerType.INTRO, 126_000, 157_000, Source.SEASON_AUDIO_PREVIOUS, 1.0, "4/4"),
             Candidate(MarkerType.INTRO, 126_500, 157_500, Source.SEASON_AUDIO, 1.0, "1/1"),
         ]
-        assert decide(c, self._ctx(publish_when), {})[MarkerType.INTRO].status is DecisionStatus.NEEDS_REVIEW
+        d = decide(c, self._ctx(publish_when), {})[MarkerType.INTRO]
+        assert d.reason.startswith(reason), d.reason
+        assert "sources agree" not in d.reason
 
     def test_hint_confirmed_by_an_independent_source_decides_at_high(self):
         c = [
@@ -2435,17 +2485,11 @@ class TestSeasonAudioSources:
     @pytest.mark.parametrize(
         ("others", "reason"),
         [
-            # season audio alone (ruling R2)
-            ([], "only season audio found the intro; matching audio needs another source to agree"),
-            # this season's audio and the hint
-            (
-                [(S.SEASON_AUDIO_PREVIOUS, 126_500)],
-                "only season audio and the previous season's audio found the intro; matching audio needs another "
-                "source to agree",
-            ),
             ([(S.SERVER_MARKERS, 140_000)], "sources disagree: season_audio, server_markers"),
+            # the hint disagreeing with this season's audio: one source that contradicts itself
+            ([(S.SEASON_AUDIO_PREVIOUS, 140_000)], "source disagrees with itself"),
         ],
-        ids=["alone", "with-the-hint", "server-disagrees"],
+        ids=["server-disagrees", "hint-disagrees"],
     )
     def test_other_audio_reviews_keep_their_reasons(self, others, reason):
         c = [
@@ -2777,8 +2821,13 @@ def _plain_group(kind):
 
 
 def _alone_at_medium(source, mtype):
-    """Rule 6 (and Q1, F3): credit text alone, SkipDB alone for intros and recaps."""
-    return source is S.CREDITS_TEXT or (source is S.SKIPDB and mtype in (T.INTRO, T.RECAP))
+    """Rule 6 (and Q1, F3, 2026-09-24): credit text alone, SkipDB alone for intros and recaps, season audio alone for
+    intros."""
+    return (
+        source is S.CREDITS_TEXT
+        or (source is S.SKIPDB and mtype in (T.INTRO, T.RECAP))
+        or (source is S.SEASON_AUDIO and mtype is T.INTRO)
+    )
 
 
 def _credited(*sources):

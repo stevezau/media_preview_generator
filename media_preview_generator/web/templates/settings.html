@@ -578,9 +578,9 @@
                                 <span class="markers-source-grip" draggable="true" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                                 <div class="markers-source-body">
                                     <span class="markers-source-name">Matching audio across a season</span>
-                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds the theme tune a season's episodes share. Tested alone on 118 episodes: 91 right, 13 wrong, 14 missed — too error-prone to decide by itself, so it never publishes an intro alone; it only confirms what another source already found. A server's own intro marker doesn't count as that other source."><i class="bi bi-info-circle"></i></button>
+                                    <button type="button" class="info-icon ms-1" tabindex="0" data-bs-toggle="tooltip" data-bs-placement="top" title="Finds the theme tune a season's episodes share. Tested alone on 118 episodes: 91 right, 13 wrong, 14 missed (Plex's own intro detection: 23 right, 15 wrong), so it publishes an intro on its own when nothing else answers. When another source disagrees, the episode goes to Needs review. A server's own intro marker doesn't count as a second source for it."><i class="bi bi-info-circle"></i></button>
                                     <span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle ms-1 markers-source-unavailable" hidden>Not available</span>
-                                    <div class="small text-muted">Confirms intros another source found by matching the season's episodes · CPU, about 2 s per episode</div>
+                                    <div class="small text-muted">Finds intros by matching the season's episodes, even for shows no database has · CPU, about 2 s per episode</div>
                                     <div class="small text-warning-emphasis markers-source-reason" hidden></div>
                                 </div>
                                 <div class="markers-source-controls">
@@ -632,7 +632,8 @@
                             published once an independent source agrees with it: on-screen credits, season audio,
                             another database, or a server's own marker (IntroDB and TheIntroDB count as one). A single
                             answer decides alone only when it checks your own file: on-screen credit text for credits,
-                            or SkipDB matched to your file's length for intros and recaps. If sources disagree, or the
+                            season audio for intros (so a show no online database has still gets them), or SkipDB
+                            matched to your file's length for intros and recaps. If sources disagree, or the
                             only answer can't decide alone, the file goes to Needs review so you can pick.
                         </p>
                     </div>
