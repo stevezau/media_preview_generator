@@ -856,10 +856,13 @@ def _start_detector(textdet: Any, args: argparse.Namespace) -> tuple[Any, dict[s
 
 def _serve(detector: Any, protocol: BinaryIO, idle_exit_s: float) -> int:
     stdin = sys.stdin.buffer
+    # poll, not select: select() raises ValueError for any descriptor at or above FD_SETSIZE (1024).
+    requests = select.poll()
+    requests.register(stdin, select.POLLIN)
     while True:
         # The parent waits for each answer before it sends again, so nothing sits in stdin's buffer between requests.
-        readable, _, _ = select.select([stdin], [], [], idle_exit_s)
-        if not readable:
+        # A closed stdin wakes the poll too (POLLHUP), and readline() below then sees the end of the stream.
+        if not requests.poll(idle_exit_s * 1000):
             return IDLE_EXIT_CODE
         header = stdin.readline()
         if not header:

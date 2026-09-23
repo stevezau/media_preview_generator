@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import fcntl
 import io
 import json
 import os
+import resource
 import signal
 import subprocess
 import sys
@@ -1032,6 +1034,53 @@ class TestProtocol:
         assert helper.request(self.PLANES) == self.BOXES
         sent = helper.proc.stdin.getvalue()
         assert json.loads(sent.split(b"\n", 1)[0]) == {"id": 1, "frames": 2, "height": 2, "width": 3}
+
+    def _serve_stdin(self, monkeypatch, read_fd: int, idle_exit_s: float) -> tuple[int, bytes]:
+        written = io.BytesIO()
+        detector = SimpleNamespace(detect=lambda planes: self.BOXES)
+        with os.fdopen(read_fd, "rb", buffering=0) as stdin:
+            monkeypatch.setattr(th, "sys", SimpleNamespace(stdin=SimpleNamespace(buffer=stdin)))
+            code = th._serve(detector, written, idle_exit_s=idle_exit_s)
+        return code, written.getvalue()
+
+    def test_the_helper_serves_a_stdin_numbered_past_1024_when_many_files_are_open(self, monkeypatch):
+        # select() can't watch a descriptor at or above FD_SETSIZE (1024) and raises ValueError instead.
+        if resource.getrlimit(resource.RLIMIT_NOFILE)[0] <= 1100:
+            pytest.skip("the open-file limit is too low to number a descriptor past 1024")
+        request = json.dumps({"id": 1, "frames": 2, "height": 2, "width": 3}).encode()
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, request + b"\n" + self.PLANES.tobytes())
+        os.close(write_fd)
+        high_fd = fcntl.fcntl(read_fd, fcntl.F_DUPFD, 1024)
+        os.close(read_fd)
+
+        code, written = self._serve_stdin(monkeypatch, high_fd, idle_exit_s=5.0)
+
+        assert high_fd >= 1024
+        assert code == 0
+        assert json.loads(written) == {"id": 1, "boxes": [[[1, 2, 3, 4], [5, 6, 7, 8]], []]}
+
+    def test_the_helper_exits_idle_when_no_request_arrives_in_time(self, monkeypatch):
+        read_fd, write_fd = os.pipe()
+        try:
+            started = time.monotonic()
+            code, written = self._serve_stdin(monkeypatch, read_fd, idle_exit_s=0.2)
+            waited = time.monotonic() - started
+        finally:
+            os.close(write_fd)
+
+        assert code == th.IDLE_EXIT_CODE
+        assert written == b""
+        assert 0.15 <= waited < 5.0
+
+    def test_the_helper_exits_0_when_the_parent_closes_stdin(self, monkeypatch):
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+
+        code, written = self._serve_stdin(monkeypatch, read_fd, idle_exit_s=5.0)
+
+        assert code == 0
+        assert written == b""
 
     @pytest.mark.parametrize(
         ("boxes", "why"),
