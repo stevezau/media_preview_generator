@@ -2456,7 +2456,7 @@ function updateActiveJobs(runningJobs, force) {
                 </div>
             </div>
             <div class="mb-2 small">
-                <strong>Library:</strong> ${libraryDisplay}${_serverBadge(job)}${webhookFilesHtml}
+                <strong>Job:</strong> ${libraryDisplay}${_serverBadge(job)}${webhookFilesHtml}
             </div>
             <div id="activeJobPublishers-${jid}">${_renderPublishersBlock(job)}</div>
             ${startedLine ? `<div class="mb-2">${startedLine}</div>` : ''}

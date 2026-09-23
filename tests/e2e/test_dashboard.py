@@ -171,3 +171,8 @@ class TestActiveJobWaitingToRetry:
         expect(card).to_contain_text("Attempt 2 of 5")
         expect(card.locator(".job-kind-badge")).to_have_text("Previews")
         expect(authed_page.locator(f"#job-row-{job['id']}")).to_contain_text("Retry starting in 5 min")
+
+        # The queue's first text column covers scans, webhooks, and retry
+        # chains alike — "Job" describes it, not "Library".
+        expect(authed_page.locator(".jobs-table thead th:nth-child(2)")).to_have_text("Job")
+        expect(card).to_contain_text("Job:")
