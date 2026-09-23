@@ -242,6 +242,19 @@ class TestFallback:
         assert env.pool.backend_of("NVIDIA", "cuda:0") == "webgpu"
         assert not [r for r in loguru_caplog.records if r.levelname == "WARNING"]
 
+    @pytest.mark.parametrize(("gpu", "device"), [(None, None), ("NVIDIA", "cuda:0")], ids=["cpu", "gpu"])
+    def test_a_helper_that_left_on_its_idle_timer_is_reaped_without_another_request(self, envs, gpu, device):
+        # Its device may get no credit text to look for again for hours; until something reaps it, the helper
+        # sits in the container's process list as <defunct>. The test never waits on it, so only the app can.
+        env = envs(idle_exit_s=0.3)
+        assert env.pool.detect_boxes(PLANES, gpu=gpu, gpu_device_path=device) == ANSWER
+        proc = env.procs[0]
+        deadline = time.monotonic() + 10
+        while proc.returncode is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert proc.returncode == th.IDLE_EXIT_CODE
+        assert not Path(f"/proc/{proc.pid}").exists()
+
     def test_a_helper_close_to_its_idle_exit_is_replaced_before_a_request(self, envs):
         env = envs()
         assert env.pool.detect_boxes(PLANES, gpu="NVIDIA", gpu_device_path="cuda:0") == ANSWER
@@ -997,7 +1010,7 @@ class TestProtocol:
     BOXES = [((1, 2, 3, 4), (5, 6, 7, 8)), ()]
 
     def _helper(self, reply: bytes) -> th._Helper:
-        proc = SimpleNamespace(stdout=io.BytesIO(reply), stdin=io.BytesIO(), poll=lambda: None)
+        proc = SimpleNamespace(stdout=io.BytesIO(reply), stdin=io.BytesIO(), poll=lambda: None, wait=lambda timeout: 0)
         return th._Helper(proc, io.BytesIO(), 5.0)
 
     def test_the_helper_writes_each_frames_boxes_and_the_parent_reads_them_back(self, monkeypatch):

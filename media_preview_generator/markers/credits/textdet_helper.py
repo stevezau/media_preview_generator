@@ -330,6 +330,12 @@ class _Helper:
                     self._lines.put(line)
         finally:
             self._lines.put(b"")
+        # A helper that left on its idle timer is otherwise reaped only by its device's next request, which may be
+        # hours away; until then it shows as <defunct>. A timed wait holds the waitpid lock only for each non-blocking
+        # poll, never while it sleeps, so it blocks no other waiter; a poll() landing on one of those instants reads
+        # "still running", which every caller already survives (a dead helper fails its request and is replaced).
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            self.proc.wait(timeout=EXIT_CODE_WAIT_S)
 
     def read_message(self, timeout_s: float) -> dict[str, Any]:
         """The helper's next JSON line.
