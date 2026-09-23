@@ -45,6 +45,7 @@ def _reset_singletons():
         wh._pending_timers.clear()
         wh._pending_batches.clear()
         wh._recent_dispatches.clear()
+        wh._import_file_events.clear()
     yield
     reset_settings_manager()
     with jobs_mod._job_lock:
@@ -64,6 +65,7 @@ def _reset_singletons():
         wh._pending_timers.clear()
         wh._pending_batches.clear()
         wh._recent_dispatches.clear()
+        wh._import_file_events.clear()
 
 
 @pytest.fixture()
@@ -2082,7 +2084,7 @@ class TestSonarrImportComplete:
 
         assert resp.status_code == 202
         mock_schedule.assert_called_once_with(
-            "sonarr", "Accused: Guilty or Innocent? S04E01, S04E02", _sonarr_episode_file(2)["path"]
+            "sonarr", "Accused: Guilty or Innocent? S04E01, S04E02", _sonarr_episode_file(2)["path"], early_scan=False
         )
 
     def test_import_complete_forwards_the_server_pin(self, client):
@@ -2093,7 +2095,70 @@ class TestSonarrImportComplete:
                 headers=_auth_headers(),
             )
 
-        assert mock_schedule.call_args.kwargs == {"server_id": "plex-b"}
+        assert mock_schedule.call_args.kwargs == {"server_id": "plex-b", "early_scan": False}
+
+    @staticmethod
+    def _age_webhook_memory(seconds: float) -> None:
+        """Move every dedup and per-file-event timestamp ``seconds`` into the past, and let the batch fire."""
+        import media_preview_generator.web.webhooks as wh
+
+        with wh._pending_lock:
+            for key in list(wh._recent_dispatches):
+                wh._recent_dispatches[key] -= seconds
+            for key in list(wh._import_file_events):
+                wh._import_file_events[key] -= seconds
+            wh._pending_batches.clear()
+
+    def test_a_slow_import_isnt_queued_again_when_import_complete_comes_after_the_dedup_window(self, client):
+        """Review MED: per-file events 5 min apart, Import Complete at +15 min. The first files' dedup entries (10 min)
+        had expired, so the summary queued them as a second job ("(2 file(s))")."""
+        client.post("/api/webhooks/sonarr", json=_sonarr_on_import_payload(1), headers=_auth_headers())
+        self._age_webhook_memory(5 * 60)
+        client.post("/api/webhooks/sonarr", json=_sonarr_on_import_payload(2), headers=_auth_headers())
+        self._age_webhook_memory(10 * 60)
+
+        resp = client.post(
+            "/api/webhooks/sonarr", json=_sonarr_import_complete_payload([1, 2]), headers=_auth_headers()
+        )
+
+        assert resp.status_code == 200, resp.get_json()
+        assert "already queued" in resp.get_json()["message"]
+        assert self._batch_paths() == set()
+
+    @pytest.mark.parametrize(
+        ("download_id", "age_s"),
+        [("OTHER-DOWNLOAD", 15 * 60), (None, 15 * 60), ("A1B2C3D4E5F6", 7 * 3600)],
+        ids=["another-download", "no-download-id", "reported-hours-ago"],
+    )
+    def test_import_complete_queues_files_no_per_file_event_of_its_download_reported_recently(
+        self, client, download_id, age_s
+    ):
+        client.post("/api/webhooks/sonarr", json=_sonarr_on_import_payload(1), headers=_auth_headers())
+        self._age_webhook_memory(age_s)
+        summary = _sonarr_import_complete_payload([1])
+        summary["downloadId"] = download_id
+
+        resp = client.post("/api/webhooks/sonarr", json=summary, headers=_auth_headers())
+
+        assert resp.status_code == 202
+        assert self._batch_paths() == {_sonarr_episode_file(1)["path"]}
+
+    def test_import_complete_sends_one_early_scan_per_folder(self, client):
+        payload = _sonarr_import_complete_payload([1, 2, 3])
+        season5 = _sonarr_episode_file(4)
+        season5["path"] = season5["path"].replace("Season 04/", "Season 05/").replace("S04E04", "S05E01")
+        payload["episodeFiles"].append(season5)
+        import media_preview_generator.web.webhooks as wh
+
+        with patch.object(wh, "_kick_early_scan") as kick:
+            resp = client.post("/api/webhooks/sonarr?server_id=plex-a", json=payload, headers=_auth_headers())
+
+        assert resp.status_code == 202
+        job_id = wh._pending_batches[wh._debounce_key("sonarr", "plex-a")]["job_id"]
+        assert [c.args for c in kick.call_args_list] == [
+            (_sonarr_episode_file(1)["path"], "plex-a", job_id),
+            (season5["path"], "plex-a", job_id),
+        ]
 
     def test_already_queued_check_is_per_server(self, client):
         """A per-file event pinned to one server doesn't cover the same file sent for another server."""

@@ -371,8 +371,9 @@ Automatically generate preview thumbnails when Radarr or Sonarr imports new medi
 3. Set **Name**: `Plex Previews`
 4. Set **URL**: paste the Sonarr Webhook URL
 5. Under **Events**, enable **On File Import** and **On File Upgrade**. **On Import Complete** can stay on as well: it
-   lists the files of an import again once they're all in, so a file its per-file event already sent is skipped, and
-   a file it's the only one to list is processed.
+   lists the files of an import again once they're all in, so a file its per-file event already sent is skipped (the
+   two are matched by Sonarr's download id, so a season pack that takes an hour to import isn't queued twice), and a
+   file it's the only one to list is processed.
 6. **Authentication** (use one):
    - **Username/Password** (works in all versions): Leave **Username** empty and set **Password** to your API token or webhook secret. The app treats the password as the token.
    - **Custom headers** (if your webhook form has a Headers section): Add **Key** = `X-Auth-Token`, **Value** = your API token or webhook secret.

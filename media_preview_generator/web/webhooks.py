@@ -37,6 +37,11 @@ _pending_lock = threading.Lock()
 # metadata refreshes and analyzer reruns.
 _recent_dispatches: dict[tuple[str, str], float] = {}
 _RECENT_DISPATCH_TTL_SECONDS = 600
+# Files Sonarr's per-file import events reported, keyed (source, server_id, downloadId, path), so its "Import
+# Complete" event for the same download doesn't queue them again. Kept for hours: a slow season pack's first files
+# are reported long before the event, well past _RECENT_DISPATCH_TTL_SECONDS.
+_import_file_events: dict[tuple[str, str, str, str], float] = {}
+_IMPORT_FILE_EVENT_TTL_SECONDS = 6 * 3600
 # Longest a batch waits, counted from its first webhook. Each webhook restarts the delay, so without a cap a steady
 # stream of imports held its batch until the stream stopped (342 files waited 55 minutes in job 7d24a00b).
 _WEBHOOK_BATCH_MAX_WAIT_SECONDS = 600
@@ -83,6 +88,7 @@ def reset_webhook_debounce() -> None:
         _pending_timers.clear()
         _pending_batches.clear()
         _recent_dispatches.clear()
+        _import_file_events.clear()
 
 
 # In-memory log of received webhook events, persisted to disk on each write.
@@ -380,6 +386,27 @@ def _was_recently_dispatched(source: str, server_id: str | None, canonical_path:
     """
     last = _recent_dispatches.get((source, server_id or "", canonical_path))
     return last is not None and datetime.now(UTC).timestamp() - last < _RECENT_DISPATCH_TTL_SECONDS
+
+
+def _remember_import_file_event(source: str, server_id: str | None, download_id: str, path: str) -> None:
+    """Record that a per-file import event of this download reported ``path`` (already normalised).
+
+    Expired entries are evicted in the same pass. Caller must hold ``_pending_lock``.
+    """
+    now_ts = datetime.now(UTC).timestamp()
+    expired = [k for k, ts in _import_file_events.items() if now_ts - ts >= _IMPORT_FILE_EVENT_TTL_SECONDS]
+    for k in expired:
+        _import_file_events.pop(k, None)
+    _import_file_events[(source, server_id or "", download_id, path)] = now_ts
+
+
+def _reported_by_import_file_event(source: str, server_id: str | None, download_id: str, path: str) -> bool:
+    """Whether a per-file import event of this download reported ``path`` within the last few hours.
+
+    Caller must hold ``_pending_lock``.
+    """
+    seen = _import_file_events.get((source, server_id or "", download_id, path))
+    return seen is not None and datetime.now(UTC).timestamp() - seen < _IMPORT_FILE_EVENT_TTL_SECONDS
 
 
 def _queue_intro_credits_follow_up(
@@ -823,13 +850,16 @@ def _schedule_webhook_job(
     server_id: str | None = None,
     *,
     deleted_paths: list[str] | None = None,
+    early_scan: bool = True,
 ) -> bool:
     """Schedule a debounced single-file webhook job and batch paths per (source, server_id).
 
     ``deleted_paths`` carries the Radarr/Sonarr ``deletedFiles[]`` array
     when this webhook is an upgrade event — they are merged into the
     batch and forwarded to ``process_canonical_path`` so the orphan
-    cleanup / deleted-path nudge can fire.
+    cleanup / deleted-path nudge can fire. ``early_scan=False`` leaves the
+    early scan-nudge to the caller (Sonarr's Import Complete sends one per
+    folder, not one per file).
     """
     safe_source = str(source or "unknown")
     safe_title = str(title or "Unknown")
@@ -1027,7 +1057,7 @@ def _schedule_webhook_job(
     # Per-path: every webhook that joins a batch gets its own scan-nudge
     # for *just its path* (idempotent and cheap; late-joining files in a
     # season-pack get their own head start).
-    if early_scan_job_id is not None:
+    if early_scan and early_scan_job_id is not None:
         _kick_early_scan(normalized_path, server_id, early_scan_job_id)
 
     logger.info(
@@ -1393,10 +1423,18 @@ def _handle_sonarr_compatible_webhook(source: str):
     deleted_paths = _extract_sonarr_deleted_paths(data)
 
     server_id = (request.args.get("server_id") or "").strip() or None
+    download_id = str(data.get("downloadId") or "").strip()
     if not episode_file_path:
         import_complete_paths = _extract_sonarr_import_complete_paths(data)
         if import_complete_paths:
-            return _handle_sonarr_import_complete(source, display_title, import_complete_paths, server_id)
+            return _handle_sonarr_import_complete(
+                source, display_title, import_complete_paths, server_id, download_id=download_id
+            )
+    elif download_id:
+        with _pending_lock:
+            _remember_import_file_event(
+                source, server_id, download_id, _dedupe_normalised_paths([episode_file_path])[0]
+            )
     kwargs = {"server_id": server_id} if server_id else {}
     if deleted_paths:
         kwargs["deleted_paths"] = deleted_paths
@@ -1427,26 +1465,36 @@ def _handle_sonarr_compatible_webhook(source: str):
     )
 
 
-def _handle_sonarr_import_complete(source: str, display_title: str, paths: list[str], server_id: str | None):
+def _handle_sonarr_import_complete(
+    source: str, display_title: str, paths: list[str], server_id: str | None, *, download_id: str = ""
+):
     """Queue the files of a Sonarr "Import Complete" event that no per-file event queued already.
 
-    With "On File Import" on too, Sonarr has just sent one event per file and every file is queued, so this summary
-    is dropped quietly. With only "On Import Complete" on, its files are queued here, through the same
-    ``_schedule_webhook_job`` normalisation and dedup as a per-file event.
+    With "On File Import" on too, Sonarr has sent one event per file and every file is queued, so this summary is
+    dropped quietly: a file counts as queued when a per-file event of the same download reported it in the last few
+    hours (a slow season pack reports its first files long before the summary), or when it was dispatched within
+    the dedup window. With only "On Import Complete" on, its files are queued here, through the same
+    ``_schedule_webhook_job`` normalisation and dedup as a per-file event, with one early scan-nudge per folder.
 
     Args:
         source: ``"sonarr"`` or ``"sportarr"``.
         display_title: The event's title (series plus every episode code).
         paths: The event's ``episodeFiles[]`` paths (``_extract_sonarr_import_complete_paths``).
         server_id: The ``?server_id=`` the webhook URL carries, if any.
+        download_id: The event's ``downloadId`` ("" when Sonarr sent none, e.g. a manual import).
 
     Returns:
         Flask response tuple.
     """
     with _pending_lock:
-        fresh = [path for path in paths if not _was_recently_dispatched(source, server_id, path)]
+        fresh = [
+            path
+            for path in paths
+            if not _was_recently_dispatched(source, server_id, path)
+            and not (download_id and _reported_by_import_file_event(source, server_id, download_id, path))
+        ]
     kwargs = {"server_id": server_id} if server_id else {}
-    queued = sum(1 for path in fresh if _schedule_webhook_job(source, display_title, path, **kwargs))
+    queued = [path for path in fresh if _schedule_webhook_job(source, display_title, path, early_scan=False, **kwargs)]
     if not queued:
         logger.debug(
             "Webhook from {}: import-complete event for {!r} ignored — its {} file(s) were already queued by their "
@@ -1457,9 +1505,17 @@ def _handle_sonarr_import_complete(source: str, display_title: str, paths: list[
         )
         return jsonify({"success": True, "message": f"'{display_title}': every file was already queued"}), 200
 
+    with _pending_lock:
+        batch = _pending_batches.get(_debounce_key(source, server_id))
+        job_id = batch.get("job_id") if batch else None
+    if job_id:
+        # A server scans a folder at a time: one nudge per season folder, not one per episode.
+        first_per_folder = {os.path.dirname(path): path for path in reversed(queued)}
+        for path in sorted(first_per_folder.values()):
+            _kick_early_scan(path, server_id, job_id)
     _add_history_entry(source, "Download", display_title, "queued")
     return (
-        jsonify({"success": True, "message": f"Processing queued for '{display_title}' ({queued} file(s))"}),
+        jsonify({"success": True, "message": f"Processing queued for '{display_title}' ({len(queued)} file(s))"}),
         202,
     )
 
