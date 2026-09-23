@@ -708,6 +708,7 @@ class JobManager:
 
         # Background retention timer
         self._retention_timer: threading.Timer | None = None
+        self._closed = False
         self._interrupted_jobs: list[Job] = []
         # Chain Jobs that were in PENDING/RUNNING at load time. The
         # retry children that drive the chain are real Jobs and are
@@ -1140,7 +1141,23 @@ class JobManager:
                 self._enforce_log_retention()
         except Exception as e:
             logger.debug("Retention tick error: {}", e)
-        self._start_retention_timer()
+        with self._lock:
+            if not self._closed:
+                self._start_retention_timer()
+
+    def close(self) -> None:
+        """Stop the hourly retention timer and close jobs.db. Safe to call more than once.
+
+        The timer thread holds this manager, so a manager that's been replaced but never closed stays alive, with
+        jobs.db and its WAL and shared-memory files open, for as long as the process runs. After close the manager
+        still works in memory; it just stops saving jobs to disk.
+        """
+        with self._lock:
+            self._closed = True
+            self._stop_retention_timer()
+            if self._storage is not None:
+                self._storage.close()
+                self._storage = None
 
     def create_job(
         self,
@@ -2813,6 +2830,7 @@ def get_job_manager(config_dir: str | None = None, socketio=None) -> JobManager:
             _job_manager = JobManager(config_dir=config_dir or _resolve_default_config_dir(), socketio=socketio)
         else:
             if config_dir and _job_manager.config_dir != config_dir:
+                _job_manager.close()
                 _job_manager = JobManager(config_dir=config_dir, socketio=socketio)
             elif socketio and _job_manager.socketio is None:
                 _job_manager.set_socketio(socketio)

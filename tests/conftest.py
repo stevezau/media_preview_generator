@@ -542,6 +542,35 @@ def _reset_shared_dispatcher():
 
 
 @pytest.fixture(autouse=True)
+def _close_job_managers(monkeypatch):
+    """Close every JobManager a test creates, directly or through ``create_app`` / ``get_job_manager``.
+
+    Each JobManager holds jobs.db open (3 fds with its WAL and shared-memory files) and an hourly retention timer
+    whose thread holds the manager, so a test that just drops one leaks both for the rest of the xdist worker's
+    run. A few hundred of those pushed a worker past fd 1024, where ``select.select`` raises ValueError.
+    """
+    try:
+        from media_preview_generator.web import jobs as jobs_mod
+    except ImportError:
+        yield
+        return
+    created = []
+    real_init = jobs_mod.JobManager.__init__
+
+    def recording_init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        created.append(self)
+
+    monkeypatch.setattr(jobs_mod.JobManager, "__init__", recording_init)
+    yield
+    for manager in created:
+        manager.close()
+    with jobs_mod._job_lock:
+        if any(jobs_mod._job_manager is manager for manager in created):
+            jobs_mod._job_manager = None
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_real_world_calls(request, monkeypatch):
     """Stub out the network / hardware calls that ``run_job`` would
     otherwise make on a developer's laptop or on an unsandboxed CI runner.

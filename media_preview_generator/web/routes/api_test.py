@@ -80,7 +80,7 @@ def __test_reset():
     except Exception as exc:
         errors.append(f"ScheduleManager: {type(exc).__name__}: {exc}")
 
-    # 2. Stop JobManager retention timer + clear singleton.
+    # 2. Close JobManager (retention timer + jobs.db) + clear singleton.
     try:
         from .. import jobs as jobs_mod
 
@@ -88,9 +88,9 @@ def __test_reset():
             jm = jobs_mod._job_manager  # noqa: SLF001
             if jm is not None:
                 try:
-                    jm._stop_retention_timer()  # noqa: SLF001
+                    jm.close()
                 except Exception as exc:
-                    errors.append(f"jobmanager.timer: {type(exc).__name__}: {exc}")
+                    errors.append(f"jobmanager.close: {type(exc).__name__}: {exc}")
             jobs_mod._job_manager = None  # noqa: SLF001
         cleared.append("JobManager")
     except Exception as exc:

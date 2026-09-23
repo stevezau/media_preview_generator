@@ -259,6 +259,63 @@ class TestRetentionTimer:
         assert jm._retention_timer is None
 
 
+def _files_open_under(root: str) -> list[str]:
+    """The files this process has open under ``root``, by path (one entry per descriptor)."""
+    targets = []
+    for fd in os.listdir("/proc/self/fd"):
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            continue
+        if target.startswith(root + os.sep):
+            targets.append(target)
+    return targets
+
+
+class TestClose:
+    """A JobManager that's replaced releases jobs.db and its timer thread instead of holding them until exit."""
+
+    def test_close_releases_jobs_db_and_stops_the_timer_when_called(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        timer = jm._retention_timer
+        assert _files_open_under(config_dir)  # jobs.db, -wal and -shm
+
+        jm.close()
+
+        assert _files_open_under(config_dir) == []
+        timer.join(timeout=5)
+        assert not timer.is_alive()
+        jm.close()  # a second close is harmless
+
+    def test_a_closed_manager_keeps_working_in_memory_when_still_in_use(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        jm.close()
+
+        job = jm.create_job(library_name="Movies")
+
+        assert jm.get_job(job.id) is job
+        assert _files_open_under(config_dir) == []
+
+    def test_a_retention_tick_after_close_schedules_no_new_timer(self, config_dir):
+        jm = JobManager(config_dir=config_dir)
+        jm.close()
+
+        jm._retention_tick()
+
+        assert jm._retention_timer is None
+
+    def test_replacing_the_shared_manager_leaves_only_the_new_ones_files_open_when_config_dir_changes(self, tmp_path):
+        from media_preview_generator.web.jobs import get_job_manager
+
+        root = str(tmp_path)
+        managers = [get_job_manager(config_dir=os.path.join(root, f"config{i}")) for i in range(20)]
+
+        open_now = _files_open_under(root)
+        assert open_now, "the current manager's jobs.db should be open"
+        assert {os.path.dirname(path) for path in open_now} == {managers[-1].config_dir}
+        assert [jm for jm in managers[:-1] if jm._retention_timer is not None] == []
+
+
 class TestCompleteJobWarning:
     """complete_job warning= parameter produces COMPLETED status with error message."""
 
