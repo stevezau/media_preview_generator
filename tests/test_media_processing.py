@@ -37,6 +37,7 @@ from media_preview_generator.processing import (
     parse_ffmpeg_progress_line,
     record_failure,
 )
+from media_preview_generator.processing.hdr_detection import is_hdr_transfer
 
 
 @pytest.fixture(autouse=True)
@@ -1492,6 +1493,32 @@ class TestIsDolbyVision:
         assert _is_dolby_vision(hdr_format) is expected
 
 
+class TestIsHdrTransfer:
+    """is_hdr_transfer classifies MediaInfo's transfer_characteristics value."""
+
+    @pytest.mark.parametrize(
+        "transfer,expected",
+        [
+            ("PQ", True),
+            ("HLG", True),
+            # The standards' own names for the same two curves.
+            ("SMPTE ST 2084", True),
+            ("ARIB STD-B67", True),
+            (" pq ", True),
+            ("BT.709", False),
+            ("BT.601", False),
+            # BT.2020's own transfer is an SDR gamma curve, not HDR.
+            ("BT.2020 (10-bit)", False),
+            ("BT.2020 (12-bit)", False),
+            ("Linear", False),
+            (None, False),
+            ("", False),
+        ],
+    )
+    def test_detection(self, transfer: str | None, expected: bool) -> None:
+        assert is_hdr_transfer(transfer) is expected
+
+
 class TestDetectZscaleColorspaceError:
     """Test zscale colorspace error detection in stderr."""
 
@@ -2924,6 +2951,93 @@ class TestHdrFormatNoneString:
         assert "tonemap" not in vf_value
         assert "fps=" in vf_value
         assert "scale=w=320:h=240:force_original_aspect_ratio=decrease" in vf_value
+
+
+class TestHdrVersusSdrFilterChain:
+    """Each MediaInfo shape that decides HDR vs SDR must pick the right filter chain.
+
+    MediaInfo only fills ``HDR_Format`` when the file carries HDR metadata
+    (mastering display, HDR10+, Dolby Vision).  A PQ or HLG stream with no
+    such metadata still needs tone mapping, or its thumbnails come out
+    washed out.  BT.2020 primaries alone do not make a file HDR.
+
+    The GPU variants of each chain are keyed only on the chosen path, which
+    ``TestGpuScaleOptimisation`` already covers, so this matrix runs on CPU.
+    """
+
+    FPS = "fps=fps=0.2:round=up"
+    SCALE = "scale=w=320:h=240:force_original_aspect_ratio=decrease"
+    TONEMAP = (
+        "zscale=t=linear:npl=100,format=gbrpf32le,"
+        "zscale=p=bt709,tonemap=hable:desat=0,"
+        "zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+    )
+    SDR_VF = f"{FPS},{SCALE}"
+    HDR_VF = f"{FPS},{TONEMAP},{SCALE}"
+    DV5_VF = build_dv5_vf(path_kind=DV5_PATH_LIBPLACEBO, tonemap_algorithm="hable", fps_value=0.2, base_scale=SCALE)
+
+    @staticmethod
+    def _first_vf(mock_config, *, hdr_format, transfer, primaries) -> str:
+        track = MagicMock(hdr_format=hdr_format, transfer_characteristics=transfer, color_primaries=primaries)
+        info = MagicMock()
+        info.video_tracks = [track]
+        proc = MagicMock()
+        proc.poll.side_effect = [None, 0]
+        proc.returncode = 0
+        with (
+            patch("media_preview_generator.processing.generator.MediaInfo") as mock_mediainfo,
+            patch("subprocess.Popen", return_value=proc) as mock_popen,
+            patch("os.path.exists", return_value=False),
+            patch("builtins.open", new_callable=mock_open),
+            patch("time.sleep"),
+            patch("media_preview_generator.processing.generator.glob.glob", return_value=[]),
+            patch("subprocess.run", return_value=MagicMock(returncode=0)),
+            patch(
+                "media_preview_generator.gpu.vulkan_probe.get_vulkan_device_info",
+                return_value=VulkanProbeResult(device="Quadro P4000 (NVIDIA)", is_software=False),
+            ),
+        ):
+            mock_mediainfo.parse.return_value = info
+            generate_images("/test/v.mkv", "/tmp/o", None, None, mock_config)
+        first_args = mock_popen.call_args_list[0][0][0]
+        return first_args[first_args.index("-vf") + 1]
+
+    @pytest.mark.parametrize(
+        "hdr_format,transfer,primaries,expected",
+        [
+            pytest.param("SMPTE ST 2086, HDR10 compatible", "PQ", "BT.2020", "HDR", id="hdr10"),
+            pytest.param(
+                "SMPTE ST 2094 App 4, Version 1, HDR10+ Profile B compatible", "PQ", "BT.2020", "HDR", id="hdr10plus"
+            ),
+            pytest.param(
+                "Dolby Vision, Version 1.0, dvhe.08.06, BL+RPU, HDR10 compatible / SMPTE ST 2086",
+                "PQ",
+                "BT.2020",
+                "HDR",
+                id="dv-profile8",
+            ),
+            pytest.param("Dolby Vision, Version 1.0, dvhe.05.06, BL+RPU", None, None, "DV5", id="dv-profile5"),
+            # The PQ transfer must not pull a DV5 file off libplacebo onto zscale (green output).
+            pytest.param("Dolby Vision, Version 1.0, dvhe.05.06, BL+RPU", "PQ", "BT.2020", "DV5", id="dv-profile5-pq"),
+            # Lab file: Cosmos Laundromat HDR (Netflix Open Content) — PQ, P3 primaries, no HDR metadata.
+            pytest.param(None, "PQ", "Display P3", "HDR", id="pq-no-hdr-format-p3"),
+            pytest.param(None, "PQ", "BT.2020", "HDR", id="pq-no-hdr-format"),
+            pytest.param("None", "PQ", "BT.2020", "HDR", id="pq-hdr-format-none-string"),
+            pytest.param(None, "HLG", "BT.2020", "HDR", id="hlg-no-hdr-format"),
+            pytest.param(None, "BT.709", "BT.709", "SDR", id="sdr-bt709"),
+            pytest.param(None, "BT.709", "BT.2020", "SDR", id="sdr-bt2020-primaries-bt709-transfer"),
+            pytest.param(None, "BT.2020 (10-bit)", "BT.2020", "SDR", id="sdr-bt2020-primaries-bt2020-transfer"),
+            pytest.param(None, None, None, "SDR", id="no-colour-metadata"),
+        ],
+    )
+    def test_picks_filter_chain_when_track_metadata_is(
+        self, hdr_format, transfer, primaries, expected, mock_config
+    ) -> None:
+        expected_vf = {"HDR": self.HDR_VF, "SDR": self.SDR_VF, "DV5": self.DV5_VF}[expected]
+
+        vf = self._first_vf(mock_config, hdr_format=hdr_format, transfer=transfer, primaries=primaries)
+
+        assert vf == expected_vf
 
 
 class TestGpuScaleOptimisation:

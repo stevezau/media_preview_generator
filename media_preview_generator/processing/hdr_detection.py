@@ -11,6 +11,33 @@ from __future__ import annotations
 
 import re
 
+# MediaInfo's names for the two HDR transfer curves: PQ (SMPTE ST 2084)
+# and HLG (ARIB STD-B67).  The standards' own names are accepted too in
+# case a MediaInfo build reports those instead of the short names.
+_HDR_TRANSFERS = frozenset({"pq", "smpte st 2084", "hlg", "arib std-b67"})
+
+
+def is_hdr_transfer(transfer_characteristics: str | None) -> bool:
+    """Detect an HDR transfer curve (PQ or HLG).
+
+    MediaInfo only fills ``HDR_Format`` when the file carries HDR
+    metadata (mastering display, HDR10+, Dolby Vision).  A PQ or HLG
+    stream without that metadata is still HDR and still needs tone
+    mapping, so the transfer curve is the fallback signal.  Primaries
+    alone are not: BT.2020 primaries with a BT.709 / BT.2020 transfer
+    are SDR.
+
+    Args:
+        transfer_characteristics: Value of
+            ``MediaInfo.video_tracks[0].transfer_characteristics``.
+
+    Returns:
+        bool: ``True`` for PQ or HLG, ``False`` otherwise.
+    """
+    if not transfer_characteristics:
+        return False
+    return transfer_characteristics.strip().lower() in _HDR_TRANSFERS
+
 
 def is_dolby_vision(hdr_format: str | None) -> bool:
     """Detect any Dolby Vision content (any profile).
