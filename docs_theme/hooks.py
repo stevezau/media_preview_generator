@@ -88,9 +88,7 @@ def on_post_build(config: MkDocsConfig) -> None:
         config: The MkDocs config.
     """
     site_dir = Path(config.site_dir)
-    # robots.txt only takes effect at a host root. On a github.io project path
-    # (/media_preview_generator/) crawlers never read it, so this is inert until the
-    # site moves to a custom domain; it is generated now so that switch needs no work.
+    # robots.txt only takes effect at a host root, which site_url is on the custom domain.
     robots = f"User-agent: *\nAllow: /\n\nSitemap: {config.site_url}sitemap.xml\n"
     (site_dir / "robots.txt").write_text(robots, encoding="utf-8")
 
