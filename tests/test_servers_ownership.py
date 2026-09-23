@@ -24,6 +24,7 @@ from media_preview_generator.servers.ownership import (
     apply_inverse_path_mappings,
     apply_path_mappings,
     apply_webhook_prefixes,
+    path_mapping_candidates,
 )
 
 
@@ -46,6 +47,30 @@ class TestApplyInversePathMappings:
         remote = "/jf-media/Movies/Foo (2024)/Foo (2024).mkv"
         local = apply_path_mappings(remote, mappings)[0]
         assert apply_inverse_path_mappings(local, mappings) == [remote]
+
+
+class TestPathMappingCandidates:
+    """``apply_path_mappings`` with each candidate's disk root (the Plex publisher's gone-from-disk check)."""
+
+    @pytest.mark.parametrize(
+        ("remote", "mappings", "expected"),
+        [
+            ("/data/tv/A.mkv", [], [("/data/tv/A.mkv", None)]),
+            ("/other/A.mkv", [{"remote_prefix": "/data", "local_prefix": "/mnt/d1"}], [("/other/A.mkv", None)]),
+            (
+                "/data/tv/A.mkv",
+                [
+                    {"remote_prefix": "/data", "local_prefix": "/mnt/d1/"},
+                    {"plex_prefix": "/data", "local_prefix": "/mnt/d2"},
+                ],
+                [("/mnt/d1/tv/A.mkv", "/mnt/d1"), ("/mnt/d2/tv/A.mkv", "/mnt/d2")],
+            ),
+        ],
+        ids=["no-mappings", "no-match", "multi-disk"],
+    )
+    def test_each_candidate_carries_its_local_prefix(self, remote, mappings, expected):
+        assert path_mapping_candidates(remote, mappings) == expected
+        assert apply_path_mappings(remote, mappings) == [local for local, _root in expected]
 
 
 def _server(

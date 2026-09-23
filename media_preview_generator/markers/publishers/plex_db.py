@@ -60,6 +60,8 @@ SAME_HOST_PATH_ADVICE = (
 # write lock) before giving up until the next run. capability() allows this twice: once for the lock probe, once for
 # its read-only checks after the Plex calls. A caller that must answer sooner passes its own ``db_timeout_s``.
 BUSY_TIMEOUT_S = 30.0
+# How long a write waits to learn whether another version's file is gone from disk before treating it as still there.
+GONE_CHECK_TIMEOUT_S = 5.0
 # Check servers reads Plex items back one read-only connection each, like a single file's read-back, and leaves this
 # process's lock on the database free this long between them, so a write from another job waiting for it gets it.
 READ_BACK_PAUSE_S = 0.001
@@ -516,6 +518,11 @@ def _is_optimized_copy(part: _Part) -> bool:
     # Plex's "Optimize" transcodes carry media_items.proxy_type and live under a "Plex Versions" folder. Both must hold:
     # an unknown proxy_type on an ordinary file still takes part in the version agreement.
     return bool(part.proxy_type) and "Plex Versions" in part.file.replace("\\", "/").split("/")
+
+
+def _lies_under(path: str, folder: str) -> bool:
+    folder = folder.rstrip("/")
+    return not folder or path.startswith(folder + "/")
 
 
 def _version_files(parts: list[_Part]) -> tuple[str, ...]:
@@ -1518,10 +1525,49 @@ class PlexMarkerPublisher(MarkerPublisher):
                 return decided
         return None
 
+    def _local_candidates_and_roots(self, plex_path: str) -> dict[str, tuple[str, ...]]:
+        """Each local candidate of a Plex path with the disk roots it lies under: the path mapping's local folder and
+        the folder of each library holding it (``gone_from_disk``'s ``roots``)."""
+        from ...servers.ownership import path_mapping_candidates
+
+        mappings = list(self._config.path_mappings or [])
+        library_roots = [
+            local
+            for library in self._config.libraries
+            for remote in library.remote_paths
+            for local, _root in path_mapping_candidates(remote, mappings)
+        ]
+        candidates: dict[str, tuple[str, ...]] = {}
+        for local, mapping_root in path_mapping_candidates(plex_path, mappings):
+            roots = [root.rstrip("/") or "/" for root in library_roots if _lies_under(local, root)]
+            candidates[local] = tuple(dict.fromkeys([*([mapping_root] if mapping_root else []), *roots]))
+        return candidates
+
     def _gone_from_disk(self, plex_file: str) -> bool:
         """Whether a version's file is on none of the disks the server's path mappings give for it (``gone_from_disk``:
-        a disk that isn't mounted never makes it look gone)."""
-        return gone_from_disk(self._local_candidates(plex_file))
+        a disk that isn't mounted, or whose mount went stale, never makes it look gone).
+
+        Asked while the item's lock is held, so a disk that doesn't answer within ``GONE_CHECK_TIMEOUT_S`` (a stalled
+        network share blocks a stat rather than fail) counts as "not gone" instead of holding every publish to the item.
+        """
+        candidates = self._local_candidates_and_roots(plex_file)
+        answer: list[bool] = []
+        check = threading.Thread(
+            target=lambda: answer.append(gone_from_disk(candidates, roots=candidates)),
+            name="plex-version-on-disk",
+            daemon=True,
+        )
+        check.start()
+        check.join(GONE_CHECK_TIMEOUT_S)
+        if not answer:
+            logger.warning(
+                "Plex {}: couldn't tell within {:.0f} s whether {} is still on disk; waiting for it",
+                self._config.name,
+                GONE_CHECK_TIMEOUT_S,
+                os.path.basename(plex_file),
+            )
+            return False
+        return answer[0]
 
     def _desired(
         self, parts: list[_Part], markers: list[Marker], canonical_path: str, prior: list[Marker]

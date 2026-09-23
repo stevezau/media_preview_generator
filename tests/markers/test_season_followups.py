@@ -159,6 +159,42 @@ class TestSeasonFollowUpJob:
         create.assert_not_called()
 
     @pytest.mark.parametrize(
+        ("how", "ran_since", "passed_on"),
+        [
+            ("completed", False, [ep(S1, 5), ep(S1, 6)]),
+            ("completed", True, []),  # it ran them after the requests: nothing to pass on
+            # A job that doesn't complete passes every request on, whatever it ran: the requesting jobs queued nothing
+            # for those files themselves.
+            ("cancelled", True, [ep(S1, 5), ep(S1, 6)]),
+            ("crashed", True, [ep(S1, 5), ep(S1, 6)]),
+        ],
+    )
+    def test_a_season_job_passes_on_what_other_jobs_handed_it_however_it_ends(self, env, how, ran_since, passed_on):
+        env.job.config = {
+            "file_paths": [ep(S1, 1)],
+            "source": "season",
+            job_runner.LATE_REQUESTS: {ep(S1, 5): 10, ep(S1, 6): 11},
+        }
+        env.jm.get_job.return_value = env.job
+        env.ctx.ran_since.return_value = ran_since
+        if how == "cancelled":
+            env.tracker.get_result.return_value = {**env.tracker.get_result.return_value, "cancelled": True}
+        elif how == "crashed":
+            env.dispatcher.submit_items.side_effect = RuntimeError("boom")
+        create = self._run(env, [_item(ep(S1, 1))], [])
+        if passed_on:
+            create.assert_called_once()  # once, not again from the teardown
+            kwargs = create.call_args.kwargs
+            assert (kwargs["file_paths"], kwargs["source"], kwargs["priority"]) == (
+                passed_on,
+                "season",
+                env.job.priority,
+            )
+        else:
+            create.assert_not_called()
+        env.jm.merge_job_config.assert_any_call("j1", {job_runner.LATE_SEALED: True})
+
+    @pytest.mark.parametrize(
         ("config", "changed", "queued"),
         [
             ({"source": "sonarr", "retry_attempt": 1}, False, False),
@@ -517,6 +553,24 @@ class TestNoDuplicateSeasonJobs:
         _season_job_ends(starting_queue, normal, _runs())
         (follow_up,) = [j for j in _season_jobs(starting_queue) if j.config["file_paths"] == [ep(S1, 4)]]
         assert follow_up.priority == 2
+
+    def test_a_season_job_a_restart_didnt_revive_passes_on_what_other_jobs_handed_it(self, queue):
+        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 1)])
+        (season_job,) = _season_jobs(queue)
+        queue.start_job(season_job.id)
+        job_runner._queue_season_followups(_finished_job(queue), [ep(S1, 2)])  # handed over while it ran
+        assert season_job.config[job_runner.LATE_REQUESTS].keys() == {ep(S1, 2)}
+        # The restart: the job is left behind as interrupted and not revived (too old, or auto-requeue off).
+        other = queue.create_job(library_name="p", priority=2, config={"file_paths": ["/x.mkv"]})
+        season_job.status = JobStatus.PENDING
+        queue._interrupted_jobs = [season_job, other]
+        failed = queue.fail_unrevived_interrupted_jobs(JOB_KIND_INTRO_CREDITS)
+        assert [j.id for j in failed] == [season_job.id]
+        job_runner.pass_on_requests_of_unrevived_jobs([*failed, other])
+        job_runner.pass_on_requests_of_unrevived_jobs(failed)  # only the first pass does anything
+        (_, follow_up) = _season_jobs(queue)
+        assert (follow_up.config["file_paths"], follow_up.priority) == ([ep(S1, 2)], season_job.priority)
+        assert sum("didn't finish" in line for line in queue.get_logs(season_job.id)) == 1
 
     def test_a_season_job_that_passed_its_requests_on_takes_no_more(self, starting_queue):
         job_runner._queue_season_followups(_finished_job(starting_queue), [ep(S1, 1)])

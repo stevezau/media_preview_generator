@@ -434,11 +434,14 @@ def _warn_unhealthy_media_mounts(media_servers: list) -> list[dict[str, str]]:
 def _fail_unrevived_intro_credits_jobs() -> None:
     """Settle the Intro & Credits jobs a restart left behind and didn't revive.
 
-    Left PENDING they would block their schedule and absorb webhook follow-ups for good. Its own failure is logged and
-    never stops the revived jobs from starting.
+    Left PENDING they would block their schedule and absorb webhook follow-ups for good. A Season job among them passes
+    on the episodes other jobs had handed it. Its own failure is logged and never stops the revived jobs from starting.
     """
     try:
-        get_job_manager().fail_unrevived_interrupted_jobs(JOB_KIND_INTRO_CREDITS)
+        failed = get_job_manager().fail_unrevived_interrupted_jobs(JOB_KIND_INTRO_CREDITS)
+        from ..markers.job_runner import pass_on_requests_of_unrevived_jobs
+
+        pass_on_requests_of_unrevived_jobs(list(failed or []))
     except Exception as exc:
         logger.warning(
             "Couldn't mark the Intro & Credits jobs left over from before the restart as failed ({}: {}). They stay "

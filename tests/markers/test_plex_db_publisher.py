@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -34,7 +35,7 @@ from media_preview_generator.markers.publishers.plex_db import (
     plex_db_path,
 )
 from media_preview_generator.markers.settings import ServerMarkersSettings
-from media_preview_generator.servers.base import ServerConfig, ServerType
+from media_preview_generator.servers.base import Library, ServerConfig, ServerType
 
 T = MarkerType
 FIX = Path(__file__).resolve().parents[1] / "fixtures" / "markers"
@@ -158,6 +159,7 @@ def _publisher(
     plex_pass=True,
     sibling_markers=None,
     mappings=None,
+    libraries=None,
     mountinfo_lines="",
     mountinfo_path=None,
     settings_provider=None,
@@ -177,6 +179,7 @@ def _publisher(
         auth={},
         output={"plex_config_folder": str(folder)},
         path_mappings=mappings or [],
+        libraries=list(libraries or []),
     )
     settings = ServerMarkersSettings(enabled, None, confirmed, redetect)
     return PlexMarkerPublisher(
@@ -1143,6 +1146,55 @@ class TestAVersionGoneFromDisk:
         assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == int(written)
         # Only a version still to be checked makes the job try the file again.
         assert pub.last_unchecked_versions is (not written)
+
+    def test_a_version_on_a_disk_whose_mount_went_stale_is_waited_for(self, tmp_path, disks):
+        # The architecture review's case: the season folder is on disk1, and disk2 (which really holds B) shows only
+        # its empty mount point.
+        shutil.rmtree(tmp_path / "disk2")
+        (tmp_path / "disk2").mkdir()
+        db, pub = self._publisher(tmp_path, ("disk1", "disk2"))
+        assert _write_one(pub, [INTRO], path=str(tmp_path / "disk1" / "tv" / "A.mkv")) == []
+        assert _rows(db, "SELECT COUNT(*) FROM taggings")[0][0] == 0
+        assert pub.last_unchecked_versions is True
+
+    @pytest.mark.parametrize("root", ["mapping", "library"])
+    def test_a_version_in_a_flat_library_at_its_mount_point_is_waited_for(self, tmp_path, root):
+        # The files sit right in the disk's root folder, which stays (empty) once the disk is unmounted, so a missing
+        # file there proves nothing.
+        mount_point = tmp_path / "movies4k"
+        mount_point.mkdir()
+        (mount_point / "A.mkv").write_bytes(b"a")
+        folder = tmp_path / "Plex Media Server"
+        if root == "mapping":
+            _make_db(folder, parts=(("/plexmedia/A.mkv", None), ("/plexmedia/B.mkv", None)))
+            pub = _publisher(
+                tmp_path,
+                folder,
+                mappings=[{"plex_prefix": "/plexmedia", "local_prefix": str(mount_point)}],
+                sibling_markers=lambda _path: None,
+            )
+        else:
+            _make_db(folder, parts=((str(mount_point / "A.mkv"), None), (str(mount_point / "B.mkv"), None)))
+            pub = _publisher(
+                tmp_path,
+                folder,
+                libraries=[Library("1", "4K Movies", (str(mount_point),))],
+                sibling_markers=lambda _path: None,
+            )
+        assert _write_one(pub, [INTRO], path=str(mount_point / "A.mkv")) == []
+        assert pub.last_unchecked_versions is True
+
+    def test_a_disk_that_doesnt_answer_in_time_counts_as_still_holding_the_version(self, tmp_path, disks, monkeypatch):
+        # The check runs while the item's lock is held: a stalled network share must not hold every publish to it.
+        stalled = threading.Event()
+        monkeypatch.setattr(plex_db, "GONE_CHECK_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(plex_db, "gone_from_disk", lambda *_a, **_kw: stalled.wait(5) or True)
+        try:
+            db, pub = self._publisher(tmp_path, ("disk1",))
+            assert _write_one(pub, [INTRO], path=str(tmp_path / "disk1" / "tv" / "A.mkv")) == []
+            assert pub.last_unchecked_versions is True
+        finally:
+            stalled.set()
 
     def test_a_decided_version_that_disagrees_is_not_unchecked(self, tmp_path, disks):
         (tmp_path / "disk1" / "tv" / "B.mkv").write_bytes(b"b")

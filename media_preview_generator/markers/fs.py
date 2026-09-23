@@ -4,7 +4,7 @@ whether a file is gone from disk."""
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import NamedTuple
 
 # Docker Desktop shares (fakeowner, grpcfuse, virtiofs) and WSL 9p are network-backed even when they look local.
@@ -135,24 +135,45 @@ def is_local_filesystem(fs_type: str | None) -> bool:
     return bool(fs_type) and fs_type in LOCAL_FS_TYPES
 
 
-def gone_from_disk(paths: Iterable[str], folders: dict[str, bool] | None = None) -> bool:
+def _holds_entries(folder: str) -> bool:
+    try:
+        with os.scandir(folder) as entries:
+            return next(entries, None) is not None
+    except OSError:
+        return False
+
+
+def gone_from_disk(
+    paths: Iterable[str],
+    folders: dict[str, bool] | None = None,
+    *,
+    roots: Mapping[str, Iterable[str]] | None = None,
+) -> bool:
     """Whether a file is gone: on none of the local paths it can be at, while a folder of one of them is still there.
 
-    An unmounted library must never look gone: its folders are missing too. A read that fails with another error (a
+    An unmounted library must never look gone: its folders are missing too. A disk whose mount went stale shows an empty
+    mount point instead, so with ``roots`` a path whose disk root is missing or empty, or whose folder is that root
+    itself (a flat library at a bare mount point), makes the file not gone. A read that fails with another error (a
     stale network file handle) doesn't count as gone either. A hard-mounted share that stalls makes these calls block
     instead of fail.
 
     Args:
         paths: The file's local paths, one per mapped disk (a single path where there is one disk).
         folders: Each folder's answer, cached across calls.
+        roots: Per path, the disk roots it lies under (its path mapping's local folder, its library's folder); a path
+            without an entry is judged by its folder alone.
 
     Returns:
-        True when no path holds the file and at least one of their folders exists.
+        True when no path holds the file, no disk root of theirs looks unmounted, and at least one of their folders
+        exists.
     """
     folders = {} if folders is None else folders
     folder_there = False
     for path in paths:
         folder = os.path.dirname(path)
+        for root in (roots or {}).get(path, ()):
+            if os.path.normpath(folder) == os.path.normpath(root) or not _holds_entries(root):
+                return False
         if folders.get(folder) is False:
             continue
         try:

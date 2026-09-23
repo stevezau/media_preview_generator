@@ -2,6 +2,7 @@
 
 import errno
 import os
+import shutil
 
 import pytest
 
@@ -168,27 +169,44 @@ def test_same_mount_point_without_a_parent_chain_later_line_wins(tmp_path):
 
 
 class TestGoneFromDisk:
-    """A file is gone only when no disk holds it and a disk shows its folder without it."""
+    """A file is gone only when no disk holds it, a disk shows its folder without it, and no disk looks unmounted."""
 
     @pytest.fixture
     def disks(self, tmp_path):
         a, b = tmp_path / "disk_a" / "Show" / "Season 12", tmp_path / "disk_b" / "Show" / "Season 12"
         a.mkdir(parents=True)
+        for disk in ("disk_a", "disk_b"):
+            (tmp_path / disk / "Other Show").mkdir(parents=True)  # a mounted disk holds other files
         return str(a / "ep.mkv"), str(b / "ep.mkv")
 
+    @staticmethod
+    def _root(path: str) -> str:
+        return path.split("/Show/")[0]
+
     @pytest.mark.parametrize(
-        ("on_disk", "folders", "gone"),
+        ("on_disk", "folders", "unmounted", "gone"),
         [
-            ((), ("a",), True),  # deleted; its season folder is still there
-            (("a",), ("a",), False),
-            ((), (), False),  # the folder is missing too: an unmounted library looks like this
-            ((), ("a", "b"), True),
-            (("b",), ("a", "b"), False),  # moved to the other disk
-            ((), ("b",), True),
+            ((), ("a",), "", True),  # deleted; its season folder is still there
+            (("a",), ("a",), "", False),
+            ((), (), "", False),  # no disk shows the season folder
+            ((), ("a", "b"), "", True),
+            (("b",), ("a", "b"), "", False),  # moved to the other disk
+            ((), ("b",), "", True),  # disk a is mounted and simply has no such folder
+            ((), ("b",), "a", False),  # disk a's mount went stale (an empty mount point): it may hold the file
+            ((), ("a",), "b", False),  # the season folder on disk a while disk b's mount is stale
         ],
-        ids=["deleted", "present", "unmounted", "deleted-both-disks", "on-the-other-disk", "folder-only-on-b"],
+        ids=[
+            "deleted",
+            "present",
+            "no-season-folder",
+            "deleted-both-disks",
+            "on-the-other-disk",
+            "folder-only-on-b",
+            "folder-only-on-b-a-unmounted",
+            "folder-on-a-b-unmounted",
+        ],
     )
-    def test_the_matrix_over_two_disks(self, disks, on_disk, folders, gone):
+    def test_the_matrix_over_two_disks(self, disks, on_disk, folders, unmounted, gone):
         by_name = dict(zip("ab", disks, strict=True))
         for name in folders:
             os.makedirs(os.path.dirname(by_name[name]), exist_ok=True)
@@ -197,7 +215,26 @@ class TestGoneFromDisk:
         for name in on_disk:
             with open(by_name[name], "wb") as fh:
                 fh.write(b"x")
-        assert gone_from_disk(disks) is gone
+        if unmounted:
+            root = self._root(by_name[unmounted])
+            shutil.rmtree(root)
+            os.mkdir(root)  # the mount point stays, empty
+        assert gone_from_disk(disks, roots={path: (self._root(path),) for path in disks}) is gone
+
+    def test_a_disk_root_that_is_missing_makes_it_not_gone(self, disks, tmp_path):
+        roots = {disks[0]: (self._root(disks[0]),), disks[1]: (str(tmp_path / "not-mounted"),)}
+        assert gone_from_disk(disks, roots=roots) is False
+
+    def test_a_flat_library_at_a_bare_mount_point_is_not_gone(self, tmp_path):
+        # The file's folder is the mount point itself, which stays (empty) once unmounted.
+        mount_point = tmp_path / "movies4k"
+        mount_point.mkdir()
+        path = str(mount_point / "Movie (2020) - 2160p.mkv")
+        roots = {path: (str(mount_point),)}
+        assert gone_from_disk([path], roots=roots) is False
+        (mount_point / "Other Movie (2021).mkv").write_bytes(b"x")  # mounted and the file deleted: still can't tell
+        assert gone_from_disk([path], roots=roots) is False
+        assert gone_from_disk([path]) is True  # without roots only the folder is judged (the fingerprint sweep)
 
     def test_a_file_that_cant_be_read_isnt_gone(self, disks, monkeypatch):
         real_stat = os.stat

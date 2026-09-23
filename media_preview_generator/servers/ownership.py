@@ -122,12 +122,26 @@ def apply_path_mappings(remote_path: str, mappings: list[dict[str, Any]]) -> lis
     ``settings.json``: each entry has ``remote_prefix`` and ``local_prefix``
     (or the legacy ``plex_prefix``/``local_prefix`` shape).
     """
+    return [local for local, _root in path_mapping_candidates(remote_path, mappings)]
+
+
+def path_mapping_candidates(remote_path: str, mappings: list[dict[str, Any]]) -> list[tuple[str, str | None]]:
+    """:func:`apply_path_mappings`, with the ``local_prefix`` each candidate came from.
+
+    Args:
+        remote_path: A path as the server sees it.
+        mappings: The server's ``path_mappings``.
+
+    Returns:
+        ``(local path, local_prefix)`` per candidate, in :func:`apply_path_mappings`' order; ``(remote_path, None)``
+        when no mapping matches.
+    """
     if not mappings:
-        return [remote_path]
+        return [(remote_path, None)]
 
     # Convert backslashes up-front on both sides — see apply_webhook_prefixes.
     remote_path_fwd = (remote_path or "").replace("\\", "/")
-    candidates: list[str] = []
+    candidates: list[tuple[str, str | None]] = []
     norm = _normalize(remote_path_fwd)
     for entry in mappings:
         remote = entry.get("remote_prefix") or entry.get("plex_prefix") or ""
@@ -138,9 +152,9 @@ def apply_path_mappings(remote_path: str, mappings: list[dict[str, Any]]) -> lis
         norm_remote = _normalize(remote_fwd)
         if norm.startswith(norm_remote):
             tail = remote_path_fwd[len(remote_fwd.rstrip("/")) :]
-            candidates.append(local.rstrip("/") + tail)
+            candidates.append((local.rstrip("/") + tail, local.rstrip("/") or "/"))
     if not candidates:
-        candidates.append(remote_path)
+        candidates.append((remote_path, None))
     return candidates
 
 

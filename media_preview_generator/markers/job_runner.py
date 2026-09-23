@@ -562,23 +562,36 @@ def _queue_season_followups(job, paths: list[str], *, priority: int | None = Non
         logger.exception("Could not queue the season follow-up for Intro & Credits job {}", job.id)
 
 
-def _pass_on_late_requests(job, ctx) -> None:
-    """A finished Season job: stop taking requests, and queue one follow-up for the files other jobs asked for while it
-    ran that its own run of them didn't read (the run started before the request, or there was none). Never raises.
+def _pass_on_late_requests(job, ctx: PipelineContext | None) -> None:
+    """A Season job that ended: stop taking requests, and queue one follow-up for the files other jobs asked for while it
+    ran that its own run of them didn't read (the run started before the request, or there was none). Only the first
+    call does anything. Never raises.
+
+    The requesting jobs handed those files over and queue nothing for them themselves, so a job that didn't finish
+    (cancelled, failed, or not revived after a restart) passes every one of them on.
 
     Args:
         job: The Season job.
-        ctx: Its context (``PipelineContext.ran_since``).
+        ctx: Its context (``PipelineContext.ran_since``); None when the job didn't finish.
     """
     jm = get_job_manager()
     try:
         with FOLLOW_UP_LOCK:
-            jm.merge_job_config(job.id, {LATE_SEALED: True})
             latest = jm.get_job(job.id)
-            late = (latest.config or {}).get(LATE_REQUESTS) if latest is not None else None
+            config = (latest.config or {}) if latest is not None else {}
+            if config.get(LATE_SEALED):
+                return
+            jm.merge_job_config(job.id, {LATE_SEALED: True})
+        late = config.get(LATE_REQUESTS)
         if not isinstance(late, dict) or not late:
             return
-        again = sorted(path for path, number in late.items() if not ctx.ran_since(path, int(number)))
+        again = sorted(path for path, number in late.items() if ctx is None or not ctx.ran_since(path, int(number)))
+        if ctx is None:
+            jm.add_log(
+                job.id,
+                f"INFO - This job didn't finish: the {len(again)} episode(s) other jobs asked for while it ran go to "
+                "another Season job",
+            )
         if again:
             _queue_season_followups(job, again, priority=job.priority)
         else:
@@ -587,6 +600,17 @@ def _pass_on_late_requests(job, ctx) -> None:
             )
     except Exception:
         logger.exception("Could not pass on what other jobs asked Season job {} for", job.id)
+
+
+def pass_on_requests_of_unrevived_jobs(jobs: list) -> None:
+    """Season jobs a restart left behind and marked failed: queue what other jobs had handed them. Never raises.
+
+    Args:
+        jobs: The jobs ``JobManager.fail_unrevived_interrupted_jobs`` marked failed.
+    """
+    for job in jobs:
+        if (job.config or {}).get("source") == SEASON_SOURCE:
+            _pass_on_late_requests(job, None)
 
 
 def _queue_season_followups_after(job, cfg: dict, ctx, listed: set[str]) -> None:
@@ -1283,6 +1307,9 @@ def run_intro_credits_job(job_id: str) -> None:
     # While the config holds the Check servers listing (a revived job's from the start): only a revive needs it, so the
     # teardown takes it off the ended job (the config ships in every job payload).
     listing_on_job = LISTING_CONFIG_KEY in cfg
+    # A Season job's requests from other jobs, passed on where it completes; the teardown passes on the rest whatever
+    # ended the job (``_pass_on_late_requests``).
+    requests_passed_on = False
 
     def cancel_check() -> bool:
         return jm.is_cancellation_requested(job_id)
@@ -1443,6 +1470,7 @@ def run_intro_credits_job(job_id: str) -> None:
                         jm.complete_job(job_id, warning=" ".join(["No files to check.", *warnings]))
                     if cfg.get("source") == SEASON_SOURCE:
                         _pass_on_late_requests(job, ctx)
+                        requests_passed_on = True
                     sweep_store = ctx.store
                     return
                 # Webhook paths (and their retries) can arrive before the file is visible here (an import still
@@ -1477,6 +1505,7 @@ def run_intro_credits_job(job_id: str) -> None:
                         _queue_verify(job, cfg, replaced_before_restart, sender_paths)
                     if cfg.get("source") == SEASON_SOURCE:
                         _pass_on_late_requests(job, ctx)
+                        requests_passed_on = True
                     sweep_store = ctx.store
                     return
                 waiting: dict[str, set[str]] = {}
@@ -1581,6 +1610,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 if chain_head and not retried:
                     _end_chain(jm, cfg, waiting)
                 _queue_season_followups_after(job, cfg, ctx, listed)
+                requests_passed_on = True
                 _queue_budget_recheck(job, ctx)
                 if replaced and checks_replaced_later:
                     _queue_verify(job, cfg, replaced, sender_paths)
@@ -1627,6 +1657,9 @@ def run_intro_credits_job(job_id: str) -> None:
                 jm.clear_worker_statuses()
         except Exception as exc:
             logger.debug("Could not clear worker statuses after {}: {}", job_id, exc)
+        if cfg.get("source") == SEASON_SOURCE and not requests_passed_on:
+            # Cancelled or failed before it completed: what other jobs handed over still needs a Season job.
+            _pass_on_late_requests(job, None)
         unregister_job_thread()
         # After the slot is back, and outside the job's log: a skipped cleanup's warning isn't about this job.
         if sweep_store is not None:

@@ -2019,8 +2019,8 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     `pipeline.sequence_number` of its latest request). When it finishes it stops taking requests (`LATE_SEALED`, under
     `FOLLOW_UP_LOCK`) and queues one follow-up, at its own priority, for the files whose run in it started before
     their request, or that it didn't run (`PipelineContext.ran_since`: a worker stage reads everything again, so it
-    counts); a file it ran after the request already read that job's results. A Season job that is cancelled drops
-    what it took, as it drops its own files.
+    counts); a file it ran after the request already read that job's results. A Season job that doesn't complete
+    passes every request on instead (review MED 2, below).
   - **Past 40 episodes a season's files each have their own group** (the 40 nearest), and the season step compared
     every matched sibling's answer with the new episode's own signature, which never equals it: a new Daily Show
     episode asked again for all 39 siblings it matched, of which only the 19 whose group holds it could change
@@ -2084,3 +2084,25 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
     under `FOLLOW_UP_LOCK`); a recheck job already due isn't joined. At run time it drops files decided since and runs
     nothing if TheIntroDB was turned off. Its log is Season-style: one "TheIntroDB recheck, <show> Sxx (N episodes)"
     line per season for unchanged episodes; movies log their own lines. IntroDB/SkipDB keep "run the library again".
+- 2026-09-24 · **Architecture review of "A Plex version deleted from disk…" and "Season re-checks…" above** (no HIGH;
+  two MEDs and a LOW fixed, both MEDs reproduced first):
+  - **A disk whose mount went stale made a version look gone (MED 1).** `gone_from_disk` counted a version gone when
+    any candidate disk showed the season folder, so with a multi-disk mapping whose second disk had gone stale (an
+    empty mount point) while the folder existed on the first, a version really on the second disk was left out and
+    the calling file's markers went to the whole item; and in a flat library at a bare mount point, the folder is the
+    mount point itself, which stays once unmounted. Now the publisher passes each candidate's disk roots (its path
+    mapping's `local_prefix`, `servers.ownership.path_mapping_candidates`, and the folder of each library holding it),
+    and a candidate whose root is missing or empty, or whose folder is that root, makes the version not gone: it is
+    waited for, with the `versions_unchecked` retry. The fingerprint sweep passes no roots and is judged as before.
+  - **Requests a running Season job took were lost when it didn't complete (MED 2).** The requesting jobs queue nothing
+    for the files they hand over, and only a completed Season job passed them on. Now the job's teardown passes them
+    on whatever ended it, every one of them when it didn't complete (cancelled, failed), without the `ran_since`
+    filter; only the first pass does anything (`LATE_SEALED`). A Season job a restart doesn't revive passes them on
+    when startup marks it failed (`pass_on_requests_of_unrevived_jobs`, from `fail_unrevived_interrupted_jobs`); one
+    that is revived runs again and passes on every request it didn't run after, as its runs from before the restart
+    aren't known.
+  - **The gone-from-disk check ran under the item's lock (LOW).** It runs inside the publisher's write, where a stalled
+    network share blocks a stat instead of failing, so it now runs on its own thread and counts as "not gone" after
+    `plex_db.GONE_CHECK_TIMEOUT_S` (5 s): the version is waited for and the file retried.
+  - Not done (optional LOW): a `versions_unchecked` retry is still queued when the unchecked version is one of the same
+    job's own files; that file's own publish fixes the item, and the retry costs one cheap re-run.

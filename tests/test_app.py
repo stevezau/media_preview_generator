@@ -557,6 +557,24 @@ class TestRequeueInterruptedOnStartup:
         jm.fail_unrevived_interrupted_jobs.assert_called_once_with("intro_credits")
         mock_start_job.assert_not_called()
 
+    @patch("media_preview_generator.markers.job_runner.pass_on_requests_of_unrevived_jobs")
+    @patch("media_preview_generator.web.routes._start_job_async")
+    @patch("media_preview_generator.web.app.get_job_manager")
+    @patch("media_preview_generator.web.settings_manager.get_settings_manager")
+    def test_the_intro_credits_jobs_left_behind_pass_on_what_other_jobs_handed_them(
+        self, mock_get_settings_manager, mock_get_job_manager, mock_start_job, mock_pass_on
+    ):
+        # A Season job that died with the restart held episodes other jobs had handed it; they get a Season job.
+        mock_get_settings_manager.return_value.get.side_effect = lambda key, default=None: {
+            "auto_requeue_on_restart": False,
+        }.get(key, default)
+        left_behind = [type("Job", (), {"id": "season-1", "config": {"source": "season"}})()]
+        mock_get_job_manager.return_value.fail_unrevived_interrupted_jobs.return_value = left_behind
+
+        _requeue_interrupted_on_startup("/tmp/config")
+
+        mock_pass_on.assert_called_once_with(left_behind)
+
 
 class TestLeftoverIntroCreditsJobsBeforeSchedulesStart:
     """A schedule tick that fires as the scheduler starts must not see a leftover job from before the restart."""
