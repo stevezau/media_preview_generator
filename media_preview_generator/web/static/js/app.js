@@ -1507,7 +1507,7 @@ const STATUS_META = {
     // time so the per-item registration call (Jellyfin Media Preview Bridge plugin or
     // /Items/{id}/Refresh) was skipped. The retry queue picks this back up — once the
     // server indexes the file, the registration fires and the row promotes to "Generated".
-    published_pending_registration: { label: 'Generated (auto-retrying)', cls: 'bg-success', tip: 'Tiles are on disk; the server has not indexed the file yet so trickplay registration is pending. The row shows a "Retry N/M" chip while attempts back off 1m → 2m → 5m → 15m → 1h until the server catches up.' },
+    published_pending_registration: { label: 'Generated (auto-retrying)', cls: 'bg-success', tip: 'Tiles are on disk; the server has not indexed the file yet so trickplay registration is pending. The row shows a "Retry N/M" chip while retries back off (1m → 2m → 5m with the default retry settings) until the server catches up or the retries run out; after that the next scheduled scan picks the file up.' },
 
     // Output already on disk; source unchanged — nothing to redo.
     skipped_bif_exists:     { label: 'Already Existed', cls: 'bg-info text-dark', tip: 'Output already on disk and source unchanged' },

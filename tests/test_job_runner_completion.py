@@ -20,6 +20,7 @@ import pytest
 from media_preview_generator.web.routes.job_runner import (
     _classify_job_completion,
     _format_retry_wait_server_label,
+    _not_indexed_message,
     _retry_completion_message,
 )
 
@@ -282,8 +283,10 @@ class TestRetryCompletionMessage:
             effective_max=3,
         )
         assert level == "WARNING", "exhausted chains must NOT log INFO success"
-        assert "Retry chain exhausted after 3 attempt(s)" in msg
-        assert "JellyTest pending × 1" in msg, f"per-server pending count must surface in the message; got {msg!r}"
+        assert msg == (
+            "1 file(s) still weren't indexed by the media server after 3 retries, so no more retries are queued. "
+            "The next scheduled scan will pick them up. (JellyTest pending × 1)"
+        )
 
     def test_chain_exhausted_orders_pending_servers_by_count(self):
         """Multi-server pending counts sort highest-first so the most-blocked
@@ -338,3 +341,57 @@ class TestRetryCompletionMessage:
         )
         assert level == "INFO"
         assert msg == "Retry job completed successfully"
+
+
+class TestNotIndexedMessage:
+    """The completion text for files still not indexed when this job queued no retry for them.
+
+    Job c95a5453, the last of 3 retries, said "They'll be retried automatically — slow backoff: 1m → 2m → 5m → 15m →
+    60m" while no retry was queued and its chain head was marked failed. Every cell must say what really happens.
+    """
+
+    @pytest.mark.parametrize(
+        ("is_retry", "retry_attempt", "effective_max", "expected"),
+        [
+            (
+                True,
+                3,
+                3,
+                "2 file(s) still weren't indexed by the media server after 3 retries, so no more retries are queued. "
+                "The next scheduled scan will pick them up.",
+            ),
+            (
+                True,
+                1,
+                1,
+                "2 file(s) still weren't indexed by the media server after 1 retry, so no more retries are queued. "
+                "The next scheduled scan will pick them up.",
+            ),
+            (
+                False,
+                0,
+                0,
+                "2 file(s) weren't indexed by the media server yet, and retries are off (Settings → Retry policy). "
+                "The next scheduled scan will pick them up.",
+            ),
+            (
+                False,
+                0,
+                3,
+                "2 file(s) weren't indexed by the media server yet, and no retry was queued for them. "
+                "The next scheduled scan will pick them up.",
+            ),
+            (
+                True,
+                1,
+                3,
+                "2 file(s) weren't indexed by the media server yet, and no retry was queued for them. "
+                "The next scheduled scan will pick them up.",
+            ),
+        ],
+        ids=["last-retry", "last-of-one-retry", "retries-off", "original-not-flagged", "mid-chain-not-flagged"],
+    )
+    def test_message_says_what_happens_next(self, is_retry, retry_attempt, effective_max, expected):
+        msg = _not_indexed_message(2, is_retry=is_retry, retry_attempt=retry_attempt, effective_max=effective_max)
+        assert msg == expected
+        assert "retried automatically" not in msg and "backoff" not in msg

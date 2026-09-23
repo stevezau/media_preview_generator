@@ -709,6 +709,85 @@ class TestStartJobAsyncRetryBranchPublisherStatuses:
             f"{publisher_status} retry must include the affected path; got {retry_run['webhook_paths']!r}"
         )
 
+    def test_last_retry_that_stays_unindexed_says_it_gave_up(self, app, tmp_path):
+        """Job c95a5453 (the last retry of chain d10ef2f9) logged "They'll be retried automatically — slow backoff:
+        1m → 2m → 5m → 15m → 60m" although it queued no retry and the chain head was marked failed. The last retry
+        must say the file wasn't indexed after N retries and that the next scheduled scan picks it up.
+        """
+        from media_preview_generator.web.jobs import get_job_manager
+        from media_preview_generator.web.routes.job_runner import _start_job_async
+
+        run_calls: list[str] = []
+
+        def fake_run_processing(config, selected_gpus, **kwargs):
+            run_calls.append(kwargs.get("job_id"))
+            jm = get_job_manager()
+            target = (jm.get_job(kwargs.get("job_id")).config or {}).get("parent_job_id") or kwargs.get("job_id")
+            jm.record_file_result(
+                target,
+                "/data/tv/Show/S01E01.mkv",
+                "skipped_not_indexed",
+                "not indexed yet",
+                "[GPU 0]",
+                servers=[
+                    {
+                        "server_id": "plex-1",
+                        "server_name": "Plex Main",
+                        "server_type": "plex",
+                        "status": "skipped_not_in_library",
+                        "message": "This file isn't in Plex's library yet",
+                    }
+                ],
+            )
+            return {
+                "outcome": {"skipped_not_indexed": 1},
+                "webhook_resolution": {
+                    "unresolved_paths": [],
+                    "skipped_paths": [],
+                    "resolved_count": 1,
+                    "total_paths": 1,
+                    "path_hints": [],
+                },
+            }
+
+        with (
+            app.app_context(),
+            patch("media_preview_generator.jobs.orchestrator.run_processing", side_effect=fake_run_processing),
+            patch("media_preview_generator.plex_client.trigger_plex_partial_scan", return_value=[]),
+            patch("media_preview_generator.processing.retry_queue.BACKOFF_SCHEDULE", [1, 1, 1, 1, 1]),
+        ):
+            jm = get_job_manager()
+            job = jm.create_job(library_name="Signs Of A Psychopath S11E11", config={"source": "sonarr"})
+            with patch.object(jm, "upsert_retry_chain_job", wraps=jm.upsert_retry_chain_job) as chain:
+                _start_job_async(
+                    job.id,
+                    config_overrides={
+                        "webhook_paths": ["/data/tv/Show/S01E01.mkv"],
+                        "webhook_retry_count": 2,
+                        "webhook_retry_delay": 30,
+                    },
+                )
+            retries = sorted(
+                (j for j in jm.get_all_jobs() if (j.config or {}).get("parent_job_id") == job.id),
+                key=lambda j: j.config["retry_attempt"],
+            )
+            last_logs = jm.get_logs(retries[-1].id) or []
+            all_logs = (jm.get_logs(job.id) or []) + [line for r in retries for line in (jm.get_logs(r.id) or [])]
+
+        assert len(run_calls) == 3, f"original + 2 retries expected; got {run_calls!r}"
+        gave_up = (
+            "1 file(s) still weren't indexed by the media server after 2 retries, so no more retries are queued. "
+            "The next scheduled scan will pick them up."
+        )
+        assert any(line.endswith(f"INFO - {gave_up}") for line in last_logs), (
+            f"the last retry must say it gave up; got {last_logs!r}"
+        )
+        assert not any("retried automatically" in line or "slow backoff" in line for line in all_logs), all_logs
+        exhausted = [c.kwargs for c in chain.call_args_list if c.kwargs.get("outcome") == "exhausted"]
+        assert [(c["originating_job_id"], c["reason"]) for c in exhausted] == [
+            (job.id, f"{gave_up} Check the Files panel for the affected paths.")
+        ]
+
     def test_retry_spawn_log_is_warning_with_server_attribution(self, app, tmp_path):
         """Retry-spawn log lines must:
           1. Carry the ``WARNING - `` level prefix (not ``INFO - ``).
@@ -850,6 +929,10 @@ class TestStartJobAsyncRetryBranchPublisherStatuses:
         )
         assert any("JellyTest pending" in line for line in first_spawn), (
             f"First-retry-spawn log must name the blocker server; matching warn lines: {first_spawn!r}"
+        )
+        # The real first wait (the patched 1 s schedule step scaled by the 30 s setting), not the setting itself.
+        assert any(line.endswith("retry scheduled in 1s (retry 1 of 3)") for line in first_spawn), (
+            f"First-retry-spawn log must state the real wait and the retry count; got {first_spawn!r}"
         )
 
         # is_retry continuation branch (in-chain spawn). Lands on the

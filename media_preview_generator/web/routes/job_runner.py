@@ -96,7 +96,7 @@ def _retry_completion_message(
 
     Returns:
         ``("INFO", "Retry job completed successfully")`` when the chain succeeded.
-        ``("WARNING", "Retry chain exhausted after N attempt(s); …")`` when
+        ``("WARNING", "N file(s) still weren't indexed … after M retries, … (Plex pending × N)")`` when
         ``retry_paths`` is non-empty AND ``spawned_retry_id`` is ``None``
         (chain ran out of attempts).
     """
@@ -105,8 +105,48 @@ def _retry_completion_message(
             ", ".join(f"{name} pending × {n}" for name, n in sorted(pending_by_server.items(), key=lambda kv: -kv[1]))
             or f"{len(retry_paths)} path(s) still pending"
         )
-        return "WARNING", f"Retry chain exhausted after {effective_max} attempt(s); {pending_summary}"
+        return "WARNING", f"{_gave_up_text(len(retry_paths), effective_max)} ({pending_summary})"
     return "INFO", "Retry job completed successfully"
+
+
+def _retries_text(count: int) -> str:
+    return f"{count} {'retry' if count == 1 else 'retries'}"
+
+
+def _gave_up_text(file_count: int, retries: int) -> str:
+    """The final give-up of a retry chain, as the job log and the chain head's row say it."""
+    return (
+        f"{file_count} file(s) still weren't indexed by the media server after {_retries_text(retries)}, so no more "
+        "retries are queued. The next scheduled scan will pick them up."
+    )
+
+
+def _not_indexed_message(count: int, *, is_retry: bool, retry_attempt: int, effective_max: int) -> str:
+    """Why files still waiting for the media server to index them get no retry from this job.
+
+    Only called when this job queued no retry: the chain ran out of retries, retries are off, or nothing was flagged
+    for one.
+
+    Args:
+        count: Files that ended ``skipped_not_indexed``.
+        is_retry: Whether this job is a retry of a chain.
+        retry_attempt: Which retry it is (0 for the original job).
+        effective_max: The retry count in force.
+
+    Returns:
+        The job log line and completion warning.
+    """
+    if is_retry and retry_attempt >= effective_max:
+        return _gave_up_text(count, retry_attempt)
+    if effective_max <= 0:
+        return (
+            f"{count} file(s) weren't indexed by the media server yet, and retries are off (Settings → Retry policy). "
+            "The next scheduled scan will pick them up."
+        )
+    return (
+        f"{count} file(s) weren't indexed by the media server yet, and no retry was queued for them. "
+        "The next scheduled scan will pick them up."
+    )
 
 
 def _format_retry_wait_server_label(parent_job, run_job_config) -> str:
@@ -1373,6 +1413,9 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             )
                         elif not is_retry and effective_max > 0:
                             spawned_retry_id = _spawn_retry_job(retry_paths, 1, retry_reason=retry_reason)
+                            from media_preview_generator.processing.retry_queue import scaled_backoff_delay
+
+                            first_delay = scaled_backoff_delay(1, retry_delay_sec)
                             reason_parts = []
                             if unresolved_paths:
                                 reason_parts.append(f"{len(unresolved_paths)} not found on any server")
@@ -1388,7 +1431,7 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             # scheduled. Operator-visible signal.
                             job_manager.add_log(
                                 job_id,
-                                f"WARNING - {reason}, retry scheduled in {retry_delay_sec}s",
+                                f"WARNING - {reason}, retry scheduled in {first_delay}s (retry 1 of {effective_max})",
                             )
 
                     # Terminal chain transition: this is a retry Job, it
@@ -1410,9 +1453,8 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                                 if retry_paths:
                                     _chain_outcome = "exhausted"
                                     _chain_reason = (
-                                        f"Source server did not register {len(retry_paths)} "
-                                        f"file(s) after {effective_max} retry attempts. "
-                                        f"Check the Files panel for the affected paths."
+                                        f"{_gave_up_text(len(retry_paths), effective_max)} "
+                                        "Check the Files panel for the affected paths."
                                     )
                                 else:
                                     _chain_outcome = "completed"
@@ -1592,20 +1634,18 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             else:
                                 job_manager.complete_job(job_id, warning=error_msg)
                         else:
-                            # D25 — when files ended in skipped_not_indexed,
-                            # the JOB has finished dispatching but background
-                            # retries are still pending. Marking it plain
-                            # "Completed" (green) is misleading because more
-                            # work IS scheduled. Surface as a warning so the
-                            # user sees an amber badge with a clear message.
+                            # D25 — files that ended in skipped_not_indexed get an
+                            # amber badge, not a green "Completed". A job that
+                            # queued a retry never gets here (its error_parts
+                            # name the retry), so these files get no retry
+                            # from this job: say so instead of promising one.
                             not_indexed_count = (outcome or {}).get("skipped_not_indexed", 0) if outcome else 0
                             if not_indexed_count > 0:
-                                msg = (
-                                    f"{not_indexed_count} file(s) waiting for the media server to scan / "
-                                    "analyse them (the media server hasn't finished its own analysis pass "
-                                    "for these files, so we don't have the bundle hash needed to publish the "
-                                    "BIF). They'll be retried automatically — slow backoff: 1m → 2m → 5m "
-                                    "→ 15m → 60m."
+                                msg = _not_indexed_message(
+                                    not_indexed_count,
+                                    is_retry=is_retry,
+                                    retry_attempt=retry_attempt,
+                                    effective_max=effective_max,
                                 )
                                 job_manager.add_log(job_id, f"INFO - {msg}")
                                 job_manager.complete_job(job_id, warning=msg)
