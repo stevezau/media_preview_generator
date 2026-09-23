@@ -82,8 +82,19 @@ jobs:
       - name: Ruff format check
         run: ruff format --check .
 
-  test:
+  unit:
+    # Shards the unit suite 3 ways so the required `test` check (below) only has to wait on
+    # the slowest shard, not the whole 12,641-test suite serially. A repo ruleset requires a
+    # status check literally named `test`, so this discovery job is named `unit` and the
+    # combine job keeps the `test` id/name. pytest-shard balances by test count, not wall
+    # time — locally that gave 4085/4307/4249 tests in 53.63s/45.91s/48.08s, close enough
+    # (~15% spread) that a time-based split isn't worth the extra complexity.
+    name: unit (${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -116,8 +127,70 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[test]"
 
-      - name: Run tests
-        run: pytest -m "not gpu and not e2e and not integration" --cov-report=xml
+      - name: Run tests (shard ${{ matrix.shard }}/3)
+        # Deliberately does NOT clear addopts (pyproject.toml) and re-specify everything
+        # it sets — that would duplicate the config and let a shard silently drift the
+        # next time someone edits addopts. Only add what a shard needs on top:
+        # --shard-id/--num-shards pick the slice, and --cov-fail-under is a `store`
+        # action (last value on the command line wins over addopts' 70), so 0 here defers
+        # the real floor to the `test` job below, which enforces it once over the
+        # combined 3-shard total. addopts' own --cov-report=term-missing still runs and
+        # prints its per-file table in each shard's log — harmless noise, not worth
+        # fighting (pytest-cov's --cov-report is an *append* action, so cancelling it
+        # from the CLI would need clearing addopts anyway).
+        env:
+          COVERAGE_FILE: .coverage.unit-${{ matrix.shard }}
+        run: >-
+          pytest --shard-id=$((${{ matrix.shard }} - 1)) --num-shards=3
+          --cov-fail-under=0
+
+      - name: Upload coverage data (shard ${{ matrix.shard }}/3)
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-unit-${{ matrix.shard }}
+          path: .coverage.unit-${{ matrix.shard }}
+          # The data file is a dotfile; upload-artifact@v4 skips hidden files by default
+          # and would silently upload an empty artifact without this.
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  test:
+    # Required status check name — a repo ruleset pins the name `test`, so this job (not
+    # `unit` above) is what that check watches. Combines the 3 shards' coverage data and
+    # enforces the 70% floor once over the whole suite, matching what the single-job `test`
+    # used to do.
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install coverage
+        # coverage combine/report/xml is all this job does — no need for the app's own
+        # deps or an editable install. Python 3.11+'s stdlib tomllib lets coverage.py read
+        # pyproject.toml's [tool.coverage.*] natively, so no [toml] extra either.
+        run: pip install coverage
+
+      - name: Download shard coverage data
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-unit-*
+          merge-multiple: true
+
+      - name: Combine shard coverage and enforce the 70% floor
+        # All 3 shard jobs and this job check out the same commit onto the same
+        # ubuntu-latest runner workspace path, so the source paths recorded in each
+        # shard's data file already line up — no [tool.coverage.paths] aliasing needed.
+        run: |
+          coverage combine .coverage.unit-1 .coverage.unit-2 .coverage.unit-3
+          coverage report --fail-under=70
+          coverage xml
 
       - name: Upload coverage to Codecov
         # Upload on every event that produced coverage.xml (push, PR,

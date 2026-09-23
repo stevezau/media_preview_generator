@@ -47,6 +47,12 @@ The CI ships a different pattern: pytest-shard splits the e2e suite across
 largest takes 110s serially on this box). Locally, `-n 8` is empirically
 stable (verified 33/33 pass).
 
+CI's unit-test job is also sharded: the `unit` matrix job runs 3 shards (each still
+`-n auto --dist worksteal`, pytest-shard splits by test count), uploading one
+`.coverage.unit-<n>` data file per shard. The required `test` check (its id/name has to
+stay `test` for the repo ruleset) then `needs: unit`, downloads the 3 artifacts,
+`coverage combine`s them and enforces the 70% floor once over the combined total.
+
 ```bash
 
 # Lint and format
