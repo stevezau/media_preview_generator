@@ -49,6 +49,7 @@ from .filter_chain import (
 from .hdr_detection import (
     is_dolby_vision,
     is_dv_no_backward_compat,
+    is_hdr_transfer,
 )
 from .retry_cascade import (
     classify_cpu_fallback_reason,
@@ -1149,7 +1150,7 @@ def generate_images(
     # vf assembly classification.  Set by HDR detection below; consumed
     # by _run_ffmpeg.  Possible values:
     #   "sdr"               — fps + scale (or GPU-scale segment)
-    #   "hdr10_zscale"      — HDR10 / DV P7+8: zscale tonemap chain
+    #   "hdr10_zscale"      — HDR10 / PQ / HLG / DV P7+8: zscale tonemap chain
     #   "libplacebo_dv5"    — DV Profile 5 with libplacebo (CPU/NVIDIA input)
     #   "libplacebo_vaapi"  — DV Profile 5 on AMD: VAAPI→Vulkan DMA-BUF
     #   "opencl_dv5_intel"  — DV Profile 5 on Intel: VAAPI→OpenCL tonemap
@@ -1312,6 +1313,17 @@ def generate_images(
                 # (50-200 nits) map to tiny linear values that barely
                 # get tone mapped → dark output.
                 path_kind = "hdr10_zscale"
+        elif is_hdr_transfer(media_info.video_tracks[0].transfer_characteristics):
+            # PQ or HLG with no HDR metadata, so MediaInfo leaves
+            # HDR_Format empty.  Without tone mapping the thumbnails come
+            # out washed out.  The tonemap filter falls back to a default
+            # peak when there is no mastering-display / MaxCLL data.
+            logger.info(
+                "HDR transfer detected for {} without HDR metadata; using zscale tone mapping (transfer={!r})",
+                video_file,
+                media_info.video_tracks[0].transfer_characteristics,
+            )
+            path_kind = "hdr10_zscale"
 
     # FFmpeg subprocess machinery (previously three nested closures:
     # _gpu_scale_segment, _assemble_vf, _run_ffmpeg — ~540 lines) now lives
