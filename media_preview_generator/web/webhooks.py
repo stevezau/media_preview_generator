@@ -37,6 +37,9 @@ _pending_lock = threading.Lock()
 # metadata refreshes and analyzer reruns.
 _recent_dispatches: dict[tuple[str, str], float] = {}
 _RECENT_DISPATCH_TTL_SECONDS = 600
+# Longest a batch waits, counted from its first webhook. Each webhook restarts the delay, so without a cap a steady
+# stream of imports held its batch until the stream stopped (342 files waited 55 minutes in job 7d24a00b).
+_WEBHOOK_BATCH_MAX_WAIT_SECONDS = 600
 
 
 def reset_webhook_debounce() -> None:
@@ -891,7 +894,11 @@ def _schedule_webhook_job(
             # banner instead. Now the timestamp travels with the Job,
             # the row renders the countdown natively, and the banner
             # becomes redundant (issue: webhook countdown UX, May 2026).
-            fire_at_ts = datetime.now(UTC).timestamp() + delay
+            now_ts = datetime.now(UTC).timestamp()
+            opened_at = now_ts if is_fresh_batch else float(batch.get("opened_at", now_ts))
+            elapsed = now_ts - opened_at
+            wait_s = min(delay, max(0.0, _WEBHOOK_BATCH_MAX_WAIT_SECONDS - elapsed))
+            fire_at_ts = now_ts + wait_s
             fire_at_iso = datetime.fromtimestamp(fire_at_ts, tz=UTC).isoformat()
 
             if is_fresh_batch:
@@ -939,6 +946,7 @@ def _schedule_webhook_job(
                     "server_id": server_id,
                     "deleted_paths": set(),
                     "job_id": job.id,
+                    "opened_at": opened_at,
                 }
                 _pending_batches[debounce_key] = batch
 
@@ -991,10 +999,17 @@ def _schedule_webhook_job(
                     batch["job_id"],
                     f"INFO - Webhook merged into batch: {safe_title} (batch now has {path_count} path(s))",
                 )
+                if wait_s < delay:
+                    job_manager.add_log(
+                        batch["job_id"],
+                        f"INFO - Batch runs in {round(wait_s)}s: a batch waits at most "
+                        f"{_WEBHOOK_BATCH_MAX_WAIT_SECONDS // 60} minutes from its first webhook; "
+                        "webhooks after that start a new batch",
+                    )
 
             batch["fire_at"] = fire_at_ts
 
-            timer = threading.Timer(delay, _execute_webhook_job, args=[debounce_key])
+            timer = threading.Timer(wait_s, _execute_webhook_job, args=[debounce_key])
             timer.daemon = True
             _pending_timers[debounce_key] = timer
             timer.start()
@@ -1016,7 +1031,11 @@ def _schedule_webhook_job(
         _kick_early_scan(normalized_path, server_id, early_scan_job_id)
 
     logger.info(
-        "Webhook: {} imported '{}' — scheduling job with {} path(s) in {}s", safe_source, safe_title, path_count, delay
+        "Webhook: {} imported '{}' — scheduling job with {} path(s) in {}s",
+        safe_source,
+        safe_title,
+        path_count,
+        round(wait_s),
     )
     return True
 

@@ -2139,3 +2139,93 @@ class TestSonarrImportComplete:
         assert "no file path" in resp.get_json()["message"].lower()
         assert "didn't carry a file path" in " | ".join(str(call) for call in mock_warning.call_args_list)
         assert self._statuses() == ["ignored_no_path"]
+
+
+class TestWebhookBatchMaxWait:
+    """Each webhook restarts a batch's delay; a batch still runs at most ``_WEBHOOK_BATCH_MAX_WAIT_SECONDS`` after its
+    first webhook (job 7d24a00b: 342 Sonarr imports 10 s apart held one batch for 55 minutes)."""
+
+    @pytest.fixture()
+    def timers(self, app):
+        import media_preview_generator.web.webhooks as wh
+
+        wh.get_settings_manager().set("webhook_delay", 120)
+        created: list[float] = []
+
+        def _timer(delay, target, args=None, kwargs=None):
+            created.append(delay)
+            return MagicMock()
+
+        with (
+            patch.object(wh.threading, "Timer", side_effect=_timer),
+            patch.object(wh, "_kick_early_scan"),
+            patch.object(wh, "_resolve_webhook_server_context", return_value=(None, None, None)),
+        ):
+            yield created
+
+    @staticmethod
+    def _age_batch(seconds: float) -> dict:
+        """Pretend the pending sonarr batch opened ``seconds`` ago."""
+        import media_preview_generator.web.webhooks as wh
+
+        batch = wh._pending_batches[wh._debounce_key("sonarr")]
+        batch["opened_at"] -= seconds
+        return batch
+
+    @staticmethod
+    def _job_config(batch: dict) -> dict:
+        import media_preview_generator.web.webhooks as wh
+
+        return wh.get_job_manager().get_job(batch["job_id"]).config
+
+    def test_webhook_merging_early_restarts_the_full_delay(self, timers):
+        import media_preview_generator.web.webhooks as wh
+
+        wh._schedule_webhook_job("sonarr", "Show S01E01", "/tv/Show/S01E01.mkv")
+        self._age_batch(30)
+        wh._schedule_webhook_job("sonarr", "Show S01E02", "/tv/Show/S01E02.mkv")
+
+        assert timers == [120, 120]
+
+    def test_webhook_near_the_cap_only_waits_until_the_cap(self, timers):
+        import media_preview_generator.web.webhooks as wh
+
+        wh._schedule_webhook_job("sonarr", "Show S01E01", "/tv/Show/S01E01.mkv")
+        batch = self._age_batch(wh._WEBHOOK_BATCH_MAX_WAIT_SECONDS - 50)
+        wh._schedule_webhook_job("sonarr", "Show S01E02", "/tv/Show/S01E02.mkv")
+
+        assert timers[0] == 120
+        assert timers[1] == pytest.approx(50, abs=1)
+        cap = batch["opened_at"] + wh._WEBHOOK_BATCH_MAX_WAIT_SECONDS
+        assert batch["fire_at"] == pytest.approx(cap, abs=1)
+        from datetime import datetime
+
+        stored_fire_at = datetime.fromisoformat(self._job_config(batch)["webhook_fire_at"]).timestamp()
+        assert stored_fire_at == pytest.approx(cap, abs=1), "the row's countdown must show the capped time"
+        logs = " ".join(wh.get_job_manager().get_logs(batch["job_id"]))
+        assert "waits at most 10 minutes from its first webhook" in logs
+
+    def test_webhook_after_the_cap_fires_the_batch_at_once(self, timers):
+        """The Timer at the cap may not have run yet when the next webhook arrives; the batch must not wait again."""
+        import media_preview_generator.web.webhooks as wh
+
+        wh._schedule_webhook_job("sonarr", "Show S01E01", "/tv/Show/S01E01.mkv")
+        self._age_batch(wh._WEBHOOK_BATCH_MAX_WAIT_SECONDS + 5)
+        wh._schedule_webhook_job("sonarr", "Show S01E02", "/tv/Show/S01E02.mkv")
+
+        assert timers[1] == 0
+
+    def test_webhook_after_the_batch_fired_starts_a_new_batch(self, timers):
+        import media_preview_generator.web.webhooks as wh
+
+        wh._schedule_webhook_job("sonarr", "Show S01E01", "/tv/Show/S01E01.mkv")
+        first = self._age_batch(wh._WEBHOOK_BATCH_MAX_WAIT_SECONDS)
+        with patch("media_preview_generator.web.routes._start_job_async") as mock_start:
+            wh._execute_webhook_job(wh._debounce_key("sonarr"))
+        wh._schedule_webhook_job("sonarr", "Show S01E02", "/tv/Show/S01E02.mkv")
+
+        assert mock_start.call_args.args[1]["webhook_paths"] == ["/tv/Show/S01E01.mkv"]
+        second = wh._pending_batches[wh._debounce_key("sonarr")]
+        assert second["job_id"] != first["job_id"]
+        assert second["file_paths"] == {"/tv/Show/S01E02.mkv"}
+        assert timers == [120, 120]

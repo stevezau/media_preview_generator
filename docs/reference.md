@@ -240,7 +240,7 @@ Settings for automatic preview generation when media is imported via Radarr or S
 | Setting | Default | Web UI | Description |
 |---------|---------|--------|-------------|
 | `webhook_enabled` | `true` | Yes | Master enable/disable for webhook processing |
-| `webhook_delay` | `60` | Yes | Delay before processing (10–300 s). Incoming webhooks are queued per source; a batch runs only after this many seconds with no new imports, so every file gets at least this long for Plex to add it before we process. |
+| `webhook_delay` | `60` | Yes | Delay before processing (10–300 s). Incoming webhooks are queued per source; a batch runs after this many seconds with no new imports, or 10 minutes after its first webhook, whichever comes first. |
 | `webhook_secret` | *(empty)* | Yes | Dedicated secret for webhook auth (falls back to API token) |
 | `plex_webhook_enabled` | `false` | Yes | Enable the Plex direct webhook (`/api/webhooks/plex`). Requires Plex Pass on the server-owner account. |
 | `plex_webhook_public_url` | *(empty)* | Yes | URL Plex Media Server should POST to. Defaults to the URL you registered through. Override for reverse-proxy / split-network setups. |

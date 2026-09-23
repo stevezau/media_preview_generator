@@ -338,7 +338,7 @@ Automatically generate preview thumbnails when Radarr or Sonarr imports new medi
 
 1. Radarr/Sonarr imports a file (or an external tool sends a custom webhook) and a POST is sent to this app.
 2. The app **queues** the file and starts (or resets) a timer. Imports from the same source (Radarr, Sonarr, or Custom) are batched together.
-3. A batch is processed only after the **delay** (e.g. 60s) has passed with **no new** imports from that source. So if another file arrives 1 second before the batch would run, it is added to the queue and the timer resets — the batch runs 60 seconds after that file. Every file gets at least 60 seconds before we process it.
+3. A batch is processed only after the **delay** (e.g. 60s) has passed with **no new** imports from that source. So if another file arrives 1 second before the batch would run, it is added to the queue and the timer resets — the batch runs 60 seconds after that file. A batch never waits more than **10 minutes** from its first file, though: a steady stream of imports would otherwise hold it until the stream stopped. Files that arrive once that limit is reached start the next batch.
 4. This delay is important because **your media servers need time to add the new file to their library**. If we process too soon, the file may not be indexed yet (regardless of vendor) and the job can fail or skip the item. Not-yet-indexed files are automatically retried on a backoff (1 m → 2 m → 5 m with the default retry count of 3; more retries add 15 m and 60 m steps), so transient indexing lag doesn't drop work. See [Slow-backoff retry queue](multi-server.md#slow-backoff-retry-queue).
 5. When the timer fires, the app resolves each queued path against every configured server that owns it, processes it once, and publishes to each in its native format — Plex BIF bundle, Emby sidecar BIF, Jellyfin trickplay tiles. Items that already have a fresh preview are skipped automatically (source-aware dedup).
 
@@ -474,7 +474,7 @@ All settings are configurable from the **Automation** page → **Triggers** tab 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | **Enable Webhooks** | On | Master toggle |
-| **Delay before processing** | 60s | How long to wait with no new imports before running a batch (10–300 s). Incoming files are queued; a batch runs only after this many seconds of “quiet” from that source. Each new import resets the timer so every file gets at least this long for Plex to add it to the library before we process. |
+| **Delay before processing** | 60s | How long to wait with no new imports before running a batch (10–300 s). Incoming files are queued; a batch runs only after this many seconds of “quiet” from that source. Each new import resets the timer, up to 10 minutes from the batch's first file. |
 | **Webhook Secret** | *(empty)* | Dedicated authentication token for webhooks |
 
 Webhook processing uses your Settings library selection. If a webhook path belongs to an unchecked library, it is skipped.
@@ -489,9 +489,11 @@ By default, webhooks authenticate using your main API token. You can optionally 
 
 ### Batching and the delay
 
-When multiple files are imported in quick succession (e.g., a season pack), the app **queues** them per source (Radarr, Sonarr, or Custom). Each new import **resets** the delay timer for that source. A batch runs only when the timer finally fires — i.e. when that many seconds have passed with no new imports. So every file in the batch has had at least that long for Plex to add it to the library before we process.
+When multiple files are imported in quick succession (e.g., a season pack), the app **queues** them per source (Radarr, Sonarr, or Custom). Each new import **resets** the delay timer for that source. A batch runs when the timer finally fires — i.e. when that many seconds have passed with no new imports — or 10 minutes after its first file, whichever comes first.
 
 **Example:** Sonarr imports 10 episodes over 30 seconds with a 60s delay. The timer keeps resetting as each episode arrives. One job runs 60 seconds after the *last* episode and processes all 10 files. A file that arrived at 59 seconds is not processed in an earlier batch — it goes in this batch, and the batch runs 60 seconds after it, so Plex has time to index it.
+
+**Example (long import):** Sonarr imports 300 episodes one every 10 seconds (50 minutes in all). The batch runs 10 minutes after its first episode with the ~60 episodes it has by then, and the next episode opens a new batch. A file that joined a batch just before its 10 minutes were up gets less than the full delay; if the server hasn't indexed it yet, it's retried automatically.
 
 **Viewing files in a batch:** On the **Dashboard**, jobs from webhooks show a label like "Sonarr: 3 files". Click the **+** (chevron) next to the label to expand and see the list of files. On the **Automation** page (Triggers tab), **Activity Log** rows for triggered batches include a chevron; click it to expand and see the files in that batch.
 
