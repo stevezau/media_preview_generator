@@ -268,9 +268,27 @@ class TestSweep:
     def test_each_sweep_goes_on_from_where_the_last_stopped(self, store, library):
         _delete_series(library)
         assert missing.sweep_missing_files(store, library.configs, limit=2) == 1  # the kept file, then one deleted
-        assert missing.sweep_missing_files(store, library.configs, limit=2) == 2
-        assert missing.sweep_missing_files(store, library.configs, limit=2) == 1  # wraps round to the lowest id
+        assert missing.sweep_missing_files(store, library.configs, limit=3) == 2  # the marked one first, then two
+        assert missing.sweep_missing_files(store, library.configs, limit=3) == 1  # wraps round to the lowest id
         assert all(_marked(store, library.deleted))
+
+    def test_files_marked_missing_are_checked_first_so_one_back_is_seen_soon(self, store, library):
+        _delete_series(library)
+        missing.sweep_missing_files(store, library.configs)
+        _episode(library.tv / "Deleted Show" / "Season 02", os.path.basename(library.deleted[3]))  # back
+        listed = store.file_checks(2)
+        assert [rec.missing_since is not None for rec in listed] == [True, False]
+        # Half of each sweep goes to marked files, each group on its own cursor.
+        for _ in range(4):
+            missing.sweep_missing_files(store, library.configs, limit=2)
+        assert _marked(store, library.deleted) == [True, True, True, False]
+
+    def test_a_file_a_season_step_probes_on_disk_is_cleared(self, store, library):
+        rec = store.get_file(library.kept)
+        store.mark_missing(rec)
+        store.record_member(FileIdentity(rec.canonical_path, rec.size, rec.mtime_ns), duration_ms=1_500_000,
+                            season_key=rec.season_key, chapters=[], chapter_version=1)  # fmt: skip
+        assert store.get_file(library.kept).missing_since is None
 
     def test_a_sweep_out_of_time_checks_no_further_file(self, store, library, monkeypatch):
         _delete_series(library)

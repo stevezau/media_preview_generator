@@ -547,14 +547,14 @@ class TestCacheSweep:
 
     def test_a_file_that_cant_be_read_keeps_its_fingerprint(self, store, tmp_path):
         rec = self._fingerprinted(store, tmp_path / "Show" / "Season 01" / "Show - S01E01.mkv")
-        real_lstat = os.lstat
+        real_stat = os.stat
 
-        def lstat(path, *args, **kwargs):  # the folder reads fine, the file doesn't (a stalled network mount)
+        def stat(path, *args, **kwargs):  # the folder reads fine, the file doesn't (a stalled network mount)
             if str(path) == rec.canonical_path:
                 raise OSError(errno.ESTALE, "Stale file handle")
-            return real_lstat(path, *args, **kwargs)
+            return real_stat(path, *args, **kwargs)
 
-        with patch.object(fpmod.os, "lstat", side_effect=lstat):
+        with patch.object(fpmod.os, "stat", side_effect=stat):
             assert fpmod.sweep_fingerprint_cache(store) == 0
         assert store.get_fingerprint(rec.id, "intro") is not None
 
@@ -580,15 +580,15 @@ class TestCacheSweep:
         recs = [self._fingerprinted(store, tmp_path / "Show" / "Season 01" / f"S01E{n:02d}.mkv") for n in range(1, 7)]
         clock = _Clock()
         monkeypatch.setattr(fpmod, "_monotonic", clock)
-        real_lstat, checked = os.lstat, []
+        real_stat, checked = os.stat, []
 
-        def slow_lstat(path, *args, **kwargs):  # each file takes 25 s to read: two fit in the 60 s budget, not three
+        def slow_stat(path, *args, **kwargs):  # each file takes 25 s to read: two fit in the 60 s budget, not three
             if str(path) in {r.canonical_path for r in recs}:
                 checked.append(str(path))
                 clock.now += 25
-            return real_lstat(path, *args, **kwargs)
+            return real_stat(path, *args, **kwargs)
 
-        with patch.object(fpmod.os, "lstat", side_effect=slow_lstat):
+        with patch.object(fpmod.os, "stat", side_effect=slow_stat):
             fpmod.sweep_fingerprint_cache(store)
             assert checked == [r.canonical_path for r in recs[:3]]
             checked.clear()

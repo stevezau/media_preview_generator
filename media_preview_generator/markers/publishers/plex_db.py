@@ -195,6 +195,25 @@ def plex_busy_error(seconds: float) -> DatabaseBusyError:
     )
 
 
+def report_of_failure(exc: PublishError, default: Capability, details: dict | None = None) -> CapabilityReport:
+    """The capability report of a check that failed with ``exc``.
+
+    A busy database stays one through the report (``details["db_busy"]``): ``write()`` raises it again as a
+    ``DatabaseBusyError`` and the pipeline treats a busy capability check like a busy write, so the job retries the file
+    instead of skipping it, and the answer isn't reused for the job's next files.
+
+    Args:
+        exc: The failure.
+        default: The state when ``exc`` carries none.
+        details: The report's details so far.
+
+    Returns:
+        The report.
+    """
+    busy = {"db_busy": True} if isinstance(exc, DatabaseBusyError) else {}
+    return CapabilityReport(exc.state or default, str(exc), {**(details or {}), **busy})
+
+
 def plex_db_path(plex_config_folder: str) -> str:
     """Library DB path under the "Plex Media Server" folder the app already uses for previews."""
     return os.path.join(plex_config_folder, "Plug-in Support", "Databases", "com.plexapp.plugins.library.db")
@@ -1036,9 +1055,7 @@ class LocalPlexDb(PlexDatabase):
         try:
             held = shm_lock_held_elsewhere(db, deadline=deadline)
         except PublishError as exc:
-            # A busy database stays busy through the report: write() raises it again as one, so the job retries.
-            busy = {"db_busy": True} if isinstance(exc, DatabaseBusyError) else {}
-            return CapabilityReport(exc.state or Capability.UNREACHABLE, str(exc), {**details, **busy})
+            return report_of_failure(exc, Capability.UNREACHABLE, details)
         details["lock_holder"] = held
         if not held:
             return CapabilityReport(
@@ -1064,10 +1081,9 @@ class LocalPlexDb(PlexDatabase):
                 self._check_library_marker_versions(conn)
                 self._marker_tag_id(conn)
         except PublishError as exc:
-            return CapabilityReport(exc.state or Capability.MISCONFIGURED, str(exc))
+            return report_of_failure(exc, Capability.MISCONFIGURED)
         except sqlite3.Error as exc:
-            error = publish_error_from_sqlite(exc)
-            return CapabilityReport(error.state or Capability.MISCONFIGURED, str(error))
+            return report_of_failure(publish_error_from_sqlite(exc), Capability.MISCONFIGURED)
         return CapabilityReport(Capability.READY, "")
 
     def read_item(self, rating_key: int, *, deadline: float) -> ItemRead:

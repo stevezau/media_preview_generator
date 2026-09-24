@@ -197,7 +197,8 @@ def sweep_missing_files(
     are back, and log how many were marked.
 
     Runs on the fingerprint sweep's own thread (a stalled hard-mounted share blocks its stats without an error): files
-    are checked in id order until ``budget_s`` has passed, and the next sweep goes on from the first file left unchecked.
+    marked missing are checked first (``MarkerStore.file_checks``), each group in id order until ``budget_s`` has
+    passed, and the next sweep goes on from the first file of each group left unchecked.
 
     Args:
         store: The markers store.
@@ -211,14 +212,14 @@ def sweep_missing_files(
     deadline = _monotonic() + budget_s
     folders: dict[str, bool] = {}
     changes = {"marked": 0, "cleared": 0, "": 0}
-    checked_up_to = None
+    checked_up_to: dict[bool, int] = {}  # per group listed: marked missing (True) or on disk (False)
     for rec in store.file_checks(limit):
         if _monotonic() >= deadline:
             break
         changes[_check(store, rec, configs, folders)] += 1
-        checked_up_to = rec.id
-    if checked_up_to is not None:
-        store.finish_file_checks(checked_up_to)
+        checked_up_to[rec.missing_since is not None] = rec.id
+    if checked_up_to:
+        store.finish_file_checks(missing_up_to=checked_up_to.get(True), on_disk_up_to=checked_up_to.get(False))
     _log_marked(changes["marked"])
     if changes["cleared"]:
         logger.debug("{} files that were missing from disk are back", changes["cleared"])

@@ -237,22 +237,24 @@ class TestGoneFromDisk:
         assert gone_from_disk([path]) is True  # without roots only the folder is judged (the fingerprint sweep)
 
     def test_a_file_that_cant_be_read_isnt_gone(self, disks, monkeypatch):
-        real_lstat = os.lstat
+        real_stat = os.stat
 
-        def lstat(path, *args, **kwargs):  # a stalled network mount
+        def stat(path, *args, **kwargs):  # a stalled network mount
             if str(path) == disks[0]:
                 raise OSError(errno.ESTALE, "Stale file handle")
-            return real_lstat(path, *args, **kwargs)
+            return real_stat(path, *args, **kwargs)
 
-        monkeypatch.setattr(os, "lstat", lstat)
+        monkeypatch.setattr(os, "stat", stat)
         assert gone_from_disk(disks) is False
 
-    @pytest.mark.parametrize("trust", [False, True], ids=["folder-rule", "trusted-roots"])
-    def test_a_dangling_symlink_is_not_gone(self, disks, tmp_path, trust):
-        # A library of symlinks into a remote mount (rclone, zurg) that dropped: the links stay, dangling.
+    @pytest.mark.parametrize(("trust", "gone"), [(False, True), (True, False)], ids=["folder-rule", "trusted-roots"])
+    def test_a_dangling_symlink_is_gone_only_to_the_folder_rule(self, disks, tmp_path, trust, gone):
+        # A library of symlinks into a remote mount (rclone, zurg) that dropped: the links stay, dangling. Marking a
+        # file missing (trusted roots) takes the link for the file; a Plex version or a cached fingerprint behind it
+        # can't be read, so the folder rule counts it gone.
         os.symlink(tmp_path / "rclone" / "ep.mkv", disks[0])
-        roots = {disks[0]: (self._root(disks[0]),)} if trust else None
-        assert gone_from_disk([disks[0]], roots=roots, trust_roots=trust) is False
+        roots = {disks[0]: (self._root(disks[0]),)}
+        assert gone_from_disk([disks[0]], roots=roots, trust_roots=trust) is gone
 
     def test_no_paths_is_not_gone(self):
         assert gone_from_disk([]) is False

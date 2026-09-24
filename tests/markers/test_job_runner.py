@@ -486,25 +486,23 @@ class TestRun:
         rec = store.upsert_file(FileIdentity(str(media), 1, 1), duration_ms=300_000, season_key=None, is_movie=False)
         store.set_fingerprint(rec.id, size=1, mtime_ns=1, window="intro", start_s=0.0, length_s=105.0, algorithm=1,
                               points=b"")  # fmt: skip
-        entered, unblock, real_lstat = threading.Event(), threading.Event(), os.lstat
+        entered, unblock, real_stat = threading.Event(), threading.Event(), os.stat
 
-        def lstat(path, *args, **kwargs):  # a hard-mounted share that stalls: no error, no answer
+        def stat(path, *args, **kwargs):  # a hard-mounted share that stalls: no error, no answer
             if str(path) == str(media):
                 entered.set()
                 unblock.wait(10)
-            return real_lstat(path, *args, **kwargs)
+            return real_stat(path, *args, **kwargs)
 
         sweeping_at_release = []
         env.gate.release.side_effect = lambda priority: sweeping_at_release.append(fpmod._SWEEP_LOCK.locked())
         try:
             with (
-                patch.object(fpmod.os, "lstat", side_effect=lstat),
+                patch.object(fpmod.os, "stat", side_effect=stat),
                 patch.object(store, "fingerprint_checks", wraps=store.fingerprint_checks) as listed,
             ):
                 self._run()
-                assert (
-                    entered.wait(5) and fpmod._SWEEP_LOCK.locked()
-                )  # the sweep is stuck in os.lstat; the job returned
+                assert entered.wait(5) and fpmod._SWEEP_LOCK.locked()  # the sweep is stuck in os.stat; the job returned
                 env.jm.complete_job.assert_called_once_with("j1", warning=None)
                 assert sweeping_at_release == [False]  # the slot was given back before the sweep started
                 self._run()  # the next job completes too, and starts no second sweep
@@ -2012,6 +2010,16 @@ class TestLibraryRetry:
         env.jm.record_file_result.assert_called_once_with(
             "j1", "/m/a.mkv", "failed", "", "Lookup", servers=[PLEX_DB_BUSY_ROW], server_messages=True
         )
+
+    def test_files_promised_a_busy_retry_are_the_ones_the_capped_retry_takes(self, env, retry_env):
+        # Rows past the cap don't promise a retry (PipelineContext.promise_busy_retry); those that did are taken first.
+        paths = [f"/m/{i:04d}.mkv" for i in range(501)]
+        env.ctx.busy_promised.return_value = {paths[-1]}
+        retry_env.results += [(p, "markers_waiting", [NOT_IN_LIBRARY_ROW]) for p in paths[:-1]]
+        retry_env.results.append((paths[-1], "failed", [PLEX_DB_BUSY_ROW]))
+        self._run(paths)
+        retried = retry_env.create.call_args.kwargs["file_paths"]
+        assert len(retried) == 500 and retried[0] == paths[-1] and retried[1:] == paths[:499]
 
     def test_a_file_plex_s_database_still_refuses_after_the_last_retry_stays_failed(self, env, retry_env):
         env.job.config["retry_attempt"] = 3

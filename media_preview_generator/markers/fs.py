@@ -178,12 +178,15 @@ def gone_from_disk(
     mount point instead, so with ``roots`` a path whose disk root is missing or empty, or whose folder is that root
     itself (a flat library at a bare mount point), makes the file not gone. A read that fails with another error (a
     stale network file handle) doesn't count as gone either. A hard-mounted share that stalls makes these calls block
-    instead of fail. Anything at a path, a dangling symlink included, is there: a library of symlinks into a remote
-    mount (rclone, zurg) that dropped keeps its links.
+    instead of fail.
 
     With ``trust_roots``, a path whose disk roots all hold entries is gone even when its folder is missing too (a series
     deleted whole takes its season folder with it), as long as the nearest folder above it that still exists, up to its
-    deepest root, holds entries. A path without roots is still judged by its folder.
+    deepest root, holds entries. A path without roots is still judged by its folder. Anything at a path is then there,
+    a dangling symlink included (``os.lstat``): a library of symlinks into a remote mount (rclone, zurg) that dropped
+    keeps its links, and marking missing files must not take them for deleted. Without it a dangling link is gone, as a
+    Plex version's file (``plex_db``) and a cached fingerprint are judged: a version behind a dangling link can't be
+    decided, and waiting for it would hold its item's markers back.
 
     Args:
         paths: The file's local paths, one per mapped disk (a single path where there is one disk).
@@ -208,7 +211,7 @@ def gone_from_disk(
         if folders.get(folder) is False and not trusted:
             continue
         try:
-            os.lstat(path)
+            (os.lstat if trust_roots else os.stat)(path)
             return False
         except FileNotFoundError:
             pass

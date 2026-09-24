@@ -276,7 +276,9 @@ def _end_chain(jm, cfg: dict, waiting: dict[str, set[str]]) -> None:
     )
 
 
-def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dict[str, str]) -> list[str]:
+def _queue_retry(
+    job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dict[str, str], promised: set[str] = frozenset()
+) -> list[str]:
     """Create the delayed retry job for files that weren't on disk yet, that a server could take later, or whose write
     gave up waiting for Plex's busy database (a few minutes later it is usually free).
 
@@ -293,12 +295,16 @@ def _queue_retry(job, cfg: dict, waiting: dict[str, set[str]], sender_paths: dic
         cfg: Its config.
         waiting: Local paths per reason (``NOT_ON_DISK`` or a row's retry reason code).
         sender_paths: The path each local path was given as (``build_items``); a missing entry is retried as is.
+        promised: Local paths whose row said this job tries again (``PipelineContext.busy_promised``, at most
+            ``MAX_RETRY_FILES``): taken first when more files wait than a retry job takes.
 
     Returns:
         The paths the retry job lists (as sent); empty when none was queued.
     """
     jm = get_job_manager()
-    paths = _sent_paths({path for files in waiting.values() for path in files}, sender_paths)
+    waiting_paths = {path for files in waiting.values() for path in files}
+    first = _sent_paths(waiting_paths & set(promised), sender_paths)
+    paths = [*first, *(path for path in _sent_paths(waiting_paths, sender_paths) if path not in set(first))]
     reason = _retry_reason(waiting)
     # Check servers leaves the items of a file it doesn't retry to be read back again; any other job's file is only
     # tried again by a job that lists it (a retry chain started by Check servers included: its items are gone).
@@ -1501,6 +1507,7 @@ def run_intro_credits_job(job_id: str) -> None:
                     online_recheck=bool(cfg.get(ONLINE_RECHECK)),
                 )
                 ctx.busy_writes_retried = _retry_follows(cfg)
+                ctx.retry_file_cap = MAX_RETRY_FILES
                 sweep_configs = list(registry.configs())
                 listing = None
                 if cfg.get("reconcile"):
@@ -1695,7 +1702,7 @@ def run_intro_credits_job(job_id: str) -> None:
                 # Check servers only waits for files whose old item a server confirmed gone: they get the retry a normal
                 # job queues (once from here, the retry job counts on), and only then leave Check servers. Any other
                 # file still waiting keeps its item and is listed again by a later run.
-                retried = _queue_retry(job, cfg, waiting, sender_paths) if waiting else []
+                retried = _queue_retry(job, cfg, waiting, sender_paths, ctx.busy_promised()) if waiting else []
                 _mark_retried_items_gone(ctx.store, gone_items, retried, sender_paths)
                 _complete(jm, job_id, outcome, [*warnings, *unchecked_warnings, *budget_exhausted_warnings(ctx)], ctx)
                 _settle_decide_again(jm, job_id, cfg)

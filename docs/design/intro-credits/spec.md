@@ -2199,3 +2199,21 @@ C# builds for each target ABI in CI; smoke test on lab containers before any rel
   probe keeps its type through the report (`details["db_busy"]`), so `write()` raises `DatabaseBusyError` and the file
   is retried; and messages keep the old "trying again on the next run" (`base.NEXT_RUN`), which a job that does queue
   the retry words "this job tries again in a few minutes" (`PipelineContext.busy_writes_retried`).
+- 2026-09-24 · **Final review of PR #301** (three MEDs, all reproduced first, and LOWs):
+  - **A busy database during the capability check skipped the file with no retry (MED 1)**, and `cached_capability`
+    reused that UNREACHABLE answer for 5 minutes, skipping the job's next files too. Every check that gives up on a
+    busy database now says so in its report (`plex_db.report_of_failure`: `details["db_busy"]`, the lock probe and
+    the read-only checks alike); such a report is never cached (and drops a cached one), and `_publish_to` fails the
+    file with `reason_code` `plex_db_busy`, so the job retries it like a busy write.
+  - **`lstat` had reached the Plex version check (MED 2)**: a dangling 2160p symlink counted as present, so the item's
+    markers waited for it forever. `gone_from_disk` uses `os.lstat` only with `trust_roots` (marking a file missing);
+    the version check and the fingerprint sweep keep `os.stat`, so a version or a fingerprint behind a dangling link
+    is gone.
+  - **Rebased onto dev (MED 3)**: #298's weekly online re-check lists no marked file either
+    (`files_with_old_empty_lookups`), and the decide-again job marks before `_stored_file_items` lists.
+  - LOWs: `record_member` (a season step probing the file on disk) clears the mark; the sweep checks marked files
+    first, up to half of each batch, on their own cursor, so a file that is back is seen soon; a job promises "tries
+    again in a few minutes" to at most `MAX_RETRY_FILES` files (`PipelineContext.promise_busy_retry`) and its retry
+    takes those first, so no promised file is cut by the cap; the guide no longer says a cancel stops the wait within
+    a second through the Plex marker agent (its own wait runs out first); and the migration to schema 3 first copies
+    markers.db to `markers.db.pre-v3.bak` once (SQLite's backup API), which the downgrade note tells users to put back.

@@ -329,7 +329,9 @@ class PipelineContext:
             changed, logs lines of its own, and the job ends with one line for them all (``summary_lines``). It runs
             files as any job does.
         busy_writes_retried: The job queues a retry for a file whose write gave up on a busy database, so its row says
-            this job tries again in a few minutes rather than on the next run (``job_runner``).
+            this job tries again in a few minutes rather than on the next run (``job_runner``), for up to
+            ``retry_file_cap`` files (``promise_busy_retry``).
+        retry_file_cap: The most files one retry job takes (``job_runner.MAX_RETRY_FILES``).
     """
 
     registry: Any
@@ -353,6 +355,7 @@ class PipelineContext:
     decide_again: bool = False
     online_recheck: bool = False
     busy_writes_retried: bool = False
+    retry_file_cap: int = 500
     decided_by: DecidedByTally = field(default_factory=DecidedByTally, repr=False)
     _capabilities: dict[str, tuple[float, CapabilityReport]] = field(default_factory=dict, repr=False)
     _capability_locks: dict[str, threading.Lock] = field(default_factory=dict, repr=False)
@@ -411,6 +414,8 @@ class PipelineContext:
     _answers_changed: bool = field(default=False, repr=False)
     # Files this job marked missing from disk (``take_missing``).
     _missing: int = field(default=0, repr=False)
+    # Files whose busy row said this job tries again in a few minutes (``promise_busy_retry``).
+    _busy_promised: set[str] = field(default_factory=set, repr=False)
 
     def run_memo(self, canonical_path: str) -> dict[str, Any]:
         """Values the current run of a file reads once and reuses (a detector's folder listing and due answer).
@@ -507,6 +512,31 @@ class PipelineContext:
         """
         with self._followups_guard:
             self._left_out_changed.add(canonical_path)
+
+    def promise_busy_retry(self, canonical_path: str) -> bool:
+        """Whether a file a busy database refused may be told this job tries again in a few minutes.
+
+        Only when the job queues retries (``busy_writes_retried``), and for at most ``retry_file_cap`` files: the retry
+        job takes those first (``busy_promised``), so no row promises a retry that a file past the cap won't get.
+
+        Args:
+            canonical_path: The file.
+
+        Returns:
+            True when the file has the promise (again, for a file that already had it).
+        """
+        if not self.busy_writes_retried:
+            return False
+        with self._summary_lock:
+            if canonical_path not in self._busy_promised and len(self._busy_promised) >= self.retry_file_cap:
+                return False
+            self._busy_promised.add(canonical_path)
+            return True
+
+    def busy_promised(self) -> set[str]:
+        """The files promised a retry (``promise_busy_retry``)."""
+        with self._summary_lock:
+            return set(self._busy_promised)
 
     def note_missing(self) -> None:
         """Count one file this job marked missing from disk (``missing.mark_if_missing``)."""
@@ -1676,8 +1706,8 @@ def cached_capability(ctx: PipelineContext, cfg: ServerConfig, publisher: Marker
     """Per-server capability, cached for ``capability_ttl_s``; one fetch per server even when every check thread misses.
 
     An off or unconfirmed answer isn't cached: Plex reads it from the saved settings, and switching Intro & Credits
-    back on must reach the job's next file, not one 5 minutes later. A ready Plex whose Plex Pass didn't answer is
-    reused for ``PLEX_PASS_UNKNOWN_TTL_S`` only.
+    back on must reach the job's next file, not one 5 minutes later. Nor is one that gave up on a busy database
+    (``details["db_busy"]``). A ready Plex whose Plex Pass didn't answer is reused for ``PLEX_PASS_UNKNOWN_TTL_S`` only.
     """
     cached = ctx._capabilities.get(cfg.id)
     if _still_fresh(ctx, cached):
@@ -1689,7 +1719,10 @@ def cached_capability(ctx: PipelineContext, cfg: ServerConfig, publisher: Marker
         if _still_fresh(ctx, cached):
             return cached[1]
         report = publisher.capability()
-        if report.state not in _SETTINGS_ANSWERS:
+        if report.details.get("db_busy"):
+            # A database busy just now says nothing about the job's next file, which asks again.
+            ctx._capabilities.pop(cfg.id, None)
+        elif report.state not in _SETTINGS_ANSWERS:
             ctx._capabilities[cfg.id] = (time.monotonic(), report)
         return report
 
@@ -1771,6 +1804,12 @@ def _live_markers_settings(ctx: PipelineContext, cfg: ServerConfig) -> ServerMar
     return load_server(live.markers, live.type.value)
 
 
+def _busy_wording(ctx: PipelineContext, message: str, path: str) -> str:
+    """A busy database's message for a file's row: "this job tries again in a few minutes" only where the job does queue
+    the file's retry (``PipelineContext.promise_busy_retry``), its own "trying again on the next run" otherwise."""
+    return message.replace(NEXT_RUN, RETRY_SOON) if ctx.promise_busy_retry(path) else message
+
+
 def _publish_to(
     owner: _Owning,
     rec: FileRecord,
@@ -1832,6 +1871,14 @@ def _publish_to(
         logger.warning("Couldn't check whether {} can receive markers: {}", cfg.name, type(exc).__name__)
         message = f"Couldn't check this server: {type(exc).__name__}"
         return _not_written(ServerStatus.FAILED, message, name=publisher.name)
+    if report.details.get("db_busy"):
+        # The check gave up on a busy database: the file fails as a busy write does, and the job retries it.
+        return _not_written(
+            ServerStatus.FAILED,
+            _busy_wording(ctx, report.message, path),
+            name=publisher.name,
+            reason_code=PLEX_DB_BUSY,
+        )
     if not report.ready:
         return _not_written(ServerStatus.SKIPPED, report.message or report.state.value, name=publisher.name)
     if _plex_pass_unknown(report):
@@ -1977,7 +2024,7 @@ def _publish_to(
             # A database locked past the wait is usually free again within minutes: the job retries the file, and
             # only then does the row say so.
             busy = PLEX_DB_BUSY if isinstance(exc, DatabaseBusyError) else None
-            message = str(exc).replace(NEXT_RUN, RETRY_SOON) if busy and ctx.busy_writes_retried else str(exc)
+            message = _busy_wording(ctx, str(exc), path) if busy else str(exc)
             return _not_written(
                 ServerStatus.FAILED, message, name=publisher.name, item_id=attempted_item, reason_code=busy
             )

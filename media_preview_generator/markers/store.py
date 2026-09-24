@@ -33,8 +33,14 @@ _RECHECK_TAKEN_AGAIN = timedelta(days=1)
 _FINGERPRINT_CHECKED_UP_TO = "fingerprint_checked_up_to"
 # ``meta`` key: when the weekly online re-check is due next (``triggers.schedule_online_recheck``).
 _ONLINE_RECHECK_DUE = "online_recheck_due"
-# ``meta`` key: the last file id the missing-file sweep checked (``file_checks``).
+# ``meta`` keys: the last file id the missing-file sweep checked among files on disk, and among files marked missing
+# (``file_checks``).
 _FILES_CHECKED_UP_TO = "files_checked_up_to"
+_MISSING_CHECKED_UP_TO = "missing_files_checked_up_to"
+# The schema whose migration first copies markers.db aside (``files.missing_since``), and the copy's suffix: an older
+# build refuses the new schema, and the copy is what a downgrade puts back.
+_BACKUP_BEFORE_SCHEMA = 3
+BACKUP_SUFFIX = ".pre-v3.bak"
 # The fingerprint window whose points ``season_pairs`` runs are matched from: ``audio.fingerprint.WINDOW`` (which
 # imports this module, so it can't be imported here; test_store_audio pins the two together).
 SEASON_PAIR_WINDOW = "intro"
@@ -453,7 +459,10 @@ class MarkerStore:
         Raises:
             RuntimeError: The database's ``schema_version`` is newer than this build supports.
         """
-        self._refuse_newer(self._schema_version(self._conn))
+        before = self._schema_version(self._conn)
+        self._refuse_newer(before)
+        if before < _BACKUP_BEFORE_SCHEMA:
+            self._backup_before_migrating()
         self._conn.execute("PRAGMA journal_mode=WAL")
         with self._tx() as conn:
             current = self._schema_version(conn)
@@ -468,6 +477,32 @@ class MarkerStore:
                 "INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(current),),
             )
+
+    def _backup_before_migrating(self) -> None:
+        """Copy markers.db to ``<db>.pre-v3.bak`` once, before the migration to schema 3 runs.
+
+        SQLite's backup API copies a consistent snapshot, whatever is still in the WAL. An existing copy is kept (the
+        first one is the database before any schema-3 build touched it). A copy that fails is logged, and the
+        migration goes on: without it only a downgrade loses its way back.
+        """
+        backup = self.db_path + BACKUP_SUFFIX
+        if os.path.exists(backup):
+            return
+        partial = backup + ".partial"
+        try:
+            dest = sqlite3.connect(partial)
+            try:
+                self._conn.backup(dest)
+            finally:
+                dest.close()
+            os.replace(partial, backup)
+            logger.info("Copied markers.db to {} before upgrading its schema", os.path.basename(backup))
+        except (OSError, sqlite3.Error) as exc:
+            logger.warning("Couldn't copy markers.db before upgrading its schema: {}", exc)
+            try:
+                os.remove(partial)
+            except OSError:
+                pass
 
     @staticmethod
     def _refuse_newer(current: int) -> None:
@@ -676,7 +711,7 @@ class MarkerStore:
 
     def files_with_old_empty_lookups(self, sources: Iterable[Source], before: datetime) -> list[str]:
         """Canonical paths of the files whose stored lookup of any of these online sources found nothing ("no entry")
-        and was made before ``before``, sorted.
+        and was made before ``before``, sorted; files marked missing from disk are left out.
 
         Args:
             sources: The online sources.
@@ -693,7 +728,8 @@ class MarkerStore:
             rows = self._conn.execute(
                 "SELECT DISTINCT f.canonical_path FROM files f JOIN (SELECT file_id FROM evidence "
                 f"WHERE origin='' AND source IN ({marks}) GROUP BY file_id, source "  # noqa: S608
-                "HAVING COUNT(type) = 0 AND MAX(fetched_at) < ?) e ON e.file_id = f.id ORDER BY f.canonical_path",
+                "HAVING COUNT(type) = 0 AND MAX(fetched_at) < ?) e ON e.file_id = f.id "
+                "WHERE f.missing_since IS NULL ORDER BY f.canonical_path",
                 (*values, before.isoformat()),
             ).fetchall()
         return [r["canonical_path"] for r in rows]
@@ -761,8 +797,10 @@ class MarkerStore:
                 return None
             else:
                 file_id = row["id"]
+                # Just probed on disk with its stored identity: a missing mark comes off.
                 conn.execute(
-                    "UPDATE files SET duration_ms=?, season_key=COALESCE(season_key, ?), updated_at=? WHERE id=?",
+                    "UPDATE files SET duration_ms=?, season_key=COALESCE(season_key, ?), updated_at=?, "
+                    "missing_since=NULL WHERE id=?",
                     (duration_ms, season_key, now, file_id),
                 )
             self._write_evidence(conn, file_id, Source.CHAPTERS, chapters, "", "", chapter_version, (), now)
@@ -1364,37 +1402,50 @@ class MarkerStore:
     def file_checks(self, limit: int) -> list[FileRecord]:
         """The next files for the missing-file sweep to look for on disk (nothing is marked).
 
-        In file id order from just after the cursor ``finish_file_checks`` left, wrapping round to the lowest id once
-        the highest is passed, so each file is checked once per pass over ``files``.
+        Files marked missing come first, up to half of ``limit``, so one that is back is seen soon; then files on
+        disk. Each group goes in file id order from just after its own cursor (``finish_file_checks``), wrapping round
+        to its lowest id once the highest is passed, so every file is checked once per pass over its group.
 
         Args:
             limit: Most files to return.
 
         Returns:
-            The files' rows, in that order.
+            The files' rows, marked ones first.
         """
         if limit <= 0:
             return []
-        query = "SELECT * FROM files WHERE id {} ? ORDER BY id LIMIT ?"
         with self._lock:
-            row = self._conn.execute("SELECT value FROM meta WHERE key=?", (_FILES_CHECKED_UP_TO,)).fetchone()
-            after = int(row["value"]) if row else 0
-            batch = self._conn.execute(query.format(">"), (after, limit)).fetchall()
-            if len(batch) < limit:
-                batch += self._conn.execute(query.format("<="), (after, limit - len(batch))).fetchall()
-        return [self._file(r) for r in batch]
+            marked = self._cursor_batch("missing_since IS NOT NULL", _MISSING_CHECKED_UP_TO, max(1, limit // 2))
+            on_disk = self._cursor_batch("missing_since IS NULL", _FILES_CHECKED_UP_TO, limit - len(marked))
+        return [self._file(r) for r in (*marked, *on_disk)]
 
-    def finish_file_checks(self, checked_up_to: int) -> None:
-        """Move the missing-file sweep's cursor: the next sweep starts after this file id (``file_checks`` order).
+    def _cursor_batch(self, where: str, cursor_key: str, limit: int) -> list[sqlite3.Row]:
+        """Up to ``limit`` rows of ``files`` matching ``where``, in id order from after the cursor, wrapping round."""
+        if limit <= 0:
+            return []
+        query = f"SELECT * FROM files WHERE {where} AND id {{}} ? ORDER BY id LIMIT ?"  # noqa: S608 - fixed clauses
+        row = self._conn.execute("SELECT value FROM meta WHERE key=?", (cursor_key,)).fetchone()
+        after = int(row["value"]) if row else 0
+        batch = self._conn.execute(query.format(">"), (after, limit)).fetchall()
+        if len(batch) < limit:
+            batch += self._conn.execute(query.format("<="), (after, limit - len(batch))).fetchall()
+        return batch
+
+    def finish_file_checks(self, *, missing_up_to: int | None, on_disk_up_to: int | None) -> None:
+        """Move the missing-file sweep's cursors: the next sweep starts after these file ids (``file_checks`` order).
 
         Args:
-            checked_up_to: The id of the last file checked.
+            missing_up_to: The id of the last file checked among those listed as marked missing; None: not moved.
+            on_disk_up_to: The same among those listed as on disk.
         """
         with self._tx() as conn:
-            conn.execute(
-                "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (_FILES_CHECKED_UP_TO, str(checked_up_to)),
-            )
+            for key, value in ((_MISSING_CHECKED_UP_TO, missing_up_to), (_FILES_CHECKED_UP_TO, on_disk_up_to)):
+                if value is not None:
+                    conn.execute(
+                        "INSERT INTO meta(key, value) VALUES (?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (key, str(value)),
+                    )
 
     def mark_missing(self, rec: FileRecord) -> bool:
         """Mark a file found gone from disk as missing, keeping everything stored about it.

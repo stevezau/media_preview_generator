@@ -669,6 +669,18 @@ def test_a_version_plex_still_lists_but_that_is_gone_from_disk_doesnt_hold_the_i
     assert _outcomes(item.run("1080p")) == ["up_to_date"] and item.commits == 1
 
 
+def test_a_version_behind_a_dangling_symlink_doesnt_hold_the_item_back(plex_item, tmp_path):
+    # Review of #301 (MED 2): the version check counts a dangling link as gone (a symlinked 2160p whose remote mount
+    # dropped can't be decided), unlike marking a file missing, which keeps the file.
+    item = plex_item()
+    item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    os.remove(item.paths["2160p"])
+    os.symlink(tmp_path / "rclone" / "gone.mkv", item.paths["2160p"])
+    out = item.run("1080p")
+    assert _outcomes(out) == ["published"] and "reason_code" not in out.publisher_rows[0]
+    assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS]
+
+
 def test_a_version_on_disk_but_never_checked_waits_and_its_retry_publishes_once_it_is_deleted(plex_item):
     item = plex_item()
     item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
@@ -761,6 +773,44 @@ def test_a_publish_plex_s_busy_database_refuses_fails_with_the_cause_and_its_ret
     assert _outcomes(item.run("1080p")) == ["published"]
     assert item.served() == item.recorded() == [SHOWN_INTRO, SHOWN_CREDITS] and item.commits == 1
     assert item.part_types() == {os.path.basename(item.paths["1080p"]): ["pv:credits", "pv:intros"]}
+
+
+def test_a_busy_database_during_the_capability_check_fails_the_file_for_a_retry_and_isnt_reused(plex_item, monkeypatch):
+    # Review of #301 (MED 1): the check's lock wait gave up, the file was Skipped with no retry, and the UNREACHABLE
+    # answer was reused for 5 minutes, skipping the job's next files too.
+    monkeypatch.setattr(plex_db, "BUSY_TIMEOUT_S", 0.3)
+    item = plex_item(versions=("1080p",))
+    item.chapters[item.paths["1080p"]] = chapters(intro=INTRO_X, credits=CREDITS_AT)
+    ctx = _ctx(item.store, item.registry, settings_raw=NO_ONLINE)
+    ctx.busy_writes_retried = True
+    run = ProcessableItem(canonical_path=item.paths["1080p"], server_id="plex-1")
+    lock = plex_db._db_lock(item.db)
+    lock.acquire()  # another task of ours holds Plex's database through the whole check
+    try:
+        out = pipeline.check_item(run, ctx=ctx)
+    finally:
+        lock.release()
+    row = out.publisher_rows[0]
+    assert _outcomes(out) == ["failed"]
+    assert (row["status"], row["reason_code"]) == ("failed", PLEX_DB_BUSY)
+    assert row["message"] == (
+        "Another Intro & Credits task is still using this Plex database; this job tries again in a few minutes"
+    )
+    assert job_runner.retry_reason(row) == PLEX_DB_BUSY
+    assert ctx.busy_promised() == {item.paths["1080p"]}
+    # The same job's next file asks again, and publishes once the database is free.
+    assert _outcomes(pipeline.check_item(run, ctx=ctx)) == ["published"]
+    assert item.served() == [SHOWN_INTRO, SHOWN_CREDITS]
+
+
+@pytest.mark.parametrize("retried", [True, False], ids=["job-retries", "no-retry-follows"])
+def test_no_more_files_are_promised_a_busy_retry_than_one_retry_job_takes(plex_item, retried):
+    item = plex_item(versions=("1080p",))
+    ctx = _ctx(item.store, item.registry, settings_raw=NO_ONLINE)
+    ctx.busy_writes_retried, ctx.retry_file_cap = retried, 2
+    promised = [ctx.promise_busy_retry(path) for path in ("/m/a.mkv", "/m/b.mkv", "/m/c.mkv", "/m/a.mkv")]
+    assert promised == ([True, True, False, True] if retried else [False] * 4)
+    assert ctx.busy_promised() == ({"/m/a.mkv", "/m/b.mkv"} if retried else set())
 
 
 def test_a_cancelled_job_stops_waiting_for_plex_s_busy_database_within_a_slice(plex_item, monkeypatch):
