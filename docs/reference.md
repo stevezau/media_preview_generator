@@ -137,6 +137,8 @@ When the same canonical file fires multiple webhooks within the cache TTL (e.g. 
 | `ttl_minutes` | `60` | How long to keep extracted frames in the cache |
 | `max_cache_disk_mb` | `2048` | Disk cap for the cache (oldest entries evicted first) |
 
+Frames are reused only when they were extracted with the current thumbnail interval, quality and HDR tone-mapping settings. After you change one, the next job extracts fresh frames. Previews already on disk still need **Regenerate**.
+
 > [!TIP]
 > **Multi-disk libraries (unraid shfs, mergerfs, JBOD):** pick **Random** as the Processing Order on the New Job modal or on a scheduled full-library scan. With alphabetical order, parallel workers tend to read sequential files from the same physical disk; shuffling spreads reads across disks so disk I/O stops being the bottleneck. Webhook jobs and Recently Added scans are unaffected — they touch too few files for ordering to matter.
 

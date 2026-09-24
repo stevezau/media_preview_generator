@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from loguru import logger
 
 from media_preview_generator.bif_reader import read_bif_metadata
 from media_preview_generator.processing.frame_cache import get_frame_cache, reset_frame_cache
@@ -692,10 +693,13 @@ class TestCrossServerBifReuse:
 
     _DURATION_S = 100
 
-    def _dispatch_plex_bif_to_emby_at_5s(self, mock_config, tmp_path: Path, *, plex_bif_interval_ms: int):
+    def _dispatch_plex_bif_to_emby_at_5s(
+        self, mock_config, tmp_path: Path, *, plex_bif_interval_ms: int, truncate_plex_bif_to: int | None = None
+    ):
         """Plex already has an ``index-sd.bif`` made at ``plex_bif_interval_ms``; Emby at 5 s has no output yet.
 
         Plex's bundle path doesn't encode the interval, so the BIF still looks fresh after an interval change.
+        ``truncate_plex_bif_to`` cuts the Plex BIF to that many bytes, as a partial write would.
 
         Returns:
             ``(result, emby_bif_path, generate_images_calls)``.
@@ -714,6 +718,8 @@ class TestCrossServerBifReuse:
         plex_bif.parent.mkdir(parents=True)
         frames_in_plex_bif = self._DURATION_S * 1000 // plex_bif_interval_ms
         self._write_real_bif(plex_bif, [buf.getvalue()] * frames_in_plex_bif, interval_ms=plex_bif_interval_ms)
+        if truncate_plex_bif_to is not None:
+            plex_bif.write_bytes(plex_bif.read_bytes()[:truncate_plex_bif_to])
 
         library = Library(id="1", name="Movies", remote_paths=(str(media_root),), enabled=True)
         registry = ServerRegistry.from_settings(
@@ -791,6 +797,26 @@ class TestCrossServerBifReuse:
         assert (meta.frame_count, meta.frame_interval_ms) == (20, 5000), (
             f"Emby's 5 s BIF holds {meta.frame_count} frames; 10 means the 10 s Plex BIF was unpacked into it"
         )
+
+    def test_sibling_bif_is_skipped_when_header_unreadable(self, mock_config_for_processing, tmp_path):
+        """A Plex BIF cut off inside its header can't prove its interval, so Emby gets freshly extracted frames."""
+        warnings: list[str] = []
+        handler_id = logger.add(warnings.append, level="WARNING", format="{message}")
+        try:
+            result, emby_bif, calls = self._dispatch_plex_bif_to_emby_at_5s(
+                mock_config_for_processing, tmp_path, plex_bif_interval_ms=5000, truncate_plex_bif_to=12
+            )
+        finally:
+            logger.remove(handler_id)
+
+        canonical_path = str(tmp_path / "data" / "movies" / "Test (2024)" / "Test (2024).mkv")
+        assert calls == [{"video_file": canonical_path, "interval": 5}]
+        sources = {p.server_id: p.frame_source for p in result.publishers}
+        assert sources["emby-1"] == "extracted"
+        meta = read_bif_metadata(str(emby_bif))
+        assert (meta.frame_count, meta.frame_interval_ms) == (20, 5000)
+        plex_bif = str(tmp_path / "plexcfg" / "index-sd.bif")
+        assert any(f"could not read the header of {plex_bif}" in w for w in warnings), warnings
 
 
 class TestPartialFailureIsolation:

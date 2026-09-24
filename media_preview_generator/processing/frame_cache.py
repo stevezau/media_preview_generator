@@ -25,7 +25,7 @@ Cache validity rules:
   that shape the frames: interval, JPEG quality, tone map) equals the
   one stored at ``put`` time. Frames made at a 10 s interval can't fill
   a 5 s BIF, so a settings change is a miss and the entry is evicted.
-  Entries stored without a key never match a lookup that supplies one.
+  The key is required on both calls so no caller can skip the check.
 - Entries expire after ``ttl_seconds`` regardless of mtime — protects
   against cache file corruption or partial writes from a previous run
   by bounding the trust window.
@@ -65,7 +65,7 @@ class CacheEntry:
     frame_count: int
     source_mtime: float
     cached_at: float
-    extraction_key: tuple | None = None
+    extraction_key: tuple
 
 
 class FrameCache:
@@ -137,7 +137,7 @@ class FrameCache:
             return lock
 
     # ---------------------------------------------------------- accessors
-    def get(self, canonical_path: str, *, extraction_key: tuple | None = None) -> CacheEntry | None:
+    def get(self, canonical_path: str, *, extraction_key: tuple) -> CacheEntry | None:
         """Return a valid cache entry for ``canonical_path`` or ``None``.
 
         An entry is valid iff:
@@ -220,8 +220,8 @@ class FrameCache:
         *,
         frame_dir: Path,
         frame_count: int,
+        extraction_key: tuple,
         source_mtime: float | None = None,
-        extraction_key: tuple | None = None,
     ) -> CacheEntry:
         """Record a freshly-generated frame directory in the cache.
 
@@ -234,9 +234,9 @@ class FrameCache:
             canonical_path: Source media file the frames were extracted from.
             frame_dir: Directory holding the JPG frames.
             frame_count: Number of frames in ``frame_dir``.
-            source_mtime: Source mtime at extraction; read from disk when omitted.
             extraction_key: The settings the frames were made with. A later
                 :meth:`get` only hits when it asks for the same key.
+            source_mtime: Source mtime at extraction; read from disk when omitted.
 
         Returns:
             The stored entry.
