@@ -37,7 +37,7 @@ Status: maintained, released as Docker images (linux/amd64, linux/arm64); releas
 - GPUs: NVIDIA (CUDA), Intel and AMD (VAAPI) on Linux; only NVIDIA on Windows (WSL2); none on macOS. Without a GPU it runs on CPU workers.
 - HDR10, HLG and HDR10+ are tone-mapped; Dolby Vision 7 and 8 use their HDR10 layer; Dolby Vision 5 needs a hardware Vulkan driver in the container.
 - Frame interval 1-60 s (default 10; Plex's own default is 2); thumbnail quality 1-10 (default 4; lower = sharper).
-- Intro & Credits (dev image until the next release): finds intros and end credits and writes Skip Intro / Skip Credits markers to Plex (needs Plex Pass on the server and for viewers; the app runs on the Plex machine or uses the Plex marker agent), Jellyfin 10.11/12.0 and Emby 4.9/4.10 (via the app's plugins; Skip Intro on Emby needs Premiere). Off until turned on per server.
+- Intro & Credits: finds intros and end credits and writes Skip Intro / Skip Credits markers to Plex (needs Plex Pass on the server and for viewers; the app runs on the Plex machine or uses the Plex marker agent), Jellyfin 10.11/12.0 and Emby 4.9/4.10 (via the app's plugins; Skip Intro on Emby needs Premiere). Off until turned on per server.
 
 # Full documentation
 
@@ -1350,9 +1350,6 @@ Dolby Vision Profile 5 is the slowest format to process. How long it takes depen
 Source: https://mediapreviewgenerator.dev/skip-intro-credits/
 
 Detects intros and end credits once per file and adds Skip Intro and Skip Credits to Plex, and to Jellyfin and Emby through its own plugin.
-
-> [!NOTE]
-> Intro & Credits is in the `dev` image (`stevezzau/media_preview_generator:dev`) now, and in `latest` from the next release.
 
 Media Preview Generator detects where each file's intro and end credits are and sends those points to Plex, Emby and Jellyfin, so viewers get a skip button. It detects each file once and sends the same answer to every server that has the file. On Jellyfin and Emby it works through its own plugin. It runs in the same Docker container that makes your preview thumbnails, and it stays off until you turn it on for a server.
 
@@ -5306,9 +5303,6 @@ Yes, on Plex, Emby and Jellyfin, once you turn it on for each server. What each 
 - **Plex**: needs Plex Pass on the server, and for viewers (or their Plex Home). The app runs on the same machine as Plex, or the Plex marker agent runs there for it.
 - **Jellyfin** 10.11 or 12.0: the Media Preview Bridge plugin.
 - **Emby** 4.9 or 4.10: the Media Preview Bridge for Emby plugin. Skip Intro also needs Emby Premiere, which is Emby's rule; Skip Credits doesn't.
-
-> [!NOTE]
-> Intro & Credits is in the `dev` image (`stevezzau/media_preview_generator:dev`) now, and in `latest` from the next release.
 
 [More: Skip Intro and Skip Credits](https://mediapreviewgenerator.dev/skip-intro-credits/)
 
