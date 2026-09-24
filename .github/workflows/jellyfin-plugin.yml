@@ -11,24 +11,25 @@ on:
         required: false
         default: ""
 
-# Three jobs run in sequence:
-#   1. build-release  → one row per Jellyfin ABI (10.11/net9, 12.0/net10):
+# Two jobs run in sequence:
+#   1. build-release → one row per Jellyfin ABI (10.11/net9, 12.0/net10):
 #      DLL + zip + attachment on ONE GitHub release (tag plugin-v<10.11 version>)
-#   2. build-manifest → patches both new versions into the live
-#      manifest.json and hands it over as an artifact
-#   3. publish-site   → calls docs.yml, which builds the docs site from
-#      `dev`, adds that manifest at jellyfin-plugin/manifest.json and
-#      deploys both via the official Pages Actions API (no branch push,
-#      so repo branch-protection rules don't apply). A Pages deploy
-#      replaces the whole site, so the manifest and the docs always ship
-#      together. Requires Pages → "Build and deployment" set to
-#      "GitHub Actions" once in the repo settings.
+#   2. publish-site  → calls docs.yml, which builds the docs site from
+#      `dev`, rebuilds jellyfin-plugin/manifest.json from every plugin-v*
+#      release (failing unless this one is listed with both zips) and
+#      deploys both via the official Pages
+#      Actions API (no branch push, so repo branch-protection rules don't
+#      apply). A Pages deploy replaces the whole site, so the manifest and
+#      the docs always ship together. Any later docs deploy builds the same
+#      manifest, so if this deploy is cancelled or fails, the next one
+#      still lists the new versions. Requires Pages → "Build and deployment"
+#      set to "GitHub Actions" once in the repo settings.
 permissions:
   contents: write
   pages: write
   id-token: write
 
-# Stops two tag pushes / dispatches from racing the manifest publish.
+# Stops two tag pushes / dispatches from racing each other's release uploads.
 # The Pages deploy itself is serialised with docs-only deploys by the
 # job-level `pages` group inside docs.yml. Don't use `pages` here too:
 # the same group at caller and callee level deadlocks.
@@ -49,20 +50,12 @@ jobs:
           - abi: "10.11"
             dotnet: "9.0.x"
             tfm: "net9.0"
-            key: "10_11"
           - abi: "12.0"
             dotnet: "10.0.x"
             tfm: "net10.0"
-            key: "12_0"
-    # Each row writes only its own output names, so the merged job outputs carry both rows.
+    # Both rows write the same value.
     outputs:
       release_version: ${{ steps.ver.outputs.release_version }}
-      version_10_11: ${{ steps.pack.outputs.version_10_11 }}
-      checksum_10_11: ${{ steps.pack.outputs.checksum_10_11 }}
-      zip_10_11: ${{ steps.pack.outputs.zip_10_11 }}
-      version_12_0: ${{ steps.pack.outputs.version_12_0 }}
-      checksum_12_0: ${{ steps.pack.outputs.checksum_12_0 }}
-      zip_12_0: ${{ steps.pack.outputs.zip_12_0 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -120,23 +113,17 @@ jobs:
         working-directory: jellyfin-plugin
         env:
           TFM: ${{ matrix.tfm }}
-          KEY: ${{ matrix.key }}
           ROW_VERSION: ${{ steps.ver.outputs.row_version }}
         run: |
           set -euo pipefail
           ZIP="media-preview-bridge_${ROW_VERSION}.zip"
           (cd "bin/Release/$TFM" && zip -j "../../../$ZIP" Jellyfin.Plugin.MediaPreviewBridge.dll)
-          # Jellyfin's InstallationManager verifies the download with MD5
-          # (MediaBrowser.Controller/Plugins/InstallationManager.cs uses
-          # MD5.HashData()) — publishing SHA-256 here fails every install
-          # with "The checksum of the received data doesn't match".
-          # The Jellyfin official plugin repo also uses MD5 (32 hex chars).
+          # For the job summary only. The manifest's MD5 is recomputed from the uploaded release asset by
+          # scripts/build_jellyfin_manifest.py (which explains why Jellyfin needs MD5).
           CHECKSUM=$(md5sum "$ZIP" | awk '{print toupper($1)}')
           {
             echo "zip=$ZIP"
-            echo "version_${KEY}=$ROW_VERSION"
-            echo "checksum_${KEY}=$CHECKSUM"
-            echo "zip_${KEY}=$ZIP"
+            echo "checksum=$CHECKSUM"
           } >> "$GITHUB_OUTPUT"
           echo "$ZIP → MD5 $CHECKSUM"
 
@@ -162,128 +149,31 @@ jobs:
           files: jellyfin-plugin/${{ steps.pack.outputs.zip }}
           fail_on_unmatched_files: true
 
-  build-manifest:
-    needs: build-release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build manifest site
+      - name: Summary
         env:
-          RELEASE_VERSION: ${{ needs.build-release.outputs.release_version }}
-          VERSION_10_11: ${{ needs.build-release.outputs.version_10_11 }}
-          CHECKSUM_10_11: ${{ needs.build-release.outputs.checksum_10_11 }}
-          ZIP_10_11: ${{ needs.build-release.outputs.zip_10_11 }}
-          VERSION_12_0: ${{ needs.build-release.outputs.version_12_0 }}
-          CHECKSUM_12_0: ${{ needs.build-release.outputs.checksum_12_0 }}
-          ZIP_12_0: ${{ needs.build-release.outputs.zip_12_0 }}
+          ABI: ${{ matrix.abi }}
+          RELEASE_VERSION: ${{ steps.ver.outputs.release_version }}
+          ROW_VERSION: ${{ steps.ver.outputs.row_version }}
+          CHECKSUM: ${{ steps.pack.outputs.checksum }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          set -euo pipefail
-          for v in RELEASE_VERSION VERSION_10_11 CHECKSUM_10_11 ZIP_10_11 VERSION_12_0 CHECKSUM_12_0 ZIP_12_0; do
-            if [[ -z "${!v}" ]]; then
-              echo "::error::build-release output $v is empty"
-              exit 1
-            fi
-          done
-          SITE_DIR=_site/jellyfin-plugin
-          mkdir -p "$SITE_DIR"
-
-          # Fetch the previously-published manifest so we preserve version
-          # history. Only a genuine 404 (never published) seeds from the
-          # template; any other failure aborts, because publishing the bare
-          # template would wipe every earlier version from users' catalogs.
-          PREV_URL="https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json"
-          status=$(curl -sSL --retry 3 -o existing.json -w '%{http_code}' "$PREV_URL" || true)
-          case "$status" in
-            200)
-              echo "Fetched existing manifest:"
-              wc -l existing.json
-              ;;
-            404)
-              cp jellyfin-plugin/manifest.template.json existing.json
-              echo "First publish — seeded from template."
-              ;;
-            *)
-              echo "::error::Could not fetch the live manifest (HTTP ${status:-none}); refusing to publish over it."
-              exit 1
-              ;;
-          esac
-
-          SITE_DIR="$SITE_DIR" TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)" python3 <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          env = os.environ
-          template = json.loads(Path("jellyfin-plugin/manifest.template.json").read_text())
-          data = json.loads(Path("existing.json").read_text())
-          # Reseeding here would silently drop the published version history.
-          if not isinstance(data, list) or not data:
-              raise SystemExit("Live manifest is not a non-empty JSON list; refusing to overwrite it.")
-
-          plugin = data[0]
-          plugin["description"] = template[0]["description"]
-          plugin.setdefault("versions", [])
-
-          download = f"https://github.com/{env['REPOSITORY']}/releases/download/plugin-v{env['RELEASE_VERSION']}"
-          # Jellyfin only offers versions whose targetAbi is <= the server version,
-          # so 10.11 servers see the 10.11 build and 12.0 servers the (newer) 12.0 build.
-          new_versions = [
-              {
-                  "version": env[f"VERSION_{key}"],
-                  "changelog": f"Automated release for plugin-v{env['RELEASE_VERSION']}.",
-                  "targetAbi": target_abi,
-                  "sourceUrl": f"{download}/{env[f'ZIP_{key}']}",
-                  "checksum": env[f"CHECKSUM_{key}"],
-                  "timestamp": env["TIMESTAMP"],
-              }
-              for key, target_abi in (("12_0", "12.0.0.0"), ("10_11", "10.11.0.0"))
-          ]
-          # De-dupe same-version on re-runs; newest first.
-          replaced = {v["version"] for v in new_versions}
-          plugin["versions"] = new_versions + [v for v in plugin["versions"] if v.get("version") not in replaced]
-
-          out = Path(env["SITE_DIR"]) / "manifest.json"
-          out.write_text(json.dumps(data, indent=4) + "\n")
-          PY
-
-          # The site root (index.html) is the docs home page now, built by
-          # docs.yml; the "add this repository URL" instructions live in
-          # docs/multi-server.md.
-          echo "Manifest:"
-          find _site -maxdepth 3
-
-      - name: Upload manifest artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: jellyfin-plugin-manifest
-          path: _site/jellyfin-plugin/manifest.json
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 7
-
-      - name: Summary
-        run: |
           {
-            echo "## Media Preview Bridge ${{ needs.build-release.outputs.release_version }} published"
+            echo "## Media Preview Bridge $RELEASE_VERSION: Jellyfin $ABI build published"
             echo ""
-            echo "- Release: https://github.com/${{ github.repository }}/releases/tag/plugin-v${{ needs.build-release.outputs.release_version }}"
+            echo "- Release: https://github.com/$REPOSITORY/releases/tag/plugin-v$RELEASE_VERSION"
             echo "- Manifest: https://mediapreviewgenerator.dev/jellyfin-plugin/manifest.json (deployed by the publish-site job)"
-            echo "- Jellyfin 10.11 build ${{ needs.build-release.outputs.version_10_11 }}: MD5 \`${{ needs.build-release.outputs.checksum_10_11 }}\`"
-            echo "- Jellyfin 12.0 build ${{ needs.build-release.outputs.version_12_0 }}: MD5 \`${{ needs.build-release.outputs.checksum_12_0 }}\`"
+            echo "- Jellyfin $ABI build $ROW_VERSION: MD5 \`$CHECKSUM\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish-site:
-    needs: build-manifest
+    needs: build-release
     permissions:
       contents: read
       pages: write
       id-token: write
     uses: ./.github/workflows/docs.yml
     with:
-      manifest_artifact: jellyfin-plugin-manifest
       docs_ref: dev
+      # The deploy fails unless this release is in the manifest with both zips, so a renamed zip or tag
+      # can't let the release go green while Jellyfin users never see it.
+      require_tag: plugin-v${{ needs.build-release.outputs.release_version }}
