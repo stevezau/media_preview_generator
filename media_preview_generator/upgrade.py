@@ -20,6 +20,8 @@ from typing import Any
 
 from loguru import logger
 
+from .config.validation import MAX_CPU_THREADS
+
 # -------------------------------------------------------------------------
 # Schema version — bump when adding new migrations
 # -------------------------------------------------------------------------
@@ -248,6 +250,26 @@ def _seed_last_seen_version_for_upgraders(sm) -> None:
 # =========================================================================
 
 
+def _clamp_seeded_cpu_threads(value: int, source: str) -> int:
+    """Clamp a seeded CPU worker count into 0-MAX_CPU_THREADS, logging when it had to.
+
+    load_config refuses a count outside that range, so seeding one would stop every job from starting.
+
+    Args:
+        value: The count the source asks for.
+        source: Where it came from, for the log line.
+
+    Returns:
+        The count to save.
+    """
+    clamped = min(max(value, 0), MAX_CPU_THREADS)
+    if clamped != value:
+        logger.warning(
+            "{} asks for {} CPU workers, outside 0-{}. Saved {} instead.", source, value, MAX_CPU_THREADS, clamped
+        )
+    return clamped
+
+
 def _migrate_env_vars(sm) -> None:
     """Seed settings.json from environment variables.
 
@@ -276,6 +298,8 @@ def _migrate_env_vars(sm) -> None:
                 value: Any = raw.lower() in ("true", "1", "yes")
             elif val_type is int:
                 value = int(raw)
+                if settings_key == "cpu_threads":
+                    value = _clamp_seeded_cpu_threads(value, f"The {env_name} environment variable")
             else:
                 value = raw
             updates[settings_key] = value
@@ -707,8 +731,11 @@ def _migrate_to_v5(sm) -> list:
         except (ValueError, TypeError):
             current_cpu_int = 1
         if legacy_int > current_cpu_int:
-            updates["cpu_threads"] = legacy_int
-            notes.append(f"v5: folded cpu_fallback_threads={legacy_int} into cpu_threads (was {current_cpu_int})")
+            folded = _clamp_seeded_cpu_threads(legacy_int, "The old cpu_fallback_threads setting")
+            updates["cpu_threads"] = folded
+            notes.append(
+                f"v5: folded cpu_fallback_threads={legacy_int} into cpu_threads={folded} (was {current_cpu_int})"
+            )
 
     sm.apply_changes(updates=updates or None, deletes=["cpu_fallback_threads"])
     notes.append("v5: removed obsolete cpu_fallback_threads key")
