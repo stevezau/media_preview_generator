@@ -132,9 +132,6 @@ Yes, on Plex, Emby and Jellyfin, once you turn it on for each server. What each 
 - **Jellyfin** 10.11 or 12.0: the Media Preview Bridge plugin.
 - **Emby** 4.9 or 4.10: the Media Preview Bridge for Emby plugin. Skip Intro also needs Emby Premiere, which is Emby's rule; Skip Credits doesn't.
 
-> [!NOTE]
-> Intro & Credits is in the `dev` image (`stevezzau/media_preview_generator:dev`) now, and in `latest` from the next release.
-
 [More: Skip Intro and Skip Credits](skip-intro-credits.md)
 
 ### How does it find intros and credits?
