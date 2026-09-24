@@ -164,6 +164,41 @@ class TestDashboardGpuWorkerConfig:
         assert settings_posts == [{"cpu_threads": 2}, {"cpu_threads": 1}]
         assert worker_posts == [], f"the - click also resized the pool directly: {worker_posts}"
 
+    @pytest.mark.parametrize(
+        ("retiring", "warning", "message"),
+        [
+            (1, None, "CPU workers set to 1. 1 busy worker will stop after its current file."),
+            (2, None, "CPU workers set to 1. 2 busy workers will stop after their current files."),
+            (1, "No workers configured.", "No workers configured. 1 busy worker will stop after its current file."),
+        ],
+        ids=["one-busy", "two-busy", "one-busy-with-warning"],
+    )
+    def test_cpu_stepper_minus_says_busy_workers_finish_their_file(
+        self, authed_page: Page, app_url: str, retiring: int, warning: str | None, message: str
+    ) -> None:
+        mock_dashboard_defaults(authed_page)
+        saved = {"cpu_threads": 2}
+        response = {"success": True, "cpu_workers_retiring": retiring}
+        if warning:
+            response["warning"] = warning
+
+        def settings_handler(route: Route) -> None:
+            if route.request.method != "POST":
+                route.continue_()
+                return
+            saved.update(route.request.post_data_json or {})
+            _fulfill_json(route, response)
+
+        authed_page.route("**/api/settings", settings_handler)
+        authed_page.route("**/api/system/config", lambda r: _fulfill_json(r, {"gpu_threads": 0, **saved}))
+        authed_page.goto(f"{app_url}/")
+        authed_page.wait_for_load_state("domcontentloaded")
+        expect(authed_page.locator("#cpuWorkers")).to_have_text("2", timeout=3000)
+
+        authed_page.locator('button.worker-scale-btn[data-worker-type="CPU"][data-direction="-1"]').click()
+
+        expect(authed_page.locator("#toastBody")).to_have_text(message, timeout=2000)
+
 
 @pytest.mark.e2e
 class TestDashboardVersion:

@@ -1229,10 +1229,30 @@ def resume_processing():
     return jsonify({"paused": False})
 
 
+def _save_cpu_worker_count(worker_pool, target: int) -> dict:
+    """Save ``cpu_threads`` and resize the live pool to it, as a Settings save does.
+
+    Saving it means the next Settings save (which always sends ``cpu_threads``) keeps this change.
+
+    Args:
+        worker_pool: The shared WorkerPool.
+        target: The CPU worker count to save and apply.
+
+    Returns:
+        The pool's reconcile summary (``added``, ``removed``, ``deferred``, ``retiring``).
+    """
+    from ..settings_manager import get_settings_manager
+
+    get_settings_manager().cpu_threads = target
+    return worker_pool.reconcile_cpu_workers(target)
+
+
 @api.route("/workers/add", methods=["POST"])
 @api_token_required
 def add_workers_global():
-    """Add workers to the shared pool (not scoped to any job)."""
+    """Add workers to the shared pool (not scoped to any job); a CPU change is saved as the CPU worker count."""
+    from ..settings_manager import get_settings_manager
+
     data = request.get_json(silent=True) or {}
     parsed_type, parsed_count = _parse_worker_request(data)
     if parsed_type is None:
@@ -1244,10 +1264,14 @@ def add_workers_global():
     if worker_pool is None:
         return jsonify({"error": "Worker pool is not available"}), 409
 
-    try:
-        added = worker_pool.add_workers(worker_type, count)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
+    if worker_type == "CPU":
+        _save_cpu_worker_count(worker_pool, get_settings_manager().cpu_threads + count)
+        added = count
+    else:
+        try:
+            added = worker_pool.add_workers(worker_type, count)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
 
     return jsonify(
         {
@@ -1262,7 +1286,9 @@ def add_workers_global():
 @api.route("/workers/remove", methods=["POST"])
 @api_token_required
 def remove_workers_global():
-    """Remove workers from the shared pool (not scoped to any job)."""
+    """Remove workers from the shared pool (not scoped to any job); a CPU change is saved as the CPU worker count."""
+    from ..settings_manager import get_settings_manager
+
     data = request.get_json(silent=True) or {}
     parsed_type, parsed_count = _parse_worker_request(data)
     if parsed_type is None:
@@ -1274,7 +1300,17 @@ def remove_workers_global():
     if worker_pool is None:
         return jsonify({"error": "Worker pool is not available"}), 409
 
-    result = worker_pool.remove_workers(worker_type, count)
+    if worker_type == "CPU":
+        current = get_settings_manager().cpu_threads
+        target = max(0, current - count)
+        summary = _save_cpu_worker_count(worker_pool, target)
+        result = {
+            "removed": summary["removed"],
+            "scheduled": summary["deferred"],
+            "unavailable": count - (current - target),
+        }
+    else:
+        result = worker_pool.remove_workers(worker_type, count)
     return jsonify(
         {
             "success": True,

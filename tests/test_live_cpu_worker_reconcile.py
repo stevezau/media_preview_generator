@@ -12,7 +12,7 @@ that a hook ran.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -70,6 +70,19 @@ def _save(app, body: dict):
     return app.test_client().post("/api/settings", json=body, headers={"X-Auth-Token": TOKEN})
 
 
+def _scale(app, action: str, worker_type: str, count: int):
+    return app.test_client().post(
+        f"/api/workers/{action}",
+        json={"worker_type": worker_type, "count": count},
+        headers={"X-Auth-Token": TOKEN},
+    )
+
+
+def _saved_cpu_threads(app) -> int:
+    with app.app_context():
+        return get_settings_manager().cpu_threads
+
+
 class TestSaveSettingsReconcilesCpuWorkers:
     def test_live_pool_resized_when_cpu_threads_saved(self, app):
         pool = _live_pool(app, cpu=2)
@@ -121,6 +134,33 @@ class TestSaveSettingsReconcilesCpuWorkers:
         assert _cpu_workers(pool) == busy
         assert pool._pending_removals["CPU"] == 0
 
+    def test_unchanged_cpu_threads_with_pending_removal_is_noop(self, app):
+        # Autosave repeats the lowered value on every later save; it must not retire a second busy worker.
+        pool = _live_pool(app, cpu=2)
+        busy = _cpu_workers(pool)
+        for w in busy:
+            w.is_busy = True
+
+        _save(app, {"cpu_threads": 1})
+        resp = _save(app, {"cpu_threads": 1})
+
+        assert resp.status_code == 200
+        assert _cpu_workers(pool) == busy
+        assert pool._pending_removals["CPU"] == 1
+
+    def test_second_shrink_while_busy_counts_pending_removals(self, app):
+        pool = _live_pool(app, cpu=3)
+        busy = _cpu_workers(pool)
+        for w in busy:
+            w.is_busy = True
+
+        _save(app, {"cpu_threads": 2})
+        resp = _save(app, {"cpu_threads": 1})
+
+        assert resp.status_code == 200
+        assert _cpu_workers(pool) == busy
+        assert pool._pending_removals["CPU"] == 2
+
     def test_unchanged_cpu_threads_is_noop(self, app):
         # The Settings page autosave sends cpu_threads on every save, so an
         # unchanged value must leave the running workers exactly as they are.
@@ -149,6 +189,7 @@ class TestSaveSettingsReconcilesCpuWorkers:
         resp = _save(app, {"cpu_threads": 4})
 
         assert resp.status_code == 200
+        assert resp.get_json()["cpu_workers_retiring"] == 0
         with app.app_context():
             assert get_settings_manager().cpu_threads == 4
         assert get_dispatcher() is None
@@ -183,3 +224,135 @@ class TestSaveSettingsReconcilesCpuWorkers:
         assert len(_gpu_workers(pool)) == 3
         assert {w.gpu_device for w in _gpu_workers(pool)} == {GPU_DEVICE}
         assert len(_cpu_workers(pool)) == 4
+
+    @pytest.mark.parametrize(
+        ("start", "busy", "saved", "retiring"),
+        [(3, 0, 1, 0), (2, 2, 1, 1), (3, 3, 1, 2)],
+        ids=["idle-workers-go-now", "one-busy-worker", "two-busy-workers"],
+    )
+    def test_save_response_counts_busy_workers_still_retiring(self, app, start, busy, saved, retiring):
+        pool = _live_pool(app, cpu=start)
+        for w in _cpu_workers(pool)[:busy]:
+            w.is_busy = True
+
+        resp = _save(app, {"cpu_threads": saved})
+
+        assert resp.status_code == 200
+        assert resp.get_json()["cpu_workers_retiring"] == retiring
+
+    def test_retiring_count_includes_workers_an_earlier_save_scheduled(self, app):
+        pool = _live_pool(app, cpu=2)
+        for w in _cpu_workers(pool):
+            w.is_busy = True
+
+        _save(app, {"cpu_threads": 1})
+        resp = _save(app, {"cpu_threads": 0})
+
+        assert resp.get_json()["cpu_workers_retiring"] == 2
+
+
+class TestJobStartReconcilesCpuWorkers:
+    def test_preview_job_pool_sized_from_saved_cpu_threads_not_job_snapshot(self, app, tmp_path):
+        # Saved while no pool existed, so the save had nothing to resize; the job's config snapshot still says 2.
+        _save(app, {"cpu_threads": 4})
+        assert get_dispatcher() is None
+        captured: dict = {}
+        stale_config = MagicMock(
+            cpu_threads=2,
+            gpu_threads=0,
+            path_mappings=[],
+            tmp_folder=str(tmp_path),
+            plex_url="http://test",
+            plex_token="token",
+        )
+
+        with (
+            patch(
+                "media_preview_generator.jobs.orchestrator.run_processing",
+                side_effect=lambda config, *a, **kw: captured.update(kw),
+            ),
+            patch("media_preview_generator.config.load_config", return_value=stale_config),
+            patch(
+                "media_preview_generator.processing.generator._verify_tmp_folder_health",
+                return_value=(True, []),
+            ),
+            patch("media_preview_generator.utils.setup_working_directory", return_value=str(tmp_path / "work")),
+            patch("media_preview_generator.gpu.detect.detect_all_gpus", return_value=[]),
+        ):
+            resp = app.test_client().post("/api/jobs", json={}, headers={"X-Auth-Token": TOKEN})
+        assert resp.status_code == 201
+
+        pool = WorkerPool(gpu_workers=0, cpu_workers=stale_config.cpu_threads, selected_gpus=[])
+        captured["worker_pool_callback"](pool)
+
+        assert len(_cpu_workers(pool)) == 4
+
+
+class TestWorkersApiSavesCpuCount:
+    """``/api/workers/add|remove`` save the CPU count, so the next Settings save doesn't undo them."""
+
+    def test_add_cpu_saves_count_and_resizes_pool(self, app):
+        pool = _live_pool(app, cpu=2)
+
+        resp = _scale(app, "add", "CPU", 1)
+
+        assert resp.status_code == 200
+        assert resp.get_json()["added"] == 1
+        assert len(_cpu_workers(pool)) == 3
+        assert _saved_cpu_threads(app) == 3
+
+    def test_remove_idle_cpu_saves_count_and_resizes_pool(self, app):
+        pool = _live_pool(app, cpu=3)
+
+        resp = _scale(app, "remove", "CPU", 1)
+
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert (data["removed"], data["scheduled_removal"], data["unavailable"]) == (1, 0, 0)
+        assert len(_cpu_workers(pool)) == 2
+        assert _saved_cpu_threads(app) == 2
+
+    def test_remove_busy_cpu_waits_for_current_file_and_saves_count(self, app):
+        pool = _live_pool(app, cpu=2)
+        busy = _cpu_workers(pool)
+        for w in busy:
+            w.is_busy = True
+
+        resp = _scale(app, "remove", "CPU", 1)
+
+        data = resp.get_json()
+        assert (data["removed"], data["scheduled_removal"], data["unavailable"]) == (0, 1, 0)
+        assert _cpu_workers(pool) == busy
+        assert pool._pending_removals["CPU"] == 1
+        assert _saved_cpu_threads(app) == 1
+
+    def test_remove_more_than_saved_reports_unavailable(self, app):
+        pool = _live_pool(app, cpu=1)
+
+        resp = _scale(app, "remove", "CPU", 3)
+
+        data = resp.get_json()
+        assert (data["removed"], data["scheduled_removal"], data["unavailable"]) == (1, 0, 2)
+        assert _cpu_workers(pool) == []
+        assert _saved_cpu_threads(app) == 0
+
+    def test_settings_page_loads_the_api_change_so_its_next_save_keeps_it(self, app):
+        pool = _live_pool(app, cpu=2)
+        _scale(app, "add", "CPU", 1)
+
+        shown = app.test_client().get("/api/settings", headers={"X-Auth-Token": TOKEN}).get_json()["cpu_threads"]
+        _save(app, {"cpu_threads": shown})
+
+        assert shown == 3
+        assert len(_cpu_workers(pool)) == 3
+
+    def test_gpu_add_leaves_saved_cpu_count_alone(self, app):
+        # GPU counts are per GPU in Settings; the API's GPU change isn't saved (unchanged behaviour).
+        pool = _live_pool(app, cpu=2, gpu=1)
+
+        resp = _scale(app, "add", "GPU", 1)
+
+        assert resp.get_json()["added"] == 1
+        assert len(_gpu_workers(pool)) == 2
+        assert len(_cpu_workers(pool)) == 2
+        assert _saved_cpu_threads(app) == 2

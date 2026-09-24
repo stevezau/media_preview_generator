@@ -966,7 +966,7 @@ class WorkerPool:
             return list(self.workers)
 
     def _create_worker(self, worker_type: str) -> "Worker":
-        """Create a worker instance with a unique ID and display name."""
+        """Create a worker with a unique ID and display name, wired to wake the dispatch loop when it finishes."""
         worker_id = self._next_worker_id
         self._next_worker_id += 1
         normalized_type = worker_type.upper()
@@ -991,11 +991,13 @@ class WorkerPool:
                 ffmpeg_threads=per_gpu_ffmpeg,
             )
             worker.display_name = f"GPU Worker {type_idx} ({gpu_name})"
+            worker._done_event = self._worker_done_event
             return worker
 
         if normalized_type == "CPU":
             worker = Worker(worker_id, "CPU")
             worker.display_name = f"CPU Worker {type_idx}"
+            worker._done_event = self._worker_done_event
             return worker
         raise ValueError(f"Unsupported worker type: {worker_type}")
 
@@ -1007,9 +1009,7 @@ class WorkerPool:
         added = 0
         with self._workers_lock:
             for _ in range(count):
-                w = self._create_worker(worker_type)
-                w._done_event = self._worker_done_event
-                self.workers.append(w)
+                self.workers.append(self._create_worker(worker_type))
                 added += 1
         if added > 0:
             logger.info("Added {} {} worker(s)", added, worker_type.upper())
@@ -1198,7 +1198,9 @@ class WorkerPool:
             desired: Number of CPU workers the pool should settle at.
 
         Returns:
-            Summary dict with keys ``added``, ``removed``, and ``deferred``.
+            Summary dict with keys ``added``, ``removed``, ``deferred`` (busy
+            workers this call scheduled to retire) and ``retiring`` (every busy
+            CPU worker still due to retire, including earlier calls' ones).
 
         """
         desired = max(0, desired)
@@ -1220,12 +1222,11 @@ class WorkerPool:
                 result = self.remove_workers("CPU", effective - desired)
                 removed = result["removed"]
                 deferred = result["scheduled"]
+            retiring = self._pending_removals["CPU"]
 
         if cancelled:
             logger.info("Kept {} busy CPU worker(s) that were due to retire", cancelled)
-        if removed or added or deferred:
-            logger.info("CPU reconciliation: added={}, removed={}, deferred={}", added, removed, deferred)
-        return {"added": added, "removed": removed, "deferred": deferred}
+        return {"added": added, "removed": removed, "deferred": deferred, "retiring": retiring}
 
     def _find_available_worker(self, cpu_only: bool = False, *, claim: bool = False) -> Optional["Worker"]:
         """Find an available worker.

@@ -79,20 +79,23 @@ def _reconcile_live_gpu_workers(settings) -> None:
         )
 
 
-def _reconcile_live_cpu_workers(settings) -> None:
+def _reconcile_live_cpu_workers(settings) -> int:
     """Sync the live WorkerPool's CPU workers with the current cpu_threads.
 
     After cpu_threads is persisted, resize the running pool so the new
     count applies without a restart. Busy workers finish their current
     task before they retire.
+
+    Returns:
+        How many busy CPU workers are still due to retire; 0 when there is no pool yet or the resize failed.
     """
     try:
         from .api_jobs import _get_shared_worker_pool
 
         pool = _get_shared_worker_pool()
         if pool is None:
-            return
-        pool.reconcile_cpu_workers(settings.cpu_threads)
+            return 0
+        return pool.reconcile_cpu_workers(settings.cpu_threads)["retiring"]
     except Exception:
         logger.warning(
             "Could not resize the live worker pool to the new CPU worker count. "
@@ -101,6 +104,7 @@ def _reconcile_live_cpu_workers(settings) -> None:
             "See the traceback below for the underlying cause.",
             exc_info=True,
         )
+        return 0
 
 
 def _auto_pause_if_needed(settings) -> None:
@@ -669,16 +673,17 @@ def _reregister_plex_webhooks_after_secret_rotation(settings) -> None:
         )
 
 
-def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str]) -> str:
+def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str]) -> dict:
     """Run side-effects that fire after settings.update() persists the change.
 
     Hooks (in apply order):
 
     1. **Worker reconciliation** — if ``gpu_config`` or ``cpu_threads``
-       changed, scale the live worker pool to match.
+       changed, scale the live worker pool to match. A ``cpu_threads`` save
+       reports how many busy CPU workers will stop after their current file.
     2. **Worker-count gate** — if total processing threads dropped to zero,
        auto-pause; if they rose above zero and we were paused, auto-resume.
-       Returns the warning string for the response.
+       Reports the warning for the response.
     3. **Library cache bust** — if any Plex connection field changed (URL,
        token, verify_ssl), invalidate the cached library list. Uses
        ``incoming_field_keys`` rather than ``updates`` so the hook still
@@ -693,13 +698,15 @@ def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str
        BIF writer, Jellyfin trickplay registration, Emby sidecar naming, and
        BIF viewer all use the new value immediately.
 
-    Returns ``thread_warning`` (empty string when worker counts are healthy)
-    so the route can include it in the JSON response.
+    Returns:
+        Extra fields for the JSON response: ``warning`` when no workers are
+        configured, and ``cpu_workers_retiring`` when ``cpu_threads`` was saved.
     """
+    response_fields: dict = {}
     if "gpu_config" in updates:
         _reconcile_live_gpu_workers(settings)
     if "cpu_threads" in updates:
-        _reconcile_live_cpu_workers(settings)
+        response_fields["cpu_workers_retiring"] = _reconcile_live_cpu_workers(settings)
 
     ok, thread_warning = validate_processing_thread_totals(settings.get_all())
     if not ok:
@@ -760,7 +767,9 @@ def _apply_post_save_hooks(settings, updates: dict, incoming_field_keys: set[str
                 new_interval,
             )
 
-    return thread_warning
+    if thread_warning:
+        response_fields["warning"] = thread_warning
+    return response_fields
 
 
 @api.route("/settings", methods=["POST"])
@@ -788,15 +797,11 @@ def save_settings():
     if new_media_servers is not None:
         updates["media_servers"] = new_media_servers
 
-    thread_warning = ""
+    result = {"success": True}
     if updates:
         settings.update(updates)
         logger.info("Settings updated: {}", list(updates.keys()))
-        thread_warning = _apply_post_save_hooks(settings, updates, incoming_field_keys)
-
-    result = {"success": True}
-    if thread_warning:
-        result["warning"] = thread_warning
+        result.update(_apply_post_save_hooks(settings, updates, incoming_field_keys))
     return jsonify(result)
 
 

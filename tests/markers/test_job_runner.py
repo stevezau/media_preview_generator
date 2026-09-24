@@ -393,6 +393,18 @@ class TestRun:
         self._run()
         assert order == [("pool", "j1", env.dispatcher.worker_pool), "submit"]
 
+    def test_the_shared_pool_is_resized_to_the_saved_cpu_count_before_items_go_in(self, env):
+        # The job's config was read before the files were listed; a CPU count saved in between, while no pool
+        # existed yet, only reaches the pool here. It runs after the pool is registered, so a save that lands
+        # later finds the pool itself.
+        env.sm.cpu_threads = 4
+        order = []
+        env.jm.set_active_worker_pool.side_effect = lambda job_id, pool: order.append("pool")
+        env.dispatcher.worker_pool.reconcile_cpu_workers.side_effect = lambda n: order.append(("cpu", n))
+        env.dispatcher.submit_items.side_effect = lambda **kw: order.append("submit") or env.tracker
+        self._run()
+        assert order == ["pool", ("cpu", 4), "submit"]
+
     @pytest.mark.parametrize(("force", "expected"), [(True, True), (False, False), (None, False), ("", False)])
     def test_force_from_job_config_reaches_the_pipeline_context(self, env, force, expected):
         env.job.config = {"libraries": [], "force": force}

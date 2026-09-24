@@ -1644,6 +1644,12 @@ def run_intro_credits_job(job_id: str) -> None:
                 # The running job's pool for the per-job worker routes, as the preview runner registers it; complete_job
                 # and cancel_job clear it.
                 jm.set_active_worker_pool(job_id, dispatcher.worker_pool)
+                # The saved CPU count, not the config read before the files were listed: a count saved while no pool
+                # existed had nothing to resize. The pool is registered above, so a later save finds it.
+                try:
+                    dispatcher.worker_pool.reconcile_cpu_workers(settings.cpu_threads)
+                except Exception as exc:
+                    logger.debug("Could not reconcile CPU workers: {}", exc)
                 tracker = dispatcher.submit_items(
                     job_id=job_id,
                     items=items,

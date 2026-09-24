@@ -928,9 +928,13 @@ def _start_job_async(job_id: str, config_overrides: dict | None = None):
                             return
                         job_manager.set_active_worker_pool(job_id, pool)
                         try:
-                            fresh_gpus = _build_selected_gpus(get_settings_manager())
+                            fresh_settings = get_settings_manager()
+                            fresh_gpus = _build_selected_gpus(fresh_settings)
                             if fresh_gpus:
                                 pool.reconcile_gpu_workers(fresh_gpus)
+                            # The saved count, not the job's config: a CPU count saved while no pool existed
+                            # had nothing to resize. The pool is registered above, so a later save finds it.
+                            pool.reconcile_cpu_workers(fresh_settings.cpu_threads)
                         except Exception:
                             logger.debug(
                                 "Could not reconcile pool on dispatch",

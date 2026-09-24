@@ -3756,8 +3756,17 @@ async function scaleWorkersGlobal(workerType, direction) {
         // The settings save resizes the live pool itself; a follow-up
         // /api/workers/add|remove call would change a second worker.
         await Promise.all([loadJobs(), loadWorkerStatuses(), refreshStatus()]);
+        const retiring = saveResult.cpu_workers_retiring || 0;
+        let busyNote = '';
+        if (retiring === 1) {
+            busyNote = '1 busy worker will stop after its current file.';
+        } else if (retiring > 1) {
+            busyNote = `${retiring} busy workers will stop after their current files.`;
+        }
         if (saveResult.warning) {
-            showToast('Warning', saveResult.warning, 'warning');
+            showToast('Warning', busyNote ? `${saveResult.warning} ${busyNote}` : saveResult.warning, 'warning');
+        } else if (busyNote) {
+            showToast('Setting Saved', `${workerType} workers set to ${newCount}. ${busyNote}`, 'success');
         } else {
             showToast('Setting Saved', `${workerType} workers set to ${newCount}`, 'success');
         }
