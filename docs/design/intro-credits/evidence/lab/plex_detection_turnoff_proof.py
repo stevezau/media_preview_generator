@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Lab proof: ``turn_off_library_marker_detection`` really flips Plex's per-library switches, and only those.
 
+HISTORICAL RECORD — no longer runnable. ``turn_off_library_marker_detection`` and Setup Health's per-library
+"Turn off" were removed on 2026-09-24: with a library's own switch off, Plex hides every skip marker in that library,
+ours included (proven on production). Setup Health now offers ``PlexServer.turn_on_library_marker_detection``
+("Turn on") and ``PlexServer.set_marker_detection_never`` ("Set server-wide to Never") instead. Kept unchanged below
+as the evidence it was.
+
     LAB_ENV_FILE=/path/to/env ./plex_detection_turnoff_proof.py
 
 Builds a real ``PlexServer`` the way ``tests/test_servers_plex.py``'s ``plex_server_under_test`` fixture does

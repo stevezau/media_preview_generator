@@ -43,7 +43,7 @@ def main(out: Path) -> None:
             for start_s, length_s in WINDOWS:
                 command, hw_active = frames.decode_command(
                     "ffmpeg", str(clip), start_s=start_s, length_s=length_s, keyframes_only=True, fps=None, gpu=gpu,
-                    gpu_device_path=device, drop_non_key=name.startswith("vp9"),
+                    gpu_device_path=device, drop_non_key=name.startswith("vp9"), download_format="nv12",
                 )  # fmt: skip
                 run = subprocess.run(command, capture_output=True)
                 pts = [float(p) for p in re.findall(rb"pts_time:\s*(\S+)", run.stderr)]

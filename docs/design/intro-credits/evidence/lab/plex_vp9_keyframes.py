@@ -101,12 +101,13 @@ def keyframe_pass(clip: Path, gpu: str | None, device: str | None, thinning: fra
     command, _ = frames.decode_command(
         FFMPEG, str(clip), start_s=WINDOW_START_S, length_s=WINDOW_S, keyframes_only=True, fps=None, gpu=gpu,
         gpu_device_path=device, keep_every=thinning.keep_every, drop_non_key=thinning.drop_non_key,
+        download_format=thinning.download_format or "nv12",  # the clips are 8-bit 4:2:0
     )  # fmt: skip
     return command
 
 
 def without_hwaccel(command: list[str], gpu: str, device: str) -> list[str]:
-    """The same command with the device's hwaccel arguments taken out, the GPU scale filter left in.
+    """The same command with the device's hwaccel arguments taken out, the GPU download filter left in.
 
     Args:
         command: A GPU keyframe-pass command.
