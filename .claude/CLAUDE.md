@@ -130,6 +130,7 @@ media_preview_generator/
   the eight production-bug shapes that have shipped before — bug-blind tests, un-wrapped
   failure_scope, lazy-init races, vestigial blocking work, comments-vs-code drift.
 - **Docker awareness**: Check `utils.is_docker_environment()` for container-specific behavior.
+- **Lab servers for proofs**: see `docs/design/lab-servers.md` (stop, never remove).
 
 ## Security
 
