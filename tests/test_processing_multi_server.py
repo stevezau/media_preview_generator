@@ -18,8 +18,10 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from loguru import logger
 
-from media_preview_generator.processing.frame_cache import reset_frame_cache
+from media_preview_generator.bif_reader import read_bif_metadata
+from media_preview_generator.processing.frame_cache import get_frame_cache, reset_frame_cache
 from media_preview_generator.processing.multi_server import (
     _PUBLISHED_LIKE_STATUSES,
     MultiServerStatus,
@@ -546,7 +548,7 @@ class TestCrossServerBifReuse:
     """
 
     @staticmethod
-    def _write_real_bif(path: Path, frames: list[bytes]) -> None:
+    def _write_real_bif(path: Path, frames: list[bytes], *, interval_ms: int) -> None:
         """Write a minimally valid BIF that round-trips through unpack_bif_to_jpegs."""
         import array
         import struct
@@ -557,7 +559,7 @@ class TestCrossServerBifReuse:
             array.array("B", magic).tofile(f)
             f.write(struct.pack("<I", 0))  # version
             f.write(struct.pack("<I", count))
-            f.write(struct.pack("<I", 1000))  # interval ms
+            f.write(struct.pack("<I", interval_ms))
             array.array("B", [0x00] * 44).tofile(f)
             table_size = 8 + (8 * count)
             image_offset = 64 + table_size
@@ -595,7 +597,8 @@ class TestCrossServerBifReuse:
             buf = BytesIO()
             Image.new("RGB", (320, 180), (10, 20, 30)).save(buf, "JPEG", quality=70)
             real_frames.append(buf.getvalue())
-        self._write_real_bif(existing_bif, real_frames)
+        self._write_real_bif(existing_bif, real_frames, interval_ms=10_000)
+        mock_config_for_processing.plex_bif_frame_interval = 10
         # Force the source mtime to NOT be newer than the BIF; otherwise
         # outputs_fresh_for_source can return False on systems where
         # _seed_canonical_file's touch happens after our BIF write.
@@ -687,6 +690,133 @@ class TestCrossServerBifReuse:
 
         assert gen.call_count == 1
         assert result.publishers[0].status in _PUBLISHED_LIKE_STATUSES
+
+    _DURATION_S = 100
+
+    def _dispatch_plex_bif_to_emby_at_5s(
+        self, mock_config, tmp_path: Path, *, plex_bif_interval_ms: int, truncate_plex_bif_to: int | None = None
+    ):
+        """Plex already has an ``index-sd.bif`` made at ``plex_bif_interval_ms``; Emby at 5 s has no output yet.
+
+        Plex's bundle path doesn't encode the interval, so the BIF still looks fresh after an interval change.
+        ``truncate_plex_bif_to`` cuts the Plex BIF to that many bytes, as a partial write would.
+
+        Returns:
+            ``(result, emby_bif_path, generate_images_calls)``.
+        """
+        from io import BytesIO
+
+        from PIL import Image
+
+        mock_config.plex_bif_frame_interval = 5
+        mock_config.tmp_folder = str(tmp_path / "tmp")
+        media_root = tmp_path / "data" / "movies"
+        media_file = _seed_canonical_file(media_root / "Test (2024)")
+        buf = BytesIO()
+        Image.new("RGB", (320, 180), (10, 20, 30)).save(buf, "JPEG", quality=70)
+        plex_bif = tmp_path / "plexcfg" / "index-sd.bif"
+        plex_bif.parent.mkdir(parents=True)
+        frames_in_plex_bif = self._DURATION_S * 1000 // plex_bif_interval_ms
+        self._write_real_bif(plex_bif, [buf.getvalue()] * frames_in_plex_bif, interval_ms=plex_bif_interval_ms)
+        if truncate_plex_bif_to is not None:
+            plex_bif.write_bytes(plex_bif.read_bytes()[:truncate_plex_bif_to])
+
+        library = Library(id="1", name="Movies", remote_paths=(str(media_root),), enabled=True)
+        registry = ServerRegistry.from_settings(
+            [
+                _server_config(
+                    server_id="plex-1",
+                    server_type=ServerType.PLEX,
+                    libraries=[library],
+                    output={
+                        "adapter": "plex_bundle",
+                        "plex_config_folder": str(tmp_path / "plexcfg"),
+                        "frame_interval": 5,
+                    },
+                ),
+                _server_config(
+                    server_id="emby-1",
+                    server_type=ServerType.EMBY,
+                    libraries=[library],
+                    output={"adapter": "emby_sidecar", "width": 320, "frame_interval": 5},
+                ),
+            ],
+        )
+
+        calls: list[dict] = []
+
+        def fake_generate_images(video_file, output_folder, gpu, gpu_device_path, config, *args, **kwargs):
+            calls.append({"video_file": video_file, "interval": config.plex_bif_frame_interval})
+            count = self._DURATION_S // config.plex_bif_frame_interval
+            _populate_frames(output_folder, count=count)
+            return (True, count, "h264", 1.0, 30.0, None)
+
+        with (
+            patch(
+                "media_preview_generator.output.plex_bundle.PlexBundleAdapter.compute_output_paths",
+                return_value=[plex_bif],
+            ),
+            patch(
+                "media_preview_generator.processing.multi_server.generate_images",
+                side_effect=fake_generate_images,
+            ),
+        ):
+            result = process_canonical_path(
+                canonical_path=str(media_file),
+                registry=registry,
+                config=mock_config,
+                item_id_by_server={"plex-1": "123", "emby-1": "e1"},
+            )
+        return result, media_file.parent / "Test (2024)-320-5.bif", calls
+
+    def test_sibling_bif_is_reused_when_interval_matches(self, mock_config_for_processing, tmp_path):
+        result, emby_bif, calls = self._dispatch_plex_bif_to_emby_at_5s(
+            mock_config_for_processing, tmp_path, plex_bif_interval_ms=5000
+        )
+
+        assert calls == []
+        sources = {p.server_id: p.frame_source for p in result.publishers}
+        assert sources["emby-1"] == "cache_hit"
+        meta = read_bif_metadata(str(emby_bif))
+        assert (meta.frame_count, meta.frame_interval_ms) == (20, 5000)
+        # The unpacked frames enter the cache stamped with the settings they were checked against.
+        canonical_path = str(tmp_path / "data" / "movies" / "Test (2024)" / "Test (2024).mkv")
+        assert get_frame_cache().get(canonical_path, extraction_key=(5, 4, "hable")) is not None
+
+    def test_sibling_bif_is_skipped_when_interval_differs(self, mock_config_for_processing, tmp_path):
+        """A Plex BIF written at 10 s before the user switched to 5 s must not feed Emby's 5 s BIF."""
+        result, emby_bif, calls = self._dispatch_plex_bif_to_emby_at_5s(
+            mock_config_for_processing, tmp_path, plex_bif_interval_ms=10_000
+        )
+
+        canonical_path = str(tmp_path / "data" / "movies" / "Test (2024)" / "Test (2024).mkv")
+        assert calls == [{"video_file": canonical_path, "interval": 5}]
+        sources = {p.server_id: p.frame_source for p in result.publishers}
+        assert sources["emby-1"] == "extracted"
+        meta = read_bif_metadata(str(emby_bif))
+        assert (meta.frame_count, meta.frame_interval_ms) == (20, 5000), (
+            f"Emby's 5 s BIF holds {meta.frame_count} frames; 10 means the 10 s Plex BIF was unpacked into it"
+        )
+
+    def test_sibling_bif_is_skipped_when_header_unreadable(self, mock_config_for_processing, tmp_path):
+        """A Plex BIF cut off inside its header can't prove its interval, so Emby gets freshly extracted frames."""
+        warnings: list[str] = []
+        handler_id = logger.add(warnings.append, level="WARNING", format="{message}")
+        try:
+            result, emby_bif, calls = self._dispatch_plex_bif_to_emby_at_5s(
+                mock_config_for_processing, tmp_path, plex_bif_interval_ms=5000, truncate_plex_bif_to=12
+            )
+        finally:
+            logger.remove(handler_id)
+
+        canonical_path = str(tmp_path / "data" / "movies" / "Test (2024)" / "Test (2024).mkv")
+        assert calls == [{"video_file": canonical_path, "interval": 5}]
+        sources = {p.server_id: p.frame_source for p in result.publishers}
+        assert sources["emby-1"] == "extracted"
+        meta = read_bif_metadata(str(emby_bif))
+        assert (meta.frame_count, meta.frame_interval_ms) == (20, 5000)
+        plex_bif = str(tmp_path / "plexcfg" / "index-sd.bif")
+        assert any(f"could not read the header of {plex_bif}" in w for w in warnings), warnings
 
 
 class TestPartialFailureIsolation:

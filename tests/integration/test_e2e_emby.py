@@ -237,7 +237,12 @@ class TestEmbyEndToEndPublish:
                 # happens BEFORE the publisher, so cache hit still saves
                 # FFmpeg even on regenerate.
                 cache = get_frame_cache(base_dir=str(Path(mock_config.tmp_folder) / "frame_cache"))
-                assert cache.get(canonical) is not None  # populated
+                settings = (
+                    mock_config.plex_bif_frame_interval,
+                    mock_config.thumbnail_quality,
+                    mock_config.tonemap_algorithm,
+                )
+                assert cache.get(canonical, extraction_key=settings) is not None  # populated
 
                 # Second dispatch: cache hit → no FFmpeg → re-publishes.
                 # Emby sidecar already exists, so PublisherStatus is
