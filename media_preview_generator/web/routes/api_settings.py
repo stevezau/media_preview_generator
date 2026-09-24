@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from flask import jsonify, request
 from loguru import logger
 
-from ...config import validate_processing_thread_totals
+from ...config import MAX_CPU_THREADS, validate_processing_thread_totals
 from ...markers.settings import mask_global
 from ...utils import is_docker_environment
 from ..auth import api_token_required, setup_or_auth_required
@@ -542,6 +542,13 @@ def _validate_and_coerce_settings_updates(
                 updates[field] = int(updates[field])
             except (TypeError, ValueError):
                 return None, (jsonify({"error": f"{field} must be an integer"}), 400)
+
+    # load_config rejects a CPU count above MAX_CPU_THREADS, so saving one would stop every later job from starting.
+    if "cpu_threads" in updates and not 0 <= updates["cpu_threads"] <= MAX_CPU_THREADS:
+        return None, (
+            jsonify({"error": f"cpu_threads must be between 0 and {MAX_CPU_THREADS} (got {updates['cpu_threads']})"}),
+            400,
+        )
 
     # Clamp concurrency cap to a sane range. Mirrors the GET-side
     # clamp (line ~307) and the gate's internal clamp (JobGate._cap)

@@ -1535,7 +1535,7 @@ unless noted.
 | POST | `/api/jobs/clear` | Delete completed/failed jobs from the queue |
 | GET | `/api/jobs/stats` | Totals grouped by status |
 | GET | `/api/jobs/workers` | Current worker-pool snapshot (type, state, current item) |
-| POST | `/api/workers/add` · `/api/workers/remove` | Add or remove pool workers live (`{"worker_type": "CPU"\|"GPU", "count": N}`). A CPU change is also saved as the **CPU workers** setting, just like the dashboard's +/- buttons. A busy worker that's removed finishes its current file first. GPU changes aren't saved: the next Settings save or a restart puts back the per-GPU counts from Settings. |
+| POST | `/api/workers/add` · `/api/workers/remove` | Add or remove pool workers live (`{"worker_type": "CPU"\|"GPU", "count": N}`). A CPU change is also saved as the **CPU workers** setting, just like the dashboard's +/- buttons. That setting goes from 0 to 32, and an add that would pass 32 gets a `400` with nothing changed. A busy worker that's removed finishes its current file first. GPU changes aren't saved: the next Settings save or a restart puts back the per-GPU counts from Settings. |
 | POST | `/api/jobs/{id}/workers/add` · `/api/jobs/{id}/workers/remove` | Per-job worker adjustment while the job runs. Not saved: the next Settings save or a restart puts back the saved counts. |
 
 ### Schedules

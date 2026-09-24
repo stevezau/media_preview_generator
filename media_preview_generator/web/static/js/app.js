@@ -487,7 +487,9 @@ function normalizeWorkerConfigCounts(config) {
     // gpu_threads is the total across all enabled GPUs (computed from gpu_config)
     return {
         gpu_threads: Number(config?.gpu_threads ?? 0),
-        cpu_threads: Number(config?.cpu_threads ?? 1)
+        cpu_threads: Number(config?.cpu_threads ?? 1),
+        // The server rejects a saved CPU count above this; unknown until the config loads.
+        cpu_threads_max: Number(config?.cpu_threads_max ?? Infinity)
     };
 }
 
@@ -3715,11 +3717,11 @@ function refreshWorkerScaleButtons() {
     const buttons = document.querySelectorAll('.worker-scale-btn');
     buttons.forEach((btn) => {
         const direction = parseInt(btn.getAttribute('data-direction'), 10);
+        const workerType = btn.getAttribute('data-worker-type');
         if (direction === 1) {
-            btn.disabled = false;
+            btn.disabled = getWorkerCountForType(workerType) >= getWorkerMaxForType(workerType);
             return;
         }
-        const workerType = btn.getAttribute('data-worker-type');
         btn.disabled = getWorkerCountForType(workerType) <= 0;
     });
 }
@@ -3732,6 +3734,11 @@ function getWorkerCountForType(workerType) {
     return Number.isNaN(n) ? 0 : n;
 }
 
+function getWorkerMaxForType(workerType) {
+    if (workerType !== 'CPU') return Infinity;
+    return cachedWorkerConfigCounts?.cpu_threads_max ?? Infinity;
+}
+
 function settingsKeyForWorkerType(workerType) {
     if (workerType === 'CPU') return 'cpu_threads';
     return null;
@@ -3740,7 +3747,7 @@ function settingsKeyForWorkerType(workerType) {
 async function scaleWorkersGlobal(workerType, direction) {
     const currentCount = getWorkerCountForType(workerType);
     const newCount = Math.max(0, currentCount + direction);
-    if (newCount === currentCount) return;
+    if (newCount === currentCount || newCount > getWorkerMaxForType(workerType)) return;
 
     const settingsKey = settingsKeyForWorkerType(workerType);
 

@@ -164,6 +164,40 @@ class TestDashboardGpuWorkerConfig:
         assert settings_posts == [{"cpu_threads": 2}, {"cpu_threads": 1}]
         assert worker_posts == [], f"the - click also resized the pool directly: {worker_posts}"
 
+    def test_cpu_stepper_stops_at_the_maximum(self, authed_page: Page, app_url: str) -> None:
+        mock_dashboard_defaults(authed_page)
+        saved = {"cpu_threads": 31}
+        settings_posts: list[dict] = []
+
+        def settings_handler(route: Route) -> None:
+            if route.request.method != "POST":
+                route.continue_()
+                return
+            settings_posts.append(route.request.post_data_json or {})
+            saved.update(settings_posts[-1])
+            _fulfill_json(route, {"success": True, "cpu_workers_retiring": 0})
+
+        authed_page.route("**/api/settings", settings_handler)
+        authed_page.route(
+            "**/api/system/config", lambda r: _fulfill_json(r, {"gpu_threads": 0, "cpu_threads_max": 32, **saved})
+        )
+        authed_page.goto(f"{app_url}/")
+        authed_page.wait_for_load_state("domcontentloaded")
+        cpu_badge = authed_page.locator("#cpuWorkers")
+        plus_btn = authed_page.locator('button.worker-scale-btn[data-worker-type="CPU"][data-direction="1"]')
+        expect(cpu_badge).to_have_text("31", timeout=3000)
+        expect(plus_btn).to_be_enabled()
+
+        plus_btn.click()
+        expect(cpu_badge).to_have_text("32", timeout=2000)
+        expect(plus_btn).to_be_disabled(timeout=2000)
+
+        # Even called directly, the stepper won't save a count past the maximum.
+        authed_page.evaluate("scaleWorkersGlobal('CPU', 1)")
+        authed_page.wait_for_timeout(300)
+        assert settings_posts == [{"cpu_threads": 32}]
+        expect(cpu_badge).to_have_text("32")
+
     @pytest.mark.parametrize(
         ("retiring", "warning", "message"),
         [

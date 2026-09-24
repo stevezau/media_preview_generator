@@ -31,6 +31,7 @@ from .paths import (  # noqa: F401
     split_library_selectors,
 )
 from .validation import (  # noqa: F401
+    MAX_CPU_THREADS,
     VALID_TONEMAP_ALGORITHMS,
     ConfigValidationError,
     _validate_paths,

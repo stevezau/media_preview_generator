@@ -10,6 +10,8 @@ import json
 import os
 import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -215,6 +217,18 @@ class SettingsManager:
         with self._lock:
             self._settings[key] = value
             self._save()
+
+    @contextmanager
+    def locked(self) -> Iterator["SettingsManager"]:
+        """Hold the settings lock across a read-modify-write, so a concurrent writer can't lose the change.
+
+        The lock is re-entrant, so ``get``/``set`` inside the block still work.
+
+        Yields:
+            This settings manager.
+        """
+        with self._lock:
+            yield self
 
     def get_all(self) -> dict[str, Any]:
         """Get all settings."""

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from flask import Response, current_app, jsonify, request, session
 from loguru import logger
 
+from ...config import MAX_CPU_THREADS
 from ...job_kinds import JOB_KIND_INTRO_CREDITS
 from ..auth import (
     api_token_required,
@@ -1229,30 +1230,37 @@ def resume_processing():
     return jsonify({"paused": False})
 
 
-def _save_cpu_worker_count(worker_pool, target: int) -> dict:
-    """Save ``cpu_threads`` and resize the live pool to it, as a Settings save does.
+def _change_saved_cpu_worker_count(worker_pool, delta: int) -> tuple[dict, int, int] | tuple[None, int, int]:
+    """Add ``delta`` to the saved ``cpu_threads`` and resize the live pool to it, as a Settings save does.
 
-    Saving it means the next Settings save (which always sends ``cpu_threads``) keeps this change.
+    Saving it means the next Settings save (which always sends ``cpu_threads``) keeps this change. The read, the
+    save and the resize all run under the settings lock, so two concurrent requests can't both start from the same
+    count, and the pool is resized in the same order the counts were saved.
 
     Args:
         worker_pool: The shared WorkerPool.
-        target: The CPU worker count to save and apply.
+        delta: Workers to add (positive) or remove (negative). The count doesn't go below 0.
 
     Returns:
-        The pool's reconcile summary (``added``, ``removed``, ``deferred``, ``retiring``).
+        ``(summary, previous, target)``: the pool's reconcile summary (``added``, ``removed``, ``deferred``,
+        ``retiring``), the saved count before and the count now saved. ``summary`` is None, and nothing is saved,
+        when adding would take the count above ``MAX_CPU_THREADS``.
     """
     from ..settings_manager import get_settings_manager
 
-    get_settings_manager().cpu_threads = target
-    return worker_pool.reconcile_cpu_workers(target)
+    with get_settings_manager().locked() as settings:
+        previous = settings.cpu_threads
+        target = max(0, previous + delta)
+        if delta > 0 and target > MAX_CPU_THREADS:
+            return None, previous, target
+        settings.cpu_threads = target
+        return worker_pool.reconcile_cpu_workers(target), previous, target
 
 
 @api.route("/workers/add", methods=["POST"])
 @api_token_required
 def add_workers_global():
     """Add workers to the shared pool (not scoped to any job); a CPU change is saved as the CPU worker count."""
-    from ..settings_manager import get_settings_manager
-
     data = request.get_json(silent=True) or {}
     parsed_type, parsed_count = _parse_worker_request(data)
     if parsed_type is None:
@@ -1265,7 +1273,14 @@ def add_workers_global():
         return jsonify({"error": "Worker pool is not available"}), 409
 
     if worker_type == "CPU":
-        _save_cpu_worker_count(worker_pool, get_settings_manager().cpu_threads + count)
+        summary, previous, target = _change_saved_cpu_worker_count(worker_pool, count)
+        if summary is None:
+            return jsonify(
+                {
+                    "error": f"cpu_threads must be between 0 and {MAX_CPU_THREADS}; "
+                    f"adding {count} to {previous} would make {target}"
+                }
+            ), 400
         added = count
     else:
         try:
@@ -1287,8 +1302,6 @@ def add_workers_global():
 @api_token_required
 def remove_workers_global():
     """Remove workers from the shared pool (not scoped to any job); a CPU change is saved as the CPU worker count."""
-    from ..settings_manager import get_settings_manager
-
     data = request.get_json(silent=True) or {}
     parsed_type, parsed_count = _parse_worker_request(data)
     if parsed_type is None:
@@ -1301,13 +1314,11 @@ def remove_workers_global():
         return jsonify({"error": "Worker pool is not available"}), 409
 
     if worker_type == "CPU":
-        current = get_settings_manager().cpu_threads
-        target = max(0, current - count)
-        summary = _save_cpu_worker_count(worker_pool, target)
+        summary, previous, target = _change_saved_cpu_worker_count(worker_pool, -count)
         result = {
             "removed": summary["removed"],
             "scheduled": summary["deferred"],
-            "unavailable": count - (current - target),
+            "unavailable": count - (previous - target),
         }
     else:
         result = worker_pool.remove_workers(worker_type, count)

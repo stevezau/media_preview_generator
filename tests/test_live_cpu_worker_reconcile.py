@@ -12,6 +12,8 @@ that a hook ran.
 
 from __future__ import annotations
 
+import threading
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,7 +21,11 @@ import pytest
 from media_preview_generator.jobs.dispatcher import get_dispatcher, reset_dispatcher
 from media_preview_generator.jobs.worker import WorkerPool
 from media_preview_generator.web.app import create_app
-from media_preview_generator.web.settings_manager import get_settings_manager, reset_settings_manager
+from media_preview_generator.web.settings_manager import (
+    SettingsManager,
+    get_settings_manager,
+    reset_settings_manager,
+)
 
 TOKEN = "test-token-12345678"
 GPU_DEVICE = "cuda:0"
@@ -356,3 +362,121 @@ class TestWorkersApiSavesCpuCount:
         assert len(_gpu_workers(pool)) == 2
         assert len(_cpu_workers(pool)) == 2
         assert _saved_cpu_threads(app) == 2
+
+
+def _loader_thread_errors(app) -> list[str]:
+    """What the config loader's thread check says about the saved CPU count (the next job runs it)."""
+    from media_preview_generator.config import _validate_thread_config
+
+    errors: list[str] = []
+    _validate_thread_config(0, _saved_cpu_threads(app), 2, errors)
+    return errors
+
+
+class TestCpuWorkerCountLimit:
+    """The saved CPU count stays within what ``load_config`` accepts (0-32), on every path that saves it."""
+
+    @pytest.mark.parametrize("value", [33, -1], ids=["above-max", "negative"])
+    def test_settings_save_rejects_out_of_range_cpu_threads(self, app, value):
+        pool = _live_pool(app, cpu=2)
+
+        resp = _save(app, {"cpu_threads": value})
+
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == f"cpu_threads must be between 0 and 32 (got {value})"
+        assert _saved_cpu_threads(app) == 2
+        assert len(_cpu_workers(pool)) == 2
+        assert _loader_thread_errors(app) == []
+
+    def test_settings_save_accepts_the_maximum(self, app):
+        pool = _live_pool(app, cpu=2)
+
+        resp = _save(app, {"cpu_threads": 32})
+
+        assert resp.status_code == 200
+        assert _saved_cpu_threads(app) == 32
+        assert len(_cpu_workers(pool)) == 32
+        assert _loader_thread_errors(app) == []
+
+    def test_workers_api_add_past_the_maximum_is_rejected(self, app):
+        pool = _live_pool(app, cpu=31)
+
+        resp = _scale(app, "add", "CPU", 2)
+
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "cpu_threads must be between 0 and 32; adding 2 to 31 would make 33"
+        assert _saved_cpu_threads(app) == 31
+        assert len(_cpu_workers(pool)) == 31
+        assert _loader_thread_errors(app) == []
+
+    def test_workers_api_add_up_to_the_maximum_is_accepted(self, app):
+        pool = _live_pool(app, cpu=31)
+
+        resp = _scale(app, "add", "CPU", 1)
+
+        assert resp.status_code == 200
+        assert _saved_cpu_threads(app) == 32
+        assert len(_cpu_workers(pool)) == 32
+        assert _loader_thread_errors(app) == []
+
+    def test_system_config_reports_the_maximum_for_the_dashboard_stepper(self, app):
+        from media_preview_generator.config import MAX_CPU_THREADS
+
+        without_config = app.test_client().get("/api/system/config", headers={"X-Auth-Token": TOKEN}).get_json()
+        loaded = SimpleNamespace(
+            plex_url="http://plex:32400",
+            plex_token="t",
+            plex_config_folder="/plex",
+            plex_verify_ssl=True,
+            plex_local_videos_path_mapping="",
+            plex_videos_path_mapping="",
+            plex_bif_frame_interval=5,
+            thumbnail_quality=4,
+            regenerate_thumbnails=False,
+            gpu_config=[],
+            gpu_threads=0,
+            cpu_threads=2,
+            ffmpeg_threads=2,
+            log_level="INFO",
+        )
+        with patch("media_preview_generator.config.get_cached_config", return_value=loaded):
+            with_config = app.test_client().get("/api/system/config", headers={"X-Auth-Token": TOKEN}).get_json()
+
+        assert without_config["cpu_threads_max"] == MAX_CPU_THREADS == 32
+        assert with_config["cpu_threads_max"] == MAX_CPU_THREADS
+
+
+class TestWorkersApiConcurrency:
+    def test_two_concurrent_adds_both_land(self, app):
+        pool = _live_pool(app, cpu=2)
+        request_threads: set[int] = set()
+        both_read = threading.Barrier(2)
+        real_get = SettingsManager.get
+
+        def get_then_wait_for_the_other_request(self, key, default=None):
+            # Each request reads the saved count, then waits until the other has read it too. Without a lock both
+            # read 2 and both save 3. With one, the second request can't read until the first has saved 3.
+            value = real_get(self, key, default)
+            if key == "cpu_threads" and threading.get_ident() in request_threads:
+                try:
+                    both_read.wait(timeout=1.0)
+                except threading.BrokenBarrierError:
+                    pass
+            return value
+
+        responses = []
+
+        def add_one() -> None:
+            request_threads.add(threading.get_ident())
+            responses.append(_scale(app, "add", "CPU", 1).status_code)
+
+        with patch.object(SettingsManager, "get", get_then_wait_for_the_other_request):
+            threads = [threading.Thread(target=add_one) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+
+        assert responses == [200, 200]
+        assert _saved_cpu_threads(app) == 4
+        assert len(_cpu_workers(pool)) == 4
