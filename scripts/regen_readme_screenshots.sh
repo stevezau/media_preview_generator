@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# regen_readme_screenshots.sh — regenerate the 5 README screenshots
+# regen_readme_screenshots.sh — regenerate the 5 tour screenshots (docs site and README)
 # (dark mode, sanitized) and offer to prune stray PNGs at repo root.
 #
 # Usage:
@@ -19,7 +19,7 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 
 echo "[regen] using $PYTHON"
-echo "[regen] capturing 5 README screenshots into docs/images/..."
+echo "[regen] capturing 5 tour screenshots (docs site and README) into docs/images/..."
 "$PYTHON" tests/e2e/snapshots/regen_readme.py --out docs/images/
 
 echo

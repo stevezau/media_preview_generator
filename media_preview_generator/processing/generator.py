@@ -1178,7 +1178,8 @@ def generate_images(
     # the zscale fallback, because zscale on a DV5 stream produces a
     # green overlay (no HDR10 base layer to read).  The SDR path_kind
     # (fps + scale, no tonemap) is the same DV-safe chain used by the
-    # downstream DV-safe retry and produces dim-but-correct thumbnails.
+    # downstream DV-safe retry; its thumbnails keep normal brightness but
+    # get a green and purple tint.
     dv5_software_fallback = False
 
     # HDR10 / DV P7+8 zscale chain (sans fps and base_scale).  See
@@ -1214,11 +1215,9 @@ def generate_images(
                 #    put the fps filter first.
                 #  - No forced colorspace (apply_dolbyvision sets it)
                 #  - No -skip_frame (RPU has inter-frame dependencies)
-                #  - HW decode: NVDEC is validated (~3x speedup on 4K DV5
-                #    with visually identical output); VAAPI/QSV/D3D11VA/
-                #    VideoToolbox are untested on this path and stay on
-                #    software decode.  See the vendor gate in _run_ffmpeg
-                #    below.
+                #  - HW decode: NVDEC and VAAPI (Intel, AMD) are used;
+                #    QSV/D3D11VA/VideoToolbox stay on software decode.  See
+                #    the vendor gate below and _run_ffmpeg in ffmpeg_runner.
                 #  - Vulkan MUST be hardware.  libplacebo on a software
                 #    rasterizer (llvmpipe/lavapipe) produces a green
                 #    overlay on DV5 output.  Probe the Vulkan state
@@ -1230,11 +1229,11 @@ def generate_images(
                 vk_is_software = vulkan_info.is_software
                 if vk_is_software or vk_device is None:
                     logger.warning(
-                        "Dolby Vision Profile 5 file {} needs a real GPU with Vulkan to produce bright, "
+                        "Dolby Vision Profile 5 file {} needs a real GPU with Vulkan to produce "
                         "correctly-coloured thumbnails. No working Vulkan device was found "
-                        "(detected device: {!r}), so this file will get colour-correct but visibly dim "
-                        "thumbnails instead. The file is still processed — only the thumbnail brightness "
-                        "is reduced. See the dashboard notification centre for steps to enable Vulkan.",
+                        "(detected device: {!r}), so this file's thumbnails will have the wrong colours, "
+                        "a green and purple tint. The file is still processed. See the dashboard "
+                        "notification centre for steps to enable Vulkan.",
                         video_file,
                         vk_device,
                     )
@@ -1511,7 +1510,7 @@ def generate_images(
     #
     # Software decode + libplacebo still produces correct DV tonemapping
     # at ~5-10× (CPU-bound HEVC) — preferable to falling through to the
-    # DV-safe fps+scale chain (~1.7× and dim output).
+    # DV-safe fps+scale chain (~1.7× and a green and purple tint).
     did_sw_libplacebo_retry = False
     if rc != 0 and image_count == 0 and (use_vaapi_dv5_path or use_intel_opencl_dv5_path):
         if cancel_check and cancel_check():
@@ -1572,7 +1571,7 @@ def generate_images(
             )
             logger.warning(
                 "{} for {} — retrying with a simpler filter chain that avoids tone mapping. "
-                "Thumbnails will be colour-correct but may look dimmer than the source. "
+                "Thumbnails may come out with the wrong colours. "
                 "No action needed; this is automatic.",
                 diag_label,
                 video_file,

@@ -1,0 +1,128 @@
+<!doctype html>
+<!--
+  Source for docs/images/social-preview.jpg: the card Slack, Discord, Reddit and X show when someone
+  shares a docs link, and the image the owner uploads at GitHub > Settings > Social preview.
+  Rendered by tests/e2e/snapshots/make_social_preview.py at exactly 1280x640 (2:1, device scale 1).
+  The player strip is the approved lab capture, injected into #players at render time so this file
+  has no external references. Colours are docs/assets/css/main.css's dark tokens; the mark is
+  docs/assets/img/logo.svg inlined.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Media Preview Generator social preview</title>
+    <style>
+      :root {
+        --bg: #08080a;
+        --border: rgba(255, 255, 255, 0.09);
+        --text: #f4f4f5;
+        --muted: #94949f;
+        --amber: #e5a00d;
+        --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        position: relative;
+        width: 1280px;
+        height: 640px;
+        margin: 0;
+        padding: 52px 64px 0;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font);
+        -webkit-font-smoothing: antialiased;
+      }
+      body::before {
+        content: "";
+        position: absolute;
+        inset: -240px auto auto -200px;
+        width: 760px;
+        height: 620px;
+        background: radial-gradient(closest-side, rgba(229, 160, 13, 0.16), transparent);
+        pointer-events: none;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        font-size: 26px;
+        font-weight: 700;
+      }
+      .brand svg {
+        width: 56px;
+        height: 56px;
+      }
+      h1 {
+        max-width: 980px;
+        margin: 30px 0 0;
+        font-size: 50px;
+        line-height: 1.12;
+        font-weight: 750;
+        letter-spacing: -0.02em;
+      }
+      h1 em {
+        font-style: normal;
+        color: var(--amber);
+        white-space: nowrap;
+      }
+      .ticks {
+        display: flex;
+        gap: 28px;
+        margin: 22px 0 0;
+        padding: 0;
+        list-style: none;
+        color: var(--muted);
+        font-size: 20px;
+        font-weight: 500;
+      }
+      .ticks li::before {
+        content: "✓ ";
+        color: var(--amber);
+        font-weight: 700;
+      }
+      .strip {
+        position: absolute;
+        left: 64px;
+        right: 64px;
+        bottom: -8px;
+        height: 250px;
+        -webkit-mask-image: linear-gradient(to bottom, transparent, black 38%);
+        mask-image: linear-gradient(to bottom, transparent, black 38%);
+      }
+      .strip img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        object-position: center 30%;
+        border-radius: 14px 14px 0 0;
+        border: 1px solid var(--border);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="brand">
+      <svg viewBox="0 0 64 64" aria-hidden="true">
+        <defs><clipPath id="mpg-a-clip"><rect width="64" height="64" rx="15" /></clipPath></defs>
+        <rect width="64" height="64" rx="15" fill="#e5a00d" />
+        <g fill="#0f0f1a" clip-path="url(#mpg-a-clip)">
+          <path d="M25 8H51A5 5 0 0 1 56 13V27A5 5 0 0 1 51 32H42L38 36L34 32H25A5 5 0 0 1 20 27V13A5 5 0 0 1 25 8Z" />
+          <rect x="0" y="44" width="64" height="8" />
+          <circle cx="38" cy="48" r="8" />
+        </g>
+        <path fill="#e5a00d" d="M34 14V26L44 20Z" />
+      </svg>
+      Media Preview Generator
+    </div>
+    <h1>Your media server's slowest jobs, <em>done on your GPU</em></h1>
+    <ul class="ticks">
+      <li>Preview thumbnails</li>
+      <li>Skip Intro and Skip Credits</li>
+      <li>Plex, Emby and Jellyfin</li>
+    </ul>
+    <div class="strip"><img id="players" alt="" /></div>
+  </body>
+</html>

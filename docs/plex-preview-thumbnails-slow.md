@@ -1,11 +1,11 @@
 ---
-title: "Why Plex video preview thumbnails take so long"
-description: "Plex makes preview thumbnails on the CPU inside the server, at a frame every 2 seconds by default. How to tune Plex, or move the work to a GPU."
+title: Why Plex video preview thumbnails take so long
+heading: Why Plex video preview thumbnails take so long, and how to speed them up
+description: Plex makes preview thumbnails on the CPU inside the server, at a frame every 2 seconds by default. How to tune
+  Plex, or move the work to a GPU.
 ---
 
-# Why Plex video preview thumbnails take so long, and how to speed them up
-
-Plex makes video preview thumbnails inside Plex Media Server, on the CPU. Plex's support articles say the job "essentially requires a transcode" of each file, and that a single movie can take 10 minutes or more while using most of your CPU. By default Plex grabs a frame every 2 seconds, and it runs the job during its scheduled maintenance. So a large library can take "hours or even days". To speed it up:
+Plex makes video preview thumbnails inside Plex Media Server, on the CPU. Plex's support articles say the job "essentially requires a transcode" of each file, and call it CPU-intensive. By default Plex grabs a frame every 2 seconds, and it runs the job during its scheduled maintenance. So a large library can take "hours or even days". To speed it up:
 
 - Generate only for the libraries that need it.
 - Leave key-frame-only extraction on.
@@ -42,13 +42,13 @@ If that is fast enough, stop here. The built-in needs no extra software.
 Once it is running, set Plex's **Settings → Library → Generate video preview thumbnails** to **Never**, so Plex doesn't do the same work again. Setup steps are in [Generate Plex preview thumbnails with a GPU](plex-preview-thumbnails-gpu.md).
 
 > [!NOTE]
-> There is no published head-to-head benchmark against Plex's built-in generator. Speed depends on your GPU, the codec, your storage and the frame interval. This app defaults to one frame every 10 seconds (adjustable from 1 to 60). If you compare, use the same interval on both. If your disks are the bottleneck, a GPU won't fix that. On multi-disk shares, see the FAQ entry on [disk-bound setups](faq.md#generation-feels-disk-bound-on-my-multi-disk-setup-unraidmergerfsjbod--how-do-i-speed-it-up).
+> Speed depends on your GPU, the codec, your storage and the frame interval. This app defaults to one frame every 10 seconds (adjustable from 1 to 60). If you compare, use the same interval on both. If your disks are the bottleneck, a GPU won't fix that. On multi-disk shares, see the FAQ entry on [disk-bound setups](faq.md#why-is-generation-slow-on-my-unraid-or-mergerfs-array).
 
 ## Limits to know first
 
 - It runs only in Docker. It has a web UI and no CLI.
 - Plex must scan a new file before its preview can be written, because the file's location in Plex's data folder only exists after the scan. The app retries automatically after 1, 2 and 5 minutes by default. See [Slow-backoff retry queue](multi-server.md#slow-backoff-retry-queue).
-- It makes video preview thumbnails only. It doesn't make chapter thumbnails or detect intros or credits.
+- It makes video preview thumbnails only, not chapter thumbnails.
 - On Windows only NVIDIA GPUs are accelerated, and on macOS none are. Those setups run on CPU.
 
 ## Related

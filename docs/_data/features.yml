@@ -1,0 +1,37 @@
+# The feature grid: one idea per card, plain words, nothing every self-hosted app has. Keep it at six
+# cards: grid--trio lays them out 3+3 on desktop and 2+2+2 on tablets, and a seventh sits alone.
+# `icon` is inline SVG (the site loads no icon font). Optional `url` and `link` add a link line (link is
+# its text) under the body.
+- title: GPU first, CPU when needed
+  body: >-
+    NVIDIA, Intel and AMD on Linux; NVIDIA on Windows through WSL2. Every GPU passed in gets its own
+    workers, and a file the GPU can't decode is retried on the CPU by the same worker.
+  icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>
+- title: Starts per file
+  body: >-
+    Sonarr, Radarr, Sportarr, Tdarr, FileFlows, Plex, Emby and Jellyfin webhooks, or any JSON with a
+    path. A new episode gets its previews without waiting for a nightly task.
+  icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>
+- title: One decode, every server
+  body: >-
+    With Plex and Jellyfin on the same library, each file is read once and both servers get their own
+    output.
+  icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/></svg>
+- title: Skips what's already done
+  body: >-
+    A small file next to each preview records the source's size and date. A quality upgrade from
+    Radarr is redone; an untouched file is skipped.
+  icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>
+- title: Says why previews don't show
+  body: >-
+    Setup Health checks each server's settings, explains the ones that stop previews appearing,
+    and offers to fix them one library at a time.
+  icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V3h6v1M9 13l2 2 4-4"/></svg>
+- title: Skip Intro and Skip Credits
+  body: >-
+    Finds intros and end credits from the file's chapters, online skip databases, the season's theme
+    song or the credit roll itself, then sends the markers to every server. When it isn't sure, the
+    file waits for your review instead of getting a guess.
+  url: /skip-intro-credits/
+  link: What each server needs
+  icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 4v16l9-8zM17 4v16"/></svg>

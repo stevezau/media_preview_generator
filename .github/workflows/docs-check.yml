@@ -1,0 +1,66 @@
+name: Docs check
+
+# ci.yml ignores docs-only changes (paths-ignore: docs/**, *.md), which are exactly the changes that
+# break the docs tests. This runs just those tests, with Ruby for the Jekyll build. The -k expression
+# picks tests by module name, so a new tests/test_docs_*.py (or llms/site_claims/brand/readmes/
+# benchmark_summary/site_urls) module is included without editing this file.
+on:
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - "docs/**"
+      - "*.md"
+      - "unraid-templates/**"
+      - "scripts/generate_llms_full.py"
+      - "scripts/benchmark_previews.py"
+      - "tests/docs_toolchain.py"
+      - "tests/test_*.py"
+      - ".github/workflows/docs*.yml"
+      - ".github/workflows/jellyfin-plugin.yml"
+  push:
+    branches: [dev]
+    paths:
+      - "docs/**"
+      - "*.md"
+      - "unraid-templates/**"
+      - "scripts/generate_llms_full.py"
+      - "scripts/benchmark_previews.py"
+      - "tests/docs_toolchain.py"
+      - "tests/test_*.py"
+      - ".github/workflows/docs*.yml"
+      - ".github/workflows/jellyfin-plugin.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docs-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # setuptools-scm needs full history
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          working-directory: docs
+          bundler-cache: true
+
+      - name: Install dependencies
+        run: pip install -e ".[test]"
+
+      - name: Docs tests
+        env:
+          MPG_REQUIRE_DOCS_BUILD: "1"
+        run: >-
+          pytest --no-cov -n 0
+          -k "docs or llms or site_claims or brand or readmes or benchmark_summary or site_urls or thumbnail_quality"

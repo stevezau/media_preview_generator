@@ -1,11 +1,11 @@
 ---
-title: "Plex, Emby and Jellyfin previews when Sonarr or Radarr import a file"
-description: "Add a Sonarr or Radarr webhook for import and upgrade. Previews are made after a 60 s quiet period, with retries while the server indexes the file."
+title: Plex, Emby and Jellyfin previews when Sonarr or Radarr import a file
+heading: Generate preview thumbnails as soon as Sonarr or Radarr imports a file
+description: Add a Sonarr or Radarr webhook for import and upgrade. Previews are made after a 60 s quiet period, with retries
+  while the server indexes the file.
 ---
 
-# Generate preview thumbnails as soon as Sonarr or Radarr imports a file
-
-In Sonarr or Radarr, add a **Webhook** connection that points at Media Preview Generator. Enable the import and upgrade events. When a file lands, the app waits for a quiet period (60 seconds by default), then makes previews for just those files. It publishes them to every Plex, Emby or Jellyfin server that has the file. If a server hasn't added the file to its library yet, the app retries after 1, 2 and 5 minutes by default. A higher retry count adds 15- and 60-minute steps.
+In Sonarr or Radarr, add a **Webhook** connection that points at Media Preview Generator. Enable the import and upgrade events. When a file lands, the app waits for a quiet period (60 seconds by default), then makes previews for just those files. It publishes them to every Plex, Emby or Jellyfin server that has the file. If a server hasn't added the file to its library yet, the app retries automatically.
 
 ## Set it up
 
@@ -48,7 +48,7 @@ Field-by-field steps: [Configure Radarr](guides.md#configure-radarr) and [Config
 
 Sonarr and Radarr often call the webhook before your media server has scanned the new file. Plex in particular can't take a preview until its scan creates the item.
 
-- A file that isn't in a server's library yet, or whose preview hasn't been registered yet, is retried after about **1, 2, 5, 15 and 60 minutes**. That's about 83 minutes in total. After that the app gives up and logs it.
+- A file that isn't in a server's library yet, or whose preview hasn't been registered yet, is retried automatically.
 - The retries run as follow-up jobs covering only the files still waiting.
 - Work already done is not repeated. A companion file records the source file's size and modification time, so files with a current preview are skipped. Frames extracted in the last hour are reused if a second trigger arrives for the same file, such as Plex's own webhook after Sonarr's. See [Smart dedup](multi-server.md#smart-dedup-skipping-work-thats-already-done).
 
@@ -57,7 +57,7 @@ To shorten the wait, make sure the server notices new files quickly:
 - Plex: turn on the FSEvent library-update settings.
 - Emby and Jellyfin: turn on real-time monitoring.
 
-[Previews Readiness](guides/previews-readiness.md) checks these.
+[Setup Health](guides/previews-readiness.md) checks these.
 
 ## Upgrades
 

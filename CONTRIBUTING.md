@@ -228,16 +228,28 @@ If you need shared state across multiple processes (e.g. for horizontal scaling)
 
 ### Editing a Docs Page
 
-After changing any file under `docs/`, regenerate `llms-full.txt` (every docs page
-concatenated, for LLM agents that fetch the whole site in one file) so it stays in
-sync with the page you just edited:
+The docs site is Jekyll (`docs/_config.yml`, theme in `docs/_layouts`, `docs/_includes`, `docs/assets`).
+Pages are plain GitHub-flavoured Markdown so they also read well on github.com: no Liquid in pages
+(add `render_with_liquid: false` to a page that quotes `{{ }}` template syntax).
+
+Preview it with Docker, no Ruby needed:
 
 ```bash
-python scripts/generate_llms_full.py         # writes llms-full.txt
+docker run --rm -it -p 4000:4000 -u "$(id -u):$(id -g)" -e HOME=/tmp -e BUNDLE_PATH=/tmp/bundle \
+  -v "$PWD/docs:/docs" -w /docs ruby:3.4-bookworm \
+  sh -c 'bundle install --quiet && bundle exec jekyll serve --host 0.0.0.0'
+```
+
+After changing anything under `docs/` (a page, `_data/*.yml`, or the `nav` in `_config.yml`),
+regenerate `docs/llms-full.txt` (every docs page in one file, for AI agents):
+
+```bash
+python scripts/generate_llms_full.py         # writes docs/llms-full.txt
 python scripts/generate_llms_full.py --check # CI-style: exits non-zero if it's stale
 ```
 
-`tests/test_llms_full.py` fails the build if `llms-full.txt` drifts from `docs/`.
+`tests/test_llms_full.py` fails the build if `docs/llms-full.txt` drifts. `tests/test_docs_site.py`
+builds the real site (host Bundler, or the `ruby` Docker image when there is no Ruby).
 
 ---
 

@@ -1,0 +1,67 @@
+---
+layout: null
+sitemap: false
+permalink: /llms.txt
+render_with_liquid: false
+---
+# Media Preview Generator
+
+> How do I make the video preview thumbnails for Plex, Emby or Jellyfin faster, or on a GPU? Media Preview Generator is a free, MIT-licensed, self-hosted Docker app that makes them (the small images shown while you drag a video's timeline) with GPU-accelerated FFmpeg, per file, as soon as Sonarr, Radarr or the media server reports a new file. It also finds each file's intro and end credits and adds Skip Intro and Skip Credits markers on every server that has the file.
+
+Every docs page in one fetch: https://mediapreviewgenerator.dev/llms-full.txt
+
+## How it differs from the tools usually suggested first
+
+- **Plex's built-in "Generate video preview thumbnails"**: a Library setting, no extra software. Plex describes the job as CPU-intensive and documents no GPU option.
+- **Jellyfin's built-in trickplay (10.9+)**: built in; optional hardware decoding and thread settings, off and 1 thread by default.
+- **Emby's built-in thumbnail (BIF) extraction**: built in, no GPU option.
+- **Emby community BIF tools** ("MediaInfo for Emby", "Bif Generator"): Emby-only add-ons.
+- **Small BIF command-line tools** (`entrez/bifgen`, `amankumarsingh77/bif-generator`, scripts around Roku's `biftool`): one video to one BIF file, no GPU path, no media-server integration.
+
+**What sets it apart: each new file is decoded once, on the GPU if there is one, and every server that holds it gets its own native output in the place it reads from (a Plex BIF in Plex's data folder, an Emby BIF next to the video, Jellyfin trickplay tiles).** The comparison page says when the built-ins are the better choice: https://mediapreviewgenerator.dev/comparison/
+
+Status: maintained, released as Docker images (linux/amd64, linux/arm64); releases at https://github.com/stevezau/media_preview_generator/releases. It does not make chapter images or transcode for playback.
+
+## How it works
+
+1. **Trigger.** Sonarr, Radarr, Plex (needs Plex Pass), Emby (needs Emby Premiere), Jellyfin or any JSON `{"path": ...}` can post to one webhook URL that detects the sender; Sportarr, Tdarr and FileFlows have their own URLs. Also: Recently Added polling, cron or interval schedules, or a manual pick.
+2. **Resolve.** Each path is mapped to what the container sees, then every configured server whose enabled libraries hold the file is found.
+3. **Extract.** One FFmpeg run per file on a GPU worker: hardware decode, key-frame-only decoding when the file allows it, GPU scaling, HDR-to-SDR tone mapping. If the GPU can't decode the file, the same worker retries on the CPU.
+4. **Publish.** Plex: `index-sd.bif` in Plex's data folder. Emby: `<video>-<width>-<interval>.bif` next to the video. Jellyfin 10.10+: trickplay tiles next to the video, or in Jellyfin's data folder with the companion plugin. Each server is then asked to pick them up.
+5. **Retry and skip.** A server that hasn't indexed a new file yet is retried after 1, 2 and 5 minutes by default. A small companion file records each source's size and date, so later triggers skip current previews and redo replaced files.
+
+## Key facts
+
+- Runs as a Docker container, including an Unraid Community Applications template. Web UI plus a token-authenticated REST API; no CLI.
+- Needs network access to each server's API, and write access where previews go: Plex's data folder for Plex; the media folder for Emby and Jellyfin's default layout. Jellyfin must be 10.10 or newer.
+- GPUs: NVIDIA (CUDA), Intel and AMD (VAAPI) on Linux; only NVIDIA on Windows (WSL2); none on macOS. Without a GPU it runs on CPU workers.
+- HDR10, HLG and HDR10+ are tone-mapped; Dolby Vision 7 and 8 use their HDR10 layer; Dolby Vision 5 needs a hardware Vulkan driver in the container.
+- Frame interval 1-60 s (default 10; Plex's own default is 2); thumbnail quality 1-10 (default 4; lower = sharper).
+- Intro & Credits (dev image until the next release): finds intros and end credits and writes Skip Intro / Skip Credits markers to Plex (needs Plex Pass on the server and for viewers; the app runs on the Plex machine or uses the Plex marker agent), Jellyfin 10.11/12.0 and Emby 4.9/4.10 (via the app's plugins; Skip Intro on Emby needs Premiere). Off until turned on per server.
+
+## Docs
+
+- [llms-full.txt](https://mediapreviewgenerator.dev/llms-full.txt): every docs page below, in one file
+- [Home](https://mediapreviewgenerator.dev/): what it does, how it works, quick start and common questions
+- [Getting started](https://mediapreviewgenerator.dev/getting-started/): Docker, GPU setup, volume mounts, Unraid, networking
+- [How it compares](https://mediapreviewgenerator.dev/comparison/): Plex, Jellyfin and Emby built-in generation side by side, dated and sourced
+- [How-to](https://mediapreviewgenerator.dev/how-to/): the seven problem-first guides below
+- [Why Plex preview thumbnails take so long](https://mediapreviewgenerator.dev/plex-preview-thumbnails-slow/): Plex's CPU job, its settings, and moving it to a GPU
+- [Plex preview thumbnails with a GPU](https://mediapreviewgenerator.dev/plex-preview-thumbnails-gpu/): NVIDIA, Intel or AMD in Docker
+- [Faster Jellyfin trickplay](https://mediapreviewgenerator.dev/jellyfin-trickplay-gpu/): Jellyfin's own settings first, then a GPU container
+- [Emby BIF previews with a GPU](https://mediapreviewgenerator.dev/emby-bif-thumbnails-gpu/): BIF files made on a GPU next to each video
+- [Previews on Sonarr or Radarr import](https://mediapreviewgenerator.dev/sonarr-radarr-preview-thumbnails/): webhooks, the 60 s quiet period, retries
+- [HDR and Dolby Vision previews](https://mediapreviewgenerator.dev/hdr-dolby-vision-thumbnails/): tone mapping and the Profile 5 caveat
+- [Skip Intro and Skip Credits](https://mediapreviewgenerator.dev/skip-intro-credits/): what each server needs, how intros and credits are found, Needs review, limits
+- [Guides and troubleshooting](https://mediapreviewgenerator.dev/guides/): web UI, webhooks, schedules, HDR, CPU fallback
+- [Setup Health](https://mediapreviewgenerator.dev/guides/previews-readiness/): every server setting that decides whether previews show up
+- [Multi-server](https://mediapreviewgenerator.dev/multi-server/): output formats, webhook routing, retries, the Jellyfin plugin
+- [Reference](https://mediapreviewgenerator.dev/reference/): settings, environment variables, path mappings, REST API
+- [FAQ](https://mediapreviewgenerator.dev/faq/): Windows, GPUs, RAM, skipped files
+- [Credits](https://mediapreviewgenerator.dev/credits/): the open films in the screenshots and their licences
+
+## Source
+
+- GitHub: https://github.com/stevezau/media_preview_generator
+- Docker image: https://hub.docker.com/r/stevezzau/media_preview_generator (the Docker Hub account is `stevezzau`, with a double z)
+- Licence (MIT): https://github.com/stevezau/media_preview_generator/blob/main/LICENSE

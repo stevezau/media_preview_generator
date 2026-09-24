@@ -1,12 +1,13 @@
 ---
-description: What each Previews Readiness check means and how to fix it, so Plex, Emby and Jellyfin show the preview thumbnails this app generates.
+title: Setup Health
+heading: Setup Health
+description: What each Setup Health check means and how to fix it, so Plex, Emby and Jellyfin show the preview thumbnails
+  this app generates.
 ---
-
-# Previews Readiness
 
 > [Back to Guides](../guides.md) · [Configuration & API Reference](../reference.md) · [Multi-Media-Server Guide](../multi-server.md)
 
-The **Previews readiness** card on the Edit Server modal is the single
+The **Setup Health** tab on the Edit Server modal is the single
 place to verify — and adjust — every server-side setting that affects
 whether this app's previews show up in Plex / Emby / Jellyfin.
 
@@ -79,7 +80,7 @@ works, just slower to appear.
 
 **Enable:** one-click **Install plugin**. The app adds its manifest
 URL to Jellyfin's plugin repos, queues the install, and restarts
-Jellyfin. Takes ~30 s; the readiness card polls until the plugin is
+Jellyfin. Takes ~30 s; the Setup Health card polls until the plugin is
 live.
 
 **Disable:** **Uninstall plugin** (with confirm). Removes the package
@@ -346,8 +347,8 @@ Only Plex's detection row has buttons, one **Turn off** per library. Every other
 ### Plex
 
 - **Skip buttons need Plex Pass** (critical) / **Plex Pass is active**. Without Plex Pass Plex serves no intro or
-  credits markers at all, not ours and not its own, so nobody sees a skip button. Markers are still written and stay
-  for the day the server has a Pass. Viewers need Plex Pass or to be in your Plex Home too.
+  credits markers at all, not ours and not its own, so nobody sees a skip button, and this app writes nothing to it
+  until the server has a Pass. Viewers need Plex Pass or to be in your Plex Home too.
 - **Plex hasn't made its marker list yet** (critical) / **Plex's marker list is ready**. Plex only serves markers
   attached to a database row it made itself, and this app never creates that row. Turn on Plex's own intro detection
   for one library, play a file, then check again. You can turn Plex's detection back off afterwards.

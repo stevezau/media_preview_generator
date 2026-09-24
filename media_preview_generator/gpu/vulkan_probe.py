@@ -42,9 +42,10 @@ _VULKAN_DEBUG_BUFFER: str = ""
 
 # What users see without hardware Vulkan: the DV5 path skips libplacebo and
 # extracts frames with no tone mapping (see processing/generator.py), so the
-# thumbnails are dim. Shared by every log line below so they can't drift.
+# thumbnails keep normal brightness but get a green and purple tint. Shared by
+# every log line below so they can't drift.
 DV5_NO_VULKAN_EFFECT = (
-    "Dolby Vision Profile 5 thumbnails will come out dim (no tone mapping); "
+    "Dolby Vision Profile 5 thumbnails will have the wrong colours, a green and purple tint (no tone mapping); "
     "everything else (regular previews, HDR10, other Dolby Vision) is unaffected."
 )
 DV5_NO_VULKAN_FIX = (
@@ -121,7 +122,7 @@ class VulkanProbeResult:
                      rasteriser (``llvmpipe`` / ``lavapipe``). DV5 files
                      then skip libplacebo (which would paint a green
                      overlay there) and use the DV-safe fps+scale chain,
-                     so their thumbnails come out dim.
+                     so their thumbnails get a green and purple tint.
     """
 
     device: str | None
@@ -595,8 +596,8 @@ def get_vulkan_device_info() -> VulkanProbeResult:
             Vulkan device description string, or ``None`` if Vulkan is
             unavailable) and ``is_software`` (True when the selected
             device is a software rasteriser like ``llvmpipe`` /
-            ``lavapipe``, so DV5 files skip tone mapping and get dim
-            thumbnails).  Callers assemble the user-facing warning
+            ``lavapipe``, so DV5 files skip tone mapping and get
+            green-and-purple-tinted thumbnails).  Callers assemble the user-facing warning
             message themselves.
     """
     global _VULKAN_DEVICE_CACHE, _VULKAN_DEVICE_PROBED

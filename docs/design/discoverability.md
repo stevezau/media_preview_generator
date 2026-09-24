@@ -19,6 +19,7 @@ data → intent pages → images → repo metadata → verify with real retrieva
 - **Intro/credits detection is NOT shipped** (lives on `feat/markers-detection`). No page, no
   llms.txt claim, until it merges. `docs/faq.md` and `docs/getting-started.md` correctly say it
   isn't supported.
+  **Superseded 2026-09-24 (owner):** the site represents Intro & Credits (PR #241), launching after #241; see `docs/skip-intro-credits.md`.
 - **Funding: add Ko-fi** alongside GitHub Sponsors (username pending from owner).
 
 ## Hard constraint: the Jellyfin plugin manifest

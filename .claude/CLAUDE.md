@@ -18,9 +18,10 @@ pytest -m e2e -n 8 --no-cov                     # E2E: cap at 8 workers, NOT -n 
 pytest -m e2e -n 0 --no-cov                     # E2E serial (also fine)
 pytest -n 0                                     # Serial mode (for debugging)
 
-# Docs — after editing anything under docs/, regenerate llms-full.txt
-python scripts/generate_llms_full.py            # writes llms-full.txt
+# Docs (Jekyll, docs/) — after editing anything under docs/ (pages, _data/*.yml, nav), regenerate llms-full
+python scripts/generate_llms_full.py            # writes docs/llms-full.txt
 python scripts/generate_llms_full.py --check    # CI-style: non-zero exit if stale
+pytest --no-cov -n 0 tests/test_docs_site.py    # builds the site via host Bundler or the ruby:3.4 image
 ```
 
 **Tests run under `/dev/shm`:** `tests/conftest.py` points pytest's temp root (`tmp_path`,

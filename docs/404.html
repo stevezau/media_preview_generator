@@ -1,0 +1,28 @@
+---
+layout: default
+permalink: /404.html
+sitemap: false
+---
+<main id="main" class="section" style="text-align:center">
+  <div class="wrap">
+    <span class="eyebrow">404</span>
+    <h2 style="font-size:clamp(1.6rem,1.2rem + 1.8vw,2.35rem);margin-bottom:0.85rem">This page isn't here</h2>
+    <p class="section__lede" style="margin-inline:auto;max-width:34rem">
+      The link may be out of date, or the page may have moved. Search the documentation, or start from
+      the beginning.
+    </p>
+    <div class="hero__cta" style="margin-top:2rem">
+      <a class="btn btn--primary" href="{{ '/' | relative_url }}">Back to the home page</a>
+      <a class="btn btn--ghost" href="{{ '/getting-started/' | relative_url }}">Getting started</a>
+    </div>
+
+    <div class="grid grid--3 mt-lg" style="text-align:left;max-width:60rem;margin-inline:auto">
+      {%- for item in site.nav -%}
+        <a class="card card--link" href="{{ item.url | relative_url }}">
+          <h3>{{ item.title }}</h3>
+          <p>{{ item.blurb }}</p>
+        </a>
+      {%- endfor -%}
+    </div>
+  </div>
+</main>

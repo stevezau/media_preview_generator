@@ -1,8 +1,9 @@
 ---
-description: Install Media Preview Generator with Docker or Docker Compose, then set up NVIDIA, Intel or AMD GPU acceleration, Unraid, volume mounts and networking.
+title: Getting Started
+heading: Getting Started
+description: Install Media Preview Generator with Docker or Docker Compose, then set up NVIDIA, Intel or AMD GPU acceleration,
+  Unraid, volume mounts and networking.
 ---
-
-# Getting Started
 
 > [Back to Docs](README.md)
 
@@ -85,7 +86,7 @@ Find your token using the [Authentication Token](#authentication-token) section 
 ### Step 3: Complete the Setup Wizard
 
 1. Open `http://YOUR_SERVER_IP:8080`
-2. Enter the authentication token from the logs
+2. Enter the authentication token
 3. Follow the wizard:
    - **Step 1 — Pick your first server**: Plex, Emby, or Jellyfin. The vendor card expands to its friendliest sign-in flow:
      - **Plex** → **Sign in with Plex** OAuth (or paste a URL + token). If your Plex account has access to multiple servers, the wizard lists them all — tick one to configure in detail, or tick several to batch-add with shared defaults.
@@ -106,10 +107,9 @@ This tool's main job is **video preview thumbnails** — the small frames you
 see when you drag the scrub bar. Plex stores them as **BIF bundles**, Emby
 reads a **BIF sidecar** next to the media file, and Jellyfin reads a folder of
 JPG tile sheets called **trickplay** next to the media file. The app writes
-the right format for each. It does **not** generate chapter thumbnails or do
-other media analysis. It can also send **Skip Intro / Skip Credits markers**
-to your servers; that is off until you turn it on per server (see the
-[Intro & Credits guide](guides.md#intro--credits)).
+the right format for each. It does **not** generate chapter thumbnails. It can
+also send **Skip Intro / Skip Credits markers** to your servers, off until you
+turn it on per server (see the [Intro & Credits guide](guides.md#intro--credits)).
 
 **Turn off built-in preview generation on each server you configure** so this
 tool isn't competing with a redundant CPU job:
@@ -118,8 +118,8 @@ tool isn't competing with a redundant CPU job:
 - **Emby** — Emby can make its own thumbnails during library scans. Turn
   off its scan-time thumbnail extraction and chapter-image extraction on
   each library (`ExtractTrickplayImagesDuringLibraryScan` and
-  `ExtractChapterImagesDuringLibraryScan`). The Previews
-  Readiness card recommends this and turns them off when you click
+  `ExtractChapterImagesDuringLibraryScan`). The Setup
+  Health tab recommends this and turns them off when you click
   **Disable**; the app never changes them on its own.
 - **Jellyfin** — keep **"Trickplay image extraction"** *enabled* on each
   library (Jellyfin only reads this app's published tiles when that flag is
@@ -131,7 +131,7 @@ tool isn't competing with a redundant CPU job:
     lets Jellyfin pick up the tiles on its next library scan. Off means new
     previews wait for Jellyfin's daily trickplay task (3 AM by default).
 
-The Previews Readiness card (Servers → Edit → Setup Health) checks all of
+The Setup Health tab (Servers → Edit) checks all of
 these and can toggle them for you.
 
 > [!TIP]
@@ -172,8 +172,11 @@ With a `:ro` media mount, Emby and default-layout Jellyfin can't save anything. 
 
 Use this section whenever documentation asks for your authentication token.
 
+On first start the app makes a random token and saves it in `auth.json`, in the folder you mounted as
+`/config`. The logs show only its last 4 characters, so read it from that file:
+
 ```bash
-docker logs media-preview-generator | grep "Token:"
+docker exec media-preview-generator cat /config/auth.json
 ```
 
 You can also set a fixed token for predictable logins:
@@ -279,7 +282,7 @@ docker run -d \
 ```
 
 > [!TIP]
-> **Why `NVIDIA_DRIVER_CAPABILITIES=all`?** Dolby Vision Profile 5 videos need the NVIDIA Vulkan driver to be tone-mapped; the `all` value is what makes that driver available inside the container. Without it, the app skips tone mapping for those files and their thumbnails come out visibly dim. (The older `compute,video,utility` setting is fine for everything except Dolby Vision Profile 5.)
+> **Why `NVIDIA_DRIVER_CAPABILITIES=all`?** Dolby Vision Profile 5 videos need the NVIDIA Vulkan driver to be tone-mapped; the `all` value is what makes that driver available inside the container. Without it, the app skips tone mapping for those files and their thumbnails come out with a green and purple tint. (The older `compute,video,utility` setting is fine for everything except Dolby Vision Profile 5.)
 
 > [!TIP]
 > **Multi-GPU?** Hosts with two or more NVIDIA cards are detected automatically — each card appears as a separate row in **Settings → Processing Options → GPU Configuration** with its own enable toggle, worker count, and FFmpeg thread setting. Work spreads across cards.
@@ -366,7 +369,7 @@ Two install paths: the Community Applications template (easiest) or a manual `do
 
 1. Run the container (CA template or `docker run` below).
 2. Open the Web UI at `http://YOUR_UNRAID_IP:8080`.
-3. Get the authentication token from container logs, or set `WEB_AUTH_TOKEN` on the container.
+3. Sign in with the token from `auth.json` in the app's config folder (`/mnt/user/appdata/media-preview-generator` in the example below), or set `WEB_AUTH_TOKEN` on the container.
 4. Complete the Setup Wizard — sign in with Plex, configure settings.
 
 > [!TIP]

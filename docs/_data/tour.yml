@@ -1,0 +1,49 @@
+# The landing page's tour: what happens to one new file, in order, each step beside the screen where
+# it happens. Captured by tests/e2e/snapshots/regen_readme.py against a fixture (fake servers, the lab
+# films as titles). width/height are the CSS size the page reserves: half the 2x capture's pixels.
+# `path` is the app path shown in the frame's address bar.
+- title: A new file arrives
+  body: >-
+    Sonarr, Radarr, Tdarr or the media server itself sends a webhook when a file lands, to the URL the
+    Automation page gives it. Scheduled scans and a hand-picked list work too.
+  image: tour-trigger.webp
+  alt: The Automation page showing the webhook URL and the steps to add it in Sonarr and Radarr
+  path: /automation
+  width: 830
+  height: 737
+- title: It finds every server with that file
+  body: >-
+    The path Sonarr reports is mapped to the path the container sees. Then every Plex, Emby and
+    Jellyfin library that holds the file is found.
+  image: tour-resolve.webp
+  alt: The Servers page with one card each for Plex, Jellyfin and Emby
+  path: /servers
+  width: 1132
+  height: 216
+- title: One GPU pass per file
+  body: >-
+    FFmpeg decodes the video on the GPU, jumps between key frames when the file allows it, and
+    tone-maps HDR. If the GPU can't decode a file, the same worker tries again on the CPU.
+  image: tour-extract.webp
+  alt: GPU workers on the dashboard, each making previews for a different film
+  path: /
+  width: 1254
+  height: 509
+- title: Each server gets its own format
+  body: >-
+    A BIF in Plex's data folder, a BIF next to the video for Emby, trickplay tiles for Jellyfin. Then
+    each server is told to pick them up.
+  image: tour-publish.webp
+  alt: One film's job, showing previews published to Plex, Jellyfin and Emby
+  path: /
+  width: 1090
+  height: 217
+- title: It waits for slow servers
+  body: >-
+    A server that hasn't indexed the new file yet gets another try after 1, 2 and 5 minutes by
+    default. Next time, files whose previews are current are skipped.
+  image: tour-retry.webp
+  alt: A Jellyfin job waiting to retry while the server indexes a new film
+  path: /
+  width: 1254
+  height: 233

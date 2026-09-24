@@ -1,0 +1,64 @@
+{
+  "captures": [
+    {
+      "server": "plex",
+      "file": "player-plex.webp",
+      "proof_requests": [
+        "http://127.0.0.1:32402/photo/:/transcode?width=480&height=200&minSize=1&upscale=1&url=%2Flibrary%2Fparts%2F1966%2Findexes%2Fsd%2F378000%3FX-Plex-Token%3D<redacted>&X-Plex-Token=<redacted>",
+        "http://127.0.0.1:32402/photo/:/transcode?width=480&height=200&minSize=1&upscale=1&url=%2Flibrary%2Fparts%2F1966%2Findexes%2Fsd%2F274000%3FX-Plex-Token%3D<redacted>&X-Plex-Token=<redacted>",
+        "http://127.0.0.1:32402/photo/:/transcode?width=480&height=200&minSize=1&upscale=1&url=%2Flibrary%2Fparts%2F1966%2Findexes%2Fsd%2F277000%3FX-Plex-Token%3D<redacted>&X-Plex-Token=<redacted>"
+      ],
+      "slider_box": {
+        "x": 0,
+        "y": 610,
+        "width": 1280,
+        "height": 24
+      }
+    },
+    {
+      "server": "jellyfin",
+      "file": "player-jellyfin.webp",
+      "proof_requests": [
+        "http://127.0.0.1:18097/Videos/9a9a2da8b66e5bbf42fd5a156bd75210/Trickplay/320/0.jpg?ApiKey=<redacted>&MediaSourceId=9a9a2da8b66e5bbf42fd5a156bd75210"
+      ],
+      "slider_box": {
+        "x": 52.5625,
+        "y": 621.921875,
+        "width": 1170.078125,
+        "height": 27.890625
+      }
+    },
+    {
+      "server": "emby",
+      "file": "player-emby.webp",
+      "proof_requests": [
+        "http://127.0.0.1:18096/emby/Items/180/ThumbnailSet?MediaSourceId=mediasource_180&Width=400&X-Emby-Client=Emby+Web&X-Emby-Device-Name=Chromium+Linux&X-Emby-Device-Id=13f873b7-c043-403c-a31f-554ea98b5dac&X-Emby-Client-Version=4.10.0.40&X-Emby-Token=<redacted>&X-Emby-Language=en-us",
+        "http://127.0.0.1:18096/emby/Items/180/Images/Thumbnail?maxWidth=800&tag=e7985314aedba679e9789a80247b5c9b_639257609230136217&PositionTicks=2700000000&MediaSourceId=mediasource_180&quality=90",
+        "http://127.0.0.1:18096/emby/Items/180/Images/Thumbnail?maxWidth=800&tag=e7985314aedba679e9789a80247b5c9b_639257609230136217&PositionTicks=2800000000&MediaSourceId=mediasource_180&quality=90"
+      ],
+      "slider_box": {
+        "x": 42.890625,
+        "y": 571.484375,
+        "width": 1194.21875,
+        "height": 28.84375
+      },
+      "bif_match": {
+        "bif": "Tears of Steel (2012)-320-10.bif",
+        "frame_index": 30,
+        "bytes": 15209,
+        "identical": true
+      }
+    }
+  ],
+  "captured_at": "2026-09-23T12:44:25+00:00",
+  "film": "Tears of Steel",
+  "scrub_fraction": 0.42,
+  "hdr": {
+    "title": "Cosmos Laundromat HDR (2015)",
+    "seconds": 72.99,
+    "bif": "Cosmos Laundromat HDR (2015)-320-10.bif",
+    "frame_index": 8,
+    "bif_width": 320,
+    "likeness": 0.991
+  }
+}

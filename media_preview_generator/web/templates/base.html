@@ -21,8 +21,8 @@
     </script>
 
     <!-- Favicon -->
-    <link rel="icon" type="image/png" href="{{ url_for('static', filename='images/icon.png') }}">
-    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='images/icon.svg') }}">
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='images/favicon.svg') }}">
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='images/favicon-32.png') }}">
     <link rel="apple-touch-icon" href="{{ url_for('static', filename='images/icon.png') }}">
 
     <!-- Bootstrap 5 CSS -->
@@ -44,7 +44,7 @@
     <nav class="navbar navbar-expand-lg border-bottom sticky-top">
         <div class="container-fluid">
             <a class="navbar-brand" href="{{ url_for('main.index') }}">
-                <i class="bi bi-film me-2"></i>Media Preview Generator
+                <img class="navbar-brand-mark me-2" src="{{ url_for('static', filename='images/icon.svg') }}" alt="" width="26" height="26">Media Preview Generator
             </a>
             <!-- The standard ``.navbar-toggler-icon`` SVG is just three
                  horizontal bars; the close affordance got muddled when
@@ -66,7 +66,7 @@
                  aria-labelledby="navbarOffcanvasLabel">
                 <div class="offcanvas-header border-bottom">
                     <h5 class="offcanvas-title" id="navbarOffcanvasLabel">
-                        <i class="bi bi-film me-2 text-warning"></i>Menu
+                        <img class="offcanvas-brand-mark me-2" src="{{ url_for('static', filename='images/icon.svg') }}" alt="" width="22" height="22">Menu
                     </h5>
                     <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Close menu"></button>
                 </div>

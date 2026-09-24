@@ -1,0 +1,184 @@
+---
+layout: default
+---
+{%- comment -%}
+Find this page in site.nav so the sidebar can mark it current and the footer can
+offer prev/next. Pages are matched with and without the trailing slash so the
+layout works whether or not pretty permalinks are on.
+{%- endcomment -%}
+{%- assign nav = site.nav -%}
+{%- assign idx = -1 -%}
+{%- for item in nav -%}
+  {%- assign slashed = item.url | append: '/' -%}
+  {%- if page.url == item.url or page.url == slashed -%}{%- assign idx = forloop.index0 -%}{%- endif -%}
+{%- endfor -%}
+
+{%- comment -%}
+Guides has child pages, so a page can sit at either level. Work out whether this is
+one of them, and which parent it belongs to, so prev/next walks the section rather
+than skipping over it.
+{%- endcomment -%}
+{%- assign child_idx = -1 -%}
+{%- assign parent_idx = -1 -%}
+{%- for item in nav -%}
+  {%- if item.children -%}
+    {%- for child in item.children -%}
+      {%- if page.url == child.url -%}
+        {%- assign child_idx = forloop.index0 -%}
+        {%- assign parent_idx = forloop.parentloop.index0 -%}
+      {%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+{%- endfor -%}
+
+{%- comment -%}
+BreadcrumbList, built from the same nav lookup as the pager above (idx / parent_idx / child_idx) so
+this can never disagree with prev/next about where a page sits. A page missing from site.nav emits
+nothing: no trail beats a trail with a blank name in it.
+{%- endcomment -%}
+{%- if idx >= 0 or child_idx >= 0 -%}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {
+      "@type": "ListItem",
+      "position": 1,
+      "name": "Home",
+      "item": {{ '/' | absolute_url | jsonify }}
+    }
+    {%- if child_idx >= 0 -%}
+    ,{
+      "@type": "ListItem",
+      "position": 2,
+      "name": {{ nav[parent_idx].title | jsonify }},
+      "item": {{ nav[parent_idx].url | absolute_url | jsonify }}
+    },
+    {
+      "@type": "ListItem",
+      "position": 3,
+      "name": {{ nav[parent_idx].children[child_idx].title | jsonify }},
+      "item": {{ page.url | absolute_url | jsonify }}
+    }
+    {%- else -%}
+    ,{
+      "@type": "ListItem",
+      "position": 2,
+      "name": {{ nav[idx].title | jsonify }},
+      "item": {{ page.url | absolute_url | jsonify }}
+    }
+    {%- endif -%}
+  ]
+}
+</script>
+{%- endif -%}
+
+<div class="docs">
+  <aside class="sidebar" id="sidebar" aria-label="Documentation">
+    <h4>Documentation</h4>
+    <ul>
+      {%- for item in nav -%}
+        {%- assign slashed = item.url | append: '/' -%}
+        <li>
+          <a href="{{ item.url | relative_url }}"
+             {% if page.url == item.url or page.url == slashed %}aria-current="page"{% endif %}>{{ item.title }}</a>
+          {%- comment -%}
+          Children are only expanded while you are inside that section. Showing all eight guide
+          pages from every page in the site would bury the six top-level entries.
+          {%- endcomment -%}
+          {%- assign open = false -%}
+          {%- if page.url contains item.url -%}{%- assign open = true -%}{%- endif -%}
+          {%- for child in item.children -%}{%- if page.url == child.url -%}{%- assign open = true -%}{%- endif -%}{%- endfor -%}
+          {%- if item.children and open -%}
+            <ul class="sidebar__children">
+              {%- for child in item.children -%}
+                <li>
+                  <a href="{{ child.url | relative_url }}"
+                     {% if page.url == child.url %}aria-current="page"{% endif %}>{{ child.title }}</a>
+                </li>
+              {%- endfor -%}
+            </ul>
+          {%- endif -%}
+        </li>
+      {%- endfor -%}
+    </ul>
+
+    <h4>Project</h4>
+    <ul>
+      <li><a href="{{ site.repo }}">Source on GitHub</a></li>
+      <li><a href="{{ site.repo }}/releases">Releases</a></li>
+      <li><a href="{{ site.repo }}/issues/new/choose">Report a bug</a></li>
+    </ul>
+  </aside>
+
+  <main class="prose" id="main">
+    <div class="prose__head">
+      <h1>{{ page.heading | default: page.title }}</h1>
+      {%- if page.description %}<p>{{ page.description }}</p>{% endif -%}
+      {%- if page.facts_checked %}<p class="prose__facts">Facts checked {{ page.facts_checked | date: "%-d %B %Y" }}.</p>{% endif -%}
+    </div>
+
+    {{ content }}
+
+    <a class="edit-link" href="{{ site.repo }}/edit/dev/docs/{{ page.path | remove_first: 'docs/' }}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="M11 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-6"/>
+        <path d="M18.5 2.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4Z"/>
+      </svg>
+      Edit this page on GitHub
+    </a>
+
+    {%- if child_idx >= 0 -%}
+      {%- comment -%} A guide sub-page: walk its siblings, then out to the next section. {%- endcomment -%}
+      {%- assign parent = nav[parent_idx] -%}
+      {%- assign kids = parent.children -%}
+      {%- assign p = child_idx | minus: 1 -%}
+      {%- assign n = child_idx | plus: 1 -%}
+      <nav class="pager" aria-label="Page navigation">
+        {%- if child_idx > 0 -%}
+          {%- assign prev = kids[p] -%}
+          <a href="{{ prev.url | relative_url }}"><small>Previous</small><strong>{{ prev.title }}</strong></a>
+        {%- else -%}
+          <a href="{{ parent.url | relative_url }}"><small>Previous</small><strong>{{ parent.title }}</strong></a>
+        {%- endif -%}
+        {%- if n < kids.size -%}
+          {%- assign next = kids[n] -%}
+          <a class="is-next" href="{{ next.url | relative_url }}"><small>Next</small><strong>{{ next.title }}</strong></a>
+        {%- else -%}
+          {%- assign after = parent_idx | plus: 1 -%}
+          {%- if after < nav.size -%}
+            {%- assign next = nav[after] -%}
+            <a class="is-next" href="{{ next.url | relative_url }}"><small>Next</small><strong>{{ next.title }}</strong></a>
+          {%- endif -%}
+        {%- endif -%}
+      </nav>
+    {%- elsif idx >= 0 -%}
+      {%- assign prev_idx = idx | minus: 1 -%}
+      {%- assign next_idx = idx | plus: 1 -%}
+      {%- assign here = nav[idx] -%}
+      <nav class="pager" aria-label="Page navigation">
+        {%- if idx > 0 -%}
+          {%- assign prev = nav[prev_idx] -%}
+          <a href="{{ prev.url | relative_url }}"><small>Previous</small><strong>{{ prev.title }}</strong></a>
+        {%- else -%}
+          <a href="{{ '/' | relative_url }}"><small>Previous</small><strong>Home</strong></a>
+        {%- endif -%}
+        {%- comment -%} A section with children leads into its own first page, not past it. {%- endcomment -%}
+        {%- if here.children -%}
+          {%- assign next = here.children[0] -%}
+          <a class="is-next" href="{{ next.url | relative_url }}"><small>Next</small><strong>{{ next.title }}</strong></a>
+        {%- elsif next_idx < nav.size -%}
+          {%- assign next = nav[next_idx] -%}
+          <a class="is-next" href="{{ next.url | relative_url }}"><small>Next</small><strong>{{ next.title }}</strong></a>
+        {%- endif -%}
+      </nav>
+    {%- endif -%}
+  </main>
+
+  <aside class="toc" id="toc" aria-label="On this page" hidden>
+    <h4>On this page</h4>
+    <ul id="toc-list"></ul>
+  </aside>
+</div>
+{%- if page.faq_schema -%}{% include faq-jsonld.html %}{%- endif -%}

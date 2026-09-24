@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
-"""Regenerate the README and docs-site screenshots — dark mode, no real data, WebP.
+"""Regenerate the app tour screenshots — dark mode, no real data, WebP, 2x.
 
 Usage:
     python tests/e2e/snapshots/regen_readme.py --out docs/images/
 
 Boots the app in a temp config dir that has been pre-seeded with
 fake Plex / Jellyfin / Emby servers (see ``readme_fixture.py``) and a
-handful of plausible job rows, then drives Playwright to capture:
+handful of plausible job rows (the lab's open films), then drives
+Playwright to capture one idea per shot, each one element, no full-page
+scrolls:
 
-    /               -> home.webp        (full page)
-    /               -> dashboard.webp   (nav bar + top row of cards only)
-    /servers        -> servers.webp     (full page)
-    /settings       -> settings.webp    (Processing Options card only)
-    /automation     -> automation.webp  (Overview + *arr apps cards only)
+    /automation -> tour-trigger.webp  (Sonarr/Radarr webhook setup)
+    /servers    -> tour-resolve.webp  (one card per server)
+    /           -> tour-extract.webp  (GPU workers making previews)
+    /           -> tour-retry.webp    (a job waiting out a retry)
+    /?job=...   -> tour-publish.webp  (one file's per-server publish pills)
 
-Each surface is captured as a PNG and immediately converted to WebP
-(quality 85, method 6) via ``_to_webp()``; the PNG is deleted, not kept
-alongside it.
+Each shot is captured as a PNG at ``device_scale_factor=2`` (2x — CSS size
+is half the pixel size) and immediately converted to WebP (quality 88,
+method 6) via ``_to_webp()``; the PNG is deleted, not kept alongside it.
 
 All captures are dark-mode + desktop-only — this script targets the
 README and the docs site. For the visual-regression matrix (light + dark ×
@@ -41,9 +43,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import tempfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # Put the repo root first so ``media_preview_generator.*`` imports work
@@ -83,15 +87,6 @@ PLACEHOLDER_ORIGIN = f"http://{APP_HOST}:{APP_PORT}"
 # recognize, so the three vendor cards keep their distinct addresses instead
 # of collapsing to one placeholder.
 ALLOWED_IPS = [APP_HOST, PLEX_HOST, JELLYFIN_HOST, EMBY_HOST]
-
-# Full-page captures. Settings and Automation are handled separately below
-# because both crop to a specific section rather than capturing the whole
-# page (the full Settings page is ~4000px tall, and the full Automation
-# page ~3500px — neither fits a README gallery tile).
-SURFACES: list[tuple[str, str]] = [
-    ("/", "home"),
-    ("/servers", "servers"),
-]
 
 # Init script (runs in every page before app JS boots). Two jobs:
 # 1. Override window.location.origin so _refreshWebhookUrls() in
@@ -229,8 +224,19 @@ def _fake_library_rows(server_id: str | None = None) -> list[dict]:
     return rows
 
 
+# The first three GPU workers are shown mid-extraction, one per lab film, so
+# the dashboard tour shot (tour-extract.webp, "GPU workers making previews
+# for three films") reads as a real job in flight instead of an idle pool.
+# Matches three of ``readme_fixture.seed_jobs``' single-file jobs.
+BUSY_WORKER_SPECS: list[dict] = [
+    {"current_title": "Tears of Steel (2012)", "library_name": "Movies", "progress_percent": 34.0, "speed": "1.4x"},
+    {"current_title": "Sintel (2010)", "library_name": "Movies", "progress_percent": 61.0, "speed": "1.1x"},
+    {"current_title": "Big Buck Bunny (2008)", "library_name": "Movies", "progress_percent": 82.0, "speed": "1.6x"},
+]
+
+
 def _fake_worker_statuses() -> list[dict]:
-    """Idle worker rows for the dashboard's "WORKERS" panel.
+    """Worker rows for the dashboard's "WORKERS" panel — the first three busy, the rest idle.
 
     ``GET /api/jobs/workers`` is a real API call, but unstubbed it's built
     server-side from ``_ensure_gpu_cache()`` — the SAME real hardware
@@ -258,16 +264,22 @@ def _fake_worker_statuses() -> list[dict]:
     workers = []
     worker_id = 0
     gpu_seq = 0
+    busy_index = 0
     for gpu, worker_count in zip(FAKE_GPUS, FAKE_GPU_WORKERS, strict=True):
         for _ in range(worker_count):
             worker_id += 1
             gpu_seq += 1
+            entry = dict(idle_entry)
+            if busy_index < len(BUSY_WORKER_SPECS):
+                spec = BUSY_WORKER_SPECS[busy_index]
+                busy_index += 1
+                entry.update(status="processing", ffmpeg_started=True, **spec)
             workers.append(
                 {
                     "worker_id": worker_id,
                     "worker_type": "GPU",
                     "worker_name": f"GPU Worker {gpu_seq} ({gpu['name']})",
-                    **idle_entry,
+                    **entry,
                 }
             )
     for cpu_seq in range(1, FAKE_CPU_THREADS + 1):
@@ -416,13 +428,14 @@ def _install_api_stubs(ctx: BrowserContext, current_version: str) -> None:
     ctx.route("**/api/jobs/workers", handle_jobs_workers)
 
 
-def _to_webp(png_path: Path, quality: int = 85, method: int = 6) -> Path:
+def _to_webp(png_path: Path, quality: int = 88, method: int = 6) -> Path:
     """Convert a captured PNG to WebP in place and delete the PNG.
 
-    README/docs images ship as WebP only — smaller files, same quality at
-    this content type (flat UI screenshots). ``method=6`` is Pillow's
-    slowest-but-smallest WebP encoder effort; fine for a handful of
-    one-off regenerations.
+    Docs/README images ship as WebP only -- smaller files, same quality at
+    this content type (flat UI screenshots). ``quality=88`` (up from the
+    encoder default of 85) keeps small text crisp at 2x capture; ``method=6``
+    is Pillow's slowest-but-smallest WebP encoder effort -- fine for a
+    handful of one-off regenerations.
     """
     webp_path = png_path.with_suffix(".webp")
     with Image.open(png_path) as im:
@@ -432,101 +445,83 @@ def _to_webp(png_path: Path, quality: int = 85, method: int = 6) -> Path:
     return webp_path
 
 
-def _capture_surface(page: Page, app_url: str, path: str, out_path: Path) -> None:
+def _install_retry_job_stub(ctx: BrowserContext) -> None:
+    """Add one job waiting out a retry to the dashboard's job list.
+
+    The retry state lasts minutes in real life and can't be seeded (JobManager turns stored RUNNING
+    rows into FAILED at startup), so the real /api/jobs response is fetched and one job appended.
+    """
+
+    def handle(route) -> None:
+        response = route.fetch()
+        data = response.json()
+        now = datetime.now(UTC)
+        data["jobs"].insert(
+            0,
+            {
+                "id": "retry-demo",
+                "status": "running",
+                "paused": False,
+                "library_name": "Sintel (2010)",
+                "server_id": "jellyfin-home",
+                "server_name": "Home Jellyfin",
+                "server_type": "jellyfin",
+                "created_at": (now - timedelta(minutes=2)).isoformat(),
+                "started_at": (now - timedelta(minutes=2)).isoformat(),
+                "progress": {
+                    "percent": 0,
+                    "total_items": 1,
+                    "processed_items": 0,
+                    "retry_eta": (now + timedelta(seconds=100)).isoformat(),
+                    "retry_wait_total": 120,
+                },
+                "config": {"trigger": "webhook", "is_retry_chain": True, "max_retries": 5, "path_count": 1},
+            },
+        )
+        route.fulfill(response=response, json=data)
+
+    ctx.route(re.compile(r".*/api/jobs\?page="), handle)
+
+
+def _capture_element(
+    page: Page, app_url: str, path: str, selector: str, out_path: Path, *, ready: str | None = None
+) -> None:
+    """Screenshot one element: one idea per shot, no full-page scrolls."""
     page.goto(f"{app_url}{path}", wait_until="domcontentloaded", timeout=15_000)
-    # networkidle is unreliable here because the app holds a long-lived
-    # socket.io connection, so we wait for the DOM + a settle window
-    # instead. 1.5s covers the async dashboard widgets (worker pool,
-    # media-server probe, job stats) that paint after first render.
-    page.wait_for_timeout(1500)
-    page.screenshot(path=str(out_path), full_page=True)
+    page.wait_for_selector(selector, state="visible", timeout=15_000)
+    if ready:
+        page.wait_for_function(ready, timeout=15_000)
+    page.wait_for_timeout(1200)
+    page.locator(selector).first.screenshot(path=str(out_path), animations="disabled")
     print(f"[regen_readme] wrote {out_path.name}", file=sys.stderr)
 
 
-def _capture_dashboard_hero(page: Page, app_url: str, out_path: Path) -> None:
-    """Navigate to / and clip from the top of the page to the end of the first card row.
-
-    The docs landing page needs a hero, and the full dashboard (~2000px tall,
-    workers grid + job queue) swamps it. The nav bar plus the System & Workers /
-    Quick Actions / Job Statistics row is the recognisable part of the app,
-    and at ~1280x650 it sits above the fold.
-    """
-    page.goto(f"{app_url}/", wait_until="domcontentloaded", timeout=15_000)
-    page.wait_for_function(
-        "() => document.getElementById('statTotal').textContent.trim() !== '\u2014'",
-        timeout=10_000,
-    )
-    page.wait_for_timeout(1500)
-    box = page.evaluate(
-        """() => {
-            // Card bottoms, not the row's: the row box includes each column's mb-4
-            // gap, which would pull the next card's top edge into the clip.
-            const row = document.getElementById('jobStats').closest('.row');
-            const cards = [...row.querySelectorAll(':scope > div > .card')];
-            const bottom = Math.max(...cards.map((c) => c.getBoundingClientRect().bottom)) + window.scrollY;
-            return { x: 0, y: 0, width: document.documentElement.clientWidth, height: Math.ceil(bottom) + 12 };
-        }"""
-    )
-    page.screenshot(path=str(out_path), clip=box, full_page=True, animations="disabled")
-    print(f"[regen_readme] wrote {out_path.name}", file=sys.stderr)
+TOUR_SHOTS = [
+    # (file, app path, element, ready condition)
+    ("tour-trigger", "/automation", "#section-webhooks-sonarr-radarr", None),
+    ("tour-resolve", "/servers", "#serverList", "() => document.querySelectorAll('#serverList .card').length >= 3"),
+    (
+        "tour-extract",
+        "/",
+        "#workerStatusContainer",
+        "() => !!document.querySelector('#workerStatusContainer .progress')",
+    ),
+    (
+        "tour-retry",
+        "/",
+        "#activeJobsContainer",
+        "() => /Waiting to retry/.test(document.getElementById('activeJobsContainer').innerText)",
+    ),
+]
 
 
-def _capture_settings_processing(page: Page, app_url: str, out_path: Path) -> None:
-    """Navigate to /settings and clip to the Processing Options card.
-
-    The full Settings page is ~4000px tall (Processing / Logging / Auth /
-    Backups / About) and dwarfs the other README tiles. Clipping to the
-    ``#section-processing`` element (the GPU + CPU workers + thumbnail
-    + HDR + smart-caching card) yields a tile that sits comfortably next
-    to the Dashboard / Servers / Automation shots.
-
-    Uses Playwright's element-level screenshot instead of CSS crop so
-    the resulting PNG is exactly the card's bounding box — no empty
-    gutters, no guess-the-viewport math.
-    """
-    page.goto(f"{app_url}/settings", wait_until="domcontentloaded", timeout=15_000)
-    # Wait for the GPU detection spinner to be replaced by real GPU
-    # rows, otherwise the card captures mid-spin and the PNG is
-    # non-deterministic across runs.
-    page.wait_for_selector("#gpuDetecting", state="hidden", timeout=10_000)
-    page.wait_for_function("() => document.getElementById('gpuConfigList').children.length > 0", timeout=5_000)
-    el = page.locator("#section-processing")
-    el.scroll_into_view_if_needed()
-    page.wait_for_timeout(500)
-    # animations='disabled' pauses any still-running CSS transitions
-    # (badge pulses, collapse chevrons) so the clip is a clean still.
-    el.screenshot(path=str(out_path), animations="disabled")
-    print(f"[regen_readme] wrote {out_path.name}", file=sys.stderr)
-
-
-def _capture_automation_triggers(page: Page, app_url: str, out_path: Path) -> None:
-    """Navigate to /automation and clip to the Overview + *arr apps cards.
-
-    The full Triggers pane is ~3500px tall (Overview / *arr apps / Custom
-    webhook / Settings / Activity) — too tall for a README tile. Clipping to
-    the bounding box of ``#section-webhooks-overview`` +
-    ``#section-webhooks-sonarr-radarr`` shows the concrete payoff (an actual
-    webhook URL + setup steps) rather than a bare card list, while staying
-    under ~1800px — capped explicitly in case a future card grows it past
-    that.
-    """
-    page.goto(f"{app_url}/automation", wait_until="domcontentloaded", timeout=15_000)
-    page.wait_for_selector("#section-webhooks-sonarr-radarr", state="visible", timeout=10_000)
-    page.wait_for_timeout(500)
-    box = page.evaluate(
-        """() => {
-            const a = document.getElementById('section-webhooks-overview').getBoundingClientRect();
-            const b = document.getElementById('section-webhooks-sonarr-radarr').getBoundingClientRect();
-            const top = Math.min(a.top, b.top) + window.scrollY;
-            const bottom = Math.max(a.bottom, b.bottom) + window.scrollY;
-            return { x: 0, y: top, width: document.documentElement.scrollWidth, height: Math.min(bottom - top, 1800) };
-        }"""
-    )
-    # full_page=True is required here: without it, Playwright's clip is
-    # bounded by the current viewport (720px tall) rather than the full
-    # rendered page, silently truncating the shot to (viewport_height -
-    # clip.y) instead of the intended clip.height.
-    page.screenshot(path=str(out_path), clip=box, full_page=True, animations="disabled")
+def _capture_publish(page: Page, app_url: str, job_id: str, out_path: Path) -> None:
+    """The Tears of Steel job's Files tab: one pill per server that received a preview."""
+    page.goto(f"{app_url}/?job={job_id}", wait_until="domcontentloaded", timeout=15_000)
+    page.click("#filesTab", timeout=15_000)
+    page.wait_for_selector("#filesTabPane .badge", state="visible", timeout=15_000)
+    page.wait_for_timeout(800)
+    page.locator("#filesTabPane").screenshot(path=str(out_path), animations="disabled")
     print(f"[regen_readme] wrote {out_path.name}", file=sys.stderr)
 
 
@@ -536,7 +531,7 @@ def regenerate(out_dir: Path) -> int:
     print(f"[regen_readme] seeding fixture in {config_dir}", file=sys.stderr)
     write_settings(config_dir)
     seeded = seed_jobs(config_dir)
-    print(f"[regen_readme] seeded {seeded} jobs", file=sys.stderr)
+    print(f"[regen_readme] seeded {seeded['count']} jobs", file=sys.stderr)
 
     current_version = _latest_release_tag()
     print(f"[regen_readme] stubbing version as {current_version} (no update banner)", file=sys.stderr)
@@ -561,10 +556,11 @@ def regenerate(out_dir: Path) -> int:
         with sync_playwright() as p:
             browser = p.chromium.launch()
             try:
-                ctx = browser.new_context(viewport={"width": 1280, "height": 720})
+                ctx = browser.new_context(viewport={"width": 1280, "height": 720}, device_scale_factor=2)
                 ctx.add_cookies([cookie])
                 ctx.add_init_script(INIT_SCRIPT)
                 _install_api_stubs(ctx, current_version)
+                _install_retry_job_stub(ctx)
                 page = ctx.new_page()
 
                 # Prime localStorage by visiting any page once; init
@@ -574,22 +570,14 @@ def regenerate(out_dir: Path) -> int:
                 page.wait_for_timeout(500)
 
                 written_pngs = []
-                for path, name in SURFACES:
+                for name, path, selector, ready in TOUR_SHOTS:
                     png_path = out_dir / f"{name}.png"
-                    _capture_surface(page, app_url, path, png_path)
+                    _capture_element(page, app_url, path, selector, png_path, ready=ready)
                     written_pngs.append(png_path)
 
-                dashboard_png = out_dir / "dashboard.png"
-                _capture_dashboard_hero(page, app_url, dashboard_png)
-                written_pngs.append(dashboard_png)
-
-                settings_png = out_dir / "settings.png"
-                _capture_settings_processing(page, app_url, settings_png)
-                written_pngs.append(settings_png)
-
-                automation_png = out_dir / "automation.png"
-                _capture_automation_triggers(page, app_url, automation_png)
-                written_pngs.append(automation_png)
+                publish_png = out_dir / "tour-publish.png"
+                _capture_publish(page, app_url, seeded["tears_job_id"], publish_png)
+                written_pngs.append(publish_png)
 
                 ctx.close()
 

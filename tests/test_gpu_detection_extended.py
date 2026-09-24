@@ -2575,9 +2575,9 @@ class TestGetVulkanInfoAPI:
         assert "warning" in info
         warning = info["warning"]
         assert "Dolby Vision Profile 5" in warning
-        # No hardware Vulkan → DV5 thumbnails skip tone mapping (dim), not a green overlay.
-        assert "dim" in warning
-        assert "green" not in warning
+        # No hardware Vulkan → DV5 thumbnails skip tone mapping: normal brightness, wrong colours.
+        assert "wrong colours" in warning
+        assert "green and purple" in warning
         assert "/dev/dri" in warning
 
     @patch("media_preview_generator.gpu.vulkan_probe._probe_vulkan_device")

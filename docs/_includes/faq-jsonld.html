@@ -1,0 +1,25 @@
+{%- comment -%}
+FAQPage structured data from _data/faq.yml, the file the landing page's FAQ renders, so the markup
+and the visible questions can't drift. Every q in faq.yml must also be a heading on /faq/ (tested).
+Google retired the FAQ rich result; this stays because AI crawlers and other indexes read
+schema.org types to work out what this software does. It is not ranking work.
+
+An answer's trailing "[More](/page/)" link is for readers of the page. It is cut off here, or the
+structured answer would end in the bare word "More".
+{%- endcomment -%}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {%- for q in site.data.faq -%}
+    {
+      "@type": "Question",
+      "name": {{ q.q | jsonify }},
+      {%- assign answer = q.a | split: "[More](" | first %}
+      "acceptedAnswer": { "@type": "Answer", "text": {{ answer | markdownify | strip_html | normalize_whitespace | strip | jsonify }} }
+    }{%- unless forloop.last -%},{%- endunless -%}
+    {%- endfor -%}
+  ]
+}
+</script>

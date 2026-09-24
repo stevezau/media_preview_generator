@@ -1,8 +1,9 @@
 ---
-description: Every Media Preview Generator setting, environment variable, path mapping and REST API endpoint, with defaults, request and response examples.
+title: Configuration & API Reference
+heading: Configuration & API Reference
+description: Every Media Preview Generator setting, environment variable, path mapping and REST API endpoint, with defaults,
+  request and response examples.
 ---
-
-# Configuration & API Reference
 
 > [Back to Docs](README.md)
 
@@ -451,9 +452,9 @@ or when its file's row was "not in library" and the server confirmed the item mi
 (the normal retry above, `source: "reconcile"`, attempt 1; like `manual` jobs, it and its retries queue no not-on-disk
 retry and no verify job) and the item is dropped only once that retry is queued. A run cancelled or failed before
 then, or with `webhook_retry_count` 0, drops nothing, so the next run confirms the item again. Check servers queues no
-other retry (a later run lists what still waits). Other warnings: `Skipped <server>:
-<reason>`, `Couldn't check <server>`, `Couldn't check <server>: no connection to it`, `Couldn't read what N item(s)
-show on <server>`. With nothing to list it completes at once (log "Every server checked still shows what this app
+other retry (a later run lists what still waits). Other warnings: `Skipped <server>: <reason>`,
+`Couldn't check <server>`, `Couldn't check <server>: no connection to it`, `Couldn't read what N item(s) show on <server>`.
+With nothing to list it completes at once (log "Every server checked still shows what this app
 published").
 
 ### Outcome keys
@@ -714,8 +715,8 @@ episode"}` (no `SxxEyy` in its name). `500` `{"error": "Couldn't build the Seaso
 
 **Request:** `{"path"}` — any episode of the season.
 
-**Response:** `202` with `{"job_id"}` — a NORMAL-priority, not forced Intro & Credits job named `Intro & Credits:
-<show> · Season N` (or `· Specials`) for exactly the episodes `GET /api/markers/season` lists for that path (same
+**Response:** `202` with `{"job_id"}` — a NORMAL-priority, not forced Intro & Credits job named
+`Intro & Credits: <show> · Season N` (or `· Specials`) for exactly the episodes `GET /api/markers/season` lists for that path (same
 folder and season number, at most the 40 nearest), so a folder holding several seasons only sends this one: decided
 episodes are sent to every server that doesn't show them yet, undecided ones are checked again. While a Publish of the
 same episodes is still queued or running, its id is returned instead of starting a second one. For example
@@ -1250,8 +1251,8 @@ For full design and per-vendor details see [Multi-Media-Server](multi-server.md)
 | POST | `/api/servers/auth/jellyfin/quick-connect/poll` | Poll for approval |
 | POST | `/api/servers/auth/jellyfin/quick-connect/exchange` | Exchange approved secret for token |
 | GET | `/api/servers/<id>/health-check` | Per-server settings audit. Returns `{vendor, issues, issue_count, fixable_count}`; `issues[]` carries `{flag, label, severity, current, recommended, rationale, library_id, library_name, fixable}`. Works for Plex (server-wide prefs via `/:/prefs`), Emby and Jellyfin (per-library `LibraryOptions`). Replaces the older Jellyfin-only `/jellyfin/trickplay-status` route. |
-| POST | `/api/servers/<id>/health-check/apply` | Apply settings to one or more flags. Three body shapes (all backwards-compatible): `{}` = fix every issue at recommended value; `{"flags": ["FlagName", ...]}` = fix only named flags toward recommended; `{"set": [{"flag": "X", "value": true\|false, "library_ids": ["id"]\|null}]}` = set each flag to the EXPLICIT value (enables disable-direction toggles on the Previews readiness card). Returns `{ok, results}` keyed `<library_id>:<flag>` (or `:<flag>` for server-wide prefs). |
-| GET | `/api/servers/<id>/previews-readiness` | Unified readiness payload for every vendor. Returns `{vendor, overall_ok, sections: [{id, title, docs_anchor, ok, severity, checks: [{id, label, docs_anchor, tooltip, ok, severity, current, recommended, actions: {enable?, disable?}, reason, meta}]}]}`. Drives the unified Previews readiness card on the Edit Server modal. See the [Previews readiness guide](guides/previews-readiness.md). |
+| POST | `/api/servers/<id>/health-check/apply` | Apply settings to one or more flags. Three body shapes (all backwards-compatible): `{}` = fix every issue at recommended value; `{"flags": ["FlagName", ...]}` = fix only named flags toward recommended; `{"set": [{"flag": "X", "value": true\|false, "library_ids": ["id"]\|null}]}` = set each flag to the EXPLICIT value (enables disable-direction toggles on the Setup Health card). Returns `{ok, results}` keyed `<library_id>:<flag>` (or `:<flag>` for server-wide prefs). |
+| GET | `/api/servers/<id>/previews-readiness` | Unified readiness payload for every vendor. Returns `{vendor, overall_ok, sections: [{id, title, docs_anchor, ok, severity, checks: [{id, label, docs_anchor, tooltip, ok, severity, current, recommended, actions: {enable?, disable?}, reason, meta}]}]}`. Drives the unified Setup Health card on the Edit Server modal. See the [Setup Health guide](guides/previews-readiness.md). |
 | POST | `/api/servers/<id>/install-plugin` | Jellyfin and Emby (400 for Plex). Jellyfin: adds the Media Preview Bridge manifest URL to Jellyfin's plugin repos, queues the package install, and restarts Jellyfin. Returns `{ok, steps: [{step, ok, detail}], error}`. Emby: installs Media Preview Bridge for Emby from Emby's own plugin catalog and restarts Emby; when the catalog doesn't list it, answers `ok: false, manual: true` (install the DLL by hand). Returns `{ok, steps, error, manual}`. |
 | POST | `/api/servers/<id>/plex-marker-detection` | Plex only. Setup Health's per-library **Turn off** for Plex's own intro/credits detection. Body `{"library_id": "2", "prefs": ["enableIntroMarkerGeneration", "enableCreditsMarkerGeneration"]}` (one or both); sets them off with `PUT /library/sections/{id}/prefs` for that library only, never Plex's server-wide prefs. 400 for any other pref, a library outside the server's Intro & Credits selection, or a non-Plex server. Returns `{ok, library_id, prefs}` or `{ok: false, error}`. |
 | POST | `/api/servers/<id>/uninstall-plugin` | Jellyfin only. Removes the Media Preview Bridge plugin (`DELETE /Packages/{GUID}`; 404 treated as success — already gone) and restarts Jellyfin. Repo URL stays in place for possible re-install. Same response shape as `/install-plugin`. |

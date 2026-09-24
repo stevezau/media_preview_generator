@@ -1,0 +1,126 @@
+title: Media Preview Generator
+tagline: Preview thumbnails made on your GPU, plus Skip Intro and Skip Credits, for Plex, Emby and Jellyfin
+description: >-
+  Self-hosted, GPU-accelerated preview thumbnails for Plex, Emby and Jellyfin, made as soon as
+  Sonarr or Radarr import a file, plus Skip Intro and Skip Credits markers. HDR tone-mapped, one
+  Docker container.
+
+# Where the site lives. Every template link derives from these two through relative_url /
+# absolute_url; CNAME and the llms files name the host as text (tests/test_site_urls.py). The Pages
+# custom domain has been mediapreviewgenerator.dev since 2026-09-23 (certificate approved, HTTPS
+# enforced); the old github.io project URLs 301 here, path for path.
+url: https://mediapreviewgenerator.dev
+baseurl: ""
+
+repo: https://github.com/stevezau/media_preview_generator
+author:
+  name: Steven Adams
+  url: https://github.com/stevezau
+
+# The host in the landing page's fake address bars: the LAN address the app screenshots' fixture
+# uses (tests/e2e/snapshots/readme_fixture.py APP_HOST:APP_PORT), with the real default port.
+demo_host: 192.168.1.10:8080
+# The Docker Hub account doubles the z (stevezzau); GitHub is stevezau. Don't "fix" it.
+docker_image: stevezzau/media_preview_generator
+docker_image_url: https://hub.docker.com/r/stevezzau/media_preview_generator
+
+permalink: pretty
+
+# og:image for every page. jekyll-seo-tag reads page.image, never site.image, hence defaults.
+defaults:
+  - scope:
+      path: ""
+    values:
+      image: /images/social-preview.jpg
+      layout: doc
+
+# Reading order: drives the sidebar, prev/next, breadcrumbs, the footer and llms-full.txt.
+# `header: true` puts a section in the top bar; `blurb` is its card text on the 404 page.
+nav:
+  - title: Getting started
+    url: /getting-started/
+    blurb: Docker install, GPU setup, mounts and the first run
+    header: true
+  - title: How it compares
+    url: /comparison/
+    blurb: Plex, Jellyfin and Emby built-in generation, side by side
+    header: true
+  - title: How-to
+    url: /how-to/
+    blurb: Slow Plex previews, GPUs, Jellyfin trickplay, Emby BIFs, Sonarr and Radarr, HDR, skip buttons
+    header: true
+    children:
+      - title: Why Plex previews are slow
+        url: /plex-preview-thumbnails-slow/
+      - title: Plex previews with a GPU
+        url: /plex-preview-thumbnails-gpu/
+      - title: Faster Jellyfin trickplay
+        url: /jellyfin-trickplay-gpu/
+      - title: Emby BIF previews with a GPU
+        url: /emby-bif-thumbnails-gpu/
+      - title: Previews on Sonarr or Radarr import
+        url: /sonarr-radarr-preview-thumbnails/
+      - title: HDR and Dolby Vision previews
+        url: /hdr-dolby-vision-thumbnails/
+      - title: Skip Intro and Skip Credits
+        url: /skip-intro-credits/
+  - title: Guides
+    url: /guides/
+    blurb: The web UI, webhooks, schedules and troubleshooting
+    header: true
+    children:
+      - title: Setup Health
+        url: /guides/previews-readiness/
+  - title: Multi-server
+    url: /multi-server/
+    blurb: Plex, Emby and Jellyfin from one instance
+  - title: Reference
+    url: /reference/
+    blurb: Every setting, environment variable and API endpoint
+    header: true
+  - title: FAQ
+    url: /faq/
+    blurb: Windows, GPUs, speed, RAM and skipped files
+    header: true
+  - title: Credits
+    url: /credits/
+    blurb: The open films in the screenshots, and their licences
+
+plugins:
+  - jekyll-relative-links
+  - jekyll-seo-tag
+  - jekyll-sitemap
+
+# The .md links these pages use for each other work on github.com; this rewrites them for the site.
+relative_links:
+  enabled: true
+  collections: false
+
+# The same pages are read on github.com, so render them the way GitHub does: no typographic
+# rewrites (-- to an en dash, straight to curly quotes), which GitHub never makes.
+kramdown:
+  input: GFM
+  hard_wrap: false
+  gfm_quirks: [paragraph_end, no_auto_typographic]
+  smart_quotes: [apos, apos, quot, quot]
+  syntax_highlighter: rouge
+  show_warnings: true
+
+strict_front_matter: true
+liquid:
+  error_mode: strict
+  strict_filters: true
+
+# benchmark/ is where scripts/benchmark_previews.py writes the method record behind any speed number
+# (tests/test_benchmark_summary.py checks it); none of it goes on the site. superpowers/ holds
+# local planning notes some checkouts write under docs/.
+exclude:
+  - README.md
+  - design/
+  - benchmark/
+  - superpowers/
+  - Gemfile
+  - Gemfile.lock
+  - .ruby-version
+  - vendor/
+  - .bundle/

@@ -27,7 +27,7 @@ QUALITY_COPY_SURFACES = {
     "unraid-template": REPO_ROOT / "unraid-templates/media-preview-generator.xml",
     "faq.md": REPO_ROOT / "docs/faq.md",
     "reference.md": REPO_ROOT / "docs/reference.md",
-    "llms.txt": REPO_ROOT / "llms.txt",
+    "llms.txt": REPO_ROOT / "docs/llms.txt",
 }
 
 # The wording each surface must carry, one entry per key above.
@@ -69,8 +69,9 @@ SURFACE_SCOPE: dict[str, tuple[str, ...]] = {
         r'<div class="form-text">\s*Quality:.*?</div>',
     ),
     "unraid-template": (r"^.*THUMBNAIL_QUALITY.*$",),
-    # The whole FAQ answer, question heading to the next question heading.
-    "faq.md": (r"^### What's thumbnail quality 1-10\?\n.*?(?=\n### )",),
+    # The whole FAQ answer, question heading to the next question heading. The heading may end in the
+    # <a id> that keeps the old MkDocs link to it working.
+    "faq.md": (r"^### What does thumbnail quality 1-10 change\?(?:<a id=\"[^\"]+\"></a>)?\n.*?(?=\n### )",),
     "reference.md": (r"^.*[Pp]review quality.*$",),
     "llms.txt": (r"^.*thumbnail quality.*$",),
 }

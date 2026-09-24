@@ -8,8 +8,8 @@ when the warning body evolves between releases.
 
 Current sources:
 
-- ``vulkan_software_fallback`` — Dolby Vision Profile 5 dim-thumbnail
-  warning, sourced from ``api_vulkan._get_vulkan_info``.
+- ``vulkan_software_fallback`` — Dolby Vision Profile 5 wrong-colour
+  thumbnail warning, sourced from ``api_vulkan._get_vulkan_info``.
 - ``timezone_misconfigured`` — container is running UTC without an
   explicit TZ env var, sourced from ``api_system._get_timezone_info``.
 
@@ -91,7 +91,7 @@ def _build_vulkan_software_fallback_notification() -> dict[str, Any] | None:
     return {
         "id": VULKAN_SOFTWARE_FALLBACK_ID,
         "severity": "warning",
-        "title": "Dolby Vision Profile 5 thumbnails will come out dim",
+        "title": "Dolby Vision Profile 5 thumbnails will have the wrong colours",
         "body_html": warning_html,
         "dismissable": True,
         "source": "vulkan_probe",

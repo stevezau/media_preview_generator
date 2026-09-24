@@ -15,11 +15,6 @@ on:
     branches: [dev]
     paths:
       - "docs/**"
-      - "docs_theme/**"
-      - "mkdocs.yml"
-      - "llms.txt"
-      - "llms-full.txt"
-      - "pyproject.toml"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
   workflow_call:
@@ -69,23 +64,23 @@ jobs:
           ref: ${{ inputs.docs_ref || github.ref }}
 
       - name: Setup Python
+        # Only for the manifest validation below; the site itself is Jekyll.
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install docs dependencies
-        # Pins live in pyproject.toml's `docs` extra; install just those, not the app.
-        run: |
-          set -euo pipefail
-          python - <<'PY' > docs-requirements.txt
-          import tomllib
-          with open("pyproject.toml", "rb") as fh:
-              print("\n".join(tomllib.load(fh)["project"]["optional-dependencies"]["docs"]))
-          PY
-          pip install -r docs-requirements.txt
+      - name: Setup Ruby
+        # Ruby version from docs/.ruby-version; gems from docs/Gemfile.lock, cached.
+        uses: ruby/setup-ruby@v1
+        with:
+          working-directory: docs
+          bundler-cache: true
 
       - name: Build site
-        run: mkdocs build --strict --site-dir site
+        working-directory: docs
+        env:
+          JEKYLL_ENV: production
+        run: bundle exec jekyll build --destination ../site
 
       - name: Download plugin manifest artifact
         if: inputs.manifest_artifact != ''
