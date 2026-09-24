@@ -406,6 +406,27 @@ hr {
   .nav__burger {
     display: inline-grid;
   }
+
+  /* Pages with no #sidebar for the burger to open (site.js) get these same links back as a
+     dropdown instead. Positioned off `.nav`'s own sticky box, not `.nav__inner`'s, so it can
+     span edge-to-edge without adding to any flex item's width. */
+  .nav__links.is-open {
+    display: flex;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    align-items: stretch;
+    padding: 0.5rem var(--gutter) 1rem;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .nav__links.is-open .nav__link {
+    padding: 0.8rem 0.2rem;
+  }
 }
 
 /* Measured at 320: the brand, a worded search button and four 34px icons want

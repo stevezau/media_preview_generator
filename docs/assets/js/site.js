@@ -21,17 +21,40 @@
     });
   }
 
-  /* ------------------------------------------------------- mobile sidebar */
+  /* ---------------------------------------------------- burger disclosure */
+
+  /* Opens/closes `panel` from `button`, keeping aria-expanded in sync, and closes it again on
+     Escape or a click outside both — the docs sidebar and the no-sidebar nav dropdown below
+     share this so the button behaves the same way everywhere it appears. */
+  function wireDisclosure(button, panel) {
+    var close = function () {
+      panel.classList.remove("is-open");
+      button.setAttribute("aria-expanded", "false");
+    };
+    button.addEventListener("click", function () {
+      var open = panel.classList.toggle("is-open");
+      button.setAttribute("aria-expanded", String(open));
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && panel.classList.contains("is-open")) close();
+    });
+    document.addEventListener("click", function (e) {
+      if (!panel.classList.contains("is-open")) return;
+      if (panel.contains(e.target) || button.contains(e.target)) return;
+      close();
+    });
+  }
 
   var burger = document.getElementById("menu-toggle");
   var sidebar = document.getElementById("sidebar");
+  var navLinks = document.querySelector(".nav__links");
   if (burger && sidebar) {
-    burger.addEventListener("click", function () {
-      var open = sidebar.classList.toggle("is-open");
-      burger.setAttribute("aria-expanded", String(open));
-    });
+    wireDisclosure(burger, sidebar);
+  } else if (burger && navLinks) {
+    // No sidebar on this page (e.g. the landing page): the burger opens the top nav links instead.
+    wireDisclosure(burger, navLinks);
   } else if (burger) {
-    burger.hidden = true; // the landing page has no sidebar to open
+    burger.hidden = true; // neither a sidebar nor nav links to open
   }
 
   /* ------------------------------------------------------- copy to clipboard */
