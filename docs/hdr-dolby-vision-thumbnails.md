@@ -28,7 +28,7 @@ Checked 23 September 2026. See the [comparison page](comparison.md) for sources.
   - NVIDIA: libplacebo on Vulkan.
   - AMD: VAAPI to Vulkan. This path is untested by the maintainer.
 
-The app picks the path per file from its metadata. A Dolby Vision file whose video is marked as HDR10 or HLG is tone-mapped through that layer; one with no such marking is treated as Profile 5. Nothing needs to be set per library. Full detail is in [Guides — HDR & Dolby Vision](guides.md#hdr--dolby-vision).
+The app picks the path per file from its metadata. A Dolby Vision file whose video also declares a PQ (HDR10) or HLG transfer is tone-mapped through that layer; one that declares neither is treated as Profile 5. Nothing needs to be set per library. Full detail is in [Guides — HDR & Dolby Vision](guides.md#hdr--dolby-vision).
 
 ## The one setup step: NVIDIA and Dolby Vision Profile 5
 

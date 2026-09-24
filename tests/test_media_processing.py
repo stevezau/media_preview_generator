@@ -1429,16 +1429,18 @@ class TestDVNoBackwardCompat:
             pytest.param("Dolby Vision / Dolby Vision", None, True, id="p5-listed-twice"),
             # Profile 8.1 web release without the ST 2086 SEI: an HDR10 base despite plain "Dolby Vision".
             pytest.param("Dolby Vision", "PQ", False, id="p8-no-st2086"),
+            # A Profile 5 tag on an HDR10 base (Falling for Christmas) has these same inputs, since the profile tag
+            # is not one; its file-level guard is ``p5_hdr10_base`` in test_dv_routing_real_fields.py.
             pytest.param("Dolby Vision / SMPTE ST 2086", "PQ", False, id="p8-st2086"),
             pytest.param("Dolby Vision / SMPTE ST 2094 App 4", "PQ", False, id="p8-hdr10plus"),
             # Profile 8.4: HLG base layer.
             pytest.param("Dolby Vision", "HLG", False, id="p84-hlg"),
             # Profile 7 and AV1 Profile 10 report the same hdr_format shape as Profile 8.1.
             pytest.param("Dolby Vision / SMPTE ST 2086 / SMPTE ST 2086", "PQ", False, id="p7-or-av1-p10"),
-            # Profile 5 profile tag on an HDR10 base (mislabelled file): the PQ base is tone mapped as HDR10.
-            pytest.param("Dolby Vision / SMPTE ST 2086", "PQ", False, id="p5-mislabelled-hdr10-base"),
             # Standards' names for the transfer curves are accepted too.
             pytest.param("Dolby Vision", "SMPTE ST 2084", False, id="p8-transfer-standard-name"),
+            # Profile 8.2/9 (SDR base) takes the Profile 5 path; no such file was seen in the library survey.
+            pytest.param("Dolby Vision", "BT.709", True, id="p82-or-p9-sdr-base"),
             # Not Dolby Vision.
             pytest.param("SMPTE ST 2086", "PQ", False, id="hdr10"),
             pytest.param("SMPTE ST 2094 App 4", "PQ", False, id="hdr10plus"),
@@ -3017,15 +3019,14 @@ class TestHdrVersusSdrFilterChain:
             pytest.param(
                 "SMPTE ST 2094 App 4, Version 1, HDR10+ Profile B compatible", "PQ", "BT.2020", "HDR", id="hdr10plus"
             ),
+            # A Profile 5 tag on an HDR10 base (Falling for Christmas) has these same inputs, since the profile tag
+            # is not one; its file-level guard is ``p5_hdr10_base`` in test_dv_routing_real_fields.py.
             pytest.param("Dolby Vision / SMPTE ST 2086", "PQ", "BT.2020", "HDR", id="dv-profile8"),
             # Profile 8.1 web release without the ST 2086 SEI (The Lion King, DSNP): plain "Dolby Vision", PQ base.
             pytest.param("Dolby Vision", "PQ", "BT.2020", "HDR", id="dv-profile8-no-st2086"),
             pytest.param("Dolby Vision", "HLG", "BT.2020", "HDR", id="dv-profile84-hlg"),
             # True Profile 5 (IPTPQc2) declares no transfer or primaries.
             pytest.param("Dolby Vision", None, None, "DV5", id="dv-profile5"),
-            # Profile 5 tag on a plain HDR10 base (Falling for Christmas): the HDR10 chain gives the right colours;
-            # the Profile 5 reshaping turns reds yellow.
-            pytest.param("Dolby Vision / SMPTE ST 2086", "PQ", "BT.2020", "HDR", id="dv-profile5-hdr10-base"),
             # Lab file: Cosmos Laundromat HDR (Netflix Open Content) — PQ, P3 primaries, no HDR metadata.
             pytest.param(None, "PQ", "Display P3", "HDR", id="pq-no-hdr-format-p3"),
             pytest.param(None, "PQ", "BT.2020", "HDR", id="pq-no-hdr-format"),

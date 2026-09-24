@@ -66,9 +66,12 @@ def is_dv_no_backward_compat(hdr_format: str | None, transfer_characteristics: s
 
     A Profile 5 base layer is IPTPQc2: its stream declares no transfer
     curve, so the zscale/tonemap chain cannot read it and only
-    libplacebo's Dolby Vision reshaping gives correct colours.  Profiles
-    7, 8.1, 8.4 and AV1 Profile 10 carry an HDR10 or HLG base layer and
-    declare PQ or HLG, which the zscale chain tone maps directly.
+    libplacebo's Dolby Vision reshaping gives correct colours.  AV1
+    Profile 10.0 has no compatible base either.  Profiles 7, 8.1, 8.4,
+    10.1 and 10.4 carry an HDR10 or HLG base layer and declare PQ or HLG,
+    which the zscale chain tone maps directly.  SDR-base profiles (8.2, 9,
+    10.2) declare neither, so they also return ``True``; none has been
+    seen in a real library.
 
     The transfer curve is the signal, not ``hdr_format``: MediaInfo keeps
     the profile tag (``dvhe.05``) in ``HDR_Format_Profile``, and an

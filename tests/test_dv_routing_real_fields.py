@@ -1,7 +1,8 @@
 """Dolby Vision routing driven by the MediaInfo fields real library files carry.
 
-Every row except Profile 8.4 is copied from a file in the owner's library, as read by libmediainfo 24.12 (the
-version pymediainfo 7.0.1 bundles, and the one in the Docker image).  MediaInfo keeps the profile tag in
+Every row except ``p84_hlg`` and ``hdr10`` is copied from a file in the owner's library, as read by libmediainfo
+24.12 (the version pymediainfo 7.0.1 bundles, and the one in the Docker image).  Those two are synthetic: MediaInfo's
+shape for formats the library survey has no file of.  MediaInfo keeps the profile tag in
 ``HDR_Format_Profile``; ``hdr_format`` never contains ``dvhe.05``.  The composite text
 ``"Dolby Vision, Version 1.0, dvhe.05.06, BL+RPU"`` is what MediaInfo prints for humans, not what the app reads.
 
@@ -69,7 +70,7 @@ REAL_ROWS = [
     pytest.param(Row("Dolby Vision", "dvhe.05", None, None, DV5), id="p5_true"),
     # True Profile 5 listed twice by MediaInfo: One Last Adventure (2026) WEB-DL.
     pytest.param(Row("Dolby Vision / Dolby Vision", "dvhe.05 / dvhe.05", None, None, DV5), id="p5_true_twice"),
-    # Non-DV HDR10 (MediaInfo's shape for a mastering-display HDR10 stream).
+    # Non-DV HDR10, synthetic (MediaInfo's shape for a mastering-display HDR10 stream).
     pytest.param(Row("SMPTE ST 2086", None, "HDR10", "PQ", HDR), id="hdr10"),
     # SDR: Spring Forward (2000) DVD.
     pytest.param(Row(None, None, None, "BT.709", SDR), id="sdr"),
