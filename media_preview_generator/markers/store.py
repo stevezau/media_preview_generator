@@ -31,6 +31,8 @@ _SERVER_SOURCE_VALUES = (Source.SERVER_MARKERS.value, Source.SERVER_MARKERS_IMPO
 _RECHECK_TAKEN_AGAIN = timedelta(days=1)
 # ``meta`` key: the last file id whose fingerprint the cache sweep checked (``fingerprint_checks``).
 _FINGERPRINT_CHECKED_UP_TO = "fingerprint_checked_up_to"
+# ``meta`` key: when the weekly online re-check is due next (``triggers.schedule_online_recheck``).
+_ONLINE_RECHECK_DUE = "online_recheck_due"
 # The fingerprint window whose points ``season_pairs`` runs are matched from: ``audio.fingerprint.WINDOW`` (which
 # imports this module, so it can't be imported here; test_store_audio pins the two together).
 SEASON_PAIR_WINDOW = "intro"
@@ -656,6 +658,55 @@ class MarkerStore:
                 (len(VERSIONS_WAITING), VERSIONS_WAITING),
             ).fetchall()
         return [r["canonical_path"] for r in rows]
+
+    def files_with_old_empty_lookups(self, sources: Iterable[Source], before: datetime) -> list[str]:
+        """Canonical paths of the files whose stored lookup of any of these online sources found nothing ("no entry")
+        and was made before ``before``, sorted.
+
+        Args:
+            sources: The online sources.
+            before: The time (UTC) such a lookup is older than.
+
+        Returns:
+            The paths; empty when no source is given.
+        """
+        values = [source.value for source in sources]
+        if not values:
+            return []
+        marks = ",".join("?" * len(values))
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT f.canonical_path FROM files f JOIN (SELECT file_id FROM evidence "
+                f"WHERE origin='' AND source IN ({marks}) GROUP BY file_id, source "  # noqa: S608
+                "HAVING COUNT(type) = 0 AND MAX(fetched_at) < ?) e ON e.file_id = f.id ORDER BY f.canonical_path",
+                (*values, before.isoformat()),
+            ).fetchall()
+        return [r["canonical_path"] for r in rows]
+
+    def online_recheck_due(self) -> datetime | None:
+        """When the weekly online re-check is due next.
+
+        Returns:
+            The stored time (None = never set).
+
+        Raises:
+            ValueError: The stored value isn't a time.
+        """
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM meta WHERE key=?", (_ONLINE_RECHECK_DUE,)).fetchone()
+        return datetime.fromisoformat(row["value"]) if row else None
+
+    def set_online_recheck_due(self, due: datetime) -> None:
+        """Store when the weekly online re-check is due next.
+
+        Args:
+            due: The time (UTC).
+        """
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (_ONLINE_RECHECK_DUE, due.isoformat()),
+            )
 
     def record_member(
         self,

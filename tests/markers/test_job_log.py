@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,6 +17,7 @@ from media_preview_generator.markers.job_log import (
     clock,
     decide_again_line,
     display_name,
+    online_recheck_line,
     season_line,
     totals_line,
 )
@@ -433,6 +434,93 @@ class TestDecideAgainJob:
     )
     def test_decide_again_line_wording(self, files, expected):
         assert decide_again_line(files) == f"Decided again after the update ({expected}"
+
+
+class TestOnlineRecheckJob:
+    """The weekly online re-check asks only the due online lookups, reads nothing it doesn't have to, logs the files an
+    online database now has (or whose decisions changed) and one line for them all."""
+
+    @staticmethod
+    def _first_run(store, media):
+        out, _ = _run(_job(store, media, _plex(media), found=()), media, {"plex-1": ready_publisher()}, probe=_probe())
+        assert out.outcome_key == FileOutcome.NO_MARKERS.value  # TheIntroDB: no entry; credit text: none found
+
+    @staticmethod
+    def _weekly(store, media, *, theintrodb, days_later):
+        later = datetime.now(UTC) + timedelta(days=days_later)
+        ctx = _job(store, media, _plex(media), theintrodb=theintrodb, found=(), now=lambda: later)
+        ctx.online_recheck = True
+        return ctx
+
+    def test_a_database_that_now_has_the_file_is_logged_and_counted(self, store, media, job_log):
+        self._first_run(store, media)
+        job_log.clear()
+
+        weekly = self._weekly(store, media, theintrodb=TIDB, days_later=15)
+        out, _ = _run(weekly, media, {"plex-1": ready_publisher()})
+
+        assert out.outcome_key == FileOutcome.NEEDS_REVIEW.value
+        assert len(weekly.clients["theintrodb"].calls) == 1
+        # Its credit text answer isn't due: the file isn't read again.
+        weekly.local_detectors[0].detect.assert_not_called()
+        assert job_log == [
+            _lines(
+                f"{EPISODE}: nothing sent to Plex · intro not found · credits 21:36–22:00 found by TheIntroDB → "
+                f"{ONLINE_ONLY}",
+                # A server's "none" a day old is read again while a type is undecided, as on any run.
+                "chapters none (saved earlier) · TheIntroDB credits 21:36–22:00 · credit text none found (saved "
+                "earlier) · Plex's own none",
+            )
+        ]
+        assert weekly.summary_lines({FileOutcome.NEEDS_REVIEW.value: 1}) == [
+            "Weekly online re-check (1 file): 1 newly found online, 0 unchanged",
+            "Done: 1 file · 0 sent to Plex · 1 needs review · 0 nothing found",
+        ]
+
+    def test_a_file_still_not_found_logs_only_the_summary_line(self, store, media, job_log):
+        self._first_run(store, media)
+        job_log.clear()
+
+        weekly = self._weekly(store, media, theintrodb=NO_DATA, days_later=15)
+        _run(weekly, media, {"plex-1": ready_publisher()})
+
+        assert len(weekly.clients["theintrodb"].calls) == 1  # due, so asked
+        assert job_log == []
+        assert weekly.summary_lines({FileOutcome.NO_MARKERS.value: 1})[0] == (
+            "Weekly online re-check (1 file): 0 newly found online, 1 unchanged"
+        )
+
+    def test_a_no_entry_that_isnt_due_is_not_asked(self, store, media, job_log):
+        self._first_run(store, media)
+        job_log.clear()
+
+        weekly = self._weekly(store, media, theintrodb=TIDB, days_later=13)
+        _run(weekly, media, {"plex-1": ready_publisher()})
+
+        assert weekly.clients["theintrodb"].calls == []
+        assert job_log == []
+        assert weekly.summary_lines({FileOutcome.NO_MARKERS.value: 1})[0] == (
+            "Weekly online re-check (1 file): 0 newly found online, 1 unchanged"
+        )
+
+    def test_any_other_job_has_no_such_line(self, store, media):
+        ctx = _job(store, media, _plex(media), found=())
+        _run(ctx, media, {"plex-1": ready_publisher()}, probe=_probe())
+        assert not any(line.startswith("Weekly") for line in ctx.summary_lines({FileOutcome.NO_MARKERS.value: 1}))
+
+    @pytest.mark.parametrize(
+        ("files", "expected"),
+        [
+            ([(True, True), (False, False), (False, False)], "3 files): 1 newly found online, 2 unchanged"),
+            ([(True, False)], "1 file): 1 newly found online, 0 unchanged"),
+            ([(False, True), (True, True), (False, False)], "3 files): 1 newly found online, 1 changed otherwise, 1 "
+             "unchanged"),
+            ([], "0 files): 0 newly found online, 0 unchanged"),
+        ],
+        ids=["found-and-unchanged", "found-without-a-change", "changed-otherwise", "none"],
+    )  # fmt: skip
+    def test_online_recheck_line_wording(self, files, expected):
+        assert online_recheck_line(files) == f"Weekly online re-check ({expected}"
 
 
 class TestTotalsLine:

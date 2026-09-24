@@ -884,14 +884,18 @@ class TestIntroCreditsTabLoading:
             item_handler=respond,
         )
         page = inspector.open_result(0)
-        page.locator("#inspectorMarkersTabBtn").click()
+        # The "Loading" text is drawn before the fetch is even issued, so it can't stand in for "the
+        # request reached the mock" -- wait on the request itself (this is what raced in CI: an assert
+        # on `held` taken before the browser had actually dispatched the S01E03 fetch).
+        with page.expect_request(lambda req: "S01E03" in req.url):
+            page.locator("#inspectorMarkersTabBtn").click()
         expect(page.locator("#markersInspectorBody")).to_contain_text("Loading", timeout=3000)
         assert len(held) == 1
 
         inspector.open_result(1)
         expect(_server_card(page, "plex-e04")).to_be_visible(timeout=3000)
-        held[0].fulfill(status=200, content_type="application/json", body=json.dumps(first))
-        page.wait_for_timeout(500)
+        with page.expect_response(lambda resp: "S01E03" in resp.url):
+            held[0].fulfill(status=200, content_type="application/json", body=json.dumps(first))
 
         expect(page.locator("#markersInspectorPath")).to_have_text(other)
         expect(_server_card(page, "plex-e04")).to_be_visible()
